@@ -294,6 +294,108 @@ describe('failures ledger', () => {
   });
 });
 
+// Rounds folded whole workspace suites into their own counts: "7737 scripted
+// assertions" held a few dozen checks the round wrote. Suite results have a
+// field of their own, and the triple counts what the round wrote.
+describe('gates', () => {
+  const GATES_ERROR = /gates must be an array of \{ suite, pass, fail \}/;
+  const withGates = (gates, counts = { pass: 4, fail: 0, total: 4 }) =>
+    check({ assertions: JSON.stringify({ ...counts, gates }) });
+
+  it("accepts suite counts beside the round's own", () => {
+    const result = withGates([
+      { suite: 'cli acp-session', pass: 1290, fail: 2, skipped: 1 },
+      { suite: 'core client', pass: 535, fail: 0 },
+    ]);
+    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
+    expect(result.counts).toEqual({ pass: 4, fail: 0, total: 4 });
+    // An empty list is a round that ran no suites: valid, and below the
+    // size threshold it has nothing to warn about.
+    const empty = withGates([]);
+    expect(empty.errors).toEqual([]);
+    expect(empty.warnings).toEqual([]);
+  });
+
+  it('refuses a malformed list without echoing the suite name', () => {
+    for (const gates of [
+      { cli: { pass: 1, fail: 0 } },
+      [null],
+      [{ pass: 1, fail: 0 }],
+      [{ suite: '  ', pass: 1, fail: 0 }],
+      [{ suite: 'x', pass: -1, fail: 0 }],
+      [{ suite: 'x', pass: 1, fail: 0.5 }],
+      [{ suite: 'x', pass: 1, fail: 0, skipped: '2' }],
+      [{ suite: 'x', pass: 1, fail: 0, skipped: false }],
+      [{ suite: 'x', pass: 1, fail: 0, skipped: null }],
+      [{ suite: 'x', pass: '1', fail: 0 }],
+    ]) {
+      const result = withGates(gates);
+      expect(result.errors.join('\n')).toMatch(GATES_ERROR);
+    }
+    // The publisher forwards error lines to its log; a suite name is
+    // agent-chosen text.
+    const named = withGates([
+      { suite: '@everyone <!-- x -->', pass: -1, fail: 0 },
+    ]);
+    expect(named.errors.join('\n')).not.toContain('@everyone');
+  });
+
+  it('refuses counts beyond the safe integer range', () => {
+    // Raw literals: JSON.stringify would turn 1e309 into null and hide the
+    // overflow that the publisher's jq clamps to a finite double.
+    const raw = (pass) =>
+      check({
+        assertions: `{"pass":4,"fail":0,"total":4,"gates":[{"suite":"x","pass":${pass},"fail":0}]}`,
+      });
+    for (const pass of ['1e309', '1e308', '9007199254740992']) {
+      expect(raw(pass).errors.join('\n')).toMatch(GATES_ERROR);
+    }
+    expect(raw('9007199254740991').errors).toEqual([]);
+  });
+
+  it('warns when a suite-sized total comes with no gate results', () => {
+    const big = check({
+      assertions: JSON.stringify({ pass: 1001, fail: 0, total: 1001 }),
+    });
+    expect(big.errors).toEqual([]);
+    expect(big.warnings.join('\n')).toMatch(
+      /counts 1001 assertions and records no gate results/,
+    );
+    const edge = check({
+      assertions: JSON.stringify({ pass: 1000, fail: 0, total: 1000 }),
+    });
+    expect(edge.warnings.join('\n')).not.toMatch(/records no gate results/);
+    const split = withGates([{ suite: 'cli', pass: 1292, fail: 0 }], {
+      pass: 1001,
+      fail: 0,
+      total: 1001,
+    });
+    expect(split.warnings.join('\n')).not.toMatch(/records no gate results/);
+    // An empty list records no suites, so it must not silence the warning
+    // either: folding suites in and writing [] is the same smell.
+    const empty = withGates([], { pass: 1001, fail: 0, total: 1001 });
+    expect(empty.errors).toEqual([]);
+    expect(empty.warnings.join('\n')).toMatch(/records no gate results/);
+    // Nor do entries that count nothing: a placeholder suite moved no test
+    // out of the counts. Skipped tests are not results either.
+    for (const gate of [
+      { suite: 'placeholder', pass: 0, fail: 0 },
+      { suite: 'cli', pass: 0, fail: 0, skipped: 12 },
+    ]) {
+      const hollow = withGates([gate], { pass: 1001, fail: 0, total: 1001 });
+      expect(hollow.errors).toEqual([]);
+      expect(hollow.warnings.join('\n')).toMatch(/records no gate results/);
+    }
+    const allRed = withGates([{ suite: 'cli', pass: 0, fail: 3 }], {
+      pass: 1001,
+      fail: 0,
+      total: 1001,
+    });
+    expect(allRed.warnings.join('\n')).not.toMatch(/records no gate results/);
+  });
+});
+
 // "Every production commit since the previous round was mutated on its own"
 // shipped while two commits had no row. A coverage claim is universally
 // quantified over an enumerable set, so it is checked against that set.
@@ -659,5 +761,79 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     expect(run(join(tmpdir(), 'verify-pr-check-does-not-exist')).status).toBe(
       1,
     );
+  });
+
+  // The artifact directory is writable by the PR code the round just ran, so
+  // its own context.json cannot pin the head. --context reads a copy the round
+  // never saw and must not fall back to the writable one.
+  it('pins the head from a host-held snapshot over the artifact copy', () => {
+    const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
+    writeFileSync(
+      join(dir, 'context.json'),
+      JSON.stringify({ headRefOid: 'e'.repeat(40) }),
+    );
+    const hostSnapshot = join(tmpdir(), `verify-pr-host-${Date.now()}.json`);
+    tmpDirs.push(hostSnapshot);
+    writeFileSync(hostSnapshot, JSON.stringify({ headRefOid: HEAD }));
+
+    const pinned = spawnSync(
+      process.execPath,
+      [SCRIPT, '--context', hostSnapshot, dir],
+      { encoding: 'utf8' },
+    );
+    expect(pinned.status).toBe(0);
+    expect(pinned.stdout).toContain(`head source: ${hostSnapshot}`);
+    expect(pinned.stdout).not.toContain('does not name the verified head');
+
+    const artifactOnly = run(dir);
+    expect(artifactOnly.status).toBe(0);
+    expect(artifactOnly.stdout).toContain('does not name the verified head');
+  });
+
+  it('refuses an unusable --context instead of falling back', () => {
+    const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
+    // Seed a usable writable copy: a fallback regression would exit 0 here
+    // and print its head source, so the exit-1 assertion pins the property.
+    writeFileSync(
+      join(dir, 'context.json'),
+      JSON.stringify({ headRefOid: HEAD }),
+    );
+    const empty = join(tmpdir(), `verify-pr-host-empty-${Date.now()}.json`);
+    tmpDirs.push(empty);
+    writeFileSync(empty, '{}');
+    for (const snapshot of [join(tmpdir(), 'verify-pr-no-such.json'), empty]) {
+      const result = spawnSync(
+        process.execPath,
+        [SCRIPT, '--context', snapshot, dir],
+        { encoding: 'utf8' },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('--context');
+      expect(result.stdout).not.toContain('head source:');
+    }
+  });
+
+  it('exits 2 for an unknown option or a missing --context value', () => {
+    const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
+    expect(
+      spawnSync(process.execPath, [SCRIPT, '--bogus', dir], {
+        encoding: 'utf8',
+      }).status,
+    ).toBe(2);
+    expect(
+      spawnSync(process.execPath, [SCRIPT, '--context'], {
+        encoding: 'utf8',
+      }).status,
+    ).toBe(2);
+    // A forgotten --context turns the snapshot into a second positional:
+    // refuse instead of silently using the artifact's writable copy.
+    const hostSnapshot = join(tmpdir(), `verify-pr-host-${Date.now()}.json`);
+    tmpDirs.push(hostSnapshot);
+    writeFileSync(hostSnapshot, JSON.stringify({ headRefOid: HEAD }));
+    expect(
+      spawnSync(process.execPath, [SCRIPT, dir, hostSnapshot], {
+        encoding: 'utf8',
+      }).status,
+    ).toBe(2);
   });
 });

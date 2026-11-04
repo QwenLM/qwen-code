@@ -120,6 +120,51 @@
   line-height: 1.5;
 }
 
+.optionGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.optionRow {
+  display: flex;
+  min-height: 34px;
+  cursor: pointer;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  user-select: none;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.optionRow:hover {
+  border-color: var(--foreground);
+}
+
+.optionRow[data-selected='true'] {
+  border-color: var(--foreground);
+  background: color-mix(in srgb, var(--muted) 62%, transparent);
+}
+
+.optionCheckbox {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--primary);
+}
+
+.optionLabel {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .recordFields {
   display: flex;
   flex-direction: column;
@@ -291,6 +336,36 @@
   line-height: 1.5;
 }
 
+.repositoryList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.repositoryListTitle {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+
+.repositoryRow {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.repositoryName {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 520px) {
   .policyGrid {
     grid-template-columns: 1fr;
@@ -307,6 +382,10 @@
   }
 
   .sessionScopeOption {
+    transition: none;
+  }
+
+  .optionRow {
     transition: none;
   }
 }

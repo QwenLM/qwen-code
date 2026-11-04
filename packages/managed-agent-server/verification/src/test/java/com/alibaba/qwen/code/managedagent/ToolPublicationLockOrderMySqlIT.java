@@ -11,7 +11,6 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.maintenance.WorkspaceCsiSessionMain;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
@@ -276,8 +275,8 @@ class ToolPublicationLockOrderMySqlIT {
             String sessionId = createCsiOriginal(jdbc, manager, JSON, properties, registration);
             var bindings = new JdbcRuntimeBindingRepository(source,
                     new AesGcmSecretProtector("test", new byte[32]));
-            var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
+                    new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             var transaction = new TransactionTemplate(manager);
             var request = transaction.execute(status ->
                     requireCsiRequest(managed, registration, sessionId));
@@ -293,7 +292,7 @@ class ToolPublicationLockOrderMySqlIT {
                     new RuntimeResourceHandle("kubernetes-workspace", 3,
                             Map.of("podUid", "fixture-original")),
                     Instant.now(), Instant.now()));
-            var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+            var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
             transaction.executeWithoutResult(status -> sessions.acquireWriter("tenant", sessionId,
                     WRITER_TOKEN, new AcquireWriterRequest("workspace", "writer", 60_000L)));
             // InnoDB rolls back the transaction with the smaller undo log;
@@ -507,7 +506,8 @@ class ToolPublicationLockOrderMySqlIT {
             }
             assertThat(waiting).as("Publication waits for the placement owner").isPositive();
             assertThat(source.subjectPlacementLocks.get())
-                    .as("Placement precedes retention in the contending transaction")
+                    .as(() -> "Placement precedes retention in the contending transaction; "
+                            + MySqlLockProbe.describeLockWaits(admin, schema))
                     .containsExactly("placement");
             source.releaseOwner.countDown();
             owner.get(30, TimeUnit.SECONDS);

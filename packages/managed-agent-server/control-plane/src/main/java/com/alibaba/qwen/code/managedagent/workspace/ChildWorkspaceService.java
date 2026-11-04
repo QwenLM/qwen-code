@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.workspace;
 
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceException;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceProvider;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit;
@@ -82,7 +82,7 @@ public class ChildWorkspaceService {
     /** A scan drives no new row after this long; the rest wait for the next tick. */
     static final long SCAN_BUDGET_MS = LEASE_MS / 2;
 
-    private final AgentStateStore sessions;
+    private final SessionQueryStore sessions;
     private final ChildWorkspaceStore store;
     private final WorkspaceExecutionStore leases;
     private final RuntimeWarmer warmer;
@@ -96,13 +96,13 @@ public class ChildWorkspaceService {
     });
 
     @org.springframework.beans.factory.annotation.Autowired
-    public ChildWorkspaceService(AgentStateStore sessions, ChildWorkspaceStore store,
+    public ChildWorkspaceService(SessionQueryStore sessions, ChildWorkspaceStore store,
             WorkspaceExecutionStore leases, RuntimeWarmer warmer) {
         this(sessions, store, leases, warmer, System::currentTimeMillis,
                 "child-workspace-" + UUID.randomUUID(), LEASE_MS / 3);
     }
 
-    ChildWorkspaceService(AgentStateStore sessions, ChildWorkspaceStore store,
+    ChildWorkspaceService(SessionQueryStore sessions, ChildWorkspaceStore store,
             WorkspaceExecutionStore leases, RuntimeWarmer warmer, Supplier<Long> clock, String owner,
             long renewMillis) {
         this.sessions = sessions;

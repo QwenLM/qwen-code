@@ -175,9 +175,9 @@ export interface PermissionManagerConfig {
   /**
    * Live folder trust. Read on every permission decision for the session
    * allow rules a project skill granted (`trustGated`): those apply only
-   * while the folder is trusted. Absent means trusted.
+   * while the folder is explicitly trusted. Absent denies repository grants.
    */
-  isTrustedFolder?(): boolean;
+  isExplicitlyTrustedFolder?(): boolean;
   /**
    * Returns the current approval mode (plan/default/auto-edit/yolo).
    * Used by `getDefaultMode()` to determine the fallback when no rule matches.
@@ -1471,14 +1471,14 @@ export class PermissionManager {
   /**
    * The session allow rules in force right now: every rule the user granted,
    * plus the repository-granted (`trustGated`) ones only while the folder is
-   * trusted. Trust is re-read on every call — `Config.isTrustedFolder()` is
+   * trusted. Trust is re-read on every call — `Config.isExplicitlyTrustedFolder()` is
    * live under an IDE connection — so a revocation mid-session suspends a
    * project skill's grants at the next decision, and a later grant of trust
    * restores them, the second side of the gate `applySideEffects` enforces
    * on the way in.
    */
   private activeSessionAllowRules(): PermissionRule[] {
-    const trusted = this.config.isTrustedFolder?.() ?? true;
+    const trusted = this.config.isExplicitlyTrustedFolder?.() ?? false;
     return trusted
       ? this.sessionRules.allow
       : this.sessionRules.allow.filter((rule) => !rule.trustGated);
