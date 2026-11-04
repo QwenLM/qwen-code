@@ -202,6 +202,17 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 const mockUseReactToolScheduler = useReactToolScheduler as Mock;
+const mockRunModelRound = vi.hoisted(() => vi.fn());
+vi.mock(
+  '@qwen-code/qwen-code-core/core/agent-loop.js',
+  async (importOriginal) => {
+    const actual =
+      (await importOriginal()) as typeof import('@qwen-code/qwen-code-core/core/agent-loop.js');
+    mockRunModelRound.mockImplementation(actual.runModelRound);
+    return { ...actual, runModelRound: mockRunModelRound };
+  },
+);
+
 vi.mock('./useReactToolScheduler.js', async (importOriginal) => {
   const actualSchedulerModule = (await importOriginal()) as any;
   return {
@@ -24513,5 +24524,146 @@ describe('useLlmStream', () => {
     // findLastIndex should land on 'second' (index 2), not the steer (index 4).
     // turnCount = history.length - 2 = 3.
     expect(event.turnCount).toBe(3);
+  });
+
+  describe('shared agent loop round (experimental.unifiedAgentLoop)', () => {
+    const toolRequest = (callId: string) => ({
+      type: ServerLlmEventType.ToolCallRequest,
+      value: {
+        callId,
+        name: 'read_file',
+        args: { file_path: `/test/dir/${callId}.txt` },
+        isClientInitiated: false,
+        prompt_id: 'prompt-shared',
+      },
+    });
+
+    beforeEach(() => {
+      (
+        mockConfig as unknown as { isUnifiedAgentLoopEnabled: () => boolean }
+      ).isUnifiedAgentLoopEnabled = () => true;
+      mockRunModelRound.mockClear();
+    });
+
+    it('sends the round through runModelRound with the same request', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'Hello.' };
+        })(),
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'Say hello.',
+          SendMessageType.UserQuery,
+          'prompt-shared',
+        );
+      });
+
+      expect(mockRunModelRound).toHaveBeenCalledTimes(1);
+      const [, round, signal] = mockRunModelRound.mock.calls[0];
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        round.parts,
+        signal,
+        'prompt-shared',
+        round.options,
+      );
+      expect(round).toMatchObject({
+        promptId: 'prompt-shared',
+        options: { type: SendMessageType.UserQuery },
+      });
+      expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    });
+
+    it('schedules the calls the round collected, without those a retry replaced', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield toolRequest('dropped');
+          yield { type: ServerLlmEventType.Retry, isContinuation: false };
+          yield toolRequest('kept_a');
+          yield toolRequest('kept_b');
+        })(),
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read the files.');
+      });
+
+      expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
+      expect(
+        mockScheduleToolCalls.mock.calls[0][0].map(
+          (request: { callId: string }) => request.callId,
+        ),
+      ).toEqual(['kept_a', 'kept_b']);
+    });
+
+    it('schedules the calls the round collected, without those a model fallback replaced', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield toolRequest('dropped');
+          yield {
+            type: ServerLlmEventType.ModelFallback,
+            fromModel: 'primary-model',
+            toModel: 'fallback-model',
+            fallbackIndex: 1,
+          };
+          yield toolRequest('kept');
+        })(),
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
+      expect(
+        mockScheduleToolCalls.mock.calls[0][0].map(
+          (request: { callId: string }) => request.callId,
+        ),
+      ).toEqual(['kept']);
+    });
+
+    it('schedules nothing when the round ends on a stop reason', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield toolRequest('before_stop');
+          yield {
+            type: ServerLlmEventType.MaxSessionTurns,
+          };
+        })(),
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      expect(mockRunModelRound).toHaveBeenCalledTimes(1);
+      expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    });
+
+    it('ends the round on a cancel without scheduling its calls', async () => {
+      const after = vi.fn();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield toolRequest('cancelled');
+          yield { type: ServerLlmEventType.UserCancelled };
+          after();
+          yield toolRequest('after_cancel');
+        })(),
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      expect(after).not.toHaveBeenCalled();
+      expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    });
   });
 });
