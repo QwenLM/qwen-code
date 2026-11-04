@@ -5775,11 +5775,20 @@ jobs:
           PARTIAL_ZH='本次验证运行未正常结束，下列内容可能不完整甚至缺失。仅作为评审证据，**不构成评审、批准或 CI 检查**。'
 
           # Every body opens with a header: the verify marker, this run's
-          # marker and, on a body that carries findings, the substantive
-          # marker, ended by a blank line. Every lookup reads markers only
+          # marker, the flaky marker when the gate demoted the run and, on a
+          # body that carries findings, the substantive marker, ended by a
+          # blank line. Every lookup reads markers only
           # from a header, so it is started once, here, and each branch below
           # appends to it.
           printf '%s\n%s\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER" > "$BODY_FILE"
+          # Every branch a flaky verdict can reach demotes on it (the gate step
+          # runs only on a prepared round it was asked to verify), so the
+          # header records it once, here: a later attempt of this run can
+          # then tell whether the report it would post beside carries it.
+          FLAKY_MARKER='<!-- qwen-triage:verify-flaky -->'
+          if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
+            printf '%s\n' "$FLAKY_MARKER" >> "$BODY_FILE"
+          fi
 
           # The gate verdict travels via job outputs: it survives a later
           # agent-step failure, a job timeout, and a cancellation. A
@@ -5863,16 +5872,16 @@ jobs:
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); result artifact unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
-                printf 'The verification ran and its deterministic flakiness gate observed run-to-run divergence, but the result artifact (report and per-round matrix) could not be retrieved for publishing. The run log still has the full output; re-run `@qwen-code /verify` for a fresh report.\n\n'
+                printf 'The verification ran and its deterministic flakiness gate observed run-to-run divergence, but the result artifact (report and per-round matrix) could not be retrieved for publishing. The run log still has the full output; while the PR is open, re-run `@qwen-code /verify` for a fresh report.\n\n'
                 printf '<details>\n<summary>中文 — 判定：❌ 不通过 · 测试结果不确定（抖动门）；结果产物不可用</summary>\n\n'
                 printf '抖动门：❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
-                printf '验证已执行，其确定性抖动门观测到轮间分歧，但结果产物（报告与各轮矩阵）未能取回用于发布。运行日志中仍有完整输出；如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
+                printf '验证已执行，其确定性抖动门观测到轮间分歧，但结果产物（报告与各轮矩阵）未能取回用于发布。运行日志中仍有完整输出；PR 未关闭时，如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
                 printf '</details>\n\n'
               else
                 printf '**Sandboxed verification: ⚠️ incomplete — results unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
-                printf 'The verification ran, but its result artifact could not be retrieved for publishing, so there is nothing to report here. The run log still has the agent output; re-run `@qwen-code /verify` for a fresh report.\n\n'
+                printf 'The verification ran, but its result artifact could not be retrieved for publishing, so there is nothing to report here. The run log still has the agent output; while the PR is open, re-run `@qwen-code /verify` for a fresh report.\n\n'
                 printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 结果不可用</summary>\n\n'
-                printf '验证已执行，但结果产物未能取回用于发布，因此此处没有可报告的内容。运行日志中仍有 agent 输出；如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
+                printf '验证已执行，但结果产物未能取回用于发布，因此此处没有可报告的内容。运行日志中仍有 agent 输出；PR 未关闭时，如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
                 printf '</details>\n\n'
               fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
@@ -6033,8 +6042,8 @@ jobs:
                     G_SKIP_CLAUSE=" · ${G_SKIP} skipped"
                     G_SKIP_CLAUSE_ZH=" · ${G_SKIP} 跳过"
                   fi
-                  GATES_LINE="Targeted gates (existing tests, not counted above): ${G_PASS} passed · ${G_FAIL} failed${G_SKIP_CLAUSE} across ${G_SUITES} suite(s)"
-                  GATES_LINE_ZH="定向门禁（已有测试，不计入上面的断言）：${G_PASS} 通过 · ${G_FAIL} 失败${G_SKIP_CLAUSE_ZH}，共 ${G_SUITES} 个套件"
+                  GATES_LINE="Targeted gates (existing tests, not counted individually above): ${G_PASS} passed · ${G_FAIL} failed${G_SKIP_CLAUSE} across ${G_SUITES} suite(s)"
+                  GATES_LINE_ZH="定向门禁（已有测试，不逐条计入上面的断言）：${G_PASS} 通过 · ${G_FAIL} 失败${G_SKIP_CLAUSE_ZH}，共 ${G_SUITES} 个套件"
                 fi
               else
                 echo "::warning::assertions.json missing or inconsistent; not treating it as evidence."
@@ -6310,6 +6319,7 @@ jobs:
           # run produced, can quote one further down.
           OWN_ID=''
           OWN_SUBSTANTIVE=''
+          OWN_FLAKY=''
           if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
             echo "::warning::Could not resolve the bot identity; posting a fresh comment instead of reusing one."
             BOT_LOGIN=''
@@ -6319,15 +6329,17 @@ jobs:
               --method GET \
               --paginate \
               -F per_page=100 \
-              | jq -sr --arg bot "$BOT_LOGIN" --arg run "$RUN_MARKER" --arg sub "$SUBSTANTIVE_MARKER" \
+              | jq -sr --arg bot "$BOT_LOGIN" --arg run "$RUN_MARKER" --arg sub "$SUBSTANTIVE_MARKER" --arg flaky "$FLAKY_MARKER" \
                 'def header: split("\n\n")[0] | split("\n");
                  [.[][] | select((.body | startswith("<!-- qwen-triage:verify -->")) and .user.login == $bot)
                     | (.body | header) as $h | select(any($h[]; . == $run))
-                    | "\(.id)\t\(any($h[]; . == $sub))"]
+                    | "\(.id)\t\(any($h[]; . == $sub))\t\(any($h[]; . == $flaky))"]
                  | last // empty'
           )"; then
             OWN_ID="${OWN_META%%$'\t'*}"
-            OWN_SUBSTANTIVE="${OWN_META#*$'\t'}"
+            OWN_META="${OWN_META#*$'\t'}"
+            OWN_SUBSTANTIVE="${OWN_META%%$'\t'*}"
+            OWN_FLAKY="${OWN_META#*$'\t'}"
           elif [ -n "$BOT_LOGIN" ]; then
             echo "::warning::Failed to look up this run's comment; will create a new one."
           fi
@@ -6342,9 +6354,14 @@ jobs:
             OWN_ID=''
           fi
           # A round can queue for hours: a notice with no status of its own
-          # to finalize is noise on a PR that closed meanwhile. A failed
-          # lookup posts.
+          # to finalize is noise on a PR that closed meanwhile. A flaky
+          # demotion still posts, since on a merged PR it names tests now on
+          # main, unless this run's own report already carries it. An
+          # attempt whose own live status is missing (that post is
+          # best-effort) finds an earlier attempt's report instead, which
+          # can predate the verdict. A failed lookup posts.
           if [ -z "$OWN_ID" ] && [ "$BODY_SUBSTANTIVE" != true ] &&
+            { [ "${FLAKE_VERDICT:-}" != flaky ] || [ "$OWN_FLAKY" = true ]; } &&
             [ "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.state' 2>/dev/null || true)" = closed ]; then
             echo "PR #${PR_NUMBER} closed before this round published; notice not posted (verdict=${VERDICT})." >> "$GITHUB_STEP_SUMMARY"
             exit 0
