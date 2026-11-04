@@ -125,7 +125,7 @@ public class WorkspaceFileStore {
         }
     }
 
-    record Scope(ContextBinding binding, String kind, String revision, Map<String, Object> sessionFileScope) {
+    record Scope(ContextBinding binding, String kind, String revision, Map<String, Object> sessionFileScope, Long mountRevision) {
     }
 
     private record Exchange(String revision, Map<String, Object> files) {
@@ -231,7 +231,8 @@ public class WorkspaceFileStore {
                 var identity = locator.sessionId() == null ? List.of(actor, binding.getContextDigest(), rows, owner)
                         : List.of(actor, binding.getContextDigest(), rows, owner, locator.sessionId(), worktreeRevision);
                 String revision = DigestUtils.sha256Hex(mapper.writeValueAsBytes(identity));
-                return new Scope(binding, (String) rows.getFirst().get("storage_kind"), revision, sessionFileScope);
+                Long mountRevision = owner.size() == 1 && owner.getFirst().get("mount_revision") instanceof Number value ? value.longValue() : null;
+                return new Scope(binding, (String) rows.getFirst().get("storage_kind"), revision, sessionFileScope, mountRevision);
             } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
                 throw new IllegalStateException(error);
             }

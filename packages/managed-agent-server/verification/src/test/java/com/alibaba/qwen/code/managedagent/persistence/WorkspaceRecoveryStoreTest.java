@@ -46,6 +46,7 @@ class WorkspaceRecoveryStoreTest {
 
     @TempDir Path temporary;
     private JdbcTemplate jdbc;
+    private StoreLockTrace trace;
     private DataSourceTransactionManager manager;
     private WorkspaceStorageGuard guard;
     private ManagedAgentStore sessions;
@@ -55,7 +56,8 @@ class WorkspaceRecoveryStoreTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        var source = recoveryDataSource();
+        var source = new StoreLockTrace(recoveryDataSource());
+        trace = source;
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
@@ -269,8 +271,10 @@ class WorkspaceRecoveryStoreTest {
         head(session);
         String operation = retireSession(session);
         var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE session_id = ?", session);
-        var retirement = jdbc.queryForMap("SELECT retirement_operation_id, retirement_generation, retired_at, recovery_protected FROM ma_session WHERE session_id = ?", session);
+        var retirement = jdbc.queryForMap("SELECT retirement_operation_id, retirement_generation, retired_at, is_recovery_protected FROM ma_session WHERE session_id = ?", session);
+        trace.clear();
         JsonNode source = call(capture(), "sessions").path("sessions").get(0).path("source");
+        trace.assertSessionBeforeTurn("tenant", session);
         assertThat(source.path("retirement").path("operationId").asText()).isEqualTo(operation);
         assertThat(source.path("retirement").path("tenantId").asText()).isEqualTo("tenant");
         assertThat(source.path("retirement").path("sessionId").asText()).isEqualTo(session);
@@ -280,7 +284,7 @@ class WorkspaceRecoveryStoreTest {
         assertThat(source.path("head").path("latestCheckpointResourceId").isNull()).isTrue();
         assertThat(source.path("head").path("writerId").isNull()).isTrue();
         assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE session_id = ?", session)).isEqualTo(before);
-        assertThat(jdbc.queryForMap("SELECT retirement_operation_id, retirement_generation, retired_at, recovery_protected FROM ma_session WHERE session_id = ?", session)).isEqualTo(retirement);
+        assertThat(jdbc.queryForMap("SELECT retirement_operation_id, retirement_generation, retired_at, is_recovery_protected FROM ma_session WHERE session_id = ?", session)).isEqualTo(retirement);
     }
 
     @Test
@@ -324,7 +328,7 @@ class WorkspaceRecoveryStoreTest {
         String scope = ToolPublicationDataStore.scope("tenant", "private-key", session);
         jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
-                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, write_evidence, accepted_complete,"
+                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete,"
                 + " receipt_sequence, receipt_revision) VALUES (?, ?, 'tenant', 'private-key', ?, 'pub-1', ?,"
                 + " 'capture-1', '{}', ?, ?, 'FENCED', 0, 0, 0, 'REFERENCED', TRUE, TRUE, 1, 1)",
                 scope, com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.hash("tenant"), session, scope, scope, scope);
@@ -385,7 +389,7 @@ class WorkspaceRecoveryStoreTest {
         switch (damage) {
             case "owner" -> jdbc.update("UPDATE ma_session_head SET tenant_id = X'666f726569676e' WHERE session_id = ?", session);
             case "generation" -> jdbc.update("UPDATE ma_session SET retirement_generation = 2 WHERE session_id = ?", session);
-            case "protected" -> jdbc.update("UPDATE ma_session SET recovery_protected = TRUE WHERE session_id = ?", session);
+            case "protected" -> jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE WHERE session_id = ?", session);
             case "operation" -> jdbc.update("UPDATE ma_operation SET delivery_state = 'PENDING' WHERE session_id = ?", session);
             case "public" -> jdbc.update("UPDATE ma_session SET status = 'CLOSED' WHERE session_id = ?", session);
             case "head" -> jdbc.update("UPDATE ma_session_head SET latest_checkpoint_resource_id = X'72657461696e6564' WHERE session_id = ?", session);
