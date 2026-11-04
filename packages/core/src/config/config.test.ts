@@ -8371,6 +8371,55 @@ describe('Server Config (config.ts)', () => {
       expect(policy).not.toContain('auto-memory');
     });
 
+    // The session-start refresh runs before the tool registry exists, so the
+    // route must be decided when the policy is read, not when it is built.
+    it('sends the full policy once the registry turns out to have no Skill tool', async () => {
+      const config = makeConfig();
+      vi.spyOn(config, 'getSkillManager').mockReturnValue(
+        {} as unknown as ReturnType<Config['getSkillManager']>,
+      );
+      const toolNames: string[] = [];
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue({
+        getAllToolNames: () => toolNames,
+        isPermissionDeferred: () => false,
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      loadProjectRules();
+
+      await config.refreshHierarchicalMemory();
+
+      expect(config.getAutoMemoryPrompt()).toContain('<types>');
+      toolNames.push('skill');
+      expect(config.getAutoMemoryPrompt()).toContain(
+        'load the `auto-memory` skill',
+      );
+    });
+
+    it('gives a derived Config with no skill manager the full policy', async () => {
+      const config = makeConfig();
+      withSkillTool(config);
+      loadProjectRules();
+      await config.refreshHierarchicalMemory();
+
+      // As buildSubagentContextOverride does for a skill-denied agent (#12424).
+      const subagent = deriveConfig(config);
+      subagent.getSkillManager = () => null;
+
+      expect(config.getAutoMemoryPrompt()).toContain(
+        'load the `auto-memory` skill',
+      );
+      expect(subagent.getAutoMemoryPrompt()).toContain('<types>');
+      expect(subagent.getAutoMemoryPrompt()).not.toContain('auto-memory');
+    });
+
+    it('does not list the bundled auto-memory skill under structured recall', () => {
+      const config = makeConfig({ enableManagedAutoMemory: true });
+      Object.assign(config, { memoryRecallMode: 'structured' });
+
+      expect(
+        config.isSkillEnabled({ name: 'auto-memory', level: 'bundled' }),
+      ).toBe(false);
+    });
+
     it.each([
       [true, true],
       [false, false],

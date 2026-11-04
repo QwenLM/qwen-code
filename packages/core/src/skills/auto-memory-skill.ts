@@ -81,34 +81,68 @@ export function buildAutoMemoryReferenceSection(
   }
 }
 
+/** What the main session's legacy auto-memory policy is built from. */
+export interface MainSessionAutoMemoryInputs {
+  memoryDir: string;
+  indexContent: string | null;
+  userSection: UserAutoMemorySection;
+  teamSection: TeamAutoMemorySection | undefined;
+}
+
 /**
- * The main session's auto-memory policy for this config: the resident policy
+ * The main session's auto-memory policy for one route: the resident policy
  * with a pointer to the bundled reference, or the full policy where no skill
  * can be loaded. The indexes always travel as request-tail catalog data.
  */
-export function buildMainSessionAutoMemoryPrompt(
-  config: Config,
-  memoryDir: string,
-  indexContent: string | null,
-  userSection: UserAutoMemorySection,
-  teamSection: TeamAutoMemorySection | undefined,
+export function buildMainSessionAutoMemoryPromptForRoute(
+  route: BundledReferenceRoute,
+  inputs: MainSessionAutoMemoryInputs,
 ): string {
-  const reference = buildAutoMemoryReferenceSection(
-    resolveBundledReferenceRoute(config, AUTO_MEMORY_SKILL_NAME),
-  );
+  const reference = buildAutoMemoryReferenceSection(route);
   if (reference === undefined) {
     return buildManagedAutoMemoryPrompt(
-      memoryDir,
-      indexContent,
-      userSection,
-      teamSection,
+      inputs.memoryDir,
+      inputs.indexContent,
+      inputs.userSection,
+      inputs.teamSection,
       { includeIndexes: false },
     );
   }
   return buildResidentAutoMemoryPrompt(
-    memoryDir,
-    userSection,
-    teamSection,
+    inputs.memoryDir,
+    inputs.userSection,
+    inputs.teamSection,
     reference,
   );
+}
+
+/**
+ * The main session's policy, resolved for whichever Config reads it.
+ *
+ * The route is decided at read time, not when memory is refreshed: a
+ * subagent reads the policy through a Config derived from the session's, and
+ * one whose tool policy leaves out the Skill tool holds no skill manager
+ * (#12424), so its route is `inline` and it must get the full policy rather
+ * than the session's pointer. Reading it late also follows the Skill tool's
+ * reachability when that changes between refreshes, and covers the
+ * session-start refresh, which runs before the tool registry exists.
+ *
+ * Built once per route: a session normally sees one or two routes, and the
+ * text for a route only changes when the inputs do, which replaces this
+ * object.
+ */
+export class MainSessionAutoMemoryPolicy {
+  private readonly byRoute = new Map<BundledReferenceRoute, string>();
+
+  constructor(readonly inputs: MainSessionAutoMemoryInputs) {}
+
+  forConfig(config: Config): string {
+    const route = resolveBundledReferenceRoute(config, AUTO_MEMORY_SKILL_NAME);
+    let prompt = this.byRoute.get(route);
+    if (prompt === undefined) {
+      prompt = buildMainSessionAutoMemoryPromptForRoute(route, this.inputs);
+      this.byRoute.set(route, prompt);
+    }
+    return prompt;
+  }
 }

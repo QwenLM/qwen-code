@@ -40,7 +40,7 @@ The constants stay the single source, because other prompts are built from them:
 
 ## 3. How the route is decided
 
-`buildMainSessionAutoMemoryPrompt` (`skills/auto-memory-skill.ts`) uses `resolveBundledReferenceRoute`, the same resolver the Workflow and Agent tools use:
+`MainSessionAutoMemoryPolicy` (`skills/auto-memory-skill.ts`) uses `resolveBundledReferenceRoute`, the same resolver the Workflow and Agent tools use:
 
 | Route                                                                           | Main-session policy                                         |
 | ------------------------------------------------------------------------------- | ----------------------------------------------------------- |
@@ -51,9 +51,13 @@ The constants stay the single source, because other prompts are built from them:
 
 It decides on the route rather than on the surface the tool descriptions use. That surface falls back to a pointer when the reference file cannot be read, but the full policy needs no file.
 
-**Session start.** `Config.refreshHierarchicalMemory` first runs at session start, before the tool registry exists, so the first build cannot see the Skill tool. Config therefore keeps the policy's inputs and builds the policy again right after it creates the registry. Later refreshes see the registry directly.
+**When the route is decided.** A refresh stores the policy's inputs, and `Config.getAutoMemoryPrompt()` resolves the route each time it is read, against the Config it is read through; the text is built once per route. Three cases need that:
 
-**Listing.** The skill is listed only when managed auto-memory is on. `Config.isSkillEnabled` and `SkillManager` hide it otherwise, the way they hide `generated-ui`.
+- The first refresh runs at session start, before the tool registry exists, so it cannot see the Skill tool.
+- A subagent reads the policy through a Config derived from the session's. One whose tool policy leaves out `skill` holds no skill manager ([#12424](https://github.com/QwenLM/qwen-code/issues/12424)), so its route is `inline` and it gets the full policy.
+- The Skill tool can become unreachable between refreshes, for example through `tools.disabled`; the next request follows it.
+
+**Listing.** The skill is listed only when managed auto-memory is on and recall is in legacy mode. `Config.isSkillEnabled` hides it otherwise, and `SkillManager` applies that gate both to the listing and to loading it by name, the way it does for `generated-ui`. The daemon's skills catalog answers the same question from the workspace settings.
 
 ## 4. Measured effect
 
@@ -62,12 +66,12 @@ Lengths in characters, with typical paths (`/home/alice/.qwen/memories` and `/ho
 | Shape                          | No team | Team on |
 | ------------------------------ | ------- | ------- |
 | Before (full policy)           | 15,868  | 17,243  |
-| Pointer route                  | 4,572   | 5,356   |
-| Pointer via tool_search        | 4,690   | 5,474   |
-| Withheld                       | 4,337   | 5,121   |
+| Pointer route                  | 4,686   | 5,470   |
+| Pointer via tool_search        | 4,804   | 5,588   |
+| Withheld                       | 4,451   | 5,235   |
 | Inline (no route to any skill) | 15,868  | 17,243  |
 
-The default session saves **11,296 characters (about 2.8k tokens) per request**.
+The default session saves **11,182 characters (about 2.8k tokens) per request**.
 
 The listing cost is small:
 
@@ -82,15 +86,14 @@ A session that loads the skill carries its body, about 14.6k characters, in hist
   - The resident policy keeps the frontmatter template, the category names and the body rule.
   - The writer's validation messages still quote `MEMORY_METADATA_ITEM_BOUNDS`.
   - The background extractor and Dream keep working from the full rules.
-- **Restricted subagents.** The route resolver reads the tool registry, not a subagent's tool policy. A custom subagent that inherits the policy but cannot call `skill` gets a pointer it cannot follow. This is the existing [#12424](https://github.com/QwenLM/qwen-code/issues/12424) gap; the resident policy alone still saves correctly.
-- **Structured recall.** This change is independent of structured recall ([#12947](https://github.com/QwenLM/qwen-code/issues/12947)), whose prompt is already short. It changes only the legacy path, which is the default.
+- **Structured recall.** This change is independent of structured recall ([#12947](https://github.com/QwenLM/qwen-code/issues/12947)), whose prompt is already short. It changes only the legacy path, which is the default, and the skill is not listed under structured recall.
 
 ## 6. Validation
 
 - **Unit tests:**
   - `skills/bundled/auto-memory/SKILL.test.ts`: every constant line in the skill, plus both-way anchors;
-  - `skills/auto-memory-skill.test.ts`: the four routes and the size budget;
-  - `config/config.test.ts`: the policy per route, and the listing gate;
+  - `skills/auto-memory-skill.test.ts`: the four routes, the route of the reading Config, and the size budget;
+  - `config/config.test.ts`: the policy per route, a registry without the Skill tool, a derived Config without a skill manager, and the listing gate;
   - `memory/prompt.test.ts` and `skills/bundled-skills.integration.test.ts`.
 - **Byte identity:** the output of `buildManagedAutoMemoryPrompt` was compared with the merge base for five argument shapes and matched.
 - **Behavior:** a before/after run with real models over nine scenarios. The scenarios cover saving to the right tier with valid metadata, absolute dates, references, refusing to store derivable facts, updating instead of duplicating, forgetting, verifying a stale memory against the code, honoring "don't use memory", and an unrelated task that must neither load the skill nor write memory. The results are in the PR.

@@ -39,26 +39,22 @@ function normalize(text: string): string {
   return text.replace(/(?<!\*)\*(?!\*)/g, '_').replace(/\s+/g, ' ');
 }
 
-function skillBody(): string {
-  return normalize(loadSkill().body);
-}
-
+// Read and normalized once: every generated case below compares against the
+// same three strings.
+const skill = loadSkill();
+const skillBody = normalize(skill.body);
 /** The bundled listing charges the frontmatter on every request. */
-function skillFrontmatter(): string {
-  const skill = loadSkill();
-  return normalize(`${skill.description} ${skill.whenToUse ?? ''}`);
-}
-
-function residentPrompt(): string {
-  return normalize(
-    buildResidentAutoMemoryPrompt(
-      '/home/user/.qwen/projects/app/memory',
-      { memoryDir: '/home/user/.qwen/memories' },
-      { memoryDir: '/repo/.qwen/team-memory' },
-      'POINTER',
-    ),
-  );
-}
+const skillFrontmatter = normalize(
+  `${skill.description} ${skill.whenToUse ?? ''}`,
+);
+const residentPrompt = normalize(
+  buildResidentAutoMemoryPrompt(
+    '/home/user/.qwen/projects/app/memory',
+    { memoryDir: '/home/user/.qwen/memories' },
+    { memoryDir: '/repo/.qwen/team-memory' },
+    'POINTER',
+  ),
+);
 
 /** Every non-empty line of a prompt constant, as one comparable paragraph. */
 function lines(section: readonly string[]): string[] {
@@ -67,13 +63,11 @@ function lines(section: readonly string[]): string[] {
 
 describe('bundled auto-memory skill', () => {
   it('is the auto-memory reference, and says what the session already has', () => {
-    const skill = loadSkill();
-
     expect(skill.name).toBe(AUTO_MEMORY_SKILL_NAME);
     expect(skill.description).toContain(
       'Load once you decide to save a memory',
     );
-    expect(skillBody()).toContain(
+    expect(skillBody).toContain(
       'Your instructions already list the memory directories, the frontmatter template, the category names and the two save steps',
     );
   });
@@ -93,7 +87,7 @@ describe('bundled auto-memory skill', () => {
     ['MEMORY_PERSISTENCE_SECTION', MEMORY_PERSISTENCE_SECTION],
   ])('carries %s', (_name, section) => {
     it.each(lines(section))('%s', (line) => {
-      expect(skillBody()).toContain(normalize(line));
+      expect(skillBody).toContain(normalize(line));
     });
   });
 
@@ -121,13 +115,13 @@ describe('bundled auto-memory skill', () => {
     ['Memory records can become stale over time'],
   ])('moved out of the resident prompt: %s', (anchor) => {
     it('is in the skill', () => {
-      expect(skillBody()).toContain(normalize(anchor));
+      expect(skillBody).toContain(normalize(anchor));
     });
     it('is not in the resident prompt', () => {
-      expect(residentPrompt()).not.toContain(normalize(anchor));
+      expect(residentPrompt).not.toContain(normalize(anchor));
     });
     it('is not in the skill frontmatter', () => {
-      expect(skillFrontmatter()).not.toContain(normalize(anchor));
+      expect(skillFrontmatter).not.toContain(normalize(anchor));
     });
   });
 
@@ -151,6 +145,8 @@ describe('bundled auto-memory skill', () => {
     ['the frontmatter template', 'usage_scenarios:'],
     ['the category list', '`category` is exactly one of: basic_information'],
     ['the same-directory index', 'lives in the SAME directory you wrote to'],
+    ['no frontmatter in the index', 'The index has no frontmatter'],
+    ['the index line limit', 'will be truncated, so keep every index concise'],
     ['no content in the index', 'Never write memory content directly'],
     ['deduplication', 'should be updated instead'],
     ['when to read memory', 'always when they ask you to check, recall'],
@@ -159,6 +155,6 @@ describe('bundled auto-memory skill', () => {
     ['verifying before recommending', 'check the current state'],
     ['the reference pointer', 'POINTER'],
   ])('keeps %s in the resident prompt', (_what, anchor) => {
-    expect(residentPrompt()).toContain(normalize(anchor));
+    expect(residentPrompt).toContain(normalize(anchor));
   });
 });

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from '../tools/tool-names.js';
 import { ToolMode } from '../tools/code-mode.js';
@@ -15,7 +15,8 @@ import {
 import { toolSearchBridgeSentence } from './bundled-reference.js';
 import {
   AUTO_MEMORY_SKILL_NAME,
-  buildMainSessionAutoMemoryPrompt,
+  MainSessionAutoMemoryPolicy,
+  type MainSessionAutoMemoryInputs,
 } from './auto-memory-skill.js';
 
 const PROJECT_DIR = '/home/user/.qwen/projects/app/memory';
@@ -67,17 +68,18 @@ function stubConfig({
   } as unknown as Config;
 }
 
+const INPUTS: MainSessionAutoMemoryInputs = {
+  memoryDir: PROJECT_DIR,
+  indexContent: null,
+  userSection: USER,
+  teamSection: undefined,
+};
+
 function build(config: Config): string {
-  return buildMainSessionAutoMemoryPrompt(
-    config,
-    PROJECT_DIR,
-    null,
-    USER,
-    undefined,
-  );
+  return new MainSessionAutoMemoryPolicy(INPUTS).forConfig(config);
 }
 
-describe('buildMainSessionAutoMemoryPrompt', () => {
+describe('MainSessionAutoMemoryPolicy', () => {
   it('sends the resident policy with a pointer when the skill can be loaded', () => {
     const prompt = build(stubConfig());
 
@@ -121,7 +123,41 @@ describe('buildMainSessionAutoMemoryPrompt', () => {
     },
   );
 
-  // The per-request price of the policy. Measured with these paths at 4,553
+  // A subagent reads the policy through a Config derived from the session's
+  // (Object.create), and one whose tool policy leaves out the Skill tool holds
+  // no skill manager (#12424). The route has to be the reader's, not the
+  // session's, or that subagent gets a pointer it cannot follow.
+  it('resolves the route for the Config that reads it, so a skill-less subagent gets the full policy', () => {
+    const policy = new MainSessionAutoMemoryPolicy(INPUTS);
+    const session = stubConfig();
+    const subagent = Object.create(session) as Config;
+    subagent.getSkillManager = () => null;
+
+    expect(policy.forConfig(session)).toContain(
+      `load the \`${AUTO_MEMORY_SKILL_NAME}\` skill`,
+    );
+    expect(policy.forConfig(subagent)).toContain('<types>');
+    expect(policy.forConfig(subagent)).not.toContain(AUTO_MEMORY_SKILL_NAME);
+  });
+
+  it('asks for the route on every read', () => {
+    const policy = new MainSessionAutoMemoryPolicy(INPUTS);
+    const config = stubConfig();
+    const getSkillManager = vi.spyOn(
+      config as unknown as { getSkillManager: () => unknown },
+      'getSkillManager',
+    );
+
+    const first = policy.forConfig(config);
+    const second = policy.forConfig(config);
+
+    expect(second).toBe(first);
+    // Resolved per read, so a change in the Skill tool's reachability shows
+    // up on the next request; only the text for a route is reused.
+    expect(getSkillManager).toHaveBeenCalledTimes(2);
+  });
+
+  // The per-request price of the policy. Measured with these paths at 4,667
   // characters on the pointer route and 15,849 for the full policy it
   // replaces. Raising the budget is a decision about what every request of
   // every session carries; prefer moving guidance into the skill.

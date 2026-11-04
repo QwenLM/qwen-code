@@ -58,8 +58,11 @@ const SKILLS_CONFIG_DIR = 'skills';
 /**
  * Bundled skills that `Config.isSkillEnabled` hides when the feature they
  * serve is off: `generated-ui` without the generated-UI runtime, and
- * `auto-memory` without managed auto-memory. Spelled out rather than imported
- * from their modules, which sit above this one in the import graph.
+ * `auto-memory` without legacy managed auto-memory. Both the listing and a
+ * by-name load consult it, so the two cannot disagree. Spelled out rather than
+ * imported from their modules, which sit above this one in the import graph.
+ * A Config stand-in that builds a SkillManager must answer `isSkillEnabled`
+ * for these (see the daemon's skills catalog).
  */
 const CONDITIONAL_BUNDLED_SKILLS: ReadonlySet<string> = new Set([
   'generated-ui',
@@ -1292,7 +1295,7 @@ export class SkillManager {
         (skill) =>
           skill.name === name &&
           (level !== 'bundled' ||
-            name !== 'generated-ui' ||
+            !CONDITIONAL_BUNDLED_SKILLS.has(name) ||
             this.config.isSkillEnabled(skill)),
       ) || null
     );

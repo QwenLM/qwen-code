@@ -40,7 +40,7 @@
 
 ## 3. 路由如何决定
 
-`buildMainSessionAutoMemoryPrompt`（`skills/auto-memory-skill.ts`）调用 `resolveBundledReferenceRoute`，与 Workflow、Agent 工具用的是同一个解析器：
+`MainSessionAutoMemoryPolicy`（`skills/auto-memory-skill.ts`）调用 `resolveBundledReferenceRoute`，与 Workflow、Agent 工具用的是同一个解析器：
 
 | 路由                                                                    | 主会话策略                           |
 | ----------------------------------------------------------------------- | ------------------------------------ |
@@ -51,9 +51,13 @@
 
 这里按路由决定，而不是按工具描述使用的 surface 决定。那个 surface 在参考文件读不到时会退回为指针，但完整策略并不需要这个文件。
 
-**会话启动。** `Config.refreshHierarchicalMemory` 第一次运行在会话启动时，早于工具注册表的创建，所以第一次构建看不到 Skill 工具。因此 Config 会保存策略的输入，在创建注册表之后立刻再构建一次。之后的刷新可以直接看到注册表。
+**何时决定路由。** 刷新时只保存策略的输入，`Config.getAutoMemoryPrompt()` 每次被读取时，按读取它的那个 Config 解析路由；每种路由的文本只构建一次。需要这样做的情况有三种：
 
-**列表。** 只有开启 managed auto-memory 时才列出这个 skill。否则 `Config.isSkillEnabled` 和 `SkillManager` 会把它隐藏，与隐藏 `generated-ui` 的方式一样。
+- 第一次刷新运行在会话启动时，早于工具注册表的创建，看不到 Skill 工具。
+- 子 agent 通过从会话 Config 派生出的 Config 读取策略。工具策略里没有 `skill` 的子 agent 不持有 skill manager（[#12424](https://github.com/QwenLM/qwen-code/issues/12424)），所以它的路由是 `inline`，拿到完整策略。
+- 两次刷新之间 Skill 工具可能变得不可用，例如通过 `tools.disabled`；下一次请求就会跟上。
+
+**列表。** 只有开启 managed auto-memory 且召回处于 legacy 模式时才列出这个 skill。否则 `Config.isSkillEnabled` 会把它隐藏；`SkillManager` 在列表和按名加载时都使用这个开关，与 `generated-ui` 的处理方式一样。daemon 的 skills 目录根据工作区设置回答同一个问题。
 
 ## 4. 实测效果
 
@@ -62,12 +66,12 @@
 | 形态                         | 未开 team | 开启 team |
 | ---------------------------- | --------- | --------- |
 | 改动前（完整策略）           | 15,868    | 17,243    |
-| 指针路由                     | 4,572     | 5,356     |
-| 经 tool_search 的指针        | 4,690     | 5,474     |
-| withheld                     | 4,337     | 5,121     |
+| 指针路由                     | 4,686     | 5,470     |
+| 经 tool_search 的指针        | 4,804     | 5,588     |
+| withheld                     | 4,451     | 5,235     |
 | inline（没有途径加载 skill） | 15,868    | 17,243    |
 
-默认会话**每次请求减少 11,296 字符（约 2.8k tokens）**。
+默认会话**每次请求减少 11,182 字符（约 2.8k tokens）**。
 
 列表上的代价很小：
 
@@ -82,15 +86,14 @@
   - 常驻策略保留了 frontmatter 模板、category 名称和正文规则。
   - 写入校验的提示信息仍会引用 `MEMORY_METADATA_ITEM_BOUNDS`。
   - 后台抽取和 Dream 仍按完整规则工作。
-- **受限的子 agent。** 路由解析读取的是工具注册表，而不是子 agent 的工具策略。继承了该策略却不能调用 `skill` 的自定义子 agent，会拿到一个无法使用的指针。这是已知的 [#12424](https://github.com/QwenLM/qwen-code/issues/12424) 缺口；仅凭常驻策略也能正确保存。
-- **结构化召回。** 与结构化召回（[#12947](https://github.com/QwenLM/qwen-code/issues/12947)）互不影响，它的 prompt 本来就很短。本改动只涉及默认的 legacy 路径。
+- **结构化召回。** 与结构化召回（[#12947](https://github.com/QwenLM/qwen-code/issues/12947)）互不影响，它的 prompt 本来就很短。本改动只涉及默认的 legacy 路径，结构化召回下也不会列出这个 skill。
 
 ## 6. 验证
 
 - **单元测试：**
   - `skills/bundled/auto-memory/SKILL.test.ts`：skill 包含每个常量的每一行，以及双向锚点；
-  - `skills/auto-memory-skill.test.ts`：四种路由与体积预算；
-  - `config/config.test.ts`：各路由下的策略，以及列表开关；
+  - `skills/auto-memory-skill.test.ts`：四种路由、读取方 Config 的路由，以及体积预算；
+  - `config/config.test.ts`：各路由下的策略、没有 Skill 工具的注册表、没有 skill manager 的派生 Config，以及列表开关；
   - `memory/prompt.test.ts` 与 `skills/bundled-skills.integration.test.ts`。
 - **逐字节一致：** `buildManagedAutoMemoryPrompt` 的输出在五种参数组合下与 merge base 对比，全部一致。
 - **行为：** 用真实模型在九个场景下做改动前后对比。场景覆盖：保存到正确的层级且元数据合法、绝对日期、reference、拒绝保存可推导的内容、更新而非重复、忘掉、对照代码核实过时的 memory、遵守“不要用 memory”，以及一个既不应加载 skill、也不应写 memory 的无关任务。结果写在 PR 中。
