@@ -53,6 +53,7 @@ describe('createInkToolExecutor', () => {
         void onBatchComplete?.([
           completed(calls[0], 'success', true),
           completed(calls[1], 'cancelled'),
+          completed(calls[2], 'error'),
         ]);
       },
     );
@@ -60,13 +61,17 @@ describe('createInkToolExecutor', () => {
     const executor = createInkToolExecutor(schedule, 'model\0', onSettled);
 
     const settled = await executor.run(
-      [request('a'), request('b'), request('refused')],
+      [request('a'), request('b'), request('c'), request('refused')],
       signal,
       hooks(['refused']),
     );
 
     expect(schedule).toHaveBeenCalledOnce();
-    expect(schedule.mock.calls[0][0]).toEqual([request('a'), request('b')]);
+    expect(schedule.mock.calls[0][0]).toEqual([
+      request('a'),
+      request('b'),
+      request('c'),
+    ]);
     expect(schedule.mock.calls[0][1]).toBe(signal);
     expect(schedule.mock.calls[0][2]).toBe('model\0');
     expect(onSettled).toHaveBeenCalledOnce();
@@ -77,8 +82,10 @@ describe('createInkToolExecutor', () => {
         recorded,
       ]),
     ).toEqual([
+      // The middleware counted a; the TUI counts the cancelled b itself.
       ['a', 'success', true],
-      ['b', 'cancelled', false],
+      ['b', 'cancelled', true],
+      ['c', 'error', false],
     ]);
   });
 

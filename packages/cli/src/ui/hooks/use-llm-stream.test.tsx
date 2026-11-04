@@ -24979,6 +24979,173 @@ describe('useLlmStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
     });
 
+    const cancelBatches = () =>
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          void onBatchComplete?.(
+            requests.map((request) => ({
+              ...completedCall(request),
+              status: 'cancelled' as const,
+            })),
+          );
+        },
+      );
+
+    it('counts a cancelled call as the current path does: not when history already answered it', async () => {
+      cancelBatches();
+      rounds([toolRequest('read_a'), toolRequest('read_b')]);
+      const client = mockConfig.getLlmClient();
+      client.getHistoryFunctionResponseIds = vi
+        .fn()
+        .mockReturnValue(new Set(['read_a']));
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the files.');
+      });
+
+      await waitFor(() => {
+        expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+      });
+      expect(client.recordCompletedToolCall).toHaveBeenCalledWith('read_file', {
+        file_path: '/test/dir/read_b.txt',
+      });
+    });
+
+    it('commits the tool group when the scheduler completes the batch and keeps its results in that session', async () => {
+      const outputDir = await fs.mkdtemp(
+        path.join(tmpdir(), 'qwen-shared-finalizer-'),
+      );
+      let releaseFinalizer!: () => void;
+      const persistenceEntered = vi.fn();
+      pendingToolPersistence.directory = outputDir;
+      pendingToolPersistence.wait = new Promise<void>((resolve) => {
+        releaseFinalizer = resolve;
+      });
+      pendingToolPersistence.entered = persistenceEntered;
+      try {
+        let sessionId = 'old-session';
+        mockConfig.getSessionId = () => sessionId;
+        const oldRecorder = { recordToolResult: vi.fn() };
+        let recorder = oldRecorder;
+        mockConfig.getChatRecordingService = vi.fn(() => recorder) as Mock;
+        mockConfig.getToolOutputBatchBudget = () => 200_000;
+        mockConfig.getToolResultBytesWritten = () => 0;
+        mockConfig.trackToolResultBytes = vi.fn();
+        mockConfig.getExecutionEnvironment = () => undefined;
+        mockConfig.storage = {
+          getToolResultsDir: () => outputDir,
+          getProjectTempDir: () => outputDir,
+        } as Config['storage'];
+        let schedulerCallbackReturned = false;
+        mockScheduleToolCalls.mockImplementation(
+          (
+            requests: ToolCallRequestInfo[],
+            _signal: AbortSignal,
+            _modelOverride: string | undefined,
+            onBatchComplete?: (calls: unknown[]) => Promise<void>,
+          ) => {
+            void onBatchComplete?.(
+              requests.map((request) => {
+                const call = completedCall(request);
+                call.response.responseParts[0].functionResponse!.response = {
+                  output: 'a'.repeat(220_000),
+                };
+                return call;
+              }),
+            )?.then(() => {
+              schedulerCallbackReturned = true;
+            });
+          },
+        );
+        // No continuation follows: the swapped session drops the result.
+        rounds([toolRequest('read_a')]);
+        const { result, client } = renderTestHook();
+        const toolGroups = () =>
+          mockAddItem.mock.calls.filter(
+            ([item]) => (item as { type?: string }).type === 'tool_group',
+          );
+
+        await act(async () => {
+          await result.current.submitQuery('Read the file.');
+        });
+        await waitFor(() => expect(persistenceEntered).toHaveBeenCalled());
+        // The finalize persists the result; the group is already in history.
+        expect(schedulerCallbackReturned).toBe(true);
+        expect(toolGroups()).toHaveLength(1);
+
+        // A /clear swaps the session while the result is persisted.
+        sessionId = 'new-session';
+        const newRecorder = { recordToolResult: vi.fn() };
+        recorder = newRecorder;
+        client.getChat = vi.fn(() => ({ addHistory: vi.fn() }));
+        await act(async () => {
+          releaseFinalizer();
+        });
+
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        });
+        expect(newRecorder.recordToolResult).not.toHaveBeenCalled();
+        expect(oldRecorder.recordToolResult).not.toHaveBeenCalled();
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+        expect(toolGroups()).toHaveLength(1);
+      } finally {
+        releaseFinalizer();
+        pendingToolPersistence.directory = '';
+        pendingToolPersistence.wait = undefined;
+        pendingToolPersistence.entered = undefined;
+      }
+    });
+
+    it('does not count a replay as answered when the batch fails before sending it', async () => {
+      completeBatches();
+      const replayed = {
+        ...toolRequest('replayed'),
+        value: { ...toolRequest('replayed').value, providerCallId: 'replayed' },
+      };
+      const client = mockConfig.getLlmClient();
+      client.getHistoryToolCallFingerprints = vi
+        .fn()
+        .mockReturnValue(
+          new Map([
+            [
+              'replayed',
+              getToolCallFingerprint(replayed.value.name, replayed.value.args),
+            ],
+          ]),
+        );
+      // The first batch's finalize throws.
+      let budgetCalls = 0;
+      mockConfig.getToolOutputBatchBudget = () => {
+        if (budgetCalls++ === 0) throw new Error('finalize failed');
+        return Number.POSITIVE_INFINITY;
+      };
+      rounds(
+        [replayed, toolRequest('read_a')],
+        [replayed],
+        [{ type: ServerLlmEventType.Content, value: 'Done.' }],
+      );
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      // The fallback sends the executed result only; the next replay of the
+      // same id is answered, not taken for a repeated duplicate.
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      expect(sentIds(1)).toEqual(['read_a']);
+      expect(sentIds(2)).toEqual(['replayed']);
+    });
+
     it('ends the round on a cancel without scheduling its calls', async () => {
       const after = vi.fn();
       mockSendMessageStream.mockReturnValue(

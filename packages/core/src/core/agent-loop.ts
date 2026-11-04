@@ -94,8 +94,8 @@ export type AgentLoopSettledCall = Pick<
   'status' | 'request' | 'response'
 > & {
   /**
-   * The executor already counted the call toward the client's tool-call
-   * stats, as the Ink TUI's Mod tool middleware does for each attempt.
+   * The executor counts the call toward the client's tool-call stats
+   * itself, as the Ink TUI's Mod tool middleware does for each attempt.
    */
   recorded?: boolean;
 };

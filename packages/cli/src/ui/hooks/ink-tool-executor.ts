@@ -21,6 +21,9 @@ import type { ScheduleFn } from './useReactToolScheduler.js';
  *
  * `onSettled` runs as soon as the scheduler completes the batch, before the
  * loop finalizes its results, with the calls as the scheduler reported them.
+ * It runs inside the scheduler's completion callback, right after the
+ * scheduler cleared its display list, so a tool group committed there lands
+ * in the same render as the clear (#9420).
  */
 export function createInkToolExecutor(
   schedule: ScheduleFn,
@@ -46,8 +49,12 @@ export function createInkToolExecutor(
                       status: call.status,
                       request: call.request,
                       response: call.response,
-                      // The Mod tool middleware counts each native attempt.
-                      recorded: call.nativeAttemptsObserved === true,
+                      // The Mod tool middleware counts each native attempt,
+                      // and the TUI counts a cancelled call only where the
+                      // current path does (not when history answered it).
+                      recorded:
+                        call.nativeAttemptsObserved === true ||
+                        call.status === 'cancelled',
                     },
                   ]
                 : [],

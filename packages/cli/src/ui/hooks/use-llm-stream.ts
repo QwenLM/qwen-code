@@ -468,9 +468,28 @@ interface SharedToolBatchResults {
    * recording, which waits until the result is sent.
    */
   responses: Array<{ callId: string; parts: Part[]; record?: () => void }>;
-  /** The calls the batch ran, which it counted as it counts them. */
+  /** The calls the TUI does not count again: those the batch counted. */
   ranCallIds: ReadonlySet<string>;
   promptId: string | undefined;
+  /**
+   * The session and chat the scheduler completed the batch in, captured
+   * before the batch finalized its results, as the current path captures
+   * them when the scheduler completes its batch.
+   */
+  owner: { sessionId: string; chat: unknown };
+}
+
+/**
+ * The settled calls of a shared batch that it counted: the Ink executor
+ * leaves cancelled calls to the TUI, which counts them where the current
+ * path does.
+ */
+function countedCallIds(calls: readonly InteractiveToolCall[]): Set<string> {
+  return new Set(
+    calls
+      .filter(({ status }) => status !== 'cancelled')
+      .map(({ request }) => request.callId),
+  );
 }
 
 /**
@@ -5059,19 +5078,26 @@ export const useLlmStream = (
               for (const toolCall of tools) {
                 pendingCompletedTools.set(toolCall.request.callId, toolCall);
               }
-              // The shared batches' results go out in the same continuation.
+              // The shared batches' results go out in the same continuation,
+              // one per call id as the calls above.
               if (shared) {
                 pendingShared = pendingShared
                   ? {
                       responses: [
-                        ...pendingShared.responses,
-                        ...shared.responses,
+                        ...new Map(
+                          [...pendingShared.responses, ...shared.responses].map(
+                            (entry) => [entry.callId, entry],
+                          ),
+                        ).values(),
                       ],
                       ranCallIds: new Set([
                         ...pendingShared.ranCallIds,
                         ...shared.ranCallIds,
                       ]),
                       promptId: pendingShared.promptId ?? shared.promptId,
+                      // The earliest batch's session: results of a session
+                      // swapped away never go out in its successor.
+                      owner: pendingShared.owner,
                     }
                   : shared;
               }
@@ -5567,8 +5593,10 @@ export const useLlmStream = (
       completedToolCallsFromScheduler: TrackedToolCall[],
       shared?: SharedToolBatchResults,
     ) => {
-      const sessionId = config.getSessionId();
-      const chat = llmClient?.getChat();
+      // A shared batch was finalized after the scheduler completed it; a
+      // swap during that await must not be taken as the current session.
+      const sessionId = shared ? shared.owner.sessionId : config.getSessionId();
+      const chat: unknown = shared ? shared.owner.chat : llmClient?.getChat();
       const isCurrentSession = () =>
         config.getSessionId() === sessionId && llmClient?.getChat() === chat;
       // The shared batch finalized these results and counted these calls.
@@ -7066,13 +7094,28 @@ export const useLlmStream = (
     handleCompletedToolsRef.current = handleCompletedTools;
   }, [handleCompletedTools]);
 
+  // Adds a completed batch's final tool states to the history for display.
+  const addCompletedToolGroup = useCallback(
+    (calls: InteractiveToolCall[], batchId: string | undefined) => {
+      const toolGroupDisplay = mapTrackedToolCallsToDisplay(
+        calls as TrackedToolCall[],
+        config.getProjectRoot(),
+      );
+      toolGroupDisplay.batchId = batchId;
+      addItem(toolGroupDisplay, Date.now());
+    },
+    [config, addItem],
+  );
+
   // Commits a completed batch's tool group, then hands it to
   // handleCompletedTools: the scheduler's batches, and the shared loop's with
-  // their finalized results.
+  // their finalized results. A shared batch commits its tool group when the
+  // scheduler completes it and passes that group's batch id.
   const commitCompletedToolBatch = useCallback(
     async (
       completedToolCallsFromScheduler: InteractiveToolCall[],
       shared?: SharedToolBatchResults,
+      committedToolGroup?: { batchId: string | undefined },
     ) => {
       if (completedToolCallsFromScheduler.length > 0) {
         // The scheduler empties the display list before this callback
@@ -7092,18 +7135,13 @@ export const useLlmStream = (
         // Captured before the await: the continuation scheduled inside
         // handleCompletedTools may re-register a reused callId for the
         // NEXT batch, and the cleanup below must not delete that entry.
-        const batchId = getToolBatchId(
-          completedToolCallsFromScheduler[0].request.callId,
-        );
+        const batchId = committedToolGroup
+          ? committedToolGroup.batchId
+          : getToolBatchId(completedToolCallsFromScheduler[0].request.callId);
         try {
-          const projectRoot = config.getProjectRoot();
-          // Add the final state of these tools to the history for display.
-          const toolGroupDisplay = mapTrackedToolCallsToDisplay(
-            completedToolCallsFromScheduler as TrackedToolCall[],
-            projectRoot,
-          );
-          toolGroupDisplay.batchId = batchId;
-          addItem(toolGroupDisplay, Date.now());
+          if (!committedToolGroup) {
+            addCompletedToolGroup(completedToolCallsFromScheduler, batchId);
+          }
 
           // Handle tool response submission immediately when tools complete
           await handleCompletedTools(
@@ -7131,8 +7169,7 @@ export const useLlmStream = (
       setSubmissionInFlight,
       retainSubmissionActivity,
       getToolBatchId,
-      config,
-      addItem,
+      addCompletedToolGroup,
       handleCompletedTools,
     ],
   );
@@ -7148,6 +7185,8 @@ export const useLlmStream = (
       );
       let settled: InteractiveToolCall[] = [];
       let releaseBatchActivity: (() => void) | undefined;
+      let owner: SharedToolBatchResults['owner'] | undefined;
+      let committedToolGroup: { batchId: string | undefined } | undefined;
       const executor = createInkToolExecutor(
         scheduleToolCalls,
         batch.modelOverride,
@@ -7160,7 +7199,32 @@ export const useLlmStream = (
           releaseBatchActivity = retainSubmissionActivity(
             submissionLeaseGenerationRef.current,
           );
+          if (calls.length === 0) return;
+          // Taken here, before the batch finalizes, as the scheduler's
+          // completion takes them.
+          owner = {
+            sessionId: config.getSessionId(),
+            chat: llmClient?.getChat(),
+          };
+          // In the render that clears the scheduler's display list (#9420).
+          const batchId = getToolBatchId(calls[0].request.callId);
+          try {
+            addCompletedToolGroup(calls, batchId);
+            committedToolGroup = { batchId };
+          } catch (error) {
+            debugLogger.error('Committing a shared tool group failed:', error);
+          }
         },
+      );
+      // Replay answers the batch marks as sent but never sends, when it
+      // throws, must not count as answered.
+      const providerKeys = batch.calls.flatMap(({ providerCallId, callId }) =>
+        (providerCallId ?? callId) ? [providerCallId ?? callId] : [],
+      );
+      const respondedBefore = new Set(
+        providerKeys.filter((key) =>
+          duplicateProviderToolCallResponseIdsRef.current.has(key),
+        ),
       );
       let committed = false;
       try {
@@ -7185,25 +7249,42 @@ export const useLlmStream = (
             },
           },
         });
-        if (settled.length === 0) return;
+        if (settled.length === 0 || !owner) return;
         committed = true;
-        await commitCompletedToolBatch(settled, {
-          responses: result.responses ?? [],
-          ranCallIds: new Set(settled.map(({ request }) => request.callId)),
-          promptId: batch.promptId,
-        });
+        await commitCompletedToolBatch(
+          settled,
+          {
+            responses: result.responses ?? [],
+            ranCallIds: countedCallIds(settled),
+            promptId: batch.promptId,
+            owner,
+          },
+          committedToolGroup,
+        );
       } catch (error) {
         debugLogger.error('Shared tool batch failed:', error);
         // The scheduler already settled the calls: complete them without
         // the batch's results, as the current path would, so the tool group
         // is kept and the turn goes on. The batch counted them already.
-        if (!committed && settled.length > 0) {
+        if (!committed) {
+          for (const key of providerKeys) {
+            if (!respondedBefore.has(key)) {
+              duplicateProviderToolCallResponseIdsRef.current.delete(key);
+            }
+          }
+        }
+        if (!committed && settled.length > 0 && owner) {
           try {
-            await commitCompletedToolBatch(settled, {
-              responses: [],
-              ranCallIds: new Set(settled.map(({ request }) => request.callId)),
-              promptId: batch.promptId,
-            });
+            await commitCompletedToolBatch(
+              settled,
+              {
+                responses: [],
+                ranCallIds: countedCallIds(settled),
+                promptId: batch.promptId,
+                owner,
+              },
+              committedToolGroup,
+            );
           } catch (commitError) {
             debugLogger.error(
               'Completing a failed shared tool batch failed:',
@@ -7222,6 +7303,8 @@ export const useLlmStream = (
       config,
       llmClient,
       dualOutput,
+      getToolBatchId,
+      addCompletedToolGroup,
       commitCompletedToolBatch,
     ],
   );
