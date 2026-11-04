@@ -303,7 +303,7 @@ export function QwenSubscriptionFlow(props: FlowProps) {
               ...flow.state,
               model: activeCompletion.model,
               authorizationUrl: flow.authorizationUrl,
-              showCommonCommands: !props.desktopSuccess,
+              showCommonCommands: true,
             }
           : flow.state
       }

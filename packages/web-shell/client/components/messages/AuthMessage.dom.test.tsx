@@ -1252,8 +1252,11 @@ describe('subscription development entry', () => {
           plan === 'plus' ? 'Qwen Plus' : 'Qwen Pro',
         );
         expect(success.textContent).toContain('qwen3.8-max');
-        expect(success.textContent).not.toContain('常用命令');
-        expect(success.textContent).not.toContain('Common commands');
+        expect(success.textContent).toContain(
+          language === 'en'
+            ? 'Common commands: /usage   /upgrade   /status   /logout'
+            : '常用命令：/usage   /upgrade   /status   /logout',
+        );
         expect(completion.onMessage).not.toHaveBeenCalled();
         expect(completion.onClose).not.toHaveBeenCalled();
         await act(async () =>
