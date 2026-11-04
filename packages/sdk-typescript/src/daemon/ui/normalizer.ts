@@ -1080,10 +1080,10 @@ function normalizeSessionUpdate(
     }
     case 'tool_call':
     case 'tool_call_update': {
-      // Silent-shell liveness heartbeat: a meta-only in_progress frame with
-      // no kind/title/content. Normalizing it would overwrite the tool
-      // block's human-readable title with the bare tool name from _meta;
-      // the web UI has its own activity indicator, so drop the frame.
+      // A metadata-only lifecycle frame (no status/kind/title/content) is
+      // forwarded as a name-only event: it may name an existing block by
+      // `toolCallId` and must never create one. The name is deliberately not
+      // folded into the block's human-readable `title`.
       const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
       if (
         meta &&

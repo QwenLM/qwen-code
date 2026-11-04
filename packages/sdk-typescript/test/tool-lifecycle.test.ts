@@ -92,6 +92,27 @@ describe('tool lifecycle', () => {
       }),
     ).toHaveLength(1);
   });
+  it('names a status-bearing frame from the lifecycle metadata alone', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'c',
+          status: 'completed',
+          _meta: { toolLifecycle: { ...ended, toolName: 'read_file' } },
+        },
+      },
+    });
+    const { blocks } = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      events,
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ kind: 'tool', toolName: 'read_file' });
+  });
   it('validates execution boundaries and preserves independent call outcome', () => {
     expect(extractToolLifecycle(frame(ended))).toMatchObject({
       executionStatus: 'success',

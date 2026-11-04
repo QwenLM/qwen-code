@@ -1048,14 +1048,25 @@ function upsertToolBlock(
 ): void {
   if (event.nameOnly) {
     const namedId = state.toolBlockByCallId[event.toolCallId];
-    const named = getWritableBlockById(state, namedId);
+    const index =
+      namedId !== undefined ? state.blockIndexById[namedId] : undefined;
+    const named = index !== undefined ? state.blocks[index] : undefined;
+    // Every named block's `ended` frame is a no-op; returning before the
+    // copy-on-write path keeps it from swapping identities and bumping the
+    // store revision for nothing.
     if (
-      named?.kind === 'tool' &&
-      named.toolName === undefined &&
-      event.toolName
+      named?.kind !== 'tool' ||
+      named.toolName !== undefined ||
+      !event.toolName
     ) {
-      named.toolName = event.toolName;
-      named.updatedAt = state.now;
+      return;
+    }
+    const writable = getWritableBlockById(state, namedId);
+    if (writable?.kind === 'tool') {
+      const bytesBefore = estimateBlockBytes(writable);
+      writable.toolName = event.toolName;
+      writable.updatedAt = state.now;
+      state.retainedBytes += estimateBlockBytes(writable) - bytesBefore;
     }
     return;
   }
