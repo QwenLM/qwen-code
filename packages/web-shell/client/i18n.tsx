@@ -2401,6 +2401,7 @@ const EN: Messages = {
   'sidebar.removeWorkspaceVoiceSessions': (v) =>
     `Voice sessions: ${v?.count ?? 0}`,
   'sidebar.noSessions': 'No sessions.',
+  'sidebar.untitledSession': 'Untitled session',
   'sidebar.projectFallback': 'Workspace',
   'sidebar.sessionsOverview': 'Session Overview',
   'sidebar.splitView': 'Split View',
@@ -7060,6 +7061,7 @@ const ZH: Messages = {
   'sidebar.removeWorkspaceWorkers': (v) => `Channel worker：${v?.count ?? 0}`,
   'sidebar.removeWorkspaceVoiceSessions': (v) => `语音会话：${v?.count ?? 0}`,
   'sidebar.noSessions': '暂无会话',
+  'sidebar.untitledSession': '未命名会话',
   'sidebar.projectFallback': '工作区',
   'sidebar.sessionsOverview': '会话总览',
   'sidebar.splitView': '分屏',

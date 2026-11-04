@@ -49,6 +49,11 @@ import { compactToolResultDisplayForRecording } from '../utils/toolResultDisplay
 import { stripRuntimeSnapshotPrefix } from '../utils/runtimeModelPrefix.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import { tryGenerateSessionTitle } from './sessionTitle.js';
+import {
+  readSessionTitleSidecar,
+  sessionTitleSidecarPath,
+  writeSessionTitleSidecar,
+} from './session-title-sidecar.js';
 import type {
   ChatCompressionInfo,
   ToolCallResponseInfo,
@@ -1447,6 +1452,36 @@ export class ChatRecordingService {
     return conversationFile;
   }
 
+  private titleSidecarPath(): string {
+    return sessionTitleSidecarPath(this.ensureChatsDir(), this.getSessionId());
+  }
+
+  /**
+   * Keeps the session list label independent of the transcript's head. A
+   * transcript can be rebuilt without its first records (the writer recreates
+   * a missing file on the next append), and the list otherwise degrades to a
+   * bare session id. Managed logs own their metadata and are skipped.
+   */
+  private persistListTitle(
+    displayName: string,
+    source: 'manual' | 'auto' | 'prompt',
+  ): void {
+    if (this.managedSink) return;
+    writeSessionTitleSidecar(this.titleSidecarPath(), displayName, source);
+  }
+
+  private persistPromptDerivedTitle(message: Content | undefined): void {
+    if (this.managedSink) return;
+    const sidecarPath = this.titleSidecarPath();
+    const existing = readSessionTitleSidecar(sidecarPath);
+    if (existing && existing.source !== 'prompt') return;
+    const text = message?.parts?.find(
+      (part): part is { text: string } => 'text' in part,
+    )?.text;
+    if (!text?.trim()) return;
+    writeSessionTitleSidecar(sidecarPath, text.trim().slice(0, 200), 'prompt');
+  }
+
   private restoreSessionState(
     sessionData?: {
       conversation: { messages: ChatRecord[] };
@@ -2560,6 +2595,9 @@ export class ChatRecordingService {
       };
       // Advance rewind associations only after the record is built, so a
       // rejected message cannot skew the projection.
+      if (this.userDisplayTextsForTitle.length === 0) {
+        this.persistPromptDerivedTitle(record.message);
+      }
       this.trackUserDisplayTextForTitle(promptPayload?.displayText);
       this.turnParentUuids.push(record.parentUuid ?? null);
       this.turnPromptIds.push(getRecordRewindId(record));
@@ -3874,6 +3912,7 @@ export class ChatRecordingService {
       );
       this.currentCustomTitle = customTitle;
       this.currentTitleSource = titleSource;
+      this.persistListTitle(customTitle, titleSource);
       try {
         this.titleRecordedCallback?.(
           customTitle,

@@ -323,6 +323,7 @@ function LiveHostWorkspace({
       trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
       noSessionsLabel={t('sidebar.noSessions')}
       loadErrorLabel={t('sidebar.loadFailed')}
+      untitledSessionLabel={t('sidebar.untitledSession')}
       organizationEnabled={false}
       channelGroupingEnabled={false}
       ungroupedLabel={t('sidebar.groupUngrouped')}
@@ -408,7 +409,8 @@ function FanoutSessionRow({
   session: DaemonSessionSummary;
   onOpen: () => void;
 }) {
-  const label = session.displayName?.trim() || session.sessionId.slice(0, 8);
+  const { t } = useI18n();
+  const label = session.displayName?.trim() || t('sidebar.untitledSession');
   return (
     <div
       className={sidebarStyles.sessionRow}
