@@ -188,6 +188,7 @@ export const MOD_GUEST_FACTORY = String.raw`
           });
         }
       },
+      prompt: { submit: input => invoke('prompt.submit', input) },
       turn: { abort: input => invoke('turn.abort', input) },
       ui: {
         log: (text, options = {}) => {

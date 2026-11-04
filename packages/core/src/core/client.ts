@@ -334,6 +334,11 @@ export interface SendMessageOptions {
    * the hidden block the person never sees, ahead of it.
    */
   promptContext?: readonly string[];
+  /**
+   * The Mod that submitted this UserQuery's prompt with `$.prompt.submit`.
+   * The transcript records it as the Mod's prompt, not the person's.
+   */
+  submittedByMod?: string;
   /** A UserQuery running beside an active turn, without replacing its state. */
   isConcurrentSideQuery?: boolean;
   /**
@@ -4738,7 +4743,14 @@ export class LlmClient {
           recorder?.recordUserMessage(
             request,
             goalPermit,
-            userPromptRecordPayload,
+            options?.submittedByMod === undefined
+              ? userPromptRecordPayload
+              : {
+                  displayText: options.submittedPrompt ?? '',
+                  hookContext: '',
+                  ...userPromptRecordPayload,
+                  mod: options.submittedByMod,
+                },
             prompt_id,
           );
         }

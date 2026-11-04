@@ -137,7 +137,7 @@ this recovery exception.
 | API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
 | Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
 | Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits, described in [Turn events](#turn-events)                                                             |
-| Prompts    | `prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                                                |
+| Prompts    | `prompt.submit` in headless runs and the Ink and OpenTUI terminals, and `$.prompt.submit` in headless runs, described in [Submitted prompts](#submitted-prompts)                        |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
 | Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, described in [The band above the prompt](#the-band-above-the-prompt)                                        |
@@ -423,6 +423,7 @@ supports:
       "clock.sleep",
       "command.register",
       "command.run",
+      "prompt.submit",
       "session.cwd",
       "session.end",
       "session.id",
@@ -446,6 +447,7 @@ supports:
       "clock.now",
       "clock.sleep",
       "command.register",
+      "prompt.submit",
       "session.cwd",
       "session.id",
       "session.model",
@@ -464,7 +466,7 @@ supports:
 }
 ```
 
-This is a headless run. In the Ink and OpenTUI terminals, `events` also lists `ui.render`.
+This is a headless run. In the Ink and OpenTUI terminals, `events` also lists `ui.render`, and `methods` does not list `prompt.submit` yet.
 `claudeCode` is the Claude Code release whose event names are recognized,
 `events` lists the events hooks can receive and `methods` the `$` methods a Mod can
 call. A Mod can use it to choose a fallback, such as a command reply where a
@@ -722,6 +724,48 @@ A prompt longer than 128 KiB as JSON reaches no hook, and the line
 `prompt.submit hook skipped: the prompt is too long for a Mod payload` appears
 where transcript logs do.
 
+### A Mod's own prompt
+
+In headless runs, `$.prompt.submit({ text })` submits a prompt of the Mod's own.
+It starts a turn once the run is idle, after the turn that is running, and
+never joins a running turn:
+
+```javascript
+export function register(on) {
+  on('turn.complete', ($, e, next) => {
+    if (/TODO/.test(e.answer))
+      void $.prompt.submit({ text: 'List the TODOs you just mentioned.' });
+    return next(e);
+  });
+}
+```
+
+- The prompt raises `prompt.submit` through every hook but the calling one and
+  those it runs beneath, with `origin` `{ kind: 'plugin', name }`, `name` being
+  the Mod's. The Mod's other hooks hear it. They can rewrite it, attach context
+  or drop it, as for a typed prompt.
+- The call resolves once the hooks have answered and the prompt is queued, to
+  `{ text, context?, origin }`, or to `{ drop: reason }` when a hook dropped it
+  or Qwen Code refused it.
+- The model is told the prompt came from the Mod and that the person did not
+  type it. With `asUser: true` the model reads the text as the person's own
+  words; `origin` still names the Mod.
+- The transcript records the prompt as the Mod's, with the Mod's name, not as
+  the person's.
+- UserPromptSubmit hooks hear the prompt, and its turn raises `turn.start` and
+  `turn.complete` like any other. It counts toward the session turn limit.
+- `@` references in the text are not read.
+- The Mods' prompts start at most 8 turns before the person sends a prompt
+  again. Past that a call resolves to a drop, and the line
+  `$.prompt.submit refused: …` appears where transcript logs do. In a headless
+  run, the prompt the run was given is the person's, and in a stream-json
+  session each message the client sends is.
+- A prompt still queued when the run stops early, on an interrupt, a structured
+  result or a detected loop, does not run.
+- In the Ink and OpenTUI terminals the method is not listed in `methods` yet,
+  and a call resolves to
+  `{ drop: 'this host does not run prompts a Mod submits' }`.
+
 These differ from Claude Code:
 
 - Slash commands, background notifications and the continuation of an
@@ -732,11 +776,12 @@ These differ from Claude Code:
 - A UserPromptSubmit hook that blocks the prompt beneath does not turn `next(e)`
   into `{drop}`: the Mod hooks have settled by the time it runs.
 - `next(e)` resolves once the hooks beneath have answered, not once the turn
-  starts.
+  starts. In the same way, `$.prompt.submit` resolves once its prompt is
+  queued.
 - A context the conversation already holds word for word is not sent again.
   Each Mod context and UserPromptSubmit's context count on their own, so a
   context that changes every turn does not make the others repeat.
-- `$.prompt.submit` does not exist yet.
+- `$.prompt.submit` takes no `attachments`.
 
 ## Elements
 

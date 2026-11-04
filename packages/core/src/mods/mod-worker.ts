@@ -21,6 +21,7 @@ import {
   MOD_END_TIMEOUT_MS,
   type ModCommand,
   type ModPlugin,
+  type ModQueuedPrompt,
   type ModReply,
   type ModSessionFacts,
   type ModWorkerRequest,
@@ -37,6 +38,7 @@ import {
   assertModDepth,
   engineOrigin,
   isModMethod,
+  promptSubmitCall,
   record,
   validateInput,
   validateResult,
@@ -69,6 +71,11 @@ const turnAborts = new Map<
   number,
   { resolve: () => void; reject: (error: Error) => void }
 >();
+// $.prompt.submit calls waiting for the host to queue what they submitted.
+const promptQueues = new Map<
+  number,
+  { resolve: (refused?: string) => void; reject: (error: Error) => void }
+>();
 let serial = 0;
 let epoch = 0;
 let rootId = 0;
@@ -91,6 +98,8 @@ let builtinTool: string | undefined;
 let surface: 'terminal' | null = null;
 let sites: readonly ModRenderSite[] = [];
 let version = 'unknown';
+// Whether the host runs what `$.prompt.submit` submits.
+let submitsPrompts = false;
 // The events this host runs: those it raises only where it draws need a site.
 let supported: readonly ModEvent[] = MOD_EVENTS;
 // A render hook that keeps failing the same way is said once per load.
@@ -660,12 +669,20 @@ async function hostCall(
     }
   }
   if (!isModMethod(method)) throw new Error('Mod API not supported: ' + method);
-  validateInput(method, value, {});
   const plugin = realms[call.plugin].plugin;
+  // A submitted prompt raises prompt.submit as a typed one does, through
+  // every hook but the caller's, and is queued once it arrives beneath them.
+  const submits = method === 'prompt.submit';
+  const input = submits ? promptSubmitCall(value, plugin.name) : value;
+  if (!submits) validateInput(method, value, {});
+  // No hook hears a prompt the host would not run.
+  else if (!submitsPrompts)
+    return { drop: 'this host does not run prompts a Mod submits' };
+  let queued = false;
   const invoke = async () => {
     const result = await dispatch(
       method,
-      value,
+      input as ModInput,
       { plugin: plugin.name, tier: 'user' },
       frames,
       async (e) => {
@@ -691,7 +708,9 @@ async function hostCall(
               qwen: {
                 claudeCode: CLAUDE_CODE_EVENTS_VERSION,
                 events: supported,
-                methods: [...MOD_METHODS, ...MOD_READS].sort(),
+                methods: [...MOD_METHODS, ...MOD_READS]
+                  .filter((name) => name !== 'prompt.submit' || submitsPrompts)
+                  .sort(),
               },
             },
           };
@@ -711,6 +730,23 @@ async function hostCall(
         if (method === 'turn.abort') {
           await abortTurn(String(e['turnId']));
           return { value: undefined };
+        }
+        if (submits) {
+          const context = e['context'] as string[] | undefined;
+          const origin = e['origin'] as ModInput;
+          const refused = await queuePrompt({
+            plugin: plugin.name,
+            text: String(e['text']),
+            ...(context !== undefined && { context }),
+            ...(origin['asUser'] === true && { asUser: true }),
+          });
+          if (refused !== undefined) return { drop: refused };
+          queued = true;
+          return {
+            text: e['text'],
+            ...(context !== undefined && { context }),
+            origin,
+          };
         }
         if (method === 'ui.invalidate') {
           send({
@@ -734,6 +770,10 @@ async function hostCall(
       notice(method) ? undefined : call,
     );
     if (!record(result)) throw new Error('Invalid Mod API result.');
+    if (submits)
+      return typeof result['drop'] === 'string' || queued
+        ? result
+        : { drop: 'a hook answered without passing the prompt on' };
     if ('deny' in result) throw new Error(String(result['deny']));
     return result['value'];
   };
@@ -777,6 +817,14 @@ function abortTurn(turnId: string): Promise<void> {
     turnAborts.set(id, { resolve, reject });
     send({ type: 'turn-abort', id, turnId });
   }).finally(() => turnAborts.delete(id));
+}
+
+function queuePrompt(prompt: ModQueuedPrompt): Promise<string | undefined> {
+  const id = ++serial;
+  return new Promise<string | undefined>((resolve, reject) => {
+    promptQueues.set(id, { resolve, reject });
+    send({ type: 'prompt-queue', id, prompt });
+  }).finally(() => promptQueues.delete(id));
 }
 
 function cancelAbandonedOperations(): void {
@@ -844,6 +892,11 @@ port.on('message', async (request: ModWorkerRequest) => {
     const pending = turnAborts.get(request.id);
     if (request.error !== undefined) pending?.reject(new Error(request.error));
     else pending?.resolve();
+    return;
+  }
+  if (request.type === 'prompt-queue-result') {
+    if (!busy || request.root !== rootId) return;
+    promptQueues.get(request.id)?.resolve(request.refused);
     return;
   }
   if (request.type === 'tool-check') {
@@ -917,6 +970,7 @@ port.on('message', async (request: ModWorkerRequest) => {
       surface = request.surface;
       version = request.version;
       sites = request.sites ?? [];
+      submitsPrompts = request.submits === true;
       supported = MOD_EVENTS.filter(
         (event) =>
           !MOD_HOST_EVENTS.includes(event) ||
@@ -1095,11 +1149,13 @@ port.on('message', async (request: ModWorkerRequest) => {
     for (const operation of [
       ...hostOperations.values(),
       ...turnAborts.values(),
+      ...promptQueues.values(),
     ]) {
       operation.reject(new Error('Mod root dispatch has ended.'));
     }
     hostOperations.clear();
     turnAborts.clear();
+    promptQueues.clear();
     starting = false;
     builtinTool = undefined;
     rootBudget = undefined;

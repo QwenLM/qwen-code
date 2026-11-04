@@ -19,6 +19,7 @@ import {
   type ModLog,
   type ModPromptSubmit,
   type ModPromptSubmitted,
+  type ModQueuedPrompt,
   type ModSessionFacts,
   type ModTurnComplete,
   type ModTurnStart,
@@ -42,7 +43,11 @@ import {
 } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import type { LoadedSettings } from '../config/settings.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
-import { ModSession, type ModTerminalHost } from './mod-session.js';
+import {
+  MOD_PROMPT_TURN_LIMIT,
+  ModSession,
+  type ModTerminalHost,
+} from './mod-session.js';
 import { CommandService } from '../services/CommandService.js';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
@@ -708,6 +713,86 @@ describe('Mod session ownership', () => {
     await loaded.session.initialize(new AbortController().signal);
     return loaded;
   };
+
+  describe('prompts a Mod submits', () => {
+    const queueOf = (index = 0) =>
+      mocks.create.mock.calls[index][11] as
+        | ((prompt: ModQueuedPrompt) => string | undefined)
+        | undefined;
+    const prompt = (text: string): ModQueuedPrompt => ({
+      plugin: 'lint',
+      text,
+    });
+
+    it('queues them for the session to run once idle, in order', async () => {
+      const { session } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      expect(queue(prompt('one'))).toBeUndefined();
+      expect(queue({ ...prompt('two'), context: ['c'], asUser: true })).toBe(
+        undefined,
+      );
+      expect(session.takeSubmittedPrompt()).toEqual(prompt('one'));
+      expect(session.takeSubmittedPrompt()).toEqual({
+        ...prompt('two'),
+        context: ['c'],
+        asUser: true,
+      });
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+    });
+
+    it(`refuses past ${MOD_PROMPT_TURN_LIMIT} turns until the person sends a prompt`, async () => {
+      const { session, adapter } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      // Queued and started prompts count alike.
+      for (let i = 0; i < MOD_PROMPT_TURN_LIMIT; i++) {
+        expect(queue(prompt(`p${i}`))).toBeUndefined();
+        if (i % 2) session.takeSubmittedPrompt();
+      }
+      const refused = queue(prompt('one more'));
+      expect(refused).toContain(`${MOD_PROMPT_TURN_LIMIT} turns`);
+      expect(adapter.emitSystemMessage).toHaveBeenCalledWith(
+        'ui_log',
+        expect.objectContaining({
+          plugin: 'lint',
+          text: `$.prompt.submit refused: ${refused}`,
+        }),
+      );
+      while (session.takeSubmittedPrompt());
+      expect(queue(prompt('still'))).toBe(refused);
+      session.notePersonPrompt();
+      expect(queue(prompt('again'))).toBeUndefined();
+    });
+
+    it('drops a prompt queued for a session that has ended, or once it closes', async () => {
+      const { session, config } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      queue(prompt('old'));
+      config.getSessionId.mockReturnValue('session-2');
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      config.getSessionId.mockReturnValue('session-1');
+      expect(queue(prompt('new'))).toBeUndefined();
+      await session.close();
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      expect(queue(prompt('late'))).toBe('the session is ending');
+    });
+
+    it('offers no queue to a terminal yet', async () => {
+      const { session } = setup(
+        { isInteractive: () => true },
+        {
+          surface: 'terminal',
+          log: vi.fn(),
+          presentation: () => ({ isFullscreen: false, columns: 80 }),
+          prompts: () => true,
+        },
+      );
+      await session.initialize(new AbortController().signal);
+      expect(queueOf()).toBeUndefined();
+    });
+  });
 
   it('says whether a loaded Mod hooks prompt.submit', async () => {
     const quiet = setup();

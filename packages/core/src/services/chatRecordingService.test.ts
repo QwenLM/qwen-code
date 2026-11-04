@@ -436,6 +436,22 @@ describe('ChatRecordingService', () => {
       return { record: await flushed(), attachmentReferences };
     }
 
+    it("records a Mod's prompt as the Mod's, not the person's", async () => {
+      svc.recordUserMessage(
+        [{ text: 'framed' }],
+        undefined,
+        { displayText: 'Run the linter', hookContext: '', mod: 'lint' },
+        'prompt-1',
+      );
+      const record = await flushed();
+      expect(record.provenance).toBe('mod_prompt');
+      expect(record.systemPayload).toEqual({
+        displayText: 'Run the linter',
+        hookContext: '',
+        mod: 'lint',
+      });
+    });
+
     it('should record a user message immediately', async () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
       svc.recordUserMessage(userParts, undefined, undefined, 'prompt-1');

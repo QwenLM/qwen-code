@@ -106,6 +106,8 @@ import type { ControlService } from './nonInteractive/control/ControlService.js'
 
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
 import { ModSession, type ModTurn } from './services/mod-session.js';
+import { frameModPrompt } from './services/mod-prompt-frame.js';
+import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
   AlreadyReportedError,
@@ -930,6 +932,8 @@ export async function runNonInteractive(
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      // A prompt a Mod submitted, which runs as a turn of its own.
+      modPrompt?: ModQueuedPrompt;
       todoWorkChainId?: string;
       monitorId?: string;
       sdkNotification?: {
@@ -944,6 +948,21 @@ export async function runNonInteractive(
       };
     }
     const localQueue: LocalQueueItem[] = [];
+    // The Mods' own prompts wait for the session to be idle, as the queue's
+    // other items do.
+    const pullModPrompts = () => {
+      for (
+        let prompt = modSession?.takeSubmittedPrompt();
+        prompt;
+        prompt = modSession?.takeSubmittedPrompt()
+      )
+        localQueue.push({
+          displayText: prompt.text,
+          modelText: frameModPrompt(prompt),
+          sendMessageType: SendMessageType.UserQuery,
+          modPrompt: prompt,
+        });
+    };
     const sdkOnlyMonitorQueue: LocalQueueItem[] = [];
     const isCancelledMonitorEvent = (item: LocalQueueItem) =>
       Boolean(
@@ -1417,6 +1436,13 @@ export async function runNonInteractive(
         if (!slashHandled) {
           // The hooks hear what was typed, not the serialized blocks.
           const heard = options.promptParts?.text ?? input;
+          // The person's own prompt lets the Mods' prompts start turns again.
+          if (
+            !options.fromTool &&
+            (options.sendMessageType ?? SendMessageType.UserQuery) ===
+              SendMessageType.UserQuery
+          )
+            modSession?.notePersonPrompt();
           if (
             modSession &&
             !options.fromTool &&
@@ -3410,7 +3436,10 @@ export async function runNonInteractive(
             // of the queue. Cron prompts run individually — each needs its
             // own slash/shell/@ preprocessing and approval cycle.
             const targetType = localQueue[0]!.sendMessageType;
-            let splitIdx = targetType === SendMessageType.Cron ? 1 : 0;
+            let splitIdx =
+              targetType === SendMessageType.Cron || localQueue[0]!.modPrompt
+                ? 1
+                : 0;
             if (splitIdx === 0) {
               while (
                 splitIdx < localQueue.length &&
@@ -3437,6 +3466,7 @@ export async function runNonInteractive(
               sendMessageType: targetType,
               todoWorkChainId: batch[0]?.todoWorkChainId,
             };
+            const modPrompt = batch[0]?.modPrompt;
 
             turnCount++;
             await enforceSessionTurnLimit(false);
@@ -3447,18 +3477,46 @@ export async function runNonInteractive(
             let itemIsFirstTurn = true;
             let itemModelOverride: string | undefined;
             const itemPromptId = `${prompt_id}/automatic/${turnCount}`;
+            // A Mod's prompt is a prompt like a typed one: UserPromptSubmit
+            // hears it, and the Mods hear its turn.
+            let itemTurn: ModTurn | undefined;
+            const firstOptions: SendMessageOptions = modPrompt
+              ? {
+                  type: SendMessageType.UserQuery,
+                  modelOverride: itemModelOverride,
+                  submittedPrompt: modPrompt.text,
+                  submittedByMod: modPrompt.plugin,
+                  ...(modPrompt.context?.length && {
+                    promptContext: modPrompt.context,
+                  }),
+                  ...(modSession && {
+                    onPromptAdmitted: () => {
+                      itemTurn = modTurn = modSession.startTurn(
+                        modPrompt.text,
+                        abortController.signal,
+                        () => {
+                          if (abortController.signal.aborted) return false;
+                          abortController.abort(new ModTurnAbortedError());
+                          return true;
+                        },
+                        itemPromptId,
+                      );
+                    },
+                  }),
+                }
+              : {
+                  type: item.sendMessageType,
+                  modelOverride: itemModelOverride,
+                  notificationDisplayText: item.displayText,
+                  todoWorkChainId: item.todoWorkChainId,
+                };
 
             if (sharedAgentLoop) {
               const result = await runOnSharedLoop(
                 {
                   parts: itemMessages[0]?.parts || [],
                   promptId: itemPromptId,
-                  options: {
-                    type: item.sendMessageType,
-                    modelOverride: itemModelOverride,
-                    notificationDisplayText: item.displayText,
-                    todoWorkChainId: item.todoWorkChainId,
-                  },
+                  options: firstOptions,
                 },
                 {
                   setModelOverride: (override) => {
@@ -3486,6 +3544,7 @@ export async function runNonInteractive(
                     flushQueuedNotificationsToSdk(localQueue);
                     finalizeOneShotMonitors();
                   },
+                  onEvent: (event) => itemTurn?.saw(event),
                   tracksPreview: false,
                 },
               );
@@ -3504,6 +3563,7 @@ export async function runNonInteractive(
                 await settleBeforeTerminalOutput();
                 await handleMaxTurnsExceededError(config);
               }
+              await itemTurn?.complete();
               return;
             }
 
@@ -3515,16 +3575,12 @@ export async function runNonInteractive(
                 itemMessages[0]?.parts || [],
                 abortController.signal,
                 itemPromptId,
-                {
-                  type: itemIsFirstTurn
-                    ? item.sendMessageType
-                    : SendMessageType.ToolResult,
-                  modelOverride: itemModelOverride,
-                  ...(itemIsFirstTurn && {
-                    notificationDisplayText: item.displayText,
-                    todoWorkChainId: item.todoWorkChainId,
-                  }),
-                },
+                itemIsFirstTurn
+                  ? { ...firstOptions, modelOverride: itemModelOverride }
+                  : {
+                      type: SendMessageType.ToolResult,
+                      modelOverride: itemModelOverride,
+                    },
               );
               itemIsFirstTurn = false;
 
@@ -3553,6 +3609,7 @@ export async function runNonInteractive(
                   await routeAbort();
                 }
                 discardAbandonedAttempt(event, itemToolCallRequests);
+                itemTurn?.saw(event);
                 adapter.processEvent(event);
                 if (
                   event.type === LlmEventType.HookSystemMessage &&
@@ -3640,6 +3697,7 @@ export async function runNonInteractive(
                 break;
               }
             }
+            await itemTurn?.complete();
           };
 
           // Single-flight drain: concurrent callers wait for the running drain so
@@ -3653,7 +3711,7 @@ export async function runNonInteractive(
           const drainLocalQueue = (): Promise<void> => {
             if (drainPromise) return drainPromise;
             const p = (async () => {
-              while (localQueue.length > 0) {
+              while ((pullModPrompts(), localQueue.length > 0)) {
                 if (loopDetected) return;
                 // Stop draining once a queued item's structured_output
                 // call captured the terminal contract — no point running

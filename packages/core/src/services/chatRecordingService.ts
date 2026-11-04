@@ -301,7 +301,9 @@ export type ChatRecordProvenance =
   | 'goal_runtime'
   | 'system'
   /** Written on behalf of a workspace agent (session multi-agent). */
-  | 'external_agent';
+  | 'external_agent'
+  /** A prompt a Mod submitted with `$.prompt.submit`, not the person's. */
+  | 'mod_prompt';
 
 export type RecordToolResultOptions = {
   subtype?: 'code_mode_tool_result';
@@ -612,6 +614,8 @@ export interface UserPromptRecordPayload {
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
+  /** The Mod that submitted the prompt; the record's provenance says so too. */
+  mod?: string;
   /** UI-only annotations; interpreted by transcript consumers, not the model. */
   inputAnnotations?: unknown[];
   /** Daemon-owned attachment references used to restore prompt previews. */
@@ -2551,6 +2555,9 @@ export class ChatRecordingService {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        ...(promptPayload?.mod !== undefined && {
+          provenance: 'mod_prompt' as const,
+        }),
         executionContext: this.getExecutionContext(),
         ...(daemonPromptId ? { daemonPromptId } : {}),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),

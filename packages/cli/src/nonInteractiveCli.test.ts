@@ -90,6 +90,8 @@ import { McpPromptLoader } from './services/McpPromptLoader.js';
 import { SavedWorkflowLoader } from './services/saved-workflow-loader.js';
 import { SkillCommandLoader } from './services/SkillCommandLoader.js';
 import type { ICommandLoader } from './services/types.js';
+import { frameModPrompt } from './services/mod-prompt-frame.js';
+import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import {
   _resetCleanupFunctionsForTest,
   runExitCleanup,
@@ -490,6 +492,8 @@ describe('runNonInteractive', () => {
       hasToolHooks: true,
       toolCall: () => undefined,
       submitPrompt: vi.fn(async (text: string) => ({ text })),
+      takeSubmittedPrompt: () => undefined,
+      notePersonPrompt: vi.fn(),
     } as unknown as ModSession);
   }
 
@@ -6659,6 +6663,8 @@ describe('runNonInteractive', () => {
                 text: 'MOD_START_LOG',
               });
             }),
+            takeSubmittedPrompt: () => undefined,
+            notePersonPrompt: vi.fn(),
           }) as unknown as ModSession,
       );
 
@@ -6721,6 +6727,10 @@ describe('runNonInteractive', () => {
           return turn;
         },
       );
+      // The prompts the Mods submitted, taken once the run is idle.
+      const submitted: ModQueuedPrompt[] = [];
+      const takeSubmittedPrompt = vi.fn(() => submitted.shift());
+      const notePersonPrompt = vi.fn();
       const submitPrompt = vi.fn(
         async (
           text: string,
@@ -6747,9 +6757,19 @@ describe('runNonInteractive', () => {
             toolCall: () => undefined,
             startTurn,
             submitPrompt,
+            takeSubmittedPrompt,
+            notePersonPrompt,
           }) as unknown as ModSession,
       );
-      return { order, turn, startTurn, submitPrompt, abort: () => abort() };
+      return {
+        order,
+        turn,
+        startTurn,
+        submitPrompt,
+        submitted,
+        notePersonPrompt,
+        abort: () => abort(),
+      };
     };
     // Admits the prompt, as core does once UserPromptSubmit lets it through.
     const admitting = (events: () => AsyncGenerator<ServerLlmStreamEvent>) =>
@@ -6788,6 +6808,71 @@ describe('runNonInteractive', () => {
       // The answer ends the turn before the run settles and closes.
       expect(turn.complete.mock.calls[0]).toEqual([]);
       expect(order.slice(0, 3)).toEqual(['start', 'complete', 'close']);
+    });
+
+    it('runs a prompt a Mod submitted as a turn of its own once the run is idle', async () => {
+      setupMetricsMock();
+      const { order, turn, startTurn, submitted, notePersonPrompt } =
+        installModTurn();
+      const finished: ServerLlmStreamEvent = {
+        type: LlmEventType.Finished,
+        value: { reason: undefined, usageMetadata: undefined },
+      };
+      // The Mod submits while the person's turn ends.
+      turn.complete.mockImplementationOnce(async () => {
+        order.push('complete');
+        submitted.push(
+          { plugin: 'lint', text: 'Run the linter', context: ['note'] },
+          { plugin: 'lint', text: 'Say done', asUser: true },
+        );
+      });
+      admitting(() => createStreamFromEvents([finished]));
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Fix it',
+        'mod-prompt',
+      );
+
+      expect(exitCode).toBe(0);
+      expect(notePersonPrompt).toHaveBeenCalledOnce();
+      const calls = mockLlmClient.sendMessageStream.mock.calls;
+      expect(calls).toHaveLength(3);
+      expect(calls[1][0]).toEqual([
+        {
+          text: frameModPrompt({
+            plugin: 'lint',
+            text: 'Run the linter',
+            context: ['note'],
+          }),
+        },
+      ]);
+      expect(calls[1][3]).toMatchObject({
+        type: SendMessageType.UserQuery,
+        submittedPrompt: 'Run the linter',
+        submittedByMod: 'lint',
+        promptContext: ['note'],
+      });
+      expect(calls[1][3]).not.toHaveProperty('notificationDisplayText');
+      // Submitted as the person's own words, the model reads it bare.
+      expect(calls[2][0]).toEqual([{ text: 'Say done' }]);
+      expect(calls[2][3]).not.toHaveProperty('promptContext');
+      // The Mods hear each of those turns too.
+      expect(startTurn.mock.calls.map(([text, , , id]) => [text, id])).toEqual([
+        ['Fix it', calls[0][2]],
+        ['Run the linter', calls[1][2]],
+        ['Say done', calls[2][2]],
+      ]);
+      // The person's prompt resets the Mods' count before its turn starts, and
+      // the person's turn ends before the Mod's prompt starts its own.
+      expect(notePersonPrompt.mock.invocationCallOrder[0]).toBeLessThan(
+        startTurn.mock.invocationCallOrder[0],
+      );
+      expect(order.slice(0, 3)).toEqual(['start', 'complete', 'start']);
+      // Each turn hears what its own request streamed.
+      expect(turn.saw).toHaveBeenCalledTimes(3);
+      expect(order.at(-1)).toBe('close');
     });
 
     it('sends the prompt and context the prompt.submit hooks passed on', async () => {

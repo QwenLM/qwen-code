@@ -13916,6 +13916,27 @@ Other open files:
         expect(promptId).toBe('prompt-hook-context-tag');
       });
 
+      it("records a Mod's prompt under the Mod's name", async () => {
+        const recordUserMessage = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordCronPrompt: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+        await run([{ text: 'framed prompt' }], 'prompt-from-mod', {
+          type: SendMessageType.UserQuery,
+          submittedPrompt: 'Run the linter',
+          submittedByMod: 'lint',
+        });
+        expect(recordUserMessage.mock.calls[0]![2]).toEqual({
+          displayText: 'Run the linter',
+          hookContext: expect.any(String),
+          mod: 'lint',
+        });
+      });
+
       it('puts the Mods prompt context ahead of the hook context, escaped', async () => {
         const recordUserMessage = vi.fn();
         vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
