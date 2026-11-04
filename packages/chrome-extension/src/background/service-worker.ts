@@ -62,9 +62,14 @@ const ACP_INIT_ID = 'browser-tools-acp-init';
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
 
+// A short healthy period proves the old outage is over. Keep it well below the
+// five-minute persisted ceiling so a later drop starts with a fresh ladder.
+const CONNECTION_STABLE_MS = 30_000;
+
 let socket: WebSocket | null = null;
 let started = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let ackedAt: number | null = null;
 // Base URL of the in-flight/last attempt, so the failure paths know which
 // config's ladder to bump.
 let attemptBaseUrl = '';
@@ -116,7 +121,9 @@ function onWsMessage(ws: WebSocket, data: unknown): void {
       ws.close();
     } else {
       // An ack alone does not prove a stable tunnel. Keep the ladder so an
-      // immediate close still escalates; old episodes expire in the read path.
+      // immediate close still escalates. Only a connection that outlives the
+      // stability window may reset it when the close eventually arrives.
+      ackedAt = Date.now();
       console.log(LOG_PREFIX, 'ACP initialized; CDP tunnel ready');
     }
     return;
@@ -138,8 +145,13 @@ function onWsMessage(ws: WebSocket, data: unknown): void {
  */
 function scheduleReconnect(): void {
   if (!started || reconnectTimer) return;
+  const resetAfterStableConnection =
+    ackedAt !== null && Date.now() - ackedAt >= CONNECTION_STABLE_MS;
+  ackedAt = null;
   void (async () => {
-    const delay = await recordFailure(attemptBaseUrl);
+    const delay = resetAfterStableConnection
+      ? await recordFailure(attemptBaseUrl, { reset: true })
+      : await recordFailure(attemptBaseUrl);
     if (!started || reconnectTimer) return;
     console.log(LOG_PREFIX, `Reconnecting in ${delay}ms`);
     reconnectTimer = setTimeout(() => {
@@ -197,6 +209,7 @@ async function connect(): Promise<void> {
       ws.close();
       return;
     }
+    ackedAt = null;
     console.log(LOG_PREFIX, 'Connected; sending ACP initialize');
     sendRaw(ws, {
       jsonrpc: '2.0',

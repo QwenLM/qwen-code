@@ -291,4 +291,29 @@ describe('service worker reconnect-backoff gates (#13966)', () => {
     );
     expect(mocks.clearReconnectState).not.toHaveBeenCalled();
   });
+
+  it('resets the ladder when a connection stays healthy past the stability window', async () => {
+    installChromeHarness();
+    await loadServiceWorker();
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    const ws = sockets[0];
+    ws.readyState = MockWebSocket.OPEN;
+    ws.onopen?.();
+    ws.onmessage?.({
+      data: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'browser-tools-acp-init',
+        result: {},
+      }),
+    });
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    dropSocket(ws);
+
+    await vi.waitFor(() =>
+      expect(mocks.recordFailure).toHaveBeenCalledWith(BASE_URL, {
+        reset: true,
+      }),
+    );
+  });
 });

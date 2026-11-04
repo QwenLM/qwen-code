@@ -88,6 +88,23 @@ describe('recordFailure', () => {
     expect(await recordFailure(BASE)).toBe(256_000);
   });
 
+  it('resets a maxed episode only when the previous connection was stable', async () => {
+    sessionData['qwen.cdpReconnect'] = {
+      failures: 10,
+      nextRetryAt: Date.now() - 1_000,
+      baseUrl: BASE,
+    };
+    expect(await recordFailure(BASE)).toBe(300_000);
+
+    sessionData['qwen.cdpReconnect'] = {
+      failures: 10,
+      nextRetryAt: Date.now() - 1_000,
+      baseUrl: BASE,
+    };
+    expect(await recordFailure(BASE, { reset: true })).toBe(RECONNECT_MIN_MS);
+    expect((await readReconnectState(BASE))?.failures).toBe(1);
+  });
+
   it('does not evict the ladder when a failure has no known base', async () => {
     await recordFailure(BASE);
     await recordFailure(BASE);

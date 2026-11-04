@@ -90,8 +90,11 @@ export async function readReconnectState(
  * Record one more failed attempt for `baseUrl` and return the delay before
  * the next attempt may run.
  */
-export async function recordFailure(baseUrl: string): Promise<number> {
-  const prev = await readReconnectState(baseUrl);
+export async function recordFailure(
+  baseUrl: string,
+  options: { reset?: boolean } = {},
+): Promise<number> {
+  const prev = options.reset ? null : await readReconnectState(baseUrl);
   const failures = (prev?.failures ?? 0) + 1;
   const delay = computeBackoffMs(failures - 1);
   const state = {
