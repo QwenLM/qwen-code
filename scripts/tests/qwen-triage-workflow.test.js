@@ -1699,261 +1699,273 @@ describe('qwen-triage verify workflow', () => {
   // and the local preflight writes the same file with its own transform. One
   // set of pages through both must give one answer, or a local round and a CI
   // round read different review states for the same PR.
-  it('snapshots review threads in the shape the local preflight writes', () => {
-    const resolveStep = stepIn('verify', 'Resolve PR and snapshot metadata');
-    const snippet = resolveStep
-      .match(/\n( {10}if ! gh api graphql[\s\S]*?\n {10}fi)\n/)?.[1]
-      ?.replace(/^ {10}/gm, '');
-    expect(snippet).toBeTruthy();
-    // After the context directory is reset, or the file never survives to
-    // the agent; before the decision line, so only a run pays for it.
-    const at = resolveStep.indexOf(snippet.split('\n')[0]);
-    const reset = resolveStep.indexOf('rm -rf "$RUNNER_TEMP/verify-context"');
-    const made = resolveStep.indexOf('mkdir -p "$RUNNER_TEMP/verify-context"');
-    expect(reset).toBeGreaterThan(-1);
-    expect(made).toBeGreaterThan(reset);
-    expect(at).toBeGreaterThan(made);
-    expect(at).toBeLessThan(
-      resolveStep.lastIndexOf('echo "decision=run" >> "$GITHUB_OUTPUT"'),
-    );
-    const dir = mkdtempSync(join(tmpdir(), 'verify-review-snapshot-'));
-    try {
-      writeFileSync(
-        join(dir, 'gh'),
-        [
-          '#!/usr/bin/env bash',
-          'printf "%s\\n" "$@" > "$GH_ARGS"',
-          '[ -n "${GH_FAIL:-}" ] && exit 1',
-          '[ -n "${GH_EMPTY:-}" ] && exit 0',
-          'cat "$GH_PAGES"',
-        ].join('\n'),
-        { mode: 0o755 },
+  // Executes the step's real jq program, so it needs jq, like its siblings.
+  it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+    'snapshots review threads in the shape the local preflight writes',
+    () => {
+      const resolveStep = stepIn('verify', 'Resolve PR and snapshot metadata');
+      const snippet = resolveStep
+        .match(/\n( {10}if ! gh api graphql[\s\S]*?\n {10}fi)\n/)?.[1]
+        ?.replace(/^ {10}/gm, '');
+      expect(snippet).toBeTruthy();
+      // After the context directory is reset, or the file never survives to
+      // the agent; before the decision line, so only a run pays for it.
+      const at = resolveStep.indexOf(snippet.split('\n')[0]);
+      const reset = resolveStep.indexOf('rm -rf "$RUNNER_TEMP/verify-context"');
+      const made = resolveStep.indexOf(
+        'mkdir -p "$RUNNER_TEMP/verify-context"',
       );
-      const context = join(dir, 'verify-context');
-      const file = join(context, 'review-threads.json');
-      const run = (pages, env = {}) => {
-        rmSync(context, { recursive: true, force: true });
-        mkdirSync(context);
-        writeFileSync(join(dir, 'pages.json'), JSON.stringify(pages));
-        const proc = spawnSync(
-          'bash',
+      expect(reset).toBeGreaterThan(-1);
+      expect(made).toBeGreaterThan(reset);
+      expect(at).toBeGreaterThan(made);
+      expect(at).toBeLessThan(
+        resolveStep.lastIndexOf('echo "decision=run" >> "$GITHUB_OUTPUT"'),
+      );
+      const dir = mkdtempSync(join(tmpdir(), 'verify-review-snapshot-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
           [
-            '--noprofile',
-            '--norc',
-            '-eo',
-            'pipefail',
-            '-c',
-            `set -euo pipefail\n${snippet}`,
-          ],
-          {
-            encoding: 'utf8',
-            env: {
-              ...process.env,
-              PATH: `${dir}:${process.env.PATH}`,
-              RUNNER_TEMP: dir,
-              GITHUB_REPOSITORY: 'QwenLM/qwen-code',
-              PR_NUMBER: '7999',
-              GH_ARGS: join(dir, 'args'),
-              GH_PAGES: join(dir, 'pages.json'),
-              ...env,
-            },
-          },
+            '#!/usr/bin/env bash',
+            'printf "%s\\n" "$@" > "$GH_ARGS"',
+            '[ -n "${GH_FAIL:-}" ] && exit 1',
+            '[ -n "${GH_EMPTY:-}" ] && exit 0',
+            'cat "$GH_PAGES"',
+          ].join('\n'),
+          { mode: 0o755 },
         );
-        expect(proc.status, proc.stderr).toBe(0);
-        return {
-          out: `${proc.stdout}${proc.stderr}`,
-          args: readFileSync(join(dir, 'args'), 'utf8').split('\n'),
-          state: existsSync(file)
-            ? JSON.parse(readFileSync(file, 'utf8'))
-            : null,
+        const context = join(dir, 'verify-context');
+        const file = join(context, 'review-threads.json');
+        const run = (pages, env = {}) => {
+          rmSync(context, { recursive: true, force: true });
+          mkdirSync(context);
+          writeFileSync(join(dir, 'pages.json'), JSON.stringify(pages));
+          const proc = spawnSync(
+            'bash',
+            [
+              '--noprofile',
+              '--norc',
+              '-eo',
+              'pipefail',
+              '-c',
+              `set -euo pipefail\n${snippet}`,
+            ],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                PATH: `${dir}:${process.env.PATH}`,
+                RUNNER_TEMP: dir,
+                GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+                PR_NUMBER: '7999',
+                GH_ARGS: join(dir, 'args'),
+                GH_PAGES: join(dir, 'pages.json'),
+                ...env,
+              },
+            },
+          );
+          expect(proc.status, proc.stderr).toBe(0);
+          return {
+            out: `${proc.stdout}${proc.stderr}`,
+            args: readFileSync(join(dir, 'args'), 'utf8').split('\n'),
+            state: existsSync(file)
+              ? JSON.parse(readFileSync(file, 'utf8'))
+              : null,
+          };
         };
-      };
-      const comment = (body, login = 'reviewer', review = null) => ({
-        createdAt: '2026-11-01T00:00:00Z',
-        url: `https://github.com/QwenLM/qwen-code/pull/7999#discussion_${body.length}`,
-        body,
-        author: login === null ? null : { login },
-        authorAssociation: 'MEMBER',
-        originalCommit: login === null ? null : { oid: 'c'.repeat(40) },
-        pullRequestReview: review === null ? null : { url: review },
-      });
-      const opinionated = {
-        nodes: [
+        const comment = (body, login = 'reviewer', review = null) => ({
+          createdAt: '2026-11-01T00:00:00Z',
+          url: `https://github.com/QwenLM/qwen-code/pull/7999#discussion_${body.length}`,
+          body,
+          author: login === null ? null : { login },
+          authorAssociation: 'MEMBER',
+          originalCommit: login === null ? null : { oid: 'c'.repeat(40) },
+          pullRequestReview: review === null ? null : { url: review },
+        });
+        const opinionated = {
+          nodes: [
+            {
+              state: 'CHANGES_REQUESTED',
+              submittedAt: '2026-11-01T01:00:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-1',
+              body: 'Blocking: the retry drops the cursor.',
+              author: { login: 'maintainer' },
+              authorAssociation: 'COLLABORATOR',
+              commit: { oid: 'a'.repeat(40) },
+            },
+            {
+              state: 'APPROVED',
+              submittedAt: '2026-11-01T02:00:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-2',
+              body: 'LGTM',
+              author: { login: 'colleague' },
+              authorAssociation: 'MEMBER',
+              commit: { oid: 'b'.repeat(40) },
+            },
+            {
+              state: 'CHANGES_REQUESTED',
+              submittedAt: '2026-11-01T03:00:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-3',
+              body: '',
+              author: null,
+              authorAssociation: 'NONE',
+              commit: null,
+            },
+          ],
+        };
+        // Two pages, as --paginate --slurp returns them: the threads continue,
+        // and the change requests repeat with every page.
+        const pages = [
           {
-            state: 'CHANGES_REQUESTED',
-            submittedAt: '2026-11-01T01:00:00Z',
-            url: 'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-1',
-            body: 'Blocking: the retry drops the cursor.',
-            author: { login: 'maintainer' },
-            authorAssociation: 'COLLABORATOR',
-            commit: { oid: 'a'.repeat(40) },
-          },
-          {
-            state: 'APPROVED',
-            submittedAt: '2026-11-01T02:00:00Z',
-            url: 'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-2',
-            body: 'LGTM',
-            author: { login: 'colleague' },
-            authorAssociation: 'MEMBER',
-            commit: { oid: 'b'.repeat(40) },
-          },
-          {
-            state: 'CHANGES_REQUESTED',
-            submittedAt: '2026-11-01T03:00:00Z',
-            url: 'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-3',
-            body: '',
-            author: null,
-            authorAssociation: 'NONE',
-            commit: null,
-          },
-        ],
-      };
-      // Two pages, as --paginate --slurp returns them: the threads continue,
-      // and the change requests repeat with every page.
-      const pages = [
-        {
-          data: {
-            repository: {
-              pullRequest: {
-                latestOpinionatedReviews: opinionated,
-                reviewThreads: {
-                  pageInfo: { hasNextPage: true, endCursor: 'c1' },
-                  nodes: [
-                    {
-                      isResolved: false,
-                      isOutdated: false,
-                      path: 'packages/core/src/a.ts',
-                      line: 12,
-                      originalLine: 10,
-                      comments: {
-                        totalCount: 2,
-                        nodes: [
-                          comment(
-                            '**[Critical]** R1-1: the cursor is lost',
-                            'maintainer',
-                            'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-1',
-                          ),
-                          comment('Fixed in abc1234.', 'author'),
-                        ],
+            data: {
+              repository: {
+                pullRequest: {
+                  latestOpinionatedReviews: opinionated,
+                  reviewThreads: {
+                    pageInfo: { hasNextPage: true, endCursor: 'c1' },
+                    nodes: [
+                      {
+                        isResolved: false,
+                        isOutdated: false,
+                        path: 'packages/core/src/a.ts',
+                        line: 12,
+                        originalLine: 10,
+                        comments: {
+                          totalCount: 2,
+                          nodes: [
+                            comment(
+                              '**[Critical]** R1-1: the cursor is lost',
+                              'maintainer',
+                              'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-1',
+                            ),
+                            comment('Fixed in abc1234.', 'author'),
+                          ],
+                        },
                       },
-                    },
-                    {
-                      isResolved: true,
-                      isOutdated: false,
-                      path: 'packages/core/src/b.ts',
-                      line: null,
-                      originalLine: 7,
-                      comments: {
-                        totalCount: 1,
-                        nodes: [comment('**[Blocker]** R1-2: unbounded')],
+                      {
+                        isResolved: true,
+                        isOutdated: false,
+                        path: 'packages/core/src/b.ts',
+                        line: null,
+                        originalLine: 7,
+                        comments: {
+                          totalCount: 1,
+                          nodes: [comment('**[Blocker]** R1-2: unbounded')],
+                        },
                       },
-                    },
-                  ],
+                    ],
+                  },
                 },
               },
             },
           },
-        },
-        {
-          data: {
-            repository: {
-              pullRequest: {
-                latestOpinionatedReviews: opinionated,
-                reviewThreads: {
-                  pageInfo: { hasNextPage: false, endCursor: 'c2' },
-                  nodes: [
-                    {
-                      isResolved: false,
-                      isOutdated: true,
-                      path: 'docs/c.md',
-                      line: null,
-                      originalLine: null,
-                      // Longer than the 50 the query asks for.
-                      comments: {
-                        totalCount: 51,
-                        nodes: [comment('Typo?', null)],
+          {
+            data: {
+              repository: {
+                pullRequest: {
+                  latestOpinionatedReviews: opinionated,
+                  reviewThreads: {
+                    pageInfo: { hasNextPage: false, endCursor: 'c2' },
+                    nodes: [
+                      {
+                        isResolved: false,
+                        isOutdated: true,
+                        path: 'docs/c.md',
+                        line: null,
+                        originalLine: null,
+                        // Longer than the 50 the query asks for.
+                        comments: {
+                          totalCount: 51,
+                          nodes: [comment('Typo?', null)],
+                        },
                       },
-                    },
-                  ],
+                    ],
+                  },
                 },
               },
             },
           },
-        },
-      ];
+        ];
 
-      const ok = run(pages);
-      expect(ok.state).toEqual(reviewState(pages));
-      // `line` and `originalLine` stay apart: an outdated thread's line in
-      // the current diff and its line in the comment's commit differ.
-      expect(
-        ok.state.threads.map((t) => [
-          t.resolved,
-          t.outdated,
-          t.path,
-          t.line,
-          t.originalLine,
-          t.commentCount,
-        ]),
-      ).toEqual([
-        [false, false, 'packages/core/src/a.ts', 12, 10, 2],
-        [true, false, 'packages/core/src/b.ts', null, 7, 1],
-        [false, true, 'docs/c.md', null, null, 51],
-      ]);
-      // An inline comment names the review it belongs to, so a change
-      // request with an empty body still has its defects.
-      expect(
-        ok.state.threads[0].comments.map((c) => [c.author, c.review, c.commit]),
-      ).toEqual([
-        [
-          'maintainer',
-          'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-1',
-          'c'.repeat(40),
-        ],
-        ['author', null, 'c'.repeat(40)],
-      ]);
-      expect(ok.state.threads[2].comments[0].author).toBeNull();
-      expect(ok.state.changeRequests.map((r) => [r.author, r.commit])).toEqual([
-        ['maintainer', 'a'.repeat(40)],
-        [null, null],
-      ]);
-      // The query the local preflight sends, against this PR of this repo.
-      expect(ok.args).toEqual(
-        expect.arrayContaining([
-          'graphql',
-          '--paginate',
-          '--slurp',
-          'owner=QwenLM',
-          'name=qwen-code',
-          'number=7999',
-          `query=${REVIEW_STATE_QUERY}`,
-        ]),
-      );
-      expect(ok.args[ok.args.indexOf('number=7999') - 1]).toBe('-F');
-      expect(ok.args[ok.args.indexOf('owner=QwenLM') - 1]).toBe('-f');
-
-      // A failed fetch, or pages that are not this query's answer, leave no
-      // file: the skill reads its absence as "unknown", and a partial file
-      // would read as "nothing open".
-      for (const [input, env] of [
-        [pages, { GH_FAIL: '1' }],
-        // gh exits 0 with nothing on stdout, and jq then exits 0 too.
-        [pages, { GH_EMPTY: '1' }],
-        [[{ data: null }], {}],
-        [[], {}],
-      ]) {
-        const failed = run(input, env);
-        expect(failed.state).toBeNull();
-        expect(failed.out).toContain(
-          "Could not snapshot the PR's review threads",
+        const ok = run(pages);
+        expect(ok.state).toEqual(reviewState(pages));
+        // `line` and `originalLine` stay apart: an outdated thread's line in
+        // the current diff and its line in the comment's commit differ.
+        expect(
+          ok.state.threads.map((t) => [
+            t.resolved,
+            t.outdated,
+            t.path,
+            t.line,
+            t.originalLine,
+            t.commentCount,
+          ]),
+        ).toEqual([
+          [false, false, 'packages/core/src/a.ts', 12, 10, 2],
+          [true, false, 'packages/core/src/b.ts', null, 7, 1],
+          [false, true, 'docs/c.md', null, null, 51],
+        ]);
+        // An inline comment names the review it belongs to, so a change
+        // request with an empty body still has its defects.
+        expect(
+          ok.state.threads[0].comments.map((c) => [
+            c.author,
+            c.review,
+            c.commit,
+          ]),
+        ).toEqual([
+          [
+            'maintainer',
+            'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-1',
+            'c'.repeat(40),
+          ],
+          ['author', null, 'c'.repeat(40)],
+        ]);
+        expect(ok.state.threads[2].comments[0].author).toBeNull();
+        expect(
+          ok.state.changeRequests.map((r) => [r.author, r.commit]),
+        ).toEqual([
+          ['maintainer', 'a'.repeat(40)],
+          [null, null],
+        ]);
+        // The query the local preflight sends, against this PR of this repo.
+        expect(ok.args).toEqual(
+          expect.arrayContaining([
+            'graphql',
+            '--paginate',
+            '--slurp',
+            'owner=QwenLM',
+            'name=qwen-code',
+            'number=7999',
+            `query=${REVIEW_STATE_QUERY}`,
+          ]),
         );
+        expect(ok.args[ok.args.indexOf('number=7999') - 1]).toBe('-F');
+        expect(ok.args[ok.args.indexOf('owner=QwenLM') - 1]).toBe('-f');
+
+        // A failed fetch, or pages that are not this query's answer, leave no
+        // file: the skill reads its absence as "unknown", and a partial file
+        // would read as "nothing open".
+        for (const [input, env] of [
+          [pages, { GH_FAIL: '1' }],
+          // gh exits 0 with nothing on stdout, and jq then exits 0 too.
+          [pages, { GH_EMPTY: '1' }],
+          [[{ data: null }], {}],
+          [[], {}],
+        ]) {
+          const failed = run(input, env);
+          expect(failed.state).toBeNull();
+          expect(failed.out).toContain(
+            "Could not snapshot the PR's review threads",
+          );
+        }
+        expect(reviewState([{ data: null }])).toBeNull();
+        expect(reviewState([])).toBeNull();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
       }
-      expect(reviewState([{ data: null }])).toBeNull();
-      expect(reviewState([])).toBeNull();
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 
   // The snapshot only helps if the round treats it as the skill says: an
   // absent file is unknown, a resolved thread is a claim, and an open

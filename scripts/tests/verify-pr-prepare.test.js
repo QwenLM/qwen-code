@@ -809,6 +809,28 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       JSON.parse(readFileSync(reviewPath, 'utf8')).threads[0].comments[0].body,
     ).toHaveLength(1536 * 1024);
 
+    // gh exits 0 but its answer is not this query's: no file either, and
+    // the copy the previous run wrote goes too. An empty state here would
+    // read as "nothing open".
+    for (const [answer, reason] of [
+      ['not json', 'gh api graphql returned output that is not JSON'],
+      [
+        '[{"data":null}]',
+        'gh api graphql returned pages without review threads',
+      ],
+    ]) {
+      expect(existsSync(reviewPath)).toBe(true);
+      writeFileSync(env.FAKE_GH_REVIEW, answer);
+      const odd = runPrepare(dir, ['42', '--repo', REPO], env);
+      expect(odd.status).toBe(0);
+      expect(existsSync(reviewPath)).toBe(false);
+      expect(odd.stdout).toContain(
+        `review     not written — ${reason}; the round lists review findings as not covered`,
+      );
+      writeFileSync(env.FAKE_GH_REVIEW, JSON.stringify(pages));
+      expect(runPrepare(dir, ['42', '--repo', REPO], env).status).toBe(0);
+    }
+
     rmSync(env.FAKE_GH_REVIEW);
     const failed = runPrepare(dir, ['42', '--repo', REPO], env);
     expect(failed.status).toBe(0);

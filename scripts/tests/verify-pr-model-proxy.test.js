@@ -896,9 +896,20 @@ describe('local container recipe pins', () => {
       'if [ -f <pr-clone>/tmp/verify-context/pr<n>-review-threads.json ]; then',
     );
     // The container sees only the name the skill tells the round to read.
-    expect(skill).toContain(
+    const cp = skill.indexOf(
       'cp <pr-clone>/tmp/verify-context/pr<n>-review-threads.json ~/.cache/qwen-verify/pr<n>/review-threads.json',
     );
+    // Clear first, then copy: the other way round deletes the copy it just
+    // made, and every local round would read the review state as unknown.
+    const rm = skill.indexOf(
+      'rm -f ~/.cache/qwen-verify/pr<n>/review-threads.json',
+    );
+    const test = skill.indexOf(
+      'if [ -f <pr-clone>/tmp/verify-context/pr<n>-review-threads.json ]; then',
+    );
+    expect(rm).toBeGreaterThan(-1);
+    expect(test).toBeGreaterThan(rm);
+    expect(cp).toBeGreaterThan(test);
   });
 
   it('keeps the proxy JSON parseable and the base extraction fresh', () => {
