@@ -264,6 +264,13 @@ describe('isDestructiveCommand — git commit --amend', () => {
     // ANSI-C decoding turns `\n` into a real command boundary, so the amend is
     // a second command rather than text inside one word (#16075 review, R3-2).
     "bash -c $'git commit --amend\\ntrue'",
+    // More unmodelled executors/consumers (#16075 review, R1-1): `script -c`
+    // runs a program, `exec` prefixes the real shell, `fish` reads stdin, and
+    // `su` carries a positional user before its `-c` payload.
+    "script -c 'git commit --amend --no-edit' /dev/null",
+    "exec bash <<'EOF'\ngit commit --amend --no-edit\nEOF",
+    "fish <<'EOF'\ngit commit --amend --no-edit\nEOF",
+    "su root -c 'git commit --amend --no-edit'",
   ])('blocks amend through an execution wrapper: %s', (command) => {
     expectBlocked(command, 'amend the commit', 'amend');
   });

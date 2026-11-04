@@ -2435,7 +2435,7 @@ function getHeredocDelimiters(line: string): string[] {
   return delimiters;
 }
 
-const AMEND_PREFIX_COMMANDS = new Set([...PREFIX_COMMANDS, 'command']);
+const AMEND_PREFIX_COMMANDS = new Set([...PREFIX_COMMANDS, 'command', 'exec']);
 
 const AMEND_PREFIX_FLAGS_WITH_VALUE = new Map<string, ReadonlySet<string>>([
   ...PREFIX_COMMAND_FLAGS_WITH_VALUE,
@@ -2577,6 +2577,7 @@ const AMEND_SHELL_PROGRAMS = new Set([
   'ash',
   'fish',
   'su',
+  'script',
 ]);
 
 /**
@@ -2633,6 +2634,23 @@ function nestedAmendPayloads(tokens: string[]): {
           payloads.push(flag.slice('--split-string='.length));
           break;
         }
+      }
+      continue;
+    }
+
+    // `su [user] -c '…'` carries a positional user before the `-c` flag, so the
+    // leading-flag scan below would stop at the user and miss the payload. Scan
+    // past positionals for the `-c` flag and read the program it runs.
+    if (program === 'su') {
+      for (let inner = index + 1; inner < tokens.length; inner++) {
+        const flag = tokens[inner]!;
+        const marker = /^-[A-Za-z]*c/.exec(flag);
+        if (!marker) continue;
+        const attached = flag.slice(marker[0].length);
+        const value = attached.length > 0 ? attached : tokens[inner + 1];
+        if (value === undefined) unclassifiable = true;
+        else payloads.push(value);
+        break;
       }
       continue;
     }
@@ -2864,6 +2882,7 @@ const SHELLS_READING_STDIN = new Set([
   'dash',
   'ksh',
   'ash',
+  'fish',
 ]);
 
 /**
