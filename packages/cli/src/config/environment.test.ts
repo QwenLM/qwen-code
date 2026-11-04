@@ -2263,6 +2263,45 @@ describe('home .env with the global dir in the XDG config directory', () => {
     }
   });
 
+  it('reports a home .env that sets HOME to something else', () => {
+    const envFile = path.join(os.homedir(), '.env');
+    fs.writeFileSync(envFile, 'HOME=/elsewhere\n');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const home = process.env['HOME'];
+      loadEnvironment(testSettings({}), makeWorkspace());
+
+      expect(process.env['HOME']).toBe(home);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `.env file ${envFile} cannot set the env vars that locate the global directory; ignored: HOME.`,
+        ),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('reports a home .env that gains XDG_CONFIG_HOME before a reload', () => {
+    const envFile = path.join(os.homedir(), '.env');
+    const workspace = makeWorkspace();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      loadEnvironment(testSettings({}), workspace);
+      fs.writeFileSync(envFile, 'XDG_CONFIG_HOME=/elsewhere\n');
+      reloadEnvironment(testSettings({}), workspace, true);
+
+      expect(process.env['XDG_CONFIG_HOME']).toBeUndefined();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `.env file ${envFile} cannot set the env vars that locate the global directory; ignored: XDG_CONFIG_HOME.`,
+        ),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('does not report the QWEN_HOME the home .env pre-read applied', () => {
     const qwenHome = makeWorkspace();
     fs.writeFileSync(

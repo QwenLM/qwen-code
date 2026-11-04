@@ -896,6 +896,12 @@ export function reloadEnvironment(
       `.env file ${envFile.path}`,
       Object.keys(envFile.parsedEnv),
     );
+    if (envFile.isHomeScopedEnvFile) {
+      reportRejectedGlobalDirKeys(
+        `.env file ${envFile.path}`,
+        envFile.parsedEnv,
+      );
+    }
   }
 
   if (settings.env) {

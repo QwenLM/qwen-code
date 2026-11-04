@@ -715,8 +715,8 @@ export function reportRejectedLoaderKeys(
 
 // A home .env could set these before they decided where the global dir is,
 // so say why one is now ignored instead of dropping it silently. A key the
-// environment already holds (QWEN_HOME from the home .env pre-read, say) was
-// not dropped.
+// environment already holds with this value (QWEN_HOME from the home .env
+// pre-read, say) was not dropped.
 export function reportRejectedGlobalDirKeys(
   source: string,
   parsedEnv: Readonly<Record<string, string>>,
@@ -727,7 +727,7 @@ export function reportRejectedGlobalDirKeys(
     (key) =>
       isGlobalDirEnvKey(key) &&
       parsedEnv[key] &&
-      !process.env[key] &&
+      process.env[key] !== parsedEnv[key] &&
       !warnedKeys.has(key),
   );
   if (freshKeys.length === 0) return;
