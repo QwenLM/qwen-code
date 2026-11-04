@@ -144,7 +144,7 @@ export function registerSubscriptionAuthRoutes(
           flow.view = {
             id,
             status: 'waiting',
-            authorizationUrl: getQwenSubscriptionSuccessUrl(),
+            authorizationUrl: getQwenSubscriptionSuccessUrl(saved.member_type),
           };
         }
         const user =

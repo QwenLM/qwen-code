@@ -158,26 +158,41 @@ it('resumes saved membership without requesting another device code', async () =
 });
 
 it.each(['free', 'FREE', 'lite', 'go', 'enterprise', 'VIP'])(
-  'opens plans only on request for a saved %s account and keeps polling',
+  'opens plans on the success page for a saved %s account and keeps polling',
   async (member_type) => {
     mocks.getUserInfo.mockResolvedValue({ ...free, member_type });
     const { result, unmount } = renderHook(() => useSubscription());
     await flush();
     expect(result.current.state.status).toBe('purchase-required');
     expect(mocks.browser).toHaveBeenCalledWith(
-      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
+      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code&memberPlan=qwen_code',
     );
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
     expect(mocks.getUserInfo).toHaveBeenCalledTimes(2);
     expect(mocks.browser).toHaveBeenCalledWith(
-      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
+      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code&memberPlan=qwen_code',
     );
     act(() => result.current.openPlans());
     expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
+      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code&memberPlan=qwen_code',
       'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
+    ]);
+    expect(mocks.signIn).not.toHaveBeenCalled();
+    unmount();
+  },
+);
+
+it.each(['plus', 'PLUS', 'pro', 'Pro'])(
+  'opens only the success page for a saved %s account',
+  async (member_type) => {
+    mocks.getUserInfo.mockResolvedValue({ ...free, member_type });
+    const { result, unmount } = renderHook(() => useSubscription());
+    await flush();
+    expect(result.current.state.status).toBe('ready');
+    expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
+      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
     ]);
     expect(mocks.signIn).not.toHaveBeenCalled();
     unmount();

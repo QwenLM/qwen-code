@@ -164,14 +164,17 @@ it.each(
     [false, true].map((dialog) => ({ member_type, dialog })),
   ),
 )(
-  'opens plans only on request for saved $member_type membership (dialog=$dialog)',
+  'opens plans on the success page for saved $member_type membership (dialog=$dialog)',
   async ({ member_type, dialog }) => {
+    const successUrl =
+      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code&memberPlan=qwen_code';
     transport.startSubscriptionLogin.mockResolvedValue({
       ...ready,
+      authorizationUrl: successUrl,
       userInfo: { ...user, member_type },
     });
     await render(undefined, transport, { dialog });
-    expect(open).not.toHaveBeenCalled();
+    expect(open.mock.calls.map(([url]) => url)).toEqual([successUrl]);
     expect(
       [...document.querySelectorAll('section button')].map((button) =>
         button.getAttribute('aria-label'),
@@ -179,7 +182,7 @@ it.each(
     ).toEqual(['View Plans', 'Switch Provider', 'Use another account']);
     await tick(5000);
     expect(transport.getSubscriptionUserInfo).toHaveBeenCalledOnce();
-    expect(open).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalledOnce();
     await act(async () => {
       document
         .querySelector<HTMLButtonElement>(
@@ -187,10 +190,30 @@ it.each(
         )!
         .click();
     });
-    expect(open).toHaveBeenCalledOnce();
-    expect(open).toHaveBeenLastCalledWith(
+    expect(open.mock.calls.map(([url]) => url)).toEqual([
+      successUrl,
       'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
-    );
+    ]);
+  },
+);
+
+it.each(
+  ['plus', 'PLUS', 'pro', 'Pro'].flatMap((member_type) =>
+    [false, true].map((dialog) => ({ member_type, dialog })),
+  ),
+)(
+  'opens only the success page for saved $member_type membership (dialog=$dialog)',
+  async ({ member_type, dialog }) => {
+    const successUrl =
+      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code';
+    transport.startSubscriptionLogin.mockResolvedValue({
+      ...ready,
+      authorizationUrl: successUrl,
+      userInfo: { ...user, member_type },
+    });
+    await render(undefined, transport, { dialog });
+    expect(open.mock.calls.map(([url]) => url)).toEqual([successUrl]);
+    expect(transport.startSubscriptionLogin).toHaveBeenCalledOnce();
   },
 );
 

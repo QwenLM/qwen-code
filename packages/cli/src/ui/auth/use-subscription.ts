@@ -261,7 +261,9 @@ export function useSubscription({
         });
       if (saved) {
         signal.throwIfAborted();
-        authorizationUrl.current = getQwenSubscriptionSuccessUrl();
+        authorizationUrl.current = getQwenSubscriptionSuccessUrl(
+          saved.member_type,
+        );
         if (!suppressBrowserLaunch) {
           void openBrowserSecurely(authorizationUrl.current).catch(
             () => undefined,

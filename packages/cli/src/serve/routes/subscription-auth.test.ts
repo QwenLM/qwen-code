@@ -170,12 +170,39 @@ describe('process-global Subscription routes', () => {
       id: first.body.id,
       status: 'ready',
       authorizationUrl:
-        'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
+        'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code&memberPlan=qwen_code',
       userInfo: user,
     });
     expect((await post(`${base}/userinfo`)).body).toEqual(user);
     expect(mocks.signIn).not.toHaveBeenCalled();
   });
+  it.each([
+    ['free', 'qwen_code'],
+    ['FREE', 'qwen_code'],
+    ['lite', 'qwen_code'],
+    ['go', 'qwen_code'],
+    ['enterprise', 'qwen_code'],
+    ['VIP', 'qwen_code'],
+    ['plus', null],
+    ['PLUS', null],
+    ['pro', null],
+    ['Pro', null],
+  ])(
+    'returns the membership-specific success URL for saved %s credentials',
+    async (member_type, memberPlan) => {
+      mocks.userInfo.mockResolvedValue({ ...user, member_type });
+      const { post, get } = makeApp();
+      const started = await post(`${base}/flows`);
+      const view = (await get(`${base}/flows/${started.body.id}`)).body;
+      expect(view.status).toBe('ready');
+      const url = new URL(view.authorizationUrl);
+      expect(url.origin).toBe('https://pre4-chat.qwen.ai');
+      expect(url.pathname).toBe('/authorize/success');
+      expect(url.searchParams.get('client')).toBe('qwen-code');
+      expect(url.searchParams.get('memberPlan')).toBe(memberPlan);
+      expect(mocks.signIn).not.toHaveBeenCalled();
+    },
+  );
   it('cancels polling and ignores a late successful result', async () => {
     let resolve!: (value: typeof user) => void;
     mocks.signIn.mockImplementation(
