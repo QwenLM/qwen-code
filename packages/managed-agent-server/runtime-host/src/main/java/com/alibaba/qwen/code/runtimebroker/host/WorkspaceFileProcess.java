@@ -4,6 +4,12 @@ import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -12,6 +18,13 @@ import java.util.Map;
 public final class WorkspaceFileProcess implements com.alibaba.qwen.code.managedagent.contracts.workspace.LocalWorkspaceFiles {
     public static final int MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
     public static final int MAX_UPLOAD_REQUEST_BYTES = 12 * 1024 * 1024;
+    private static volatile Capability cachedCapability;
+
+    private record FileIdentity(String configured, Path resolved, Object key, long size,
+            FileTime created, FileTime modified) { }
+
+    private record Capability(List<FileIdentity> identity, HostCommandRunner.Result help) { }
+
     public WorkspaceFileProcess() {
     }
 
@@ -31,9 +44,7 @@ public final class WorkspaceFileProcess implements com.alibaba.qwen.code.managed
         if (input.length > (upload ? MAX_UPLOAD_REQUEST_BYTES : 65536)) {
             throw unsupported();
         }
-        var help = HostCommandRunner.run(List.of(node, entry, "managed-runtime-bootstrap", "--help"),
-                new byte[]{'{', '}'}, Duration.ofSeconds(15));
-        requireCapability(help, upload);
+        requireLocalCapability(node, entry, upload);
         List<String> command = upload
                 ? List.of(node, entry, "managed-runtime-bootstrap", "--workspace-file-upload")
                 : List.of(node, entry, "managed-runtime-bootstrap");
@@ -57,6 +68,43 @@ public final class WorkspaceFileProcess implements com.alibaba.qwen.code.managed
         }
         throw upload ? uncertain()
                 : new RuntimeBrokerException(409, "workspace_file_unavailable", "Workspace file cannot be read.", false);
+    }
+
+    private static void requireLocalCapability(String node, String entry, boolean upload) {
+        var identity = identity(node, entry);
+        var cached = cachedCapability;
+        if (identity != null && cached != null && identity.equals(cached.identity())) {
+            requireCapability(cached.help(), upload);
+            return;
+        }
+        var help = HostCommandRunner.run(List.of(node, entry, "managed-runtime-bootstrap", "--help"),
+                new byte[]{'{', '}'}, Duration.ofSeconds(15));
+        requireCapability(help, upload);
+        if (identity != null && identity.equals(identity(node, entry))) {
+            cachedCapability = new Capability(identity, help);
+        }
+    }
+
+    private static List<FileIdentity> identity(String node, String entry) {
+        try {
+            var identities = new java.util.ArrayList<FileIdentity>(2);
+            for (String configured : List.of(node, entry)) {
+                Path path = Path.of(configured);
+                if (!path.isAbsolute()) {
+                    return null;
+                }
+                Path resolved = path.toRealPath();
+                var attributes = Files.readAttributes(resolved, BasicFileAttributes.class);
+                if (!attributes.isRegularFile()) {
+                    return null;
+                }
+                identities.add(new FileIdentity(configured, resolved, attributes.fileKey(), attributes.size(),
+                        attributes.creationTime(), attributes.lastModifiedTime()));
+            }
+            return List.copyOf(identities);
+        } catch (IOException | InvalidPathException unavailable) {
+            return null;
+        }
     }
 
     public static RuntimeBrokerException unsupported() {

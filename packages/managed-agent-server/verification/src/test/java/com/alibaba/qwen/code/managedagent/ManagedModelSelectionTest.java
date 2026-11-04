@@ -386,6 +386,20 @@ class ManagedModelSelectionTest {
         return new ManagedAgentService(source, new RequestDigests(), mock(HarnessCoordinator.class), harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
+    @Test
+    void modelChangeDoesNotWaitForTheTenantPlacementGuard() throws Exception {
+        try (var holder = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
+            holder.setAutoCommit(false);
+            com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.lockPlacementDomain(holder, tenant);
+            try {
+                assertThat(change("actor", "guarded", "model-a", 0).modelSelection())
+                        .isEqualTo(new WebShellModelSelection("model-a", 1));
+            } finally {
+                holder.rollback();
+            }
+        }
+    }
+
     private WebShellModelChangeResult change(String actor, String key, String model, long revision) {
         return transaction().execute(status -> service.changeWebShellSessionModel(tenant, actor, session, key, model, revision));
     }
