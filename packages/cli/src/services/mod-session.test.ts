@@ -1010,6 +1010,33 @@ describe('Mod session ownership', () => {
     expect(ended()).not.toHaveProperty('usage');
   });
 
+  it('keeps OpenAI cache writes out of uncached Mod input', async () => {
+    const { session, ended } = await loadTurns(['hello-mod'], {
+      getContentGeneratorConfig: () => ({ authType: 'openai' }),
+    });
+    const turn = session.startTurn('', turnSignal, abortHost)!;
+    const written = {
+      promptTokenCount: 100,
+      cachedContentTokenCount: 40,
+      candidatesTokenCount: 7,
+      totalTokenCount: 107,
+    };
+    setGenAiUsageProvenance(written, {
+      cachedInputTokensReported: true,
+      cacheCreationInputTokens: 20,
+    });
+    turn.saw(finished(written));
+    await turn.complete();
+
+    expect(ended().usage).toEqual({
+      input_tokens: 40,
+      output_tokens: 7,
+      cache_read_input_tokens: 40,
+      cache_creation_input_tokens: 20,
+      model: 'qwen-max',
+    });
+  });
+
   it.each(['openai', 'openai-responses', 'qwen-oauth'])(
     'counts reasoning once where the provider includes it in the output (%s)',
     async (authType) => {

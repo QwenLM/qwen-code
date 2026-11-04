@@ -1115,8 +1115,9 @@ function tokenCount(value: unknown): number {
     : 0;
 }
 
-// The API's four counts. Cache writes are known only where the provider
-// reports them apart, as Anthropic's does.
+// The API's four counts. Cache reads and writes are separated from input.
+// Anthropic sums writes into its prompt total; OpenAI Chat already includes
+// them in prompt_tokens.
 function addTurnUsage(
   usage: RunningTurn['usage'],
   metadata: GenerateContentResponseUsageMetadata | undefined,
