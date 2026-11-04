@@ -3171,6 +3171,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.transitionInboundTask(task.id, 'running', {
         deliveredAt: Date.now(),
       });
+      // The slot mark must be durable BEFORE the accepted task is removed:
+      // it is the only evidence connecting the acceptance to the original
+      // fanout slot across retargeting. A write failure fails the poll
+      // closed with the deliveredAt record on disk; recovery retries the
+      // mark before retiring the task, and reconstruction honors the
+      // acceptance evidence in the meantime.
+      this.markFanoutSlotCompleted(envelope, task.delivery.role);
       this.removeInboundTask(task.id);
       return true;
     }
@@ -3220,7 +3227,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // key stays as a secondary guard for the accepting session.
         if (
           target.completed === true ||
-          this.boundTargetCompleted(task.envelope, target.sessionId)
+          this.boundTargetCompleted(task.envelope, target.sessionId) ||
+          this.boundSlotAcceptancePending(task.envelope, target.role)
         ) {
           continue;
         }
@@ -3278,7 +3286,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
       if (task.deliveredAt !== undefined) {
         // The daemon accepted this prompt before the crash; re-injecting
-        // would deliver the same event twice. Retire without replay.
+        // would deliver the same event twice. Retire without replay — but
+        // complete the slot mark FIRST: a crash (or a failed mark write)
+        // between acceptance and the mark must not leave the original
+        // slot reconstructable into a rebound session. A mark failure
+        // aborts recovery and retries next poll; the task stays accepted.
+        if (task.delivery?.kind === 'bound-session' && task.envelope) {
+          this.markFanoutSlotCompleted(task.envelope, task.delivery.role);
+        }
         this.removeInboundTask(task.id);
         continue;
       }
@@ -3316,7 +3331,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             // Sibling targets get their own durable tasks; this pass's
             // snapshot does not include them, the next recovery runs them.
             for (const target of rest) {
-              if (this.boundTargetCompleted(task.envelope, target.sessionId)) {
+              if (
+                this.boundTargetCompleted(task.envelope, target.sessionId) ||
+                this.boundSlotAcceptancePending(task.envelope, target.role)
+              ) {
                 continue;
               }
               this.claimInboundTask(
@@ -4243,47 +4261,60 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * after retargeting completes the ORIGINAL slot, and the mark lives on
    * the carrier task — durable for exactly as long as a surviving sibling
    * can reconstruct it, immune to the bounded ring's FIFO eviction.
-   * Best-effort like the ring: a write failure is surfaced, never thrown
-   * into the delivery path (the per-target ring key still guards this
-   * lifetime).
+   * MANDATORY, not best-effort: the mark is the only evidence connecting
+   * an acceptance to its original slot, so a write failure throws and the
+   * accepted task is NOT removed — its persisted deliveredAt record lets
+   * recovery retry the mark before retiring it, and reconstruction honors
+   * that acceptance evidence in the meantime (boundSlotAcceptancePending).
    */
   private markFanoutSlotCompleted(
     envelope: Envelope,
     role: PrBindingRole | undefined,
   ): void {
-    try {
-      const records = this.readInboundTasks();
-      let changed = false;
-      const next = records.map((record) => {
-        if (
-          !record.fanout ||
-          record.source.chatId !== envelope.chatId ||
-          record.source.threadId !== envelope.threadId ||
-          record.source.messageId !== envelope.messageId
-        ) {
-          return record;
-        }
+    const matches = (record: InboundTaskRecord): boolean =>
+      record.fanout !== undefined &&
+      record.source.chatId === envelope.chatId &&
+      record.source.threadId === envelope.threadId &&
+      record.source.messageId === envelope.messageId;
+    if (!this.readInboundTasks().some(matches)) return;
+    this.updateInboundTasks((records) =>
+      records.map((record) => {
+        if (!matches(record)) return record;
         let hit = false;
-        const fanout = record.fanout.map((target) => {
+        const fanout = record.fanout!.map((target) => {
           if (target.role !== role || target.completed === true) {
             return target;
           }
           hit = true;
           return { ...target, completed: true };
         });
-        if (!hit) return record;
-        changed = true;
-        return { ...record, fanout };
-      });
-      if (changed) this.writeInboundTasks(next);
-    } catch (err) {
-      process.stderr.write(
-        `[Channel:${this.name}] failed to persist fan-out completion for ${envelope.messageId}: ${sanitizeLogText(
-          err instanceof Error ? err.message : String(err),
-          200,
-        )}\n`,
-      );
-    }
+        return hit ? { ...record, fanout } : record;
+      }),
+    );
+  }
+
+  /**
+   * Acceptance evidence for a logical slot whose completion mark is not
+   * yet durable: a sibling task of the same event already carries
+   * deliveredAt (the daemon accepted its prompt). Reconstruction must
+   * honor it across rebinding — the accepting session may differ from the
+   * slot's original session, so the per-target ring key cannot stand in.
+   * Recovery completes the mark from the deliveredAt record before
+   * retiring the task; until then the slot stays unreconstructable.
+   */
+  private boundSlotAcceptancePending(
+    envelope: Envelope,
+    role: PrBindingRole | undefined,
+  ): boolean {
+    return this.readInboundTasks().some(
+      (task) =>
+        task.deliveredAt !== undefined &&
+        task.delivery?.kind === 'bound-session' &&
+        task.delivery.role === role &&
+        task.source.chatId === envelope.chatId &&
+        task.source.threadId === envelope.threadId &&
+        task.source.messageId === envelope.messageId,
+    );
   }
 
   /**
@@ -4761,7 +4792,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // gone-fallback may route the same event publicly, even after every
       // follower disappears (the ring outlives the tasks).
       this.recordBoundDelivered(envelope, delivery.sessionId);
-      this.markFanoutSlotCompleted(envelope, delivery.role);
     } catch (err) {
       if (!(err instanceof BoundSessionGoneError)) throw err;
       // The daemon's Gone verdict is authoritative deletion evidence. Evict
@@ -4801,7 +4831,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             idempotencyKey,
           );
           this.recordBoundDelivered(envelope, next.sessionId);
-          this.markFanoutSlotCompleted(envelope, next.role);
           return true;
         } catch (retryErr) {
           if (!(retryErr instanceof BoundSessionGoneError)) throw retryErr;

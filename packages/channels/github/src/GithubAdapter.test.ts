@@ -9949,6 +9949,139 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(afterRestart).not.toContain('verify-old');
     });
 
+    it('keeps the slot unreconstructable when the completion mark write fails (R2-2 mark write failure)', async () => {
+      const config = {
+        deliverToBoundSessions: true,
+        boundSessionActions: {
+          'review:comment': 'review it',
+          'verify:comment': 'verify it',
+        },
+      };
+      await initChannel(config, { boundSessions });
+      const verifyBindingFor = (sessionId: string, updatedAt?: string) =>
+        makeBinding({
+          sessionId,
+          ...(updatedAt ? { updatedAt } : {}),
+          prs: [
+            {
+              number: 42,
+              url: 'https://github.com/owner/repo/pull/42',
+              state: 'open',
+              role: 'verify',
+            },
+          ],
+        });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding(), verifyBindingFor('verify-old')],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 'review-session' || sessionId === 'verify-old') {
+            throw new BoundSessionQueueFullError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+
+      // verify-mid accepts, but the ONE write that would persist the
+      // carrier's completed:true slot mark fails with a real rename EIO
+      // (content-selected, fired once; the completion helper is not mocked).
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          verifyBindingFor('verify-mid', '2026-07-03T00:00:00.000Z'),
+        ],
+        partial: false,
+      });
+      const originalRename = nodeFs.renameSync;
+      let fired = false;
+      const spy = vi.spyOn(nodeFs, 'renameSync').mockImplementation(((
+        from: string,
+        to: string,
+      ) => {
+        if (
+          !fired &&
+          typeof to === 'string' &&
+          to.endsWith('-github-inbound-tasks.json')
+        ) {
+          const staged = JSON.parse(
+            nodeFs.readFileSync(from, 'utf-8'),
+          ) as Array<{ fanout?: Array<{ completed?: boolean }> }>;
+          if (
+            Array.isArray(staged) &&
+            staged.some((record) =>
+              (record.fanout ?? []).some((t) => t.completed === true),
+            )
+          ) {
+            fired = true;
+            throw Object.assign(new Error('EIO: i/o error'), {
+              code: 'EIO',
+            });
+          }
+        }
+        return (originalRename as (a: string, b: string) => void)(from, to);
+      }) as unknown as typeof nodeFs.renameSync);
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce().catch(() => undefined);
+      spy.mockRestore();
+      expect(fired).toBe(true);
+
+      // The acceptance evidence survives on disk: the accepted task is NOT
+      // removed, and the carrier's original slot is still unmarked.
+      const afterFailure = readTasks();
+      const acceptedTask = afterFailure.find(
+        (t) =>
+          (t['delivery'] as { sessionId?: string } | undefined)?.sessionId ===
+          'verify-mid',
+      );
+      expect(acceptedTask).toBeDefined();
+      expect(acceptedTask!['deliveredAt']).toBeDefined();
+      const carrier = afterFailure.find((t) => t['fanout'] !== undefined);
+      expect(carrier).toBeDefined();
+      expect(
+        (
+          carrier!['fanout'] as Array<{
+            sessionId: string;
+            completed?: boolean;
+          }>
+        ).find((t) => t.sessionId === 'verify-old')!['completed'],
+      ).toBeUndefined();
+
+      // Rebind again WITHOUT a restart: recovery must honor the acceptance
+      // evidence (no reconstruction into verify-new), then complete the
+      // mark from the deliveredAt record and retire the accepted task.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          verifyBindingFor('verify-new', '2026-07-04T00:00:00.000Z'),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      const all = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).map(([id]) => id);
+      expect(all).not.toContain('verify-new');
+      expect(all.filter((id) => id === 'verify-mid')).toHaveLength(1);
+      const healed = readTasks().find((t) => t['fanout'] !== undefined);
+      expect(healed).toBeDefined();
+      expect(
+        (
+          healed!['fanout'] as Array<{
+            sessionId: string;
+            completed?: boolean;
+          }>
+        ).find((t) => t.sessionId === 'verify-old')!['completed'],
+      ).toBe(true);
+    });
+
     it('keeps a ring-retired comment terminal when task removal fails (R2-4 ring branch)', async () => {
       const config = {
         deliverToBoundSessions: true,
