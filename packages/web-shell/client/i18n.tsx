@@ -4467,6 +4467,9 @@ const EN: Messages = {
   'channels.editor.section.credentials': 'Credentials',
   'channels.editor.section.connection': 'Connection',
   'channels.editor.section.routing': 'Notifications and routing',
+  'channels.editor.section.boundSessions': 'PR-bound sessions',
+  'channels.editor.section.boundSessions.description':
+    'Watch events apply to PRs bound to a live session. Enable delivery first, then choose the transitions to watch.',
   'channels.editor.section.session': 'Conversation management',
   'channels.editor.section.access': 'Access control',
   'channels.editor.section.access.description':
@@ -4594,6 +4597,8 @@ const EN: Messages = {
   'channels.editor.field.github.prWatchEvents': 'PR Watch Events',
   'channels.editor.field.github.prWatchEvents.description':
     'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
+  'channels.editor.field.github.prWatchEvents.disabledHint':
+    'Enable "Deliver To PR-Bound Sessions" above to select watch events.',
   'channels.editor.field.github.prWatchEvents.option.ci_failure':
     'ci_failure — CI checks turn red on a head commit',
   'channels.editor.field.github.prWatchEvents.option.merge_conflict':
@@ -4785,6 +4790,8 @@ const EN: Messages = {
     `This channel stores a group entry that is not an object: ${v?.repositories ?? ''}. The daemon refuses every save while it is there, and the form has no row for it. Fix or remove that entry in settings.json, then reload the channel.`,
   'channels.editor.validation.invalidOption':
     "Remove values that aren't in the allowed list.",
+  'channels.editor.validation.requiresBoundDelivery':
+    'Enable "Deliver To PR-Bound Sessions" to save the selected watch events.',
   'channels.editor.validation.number': 'Enter a valid number.',
   'channels.editor.validation.outOfRange': (v) =>
     v?.min !== undefined && v?.max !== undefined
@@ -8965,6 +8972,9 @@ const ZH: Messages = {
   'channels.editor.section.credentials': '应用凭据',
   'channels.editor.section.connection': '连接',
   'channels.editor.section.routing': '通知与路由',
+  'channels.editor.section.boundSessions': 'PR 绑定会话',
+  'channels.editor.section.boundSessions.description':
+    '监视事件作用于已绑定到活跃会话的 PR。先开启投递，再选择要监视的状态转换。',
   'channels.editor.section.session': '会话管理',
   'channels.editor.section.access': '访问控制',
   'channels.editor.section.access.description':
@@ -9089,6 +9099,8 @@ const ZH: Messages = {
   'channels.editor.field.github.prWatchEvents': 'PR 状态监视事件',
   'channels.editor.field.github.prWatchEvents.description':
     '可选。为绑定 PR 监视的状态转换（需开启"投递到 PR 绑定会话"）。留空则禁用。',
+  'channels.editor.field.github.prWatchEvents.disabledHint':
+    '开启上方「投递到 PR 绑定会话」后即可选择监视事件。',
   'channels.editor.field.github.prWatchEvents.option.ci_failure':
     'ci_failure — CI 检查在 head 提交上变红',
   'channels.editor.field.github.prWatchEvents.option.merge_conflict':
@@ -9270,6 +9282,8 @@ const ZH: Messages = {
   'channels.editor.validation.invalidGroupEntry': (v) =>
     `该渠道把以下群组条目存成了非对象：${v?.repositories ?? ''}。只要它还在，daemon 就会拒绝每次保存，而表单里没有对应的行。请在 settings.json 里修正或删除该条目，然后重新加载渠道。`,
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
+  'channels.editor.validation.requiresBoundDelivery':
+    '需开启「投递到 PR 绑定会话」才能保存所选的监视事件。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>
     v?.min !== undefined && v?.max !== undefined

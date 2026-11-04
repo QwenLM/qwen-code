@@ -620,6 +620,81 @@ public class RuntimeHarnessDrainTest {
     }
 
     @ParameterizedTest
+    @CsvSource({"false,false,executor", "false,false,readers", "true,false,executor", "true,true,executor"})
+    @DisabledOnOs(OS.WINDOWS)
+    void localCapacityRefusalPreservesTheOriginalBindingForRetry(boolean durable, boolean savedHandle,
+            String pool, @TempDir Path directory) throws Exception {
+        var store = durable ? new LocalRuntimeStore(directory.toRealPath(),
+                DurableLocalProcessRuntimeProvisionerTest.HOST) : null;
+        var http = new HttpRuntimeTransport();
+        try (var local = new LocalProcessRuntimeProvisioner(java.util.List.of("node",
+                Path.of("src/test/resources/fake-attestation-worker.mjs").toAbsolutePath().toString()),
+                directory, http, ignored -> "storage", store)) {
+            var initial = bindings.findOrCreate(request);
+            if (savedHandle) {
+                var handle = local.ensureResource(request, initial.getProvisionSeed(), null)
+                        .toCompletableFuture().get(5, TimeUnit.SECONDS);
+                var claim = bindings.claimOperation(initial.getBindingId(), "setup", Duration.ofSeconds(10));
+                initial = bindings.compareAndSet(claim, claim.withResourceHandle(handle, Instant.now()));
+                assertNotNull(initial);
+                bindings.releaseOperation(initial.getBindingId(), "setup", initial.getOperationGeneration());
+                initial = bindings.findById(initial.getBindingId());
+            }
+            try (var service = new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(scope),
+                    local, http, bindings, sessions, executions, "capacity", Duration.ofSeconds(10),
+                    Duration.ofSeconds(10))) {
+                RuntimeBindingRecord ready = null;
+                try {
+                    try (var blocked = new LocalProcessExecutorTest.Saturation(
+                            LocalProcessExecutorTest.pool(local, pool), "readers".equals(pool) ? 64 : 16)) {
+                        var error = assertThrows(ExecutionException.class,
+                                () -> service.warm("harness").toCompletableFuture().get(5, TimeUnit.SECONDS));
+                        var refusal = assertInstanceOf(RuntimeBrokerException.class, error.getCause());
+                        assertEquals(503, refusal.getStatusCode());
+                        assertEquals("runtime_local_capacity", refusal.getCode());
+                        assertTrue(refusal.isRetryable());
+                        var retained = bindings.findById(initial.getBindingId());
+                        assertEquals(RuntimeBindingRecord.State.PROVISIONING, retained.getState());
+                        assertEquals(initial.getProvisionSeed(), retained.getProvisionSeed());
+                        assertEquals(initial.getResourceHandle(), retained.getResourceHandle());
+                        assertNull(retained.getOperationOwner());
+                    }
+                    ready = service.warm("harness").toCompletableFuture().get(10, TimeUnit.SECONDS);
+                    assertEquals(RuntimeBindingRecord.State.READY, ready.getState());
+                    assertEquals(initial.getBindingId(), ready.getBindingId());
+                    assertEquals(initial.getProvisionSeed(), ready.getProvisionSeed());
+                } finally {
+                    if (durable && ready != null) {
+                        local.stopDrained(ready.withDrainRequested(true, Instant.now()))
+                                .toCompletableFuture().get(10, TimeUnit.SECONDS);
+                    }
+                }
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void capacityCodeOrRejectionCauseAloneCannotBypassRecoveryBlocking(boolean matchingCode) throws Exception {
+        var initial = bindings.findOrCreate(request);
+        provisioner.resource = CompletableFuture.failedFuture(new RuntimeBrokerException(503,
+                matchingCode ? "runtime_local_capacity" : "runtime_provision_failed", "Worker failure", true,
+                matchingCode ? null : new java.util.concurrent.RejectedExecutionException()));
+        try (var service = new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(scope),
+                provisioner, transport, bindings, sessions, executions, "capacity", Duration.ofSeconds(10),
+                Duration.ofSeconds(10))) {
+            var error = assertThrows(ExecutionException.class,
+                    () -> service.warm("harness").toCompletableFuture().get(5, TimeUnit.SECONDS));
+            var refusal = assertInstanceOf(RuntimeBrokerException.class, error.getCause());
+            assertEquals("runtime_broker_recovery_blocked", refusal.getCode());
+            assertFalse(refusal.isRetryable());
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                    bindings.findById(initial.getBindingId()).getState());
+            assertEquals(0, provisioner.provisions);
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"stop", "reconcile", "release"})
     void stalledDrainReleasesItsClaimAndFencesLateCompletion(String step) throws Exception {
         var binding = ready();
