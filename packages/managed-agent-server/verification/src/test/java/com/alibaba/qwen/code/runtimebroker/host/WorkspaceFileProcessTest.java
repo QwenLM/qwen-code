@@ -7,12 +7,17 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
 
 class WorkspaceFileProcessTest {
     @TempDir
@@ -112,5 +117,92 @@ class WorkspaceFileProcessTest {
                 "-e", "process.stdin.pause(); setTimeout(() => {}, 60000)"), new byte[1024 * 1024], Duration.ofMillis(150)))
                 .isInstanceOf(RuntimeBrokerException.class);
         assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(5));
+    }
+
+    @Test
+    void reusesSuccessfulHelpAcrossReadsAndUploadsButStillRunsEachOperation() throws Exception {
+        Path entry = temp.resolve("cached.mjs");
+        Files.writeString(entry, """
+                import fs from 'node:fs';
+                if (process.argv.includes('--help')) {
+                  fs.appendFileSync(new URL('./probes', import.meta.url), 'p');
+                  console.log(JSON.stringify({protocolVersion:1,capabilities:{workspaceFiles:1,workspaceFileUpload:1}}));
+                } else {
+                  for await (const bytes of process.stdin) {}
+                  fs.appendFileSync(new URL('./operations', import.meta.url), 'o');
+                  console.log(JSON.stringify({protocolVersion:1,ok:true,result:{}}));
+                }
+                """);
+        String node = nodePath();
+        WorkspaceFileProcess.read(node, entry.toString(), Map.of());
+        WorkspaceFileProcess.upload(node, entry.toString(), Map.of());
+        WorkspaceFileProcess.upload(node, entry.toString(), Map.of());
+        assertThat(temp.resolve("probes")).hasContent("p");
+        assertThat(temp.resolve("operations")).hasContent("ooo");
+    }
+
+    @Test
+    void invalidatesReplacedCliAndDoesNotInferUploadSupportFromReadSupport() throws Exception {
+        Path entry = temp.resolve("replace.mjs");
+        Files.writeString(entry, """
+                if (process.argv.includes('--help')) console.log(JSON.stringify({protocolVersion:1,capabilities:{workspaceFiles:1}}));
+                else { for await (const bytes of process.stdin) {} console.log(JSON.stringify({protocolVersion:1,ok:true,result:{}})); }
+                """);
+        String node = nodePath();
+        WorkspaceFileProcess.read(node, entry.toString(), Map.of());
+        assertThatThrownBy(() -> WorkspaceFileProcess.upload(node, entry.toString(), Map.of()))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("workspace_files_unsupported"));
+        FileTime modified = Files.getLastModifiedTime(entry);
+        Path replacement = temp.resolve("replacement.mjs");
+        Files.writeString(replacement, """
+                import fs from 'node:fs';
+                if (process.argv.includes('--help')) console.log('legacy help');
+                else fs.writeFileSync(new URL('./unexpected', import.meta.url), 'executed');
+                """);
+        Files.setLastModifiedTime(replacement, modified);
+        Files.move(replacement, entry, StandardCopyOption.REPLACE_EXISTING);
+        assertThatThrownBy(() -> WorkspaceFileProcess.read(node, entry.toString(), Map.of()))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("workspace_files_unsupported"));
+        assertThat(temp.resolve("unexpected")).doesNotExist();
+    }
+
+    @Test
+    void reprobesChangedNodeAndRelativePathsAndRetriesFailedHandshakes() throws Exception {
+        Path node = Files.writeString(temp.resolve("node"), "node-version-one");
+        Path entry = Files.writeString(temp.resolve("entry"), "entry");
+        var help = new HostCommandRunner.Result(0, JsonCodec.encode(Map.of("protocolVersion", 1,
+                "capabilities", Map.of("workspaceFiles", 1))));
+        var result = new HostCommandRunner.Result(0, JsonCodec.encode(Map.of("protocolVersion", 1, "ok", true, "result", Map.of())));
+        var probes = new java.util.concurrent.atomic.AtomicInteger();
+        try (var runner = mockStatic(HostCommandRunner.class)) {
+            runner.when(() -> HostCommandRunner.run(any(), any(), any())).thenAnswer(call -> {
+                List<String> command = call.getArgument(0);
+                if (!command.contains("--help")) {
+                    return result;
+                }
+                return probes.incrementAndGet() == 1 ? new HostCommandRunner.Result(1, new byte[0]) : help;
+            });
+            assertThatThrownBy(() -> WorkspaceFileProcess.read(node.toString(), entry.toString(), Map.of()))
+                    .isInstanceOf(RuntimeBrokerException.class);
+            WorkspaceFileProcess.read(node.toString(), entry.toString(), Map.of());
+            WorkspaceFileProcess.read(node.toString(), entry.toString(), Map.of());
+            assertThat(probes.get()).isEqualTo(2);
+            Files.writeString(node, "node-version-two-updated");
+            WorkspaceFileProcess.read(node.toString(), entry.toString(), Map.of());
+            assertThat(probes.get()).isEqualTo(3);
+            WorkspaceFileProcess.read("node", entry.toString(), Map.of());
+            WorkspaceFileProcess.read("node", entry.toString(), Map.of());
+            assertThat(probes.get()).isEqualTo(5);
+            runner.verify(() -> HostCommandRunner.run(any(), any(), any()), times(10));
+        }
+    }
+
+    private static String nodePath() {
+        var result = HostCommandRunner.run(List.of(System.getProperty("node.executable", "node"),
+                "-p", "process.execPath"), new byte[]{'\n'}, Duration.ofSeconds(5));
+        assertThat(result.exitCode()).isZero();
+        return new String(result.stdout(), java.nio.charset.StandardCharsets.UTF_8).strip();
     }
 }

@@ -4,6 +4,8 @@
 
 - Status: implemented in this change (witness: `ManagedSessionGuardConvoyIT`);
   the lanes listed under Follow-ups keep unbounded acquisitions
+- Update 2026-11-03: Turn submit admission no longer takes the placement
+  guard; see the [turn admission design](2026-11-03-managed-turn-admission-tenant-guard.md)
 - Issue: [#13800](https://github.com/QwenLM/qwen-code/issues/13800) — a
   `recovery_blocked` Session wedges later turns of other Sessions on the same
   daemon. This change does not implement that issue's W1 or W2; see Scope.

@@ -208,7 +208,10 @@ public final class JdbcRuntimeBindingRepository
             JdbcRepositorySupport.setIdentity(clear, 2, session.getBindingId());
             clear.setLong(3, session.getRuntimeGeneration());
             JdbcRepositorySupport.setIdentity(clear, 4, session.getRuntimeSessionId());
-            clear.executeUpdate();
+            com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore.releaseMembers(connection, key,
+                    clear.executeUpdate(), com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore
+                            .exclusiveMemberKey(session.getBindingId(), session.getRuntimeGeneration(),
+                                    session.getRuntimeSessionId()));
         }
     }
 
@@ -602,6 +605,9 @@ public final class JdbcRuntimeBindingRepository
                     connection -> {
                         lockPlacementDomain(
                                 connection, original.getRequest().getScope().getTenantId());
+                        if (!csi && HarnessOwnership.sharesRuntimeSessions(original.getRequest())) {
+                            requireStorageAdmission(connection, original.getRequest());
+                        }
                         var csiOriginal =
                                 JdbcCsiActivationAdmission.lockForExecution(
                                         connection, original, this);
@@ -850,10 +856,12 @@ public final class JdbcRuntimeBindingRepository
         requirePhysicalStorageAdmission(connection, request);
     }
 
+    // Harness admission, recovery, cleanup and Hook checks below are read-only: they write no
+    // row a concurrent lifecycle transition could observe, so they take no tenant placement
+    // guard. A transition committing after the check's snapshot is ordered after the check.
     @Override
     public void requireHarnessAdmission(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority);
             return null;
         });
@@ -867,7 +875,6 @@ public final class JdbcRuntimeBindingRepository
             return;
         }
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true));
             return null;
         });
@@ -889,7 +896,6 @@ public final class JdbcRuntimeBindingRepository
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
-                    lockPlacementDomain(connection, scope.getTenantId());
                     try (PreparedStatement fence =
                             connection.prepareStatement(
                                     "SELECT operation_id FROM ma_session_head"
@@ -938,7 +944,6 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public void requireHarnessCleanup(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(false, HarnessFence.CLEANUP));
             return null;
         });
@@ -952,7 +957,6 @@ public final class JdbcRuntimeBindingRepository
             return;
         }
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true, HarnessFence.CLEANUP));
             return null;
         });
@@ -961,7 +965,6 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public void requireHookAdmission(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(false, HarnessFence.LEGACY_HOOK));
             return null;
         });
@@ -975,7 +978,6 @@ public final class JdbcRuntimeBindingRepository
             return;
         }
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true, HarnessFence.LEGACY_HOOK));
             return null;
         });

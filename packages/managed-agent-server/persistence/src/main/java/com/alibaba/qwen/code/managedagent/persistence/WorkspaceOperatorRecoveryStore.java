@@ -80,6 +80,8 @@ public final class WorkspaceOperatorRecoveryStore {
                         saved.getRequest().getScope().getTenantId());
                 return null;
             });
+            LocalStorageOwners.key(jdbc, saved.getRequest().getScope().getTenantId(),
+                    saved.getRequest().getStorageId());
             List<Boolean> valid = jdbc.query("SELECT binding_state, record_version,"
                     + " resource_handle_version, provision_request_id, runtime_lease_id,"
                     + " runtime_epoch, storage_id, tenant_id, stop_evidence_json"
