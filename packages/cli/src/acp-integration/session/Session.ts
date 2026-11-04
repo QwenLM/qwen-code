@@ -531,7 +531,11 @@ import {
   unrestorableGoalStatus,
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
-import { runAcpToolBatch, type AcpToolBatchHost } from './acp-tool-batch.js';
+import {
+  acpPlanModeBlockedMessage,
+  runAcpToolBatch,
+  type AcpToolBatchHost,
+} from './acp-tool-batch.js';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
@@ -18084,10 +18088,7 @@ export class Session implements SessionContext {
               )
             ) {
               return earlyErrorResponse(
-                new Error(
-                  `Plan mode is active. The tool "${toolName}" cannot be executed because it modifies the system. ` +
-                    'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
-                ),
+                new Error(acpPlanModeBlockedMessage(toolName)),
                 toolName,
                 {
                   status: 'error',
@@ -18274,10 +18275,7 @@ export class Session implements SessionContext {
                           isEnterPlanModeTool,
                         )
                       ) {
-                        return reject(
-                          `Plan mode is active. The tool "${toolName}" cannot be executed because it modifies the system. ` +
-                            'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
-                        );
+                        return reject(acpPlanModeBlockedMessage(toolName));
                       }
                       // AUTO mode judges the replacement like any input: its
                       // own allow rule, else the classifier. A block denies it;

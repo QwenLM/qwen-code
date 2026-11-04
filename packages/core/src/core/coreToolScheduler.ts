@@ -1606,6 +1606,12 @@ interface CoreToolSchedulerOptions {
    * fails the call as execution-denied.
    */
   refuseToolCall?: (request: ToolCallRequestInfo) => string | undefined;
+  /**
+   * The owner's own message for a call plan mode blocks, so a surface that
+   * moves onto this scheduler keeps the wording its model and client already
+   * see. Omitted, the scheduler's message is used.
+   */
+  planModeBlockedMessage?: (toolName: string) => string;
   /** The terminal sequence a permission prompt's Notification hook returned. */
   onPermissionPromptTerminalSequence?: (terminalSequence: string) => void;
 }
@@ -4403,14 +4409,17 @@ export class CoreToolScheduler {
               const isPlanRequiredTeammate =
                 !shouldUsePlanOnlyReminderInSubagentContext() &&
                 !this.config.getSdkMode();
+              const ownerMessage =
+                this.schedulerOptions.planModeBlockedMessage?.(reqInfo.name);
               const planModeError = new Error(
-                `Tool blocked by plan mode: "${reqInfo.name}" is not a read-only tool. ` +
-                  `Only read-only tools (read_file, grep_search, glob, ` +
-                  `web_fetch, etc.) are allowed in plan mode.` +
-                  ` Do NOT retry this tool. ` +
-                  (isPlanRequiredTeammate
-                    ? `Pivot to read-only alternatives to gather the information you need, then call exit_plan_mode with a plan that covers this tool's purpose.`
-                    : `Pivot to read-only alternatives to gather equivalent information, then present your plan directly to the caller.`),
+                ownerMessage ??
+                  `Tool blocked by plan mode: "${reqInfo.name}" is not a read-only tool. ` +
+                    `Only read-only tools (read_file, grep_search, glob, ` +
+                    `web_fetch, etc.) are allowed in plan mode.` +
+                    ` Do NOT retry this tool. ` +
+                    (isPlanRequiredTeammate
+                      ? `Pivot to read-only alternatives to gather the information you need, then call exit_plan_mode with a plan that covers this tool's purpose.`
+                      : `Pivot to read-only alternatives to gather equivalent information, then present your plan directly to the caller.`),
               );
               this.setStatusInternal(reqInfo.callId, 'error', {
                 ...createErrorResponse(

@@ -9086,6 +9086,7 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       sdkMode?: boolean;
       avoidPermissionPrompts?: boolean;
       permissionManager?: unknown;
+      planModeBlockedMessage?: (toolName: string) => string;
     } = {},
   ) {
     return schedulerWithCallbacks(
@@ -9100,6 +9101,9 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
           .fn()
           .mockReturnValue(options.avoidPermissionPrompts ?? false),
       }),
+      options.planModeBlockedMessage
+        ? { planModeBlockedMessage: options.planModeBlockedMessage }
+        : {},
     );
   }
 
@@ -9218,6 +9222,29 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     expect(responseJson).not.toContain('list_directory');
     // Plan-required teammates get the exit_plan_mode hint after the pivot.
     expect(responseJson).toContain('exit_plan_mode');
+  });
+
+  it("fails a blocked call with the owner's plan-mode message", async () => {
+    const planModeBlockedMessage = vi.fn(
+      (toolName: string) => `Owner blocked "${toolName}".`,
+    );
+    const completedCall = (await completePlanModeCall(
+      askingWriteFileTool(),
+      toolRequest('1', 'write_file', {}, 'prompt-plan-owner-message'),
+      { planModeBlockedMessage },
+    )) as CompletedToolCall;
+
+    expectStatus(completedCall, 'error');
+    expect(planModeBlockedMessage).toHaveBeenCalledWith('write_file');
+    expect(completedCall.response.error?.message).toBe(
+      'Owner blocked "write_file".',
+    );
+    expect(completedCall.response.errorType).toBe(
+      ToolErrorType.EXECUTION_DENIED,
+    );
+    const responseJson = JSON.stringify(completedCall.response.responseParts);
+    expect(responseJson).toContain('Owner blocked');
+    expect(responseJson).not.toContain('Tool blocked by plan mode');
   });
 
   it.each([

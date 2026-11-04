@@ -56,6 +56,17 @@ import type { SessionContext } from './types.js';
 
 const debugLogger = createDebugLogger('ACP_TOOL_BATCH');
 
+/**
+ * What a call plan mode blocks fails with in an ACP session, on ACP's own tool
+ * step and on the shared loop's batch alike.
+ */
+export function acpPlanModeBlockedMessage(toolName: string): string {
+  return (
+    `Plan mode is active. The tool "${toolName}" cannot be executed because it modifies the system. ` +
+    'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.'
+  );
+}
+
 /** A Session Workflow plan an `exit_plan_mode` approval carries. */
 export interface TodoPlanApproval {
   revision: { planId: string; sourceCallId: string };
@@ -535,6 +546,7 @@ export async function runAcpToolBatch(
         },
         onToolResultFullTurnModel: options.onFullTurnModel,
         refuseToolCall: (request) => host.refuseToolCall(request),
+        planModeBlockedMessage: acpPlanModeBlockedMessage,
         onPermissionPromptTerminalSequence: (sequence) =>
           host.sendTerminalSequence(sequence),
       }),

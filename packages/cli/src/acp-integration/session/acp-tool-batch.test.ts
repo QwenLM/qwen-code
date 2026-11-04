@@ -12,7 +12,11 @@ import type {
   ToolBatchOptions,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import type { Part } from '@google/genai';
-import { runAcpToolBatch, type AcpToolBatchHost } from './acp-tool-batch.js';
+import {
+  acpPlanModeBlockedMessage,
+  runAcpToolBatch,
+  type AcpToolBatchHost,
+} from './acp-tool-batch.js';
 
 type SchedulerOptions = {
   onToolCallsUpdate: (calls: unknown[]) => void;
@@ -23,6 +27,7 @@ type SchedulerOptions = {
     status: string,
     durationMs: number,
   ) => void;
+  planModeBlockedMessage?: (toolName: string) => string;
 };
 
 const batch = vi.hoisted(() => ({
@@ -352,6 +357,25 @@ describe('runAcpToolBatch', () => {
       'write_file',
       new Error('Denied.'),
     ]);
+  });
+
+  it("fails a call plan mode blocks with ACP's own message", async () => {
+    batch.run = async () => ({ parts: [] });
+
+    await runAcpToolBatch(host, {
+      requests: [write],
+      signal: new AbortController().signal,
+      duplicates: { handled: new Map(), responded: new Set() },
+    });
+
+    // The model and the client see the wording ACP's own tool step gives.
+    expect(batch.options.planModeBlockedMessage).toBe(
+      acpPlanModeBlockedMessage,
+    );
+    expect(acpPlanModeBlockedMessage('write_file')).toBe(
+      'Plan mode is active. The tool "write_file" cannot be executed because it modifies the system. ' +
+        'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
+    );
   });
 
   it('reports a replayed call as failed', async () => {
