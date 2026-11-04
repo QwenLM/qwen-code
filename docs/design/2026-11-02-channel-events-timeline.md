@@ -251,9 +251,9 @@ must not be the answer when the journal could not be read.
   the poll loop awaits `pollOnce`, so no poll runs while a turn is in progress;
   the reachable cases are a task that failed and is still retryable, a thread
   GitHub failed to read with a 5xx (held for at most 30 polls), and a rate
-  limit or credential failure; while a window is held, a thread already read
-  whose notification has not changed is not read again. A real run with a 2 s
-  poll and a turn that kept failing re-journaled one batch of 300 filtered
+  limit or credential failure. A held window is read again in full on every
+  poll, except threads that failed permanently or were stale. A real run with
+  a 2 s poll and a turn that kept failing re-journaled one batch of 300 filtered
   notifications until the journal rotated, pushing the accepted/posted rows out
   of the page's window. The adapter therefore journals at most 20
   `reason_filter` rows per poll and collapses the remainder into one

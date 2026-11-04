@@ -1275,14 +1275,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    */
   private windowJournalKeys = new Set<string>();
   /**
-   * Threads of the current window already read without error, by their
-   * notification's `updated_at`. A held window is listed again on every
-   * poll, but a thread whose notification has not changed since it was read
-   * has nothing new (new activity moves `updated_at`), so it is not read again
-   * until the window commits. A hold then re-reads only the threads that
-   * failed, and a poll a rate limit stopped resumes where it stopped.
+   * Threads of the current window that failed with a permanent answer or
+   * were stale, by their notification's `updated_at`: they read the same on
+   * the next poll, so a held window does not read them again until it
+   * commits or the notification changes. A thread read without error is read
+   * again on every held poll, as before: GitHub's one-second timestamps and
+   * late notifications mean an unchanged `updated_at` does not prove the
+   * thread has nothing new, and a first-contact body waits for that re-read.
    */
-  private windowReadThreads = new Map<string, string>();
+  private windowSettledThreads = new Map<string, string>();
 
   constructor(
     name: string,
@@ -2272,7 +2273,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       };
 
       const failureKey = `${chatId}|${threadId}`;
-      if (this.windowReadThreads.get(failureKey) === notification.updated_at) {
+      if (
+        this.windowSettledThreads.get(failureKey) === notification.updated_at
+      ) {
         continue;
       }
       // A notification at or before the cursor was already handled in a
@@ -2303,11 +2306,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             break;
           default:
             await this.processCommentLane(ctx, false);
-        }
-        // A failing task store or audit holds the window and must see the
-        // thread again.
-        if (!this.inboundPersistenceBlocked && !this.publicationAuditBlocked) {
-          this.rememberWindowRead(failureKey, notification.updated_at);
         }
       } catch (err) {
         const failure = classifyThreadFailure(err);
@@ -2350,7 +2348,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // A permanent answer or a stale notification reads the same on the
         // next poll: the held window need not read it again.
         if (!held && (failure === 'permanent' || stale)) {
-          this.rememberWindowRead(failureKey, notification.updated_at);
+          this.rememberSettledThread(failureKey, notification.updated_at);
         }
         const milestone = (n: number) => n === 1 || n % 10 === 0;
         const report =
@@ -2439,7 +2437,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.sharedHoldPolls = 0;
         this.transientNotificationFailures.clear();
         this.windowJournalKeys.clear();
-        this.windowReadThreads.clear();
+        this.windowSettledThreads.clear();
       }
     } finally {
       // Bound the comment-time map EVERY poll, independent of dispatch: fetch
@@ -2465,12 +2463,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * same thread or comment every poll journals the repeat once.
    */
   /** Past the bound a thread is simply read again on the next poll. */
-  private rememberWindowRead(threadKey: string, updatedAt: string): void {
+  private rememberSettledThread(threadKey: string, updatedAt: string): void {
     if (
-      this.windowReadThreads.has(threadKey) ||
-      this.windowReadThreads.size < MAX_WINDOW_KEYS
+      this.windowSettledThreads.has(threadKey) ||
+      this.windowSettledThreads.size < MAX_WINDOW_KEYS
     ) {
-      this.windowReadThreads.set(threadKey, updatedAt);
+      this.windowSettledThreads.set(threadKey, updatedAt);
     }
   }
 
