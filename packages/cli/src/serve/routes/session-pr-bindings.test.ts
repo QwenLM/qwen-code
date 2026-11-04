@@ -649,11 +649,8 @@ describe('GET /sessions/pr-bindings', () => {
     expect(body.bindings[0]?.updatedAt).toBe('2026-11-02T12:00:00.000Z');
   });
 
-  it('falls back to a parseable live createdAt when updatedAt is unparseable', async () => {
+  it('falls back to a parseable live createdAt when updatedAt is unparseable and nothing is persisted', async () => {
     const cwd = await makeWorkspace();
-    await seedTranscript(cwd, SESSION_A, {
-      mtime: new Date('2026-11-02T12:00:00.000Z'),
-    });
     await seedBinding(cwd, SESSION_A, [101]);
     liveSessions.set(cwd, [
       liveSummary(cwd, SESSION_A, {
@@ -665,6 +662,23 @@ describe('GET /sessions/pr-bindings', () => {
     const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
 
     expect(body.bindings[0]?.updatedAt).toBe('2026-11-03T12:00:00.000Z');
+  });
+
+  it('does not count a restore as activity for a persisted session', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, {
+      mtime: new Date('2026-11-01T12:00:00.000Z'),
+    });
+    await seedBinding(cwd, SESSION_A, [101]);
+    // The bridge stamps a fresh createdAt when it restores a session and
+    // leaves updatedAt absent until a turn completes.
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, { createdAt: '2026-11-03T12:00:00.000Z' }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.bindings[0]?.updatedAt).toBe('2026-11-01T12:00:00.000Z');
   });
 
   it('excludes machine-owned hidden-catalog sessions', async () => {
@@ -988,20 +1002,29 @@ describe('GET /sessions/pr-bindings', () => {
     expect(body).toEqual({ bindings: [], partial: false });
   });
 
-  it('keeps same-numbered PRs from different repositories apart when merging', async () => {
+  it('does not resurrect a PR replaced by a same-number rebind', async () => {
     const cwd = await makeWorkspace();
     await seedTranscript(cwd, SESSION_A);
-    await seedBinding(cwd, SESSION_A, [5]);
+    // The production writer replaces #5 when it is re-bound to another
+    // repository; the bridge still holds the replaced entry.
+    const prPath = await seedBinding(cwd, SESSION_A, [5]);
+    await upsertSessionPr(prPath, {
+      number: 5,
+      url: 'https://github.com/acme/gadgets/pull/5',
+      state: 'open',
+    });
     liveSessions.set(cwd, [
       liveSummary(cwd, SESSION_A, {
-        prs: [{ number: 5, url: 'https://github.com/acme/gadgets/pull/5' }],
+        prs: [
+          { number: 5, url: 'https://github.com/acme/widgets/pull/5' },
+          { number: 5, url: 'https://github.com/acme/gadgets/pull/5' },
+        ],
       }),
     ]);
 
     const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
 
     expect(body.bindings[0]?.prs.map((pr) => pr.url)).toEqual([
-      'https://github.com/acme/widgets/pull/5',
       'https://github.com/acme/gadgets/pull/5',
     ]);
   });

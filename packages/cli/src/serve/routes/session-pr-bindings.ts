@@ -9,7 +9,6 @@ import { dirname, join } from 'node:path';
 import type { Application } from 'express';
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import {
-  canonicalSessionPrUrl,
   readSessionPrsDetailed,
   SESSION_PR_LIST_LIMIT,
 } from '@qwen-code/qwen-code-core/services/session-pr-service.js';
@@ -133,12 +132,18 @@ async function resolveAttribution(
       return { kind: 'archived' };
     }
   }
-  // The shared recency rule: an unparseable live value never displaces the
-  // persisted one (an unparseable updatedAt falls through to createdAt), and
-  // the comparison is chronological, not lexicographic.
-  const updatedAt = laterActivityTimestamp(
+  // The shared recency rule: the later valid value wins, an unparseable live
+  // value never displaces the persisted one, and the comparison is
+  // chronological, not lexicographic. The live createdAt stands in for
+  // activity only when there is no persisted record (a binding before the
+  // first transcript flush): the bridge stamps a fresh createdAt on restore
+  // too, so for a persisted session it would turn a mere restore into
+  // activity and hand the PR's events to an idle follower.
+  const liveActivity =
     validTimestamp(liveSummary?.updatedAt) ??
-      validTimestamp(liveSummary?.createdAt),
+    (item === undefined ? validTimestamp(liveSummary?.createdAt) : undefined);
+  const updatedAt = laterActivityTimestamp(
+    liveActivity,
     item ? new Date(item.mtime).toISOString() : undefined,
   );
   return {
@@ -277,13 +282,14 @@ async function scanWorkspaceBindings(
       if (row.prs.length === 0 || row.prs.length >= SESSION_PR_LIST_LIMIT) {
         continue;
       }
-      // Keyed by number AND repository: a sidecar can hold same-numbered
-      // PRs from different repositories.
-      const prKey = (pr: { number: number; url: string }) =>
-        `${pr.number}|${canonicalSessionPrUrl(pr.url)}`;
-      const known = new Set(row.prs.map(prKey));
+      // Keyed by PR number alone, like the session list's merge: the sidecar
+      // writers replace an entry by number when it is re-bound to another
+      // repository, so a bridge-held entry whose number the sidecar already
+      // carries is either the same PR or the one that rebind replaced (the
+      // bridge keeps the stale entry) — never a second binding to append.
+      const known = new Set(row.prs.map((pr) => pr.number));
       row.prs.push(
-        ...projectPrs(summary.prs.filter((pr) => !known.has(prKey(pr)))),
+        ...projectPrs(summary.prs.filter((pr) => !known.has(pr.number))),
       );
       row.prs = row.prs.slice(-SESSION_PR_LIST_LIMIT);
       continue;
