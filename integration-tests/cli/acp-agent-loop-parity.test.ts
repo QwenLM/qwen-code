@@ -1009,6 +1009,71 @@ const allowOnce = () => ({
       expect(Date.now() - started).toBeLessThan(30_000);
     }, 120_000);
 
+    it("blocks a write in plan mode with the scheduler's notice, as other surfaces do", async () => {
+      const written: boolean[] = [];
+      const { current, shared } = await both({
+        name: 'a write in plan mode',
+        prompts: ['Write the file.'],
+        settings: { tools: { approvalMode: 'plan' } },
+        reply: (messages, dir) => {
+          if (toolResults(messages) === 0)
+            return {
+              toolCalls: [write(join(dir, 'out.txt'), 'no\n', 'call_no')],
+            };
+          // The batch has settled by the time its results are sent back.
+          written.push(existsSync(join(dir, 'out.txt')));
+          return { content: 'Understood.' };
+        },
+      });
+      // The notice is the text of the blocked call's failed update.
+      const notice = (run: Run) => {
+        const failed = run.updates.filter(
+          (update) =>
+            (update as JsonObject)['toolCallId'] === 'call_no' &&
+            (update as JsonObject)['status'] === 'failed',
+        ) as JsonObject[];
+        expect(failed).toHaveLength(1);
+        const content = failed[0]['content'] as JsonObject[];
+        expect(content).toHaveLength(1);
+        return (content[0]['content'] as JsonObject)['text'] as string;
+      };
+      /** Puts a placeholder wherever a string value is the notice. */
+      const withoutNotice = (value: unknown, text: string): unknown =>
+        JSON.parse(JSON.stringify(value), (_key, child: unknown) =>
+          child === text ? '<PLAN MODE NOTICE>' : child,
+        );
+      const currentNotice = notice(current);
+      const sharedNotice = notice(shared);
+
+      expect(currentNotice).toMatch(
+        /^Plan mode is active\. The tool "write_file" cannot be executed because it modifies the system\. .*exit_plan_mode/,
+      );
+      expect(sharedNotice).toMatch(
+        /^Tool blocked by plan mode: "write_file" is not a read-only tool\. .*call exit_plan_mode/,
+      );
+      expect(shared.stopReasons).toEqual(current.stopReasons);
+      // Both loops block the write before it runs and ask nothing; only the
+      // notice the model and the client see differs.
+      expect(current.permissions).toEqual([]);
+      expect(shared.permissions).toEqual([]);
+      expect(current.requests).toHaveLength(2);
+      expect(withoutNotice(shared.requests, sharedNotice)).toEqual(
+        withoutNotice(current.requests, currentNotice),
+      );
+      expect(withoutNotice(shared.updates, sharedNotice)).toEqual(
+        withoutNotice(current.updates, currentNotice),
+      );
+      // The model gets the notice as the call's result on each loop.
+      expect(JSON.stringify(current.requests[1])).toContain(
+        JSON.stringify(currentNotice),
+      );
+      expect(JSON.stringify(shared.requests[1])).toContain(
+        JSON.stringify(sharedNotice),
+      );
+      // One reading per run, current first, and neither wrote the file.
+      expect(written).toEqual([false, false]);
+    }, 120_000);
+
     it('sends the date reminder with a prompt, as other surfaces do', async () => {
       const { current, shared } = await both({
         name: 'date reminder',
