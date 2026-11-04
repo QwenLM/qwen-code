@@ -122,6 +122,7 @@ interface SkillsDiscoveryState {
   startedAt: number;
   sequence: number;
   publishedSequence: number;
+  activeScans: number;
   dirty: boolean;
   directories: Set<string>;
   debounce?: NodeJS.Timeout;
@@ -146,6 +147,7 @@ export function createWorkspaceSkillsStatusProvider(
     { watcher: FSWatcher; workspaces: Set<string> }
   >();
   const closing = new Set<Promise<void>>();
+  const watcherRetryAfter = new Map<string, number>();
   let disposed = false;
 
   function closeWatcher(directory: string): void {
@@ -202,6 +204,7 @@ export function createWorkspaceSkillsStatusProvider(
         existing.workspaces.add(workspaceCwd);
         continue;
       }
+      if (Date.now() < (watcherRetryAfter.get(directory) ?? 0)) continue;
       try {
         const workspaces = new Set([workspaceCwd]);
         const watcher = watch(directory, {
@@ -210,6 +213,7 @@ export function createWorkspaceSkillsStatusProvider(
           depth: WATCHER_MAX_DEPTH,
         });
         watchers.set(directory, { watcher, workspaces });
+        watcherRetryAfter.delete(directory);
         watcher.on('all', () => {
           for (const cwd of workspaces) {
             const current = discovery.get(cwd);
@@ -217,6 +221,8 @@ export function createWorkspaceSkillsStatusProvider(
           }
         });
         watcher.on('error', (error: unknown) => {
+          if (watchers.get(directory)?.watcher !== watcher) return;
+          watcherRetryAfter.set(directory, Date.now() + 30_000);
           writeStderrLine(
             `qwen serve: Skills watcher failed: ${String(error)}`,
           );
@@ -224,23 +230,30 @@ export function createWorkspaceSkillsStatusProvider(
             closeWatcher(directory);
         });
       } catch (error) {
+        watcherRetryAfter.set(directory, Date.now() + 30_000);
         writeStderrLine(`qwen serve: Skills watcher failed: ${String(error)}`);
       }
     }
   }
 
   function refresh(workspaceCwd: string, state: SkillsDiscoveryState): void {
-    if (disposed || discovery.get(workspaceCwd) !== state || state.pending)
+    if (
+      disposed ||
+      discovery.get(workspaceCwd) !== state ||
+      state.pending ||
+      state.activeScans >= 2
+    )
       return;
+    state.activeScans++;
     state.dirty = false;
     state.startedAt = Date.now();
     const sequence = ++state.sequence;
     const freshManagers = new Map<string, WorkspaceSkillManagers>();
     const release = () => {
       clearTimeout(pending.timeout);
-      if (state.pending !== pending) return;
-      state.pending = undefined;
-      if (state.dirty) scheduleChange(workspaceCwd, state);
+      if (state.pending === pending) state.pending = undefined;
+      if (!state.pending && state.dirty && state.activeScans < 2)
+        scheduleChange(workspaceCwd, state);
     };
     const pending = {
       timeout: setTimeout(release, WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS),
@@ -259,7 +272,7 @@ export function createWorkspaceSkillsStatusProvider(
           !status.initialized ||
           status.errors?.length ||
           !candidate ||
-          candidate.skillManager.hasDiscoveryErrors()
+          candidate.skillManager.hasDiscoveryReadErrors()
         )
           return;
         // A timeout releases the slot, not publication rights. A valid slow
@@ -280,7 +293,10 @@ export function createWorkspaceSkillsStatusProvider(
           `qwen serve: Skills revalidation failed: ${String(error)}`,
         );
       })
-      .finally(release);
+      .finally(() => {
+        state.activeScans--;
+        release();
+      });
   }
 
   const provider = ((workspaceCwd: string) => {
@@ -303,6 +319,7 @@ export function createWorkspaceSkillsStatusProvider(
         startedAt: Date.now(),
         sequence: 0,
         publishedSequence: 0,
+        activeScans: 0,
         dirty: false,
         directories: new Set(),
       };
@@ -364,6 +381,7 @@ export function createWorkspaceSkillsStatusProvider(
       provider.invalidate?.(cwd);
     }
     await Promise.all(closing);
+    watcherRetryAfter.clear();
   };
   provider.snapshot = async (workspaceCwd) => {
     if (options.workspaceTrusted === false)
@@ -511,12 +529,14 @@ async function buildWorkspaceSkillsStatus(
         getDisabledSkillLevels: () => disabledLevels,
       };
       const skillManager = new SkillManager(shim as Config);
+      const watchDirectories: string[] = [];
       if (!safeMode) {
         for (const level of ['project', 'user'] as const) {
           if (disabledLevels.has(level)) continue;
           for (const directory of skillManager.getSkillsBaseDirs(level)) {
             try {
               await fs.readdir(directory);
+              if (workspaceTrusted) watchDirectories.push(directory);
             } catch (error) {
               if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
                 throw error;
@@ -529,12 +549,7 @@ async function buildWorkspaceSkillsStatus(
         skillManager,
         extensionManager,
         extensionSkillStates,
-        watchDirectories:
-          workspaceTrusted && !safeMode
-            ? (['project', 'user'] as const)
-                .filter((level) => !disabledLevels.has(level))
-                .flatMap((level) => skillManager.getSkillsBaseDirs(level))
-            : [],
+        watchDirectories,
       };
       if (!canInstall || canInstall()) managers.set(workspaceCwd, cached);
     }

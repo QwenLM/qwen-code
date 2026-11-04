@@ -1109,6 +1109,10 @@ export function createServeApp(
     autoDiscover: true,
   });
   const getSkillsConfigStatus = (workspaceCwd: string, trusted: boolean) => {
+    const obsolete = trusted
+      ? untrustedSkillsConfigStatus
+      : trustedSkillsConfigStatus;
+    obsolete.invalidate?.(workspaceCwd);
     const provider = trusted
       ? trustedSkillsConfigStatus
       : untrustedSkillsConfigStatus;
@@ -1118,6 +1122,7 @@ export function createServeApp(
     trustedSkillsConfigStatus.invalidate?.(workspaceCwd);
     untrustedSkillsConfigStatus.invalidate?.(workspaceCwd);
   };
+  app.locals['invalidateSkillsConfigStatus'] = invalidateSkillsConfigStatus;
   const webTerminalRegistry = new WebTerminalRegistry();
   const webTerminalLocals = app.locals as {
     stopWebTerminalRegistry?: () => void;
@@ -4347,11 +4352,9 @@ export function createServeApp(
       untrustedSkillsConfigStatus.dispose?.(),
     ]);
   };
-  if (deps.serveAppLifecycle) {
-    serveAppLifecycle.setAppDrain(disposeSkillsConfigStatus);
-  } else
+  serveAppLifecycle.addAppDrain(disposeSkillsConfigStatus);
+  if (!deps.serveAppLifecycle)
     serveAppLifecycle.setAppDrain(async () => {
-      await disposeSkillsConfigStatus();
       if (appDrainComplete) return;
       const pendingDrains = [
         stopHostedCsiSessions?.() ?? Promise.resolve(),

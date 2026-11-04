@@ -26,8 +26,11 @@ does not await background filesystem work.
 Trusted, non-safe catalogs subscribe to project/user directories using chokidar
 and the runtime's `watcherIgnored` and `WATCHER_MAX_DEPTH` policy. Subscriptions
 are shared by directory within the provider, including user directories shared
-by multiple workspaces. Events debounce for 150 ms and start background discovery
-without a GET. An event during a scan queues one further observation.
+by multiple workspaces. Only existing directories are subscribed; a later read or
+publication arms newly created roots. Failed watchers retry after 30 seconds,
+while read reconciliation remains available. Events debounce for 150 ms and start
+background discovery without a GET. An event during a scan queues one further
+observation.
 
 Reads also request background reconciliation at most once per second, measured
 from task start. This discovers directories created after startup, covers missed
@@ -37,13 +40,20 @@ a start throttle, not a guaranteed visibility deadline. An idle catalog whose
 change was not watched converges after another read and a successful scan.
 
 Each background observation builds into a fresh temporary manager map. A complete
-successful result atomically replaces the retained manager. Rejected or partial
-discovery, including `hasDiscoveryErrors()`, preserves the previous inventory.
+successful result atomically replaces the retained manager. Failed reads or
+incomplete source enumeration preserve the previous inventory. Invalid
+project/user manifests are omitted without vetoing unrelated valid changes. Extension discovery errors
+remain conservative because the extension loader does not classify their cause.
+Core exposes a separate read-failure signal for this distinction; its existing completeness signal and
+the snapshot export's strict rejection of incomplete catalogs stay unchanged.
 Every warm GET still rereads settings; enable/disable changes do not wait for a
 discovery window. The initial discovery retains its existing response semantics.
 
 Background work releases its shared slot after five seconds so a slow filesystem
-does not permanently prevent retries. This does not cancel underlying I/O. A late
+does not permanently prevent retries. At most two background scans per workspace
+generation may remain unsettled: the original scan and one timeout retry. Once
+both are occupied, further retries wait for a scan to settle. This does not cancel
+underlying I/O. A late
 successful observation may publish if its workspace generation is still current
 and no newer successful observation has published. Start sequence, not completion
 time or wall clock, orders publication. Completion only clears its own slot.
@@ -54,7 +64,11 @@ Cold reads wait for actual discovery and do not use this timeout.
 Safe catalogs remain bundled-only. Effective safe-mode changes discard the
 previous manager and subscriptions before answering another read. Inert untrusted
 catalogs may read manifests under the existing policy, but never load workspace
-settings/extensions or create persistent watchers. No watcher creates directories.
+settings/extensions or create persistent watchers. Trust replacement invalidates
+both providers before runtime draining, even without another configuration read.
+Dispatch under a different trust policy invalidates that workspace in the
+opposite provider before reading.
+No watcher creates directories.
 
 Explicit invalidation advances the existing epoch, drops the manager and active
 read/refresh slots, cancels debounce timers, and removes that workspace's watcher
@@ -63,17 +77,20 @@ install managers or watchers afterward. Other workspaces keep their subscription
 
 Provider disposal seals all new work before invalidating every workspace,
 including cold in-flight reads, and closes the owned watchers. The server
-registers this cleanup with both supplied and locally owned lifecycles without
-changing ownership of unrelated daemon resources. The throwaway `snapshot()`
+adds this cleanup independently of the owner's replaceable app drain with both
+supplied and locally owned lifecycles, preserving ownership of unrelated daemon
+resources. The throwaway `snapshot()`
 path performs fresh discovery and never starts watchers or background tasks.
 
 ## Tradeoffs and attribution
 
 This replaces #15703 and builds on 2SinceJuly's watcher-based direction, failure
-cases, and regression scenarios. It keeps core `SkillManager` unchanged. Fresh
-background builds scan all enabled levels, including bundled and extension
+cases, and regression scenarios. Core discovery and its existing completeness
+consumers remain unchanged; only an additive read-failure signal is introduced.
+Its only consumer is the configuration provider's background publication gate.
+Fresh background builds scan all enabled levels, including bundled and extension
 metadata, rather than introducing partial-cache publication into core. This is
-more work per refresh, bounded by the shared slot and start throttle; warm reads
+more work per refresh, bounded by the unsettled-scan cap and start throttle; warm reads
 remain cache-backed. A hung OS operation is not forcibly cancellable and can
 outlive its timeout, but cannot overwrite newer successful observations.
 

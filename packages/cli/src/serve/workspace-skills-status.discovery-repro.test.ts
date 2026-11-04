@@ -10,6 +10,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import { watch } from 'chokidar';
 import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
 import {
   createWorkspaceRegistry,
@@ -21,7 +22,55 @@ import {
 } from './routes/workspace-skills.js';
 import { sendBridgeError } from './server/error-response.js';
 
+vi.mock('chokidar', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('chokidar')>();
+  return { ...actual, watch: vi.fn(actual.watch) };
+});
+
 afterEach(() => vi.unstubAllEnvs());
+
+it('arms a real watcher after initially missing parent directories are created', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-missing-roots-'));
+  const workspace = path.join(root, 'workspace');
+  const home = path.join(root, 'home');
+  await fs.mkdir(workspace);
+  await fs.mkdir(home);
+  vi.stubEnv('QWEN_HOME', home);
+  const provider = createWorkspaceSkillsStatusProvider({ autoDiscover: true });
+  const directory = path.join(workspace, '.qwen', 'skills');
+  const subscriptions = () =>
+    vi
+      .mocked(watch)
+      .mock.results.flatMap((result, index) =>
+        vi.mocked(watch).mock.calls[index]?.[0] === directory &&
+        result.type === 'return'
+          ? [result.value]
+          : [],
+      );
+  try {
+    await provider(workspace);
+    expect(subscriptions()).toHaveLength(0);
+    await fs.mkdir(directory, { recursive: true });
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    await provider(workspace);
+    await vi.waitFor(() => expect(subscriptions()).toHaveLength(1));
+    const watcher = subscriptions()[0]!;
+    await vi.waitFor(() => expect(watcher.getWatched()[directory]).toEqual([]));
+    const event = new Promise<void>((resolve) =>
+      watcher.once('all', () => resolve()),
+    );
+    const skill = path.join(directory, 'external');
+    await fs.mkdir(skill);
+    await fs.writeFile(
+      path.join(skill, 'SKILL.md'),
+      '---\nname: external\ndescription: external\n---\nInstructions\n',
+    );
+    await event;
+  } finally {
+    await provider.dispose?.();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}, 10000);
 
 it('discovers externally created Skills through both config routes without a child', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-15645-routes-'));

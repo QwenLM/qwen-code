@@ -50,6 +50,7 @@ describe('configuration catalog automatic discovery', () => {
     home = path.join(root, 'home');
     await fs.mkdir(workspace);
     await fs.mkdir(home);
+    await fs.mkdir(path.join(home, 'skills'));
     vi.stubEnv('QWEN_HOME', home);
     vi.stubEnv('QWEN_CODE_SAFE_MODE', '0');
     now = 1_000_000;
@@ -126,23 +127,35 @@ describe('configuration catalog automatic discovery', () => {
         'second',
       ),
     );
-    expect(now).toBe(1_000_000);
+    await provider(workspace);
+    expect(scans).toBe(2);
   });
 
   it('reconciles missing directories over successive windows and applies settings on warm reads', async () => {
     const provider = create();
+    const original = SkillManager.prototype.listSkills;
+    let scans = 0;
+    vi.spyOn(SkillManager.prototype, 'listSkills').mockImplementation(function (
+      this: SkillManager,
+      options,
+    ) {
+      if (this.getCachedSkills() === null) scans++;
+      return original.call(this, options);
+    });
     await provider(workspace);
     const directory = await writeSkill('external', 'first');
     now += 999;
     expect((await provider(workspace)).skills.map((s) => s.name)).not.toContain(
       'external',
     );
+    expect(scans).toBe(1);
     now += 1;
     await vi.waitFor(async () =>
       expect((await provider(workspace)).skills.map((s) => s.name)).toContain(
         'external',
       ),
     );
+    expect(scans).toBe(2);
     await fs.writeFile(
       path.join(workspace, '.qwen', 'settings.json'),
       JSON.stringify({ skills: { disabled: ['external'] } }),
@@ -214,7 +227,9 @@ describe('configuration catalog automatic discovery', () => {
       ),
     );
     expect(watch).not.toHaveBeenCalled();
-    await expect(fs.stat(path.join(home, 'skills'))).rejects.toMatchObject({
+    await expect(
+      fs.stat(path.join(workspace, '.agents')),
+    ).rejects.toMatchObject({
       code: 'ENOENT',
     });
     vi.stubEnv('QWEN_CODE_SAFE_MODE', '1');
@@ -419,7 +434,7 @@ describe('configuration catalog automatic discovery', () => {
     await fs.rm(directory, { recursive: true });
     await writeSkill('replacement');
     const failedDiscovery = vi
-      .spyOn(SkillManager.prototype, 'hasDiscoveryErrors')
+      .spyOn(SkillManager.prototype, 'hasDiscoveryReadErrors')
       .mockReturnValue(true);
     now += 1000;
     await provider(workspace);
@@ -443,6 +458,13 @@ describe('configuration catalog automatic discovery', () => {
     const watcher = watchers.get(path.join(workspace, '.qwen', 'skills'))!;
     watcher.emit('error', new Error('watch unavailable'));
     expect(watcher.close).toHaveBeenCalledOnce();
+    for (let read = 0; read < 3; read++) await provider(workspace);
+    const projectWatches = () =>
+      watch.mock.calls.filter(
+        ([dir]) => dir === path.join(workspace, '.qwen', 'skills'),
+      ).length;
+    expect(projectWatches()).toBe(1);
+    expect(stderr).toHaveBeenCalledTimes(1);
     await writeSkill('recovered');
     now += 1000;
     await vi.waitFor(async () =>
@@ -450,5 +472,9 @@ describe('configuration catalog automatic discovery', () => {
         'recovered',
       ),
     );
+    expect(projectWatches()).toBe(1);
+    now += 30_000;
+    await provider(workspace);
+    expect(projectWatches()).toBe(2);
   });
 });

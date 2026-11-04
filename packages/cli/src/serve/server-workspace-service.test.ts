@@ -53,6 +53,33 @@ function makeBridge() {
 }
 
 describe('createServeApp workspace service wiring', () => {
+  it.each(['before', 'after'] as const)(
+    'preserves an injected lifecycle drain registered %s app creation',
+    async (order) => {
+      mockCreateSkillsProvider.mockClear();
+      const lifecycle = new ServeAppLifecycleController();
+      const drain = vi.fn(async () => {});
+      if (order === 'before') lifecycle.setAppDrain(drain);
+      const app = createServeApp(baseOpts, undefined, {
+        boundWorkspace: '/workspace',
+        bridge: makeBridge(),
+        serveAppLifecycle: lifecycle,
+      } as never);
+      if (order === 'after') lifecycle.setAppDrain(drain);
+      await getServeAppLifecycle(app).close();
+      expect(drain).toHaveBeenCalledOnce();
+      for (const [
+        index,
+        [options],
+      ] of mockCreateSkillsProvider.mock.calls.entries()) {
+        if (options.autoDiscover)
+          expect(
+            mockCreateSkillsProvider.mock.results[index]!.value.dispose,
+          ).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
   it.each([false, true])(
     'disposes both automatic catalogs with an externally supplied lifecycle: %s',
     async (supplied) => {
