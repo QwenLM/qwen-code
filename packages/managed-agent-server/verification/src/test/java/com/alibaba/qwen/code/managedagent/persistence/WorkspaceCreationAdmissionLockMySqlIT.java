@@ -1,11 +1,13 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 
 import javax.sql.DataSource;
 
@@ -35,14 +37,14 @@ class WorkspaceCreationAdmissionLockMySqlIT extends WorkspaceCreationAdmissionLo
 
     @Test
     @Timeout(30)
-    void defaultResolutionAllowsUpdatingAnUnselectedWorkspace() throws Exception {
+    void explicitResolutionAllowsUpdatingAnUnselectedWorkspace() throws Exception {
         var resolved = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         var observer = new JdbcTemplate(source);
         try (var pool = Executors.newFixedThreadPool(2)) {
             var admission = pool.submit(() -> transactions.execute(status -> {
                 WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant");
-                var selected = registry.resolveForCreation("tenant", "actor", null);
+                var selected = registry.resolveForCreation("tenant", "actor", new WorkspaceSelection("chosen", "."));
                 assertThat(selected.binding().getWorkspaceId()).isEqualTo("chosen");
                 resolved.countDown();
                 try {
@@ -66,9 +68,35 @@ class WorkspaceCreationAdmissionLockMySqlIT extends WorkspaceCreationAdmissionLo
                 release.countDown();
                 assertThat(update.get(5, TimeUnit.SECONDS)).isEqualTo(1);
                 admission.get(5, TimeUnit.SECONDS);
-                assertThat(blocked).as("default admission locks only its selected Workspace").isFalse();
+                assertThat(blocked).as("explicit admission locks only its selected Workspace").isFalse();
             } finally {
                 release.countDown();
+            }
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    void defaultSwitchAfterMetadataUpdateDoesNotDeadlockAdmission() throws Exception {
+        var observer = new JdbcTemplate(source);
+        try (var connection = source.getConnection(); var pool = Executors.newSingleThreadExecutor()) {
+            connection.setAutoCommit(false);
+            var administrator = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
+            assertThat(administrator.update("UPDATE ma_workspace SET display_name = 'changed'"
+                    + " WHERE tenant_id = 'tenant' AND workspace_id = 'chosen'")).isEqualTo(1);
+            var admission = pool.submit(() -> transactions.execute(status -> registry.resolveForCreation("tenant", "actor", null)));
+            try {
+                await().atMost(Duration.ofSeconds(5)).until(() -> admission.isDone() || workspaceWaits(observer) > 0);
+                assertThat(admission.isDone()).as("admission waits for the administrator's Workspace row lock").isFalse();
+                assertThat(workspaceWaits(observer)).isPositive();
+                assertThat(administrator.update("UPDATE ma_workspace SET is_default = FALSE"
+                        + " WHERE tenant_id = 'tenant' AND workspace_id = 'chosen'")).isEqualTo(1);
+                assertThat(administrator.update("UPDATE ma_workspace SET is_default = TRUE"
+                        + " WHERE tenant_id = 'tenant' AND workspace_id = 'unselected'")).isEqualTo(1);
+                connection.commit();
+                assertThat(admission.get(5, TimeUnit.SECONDS).binding().getWorkspaceId()).isEqualTo("unselected");
+            } finally {
+                connection.rollback();
             }
         }
     }

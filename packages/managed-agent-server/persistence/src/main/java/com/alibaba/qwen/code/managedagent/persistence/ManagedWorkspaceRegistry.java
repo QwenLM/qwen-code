@@ -302,7 +302,7 @@ public class ManagedWorkspaceRegistry
                 "SELECT workspace_id, workspace_generation, storage_id, display_name,"
                         + " config_ref, policy_ref, state, workspace_kind FROM"
                         + " ma_workspace WHERE "
-                        + (selection == null ? "default_tenant = ?" : "tenant_id = ? AND workspace_id = ?")
+                        + (selection == null ? "tenant_id = ? AND is_default = TRUE" : "tenant_id = ? AND workspace_id = ?")
                         + (lock ? " FOR UPDATE" : ""),
                 (result, row) -> new RegistryRow(workspaceRow(tenantId, result.getString("workspace_id"), result),
                         result.getString("workspace_kind")),

@@ -16,13 +16,13 @@ transaction held placement and its resolved Workspace open, an update of an
 unselected Workspace waited. MySQL's lock tables showed exclusive locks on
 both Workspace records, confirming a wider lock scope than the chosen default.
 
-| Protection                                                               | Existing responsibility                                                                                                                    | Decision                                                           |
-| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
-| Tenant placement                                                         | Order ordinary/internal Session creation and private CSI creation against migration and retirement across several tables                   | Retain; removing it needs a separate admission protocol            |
-| Selected Workspace row                                                   | Read the current generation/storage/configuration/state and hold them through durable admission, including administrator SQL changes       | Retain in writes; use snapshots for browsing and preflight         |
-| Actor permission row                                                     | Order grant changes and revocation against the admitted transaction; administrator SQL need not acquire placement                          | Retain in writes; recheck snapshot authorization around reads      |
-| Default Workspace lookup followed by a second lookup of the selected row | Lock the same Workspace twice to obtain its ID and then its complete binding                                                               | Read the complete row once through the existing unique default key |
-| Storage and resident checks                                              | Check independent physical fences, registration and active Session/Runtime state; locking reads also avoid stale REPEATABLE READ snapshots | Retain                                                             |
+| Protection                                                               | Existing responsibility                                                                                                                    | Decision                                                              |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------- |
+| Tenant placement                                                         | Order ordinary/internal Session creation and private CSI creation against migration and retirement across several tables                   | Retain; removing it needs a separate admission protocol               |
+| Selected Workspace row                                                   | Read the current generation/storage/configuration/state and hold them through durable admission, including administrator SQL changes       | Retain in writes; use snapshots for browsing and preflight            |
+| Actor permission row                                                     | Order grant changes and revocation against the admitted transaction; administrator SQL need not acquire placement                          | Retain in writes; recheck snapshot authorization around reads         |
+| Default Workspace lookup followed by a second lookup of the selected row | Lock the same Workspace twice to obtain its ID and then its complete binding                                                               | Read the complete row once with the existing tenant/default predicate |
+| Storage and resident checks                                              | Check independent physical fences, registration and active Session/Runtime state; locking reads also avoid stale REPEATABLE READ snapshots | Retain                                                                |
 
 Before this change, ordinary and internal team-lead creation acquire placement
 before resolving the Workspace. Private CSI creation acquires placement in its
@@ -38,30 +38,30 @@ committed Session or derived Workspace.
 
 ## Change
 
-For durable admission, resolve an omitted selection with a single locking query on `default_tenant`,
-the generated column already constrained by `uk_ma_workspace_default`. It
-returns the ID and full Workspace record in one statement. Explicit selections
+For durable admission, resolve an omitted selection with a single locking query
+using the existing `tenant_id = ? AND is_default = TRUE` predicate. It returns
+the ID and full Workspace record in one statement. Explicit selections
 continue to use the exact tenant and Workspace business key. Both paths then
 lock and validate the actor's permission, check SSH node access and verify the
 Workspace is ACTIVE in the existing order.
 
-This removes the second acquisition/query for the same default Workspace and
-uses the declared unique selector instead of filtering the tenant's Workspace
-rows by `is_default`. No index or schema change is required. A default change
-still conflicts with the selected default's row/index lock until admission
-commits or rolls back. The current read must remain a locking read: an older
+This removes the second acquisition/query for the same default Workspace while
+preserving the existing lookup's lock order and broader tenant lock scope.
+No index or schema change is required. A default change still conflicts with
+the admission transaction until it commits or rolls back. The current read
+must remain a locking read: an older
 REPEATABLE READ snapshot must not select a former default or an outdated
 registration.
 
-Administrator SQL that changes the default must lock the current default with
-`WHERE default_tenant = ? FOR UPDATE` before modifying Workspace rows in that
-transaction. Updating a Workspace row first and then changing `is_default`
-can invert admission's unique-index/clustered-record order and cause an InnoDB
-deadlock (1213 / SQLState 40001), rather than a simple wait. A deadlock victim
-must roll back and retry its complete transaction; retrying only the resolver
-inside the aborted transaction is invalid. This increment documents that
-administrative ordering constraint; automatic admission-transaction retries
-remain a separate change.
+Using the unique `default_tenant` selector for admission was rejected after a
+real MySQL regression probe. That lookup takes `uk_ma_workspace_default` before
+the clustered row, while an administrator updating metadata and then changing
+`is_default` takes them in reverse order. This introduces a deadlock (1213 /
+SQLState 40001) where the original predicate waits. Keeping the original
+predicate avoids that new inversion without requiring an administrator lock
+convention or adding automatic admission retries. Narrowing default admission's
+tenant lock scope remains separate work; this change makes no general claim
+that admission is deadlock-free.
 
 ## Read and preflight paths
 
@@ -123,8 +123,10 @@ setting for durable writes changes. No new generic locking framework is needed.
 ## Validation and acceptance
 
 Measure default-resolution SQL and the actual MySQL lock scope before and after
-the change. Verify that unrelated Workspace metadata can progress while the
-selected default's transaction remains open. Verify default switching,
+the change. Verify that explicit selection permits unrelated Workspace metadata
+updates. Verify that an administrator can update the default's metadata and
+switch the default while admission waits, and that admission then returns the
+new default without the unique-selector deadlock. Verify default switching,
 registration changes, permission revocation, an already established REPEATABLE
 READ snapshot, explicit selection and refusal behavior. Exercise the actual
 creation/retirement boundary and relevant resolver consumers.
