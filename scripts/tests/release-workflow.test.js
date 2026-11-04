@@ -2516,6 +2516,23 @@ describe('release workflow', () => {
     );
   });
 
+  it('selects the apt mirror before the always-cold sandbox build', () => {
+    // #16271: this lane prunes the builder cache, so its apt layers are always
+    // cold — the same defect #16214 fixed for the E2E leg. It must source the
+    // shared probe and apply it before `build:sandbox`, so a mainland host
+    // builds against the VPC intranet mirror rather than the throttled default.
+    // Match the source statement, not a substring — the shellcheck directive
+    // above it also names the file.
+    expect(dockerIntegrationScript).toMatch(
+      /^source .*apt-mirror-probe\.sh"$/m,
+    );
+    const applyIndex = dockerIntegrationScript.indexOf('apply_apt_mirror');
+    expect(applyIndex).toBeGreaterThan(-1);
+    expect(
+      dockerIntegrationScript.indexOf('npm run build:sandbox'),
+    ).toBeGreaterThan(applyIndex);
+  });
+
   it('prunes BuildKit cache and gates the docker data root before the build and the vitest phase', () => {
     // #13479: run 37374675168 passed the job-start disk floor gate and the
     // runner still died on ENOSPC 24 minutes into the docker test step. The
