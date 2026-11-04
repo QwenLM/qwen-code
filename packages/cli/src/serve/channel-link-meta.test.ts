@@ -33,6 +33,7 @@ describe('channelLinkMetaForEvents', () => {
       'my-github': {
         type: 'github',
         baseUrl: 'https://ghe.example.com/api/v3',
+        webOrigin: 'https://ghe.example.com',
       },
     });
     expect(load).toHaveBeenCalledWith(WORKSPACE);
@@ -52,7 +53,9 @@ describe('channelLinkMetaForEvents', () => {
       }),
     );
 
-    expect(meta).toEqual({ bot: { type: 'github' } });
+    expect(meta).toEqual({
+      bot: { type: 'github', webOrigin: 'https://github.com' },
+    });
   });
 
   it('keeps workspace isolation: a channel owned by another workspace is excluded', () => {
@@ -87,7 +90,9 @@ describe('channelLinkMetaForEvents', () => {
       }),
     );
 
-    expect(meta).toEqual({ named: { type: 'github' } });
+    expect(meta).toEqual({
+      named: { type: 'github', webOrigin: 'https://github.com' },
+    });
   });
 
   it('returns an empty map without loading settings when there are no events', () => {
@@ -140,7 +145,10 @@ describe('channelLinkMetaForEvents', () => {
 
     expect(Object.hasOwn(meta, '__proto__')).toBe(true);
     expect(Object.hasOwn(meta, 'constructor')).toBe(true);
-    expect(meta['__proto__']).toEqual({ type: 'github' });
+    expect(meta['__proto__']).toEqual({
+      type: 'github',
+      webOrigin: 'https://github.com',
+    });
     expect(Object.getPrototypeOf(meta)).toBe(Object.prototype);
     expect(({} as Record<string, unknown>)['type']).toBeUndefined();
   });

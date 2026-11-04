@@ -1246,7 +1246,9 @@ Read-only discovery uses:
 journal as `{ "events": [...], "truncated": boolean }` with
 `Cache-Control: no-store`, plus an optional `channelLinkMeta` member: a map
 from channel instance name to non-secret link metadata (`type` and `baseUrl`,
-each present only when configured as a string). The metadata is resolved
+each present only when configured as a string, and for GitHub channels a
+resolved `webOrigin` — the web UI origin clients should concatenate directly
+instead of re-deriving it from the API root). The metadata is resolved
 from the merged system + user + workspace settings the channel workers run
 with — the scope-local management listing does not contain channels
 configured in another scope — and filtered to channels whose resolved `cwd`
@@ -1264,10 +1266,13 @@ the first 20 individually and one further `reason_filter` row whose
 `detail.filtered` counts the rest, so a pinned poll cursor cannot flood the
 journal with repeats of the same batch. Query parameters: `limit` (1-500, default 100), `type`
 (comma-separated `inbound`, `outbound`, `task`, `poll`), `channel`
-(repeat the parameter once per instance name), and `since` (ISO 8601). The route reads only
-the resolved workspace's Channel state directory and needs no operator authority. Reads are
-asynchronous and bounded: the current journal plus one rotated file per Channel, 256 KiB per
-file, 4 MiB per request, 32 files per request, freshest first. `truncated` is true when the
+(repeat the parameter once per instance name), and `since` (ISO 8601). The route needs no
+operator authority. Journal reads are asynchronous and bounded: the current journal plus one
+rotated file per Channel, 256 KiB per file, 4 MiB per request, 32 files per request, freshest
+first. Link metadata additionally reads a side-effect-free snapshot of the merged settings
+(a few small JSON files, resolved against the runtime's effective environment) synchronously;
+it is best-effort decoration, so any failure omits the member instead of failing the journal
+read. `truncated` is true when the
 record limit or any read bound clipped the result, including a journal taller than the
 per-file tail window. A workspace with no journal yet
 returns an empty list; a scope directory that cannot be read answers 5xx rather than an empty

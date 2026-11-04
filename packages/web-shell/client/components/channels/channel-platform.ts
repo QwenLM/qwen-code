@@ -81,12 +81,18 @@ export function githubEventNumber(event: GithubEventRef): number | undefined {
 
 /**
  * Web URL for a GitHub channel journal event, or undefined when the event
- * cannot be linked. The origin mapping mirrors GithubAdapter.connect's
- * `webOrigin` derivation and must stay in sync with it.
+ * cannot be linked. The daemon emits the resolved web origin
+ * (`channelLinkMeta.webOrigin`, single owner: the channel package's
+ * resolveGithubWebOrigin); this client only concatenates it. The baseUrl
+ * derivation below is a compatibility fallback for daemons that predate the
+ * emitted origin (including the scope-local listing, which never carries
+ * one).
  */
 export function githubEventWebUrl(
   event: GithubEventRef,
-  config: { type?: unknown; baseUrl?: unknown } | undefined,
+  config:
+    | { type?: unknown; baseUrl?: unknown; webOrigin?: unknown }
+    | undefined,
 ): string | undefined {
   if (config?.['type'] !== 'github') return undefined;
   const repository = event.repository;
@@ -96,6 +102,10 @@ export function githubEventWebUrl(
   // Without a thread kind, /issues/<n> still works: GitHub redirects PR
   // numbers to /pull/<n>.
   const path = event.thread?.startsWith('pr:') ? 'pull' : 'issues';
+  const emittedOrigin = config['webOrigin'];
+  if (typeof emittedOrigin === 'string' && emittedOrigin.trim()) {
+    return `${emittedOrigin}/${repository}/${path}/${number}`;
+  }
   const configuredBaseUrl = config['baseUrl'];
   const baseUrl =
     typeof configuredBaseUrl === 'string' && configuredBaseUrl.trim()

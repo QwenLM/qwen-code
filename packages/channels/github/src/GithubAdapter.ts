@@ -36,6 +36,7 @@ import {
   truncateCodePoints,
 } from '@qwen-code/channel-base';
 import { testBotMention, stripBotMention } from './mention.js';
+import { resolveGithubWebOrigin } from './web-origin.js';
 
 interface GithubConfig extends ChannelConfig {
   baseUrl?: string;
@@ -1119,16 +1120,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       credential = `local gh credential for ${hostname}`;
     }
     process.stderr.write(`[Channel:${this.name}] using ${credential}\n`);
-    this.webOrigin = baseUrl
-      .replace(/\/api\/v3\/?$/, '')
-      .replace(/^https:\/\/api\.github\.com/, 'https://github.com')
-      // GitHub Enterprise Cloud data-residency tenants serve the web UI at
-      // <tenant>.ghe.com and the REST API at api.<tenant>.ghe.com. Binding
-      // URLs carry the web host, so map the API host to it. Scoped to a
-      // single .ghe.com label on purpose: a self-hosted GHE Server may
-      // legitimately serve web and API from an `api.`-prefixed host.
-      .replace(/^https:\/\/api\.([^./]+\.ghe\.com)/i, 'https://$1')
-      .replace(/\/+$/, '');
+    this.webOrigin = resolveGithubWebOrigin(baseUrl);
     this.githubHost = new URL(this.webOrigin).hostname.toLowerCase();
     this.octokit = new Octokit({
       auth,

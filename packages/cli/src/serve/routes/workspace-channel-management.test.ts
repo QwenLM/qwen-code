@@ -113,7 +113,11 @@ function service(): ChannelManagementService {
 
 function mount(
   secondaryTrusted = true,
-  primaryOverrides?: { cwd?: string; env?: WorkspaceRuntime['env'] },
+  primaryOverrides?: {
+    cwd?: string;
+    env?: WorkspaceRuntime['env'];
+    daemonEnv?: NodeJS.ProcessEnv;
+  },
 ) {
   const primary = runtime(
     'primary',
@@ -154,7 +158,7 @@ function mount(
       }
       return id;
     },
-    daemonEnv: process.env,
+    daemonEnv: primaryOverrides?.daemonEnv ?? process.env,
   });
   return { app, primaryService, secondaryService };
 }
@@ -949,6 +953,7 @@ describe('workspace Channel event journal', () => {
       'my-github': {
         type: 'github',
         baseUrl: 'https://ghe.example.com/api/v3',
+        webOrigin: 'https://ghe.example.com',
       },
     });
     expect(JSON.stringify(response.body)).not.toContain('super-secret');
@@ -975,10 +980,10 @@ describe('workspace Channel event journal', () => {
     );
 
     expect(primary.body.channelLinkMeta).toEqual({
-      'primary-gh': { type: 'github' },
+      'primary-gh': { type: 'github', webOrigin: 'https://github.com' },
     });
     expect(secondary.body.channelLinkMeta).toEqual({
-      'secondary-gh': { type: 'github' },
+      'secondary-gh': { type: 'github', webOrigin: 'https://github.com' },
     });
   });
 
@@ -1030,7 +1035,7 @@ describe('workspace Channel event journal', () => {
 
       expect(response.status).toBe(200);
       expect(response.body.channelLinkMeta).toEqual({
-        'ws-gh': { type: 'github' },
+        'ws-gh': { type: 'github', webOrigin: 'https://github.com' },
       });
       expect(process.env[sentinel]).toBeUndefined();
     } finally {
@@ -1094,10 +1099,64 @@ describe('workspace Channel event journal', () => {
         'overlay-gh': {
           type: 'github',
           baseUrl: 'https://overlay.example/api/v3',
+          webOrigin: 'https://overlay.example',
         },
       });
     } finally {
       rmSync(overlayHome, { recursive: true, force: true });
     }
+  });
+
+  it('resolves metadata from the boot snapshot when it disagrees with the process environment', async () => {
+    // R2-2: the daemonEnv branch must be behaviorally pinned — a live
+    // process.env read would resolve nothing here and stay green otherwise.
+    const bootHome = mkdtempSync(join(tmpdir(), 'channel-link-meta-boot-'));
+    try {
+      writeFileSync(
+        join(bootHome, 'settings.json'),
+        JSON.stringify({ channels: { 'boot-gh': { type: 'github' } } }),
+      );
+      // The process QWEN_HOME (qwenHome) configures no channels.
+      const { app } = mount(true, {
+        daemonEnv: { ...process.env, QWEN_HOME: bootHome },
+      });
+      append('/work/primary', 1, 'boot-gh');
+
+      const response = await request(app).get('/workspace/channels/events');
+
+      expect(response.status).toBe(200);
+      expect(response.body.channelLinkMeta).toEqual({
+        'boot-gh': { type: 'github', webOrigin: 'https://github.com' },
+      });
+    } finally {
+      rmSync(bootHome, { recursive: true, force: true });
+    }
+  });
+
+  it('emits the resolved web origin for a whitespace-padded baseUrl', async () => {
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        channels: {
+          'padded-gh': {
+            type: 'github',
+            baseUrl: ' https://api.github.com/ ',
+          },
+        },
+      }),
+    );
+    const { app } = mount();
+    append('/work/primary', 1, 'padded-gh');
+
+    const response = await request(app).get('/workspace/channels/events');
+
+    expect(response.status).toBe(200);
+    expect(response.body.channelLinkMeta).toEqual({
+      'padded-gh': {
+        type: 'github',
+        baseUrl: ' https://api.github.com/ ',
+        webOrigin: 'https://github.com',
+      },
+    });
   });
 });

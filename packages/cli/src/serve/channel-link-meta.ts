@@ -5,16 +5,21 @@
  */
 
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
-import { resolveChannelCwd } from '../commands/channel/channel-cwd.js';
+import { resolveGithubWebOrigin } from '@qwen-code/channel-github/web-origin';
+import { resolveChannelOwnerCwd } from './channel-workspace-grouping.js';
 
 /**
  * Non-secret metadata the channel events page needs to link a journal row to
- * its PR/issue web page. Only these two fields ever leave the daemon here;
- * tokens and every other config field stay out.
+ * its PR/issue web page. Only these fields ever leave the daemon here;
+ * tokens and every other config field stay out. `webOrigin` is the resolved
+ * GitHub web origin, emitted so browser clients concatenate a ready origin
+ * instead of re-deriving the API-root mapping (the browser bundle cannot
+ * import the Node-only channel package).
  */
 export interface ChannelLinkMeta {
   type?: string;
   baseUrl?: string;
+  webOrigin?: string;
 }
 
 /**
@@ -51,11 +56,9 @@ export function channelLinkMetaForEvents(
     const config = entry as Record<string, unknown>;
     const rawCwd = config['cwd'];
     try {
-      const resolved = canonicalizeWorkspace(
-        resolveChannelCwd(
-          typeof rawCwd === 'string' && rawCwd.length > 0 ? rawCwd : undefined,
-          workspaceCwd,
-        ),
+      const resolved = resolveChannelOwnerCwd(
+        typeof rawCwd === 'string' && rawCwd.length > 0 ? rawCwd : undefined,
+        workspaceCwd,
       );
       if (resolved !== ownerCwd) continue;
     } catch {
@@ -66,6 +69,9 @@ export function channelLinkMetaForEvents(
     const meta: ChannelLinkMeta = {};
     if (typeof config['type'] === 'string') meta.type = config['type'];
     if (typeof config['baseUrl'] === 'string') meta.baseUrl = config['baseUrl'];
+    if (config['type'] === 'github') {
+      meta.webOrigin = resolveGithubWebOrigin(config['baseUrl']);
+    }
     if (Object.keys(meta).length > 0) entries.push([name, meta]);
   }
   // Object.fromEntries defines own properties, so a journal channel named
