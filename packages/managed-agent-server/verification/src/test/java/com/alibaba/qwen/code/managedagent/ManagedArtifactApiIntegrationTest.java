@@ -15,7 +15,6 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellEvent;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedToolDetailsStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
@@ -529,7 +528,7 @@ class ManagedArtifactApiIntegrationTest {
     @Test
     void exposesOriginalCommittedBytesAfterWriterSealAndSessionClose() throws Exception {
         new TransactionTemplate(fixture.manager()).executeWithoutResult(ignored ->
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(fixture.jdbc())).sealWriter("tenant-1", "session-1", "a".repeat(32),
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc()).sealWriter("tenant-1", "session-1", "a".repeat(32),
                         new SealWriterRequest("workspace-1", "writer-1", 1)));
         assertThat(fixture.jdbc().queryForObject("SELECT state FROM ma_session_head", String.class))
                 .isEqualTo("SEALED");
@@ -675,13 +674,13 @@ class ManagedArtifactApiIntegrationTest {
                 .andExpect(jsonPath("$.access.can_read_content").value(false));
         mvc.perform(asReader(get(ROOT + "/artifacts"))).andExpect(status().isOk()).andExpect(header().string("Cache-Control", "private, no-store"))
                 .andExpect(jsonPath("$.data").isEmpty());
-        assertThat(fixture.jdbc().queryForObject("SELECT quarantined FROM ma_output_capture", Boolean.class))
+        assertThat(fixture.jdbc().queryForObject("SELECT is_quarantined FROM ma_output_capture", Boolean.class))
                 .isTrue();
     }
 
     @Test
     void deletionAndQuarantineHideContentWithoutChangingExecutionFacts() throws Exception {
-        fixture.jdbc().update("UPDATE ma_output_capture SET quarantined = TRUE WHERE publication_id = X'7075622d31'");
+        fixture.jdbc().update("UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id = X'7075622d31'");
         mvc.perform(asReader(get(ROOT + "/artifacts/" + stdout.path("id").asText())))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.artifact.availability").value("unavailable"))
                 .andExpect(jsonPath("$.access.can_read_content").value(false));

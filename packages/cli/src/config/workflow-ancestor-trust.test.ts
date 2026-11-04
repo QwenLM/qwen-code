@@ -34,6 +34,7 @@ import {
   LoadedSettings,
   type Settings,
 } from './settings.js';
+import { isWorkflowAncestorDirectorySafe } from './workflow-ancestor-directory-safety.js';
 
 describe('local workflow ancestor trust', () => {
   let directory: string;
@@ -163,23 +164,26 @@ describe('local workflow ancestor trust', () => {
   });
 
   it.each([false, true])(
-    'R1-22 uses operator trust when workspace overrides enabled=%s',
+    'R1-22 uses operator trust when workspace declares enabled=%s',
     async (workspaceEnabled) => {
       const file = (settings: Settings) => ({
         settings,
         originalSettings: settings,
         path: 'fixture',
       });
+      const operatorEnabled = !workspaceEnabled;
       const loaded = new LoadedSettings(
         file({}),
         file({}),
-        file({ security: { folderTrust: { enabled: !workspaceEnabled } } }),
+        file({ security: { folderTrust: { enabled: operatorEnabled } } }),
         file({ security: { folderTrust: { enabled: workspaceEnabled } } }),
         true,
         new Set(),
       );
+      // The workspace value is restricted, so the operator's flag survives
+      // the merge and the ancestor provider must follow it, not the repo's.
       expect(loaded.merged.security?.folderTrust?.enabled).toBe(
-        workspaceEnabled,
+        operatorEnabled,
       );
       writeRules({
         [repo]: TrustLevel.TRUST_FOLDER,
@@ -188,10 +192,14 @@ describe('local workflow ancestor trust', () => {
       const provider = createLocalWorkflowAncestorTrustProvider(
         getOperatorTrustSettings(loaded),
       );
-      await expect(provider([packages, repo], target)).resolves.toEqual([
-        workspaceEnabled,
-        workspaceEnabled,
-      ]);
+      // With the operator's feature on, the target's DO_NOT_TRUST rule denies
+      // every ancestor. With it off, the provider falls back to directory
+      // safety and never consults the rules — the repo's flag changes neither.
+      await expect(provider([packages, repo], target)).resolves.toEqual(
+        operatorEnabled
+          ? [false, false]
+          : [packages, repo].map(isWorkflowAncestorDirectorySafe),
+      );
     },
   );
 
