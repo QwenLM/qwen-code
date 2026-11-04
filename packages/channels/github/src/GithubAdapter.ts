@@ -1036,6 +1036,9 @@ function isWatchFailFastError(err: unknown): boolean {
   );
 }
 
+/** GitHub's wording for a secondary (abuse) rate limit. */
+const SECONDARY_RATE_LIMIT_MESSAGE = /secondary rate limit|abuse detection/i;
+
 /**
  * Fail-fast statuses that condemn the WHOLE pass, not just one PR: a bad
  * credential or an exhausted rate budget is shared by every watched PR, so
@@ -1045,23 +1048,27 @@ function isWatchFailFastError(err: unknown): boolean {
  * must not stop the others from being watched. A 403 aborts the pass only
  * when it is provably a shared rate limit; a per-repo permission 403 (a
  * fine-grained token lacking access to one repo) is isolated to that PR,
- * since bindings come from sessions, not the token's grants (R1-11).
+ * since bindings come from sessions, not the token's grants (R1-11). The
+ * notification lane stops a poll on the same answers (classifyThreadFailure).
  */
 function isWatchPassAbortError(err: unknown): boolean {
   const e = err as {
     status?: number;
+    message?: unknown;
     response?: { headers?: Record<string, string | number> };
   };
   if (e.status === 401 || e.status === 429) return true;
   if (e.status === 403) {
-    // GitHub does not always send x-ratelimit-remaining === 0 on a
-    // secondary/abuse limit, but it does send retry-after; either marks a
-    // shared rate limit. A bare permission 403 (remaining > 0, no
-    // retry-after) stays per-PR so it cannot starve the other watched PRs.
+    // GitHub sends a secondary/abuse limit with quota left and not always
+    // with retry-after, so an exhausted budget, retry-after or the limit's
+    // wording each mark a shared rate limit. A bare permission 403 (quota
+    // left, no retry-after, no limit wording) stays per-PR so it cannot
+    // starve the other watched PRs.
     const headers = e.response?.headers;
     return (
       Number(headers?.['x-ratelimit-remaining']) === 0 ||
-      headers?.['retry-after'] !== undefined
+      headers?.['retry-after'] !== undefined ||
+      SECONDARY_RATE_LIMIT_MESSAGE.test(String(e.message))
     );
   }
   return false;
@@ -1069,25 +1076,19 @@ function isWatchPassAbortError(err: unknown): boolean {
 
 /**
  * How a failure reading one notification's thread is handled. A rate-limit or
- * credential answer (`shared`) applies to every thread, so the poll stops and
- * holds the window until GitHub answers again; a secondary limit can arrive as
- * a bare 403 whose only marker is the message. A 5xx (`transient`; Octokit
- * also reports network failures as 500) belongs to this thread. Another 4xx (a
- * deleted, transferred or inaccessible thread) or a local exception without a
- * status comes back the same on every retry (`permanent`).
+ * credential answer (`shared`, the answers that also abort the PR watch pass)
+ * applies to every thread, so the poll stops and holds the window until GitHub
+ * answers again. A 5xx (`transient`; Octokit also reports network failures as
+ * 500) belongs to this thread. Another 4xx (a deleted, transferred or
+ * inaccessible thread) or a local exception without a status comes back the
+ * same on every retry (`permanent`).
  */
 function classifyThreadFailure(
   err: unknown,
 ): 'shared' | 'transient' | 'permanent' {
-  const e = err as { status?: unknown; message?: unknown };
+  const e = err as { status?: unknown };
   if (typeof e.status !== 'number') return 'permanent';
-  if (
-    isWatchPassAbortError(err) ||
-    (e.status === 403 &&
-      /secondary rate limit|abuse detection/i.test(String(e.message)))
-  ) {
-    return 'shared';
-  }
+  if (isWatchPassAbortError(err)) return 'shared';
   return e.status >= 500 ? 'transient' : 'permanent';
 }
 
@@ -2296,13 +2297,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       } catch (err) {
         const failure = classifyThreadFailure(err);
         let failures = 0;
+        // Past the bound a new thread's count is not kept, so it is not known
+        // which of its polls are milestones.
+        let counted = false;
         if (failure === 'transient' && !stale) {
           failures =
             (this.transientNotificationFailures.get(failureKey) ?? 0) + 1;
-          if (
+          counted =
             this.transientNotificationFailures.has(failureKey) ||
-            this.transientNotificationFailures.size < MAX_WINDOW_KEYS
-          ) {
+            this.transientNotificationFailures.size < MAX_WINDOW_KEYS;
+          if (counted) {
             this.transientNotificationFailures.set(failureKey, failures);
           }
         }
@@ -2318,9 +2322,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           else transientHeld = true;
         }
         // A held window re-reads the thread every poll. Report a thread's
-        // first and every tenth failing poll in the window, a shared failure
-        // on the first and every tenth poll it stops, and each other outcome
-        // once per window under a key of its own.
+        // first and every tenth failing poll in the window (once, if its count
+        // is not kept), a shared failure on the first and every tenth poll it
+        // stops, and each other outcome once per window under a key of its
+        // own.
         const heldPolls =
           failure === 'shared' ? this.sharedHoldPolls + 1 : transientPoll;
         // A local error (no HTTP status) raised while the task store or the
@@ -2336,7 +2341,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           failure === 'shared'
             ? milestone(heldPolls)
             : retry
-              ? milestone(failures)
+              ? counted
+                ? milestone(failures)
+                : this.journalOncePerWindow(`failing\0${failureKey}`)
               : this.journalOncePerWindow(
                   `${storeHeld ? 'held' : stale ? 'stale' : 'skip'}\0${failureKey}`,
                 );

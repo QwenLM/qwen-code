@@ -222,6 +222,24 @@ function inboundTaskPath(
   );
 }
 
+/** Every row of a Channel's event journal; none before the first write. */
+function readChannelEvents(
+  channelName = 'test-github',
+): Array<Record<string, unknown>> {
+  const path = inboundTaskPath('/tmp/test', channelName).replace(
+    'github-inbound-tasks.json',
+    'channel-events.jsonl',
+  );
+  try {
+    return readFileSync(path, 'utf-8')
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch {
+    return [];
+  }
+}
+
 /** Mirrors channelFilePath('github-bound-deadletter.jsonl') for assertions. */
 function boundDeadLetterPath(
   cwd = '/tmp/test',
@@ -1525,39 +1543,13 @@ describe('GithubChannel', () => {
       const transient = () =>
         Object.assign(new Error('Server Error'), { status: 502 });
 
-      function journalRows(): Array<Record<string, unknown>> {
-        const path = inboundTaskPath().replace(
-          'github-inbound-tasks.json',
-          'channel-events.jsonl',
-        );
-        try {
-          return readFileSync(path, 'utf-8')
-            .split('\n')
-            .filter(Boolean)
-            .map((line) => JSON.parse(line) as Record<string, unknown>)
-            .filter((event) => event['reason'] === 'github_api_error');
-        } catch {
-          return [];
-        }
-      }
+      const journal = () => readChannelEvents();
+      const journalRows = () =>
+        journal().filter((event) => event['reason'] === 'github_api_error');
 
-      function journal(): Array<Record<string, unknown>> {
-        const path = inboundTaskPath().replace(
-          'github-inbound-tasks.json',
-          'channel-events.jsonl',
-        );
-        try {
-          return readFileSync(path, 'utf-8')
-            .split('\n')
-            .filter(Boolean)
-            .map((line) => JSON.parse(line) as Record<string, unknown>);
-        } catch {
-          return [];
-        }
-      }
-
-      async function initFailing() {
-        await initWithoutLoop();
+      /** `configOverrides` starts a fresh channel instance, as a restart does. */
+      async function initFailing(configOverrides?: Record<string, unknown>) {
+        await initWithoutLoop(configOverrides);
         (
           channel as unknown as {
             abortableSleep: (ms: number) => Promise<void>;
@@ -1754,6 +1746,57 @@ describe('GithubChannel', () => {
           ['failed', 10],
           ['failed', 20],
           ['skipped', 30],
+        ]);
+      });
+
+      it('begins the hold budget again after a restart', async () => {
+        await initFailing();
+        const failingThread = async (method: unknown) => {
+          if (
+            method ===
+            mockOctokit.rest.activity.listNotificationsForAuthenticatedUser
+          ) {
+            return [makeNotification()];
+          }
+          throw transient();
+        };
+        mockOctokit.paginate.mockImplementation(failingThread);
+        const failures = () =>
+          journalRows().map((row) => [
+            row['outcome'],
+            (row['detail'] as { failures: number }).failures,
+          ]);
+
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          for (let poll = 1; poll < 30; poll++) await pollOnce();
+          expect(failures()).toEqual([
+            ['failed', 1],
+            ['failed', 10],
+            ['failed', 20],
+          ]);
+
+          // A fresh instance over the same channel state and held cursor.
+          mockOctokit.paginate.mockImplementation(async () => []);
+          await initFailing({});
+          mockOctokit.paginate.mockImplementation(failingThread);
+          for (let poll = 1; poll < 30; poll++) await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        // The budget is in memory: 29 more polls still hold the window.
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+        expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+        expect(failures()).toEqual([
+          ['failed', 1],
+          ['failed', 10],
+          ['failed', 20],
+          ['failed', 1],
+          ['failed', 10],
+          ['failed', 20],
         ]);
       });
 
@@ -2771,9 +2814,15 @@ describe('GithubChannel', () => {
         });
 
         await pollOnce();
+        await pollOnce();
 
         expect(failures.size).toBe(8192);
         expect(failures.has('owner/repo|issue:1')).toBe(false);
+        // A thread whose count is not kept is still reported once, not on
+        // every poll.
+        expect(journalRows()).toEqual([
+          expect.objectContaining({ outcome: 'failed', thread: 'issue:1' }),
+        ]);
       });
 
       it('bounds the once-per-window journal keys', async () => {
@@ -7164,23 +7213,10 @@ describe('GithubChannel', () => {
   });
 
   describe('event journal', () => {
-    function readJournal(
-      channelName = 'test-github',
-    ): Array<Record<string, unknown>> {
-      const path = inboundTaskPath('/tmp/test', channelName).replace(
-        'github-inbound-tasks.json',
-        'channel-events.jsonl',
+    const readJournal = (channelName = 'test-github') =>
+      readChannelEvents(channelName).filter(
+        (event) => event['type'] !== 'poll',
       );
-      try {
-        return readFileSync(path, 'utf-8')
-          .split('\n')
-          .filter((line) => line.length > 0)
-          .map((line) => JSON.parse(line) as Record<string, unknown>)
-          .filter((event) => event['type'] !== 'poll');
-      } catch {
-        return [];
-      }
-    }
 
     it('records a notification dropped by reasonFilter before any session exists', async () => {
       await initWithoutLoop({ reasonFilter: ['mention'] });
@@ -14634,6 +14670,51 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(
           mockOctokit.rest.activity.listNotificationsForAuthenticatedUser,
         ).toHaveBeenCalledTimes(1);
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('aborts the watch pass on a secondary limit named only by its message', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding(),
+          makeBinding({
+            sessionId: 'other-session',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            prs: [
+              {
+                number: 43,
+                url: 'https://github.com/owner/repo/pull/43',
+                state: 'open',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      // Quota left and no retry-after: only GitHub's wording marks the limit.
+      mockOctokit.rest.pulls.get.mockRejectedValue(
+        Object.assign(
+          new Error(
+            'You have exceeded a secondary rate limit. Please wait a few minutes before you try again. - https://docs.github.com/rest',
+          ),
+          {
+            status: 403,
+            response: { headers: { 'x-ratelimit-remaining': '4999' } },
+          },
+        ),
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        mockNotificationsOnce([]);
+        await pollOnce();
+
+        expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(1);
+        expect(
+          stderr.mock.calls.map((call) => String(call[0])).join(''),
+        ).toContain('PR watch pass aborted');
       } finally {
         stderr.mockRestore();
       }
