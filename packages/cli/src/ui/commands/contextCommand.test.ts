@@ -1601,6 +1601,10 @@ describe('collectContextData (contextCommand)', () => {
         }),
         true,
       );
+      // The mcp schema is declared, so the guard bills it to the mcp row.
+      expect(exposed.breakdown.mcpTools).toBe(
+        estimateContextTextTokens(JSON.stringify(mcpToolDouble.schema)),
+      );
       expect(exposed.mcpTools).toEqual([
         {
           name: 'server__big_tool',
