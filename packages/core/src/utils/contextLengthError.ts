@@ -118,8 +118,9 @@ function parseTokenCounts(text: string): {
     };
   }
 
+  // SGLang states the window as "maximum context length of N tokens".
   const maxContextLimitMatch = text.match(
-    /maximum context length is\s*(\d[\d,]*)\s*tokens?/i,
+    /maximum context length (?:is|of)\s*(\d[\d,]*)\s*tokens?/i,
   );
   if (maxContextLimitMatch) {
     return {

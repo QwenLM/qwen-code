@@ -3952,6 +3952,16 @@ describe('issue #9455: compression requests fit the receiving window', () => {
           `completion.`,
       );
 
+  /**
+   * The prompt's size with no figure for the window, as from a server or
+   * gateway whose wording for the window this parser does not read.
+   */
+  const countOnlyRejection = (promptTokens: number) =>
+    new Error(
+      `Your prompt contains ${promptTokens} input tokens, which exceeds ` +
+        `the model's context window.`,
+    );
+
   function compressHistory(
     history: Content[],
     originalTokenCount: number,
@@ -4110,6 +4120,26 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     );
   });
 
+  it('sizes the retry for the window SGLang reports as "of N"', async () => {
+    // Configured for 262,144 tokens, the retry keeps the full output budget,
+    // and the reduced prompt overruns the server's window beside it. It fits
+    // only with the quarter-window reserve the reported window gives.
+    configureWindow(262_144);
+    mockBackend({ window: WINDOW, rejection: sglangRejection(WINDOW) });
+
+    const result = await compressHistory(toolSession(44, 5_200), 60_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.promptTokens + COMPACT_MAX_OUTPUT_TOKENS).toBeGreaterThan(
+      WINDOW,
+    );
+    expect(sent[1]!.maxOutputTokens).toBe(WINDOW / 4);
+    expect(
+      sent[1]!.promptTokens + sent[1]!.maxOutputTokens,
+    ).toBeLessThanOrEqual(WINDOW);
+  });
+
   it('sizes the retry for the limit a bare "N tokens > M" rejection exceeds', async () => {
     // Anthropic's wording does not say whether M bounds the prompt or the
     // window, but once the request's own count is past it the endpoint takes
@@ -4249,11 +4279,11 @@ describe('issue #9455: compression requests fit the receiving window', () => {
   });
 
   it('sends the reduced request when the count says the request should have fit', async () => {
-    // SGLang states the prompt's size but not a limit this parser reads. By
-    // the configured window the prompt left room for the budget sent, so the
+    // The rejection states the prompt's size but no window. By the
+    // configured window the prompt left room for the budget sent, so the
     // server's window is smaller by an unknown amount.
     configureWindow(262_144);
-    mockBackend({ window: 131_072, rejection: sglangRejection(131_072) });
+    mockBackend({ window: 131_072, rejection: countOnlyRejection });
 
     const result = await compressHistory(toolSession(50, 12_000), 150_000);
 
