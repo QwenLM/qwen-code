@@ -41,15 +41,16 @@ describe('InstallationManager', () => {
   let tempHomeDir: string;
   let installationManager: InstallationManager;
   const installationIdFile = () =>
-    path.join(tempHomeDir, '.qwen', 'installation_id');
+    path.join(tempHomeDir, 'qwen-home', 'installation_id');
 
   beforeEach(() => {
     tempHomeDir = fs.mkdtempSync(
       path.join(os.tmpdir(), 'gemini-cli-test-home-'),
     );
     (os.homedir as Mock).mockReturnValue(tempHomeDir);
-    // On Linux a fresh home defaults to the XDG config dir; pin ~/.qwen.
-    vi.stubEnv('QWEN_HOME', path.join(tempHomeDir, '.qwen'));
+    // On Linux a fresh home defaults to the XDG config dir. Not ~/.qwen, so a
+    // manager that hardcoded it would miss this file.
+    vi.stubEnv('QWEN_HOME', path.join(tempHomeDir, 'qwen-home'));
     installationManager = new InstallationManager();
   });
 

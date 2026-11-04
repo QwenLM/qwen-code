@@ -9944,9 +9944,9 @@ describe('runQwenServe runtime startup failures', () => {
         path.join(home, '.config', 'qwen'),
       );
     } finally {
+      await handle?.close();
       Object.defineProperty(process, 'platform', platform);
       vi.unstubAllEnvs();
-      await handle?.close();
     }
   });
 
