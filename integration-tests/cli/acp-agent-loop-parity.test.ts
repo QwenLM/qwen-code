@@ -999,14 +999,20 @@ const allowOnce = () => ({
     }, 120_000);
 
     it("blocks a write in plan mode with the scheduler's notice, as other surfaces do", async () => {
+      const written: boolean[] = [];
       const { current, shared } = await both({
         name: 'a write in plan mode',
         prompts: ['Write the file.'],
         settings: { tools: { approvalMode: 'plan' } },
-        reply: (messages, dir) =>
-          toolResults(messages) === 0
-            ? { toolCalls: [write(join(dir, 'out.txt'), 'no\n', 'call_no')] }
-            : { content: 'Understood.' },
+        reply: (messages, dir) => {
+          if (toolResults(messages) === 0)
+            return {
+              toolCalls: [write(join(dir, 'out.txt'), 'no\n', 'call_no')],
+            };
+          // The batch has settled by the time its results are sent back.
+          written.push(existsSync(join(dir, 'out.txt')));
+          return { content: 'Understood.' };
+        },
       });
       const failedWrite = (run: Run) =>
         JSON.stringify(
@@ -1025,11 +1031,17 @@ const allowOnce = () => ({
       expect(current.requests).toHaveLength(2);
       expect(shared.requests).toHaveLength(2);
       expect(shared.requests[0]).toEqual(current.requests[0]);
+      // One reading per loop, and neither wrote the file.
+      expect(written.length).toBeGreaterThanOrEqual(2);
+      expect(written).not.toContain(true);
       expect(failedWrite(current)).toContain(
         'Plan mode is active. The tool \\"write_file\\" cannot be executed',
       );
       expect(failedWrite(shared)).toContain(
         'Tool blocked by plan mode: \\"write_file\\" is not a read-only tool.',
+      );
+      expect(JSON.stringify(current.requests[1])).toContain(
+        'Plan mode is active. The tool',
       );
       expect(JSON.stringify(shared.requests[1])).toContain(
         'Tool blocked by plan mode',
