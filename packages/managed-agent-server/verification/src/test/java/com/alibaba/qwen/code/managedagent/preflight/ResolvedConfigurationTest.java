@@ -194,8 +194,8 @@ class ResolvedConfigurationTest {
                 """);
         Map<String, String> file = resolve(additional(config));
         assertEquals("http://127.0.0.1:9090", file.get("serverUrl"));
-        assertEquals("http://127.0.0.1:4171", file.get("harnessBaseUrl"));
-        // The server parses the value untrimmed, and so does the verdict.
+        // As the server parses it, untrimmed, which the preflight fails.
+        assertEquals(" http://127.0.0.1:4171 ", file.get("harnessBaseUrl"));
         assertEquals("false", file.get("harnessOrigin"));
         assertEquals("http://127.0.0.1:9091",
                 resolve(Map.of("SERVER_PORT", "9091")).get("serverUrl"));

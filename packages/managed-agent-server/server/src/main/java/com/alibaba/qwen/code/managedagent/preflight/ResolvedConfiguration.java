@@ -119,11 +119,12 @@ public final class ResolvedConfiguration {
         resolved.put("authMode", "auto".equals(mode) ? "open" : mode);
         resolved.put("trustedActorHeader",
                 StringUtils.trimToEmpty(properties.getTrustedActorHeader()));
+        // As the server parses it, untrimmed, so a refusal shows any padding,
+        // with the preflight's verdict on it: the upgrade command refuses a
+        // Harness URL the preflight would fail before it restarts the Harness,
+        // without a rule of its own.
         String harnessBaseUrl = properties.getHarness().getBaseUrl();
-        resolved.put("harnessBaseUrl", StringUtils.trimToEmpty(harnessBaseUrl));
-        // The preflight's verdict on the value the server parses, untrimmed,
-        // so the upgrade command can refuse a Harness URL the preflight would
-        // fail before it restarts the Harness, without a rule of its own.
+        resolved.put("harnessBaseUrl", StringUtils.defaultString(harnessBaseUrl));
         resolved.put("harnessOrigin", String.valueOf(harnessBaseUrl != null
                 && ManagedAgentPreflight.harnessOrigin(harnessBaseUrl) != null));
         Binder binder = Binder.get(environment);

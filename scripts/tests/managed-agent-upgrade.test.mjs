@@ -2476,6 +2476,8 @@ test('start refuses listeners it cannot reach before it starts anything', async 
   for (const harnessBaseUrl of [
     'http://qwen_harness:4170',
     'http://@127.0.0.1:4170',
+    // The resolver prints the value as the server parses it, padding and all.
+    ' http://127.0.0.1:4170 ',
   ]) {
     host.resolved = { harnessBaseUrl, harnessOrigin: 'false' };
     assert.equal(await host.upgrade('start'), 1, harnessBaseUrl);
