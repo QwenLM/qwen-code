@@ -35,6 +35,12 @@ export interface SessionPr {
    */
   source?: SessionPrSource;
   /**
+   * The job this session does for the PR (role-aware bound delivery).
+   * Assigned by the command-position backfill (`/review`, `/verify-pr`) or
+   * explicitly through the metadata route; absent means untyped.
+   */
+  role?: SessionPrRole;
+  /**
    * Issues the PR closes (GitHub's closing references), snapshotted by the
    * daemon timer — never bound by clients. Absent until the first refresh
    * after binding; an empty array means "fetched, none".
@@ -50,6 +56,25 @@ export type SessionPrState = 'open' | 'merged' | 'closed';
  * a `/review` or `/verify-pr` command names a PR it merely looked at.
  */
 export type SessionPrSource = 'create' | 'worktree' | 'review';
+
+/**
+ * The job a bound session does for a PR — the routing axis of the GitHub
+ * channel's role-aware bound delivery (one winner per role, fan-out across
+ * roles). A closed vocabulary: the command-position backfill assigns
+ * `review` / `verify` from `/review` / `/verify-pr`, `fix` is bound
+ * explicitly through the session metadata route. Absent means untyped:
+ * every binding persisted before roles existed stays valid.
+ */
+export const PR_BINDING_ROLES = ['review', 'verify', 'fix'] as const;
+
+export type SessionPrRole = (typeof PR_BINDING_ROLES)[number];
+
+export function isSessionPrRole(value: unknown): value is SessionPrRole {
+  return (
+    typeof value === 'string' &&
+    (PR_BINDING_ROLES as readonly string[]).includes(value)
+  );
+}
 
 export interface SessionPrIssue {
   number: number;
@@ -132,6 +157,7 @@ function isValidSessionPr(value: unknown): value is SessionPr {
       v['source'] === 'create' ||
       v['source'] === 'worktree' ||
       v['source'] === 'review') &&
+    (v['role'] === undefined || isSessionPrRole(v['role'])) &&
     (v['issues'] === undefined ||
       (Array.isArray(v['issues']) &&
         v['issues'].length <= SESSION_PR_ISSUE_LIST_LIMIT &&
@@ -398,12 +424,14 @@ export function toSessionPrInfo({
   number,
   url,
   state,
+  role,
   issues,
 }: Omit<SessionPr, 'createdAt'>): Omit<SessionPr, 'createdAt'> {
   return {
     number,
     url,
     ...(state ? { state } : {}),
+    ...(role ? { role } : {}),
     ...(issues ? { issues } : {}),
   };
 }
@@ -435,16 +463,23 @@ export function mergeSessionPrLists(
     // canonical url is another PR and carries nothing across.
     const [newer, older] =
       entry.createdAt >= known.createdAt ? [entry, known] : [known, entry];
+    const samePr =
+      canonicalSessionPrUrl(newer.url) === canonicalSessionPrUrl(older.url);
     const source =
-      canonicalSessionPrUrl(newer.url) === canonicalSessionPrUrl(older.url) &&
+      samePr &&
       sessionPrSourceAuthority(older.source) >
         sessionPrSourceAuthority(newer.source)
         ? older.source
         : newer.source;
-    byNumber.set(
-      entry.number,
-      source === newer.source ? newer : { ...newer, source },
-    );
+    // Role: the NEWER half wins outright, absence included. A missing role
+    // on the newer half can be an explicit `role: null` clear (the metadata
+    // route writes a newer role-less sidecar), and resurrecting the older
+    // half's role here would re-enable instructions the operator removed.
+    // Unlike provenance, role has no authority ladder to preserve.
+    byNumber.set(entry.number, {
+      ...newer,
+      ...(source !== undefined ? { source } : {}),
+    });
   }
   return capSessionPrListByAuthority(
     [...byNumber.values()].sort((left, right) =>
@@ -624,6 +659,8 @@ export function upsertSessionPr(
     url: string;
     state?: SessionPrState;
     source?: SessionPrSource;
+    /** Omitted preserves the known role; null clears it; a value sets it. */
+    role?: SessionPrRole | null;
   },
 ): Promise<SessionPr[]> {
   return enqueuePrMutation(filePath, async () => {
@@ -648,12 +685,14 @@ export function upsertSessionPr(
           ? pr.source
           : known.source;
     const state = pr.state ?? known?.state;
+    const role = pr.role === undefined ? known?.role : (pr.role ?? undefined);
     const entry: SessionPr = {
       number: pr.number,
       url: pr.url,
       createdAt: new Date().toISOString(),
       ...(state ? { state } : {}),
       ...(source ? { source } : {}),
+      ...(role ? { role } : {}),
       ...(known?.issues ? { issues: known.issues } : {}),
     };
     if (!isValidSessionPr(entry)) return existing;
@@ -710,6 +749,7 @@ export function upsertSessionPrs(
     url?: string;
     state?: SessionPrState;
     source?: SessionPrSource;
+    role?: SessionPrRole;
   }>,
 ): Promise<SessionPrUpsertManyResult> {
   return enqueuePrMutation(filePath, async () => {
@@ -733,12 +773,22 @@ export function upsertSessionPrs(
         canonicalSessionPrUrl(known.url) ===
           canonicalSessionPrUrl(candidate.url)
       ) {
+        let upgraded = known;
         if (
           candidate.source !== undefined &&
           sessionPrSourceAuthority(candidate.source) >
             sessionPrSourceAuthority(known.source)
         ) {
-          next[knownIndex] = { ...known, source: candidate.source };
+          upgraded = { ...upgraded, source: candidate.source };
+        }
+        // A re-offer stamps a role only where none exists: an explicit
+        // metadata-route role outranks every later command-position
+        // backfill of the same PR.
+        if (candidate.role !== undefined && upgraded.role === undefined) {
+          upgraded = { ...upgraded, role: candidate.role };
+        }
+        if (upgraded !== known) {
+          next[knownIndex] = upgraded;
           changed = true;
         }
         alreadyBound.push(candidate.number);
@@ -754,6 +804,7 @@ export function upsertSessionPrs(
         createdAt: new Date().toISOString(),
         ...(candidate.state ? { state: candidate.state } : {}),
         ...(candidate.source ? { source: candidate.source } : {}),
+        ...(candidate.role ? { role: candidate.role } : {}),
       };
       if (!isValidSessionPr(entry)) {
         unresolved.push(candidate.number);
