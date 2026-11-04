@@ -4360,7 +4360,40 @@ describe('GithubChannel', () => {
         mockOctokit.rest.issues.createComment.mock.calls.filter((call) =>
           String(call[0]?.body).includes('Failed to process'),
         ),
-      ).toHaveLength(4);
+      ).toHaveLength(2);
+    });
+
+    it('retries error comment publication on definite no-write errors', async () => {
+      channel.handleInboundError = new Error('agent down');
+      await initWithoutLoop();
+      (
+        channel as unknown as {
+          abortableSleep: (ms: number) => Promise<void>;
+        }
+      ).abortableSleep = vi.fn().mockResolvedValue(undefined);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      const rateLimitError = Object.assign(new Error('rate limited'), {
+        status: 429,
+        response: { headers: { 'x-ratelimit-remaining': '0' } },
+      });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(rateLimitError);
+
+      await pollOnce();
+
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({
+          state: 'failed',
+          attempts: 1,
+          errorCommentPosted: false,
+        }),
+      ]);
+      expect(
+        mockOctokit.rest.issues.createComment.mock.calls.filter((call) =>
+          String(call[0]?.body).includes('Failed to process'),
+        ),
+      ).toHaveLength(3);
     });
 
     it('reuses an existing inbound task record instead of creating a duplicate', async () => {
