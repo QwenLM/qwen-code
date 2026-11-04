@@ -19,6 +19,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -393,7 +394,7 @@ class ManagedSessionGuardConvoyIT {
      * Publication lanes take their first tenant-wide acquisition with the
      * hot-path bound: reserve (apply lane), prepareAdmission (admission
      * lane), producer/dispatch, commitReceipt (receipt lane's placement-first
-     * entry) and publishToolResult (tool-result lane) all answer tenant_guard_contended
+     * entry) all answer tenant_guard_contended
      * within the bound while a guard row is externally held, and complete
      * after the hold lifts (#13800 R1).
      */
@@ -510,27 +511,67 @@ class ManagedSessionGuardConvoyIT {
         }
         assertThat(admission.commitReceipt(key, "pub-1", PublicationJournalFixture.WRITER_TOKEN,
                 request).path("historyRevision").asLong()).isEqualTo(sequence);
+    }
 
-        // Tool-result publication takes the publication row behind bounded
-        // placement: a held row answers named and fast there too.
-        byte[] content = "tool output".getBytes(StandardCharsets.UTF_8);
-        var publish = new ManagedSessionStoreModels.PublishToolResultRequest("workspace-1", "writer-1", 1,
-                "result-content-1", "managed-tool-result-content", 1, content.length,
-                ToolPublicationContract.sha256(content), Base64.getEncoder().encodeToString(content));
-        var publications = new TransactionTemplate(manager);
-        hold = manager.getTransaction(new DefaultTransactionDefinition());
-        try {
-            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
-            assertFastGuardFailure(() -> publications.execute(ignored ->
-                    journal.sessions.publishToolResult(tenant, "session-1",
-                            PublicationJournalFixture.WRITER_TOKEN, publish)));
-        } finally {
-            manager.rollback(hold);
+    @Test
+    void ordinaryToolResultPublishesWhileBothTenantGuardsAreHeld() throws Exception {
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
+        var manager = new DataSourceTransactionManager(source);
+        var transactions = new TransactionTemplate(manager);
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
+        transactions.executeWithoutResult(status -> store.acquireWriter(TENANT, "inline", TOKEN,
+                new AcquireWriterRequest(WORKSPACE, "writer-inline", 60_000L)));
+        try (var pool = Executors.newSingleThreadExecutor()) {
+            var hold = manager.getTransaction(new DefaultTransactionDefinition());
+            try {
+                WorkspaceLifecycleStore.lockPlacement(jdbc, TENANT);
+                ToolPublicationRetentionStore.lockTenant(jdbc, TENANT);
+                var published = pool.submit(() -> transactions.execute(status ->
+                        store.publishToolResult(TENANT, "inline", TOKEN, inlineToolResult())))
+                        .get(10, TimeUnit.SECONDS);
+                assertThat(published.resourceId()).isEqualTo("inline-result");
+            } finally {
+                manager.rollback(hold);
+            }
         }
-        ManagedSessionStoreModels.ToolResultResourceRef published = publications.execute(ignored ->
-                journal.sessions.publishToolResult(tenant, "session-1", PublicationJournalFixture.WRITER_TOKEN,
-                        publish));
-        assertThat(published.resourceId()).isEqualTo("result-content-1");
+    }
+
+    @Test
+    void toolResultPublishesToAnotherSessionWhileNewResourceIsProbed() throws Exception {
+        var pausing = new PauseAfterDataSource(source, "SELECT " + ManagedSchemaProjection.RESOURCE.columns()
+                + " FROM ma_resource WHERE resource_key = ?");
+        var jdbc = new ManagedSchemaJdbcTemplate(pausing);
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(pausing));
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
+        for (String session : List.of("inline-one", "inline-two")) {
+            transactions.executeWithoutResult(status -> store.acquireWriter(TENANT, session, TOKEN,
+                    new AcquireWriterRequest(WORKSPACE, "writer-inline", 60_000L)));
+        }
+        try (var first = Executors.newSingleThreadExecutor(task -> new Thread(task, "paused"));
+                var second = Executors.newSingleThreadExecutor()) {
+            pausing.enabled = true;
+            var pending = first.submit(() -> transactions.execute(status ->
+                    store.publishToolResult(TENANT, "inline-one", TOKEN, inlineToolResult())));
+            try {
+                assertThat(pausing.reached.await(10, TimeUnit.SECONDS)).isTrue();
+                var published = second.submit(() -> transactions.execute(status ->
+                        store.publishToolResult(TENANT, "inline-two", TOKEN, inlineToolResult())))
+                        .get(10, TimeUnit.SECONDS);
+                assertThat(published.resourceId()).isEqualTo("inline-result");
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Integer.class)).isEqualTo(1);
+            } finally {
+                pausing.release.countDown();
+            }
+            assertThat(pending.get(10, TimeUnit.SECONDS).resourceId()).isEqualTo("inline-result");
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Integer.class)).isEqualTo(2);
+    }
+
+    private static ManagedSessionStoreModels.PublishToolResultRequest inlineToolResult() {
+        byte[] bytes = "tool output".getBytes(StandardCharsets.UTF_8);
+        return new ManagedSessionStoreModels.PublishToolResultRequest(WORKSPACE, "writer-inline", 1,
+                "inline-result", "managed-tool-result-content", 1, bytes.length,
+                ToolPublicationContract.sha256(bytes), Base64.getEncoder().encodeToString(bytes));
     }
 
     @Test

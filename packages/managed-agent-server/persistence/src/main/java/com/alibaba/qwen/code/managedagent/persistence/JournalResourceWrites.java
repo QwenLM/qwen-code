@@ -134,22 +134,20 @@ final class JournalResourceWrites {
         if (bytes.length != request.byteLength() || !JournalStoreRows.sha256(bytes).equals(request.digest())) {
             throw JournalStoreRows.invalid("Tool result bytes do not match their length or digest.");
         }
-        fencing.lockPlacementBounded(tenantId);
-        // Tool-result publication lane: keeps the tenant CAS row before the
-        // Session root the CSI check locks and before the head row, the
-        // order retention reads take (CAS row, root, head) and the same as
-        // before #13800 decoupled ordinary traffic.
-        JournalFencing.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
-                JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-        // After both bounded waits, so the CSI check's read does not pin this
-        // transaction's snapshot ahead of them.
+        // Ordinary inline publication queues on its Session, like commit;
+        // lifecycle authority and CSI continuation retain their tenant guards.
+        Boolean rootPin = fencing.lockSessionFirst(tenantId, sessionId);
         fencing.requirePlacement(tenantId, request.workspaceId(), sessionId, writerToken, request.writerId(), false);
-        var continuation = fencing.lockCsiContinuation(tenantId, sessionId);
+        var continuation = fencing.lockCsiContinuation(tenantId, sessionId, rootPin);
         var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
         }
-        fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
+        if (authority == null && csiOriginal == null) {
+            fencing.requireSessionStorageOpenForAdmission(tenantId, request.workspaceId(), sessionId);
+        } else {
+            fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
+        }
         JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         // Unlike the other writer paths, a v2 claim fences this lane even
@@ -161,31 +159,43 @@ final class JournalResourceWrites {
         fencing.requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, now, true);
         fencing.requireInstalledCsiWriter(csiOriginal);
         String scopeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        JournalStoreRows.ResourceRow existing = storeRows.findResource(scopeKey, request.resourceId());
+        JournalStoreRows.ResourceRow existing = storeRows.findResource(scopeKey, request.resourceId(), false);
+        if (existing != null) {
+            existing = storeRows.findResource(scopeKey, request.resourceId());
+        }
         fencing.requireCsiWriterCurrent(
                 continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         if (existing == null) {
-            jdbc.update(
-                    "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
-                        + " workspace_id, session_id, resource_id, kind, schema_version,"
-                        + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
-                        + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                        + " ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scopeKey, request.resourceId()),
-                    scopeKey,
-                    tenantId,
-                    request.workspaceId(),
-                    sessionId,
-                    request.resourceId(),
-                    request.kind(),
-                    request.schemaVersion(),
-                    request.byteLength(),
-                    request.digest(),
-                    bytes,
-                    request.resourceId(),
-                    now.getTime(),
-                    now.getTime());
-        } else {
+            try {
+                jdbc.update(
+                        "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+                            + " workspace_id, session_id, resource_id, kind, schema_version,"
+                            + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
+                            + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
+                            + " ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
+                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scopeKey, request.resourceId()),
+                        scopeKey,
+                        tenantId,
+                        request.workspaceId(),
+                        sessionId,
+                        request.resourceId(),
+                        request.kind(),
+                        request.schemaVersion(),
+                        request.byteLength(),
+                        request.digest(),
+                        bytes,
+                        request.resourceId(),
+                        now.getTime(),
+                        now.getTime());
+            } catch (DuplicateKeyException race) {
+                existing = storeRows.findResource(scopeKey, request.resourceId());
+                if (existing == null) {
+                    throw JournalStoreRows.conflict("managed_session_resource_conflict",
+                            "A resourceId was reused with different content metadata.");
+                }
+            }
+        }
+        if (existing != null) {
             JournalStoreRows.requireResourceScope(existing, tenantId, request.workspaceId(), sessionId, request.resourceId());
             storeRows.verifyStoredResource(existing);
             if (!request.kind().equals(existing.kind()) || request.schemaVersion() != existing.schemaVersion()
