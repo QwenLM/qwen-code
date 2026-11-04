@@ -74,6 +74,7 @@ import {
   afterAll,
   type Mock,
 } from 'vitest';
+import * as mcpApproval from './hooks/useMcpApproval.js';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -563,6 +564,9 @@ describe('AppContainer State Management', () => {
     });
     mockedUseLlmStream.mockReturnValue({
       streamingState: 'idle',
+      pendingToolCalls: [],
+      turnCancellationRevision: 0,
+      turnHasError: false,
       submitQuery: vi.fn(),
       initError: null,
       pendingHistoryItems: [],
@@ -779,6 +783,233 @@ describe('AppContainer State Management', () => {
       await expect(agentTool!.refreshSubagents()).resolves.toBeUndefined();
     } finally {
       await mockConfig.shutdown();
+    }
+  });
+
+  function captureProgramStatus() {
+    for (const key of [
+      'TERM_PROGRAM',
+      'TERM',
+      'TMUX',
+      'STY',
+      'KITTY_WINDOW_ID',
+    ])
+      vi.stubEnv(key, '');
+    const write = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    return {
+      write,
+      reports: () =>
+        write.mock.calls
+          .map((call) => String(call[0]))
+          .filter((value) => value.startsWith('\x1b]7501;')),
+    };
+  }
+
+  it.each([
+    [
+      'question tool',
+      'waiting_for_confirmation',
+      true,
+      false,
+      false,
+      'question',
+    ],
+    [
+      'auth dialog over question tool',
+      'waiting_for_confirmation',
+      true,
+      true,
+      false,
+      'auth',
+    ],
+    ['browser authentication wait', 'responding', false, false, true, 'auth'],
+    [
+      'tool permission',
+      'waiting_for_confirmation',
+      false,
+      false,
+      false,
+      'permission',
+    ],
+  ] as const)(
+    'reports the correct blocked kind for %s',
+    async (_name, state, question, authDialog, authenticating, kind) => {
+      const stream = mockedUseLlmStream.getMockImplementation()!();
+      mockedUseLlmStream.mockReturnValue({
+        ...stream,
+        streamingState: state,
+        pendingToolCalls: question
+          ? [
+              {
+                status: 'awaiting_approval',
+                request: {
+                  callId: 'question-1',
+                  name: 'ask_user_question',
+                  args: {},
+                  isClientInitiated: false,
+                  prompt_id: 'question-prompt',
+                },
+                confirmationDetails: {
+                  type: 'ask_user_question',
+                  title: 'Question',
+                  questions: [],
+                  onConfirm: vi.fn(),
+                },
+              },
+            ]
+          : [],
+      });
+      const auth = mockedUseAuthCommand.getMockImplementation()!();
+      mockedUseAuthCommand.mockReturnValue({
+        ...auth,
+        state: {
+          ...auth.state,
+          isAuthDialogOpen: authDialog,
+          isAuthenticating: authenticating,
+        },
+      });
+      const { write, reports } = captureProgramStatus();
+      const harness = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      try {
+        await act(async () => {});
+        expect(reports().at(-1)).toBe(
+          `\x1b]7501;state=blocked:kind=${kind}:app=qwen-code\x07`,
+        );
+      } finally {
+        harness.unmount();
+        write.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    'MCP approval',
+    'folder trust',
+    'shell confirmation',
+    'confirmation',
+    'loop detection',
+    'trust dialog',
+  ] as const)('reports idle %s as blocked permission', async (source) => {
+    const stream = mockedUseLlmStream.getMockImplementation()!();
+    mockedUseLlmStream.mockReturnValue({
+      ...stream,
+      streamingState: 'idle',
+      loopDetectionConfirmationRequest:
+        source === 'loop detection'
+          ? { prompt: 'Continue?', onConfirm: vi.fn() }
+          : undefined,
+    });
+    const slash = mockedUseSlashCommandProcessor.getMockImplementation()!();
+    mockedUseSlashCommandProcessor.mockReturnValue({
+      ...slash,
+      shellConfirmationRequest:
+        source === 'shell confirmation'
+          ? { command: 'echo test', onConfirm: vi.fn() }
+          : null,
+      confirmationRequest:
+        source === 'confirmation'
+          ? { prompt: 'Continue?', onConfirm: vi.fn() }
+          : null,
+    });
+    if (source === 'folder trust')
+      mockedUseFolderTrust.mockReturnValue({
+        isFolderTrustDialogOpen: true,
+        handleFolderTrustSelect: vi.fn(),
+        isRestarting: false,
+      });
+    const mcp = vi.spyOn(mcpApproval, 'useMcpApproval').mockReturnValue({
+      isMcpApprovalDialogOpen: source === 'MCP approval',
+      currentMcpApproval: {
+        name: 'test',
+        config: { command: 'test' },
+        summary: 'test',
+        source: '.mcp.json',
+      },
+      pendingMcpApprovals: [],
+      mcpApprovalRemaining: 0,
+      handleMcpApprovalSelect: vi.fn(),
+    });
+    const { write, reports } = captureProgramStatus();
+    const harness = render(
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    try {
+      await act(async () => {});
+      if (source === 'trust dialog')
+        await act(async () => {
+          mockedUseSlashCommandProcessor.mock.calls
+            .at(-1)![12]
+            .openTrustDialog();
+        });
+      expect(reports().at(-1)).toBe(
+        '\x1b]7501;state=blocked:kind=permission:app=qwen-code\x07',
+      );
+    } finally {
+      harness.unmount();
+      write.mockRestore();
+      mcp.mockRestore();
+    }
+  });
+
+  it('reports feedback input as blocked and restores the completed turn', async () => {
+    const { write, reports } = captureProgramStatus();
+    const tree = () => (
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />
+    );
+    const harness = render(tree());
+    try {
+      await act(async () => {});
+      const stream = mockedUseLlmStream.mock.results.at(-1)!.value;
+      mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
+        ...stream,
+        streamingState: 'responding',
+      });
+      harness.rerender(tree());
+      await act(async () => {});
+      mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+        ...stream,
+        streamingState: 'idle',
+      });
+      harness.rerender(tree());
+      await act(async () => {});
+      expect(reports().at(-1)).toBe('\x1b]7501;state=done:app=qwen-code\x07');
+      await act(async () => {
+        capturedUIActions.openFeedbackDialog();
+      });
+      expect(reports().at(-1)).toBe(
+        '\x1b]7501;state=blocked:kind=question:app=qwen-code\x07',
+      );
+      await act(async () => {
+        capturedUIActions.closeFeedbackDialog();
+      });
+      expect(reports().at(-1)).toBe('\x1b]7501;state=done:app=qwen-code\x07');
+    } finally {
+      harness.unmount();
+      write.mockRestore();
     }
   });
 
@@ -1464,6 +1695,10 @@ describe('AppContainer State Management', () => {
       });
       const requestShutdown = vi.fn();
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: StreamingState.Responding,
         submitQuery: vi.fn(),
         initError: null,
@@ -1942,6 +2177,10 @@ describe('AppContainer State Management', () => {
         confirmationRequest: null,
       });
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'responding',
         submitQuery,
         initError: null,
@@ -2614,6 +2853,10 @@ describe('AppContainer State Management', () => {
         drainQueue: vi.fn().mockReturnValue([]),
       });
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'idle',
         submitQuery,
         initError: null,
@@ -3269,6 +3512,10 @@ describe('AppContainer State Management', () => {
     it('drains a queued submission through a rendered AppContainer (#10430)', async () => {
       const submitQuery = vi.fn().mockResolvedValue(undefined);
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: StreamingState.Idle,
         submitQuery,
         initError: null,
@@ -3355,6 +3602,10 @@ describe('AppContainer State Management', () => {
       const mockSubmitQuery = vi.fn();
 
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'responding',
         submitQuery: mockSubmitQuery,
         initError: null,
@@ -3413,6 +3664,10 @@ describe('AppContainer State Management', () => {
       const mockSubmitQuery = vi.fn();
 
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'responding',
         submitQuery: mockSubmitQuery,
         initError: null,
@@ -3465,6 +3720,10 @@ describe('AppContainer State Management', () => {
       const mockQueueMessage = vi.fn();
 
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'responding',
         submitQuery: mockSubmitQuery,
         initError: null,
@@ -3516,6 +3775,10 @@ describe('AppContainer State Management', () => {
       const mockQueueMessage = vi.fn();
 
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'responding',
         submitQuery: mockSubmitQuery,
         initError: null,
@@ -3632,6 +3895,10 @@ describe('AppContainer State Management', () => {
       const mockQueueMessage = vi.fn();
 
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'idle',
         submitQuery: mockSubmitQuery,
         initError: null,
@@ -3681,6 +3948,10 @@ describe('AppContainer State Management', () => {
         .mockReturnValueOnce('Use list_agents to inspect restored agents.')
         .mockReturnValue(null);
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -3759,6 +4030,10 @@ describe('AppContainer State Management', () => {
           }),
         } as unknown as ReturnType<Config['getToolRegistry']>);
         mockedUseLlmStream.mockReturnValue({
+          pendingToolCalls: [],
+          turnCancellationRevision: 0,
+          turnHasError: false,
+
           streamingState: 'idle',
           submitQuery: vi.fn(),
           initError: null,
@@ -4092,6 +4367,10 @@ describe('AppContainer State Management', () => {
         .spyOn(mockConfig, 'consumePendingRecoveredAgentsNotice')
         .mockReturnValue('Use list_agents to inspect restored agents.');
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -4166,6 +4445,10 @@ describe('AppContainer State Management', () => {
         .spyOn(mockConfig, 'consumePendingStartupWorktreeNotice')
         .mockReturnValue('The resumed session ran in worktree /tmp/wt-1.');
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -4904,6 +5187,10 @@ describe('AppContainer State Management', () => {
           confirmationRequest: null,
         });
         mockedUseLlmStream.mockReturnValue({
+          pendingToolCalls: [],
+          turnCancellationRevision: 0,
+          turnHasError: false,
+
           streamingState: StreamingState.Responding,
           submitQuery: vi.fn(),
           initError: null,
@@ -5003,6 +5290,9 @@ describe('AppContainer State Management', () => {
           capturedOnCancelSubmit = candidate as CapturedCancelSubmit;
         }
         return {
+          pendingToolCalls: [],
+          turnCancellationRevision: 0,
+          turnHasError: false,
           ...streamReturnValue,
           streamingResponseLengthRef: { current: 0 },
           isReceivingContent: false,
@@ -7020,6 +7310,10 @@ describe('AppContainer State Management', () => {
       // Mock the streaming state and thought
       const thoughtSubject = 'Processing request';
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -7068,6 +7362,10 @@ describe('AppContainer State Management', () => {
 
       // Mock the streaming state as Idle with no thought
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -7115,6 +7413,10 @@ describe('AppContainer State Management', () => {
       // Mock the streaming state and thought
       const thoughtSubject = 'Confirm tool execution';
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: StreamingState.WaitingForConfirmation,
         submitQuery: vi.fn(),
         initError: null,
@@ -7164,6 +7466,10 @@ describe('AppContainer State Management', () => {
       // Mock the streaming state and thought with a short subject
       const shortTitle = 'Short';
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -7218,6 +7524,10 @@ describe('AppContainer State Management', () => {
       // Mock the streaming state and thought
       const title = 'Test Title';
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -7269,6 +7579,10 @@ describe('AppContainer State Management', () => {
 
       // Mock the streaming state as Idle with no thought
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -7337,6 +7651,10 @@ describe('AppContainer State Management', () => {
       >);
 
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -7437,6 +7755,10 @@ describe('AppContainer State Management', () => {
       >);
 
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -7565,6 +7887,10 @@ describe('AppContainer State Management', () => {
       mockedMeasureElement.mockReturnValue({ width: 80, height: 10 }); // Footer is taller than the screen
 
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -8363,6 +8689,10 @@ describe('AppContainer State Management', () => {
     it('should cancel ongoing request on first Ctrl+C', () => {
       const mockCancelOngoingRequest = vi.fn();
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -8441,6 +8771,9 @@ describe('AppContainer State Management', () => {
         promoteAbortController: promoteAc,
       };
       mockedUseLlmStream.mockReturnValue({
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -8498,6 +8831,9 @@ describe('AppContainer State Management', () => {
       const abortSpy1 = vi.spyOn(promoteAc1, 'abort');
       const abortSpy2 = vi.spyOn(promoteAc2, 'abort');
       mockedUseLlmStream.mockReturnValue({
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -8558,6 +8894,9 @@ describe('AppContainer State Management', () => {
       // pending tool calls must NOT throw — falls through to the input
       // layer's own Ctrl+B (cursor-left).
       mockedUseLlmStream.mockReturnValue({
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -8619,6 +8958,9 @@ describe('AppContainer State Management', () => {
         promoteAbortController: fakeNonShellAc,
       };
       mockedUseLlmStream.mockReturnValue({
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -8682,6 +9024,9 @@ describe('AppContainer State Management', () => {
 
     it('Ctrl+O flips the full-detail state that expands thoughts and tool output', () => {
       mockedUseLlmStream.mockReturnValue({
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -9682,6 +10027,10 @@ describe('AppContainer State Management', () => {
         truncateToItem: vi.fn(),
       });
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -9726,6 +10075,10 @@ describe('AppContainer State Management', () => {
         truncateToItem: vi.fn(),
       });
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
+        turnCancellationRevision: 0,
+        turnHasError: false,
+
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,

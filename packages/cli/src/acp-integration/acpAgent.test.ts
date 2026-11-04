@@ -1539,6 +1539,28 @@ describe('runAcpAgent shutdown cleanup', () => {
     expect(ndJsonStream).not.toHaveBeenCalled();
   });
 
+  it('keeps ACP startup stdout free of program status even on a TTY', async () => {
+    const tty = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+    Object.defineProperty(process.stdout, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    const write = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    try {
+      const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+      await vi.waitFor(() => expect(ndJsonStream).toHaveBeenCalledOnce());
+      mockConnectionState.resolve();
+      await agentPromise;
+      expect(
+        write.mock.calls.map((call) => String(call[0])).join(''),
+      ).not.toContain('\x1b]7501;');
+    } finally {
+      write.mockRestore();
+      if (tty) Object.defineProperty(process.stdout, 'isTTY', tty);
+      else Reflect.deleteProperty(process.stdout, 'isTTY');
+    }
+  });
+
   it('starts telemetry only after a matching successful initialize response is sent', async () => {
     const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
     await vi.waitFor(() => expect(ndJsonStream).toHaveBeenCalledOnce());

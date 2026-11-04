@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { appEvents, AppEvent } from '../../../utils/events.js';
 import { EOL } from 'node:os';
 import { promises as fsp } from 'node:fs';
 import { Box } from 'ink';
@@ -775,6 +776,67 @@ describe('ToolConfirmationMessage', () => {
     const preferredEditorSettings = {
       merged: { general: { preferredEditor: 'vscode' } },
     } as unknown as LoadedSettings;
+
+    it.each([
+      ['vim', false],
+      ['vim', true],
+      ['vscode', false],
+    ] as const)(
+      'brackets modify confirmation for %s (reject=%s)',
+      async (editor, reject) => {
+        const events: string[] = [];
+        const release = () => events.push('release');
+        const acquire = () => events.push('acquire');
+        appEvents.on(AppEvent.TerminalReleased, release);
+        appEvents.on(AppEvent.TerminalAcquired, acquire);
+        let finish!: () => void;
+        const pending = new Promise<void>((resolve, rejectPromise) => {
+          finish = () =>
+            reject ? rejectPromise(new Error('Editor failed')) : resolve();
+        });
+        const onConfirm = vi.fn(() => {
+          events.push('confirm');
+          return pending;
+        });
+        const { stdin, unmount } = renderWithProviders(
+          <ToolConfirmationMessage
+            confirmationDetails={{ ...editConfirmationDetails, onConfirm }}
+            config={mockConfig}
+            availableTerminalHeight={30}
+            contentWidth={80}
+          />,
+          {
+            settings: {
+              merged: { general: { preferredEditor: editor } },
+            } as unknown as LoadedSettings,
+          },
+        );
+        try {
+          stdin.write('3');
+          await vi.waitFor(() =>
+            expect(onConfirm).toHaveBeenCalledWith(
+              ToolConfirmationOutcome.ModifyWithEditor,
+            ),
+          );
+          expect(events).toEqual(
+            editor === 'vim' ? ['release', 'confirm'] : ['confirm'],
+          );
+          finish();
+          await vi.waitFor(() =>
+            expect(events).toEqual(
+              editor === 'vim'
+                ? ['release', 'confirm', 'acquire']
+                : ['confirm'],
+            ),
+          );
+        } finally {
+          finish();
+          unmount();
+          appEvents.removeListener(AppEvent.TerminalReleased, release);
+          appEvents.removeListener(AppEvent.TerminalAcquired, acquire);
+        }
+      },
+    );
 
     it('should show "Modify with external editor" when preferredEditor is set', () => {
       const mockConfig = {

@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isTerminalEditor } from '@qwen-code/qwen-code-core/utils/editor.js';
+import { isTerminalEditorCommand } from '../../../utils/terminal-editor.js';
+import { appEvents, AppEvent } from '../../../utils/events.js';
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   createDebugLogger,
@@ -2645,13 +2648,29 @@ export function useTextBuffer({
 
   const openInExternalEditor = useCallback(
     async (opts: { editor?: string } = {}): Promise<void> => {
+      const terminalEditor =
+        !opts.editor && preferredEditor
+          ? isTerminalEditor(preferredEditor)
+          : isTerminalEditorCommand(
+              opts.editor ??
+                process.env['VISUAL'] ??
+                process.env['EDITOR'] ??
+                (process.platform === 'win32' ? 'notepad' : 'vi'),
+            );
+      let terminalReleased = false;
       const wasRaw = stdin?.isRaw ?? false;
       try {
         const currentText = stateRef.current.lines.join('\n');
         const newText = editTextInExternalEditor(currentText, {
           editor: opts.editor,
           preferredEditor,
-          beforeLaunch: () => setRawMode?.(false),
+          beforeLaunch: () => {
+            if (terminalEditor) {
+              appEvents.emit(AppEvent.TerminalReleased);
+              terminalReleased = true;
+            }
+            setRawMode?.(false);
+          },
         });
         if (newText !== currentText) {
           dispatch({ type: 'create_undo_snapshot' });
@@ -2668,6 +2687,7 @@ export function useTextBuffer({
             rawErr,
           );
         }
+        if (terminalReleased) appEvents.emit(AppEvent.TerminalAcquired);
       }
     },
     [dispatch, stdin, setRawMode, preferredEditor],

@@ -5,7 +5,15 @@
  */
 // @vitest-environment jsdom
 
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 
 const { mockSpawnSync, mockGetExternalEditorCommand } = vi.hoisted(() => ({
@@ -60,6 +68,7 @@ vi.mock('@qwen-code/qwen-code-core/utils/editor.js', async (importOriginal) => {
 
 import fs from 'node:fs';
 import pathMod from 'node:path';
+import { appEvents, AppEvent } from '../../../utils/events.js';
 import { useTextBuffer } from './text-buffer.js';
 
 const viewport = { height: 5, width: 40 };
@@ -68,6 +77,8 @@ const expectedTmpFile = pathMod.join('/tmp/qwen-edit-mock', 'buffer.txt');
 describe('openInExternalEditor', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.stubEnv('VISUAL', undefined);
+    vi.stubEnv('EDITOR', 'vim');
     (fs.mkdtempSync as Mock).mockReturnValue('/tmp/qwen-edit-mock');
     (fs.writeFileSync as Mock).mockImplementation(() => {});
     (fs.readFileSync as Mock).mockReturnValue('edited text');
@@ -75,6 +86,135 @@ describe('openInExternalEditor', () => {
     mockSpawnSync.mockReturnValue({ status: 0, error: null });
     mockGetExternalEditorCommand.mockReturnValue(null);
   });
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.each([
+    ['vim', 0],
+    ['vim', 1],
+    ['kak', 0],
+    ['nvim.cmd', 0],
+  ] as const)(
+    'releases the terminal for %s and reacquires after status %s',
+    async (editor, status) => {
+      vi.stubEnv('EDITOR', editor);
+      const events: string[] = [];
+      const release = () => events.push('release');
+      const acquire = () => events.push('acquire');
+      appEvents.on(AppEvent.TerminalReleased, release);
+      appEvents.on(AppEvent.TerminalAcquired, acquire);
+      mockSpawnSync.mockImplementation(() => {
+        events.push('spawn');
+        return { status, error: null };
+      });
+      try {
+        const { result } = renderHook(() =>
+          useTextBuffer({
+            initialText: 'hello',
+            viewport,
+            isValidPath: () => false,
+          }),
+        );
+        await act(async () => {
+          await result.current.openInExternalEditor();
+        });
+        expect(events).toEqual(['release', 'spawn', 'acquire']);
+      } finally {
+        appEvents.removeListener(AppEvent.TerminalReleased, release);
+        appEvents.removeListener(AppEvent.TerminalAcquired, acquire);
+      }
+    },
+  );
+
+  it.each(['preferred GUI', 'opts GUI', 'opts terminal'] as const)(
+    'keeps handoff classification before Windows quoting for %s',
+    async (scenario) => {
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      Object.defineProperty(process, 'platform', {
+        value: 'win32',
+        configurable: true,
+      });
+      const events: string[] = [];
+      const release = () => events.push('release');
+      const acquire = () => events.push('acquire');
+      appEvents.on(AppEvent.TerminalReleased, release);
+      appEvents.on(AppEvent.TerminalAcquired, acquire);
+      const command = scenario === 'opts terminal' ? 'nvim.cmd' : 'code.cmd';
+      mockGetExternalEditorCommand.mockReturnValue({
+        command,
+        args: [expectedTmpFile],
+        needsShell: true,
+      });
+      mockSpawnSync.mockImplementation(() => {
+        events.push('spawn');
+        return { status: 0, error: null };
+      });
+      try {
+        const { result } = renderHook(() =>
+          useTextBuffer({
+            initialText: 'hello',
+            viewport,
+            isValidPath: () => false,
+            preferredEditor:
+              scenario === 'preferred GUI' ? 'vscode' : undefined,
+          }),
+        );
+        await act(async () => {
+          await result.current.openInExternalEditor(
+            scenario === 'preferred GUI' ? {} : { editor: command },
+          );
+        });
+        expect(mockSpawnSync.mock.calls[0]?.[0]).toBe(`"${command}"`);
+        expect(mockSpawnSync.mock.calls[0]?.[2]).toEqual(
+          expect.objectContaining({ shell: true }),
+        );
+        expect(events).toEqual(
+          scenario === 'opts terminal'
+            ? ['release', 'spawn', 'acquire']
+            : ['spawn'],
+        );
+      } finally {
+        appEvents.removeListener(AppEvent.TerminalReleased, release);
+        appEvents.removeListener(AppEvent.TerminalAcquired, acquire);
+        Object.defineProperty(process, 'platform', platform);
+      }
+    },
+  );
+
+  it.each(['write failure', 'GUI editor'])(
+    'does not publish a terminal handoff for %s',
+    async (scenario) => {
+      const events: string[] = [];
+      const release = () => events.push('release');
+      const acquire = () => events.push('acquire');
+      appEvents.on(AppEvent.TerminalReleased, release);
+      appEvents.on(AppEvent.TerminalAcquired, acquire);
+      if (scenario === 'write failure')
+        (fs.writeFileSync as Mock).mockImplementation(() => {
+          throw new Error('ENOSPC');
+        });
+      try {
+        const { result } = renderHook(() =>
+          useTextBuffer({
+            initialText: 'hello',
+            viewport,
+            isValidPath: () => false,
+          }),
+        );
+        await act(async () => {
+          await result.current.openInExternalEditor(
+            scenario === 'GUI editor' ? { editor: 'code' } : {},
+          );
+        });
+        expect(events).toEqual([]);
+        if (scenario === 'write failure')
+          expect(mockSpawnSync).not.toHaveBeenCalled();
+      } finally {
+        appEvents.removeListener(AppEvent.TerminalReleased, release);
+        appEvents.removeListener(AppEvent.TerminalAcquired, acquire);
+      }
+    },
+  );
 
   it('should create temp file in private mkdtemp directory', async () => {
     const { result } = renderHook(() =>
