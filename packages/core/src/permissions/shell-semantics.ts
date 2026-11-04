@@ -2685,11 +2685,82 @@ function nestedAmendPayloads(tokens: string[]): {
 /**
  * Decode the escapes an ANSI-C word (`$'…'`) applies, so a payload hidden
  * behind `\n` is analysed as the two commands bash runs.
+ *
+ * Bash flattens an escape it does not know to its bare letter only for the
+ * four in `ANSI_C_SIMPLE`; every other spelling keeps the backslash. Mapping
+ * `\x3b` to `x` produced a word bash never runs (`--amendx3btrue`) while bash
+ * ran `--amend; true`, so the numeric forms are decoded for real.
  */
+const ANSI_C_SIMPLE: Record<string, string> = {
+  a: '\x07',
+  b: '\b',
+  e: '\x1b',
+  E: '\x1b',
+  f: '\f',
+  n: '\n',
+  r: '\r',
+  t: '\t',
+  v: '\v',
+  '\\': '\\',
+  "'": "'",
+  '"': '"',
+  '?': '?',
+};
+
 function decodeAnsiCWord(body: string): string {
-  return body.replace(/\\(.)/g, (_match, char: string) =>
-    char === 'n' ? '\n' : char === 't' ? '\t' : char === 'r' ? '\r' : char,
-  );
+  let out = '';
+  for (let index = 0; index < body.length; index++) {
+    const char = body[index]!;
+    if (char !== '\\' || index + 1 >= body.length) {
+      out += char;
+      continue;
+    }
+    const next = body[index + 1]!;
+    const simple = ANSI_C_SIMPLE[next];
+    if (simple !== undefined) {
+      out += simple;
+      index++;
+      continue;
+    }
+    if (next === 'x' || next === 'u' || next === 'U') {
+      const max = next === 'x' ? 2 : next === 'u' ? 4 : 8;
+      const digits = new RegExp(`^[0-9a-fA-F]{1,${max}}`).exec(
+        body.slice(index + 2),
+      )?.[0];
+      if (digits) {
+        const code = parseInt(digits, 16);
+        out +=
+          next === 'x' ? String.fromCharCode(code) : String.fromCodePoint(code);
+        index += 1 + digits.length;
+        continue;
+      }
+    }
+    if (next === 'c' && index + 2 < body.length) {
+      out += String.fromCharCode(
+        body[index + 2]!.toUpperCase().charCodeAt(0) & 0x1f,
+      );
+      index += 2;
+      continue;
+    }
+    if (next >= '0' && next <= '7') {
+      const digits = /^[0-7]{1,3}/.exec(body.slice(index + 1))![0];
+      out += String.fromCharCode(parseInt(digits, 8) & 0xff);
+      index += digits.length;
+      continue;
+    }
+    // Unknown escape: bash keeps the backslash and the letter.
+    out += char;
+  }
+  return out;
+}
+
+/**
+ * Decode a payload that is exactly one ANSI-C word (`$'…'`), which is how a
+ * wrapper hands its program over (`bash -c $'…'`, `eval $'…'`).
+ */
+function decodeBareAnsiCWord(text: string): string {
+  const ansiC = /^\$'([\s\S]*)'$/.exec(text.trim());
+  return ansiC ? decodeAnsiCWord(ansiC[1]!) : text;
 }
 
 /**
@@ -2737,9 +2808,8 @@ function tokensContainGitAmend(segment: string, depth: number): boolean {
   if (unwrapped !== segment) {
     // Unwrapping `bash -c` leaves a quoted payload as written, so `$'…'` keeps
     // its introducer and escapes; decode it before scanning the program.
-    const ansiC = /^\$'([\s\S]*)'$/.exec(unwrapped.trim());
     return commandContainsGitAmendAtDepth(
-      ansiC ? decodeAnsiCWord(ansiC[1]!) : unwrapped,
+      decodeBareAnsiCWord(unwrapped),
       depth + 1,
     );
   }

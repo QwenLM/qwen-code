@@ -264,6 +264,13 @@ describe('isDestructiveCommand — git commit --amend', () => {
     // ANSI-C decoding turns `\n` into a real command boundary, so the amend is
     // a second command rather than text inside one word (#16075 review, R3-2).
     "bash -c $'git commit --amend\\ntrue'",
+    // Escapes outside the `\n \t \r \\` shim decode to the bytes bash runs, so
+    // `\x3b` / `\073` / `\u003b` are command boundaries, not letters
+    // (#16075 review, R3-1).
+    "bash -c $'git commit --amend\\x3btrue'",
+    "sh -c $'git commit --amend\\x3btrue'",
+    "bash -c $'git commit --amend\\073true'",
+    "bash -c $'git commit --amend\\u003btrue'",
     // More unmodelled executors/consumers (#16075 review, R1-1): `script -c`
     // runs a program, `exec` prefixes the real shell, `fish` reads stdin, and
     // `su` carries a positional user before its `-c` payload.
