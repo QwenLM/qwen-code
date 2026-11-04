@@ -3311,6 +3311,42 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
     ]);
   });
 
+  it('lets the hooks hear a queued paste expanded and frames its rewrite again', async () => {
+    const { submitPrompt, answer } = installHooks();
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'C:\\Users\\me\\.aws\\credentials '.repeat(40).trim();
+    const pastes = new Map([[placeholder, body]]);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('first');
+    });
+    await answer({ text: 'first' });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    act(() => {
+      result.current.submit(
+        framePasteExpansion(`check ${placeholder}`, pastes),
+        undefined,
+        {
+          submittedPrompt: `check ${placeholder}`,
+          displayText: `check ${placeholder}`,
+          pasteExpansions: pastes,
+        },
+      );
+    });
+    await act(async () => live.waiters.shift()?.());
+    await vi.waitFor(() => expect(submitPrompt).toHaveBeenCalledTimes(2));
+    const heard = submitPrompt.mock.calls[1][0];
+    expect(heard).toBe(`check ${body}`);
+    expect(heard).not.toContain('<clipboard-paste>');
+    await answer({ text: `please check ${body}` });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(2));
+    expect(live.turns[1].prompt).toBe(
+      framePasteExpansion(`please check ${placeholder}`, pastes),
+    );
+  });
+
   it('does not hear slash-form text or generated prompts', async () => {
     const { submitPrompt } = installHooks();
     const { result } = renderHook(() =>

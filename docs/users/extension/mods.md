@@ -165,12 +165,14 @@ rejected.
 
 Claude Code 2.1.316 also defines events that Qwen Code does not run yet, such as
 `prompt.fill` or `classic.Stop`. `ui.render` runs only where a host draws it. A registration for one of them,
-or for a prefix such as `prompt.*` that matches none of the events above, loads
+or for a prefix such as `classic.*` that matches none of the events above, loads
 but never runs, so the rest of the Mod keeps working. At startup each plugin
 reports its skipped patterns once, where transcript logs appear:
 `Hooks for unsupported events will not run: prompt.fill, ui.render`. A skipped
 hook never runs, including a guard and its `.catch`. Names that Claude Code does
-not define, such as `tool.calls`, still reject initialization.
+not define, such as `tool.calls`, still reject initialization. A prefix that
+covers a supported event, such as `prompt.*` or `*`, is not skipped: it hears
+that event.
 
 To refuse such a plugin instead, set its `unsupportedEvents` to `"reject"` in user
 or system settings. Initialization then fails if the plugin registers any skipped
@@ -699,8 +701,14 @@ In the Ink and OpenTUI terminals:
   again.
 - Esc while the hooks run cancels the prompt and hands it back the same way.
 - Slash commands, shell-mode commands, `/btw` questions and scheduled prompts
-  raise no `prompt.submit`. A `?btw` question is typed text, so the hooks hear
-  it; in OpenTUI it starts no turn, so context they attach to it is not used.
+  raise no `prompt.submit`. In OpenTUI, slash-form text sent with an attached
+  image goes to the model as a prompt, so the hooks hear it like any prompt.
+- A `?btw` question is typed text, so the hooks hear it. In OpenTUI it starts no
+  turn, so context they attach to it is not used, and a rewrite must keep the
+  same command: one that leaves `?`-form or names another command is refused
+  with an error line.
+- In OpenTUI, a prompt typed during a turn shows in the queued-messages strip
+  until it is sent; the hooks hear it then.
 - While a Mod hooks `prompt.submit`, a prompt typed during a turn is not sent
   into that turn when a tool finishes. It waits for the turn to end, and the
   hooks hear it when it is sent.

@@ -84,6 +84,11 @@ import {
 } from '../../services/interactive-mod-session.js';
 import { ensureConfigInitialized, nextLivePromptId } from './live-session.js';
 import { MessageSenderType } from '@qwen-code/qwen-code-core/core/logger.js';
+import {
+  collapsePastes,
+  expandPendingPastePlaceholders,
+  framePasteExpansion,
+} from '../utils/paste-placeholders.js';
 import { normalizeQuitSubmission } from './slash-gateway.js';
 import {
   createOpenTuiCommandContext,
@@ -183,8 +188,18 @@ export type OpenTuiDispatchOutcome =
   /** Typed input the Mods' prompt hooks kept out; the composer gets it back. */
   | { kind: 'refused' };
 
+/**
+ * What the composer showed for a submission whose text frames its pastes:
+ * the typed text with placeholders, and the pastes behind them.
+ */
+export interface TypedInput {
+  displayText?: string;
+  pasteExpansions?: ReadonlyMap<string, string>;
+}
+
 interface RunOptions {
   recordRecall?: boolean;
+  typed?: TypedInput;
   oneTimeShellAllowlist?: Set<string>;
   overwriteConfirmed?: boolean;
   existingInvocationItemId?: number;
@@ -215,8 +230,8 @@ const STARTUP_REGISTRY_POLL_MS = 100;
 
 const replayedExtensionRefresh = new WeakSet<ExtensionRefreshState>();
 
-const REWRITE_LEFT_QUESTION_FORM =
-  'A prompt.submit hook rewrote this ?-form input into text that is not ?-form, so it did not run.';
+const REWRITE_CHANGED_COMMAND =
+  'A prompt.submit hook rewrote this ?-form input into another command, so it did not run.';
 
 export class OpenTuiSlashDispatcher {
   private activeCommand: {
@@ -486,13 +501,16 @@ export class OpenTuiSlashDispatcher {
    * Entry point — parity of the top of `handleSlashCommand`: returns `false`
    * when the input is not a slash command at all.
    */
-  async handle(rawQuery: string): Promise<OpenTuiDispatchOutcome | false> {
+  async handle(
+    rawQuery: string,
+    typed?: TypedInput,
+  ): Promise<OpenTuiDispatchOutcome | false> {
     const trimmed = rawQuery.trim();
     if (!this.takesAsSlashCommand(trimmed)) {
       return false;
     }
     this.services.onInputProcessed?.();
-    return this.run(trimmed, { recordRecall: true });
+    return this.run(trimmed, { recordRecall: true, typed });
   }
 
   private addMessage(message: Message): void {
@@ -511,6 +529,7 @@ export class OpenTuiSlashDispatcher {
   private async hearPrompt(
     text: string,
     signal: AbortSignal,
+    typed?: TypedInput,
   ): Promise<{ text: string } | { refused: string }> {
     const mods = this.services.config
       ? getInteractiveModSession(this.services.config)
@@ -531,15 +550,46 @@ export class OpenTuiSlashDispatcher {
       }
     }
     if (!mods.hearsPrompts) return { text };
-    const submitted = await mods.submitPrompt(text, signal);
+    // The hooks hear what the person typed, with pastes expanded, not the
+    // text the composer framed them in.
+    const pastes = typed?.pasteExpansions;
+    const framed =
+      pastes?.size &&
+      typed?.displayText !== undefined &&
+      framePasteExpansion(typed.displayText, pastes) === text
+        ? pastes
+        : undefined;
+    const heard = framed
+      ? expandPendingPastePlaceholders(typed!.displayText!, framed)
+      : text;
+    const submitted = await mods.submitPrompt(heard, signal);
     if ('drop' in submitted) return { refused: submitted.drop };
     // The text runs as typed or rewritten; it starts no turn of its own, so
-    // there is no first send for the hooks' context to ride. A rewrite stays
-    // `?`-form, or it would run a command the person never typed.
+    // there is no first send for the hooks' context to ride.
     const rewritten = submitted.text.trim();
-    if (!rewritten.startsWith('?'))
-      return { refused: REWRITE_LEFT_QUESTION_FORM };
-    return { text: rewritten };
+    if (rewritten === heard.trim()) return { text };
+    // A rewrite keeps the command the person typed, or it would run one they
+    // never asked for.
+    if (!this.sameCommand(text, rewritten))
+      return { refused: REWRITE_CHANGED_COMMAND };
+    // A paste the rewrite kept whole stays framed.
+    const collapsed = collapsePastes(rewritten, framed);
+    return {
+      text: collapsed.pasteExpansions.size
+        ? framePasteExpansion(collapsed.text, collapsed.pasteExpansions)
+        : rewritten,
+    };
+  }
+
+  /** Whether two `?`-form texts run the same command. */
+  private sameCommand(typed: string, rewritten: string): boolean {
+    if (!rewritten.startsWith('?')) return false;
+    const before = parseSlashCommand(typed, this.commandList).canonicalPath;
+    const after = parseSlashCommand(rewritten, this.commandList).canonicalPath;
+    if (before.length > 0) return before.join(' ') === after.join(' ');
+    // Before the commands resolve, the command word itself must stay.
+    const word = (value: string) => value.slice(1).split(/\s+/, 1)[0];
+    return word(typed) === word(rewritten);
   }
 
   private async run(
@@ -573,7 +623,11 @@ export class OpenTuiSlashDispatcher {
     if (options.recordRecall && trimmed.startsWith('?')) {
       let heard: { text: string } | { refused: string };
       try {
-        heard = await this.hearPrompt(trimmed, abortController.signal);
+        heard = await this.hearPrompt(
+          trimmed,
+          abortController.signal,
+          options.typed,
+        );
       } catch (error) {
         releaseOwnership();
         if (abortController.signal.aborted) return { kind: 'refused' };

@@ -37,7 +37,9 @@ import {
   OpenTuiSlashDispatcher,
   shouldHideSlashCommandInvocation,
   type OpenTuiDispatchOutcome,
+  type TypedInput,
 } from './commands-dispatch.js';
+import { framePasteExpansion } from '../utils/paste-placeholders.js';
 import type { OpenTuiCommandHost } from './commands-context.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
 import { helpCommand } from '../commands/helpCommand.js';
@@ -539,6 +541,15 @@ describe('prompt.submit for ?-form input', () => {
     input: string,
     answer: (text: string) => { text: string } | { drop: string },
     mods: Record<string, unknown> = {},
+    {
+      commands = [],
+      typed,
+      started,
+    }: {
+      commands?: SlashCommand[];
+      typed?: TypedInput;
+      started?: (dispatcher: OpenTuiSlashDispatcher) => Promise<void>;
+    } = {},
   ) => {
     const submitPrompt = vi.fn(async (text: string) => answer(text));
     const owner = vi
@@ -565,10 +576,12 @@ describe('prompt.submit for ?-form input', () => {
           (typeof services)['logger']
         >,
       },
-      [stub({ name: 'btw', action })],
+      [stub({ name: 'btw', action }), ...commands],
     );
     try {
-      const outcome = await dispatcher.handle(input);
+      const pending = dispatcher.handle(input, typed);
+      await started?.(dispatcher);
+      const outcome = await pending;
       return { outcome, submitPrompt, action, logMessage, host };
     } finally {
       dispatcher.dispose();
@@ -623,7 +636,7 @@ describe('prompt.submit for ?-form input', () => {
     expect(host.items).toContainEqual(
       expect.objectContaining({
         type: 'error',
-        text: expect.stringContaining('not ?-form'),
+        text: expect.stringContaining('into another command'),
       }),
     );
   });
@@ -647,6 +660,145 @@ describe('prompt.submit for ?-form input', () => {
         text: interactiveMods.MODS_FAILED_TO_INITIALIZE,
       }),
     );
+  });
+
+  it('refuses a rewrite that names another ?-form command', async () => {
+    const clear = vi.fn();
+    const { outcome, action, logMessage, host } = await run(
+      '?btw what is prod',
+      () => ({ text: '?clear what is prod' }),
+      {},
+      { commands: [stub({ name: 'clear', action: clear })] },
+    );
+    expect(outcome).toEqual({ kind: 'refused' });
+    expect(action).not.toHaveBeenCalled();
+    expect(clear).not.toHaveBeenCalled();
+    expect(logMessage).not.toHaveBeenCalled();
+    expect(host.items).toContainEqual(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('into another command'),
+      }),
+    );
+  });
+
+  it('refuses a rewrite that changes the command word before commands resolve', async () => {
+    const { outcome, host } = await run('?unknownword what is prod', () => ({
+      text: '?otherword what is prod',
+    }));
+    expect(outcome).toEqual({ kind: 'refused' });
+    expect(host.items).toContainEqual(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('into another command'),
+      }),
+    );
+  });
+
+  describe('with a paste', () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'C:\\Users\\me\\.aws\\credentials '.repeat(40).trim();
+    const pastes = new Map([[placeholder, body]]);
+    const typed = {
+      displayText: `?btw why ${placeholder}`,
+      pasteExpansions: pastes,
+    };
+    const framed = framePasteExpansion(typed.displayText, pastes);
+
+    it('lets the hooks hear the paste expanded and runs the framed text', async () => {
+      const { outcome, submitPrompt, logMessage } = await run(
+        framed,
+        (text) => ({ text }),
+        {},
+        { typed },
+      );
+      expect(submitPrompt).toHaveBeenCalledExactlyOnceWith(
+        `?btw why ${body}`,
+        expect.any(AbortSignal),
+      );
+      expect(outcome).toEqual({ kind: 'handled' });
+      expect(logMessage).toHaveBeenCalledWith('user', framed);
+    });
+
+    it('runs the framed text as typed when the hooks pass it on unchanged', async () => {
+      // The same paste twice cannot be collapsed again from its text.
+      const twice = {
+        displayText: `?btw ${placeholder} vs ${placeholder}`,
+        pasteExpansions: pastes,
+      };
+      const framedTwice = framePasteExpansion(twice.displayText, pastes);
+      const { outcome, logMessage } = await run(
+        framedTwice,
+        (text) => ({ text: `${text}\n` }),
+        {},
+        { typed: twice },
+      );
+      expect(outcome).toEqual({ kind: 'handled' });
+      expect(logMessage).toHaveBeenCalledWith('user', framedTwice);
+    });
+
+    it('keeps a paste the rewrite kept whole framed', async () => {
+      const { outcome, logMessage } = await run(
+        framed,
+        (text) => ({ text: text.replace('?btw why', '?btw please explain') }),
+        {},
+        { typed },
+      );
+      expect(outcome).toEqual({ kind: 'handled' });
+      expect(logMessage).toHaveBeenCalledWith(
+        'user',
+        framePasteExpansion(`?btw please explain ${placeholder}`, pastes),
+      );
+    });
+  });
+
+  it('waits for Mods that are still loading before the hooks hear it', async () => {
+    let load!: () => void;
+    const ready = new Promise<void>((resolve) => (load = resolve));
+    const mods = { starting: true, hearsPrompts: false, ready };
+    let heard = 0;
+    const { outcome, submitPrompt, action, host } = await run(
+      '?btw is this key valid AKIA1',
+      () => {
+        heard++;
+        return { drop: 'Blocked: the prompt holds a key' };
+      },
+      mods,
+      {
+        started: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          expect(heard).toBe(0);
+          Object.assign(
+            interactiveMods.getInteractiveModSession(makeFakeConfig({}))!,
+            { starting: false, hearsPrompts: true },
+          );
+          load();
+        },
+      },
+    );
+    expect(submitPrompt).toHaveBeenCalledOnce();
+    expect(outcome).toEqual({ kind: 'refused' });
+    expect(action).not.toHaveBeenCalled();
+    expect(host.items).toContainEqual(
+      expect.objectContaining({ text: 'Blocked: the prompt holds a key' }),
+    );
+  });
+
+  it('refuses it on Esc while the Mods are still loading', async () => {
+    const { outcome, submitPrompt, action } = await run(
+      '?btw question',
+      (text) => ({ text }),
+      { starting: true, ready: new Promise(() => {}) },
+      {
+        started: async (dispatcher) => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          dispatcher.cancel();
+        },
+      },
+    );
+    expect(outcome).toEqual({ kind: 'refused' });
+    expect(submitPrompt).not.toHaveBeenCalled();
+    expect(action).not.toHaveBeenCalled();
   });
 
   it('leaves slash-form /btw to its own path', async () => {

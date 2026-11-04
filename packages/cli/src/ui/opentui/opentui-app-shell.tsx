@@ -1285,6 +1285,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             ...(blockedByRunningShell && !shellEntry
               ? { prompt: true, imagePaths, options }
               : {}),
+            // A `?`-form input keeps what the composer showed, so the hooks
+            // hear its pastes expanded and a refusal hands it back collapsed.
+            ...(!shellEntry && !blockedByRunningShell ? { options } : {}),
           });
           setDeferredRevision((revision) => revision + 1);
           notify(
@@ -1297,7 +1300,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         return false;
       const settlement = hasImages
         ? { kind: 'settled' as const, outcome: false as const }
-        : await gateway.dispatch(submission);
+        : await gateway.dispatch(submission, {
+            displayText: options?.displayText,
+            pasteExpansions: options?.pasteExpansions,
+          });
       if (settlement.kind === 'rejected') {
         notify(settlement.reason);
         return false;
@@ -1398,6 +1404,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       // A holdsUi pause re-queues the remainder for the turn/dialog it waits
       // for; re-arming here would drain it before that owner even starts.
       let paused = false;
+      // Refused `?`-form inputs go back to the composer together, in the
+      // order they were sent.
+      const refused: OpenTuiInputSubmission[] = [];
       try {
         for (const [i, entry] of pending.entries()) {
           if (isExitInProgress() || drainSessionId !== config.getSessionId())
@@ -1449,7 +1458,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             }
             return;
           }
-          const settlement = await gateway.dispatch(entry.text);
+          const settlement = await gateway.dispatch(entry.text, {
+            displayText: entry.options?.displayText,
+            pasteExpansions: entry.options?.pasteExpansions,
+          });
           if (settlement.kind === 'rejected') {
             notify(settlement.reason);
             continue;
@@ -1459,8 +1471,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           if (outcome.kind === 'refused') {
             // A queued `?`-form input the Mods refused, or one cancelled while
             // they heard it, has left the composer, so it goes back there.
-            if (props.composerHandle)
-              returnToComposer(props.composerHandle, { text: entry.text });
+            refused.push({
+              text: entry.text,
+              displayText: entry.options?.displayText,
+              pasteExpansions: entry.options?.pasteExpansions,
+              submittedPrompt: entry.options?.submittedPrompt,
+              humanInput: entry.options?.humanInput,
+              hasUnknownInput: entry.options?.hasUnknownInput,
+            });
             continue;
           }
           applyOutcome(outcome);
@@ -1478,6 +1496,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           }
         }
       } finally {
+        if (refused.length && props.composerHandle)
+          returnToComposer(
+            props.composerHandle,
+            restoreInputSubmissions(refused),
+          );
         drainingRef.current = false;
         // Entries that arrived mid-drain strand unless the completion re-arms
         // the drain (the queue is a ref; a push alone triggers nothing) — but
