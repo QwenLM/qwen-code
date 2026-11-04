@@ -1741,7 +1741,7 @@ describe('runNonInteractive', () => {
     mockCoreExecuteToolCall.mockImplementation(async () => {
       leaderMessageCallback?.('Teammate finished the delegated task.');
       return {
-        responseParts: [{ text: 'tool response' }],
+        responseParts: [{ text: 'Teammate finished the delegated task.' }],
       };
     });
     let requestCount = 0;
@@ -1789,7 +1789,7 @@ describe('runNonInteractive', () => {
 
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
     const firstOptions = mockLlmClient.sendMessageStream.mock.calls[0]![3];
-    const [, , secondPromptId, secondOptions] =
+    const [secondParts, , secondPromptId, secondOptions] =
       mockLlmClient.sendMessageStream.mock.calls[1]!;
     expect(secondPromptId).toBe('goal-teammate-handoff/teammate/2');
     expect(secondOptions).toMatchObject({
@@ -1798,6 +1798,12 @@ describe('runNonInteractive', () => {
       goalTurnKey: firstOptions.goalTurnKey,
       goalOrigin: 'runtime',
     });
+    expect(firstOptions.toolResultParts).toBeUndefined();
+    expect(secondOptions.toolResultParts).toHaveLength(1);
+    expect(secondOptions.toolResultParts?.[0]).toBe(secondParts[0]);
+    expect(secondParts[1]).toEqual(secondParts[0]);
+    expect(secondParts[1]).not.toBe(secondParts[0]);
+    expect(secondOptions.toolResultParts).not.toContain(secondParts[1]);
     expect(endInteractionSpanSpy).toHaveBeenCalledWith('ok', {
       promptId: 'goal-teammate-handoff',
     });

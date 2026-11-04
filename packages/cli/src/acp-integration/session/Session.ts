@@ -8402,6 +8402,9 @@ export class Session implements SessionContext {
                         nextMessage?.parts ?? [],
                         responseInterrupt.signal,
                         {
+                          ...(toolOutputParts.length
+                            ? { toolResultParts: toolOutputParts }
+                            : {}),
                           modelOverride: fullTurnModelOverride,
                           suppressedHookContext,
                           historyPromptId:
@@ -8922,6 +8925,7 @@ export class Session implements SessionContext {
             }),
             toolCallPreparations: true,
             ...round.options,
+            toolResultParts: round.toolOutputParts,
           },
         },
         responseInterrupt.signal,
@@ -9907,6 +9911,7 @@ export class Session implements SessionContext {
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
+    let toolOutputParts: readonly Part[] = [];
     let nextGuardContinuation = options.guardContinuation;
     const toolLoopState = createDaemonToolLoopState('off');
     let initialSend = true;
@@ -10000,6 +10005,9 @@ export class Session implements SessionContext {
           nextMessage.parts ?? [],
           responseInterrupt.signal,
           {
+            ...(toolOutputParts.length
+              ? { toolResultParts: toolOutputParts }
+              : {}),
             skipCompression:
               skipCompression || (guardForThisSend?.attempt ?? 0) > 1,
             getModelOverride: options.getModelOverride,
@@ -10294,6 +10302,7 @@ export class Session implements SessionContext {
           sendResult.responseStream,
         );
         nextMessage = null;
+        toolOutputParts = [];
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
           options.responseCapture,
         );
@@ -10565,6 +10574,7 @@ export class Session implements SessionContext {
           options.onFullTurnModel,
           options.rejectOnLoopDetected ?? false,
         );
+        toolOutputParts = toolRun.parts;
         nextMessage = nextAfterTools.message;
         if (nextAfterTools.stoppedByRepeatedToolFailure) {
           return {
@@ -11081,6 +11091,7 @@ export class Session implements SessionContext {
     message: Part[],
     abortSignal: AbortSignal,
     options: {
+      toolResultParts?: readonly Part[];
       skipCompression?: boolean;
       historyPromptId?: string;
       modelOverride?: string;
@@ -11272,9 +11283,13 @@ export class Session implements SessionContext {
         promptId,
         goalPermit,
         historyPromptId !== undefined ||
+          options.toolResultParts !== undefined ||
           options.onModelRequestDispatched ||
           options.suppressedHookContext
           ? {
+              ...(options.toolResultParts
+                ? { toolResultParts: options.toolResultParts }
+                : {}),
               ...(historyPromptId !== undefined
                 ? { promptId: historyPromptId }
                 : {}),
@@ -13119,6 +13134,7 @@ export class Session implements SessionContext {
                   ],
                 };
                 const toolLoopState = createDaemonToolLoopState('off');
+                let toolOutputParts: readonly Part[] = [];
 
                 while (nextMessage !== null) {
                   turnCount++;
@@ -13139,6 +13155,9 @@ export class Session implements SessionContext {
                       promptId,
                       nextMessage.parts ?? [],
                       ac.signal,
+                      toolOutputParts.length
+                        ? { toolResultParts: toolOutputParts }
+                        : {},
                     );
                   const responseStream = sendResult.responseStream;
                   const preserveFullMessage =
@@ -13179,6 +13198,7 @@ export class Session implements SessionContext {
                     this.loopTickResolver?.markDelivered();
                   }
                   nextMessage = null;
+                  toolOutputParts = [];
                   const messageDisplay = this.#createMessageDisplayDispatcher(
                     ac.signal,
                   );
@@ -13327,6 +13347,7 @@ export class Session implements SessionContext {
                         promptId,
                         toolLoopState,
                       );
+                    toolOutputParts = toolRun.parts;
                     nextMessage = nextAfterTools.message;
                     if (toolRun.loopDetected) {
                       this.todoStopGuard.suspend();
@@ -14487,6 +14508,7 @@ export class Session implements SessionContext {
             return;
           }
           const toolLoopState = createDaemonToolLoopState('off');
+          let toolOutputParts: readonly Part[] = [];
 
           while (nextMessage !== null) {
             if (ac.signal.aborted) {
@@ -14509,6 +14531,9 @@ export class Session implements SessionContext {
               promptId,
               nextMessage.parts ?? [],
               ac.signal,
+              toolOutputParts.length
+                ? { toolResultParts: toolOutputParts }
+                : {},
             );
             if (!sendResult.responseStream) {
               this.todoStopGuard.suspend();
@@ -14526,6 +14551,7 @@ export class Session implements SessionContext {
             const responseStream = sendResult.responseStream;
             const requestRouteKey = sendResult.requestRouteKey;
             nextMessage = null;
+            toolOutputParts = [];
             const messageDisplay = this.#createMessageDisplayDispatcher(
               ac.signal,
             );
@@ -14647,6 +14673,7 @@ export class Session implements SessionContext {
                 promptId,
                 toolLoopState,
               );
+              toolOutputParts = toolRun.parts;
               nextMessage = nextAfterTools.message;
               if (toolRun.loopDetected) {
                 this.todoStopGuard.suspend();

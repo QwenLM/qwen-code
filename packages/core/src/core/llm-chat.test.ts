@@ -730,33 +730,95 @@ describe('LlmChat', async () => {
     });
   });
 
-  it('rejects a cancelled tool result before admitting it or acquiring the next send lock', async () => {
-    const recordToolResultAdmission = vi.fn();
-    const target = newChat({
-      recorder: { recordToolResultAdmission, recordAssistantTurn: vi.fn() },
-    });
-    const reason = new Error('tool hook cancelled');
-    const cancelled = await target.sendMessageStream(
+  it('preserves an ordinary prompt cancelled before send for interrupted-turn recovery', async () => {
+    const reason = new Error('user cancelled');
+    const stream = await chat.sendMessageStream(
       'test-model',
       {
-        message: [
-          {
-            functionResponse: {
-              id: 'read',
-              name: 'read_file',
-              response: { output: 'private' },
-            },
-          },
-        ],
+        message: 'Keep this question for later.',
         config: { abortSignal: AbortSignal.abort(reason) },
       },
-      'first',
+      'cancelled-prompt',
     );
-    await expect(drain(cancelled)).rejects.toBe(reason);
-    expect(recordToolResultAdmission).not.toHaveBeenCalled();
-    expect(target.getHistory()).toEqual([]);
+    await expect(drain(stream)).rejects.toBe(reason);
+    expect(chat.getHistory()).toEqual([
+      { role: 'user', parts: [{ text: 'Keep this question for later.' }] },
+    ]);
+    expect(detectTurnInterruption(chat.getHistory())).toMatchObject({
+      kind: 'interrupted_prompt',
+    });
+    expect(streamMock()).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'withholds cancelled tool-owned parts while preserving independent input: mixed=%s',
+    async (mixed) => {
+      const recordToolResultAdmission = vi.fn();
+      const target = newChat({
+        recorder: { recordToolResultAdmission, recordAssistantTurn: vi.fn() },
+      });
+      const toolResultParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'read',
+            name: 'read_file',
+            response: { output: 'private' },
+          },
+        },
+        { text: 'same text' },
+        { inlineData: { mimeType: 'image/png', data: 'private-image' } },
+      ];
+      const userPart = { text: 'same text' };
+      const message = [...toolResultParts, ...(mixed ? [userPart] : [])];
+      const reason = new Error('tool hook cancelled');
+      const cancelled = await target.sendMessageStream(
+        'test-model',
+        { message, config: { abortSignal: AbortSignal.abort(reason) } },
+        'first',
+        undefined,
+        { toolResultParts },
+      );
+      await expect(drain(cancelled)).rejects.toBe(reason);
+      expect(recordToolResultAdmission).not.toHaveBeenCalled();
+      expect(target.getHistory()).toEqual(
+        mixed ? [{ role: 'user', parts: [userPart] }] : [],
+      );
+      expect(message).toHaveLength(mixed ? 4 : 3);
+      expect(streamMock()).not.toHaveBeenCalled();
+      mockStream(streamOf(stopResponse([{ text: 'done' }])));
+      await sendDrain('Next.', 'next', target);
+      expect(JSON.stringify(requestAt(0).contents)).not.toContain('private');
+    },
+  );
+
+  it('checks tool cancellation after waiting for the prior send lock', async () => {
+    const toolResultParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'read',
+          name: 'read_file',
+          response: { output: 'private' },
+        },
+      },
+    ];
+    let unlock!: () => void;
+    chat['sendPromise'] = new Promise<void>((resolve) => {
+      unlock = resolve;
+    });
+    const controller = new AbortController();
+    const pending = chat.sendMessageStream(
+      'test-model',
+      { message: toolResultParts, config: { abortSignal: controller.signal } },
+      'waiting',
+      undefined,
+      { toolResultParts },
+    );
+    controller.abort();
+    unlock();
+    await expect(drain(await pending)).rejects.toBe(controller.signal.reason);
+    expect(chat.getHistory()).toEqual([]);
     mockStream(streamOf(stopResponse([{ text: 'done' }])));
-    await sendDrain('Next.', 'next', target);
+    await sendDrain('Next.', 'next');
   });
 
   it('resyncs a tool_search response committed through the streaming send path', async () => {
@@ -1125,6 +1187,46 @@ describe('LlmChat', async () => {
       await expect(drain(response)).rejects.toThrow();
       expect(streamMock()).toHaveBeenCalledOnce();
       expect(mode.prepare(context, null).reminder).toBeUndefined();
+    });
+
+    it('restores prepared history when cancellation arrives during route resolution', async () => {
+      const routeConfig = {
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+      };
+      const controller = new AbortController();
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        routeConfig,
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockImplementation(async () => {
+          controller.abort();
+          return {
+            model: 'test-model',
+            contentGenerator: mockContentGenerator,
+            contentGeneratorConfig: routeConfig,
+          };
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const history = [userText('saved interrupted request')];
+      const saved: LlmPreparedRequest = {
+        request: { model: 'test-model', contents: history, config: {} },
+        history,
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: llmPreparedProviderPin(routeConfig),
+        promptTokensForClamp: 15,
+      };
+      const stream = await chat.sendPreparedMessageStream(
+        saved,
+        'replay',
+        controller.signal,
+      );
+      await expect(drain(stream)).rejects.toBe(controller.signal.reason);
+      expect(chat.getHistory()).toEqual(history);
+      expect(streamMock()).not.toHaveBeenCalled();
+      mockStream(streamOf(stopResponse([{ text: 'done' }])));
+      await sendDrain('Next.', 'next');
     });
 
     it('reissues saved normalized history without another push, compaction or clamp', async () => {

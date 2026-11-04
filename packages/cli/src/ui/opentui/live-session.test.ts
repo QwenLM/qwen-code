@@ -55,6 +55,7 @@ import {
   type OpenTuiSteeringSubmission,
   type WaitingCallInfo,
 } from './live-session.js';
+import type { Part } from '@google/genai';
 import type { ChatRecordingService } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
@@ -2244,7 +2245,8 @@ describe('livePromptEvents', () => {
     );
 
     expect(sendMessageStream).toHaveBeenCalledTimes(2);
-    const [secondPrompt] = sendMessageStream.mock.calls[1] as unknown[];
+    const [secondPrompt, , , secondOptions] = sendMessageStream.mock
+      .calls[1] as [Part[], unknown, unknown, SendMessageOptions];
     expect(secondPrompt).toEqual([
       {
         functionResponse: {
@@ -2255,6 +2257,13 @@ describe('livePromptEvents', () => {
       },
       { text: 'steer me' },
     ]);
+    expect(
+      (sendMessageStream.mock.calls[0][3] as SendMessageOptions)
+        .toolResultParts,
+    ).toBeUndefined();
+    expect(secondOptions.toolResultParts).toHaveLength(1);
+    expect(secondOptions.toolResultParts?.[0]).toBe(secondPrompt[0]);
+    expect(secondOptions.toolResultParts).not.toContain(secondPrompt[1]);
   });
 
   it.each([false, true])(

@@ -3970,6 +3970,7 @@ export const useLlmStream = (
         onGoalClaimDeferred?: () => void;
         onRequestStarted?: () => void;
         steerInput?: SteerInput;
+        toolResultParts?: readonly Part[];
         submittedPrompt?: string;
         displayText?: string;
         humanInput?: HumanPromptInput;
@@ -4597,6 +4598,9 @@ export const useLlmStream = (
             todoWorkChainId: metadata?.todoWorkChainId,
             modelOverride: modelOverrideRef.current,
             steerInput: metadata?.steerInput,
+            ...(metadata?.toolResultParts
+              ? { toolResultParts: metadata.toolResultParts }
+              : {}),
             ...(allowConcurrentBtwDuringResponse
               ? { isConcurrentSideQuery: true }
               : {}),
@@ -4765,7 +4769,7 @@ export const useLlmStream = (
               responseParts,
               SendMessageType.ToolResult,
               immediateDuplicateToolResponses.promptId,
-              { goalBinding },
+              { goalBinding, toolResultParts: responseParts },
             );
             if (
               goalBinding &&
@@ -6778,6 +6782,7 @@ export const useLlmStream = (
       }
 
       await submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
+        toolResultParts: toolResultPartsForPause,
         steerInput: submissionSettlement,
         onDelivered: () => submissionSettlement?.accept(),
         onAdmissionFailed: () => {

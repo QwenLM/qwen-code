@@ -6650,72 +6650,88 @@ describe('Session', () => {
       );
     });
 
-    it('delivers refined recall after tool responses and records the completed tool', async () => {
-      const memoryPrompt = '<system-reminder>refined memory</system-reminder>';
-      mockLlmClient.consumeManagedAutoMemoryRecall
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce({
-          prompt: memoryPrompt,
-          selectedDocs: [],
-          strategy: 'model',
+    it.each([false, true])(
+      'delivers refined recall after tool responses and records the completed tool: cancellation=%s',
+      async (cancelDuringRecall) => {
+        mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(false);
+        const memoryPrompt =
+          '<system-reminder>refined memory</system-reminder>';
+        mockLlmClient.consumeManagedAutoMemoryRecall
+          .mockResolvedValueOnce(null)
+          .mockImplementationOnce(async () => {
+            if (cancelDuringRecall) await session.cancelPendingPrompt();
+            return {
+              prompt: memoryPrompt,
+              selectedDocs: [],
+              strategy: 'model',
+            };
+          });
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
         });
-      const execute = vi.fn().mockResolvedValue({
-        llmContent: 'file contents',
-        returnDisplay: 'file contents',
-      });
-      mockToolRegistry.getTool.mockReturnValue({
-        name: 'read_file',
-        kind: core.Kind.Read,
-        build: vi.fn().mockReturnValue({
-          params: { path: '/tmp/test.txt' },
-          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
-          getDescription: vi.fn().mockReturnValue('Read file'),
-          toolLocations: vi.fn().mockReturnValue([]),
-          execute,
-        }),
-      });
-      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValueOnce(
-          createStreamWithChunks([
-            {
-              type: core.StreamEventType.CHUNK,
-              value: {
-                functionCalls: [
-                  {
-                    id: 'call-1',
-                    name: 'read_file',
-                    args: { path: '/tmp/test.txt' },
-                  },
-                ],
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute,
+          }),
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
               },
-            },
-          ]),
-        )
-        .mockResolvedValueOnce(createEmptyStream());
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
 
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'read file' }],
-      });
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
 
-      const followUpRequest = vi.mocked(mockChat.sendMessageStream).mock
-        .calls[1]?.[1] as { message: Part[] };
-      const followUp = followUpRequest.message;
-      expect(followUp[0]?.functionResponse).toBeDefined();
-      expect(textParts(followUp)).toEqual([memoryPrompt]);
-      expect(
-        mockLlmClient.consumeManagedAutoMemoryRecall,
-      ).toHaveBeenNthCalledWith(2, 'tool_result');
-      expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
-        'read_file',
-        { path: '/tmp/test.txt' },
-      );
-      expect(
-        mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
-      ).toHaveBeenCalledOnce();
-    });
+        const followUpRequest = vi.mocked(mockChat.sendMessageStream).mock
+          .calls[1]?.[1] as { message: Part[] };
+        const followUp = followUpRequest.message;
+        expect(followUp[0]?.functionResponse).toBeDefined();
+        expect(textParts(followUp)).toEqual([memoryPrompt]);
+        const calls = vi.mocked(mockChat.sendMessageStream).mock.calls;
+        expect(calls[0]?.[4]?.toolResultParts).toBeUndefined();
+        expect(calls[1]?.[4]?.toolResultParts).toHaveLength(1);
+        expect(calls[1]?.[4]?.toolResultParts?.[0]).toBe(followUp[0]);
+        expect(calls[1]?.[4]?.toolResultParts).not.toContain(followUp[1]);
+        expect(calls[1]?.[1].config?.abortSignal?.aborted).toBe(
+          cancelDuringRecall,
+        );
+        expect(
+          mockLlmClient.consumeManagedAutoMemoryRecall,
+        ).toHaveBeenNthCalledWith(2, 'tool_result');
+        expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+          'read_file',
+          { path: '/tmp/test.txt' },
+        );
+        expect(
+          mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
+        ).toHaveBeenCalledOnce();
+      },
+    );
 
     it('does not run managed memory for retries or failed turns', async () => {
       mockChat.sendMessageStream = vi
@@ -28419,6 +28435,16 @@ describe('Session', () => {
         expect(functionResponseIndex).toBeGreaterThanOrEqual(0);
         expect(reminderIndex).toBeGreaterThan(functionResponseIndex);
         expect(midTurnIndex).toBeGreaterThan(reminderIndex);
+        expect(secondCall?.[4]?.toolResultParts).toHaveLength(1);
+        expect(secondCall?.[4]?.toolResultParts?.[0]).toBe(
+          nextMessage[functionResponseIndex],
+        );
+        expect(secondCall?.[4]?.toolResultParts).not.toContain(
+          nextMessage[midTurnIndex],
+        );
+        expect(secondCall?.[4]?.toolResultParts).not.toContain(
+          nextMessage[reminderIndex],
+        );
         expect(
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith([midTurnPart], '  please also check tests  ');

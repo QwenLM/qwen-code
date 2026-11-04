@@ -2679,6 +2679,7 @@ describe('useLlmStream', () => {
       // the display state (the next round is pending), so streamingState
       // never reaches Idle between rounds.
       const completed = createCompletedToolCall();
+      completed.response.responseParts.push({ text: teammateModelText });
       rerenderWithToolCalls([completed]);
       await completeToolRound([completed]);
 
@@ -2694,6 +2695,14 @@ describe('useLlmStream', () => {
         'prompt-id-teammate-rounds',
         expect.objectContaining({ type: SendMessageType.ToolResult }),
       );
+
+      const [sentParts, , , sendOptions] = mockSendMessageStream.mock.calls[0];
+      expect(sendOptions.toolResultParts).toHaveLength(2);
+      expect(sendOptions.toolResultParts?.[0]).toBe(sentParts[0]);
+      expect(sendOptions.toolResultParts?.[1]).toBe(sentParts[1]);
+      expect(sentParts[2]).toEqual(sentParts[1]);
+      expect(sentParts[2]).not.toBe(sentParts[1]);
+      expect(sendOptions.toolResultParts).not.toContain(sentParts[2]);
 
       // The compact `● …` notification line renders at delivery time.
       expect(mockAddItem).toHaveBeenCalledWith(

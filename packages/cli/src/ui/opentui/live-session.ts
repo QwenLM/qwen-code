@@ -829,6 +829,7 @@ export async function* livePromptEvents(
   // Core settles this carrier at its request-local history push. Neither a
   // stream event nor a normal empty stream proves that this input was pushed.
   let pendingSteer: SteerInput | undefined;
+  let pendingToolResultParts: readonly Part[] | undefined;
   const acceptedSteerEvents: OpenTuiStreamEvent[] = [];
   let first = true;
   const waitingSeen = new Set<string>();
@@ -839,6 +840,8 @@ export async function* livePromptEvents(
     }
     const steerInput = pendingSteer;
     pendingSteer = undefined;
+    const toolResultParts = pendingToolResultParts;
+    pendingToolResultParts = undefined;
     const prepared: PreparedLiveRequest = {
       content: nextPrompt,
       modelOverride: turnModel.current,
@@ -882,6 +885,7 @@ export async function* livePromptEvents(
         }
       : {
           type: SendMessageType.ToolResult,
+          ...(toolResultParts ? { toolResultParts } : {}),
           ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
           ...(carrier ? { steerInput: carrier } : {}),
         };
@@ -1445,6 +1449,7 @@ export async function* livePromptEvents(
         });
       }
     }
+    pendingToolResultParts = responseParts.slice();
     // Sampling boundary: drained steering rides after the tool responses as
     // genuine user content (original useGeminiStream mid-turn drain).
     if (!abort.aborted) {

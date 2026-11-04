@@ -2875,6 +2875,9 @@ export async function runNonInteractive(
 
       let currentPromptId = prompt_id;
       while (true) {
+        const toolResultParts = hasUnsentToolResponse
+          ? currentMessages[0]?.parts?.slice()
+          : undefined;
         // Drain pending teammate messages into the conversation.
         // sendMessageStream only reads currentMessages[0].parts,
         // so teammate text must be merged into that same parts
@@ -2941,6 +2944,7 @@ export async function runNonInteractive(
 
         const roundOptions: SendMessageOptions = {
           type: sendType,
+          ...(toolResultParts ? { toolResultParts } : {}),
           modelOverride,
           workflowModeEligible:
             isFirstTurn &&

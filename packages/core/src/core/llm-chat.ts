@@ -717,6 +717,8 @@ export function llmPreparedProviderPin(
 }
 
 export interface LlmChatSendOptions {
+  /** Exact tool-owned parts, including companions, before host input is added. */
+  toolResultParts?: readonly Part[];
   onPreparedRequest?: LlmPreparedRequestCallback;
   onModelRequestDispatched?: () => void;
   preparedRequest?: LlmPreparedRequest;
@@ -3419,12 +3421,24 @@ export class LlmChat {
 
     await this.sendPromise;
     const signal = params.config?.abortSignal;
-    if (signal?.aborted) {
-      // Cancellation is reported when the caller consumes the stream, without
-      // reserving the lock, admitting a tool result, or changing history.
-      return (async function* cancelledSend() {
-        yield Promise.reject<never>(signal.reason);
-      })();
+    let cancelledContent: Content | undefined;
+    if (
+      signal?.aborted &&
+      !options?.preparedRequest &&
+      options?.toolResultParts
+    ) {
+      const toolResultParts = options.toolResultParts;
+      cancelledContent = createUserContent(params.message);
+      // Ownership is by identity: independent input can have the same text.
+      cancelledContent.parts = cancelledContent.parts?.filter(
+        (part) => !toolResultParts.includes(part),
+      );
+      if (!cancelledContent.parts?.length) {
+        const reason = signal.reason;
+        return (async function* cancelledSend() {
+          yield Promise.reject<never>(reason);
+        })();
+      }
     }
 
     let streamDoneResolver: () => void;
@@ -3517,10 +3531,12 @@ export class LlmChat {
         // the upcoming prompt — closes the "first send after inherited history"
         // gap where `lastPromptTokenCount === 0` and the gate would otherwise
         // see only the stale prior-turn count (0).
-        let userContent = createUserContent(params.message);
-        this.chatRecordingService?.recordToolResultAdmission?.(
-          userContent.parts ?? [],
-        );
+        let userContent = cancelledContent ?? createUserContent(params.message);
+        if (!signal?.aborted) {
+          this.chatRecordingService?.recordToolResultAdmission?.(
+            userContent.parts ?? [],
+          );
+        }
         // Restored responses have no original-size provenance. Never infer it from a preview.
         userContent = {
           ...userContent,

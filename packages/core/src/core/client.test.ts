@@ -2869,14 +2869,13 @@ describe('Gemini Client (client.ts)', () => {
 
     it('carries active todos after tool results and clears them for new work', async () => {
       const reminder = todoReminder('run tests');
+      const toolResult = fnResponse('read_file', { ok: true });
 
       await runTurn(
         SendMessageType.ToolResult,
-        [
-          fnResponse('read_file', { ok: true }),
-          'user changed priority mid-turn',
-        ],
+        [toolResult, 'user changed priority mid-turn'],
         'prompt-tool-result',
+        { toolResultParts: [toolResult] },
       );
 
       const request = lastRequest();
@@ -2891,6 +2890,13 @@ describe('Gemini Client (client.ts)', () => {
       expect(request.indexOf(reminder)).toBeLessThan(
         request.indexOf('user changed priority mid-turn'),
       );
+      const toolResultParts = mockTurnConstructorFn.mock.lastCall?.[9] as
+        | readonly Part[]
+        | undefined;
+      expect(toolResultParts).toEqual([toolResult]);
+      expect(toolResultParts?.[0]).toBe(request[functionResponseIndex]);
+      expect(toolResultParts).not.toContain('user changed priority mid-turn');
+      expect(toolResultParts).not.toContain(reminder);
       expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
         'prompt-tool-result',
       );
@@ -2920,6 +2926,24 @@ describe('Gemini Client (client.ts)', () => {
         'prompt-retry',
         'prompt-userQuery',
       );
+    });
+
+    it('shares normalized string tool companions with default cancellation ownership', async () => {
+      const toolResult = fnResponse('read_file', { ok: true });
+      await runTurn(SendMessageType.ToolResult, [
+        toolResult,
+        'tool companion text',
+      ]);
+
+      const request = lastRequest();
+      const toolResultParts = mockTurnConstructorFn.mock.lastCall?.[9] as
+        | readonly Part[]
+        | undefined;
+      expect(toolResultParts).toHaveLength(2);
+      expect(toolResultParts?.[0]).toBe(toolResult);
+      expect(toolResultParts?.[0]).toBe(request[0]);
+      expect(toolResultParts?.[1]).toEqual({ text: 'tool companion text' });
+      expect(toolResultParts?.[1]).toBe(request[1]);
     });
 
     it('leaves the user message record and work chain to a host that did both', async () => {
