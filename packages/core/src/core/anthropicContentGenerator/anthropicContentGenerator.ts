@@ -272,6 +272,14 @@ export class AnthropicContentGenerator implements ContentGenerator {
       'anthropic',
       this.cliConfig.getProxy(),
     );
+    const sessionFetch = buildSessionAwareFetch(
+      runtimeOptions.fetch,
+      this.cliConfig,
+      this.contentGeneratorConfig.customHeaders,
+    );
+    // SDK 0.36 ignores fetchOptions, so bind the dispatcher at the fetch boundary.
+    const fetchWithDispatcher: typeof globalThis.fetch = (input, init) =>
+      sessionFetch(input, { ...init, ...runtimeOptions.fetchOptions });
     // IdeaLab-style Anthropic proxies expect `Authorization: Bearer <token>`
     // instead of the SDK-default `x-api-key` header. Use the SDK's
     // `authToken` parameter (sends `Authorization: Bearer` natively) only
@@ -299,11 +307,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       maxRetries: contentGeneratorConfig.maxRetries,
       defaultHeaders,
       ...runtimeOptions,
-      fetch: buildSessionAwareFetch(
-        runtimeOptions.fetch,
-        this.cliConfig,
-        this.contentGeneratorConfig.customHeaders,
-      ) as unknown as AnthropicFetch,
+      fetch: fetchWithDispatcher as unknown as AnthropicFetch,
     });
 
     this.converter = new AnthropicContentConverter(

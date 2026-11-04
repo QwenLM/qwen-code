@@ -1004,8 +1004,8 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       '--max-count',
       '--after-context',
       '--before-context',
-      '-n',
-      '--line-number',
+      // -n/--line-number only print line numbers. They take no argument;
+      // treating them as value flags consumes the pattern and drops the file.
       '--label',
       '-D',
       '--devices',
