@@ -301,10 +301,8 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
         if (lease == null) {
             return null;
         }
-        synchronized (placements) {
-            return placementsByLease.get(List.of(lease.getRuntimeInstanceId(), lease.getLeaseId(),
-                    lease.getEpoch(), lease.getToken()));
-        }
+        return placementsByLease.get(List.of(lease.getRuntimeInstanceId(), lease.getLeaseId(),
+                lease.getEpoch(), lease.getToken()));
     }
 
     private static List<Object> ownershipKey(RuntimeProvisionSeed seed) {
