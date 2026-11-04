@@ -11815,12 +11815,17 @@ export class Config {
       : this.readProjectHooks();
   }
 
-  /** The project hooks block `getProjectHooks()` withholds while approval is pending. */
+  /**
+   * The project hooks block `getProjectHooks()` withholds while approval is
+   * pending or rejected. Reads the raw block, not the execution accessor, so
+   * the listing can name the approval reason even when the trust gate would
+   * also withhold it.
+   */
   getWithheldProjectHooks():
     | { [K in HookEventName]?: HookDefinition[] }
     | undefined {
     return this.projectHooksPendingApproval === true
-      ? this.readProjectHooks()
+      ? this.readProjectHooksBlock()
       : undefined;
   }
 
@@ -11839,16 +11844,24 @@ export class Config {
     if (!this.isInteractive() || this.isExplicitlyTrustedFolder()) {
       return undefined;
     }
-    // An approved block is its own execution authority: the registry loads
-    // it, so the listing must not add a second, trust-disabled copy.
-    if (this.hasApprovedProjectHooks()) {
+    // A cleared approval gate serves the block (approved, or nothing to
+    // approve); the listing must not add a second, trust-disabled copy.
+    if (this.isProjectHooksApprovalCleared()) {
       return undefined;
     }
     return this.readProjectHooksBlock();
   }
 
-  /** Whether a hash-bound approval authorizes the project hooks block. */
-  private hasApprovedProjectHooks(): boolean {
+  /**
+   * Whether the approval gate lets the project hooks block through: the gate
+   * is active and not withholding. `pending === false` covers BOTH a genuine
+   * approval and "no approvable object" (the CLI passes false when the
+   * workspace contributes no hooks, e.g. an untrusted folder with the trust
+   * feature on). In the latter case the block is empty, so execution is
+   * unaffected — but diagnostic surfaces must not read this as "approved";
+   * ask `getProjectHooks()` whether the hooks actually load.
+   */
+  private isProjectHooksApprovalCleared(): boolean {
     // `isProjectHooksApprovalGated()` already accounts for the YOLO
     // exemption: while exempt the session is ungated and the folder-trust
     // rule applies on its own.
@@ -11864,13 +11877,13 @@ export class Config {
     if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
-    // Repo-supplied hooks run with either authority: a hash-bound approval
-    // of this exact block (the CLI clears the pending flag only for an
-    // approved decision), or explicit folder trust. Approval is the finer
-    // grant — it authorizes these hooks, not the folder's other executable
-    // settings — so the interactive trust gate must not swallow it.
+    // Repo-supplied hooks run with either authority: a cleared approval gate
+    // (an approved block, or no approvable object — then the block is empty),
+    // or explicit folder trust. Approval is the finer grant — it authorizes
+    // these hooks, not the folder's other executable settings — so the
+    // interactive trust gate must not swallow it.
     if (
-      !this.hasApprovedProjectHooks() &&
+      !this.isProjectHooksApprovalCleared() &&
       this.isInteractive() &&
       !this.isExplicitlyTrustedFolder()
     ) {

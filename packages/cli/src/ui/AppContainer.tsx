@@ -1988,10 +1988,12 @@ export const AppContainer = (props: AppContainerProps) => {
       config.isSafeMode() ||
       // With every hook disabled the trust gate is not why they are absent.
       config.getDisableAllHooks() ||
-      // An approved block is its own execution authority and loads despite
-      // the trust gate; warning about trust would be a false negative.
-      (config.isProjectHooksApprovalGated() &&
-        !config.isProjectHooksPendingApproval())
+      // Warn only when the hooks really are withheld: the execution accessor
+      // serves an approved block despite the trust gate. `pending === false`
+      // alone is not "approved" — it also means "nothing to approve" (an
+      // untrusted folder with the trust feature on), the case this warning
+      // exists for.
+      config.getProjectHooks() !== undefined
     ) {
       return;
     }
@@ -2006,9 +2008,15 @@ export const AppContainer = (props: AppContainerProps) => {
     addHistoryItem(
       {
         type: MessageType.WARNING,
-        text: t(
-          'Project hooks in .qwen/settings.json were not loaded: this folder is not explicitly trusted. Enable security.folderTrust.enabled and trust the folder to run them.',
-        ),
+        text:
+          config.isProjectHooksApprovalGated() &&
+          config.isProjectHooksPendingApproval()
+            ? t(
+                'Project hooks in .qwen/settings.json were not loaded. Approve them in the dialog, or enable security.folderTrust.enabled and trust the folder.',
+              )
+            : t(
+                'Project hooks in .qwen/settings.json were not loaded: this folder is not explicitly trusted. Enable security.folderTrust.enabled and trust the folder to run them.',
+              ),
       },
       Date.now(),
     );

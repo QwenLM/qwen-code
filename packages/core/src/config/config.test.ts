@@ -1328,10 +1328,13 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getProjectHooks()).toBeUndefined();
       expect(config.getTrustWithheldProjectHooks()).toBe(projectHooks);
+      // The approval reason stays reachable even though trust also withholds.
+      expect(config.getWithheldProjectHooks()).toBe(projectHooks);
 
       config.setProjectHooksPendingApproval(true, true);
       expect(config.isProjectHooksRejected()).toBe(true);
       expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getWithheldProjectHooks()).toBe(projectHooks);
     });
 
     it('an ungated interactive session still needs explicit folder trust', () => {

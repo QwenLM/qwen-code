@@ -507,6 +507,29 @@ describe('buildHooksListing', () => {
     expect(listed[1]).toMatchObject({ trustGated: true });
   });
 
+  it.each([
+    [false, 'pendingApproval'],
+    [true, 'rejected'],
+  ] as const)(
+    'names the approval decision (rejected: %s) even when trust also withholds',
+    async (rejected, reason) => {
+      // Pending/rejected plus an untrusted folder: both accessors serve the
+      // block, but the listing names the decision once, not the trust gate.
+      const listed = await lintRows({
+        withheldProjectHooks: LINT_SETTINGS,
+        trustWithheldProjectHooks: LINT_SETTINGS,
+        rejected,
+      });
+
+      expect(
+        listed.map((row) => [row.source, row.enabled, row.disabledReason]),
+      ).toEqual([
+        [HooksConfigSource.User, true, undefined],
+        [HooksConfigSource.Project, false, reason],
+      ]);
+    },
+  );
+
   describe('without a hook system', () => {
     const hook = (command: string) => ({
       [HookEventName.PreToolUse]: [

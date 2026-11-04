@@ -318,9 +318,10 @@ function rowsFromSettings(
     [config.getUserHooks(), HooksConfigSource.User],
     // The gates withhold the block from the execution accessor; the listing
     // still shows what is configured (allDisabled outranks the other reasons).
+    // Approval decision first, matching the registry path's reason priority.
     [
-      config.getTrustWithheldProjectHooks?.() ??
-        config.getWithheldProjectHooks?.() ??
+      config.getWithheldProjectHooks?.() ??
+        config.getTrustWithheldProjectHooks?.() ??
         config.getProjectHooks(),
       HooksConfigSource.Project,
     ],
@@ -467,7 +468,9 @@ export function buildHooksListing(config: HooksListingConfig): HooksListing {
       ),
     );
   }
-  // Withheld project hooks are not in the registry; list what awaits approval.
+  // Withheld project hooks are not in the registry; list them once, with the
+  // most specific reason: a pending/rejected approval decision outranks the
+  // trust gate (the decision is the remedy the user can act on right now).
   const withheld = config.getWithheldProjectHooks?.();
   if (withheld) {
     listing.rows.push(
@@ -477,20 +480,18 @@ export function buildHooksListing(config: HooksListingConfig): HooksListing {
         config.isProjectHooksRejected?.() ? 'rejected' : true,
       ),
     );
-  }
-  // The interactive trust gate withholds project hooks too; list them with
-  // the trust reason. The two accessors are mutually exclusive: while the
-  // trust gate withholds, getWithheldProjectHooks() returns nothing.
-  const trustWithheld = config.getTrustWithheldProjectHooks?.();
-  if (trustWithheld) {
-    listing.rows.push(
-      ...settingsRows(
-        [[trustWithheld, HooksConfigSource.Project]],
-        { ...gates, trustedFolder: false },
-        false,
-        true,
-      ),
-    );
+  } else {
+    const trustWithheld = config.getTrustWithheldProjectHooks?.();
+    if (trustWithheld) {
+      listing.rows.push(
+        ...settingsRows(
+          [[trustWithheld, HooksConfigSource.Project]],
+          { ...gates, trustedFolder: false },
+          false,
+          true,
+        ),
+      );
+    }
   }
 
   const sessionId = config.getSessionId();
