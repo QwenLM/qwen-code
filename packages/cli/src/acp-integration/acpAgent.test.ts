@@ -11464,6 +11464,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           matcher: 'run_shell_command',
           sequential: true,
           enabled: false,
+          disabledReason: 'registryDisabled',
         },
         {
           kind: 'hook',

@@ -2147,6 +2147,7 @@ describe('llm.tsx main function', () => {
     let initialized = false;
     const configStub = {
       isInteractive: () => false,
+      getTrustWithheldProjectHooks: () => undefined,
       getQuestion: () => 'hello',
       getSandbox: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
