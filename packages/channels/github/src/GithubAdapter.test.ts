@@ -1698,6 +1698,44 @@ describe('GithubChannel', () => {
           rows.slice(0, -1).every((row) => row['outcome'] === 'failed'),
         ).toBe(true);
       });
+
+      it('commits once out-of-phase failing threads are all exhausted', async () => {
+        await initFailing();
+        const thread = (n: number) =>
+          makeNotification({
+            id: String(n),
+            updated_at: `2026-07-02T0${n}:00:00.000Z`,
+            subject: {
+              title: `Issue ${n}`,
+              url: `https://api.github.com/repos/owner/repo/issues/${n}`,
+              type: 'Issue',
+            },
+          });
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (
+            method ===
+            mockOctokit.rest.activity.listNotificationsForAuthenticatedUser
+          ) {
+            poll += 1;
+            // Thread 2 starts failing one poll after thread 1.
+            return poll === 1 ? [thread(1)] : [thread(1), thread(2)];
+          }
+          throw transient();
+        });
+
+        for (let i = 0; i < 30; i++) await pollOnce();
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+
+        await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T02:00:00.000Z');
+      });
     });
 
     it('aborts the poll cycle without advancing cursor when markNotificationsAsRead fails', async () => {

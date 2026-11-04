@@ -658,8 +658,9 @@ const MAX_INBOUND_TASK_ATTEMPTS = 3;
 /**
  * Consecutive polls one notification may fail with a transient GitHub error
  * while it holds the cursor back (~30 minutes at the default 60s poll). Past
- * that it is skipped like a permanent failure, so a thread GitHub keeps
- * failing cannot freeze mark-as-read for every other thread.
+ * that it is skipped like a permanent failure until the window commits, so a
+ * thread GitHub keeps failing cannot freeze mark-as-read for every other
+ * thread: the window is held until each failing thread recovers or is skipped.
  */
 const MAX_TRANSIENT_NOTIFICATION_FAILURES = 30;
 /**
@@ -2055,14 +2056,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }
         this.transientNotificationFailures.delete(failureKey);
       } catch (err) {
+        const transient = isTransientGithubError(err);
         const failures =
           (this.transientNotificationFailures.get(failureKey) ?? 0) + 1;
         const retry =
-          isTransientGithubError(err) &&
-          failures < MAX_TRANSIENT_NOTIFICATION_FAILURES;
-        if (retry) {
+          transient && failures < MAX_TRANSIENT_NOTIFICATION_FAILURES;
+        if (retry) this.notificationRetryPending = true;
+        // An exhausted streak stays recorded until the window commits or the
+        // thread succeeds: while another thread still holds the cursor, a
+        // fresh streak would let two out-of-phase threads hold it forever.
+        if (transient) {
           this.transientNotificationFailures.set(failureKey, failures);
-          this.notificationRetryPending = true;
         } else {
           this.transientNotificationFailures.delete(failureKey);
         }
