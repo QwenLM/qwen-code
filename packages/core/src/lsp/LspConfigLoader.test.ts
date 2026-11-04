@@ -197,16 +197,19 @@ describe('LspConfigLoader config-driven behavior', () => {
       typescript: {
         command: 'typescript-language-server',
         trustRequired: false,
+        source: 'extension',
       },
     });
     const configLoader = loader();
 
     await expect(configLoader.loadUserConfigs()).resolves.toEqual([
-      expect.objectContaining({ trustRequired: true }),
+      expect.objectContaining({ trustRequired: true, source: 'workspace' }),
     ]);
     await expect(configLoader.loadUserConfigsStrict()).resolves.toEqual({
       ok: true,
-      configs: [expect.objectContaining({ trustRequired: true })],
+      configs: [
+        expect.objectContaining({ trustRequired: true, source: 'workspace' }),
+      ],
     });
   });
 });

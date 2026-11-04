@@ -545,9 +545,13 @@ export class NativeLspService {
     const admitted: LspServerConfig[] = [];
     const skipped: LspSkippedServer[] = [];
     for (const config of configs) {
-      if (!workspaceTrusted && config.trustRequired) {
+      if (
+        (!workspaceTrusted && config.trustRequired) ||
+        (config.source === 'workspace' &&
+          !this.config.isExplicitlyTrustedFolder())
+      ) {
         debugLogger.warn(
-          `LSP server ${config.name} requires trusted workspace, skipping`,
+          `LSP server ${config.name} requires trusted workspace, skipping. Workspace .lsp.json requires explicit trust: enable security.folderTrust.enabled in user settings and trust this folder, or grant IDE workspace trust.`,
         );
         skipped.push({ name: config.name, reason: 'server_trust_required' });
         continue;
