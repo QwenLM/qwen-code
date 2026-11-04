@@ -12,7 +12,11 @@ export {
   readChannelEvents,
 } from './channel-events.js';
 export type { ChannelEventQuery, ChannelEventType } from './channel-events.js';
-export { PollingChannelBase } from './PollingChannelBase.js';
+export {
+  PollingChannelBase,
+  MIN_POLL_INTERVAL_MS,
+  MAX_POLL_INTERVAL_MS,
+} from './PollingChannelBase.js';
 export { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
 export {
   ACP_PRIVATE_PARENT_CAPABILITY_ENV,

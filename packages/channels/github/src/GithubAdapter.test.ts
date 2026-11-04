@@ -5514,12 +5514,85 @@ describe('GithubChannel', () => {
         );
       },
     );
+
+    it('respects the one-day ceiling', () => {
+      const ch = new TestableGithubChannel(
+        'test',
+        makeConfig({ pollInterval: 86_400_000 }),
+        makeBridge(),
+      );
+      expect((ch as unknown as { pollInterval: number }).pollInterval).toBe(
+        86_400_000,
+      );
+    });
+
+    it.each([86_400_001, 172_800_000, 2_592_000_000])(
+      'clamps pollInterval %s to the ceiling instead of falling back',
+      (value) => {
+        // These were honoured before the ceiling existed and are nowhere near
+        // Node's 32-bit timer limit, so replacing them with 60s would multiply
+        // the poll rate by orders of magnitude. Clamp, do not fall back.
+        const ch = new TestableGithubChannel(
+          'test',
+          makeConfig({ pollInterval: value }),
+          makeBridge(),
+        );
+        expect((ch as unknown as { pollInterval: number }).pollInterval).toBe(
+          86_400_000,
+        );
+      },
+    );
+
+    it.each([0.5, 0.001, 0.999])(
+      'raises a sub-millisecond pollInterval %s to the documented floor',
+      (value) => {
+        // The descriptor's lower bound is exclusive, so a fraction passes both
+        // the editor and the store; setTimeout then rounds it to ~1ms, which is
+        // the hot loop the ceiling exists to prevent, reached from below. The
+        // field documents 1 as the minimum, so the runtime has to enforce it.
+        const ch = new TestableGithubChannel(
+          'test',
+          makeConfig({ pollInterval: value }),
+          makeBridge(),
+        );
+        expect((ch as unknown as { pollInterval: number }).pollInterval).toBe(
+          1,
+        );
+      },
+    );
+
+    it('keeps a whole millisecond at the floor and just above it', () => {
+      for (const value of [1, 2, 60_000]) {
+        const ch = new TestableGithubChannel(
+          'test',
+          makeConfig({ pollInterval: value }),
+          makeBridge(),
+        );
+        expect((ch as unknown as { pollInterval: number }).pollInterval).toBe(
+          value,
+        );
+      }
+    });
   });
 
   describe('plugin', () => {
     it('declares chat_thread as defaultSessionScope', async () => {
       const { plugin } = await import('./index.js');
       expect(plugin.defaultSessionScope).toBe('chat_thread');
+    });
+
+    it('declares a bounded poll interval so the form cannot persist a hot loop', async () => {
+      const { plugin } = await import('./index.js');
+      const field = plugin.management?.fields.find(
+        (item) => item.key === 'pollInterval',
+      );
+      // The ceiling matches the one the Email channel enforces at runtime.
+      expect(field).toMatchObject({
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: 86_400_000,
+        default: '60000',
+      });
     });
 
     it('allows explicit local gh authentication without a configured token', async () => {
