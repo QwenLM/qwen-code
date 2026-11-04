@@ -135,6 +135,9 @@ final class WorkspaceCsiApplicationImage {
                 put(values, entry.getKey(), request.path(entry.getValue()).longValue());
             }
             put(values, "writer_token_hash", text(envelope, "writerTokenSha256"));
+            // The database generates is_activation_record from the operation.
+            String operation = text(request, "operation");
+            put(values, "is_activation_record", "installActivation".equals(operation) || "renewActivation".equals(operation));
             put(values, "record_encoding", "identity");
             byte[] records = WorkspaceCsiApplicationJson.base64(request.path("recordBytesBase64"), 128 * 1024);
             values.put("record_bytes", records);
