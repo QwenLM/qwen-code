@@ -289,26 +289,14 @@ public class ManagedWorkspaceRegistry
             throw new ManagedAgentException(403,
                     "actor_scope_mismatch", "Authenticated actor scope is invalid.");
         }
-        String workspaceId;
-        if (selection == null) {
-            List<String> defaults = jdbc.queryForList(
-                    "SELECT workspace_id FROM ma_workspace"
-                            + " WHERE tenant_id = ? AND is_default = TRUE FOR UPDATE",
-                    String.class, tenantId);
-            if (defaults.isEmpty()) {
-                throw workspaceRequired();
-            }
-            workspaceId = defaults.getFirst();
-        } else {
-            workspaceId = selection.workspaceId();
-        }
         List<WorkspaceRecord> records = jdbc.query(
-                "SELECT workspace_generation, storage_id, display_name,"
+                "SELECT workspace_id, workspace_generation, storage_id, display_name,"
                         + " config_ref, policy_ref, state FROM"
-                        + " ma_workspace WHERE tenant_id = ?"
-                        + " AND workspace_id = ? FOR UPDATE",
-                (result, row) -> workspaceRow(tenantId, workspaceId,
-                        result), tenantId, workspaceId);
+                        + " ma_workspace WHERE "
+                        + (selection == null ? "default_tenant = ?" : "tenant_id = ? AND workspace_id = ?")
+                        + " FOR UPDATE",
+                (result, row) -> workspaceRow(tenantId, result.getString("workspace_id"), result),
+                selection == null ? new Object[] {tenantId} : new Object[] {tenantId, selection.workspaceId()});
         if (records.isEmpty()) {
             if (selection == null) {
                 throw workspaceRequired();
@@ -316,6 +304,8 @@ public class ManagedWorkspaceRegistry
             throw new ManagedAgentException(404,
                     "workspace_not_found", "Workspace not found.");
         }
+        WorkspaceRecord record = records.getFirst();
+        String workspaceId = record.getWorkspaceId();
         List<AccessRow> access = jdbc.query(
                 "SELECT role FROM ma_workspace_access"
                         + " WHERE tenant_id = ? AND workspace_id = ?"
@@ -338,7 +328,6 @@ public class ManagedWorkspaceRegistry
             throw new ManagedAgentException(403,
                     "workspace_forbidden", "Workspace cannot be used.");
         }
-        WorkspaceRecord record = records.getFirst();
         requireSshNodeAccess(tenantId, actorId, record.getStorageId());
         if (record.getState() != WorkspaceState.ACTIVE) {
             if (selection == null) {
