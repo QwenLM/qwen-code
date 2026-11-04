@@ -1982,34 +1982,6 @@ describe('GithubChannel', () => {
         ]);
       });
 
-      it('reads a settled thread again when the settled set is full', async () => {
-        await initFailing();
-        const settled = (
-          channel as unknown as { windowSettledThreads: Map<string, string> }
-        ).windowSettledThreads;
-        for (let i = 0; i < 8192; i++) settled.set(`x|issue:${i}`, 'at');
-        const read: number[] = [];
-        mockOctokit.paginate.mockImplementation(
-          async (method: unknown, params: { issue_number?: number }) => {
-            if (isListNotifications(method)) {
-              return [issueNotification(1), issueNotification(2)];
-            }
-            read.push(params.issue_number!);
-            if (params.issue_number === 1) {
-              throw Object.assign(new Error('Not Found'), { status: 404 });
-            }
-            throw transient();
-          },
-        );
-
-        await pollOnce();
-        await pollOnce();
-
-        // Three in-call attempts on each poll: nothing was remembered.
-        expect(read.filter((n) => n === 1)).toHaveLength(6);
-        expect(settled.size).toBe(8192);
-      });
-
       it('keeps the budget when the commit itself fails', async () => {
         await initFailing();
         mockOctokit.paginate.mockImplementation(async (method: unknown) => {
@@ -2621,38 +2593,64 @@ describe('GithubChannel', () => {
         ]);
       });
 
-      it('reads a permanently failing thread once per held window', async () => {
+      it('reads a thread that failed with a 404 again on the next held poll', async () => {
         await initFailing();
-        const read: number[] = [];
+        let poll = 0;
         mockOctokit.paginate.mockImplementation(
           async (method: unknown, params: { issue_number?: number }) => {
             if (isListNotifications(method)) {
+              poll += 1;
               return [issueNotification(1), issueNotification(2)];
             }
-            read.push(params.issue_number!);
-            if (params.issue_number === 1) {
+            if (params.issue_number === 2) throw transient();
+            // A just-created issue can read as missing for a moment.
+            if (poll === 1) {
               throw Object.assign(new Error('Not Found'), { status: 404 });
             }
-            throw transient();
+            const at = '2026-07-02T00:30:00.000Z';
+            return [makeComment({ id: 8001, created_at: at, updated_at: at })];
           },
         );
 
-        for (let i = 0; i < 3; i++) await pollOnce();
-
-        // Three in-call attempts on poll 1, none after.
-        expect(read.filter((n) => n === 1)).toEqual([1, 1, 1]);
-        const settled = (
-          channel as unknown as { windowSettledThreads: Map<string, string> }
-        ).windowSettledThreads;
-        expect(settled.size).toBe(1);
-
-        // Once the window commits, the next one reads the thread again.
-        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
-          if (isListNotifications(method)) return [issueNotification(1)];
-          throw Object.assign(new Error('Not Found'), { status: 404 });
-        });
         await pollOnce();
-        expect(settled.size).toBe(0);
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '8001',
+        ]);
+      });
+
+      it('reads a stale notification again after its read failed', async () => {
+        await initFailing();
+        let poll = 0;
+        // A late notification at the committed cursor's second: its
+        // first-contact body is not bounded by the cursor window.
+        const stale = issueNotification(1, '2026-07-01T00:00:00.000Z');
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (isListNotifications(method)) {
+            poll += 1;
+            return poll === 1 ? [stale] : [stale, issueNotification(2)];
+          }
+          return [];
+        });
+        mockOctokit.rest.issues.get
+          .mockRejectedValueOnce(transient())
+          .mockRejectedValueOnce(transient())
+          .mockRejectedValueOnce(transient())
+          .mockResolvedValue({
+            data: {
+              title: 'Issue 1',
+              body: '@test-bot please look at this',
+              user: { login: 'alice' },
+            },
+          });
+
+        await pollOnce();
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toContain(
+          'issue-body-1',
+        );
       });
 
       describe('a local error part-way through a thread', () => {
