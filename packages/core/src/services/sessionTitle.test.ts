@@ -510,6 +510,52 @@ describe('tryGenerateSessionTitle', () => {
     expect(generateJson).not.toHaveBeenCalled();
   });
 
+  it("draws on the conversation when only a Mod's turn is in the projection", async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'Fix the flaky login test' }] },
+        { role: 'model', parts: [{ text: 'Fixed it.' }] },
+      ],
+      generateJsonResult: { title: 'Fix flaky login test' },
+    });
+
+    // The person's prompt recorded no display text; the Mod's turn offers
+    // nothing and must not switch the title to an empty projection.
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      [undefined, null],
+    );
+
+    expect(outcome).toMatchObject({ ok: true });
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    expect(call.contents[0]?.parts?.[0]?.text).toContain(
+      'Fix the flaky login test',
+    );
+  });
+
+  it("leaves a Mod's turn out of a display projection", async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden instructions' }] },
+        { role: 'model', parts: [{ text: 'Hello!' }] },
+      ],
+      generateJsonResult: { title: 'Answer greeting' },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal, [
+      '你好',
+      null,
+    ]);
+
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('你好');
+    expect(prompt).not.toContain('hidden instructions');
+  });
+
   it('does not align a display projection onto an intervening system turn', async () => {
     const { config, generateJson } = makeConfig({
       fastModel: 'qwen-turbo',

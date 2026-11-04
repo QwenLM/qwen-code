@@ -319,9 +319,10 @@ export type RecordToolResultOptions = {
 );
 
 // A prompt a Mod submitted keeps its turn's place in the title projection but
-// offers the title nothing, since the user did not type it.
-function titleText(record: ChatRecord): string | undefined {
-  if (record.provenance === 'mod_prompt') return '';
+// offers the title nothing, since the user did not type it. It is `null`, not
+// `''`, so it does not switch the title to the projection on its own.
+function titleText(record: ChatRecord): string | null | undefined {
+  if (record.provenance === 'mod_prompt') return null;
   return (record.systemPayload as UserPromptRecordPayload | undefined)
     ?.displayText;
 }
@@ -1287,7 +1288,8 @@ export class ChatRecordingService {
   private currentSessionApprovalMode:
     | SessionApprovalModeRecordPayload
     | undefined;
-  private readonly userDisplayTextsForTitle: Array<string | undefined> = [];
+  private readonly userDisplayTextsForTitle: Array<string | null | undefined> =
+    [];
   /**
    * How many auto-title attempts have been made this process.
    *
@@ -1534,7 +1536,9 @@ export class ChatRecordingService {
     }
   }
 
-  private trackUserDisplayTextForTitle(displayText: string | undefined): void {
+  private trackUserDisplayTextForTitle(
+    displayText: string | null | undefined,
+  ): void {
     this.userDisplayTextsForTitle.push(displayText);
     if (this.userDisplayTextsForTitle.length > MAX_TITLE_USER_DISPLAY_TEXTS) {
       this.userDisplayTextsForTitle.shift();
@@ -2579,7 +2583,7 @@ export class ChatRecordingService {
     }
   }
 
-  getUserDisplayTextsForTitle(): ReadonlyArray<string | undefined> {
+  getUserDisplayTextsForTitle(): ReadonlyArray<string | null | undefined> {
     return this.userDisplayTextsForTitle;
   }
 

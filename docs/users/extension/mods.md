@@ -755,7 +755,9 @@ export function register(on) {
   type it. With `asUser: true` the model reads the text as the person's own
   words; `origin` still names the Mod.
 - The transcript records the prompt as the Mod's, with the Mod's name, not as
-  the person's.
+  the person's. A stream-json client receives the text as a `user` message,
+  followed by a `system` message with the subtype `mod_prompt` and the data
+  `{ mod }`, before the turn's output.
 - UserPromptSubmit hooks hear the prompt, and its turn raises `turn.start` and
   `turn.complete` like any other. It counts toward the session turn limit.
 - `@` references in the text are not read.
@@ -763,7 +765,11 @@ export function register(on) {
   again. Past that a call resolves to a drop, and the line
   `$.prompt.submit refused: …` appears where transcript logs do. In a headless
   run, the prompt the run was given is the person's, and in a stream-json
-  session each message the client sends is.
+  session each message the client sends is, a slash command too.
+- `/clear` and `/resume` start the new session with no prompts queued and the
+  count at 0. A prompt submitted while the old session ends, from a
+  `session.end` hook for instance, resolves to
+  `{ drop: 'the session is ending' }`.
 - A prompt still queued when the run stops early, on an interrupt, a structured
   result or a detected loop, does not run.
 - In the Ink and OpenTUI terminals the method is not listed in `methods` yet,

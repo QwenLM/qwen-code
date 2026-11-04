@@ -124,7 +124,10 @@ export type SessionTitleOutcome =
 export async function tryGenerateSessionTitle(
   config: Config,
   abortSignal: AbortSignal,
-  userDisplayTexts: ReadonlyArray<string | undefined> = [],
+  // One entry per user turn: its display text, `undefined` when the turn
+  // recorded none, or `null` for a turn the person did not type, which offers
+  // the title nothing either way.
+  userDisplayTexts: ReadonlyArray<string | null | undefined> = [],
 ): Promise<SessionTitleOutcome> {
   try {
     const model = config.getFastModel();
@@ -139,7 +142,7 @@ export async function tryGenerateSessionTitle(
     if (fullHistory.length < 2) return { ok: false, reason: 'empty_history' };
 
     const hasDisplayProjection = userDisplayTexts.some(
-      (displayText) => displayText !== undefined,
+      (displayText) => typeof displayText === 'string',
     );
     const dialog = hasDisplayProjection
       ? userDisplayTexts.flatMap((displayText): Content[] =>

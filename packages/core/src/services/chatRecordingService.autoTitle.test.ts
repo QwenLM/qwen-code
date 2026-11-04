@@ -491,7 +491,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       },
       lastCompletedUuid: 'user-2',
     });
-    expect(service.getUserDisplayTextsForTitle()).toEqual(['你好', '']);
+    expect(service.getUserDisplayTextsForTitle()).toEqual(['你好', null]);
   });
 
   it('retains only display projections relevant to recent title history', () => {

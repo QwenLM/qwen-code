@@ -6882,6 +6882,108 @@ describe('runNonInteractive', () => {
       expect(order.at(-1)).toBe('close');
     });
 
+    it('tells a stream-json client of a prompt a Mod submitted', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      setupMetricsMock();
+      const { turn, submitted } = installModTurn();
+      turn.complete.mockImplementationOnce(async () => {
+        submitted.push({ plugin: 'lint', text: 'Run the linter' });
+      });
+      admitting(() =>
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Done.' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, 'Fix it', 'mod-sdk');
+
+      const messages = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      const named = messages.findIndex(
+        (message) =>
+          message.type === 'system' && message.subtype === 'mod_prompt',
+      );
+      expect(named).toBeGreaterThan(0);
+      expect(messages[named].data).toEqual({ mod: 'lint' });
+      expect(messages[named - 1]).toMatchObject({ type: 'user' });
+      expect(JSON.stringify(messages[named - 1].message)).toContain(
+        'Run the linter',
+      );
+      // It comes before the turn the prompt starts.
+      expect(
+        messages.findIndex(
+          (message, index) => index > named && message.type === 'assistant',
+        ),
+      ).toBeGreaterThan(named);
+    });
+
+    it('ends a Mod turn a duplicate provider call stops as an error', async () => {
+      setupMetricsMock();
+      mockLlmClient.getHistoryToolCallFingerprints.mockReturnValue(
+        new Map([
+          [
+            'tool-drain',
+            getToolCallFingerprint('testTool', { arg1: 'value1' }),
+          ],
+        ]),
+      );
+      const { turn, submitted } = installModTurn();
+      turn.complete.mockImplementationOnce(async () => {
+        submitted.push({ plugin: 'lint', text: 'Run the linter' });
+      });
+      const toolCall = (callId: string, providerCallId: string, arg1: string) =>
+        ({
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId,
+            providerCallId,
+            name: 'testTool',
+            args: { arg1 },
+            isClientInitiated: false,
+            prompt_id: 'mod-dup',
+          },
+        }) as ServerLlmStreamEvent;
+      const duplicate = toolCall(
+        'tool-drain__qwen_dup_2',
+        'tool-drain',
+        'value1',
+      );
+      const rounds: ServerLlmStreamEvent[][] = [
+        [
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ],
+        [duplicate],
+        [duplicate, toolCall('tool-fresh', 'tool-fresh', 'value2')],
+      ];
+      admitting(() => createStreamFromEvents(rounds.shift() ?? []));
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Fix it',
+        'mod-dup',
+      );
+
+      expect(exitCode).toBe(1);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
+      // The person's turn ends with its answer; the Mod's as an error.
+      expect(turn.complete.mock.calls[0]).toEqual([]);
+      expect(turn.complete.mock.calls[1]).toEqual(['error']);
+    });
+
     it('does not carry a prompt a Mod submitted into the next run once a run stops early', async () => {
       setupMetricsMock();
       const { turn, submitted } = installModTurn();
@@ -7073,7 +7175,7 @@ describe('runNonInteractive', () => {
 
     it('raises no prompt.submit for a slash command or a notification', async () => {
       setupMetricsMock();
-      const { submitPrompt } = installModTurn();
+      const { submitPrompt, notePersonPrompt } = installModTurn();
       mockGetCommands.mockReturnValue([
         {
           name: 'review',
@@ -7095,6 +7197,9 @@ describe('runNonInteractive', () => {
       });
 
       expect(submitPrompt).not.toHaveBeenCalled();
+      // The person's slash command still lets the Mods' prompts start turns
+      // again; a notification does not.
+      expect(notePersonPrompt).toHaveBeenCalledOnce();
     });
 
     it('starts no turn for a prompt core never admits', async () => {

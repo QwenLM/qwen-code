@@ -540,6 +540,9 @@ export class ModSession implements ICommandLoader {
       if (current === this.sessionId || this.closing) return;
       await this.end(reason);
       this.sessionId = current;
+      // The Mods' prompts and the turns they started belong to the old one.
+      this.submitted.length = 0;
+      this.modTurns = 0;
       this.adoptedAt = Date.now();
       this.startedAt = undefined;
       this.recorder = undefined;
@@ -717,7 +720,10 @@ export class ModSession implements ICommandLoader {
 
   // `$.prompt.submit` lands here once the hooks let the prompt through.
   private queuePrompt(prompt: ModQueuedPrompt): string | undefined {
-    if (this.closing) return 'the session is ending';
+    // A switch to another session ends this one, as /clear or /resume do;
+    // the hooks that hear it end cannot queue a prompt for it.
+    if (this.closing || this.sessionId !== this.config.getSessionId())
+      return 'the session is ending';
     if (this.modTurns + this.submitted.length >= MOD_PROMPT_TURN_LIMIT) {
       const refused = `the Mods have started ${MOD_PROMPT_TURN_LIMIT} turns since the last prompt from the person`;
       this.pendingLogs.push({

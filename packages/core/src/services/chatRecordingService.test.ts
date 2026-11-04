@@ -1550,9 +1550,9 @@ describe('ChatRecordingService', () => {
         mod: 'lint',
       });
       displayed('B');
-      expect(svc.getUserDisplayTextsForTitle()).toEqual(['A', '', 'B']);
+      expect(svc.getUserDisplayTextsForTitle()).toEqual(['A', null, 'B']);
       svc.rewindRecording(2, { truncatedCount: 1 });
-      expect(svc.getUserDisplayTextsForTitle()).toEqual(['A', '']);
+      expect(svc.getUserDisplayTextsForTitle()).toEqual(['A', null]);
       await svc.flush();
       vi.mocked(jsonl.writeLine).mockClear();
     });

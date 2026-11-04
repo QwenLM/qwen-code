@@ -779,6 +779,29 @@ describe('Mod session ownership', () => {
       expect(queue(prompt('late'))).toBe('the session is ending');
     });
 
+    it('refuses a prompt while /clear ends the session, and starts the next one clean', async () => {
+      const { session, config, runtime } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      for (let index = 0; index < MOD_PROMPT_TURN_LIMIT; index++)
+        expect(queue(prompt(`p${index}`))).toBeUndefined();
+      session.takeSubmittedPrompt();
+      // The config moves to the next session before the old one ends.
+      config.getSessionId.mockReturnValue('session-2');
+      let atEnd: string | undefined;
+      runtime.end.mockImplementation(async () => {
+        atEnd = queue(prompt('at end'));
+      });
+      await session.syncSession('clear');
+      expect(runtime.end).toHaveBeenCalled();
+      expect(atEnd).toBe('the session is ending');
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      // Neither the old session's queue nor its turns count against this one.
+      for (let index = 0; index < MOD_PROMPT_TURN_LIMIT; index++)
+        expect(queue(prompt(`n${index}`))).toBeUndefined();
+      expect(session.takeSubmittedPrompt()?.text).toBe('n0');
+    });
+
     it('drops what has not started when a run discards it, freeing the limit', async () => {
       const { session } = setup();
       await session.initialize(new AbortController().signal);

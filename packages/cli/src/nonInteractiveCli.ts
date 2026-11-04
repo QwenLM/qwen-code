@@ -978,6 +978,12 @@ export async function runNonInteractive(
         adapter.emitSystemMessage('task_notification', item.sdkNotification);
       }
     };
+    // The client did not send a Mod's prompt, so it learns of it as it does of
+    // a notification: the text as a user message, then who submitted it.
+    const emitModPromptToSdk = (prompt: ModQueuedPrompt) => {
+      adapter.emitUserMessage([{ text: prompt.text }]);
+      adapter.emitSystemMessage('mod_prompt', { mod: prompt.plugin });
+    };
     const flushQueuedNotificationsToSdk = (queue: LocalQueueItem[]) => {
       while (queue.length > 0) {
         const item = queue.shift()!;
@@ -1279,6 +1285,14 @@ export async function runNonInteractive(
       }
 
       if (!initialPartList) {
+        // The person's own message, a slash command too, lets the Mods'
+        // prompts start turns again.
+        if (
+          !options.fromTool &&
+          (options.sendMessageType ?? SendMessageType.UserQuery) ===
+            SendMessageType.UserQuery
+        )
+          modSession?.notePersonPrompt();
         let slashHandled = false;
         if (isSlashCommand(input)) {
           const slashCommandResult = await handleSlashCommand(
@@ -1436,13 +1450,6 @@ export async function runNonInteractive(
         if (!slashHandled) {
           // The hooks hear what was typed, not the serialized blocks.
           const heard = options.promptParts?.text ?? input;
-          // The person's own prompt lets the Mods' prompts start turns again.
-          if (
-            !options.fromTool &&
-            (options.sendMessageType ?? SendMessageType.UserQuery) ===
-              SendMessageType.UserQuery
-          )
-            modSession?.notePersonPrompt();
           if (
             modSession &&
             !options.fromTool &&
@@ -3459,6 +3466,7 @@ export async function runNonInteractive(
             for (const queueItem of batch) {
               emitNotificationToSdk(queueItem);
             }
+            if (batch[0]?.modPrompt) emitModPromptToSdk(batch[0].modPrompt);
 
             const item = {
               displayText: batch.map((i) => i.displayText).join('; '),
@@ -3565,7 +3573,13 @@ export async function runNonInteractive(
                 await settleBeforeTerminalOutput();
                 await handleMaxTurnsExceededError(config);
               }
-              await itemTurn?.complete();
+              // A duplicate provider call raises no LoopDetected event, so the
+              // turn ends as an error here, as it does on the legacy loop.
+              await itemTurn?.complete(
+                result.reason === 'duplicate_provider_call'
+                  ? 'error'
+                  : undefined,
+              );
               return;
             }
 
