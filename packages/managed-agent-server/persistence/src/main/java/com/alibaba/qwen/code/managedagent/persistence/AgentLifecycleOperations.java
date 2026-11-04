@@ -929,7 +929,6 @@ final class AgentLifecycleOperations {
 
     void markOperationAnswered(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration) {
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         storeRows.requireLegacyMutation(tenantId, sessionId);
         long now = storeRows.lifecycleDatabaseTime();
         // Watermark only: the row stays leased and no reschedule runs here —
