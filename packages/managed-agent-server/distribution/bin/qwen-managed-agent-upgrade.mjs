@@ -1079,7 +1079,9 @@ export async function migrationScripts(jar) {
     return buffer;
   };
   const scripts = new Map();
-  const add = async (from, entry, script, label) => {
+  // Where each script was first found: BOOT-INF/classes or a nested jar.
+  const containers = new Map();
+  const add = async (from, entry, script, label, container) => {
     if (!script || !script.toLowerCase().endsWith('.sql')) {
       return;
     }
@@ -1095,9 +1097,12 @@ export async function migrationScripts(jar) {
     // script to Flyway only when the copies match; otherwise which one the
     // database gets depends on the class loader, so the row cannot tell.
     if (scripts.has(script) && scripts.get(script) !== digest) {
-      throw new Error(`${jar} ships two different copies of ${script}`);
+      throw new Error(
+        `${jar} ships two different copies of ${script}, in ${containers.get(script)} and in ${container}`,
+      );
     }
     scripts.set(script, digest);
+    containers.set(script, containers.get(script) ?? container);
   };
   try {
     const { size } = await handle.stat();
@@ -1106,7 +1111,7 @@ export async function migrationScripts(jar) {
         const script = MIGRATION_SCRIPT.exec(
           entry.name.slice(CLASSES.length),
         )?.[1];
-        await add(read, entry, script, jar);
+        await add(read, entry, script, jar, 'BOOT-INF/classes');
       } else if (NESTED_JAR.test(entry.name) && entry.method === 0) {
         // Spring Boot stores a nested jar as it is, so its own entries read
         // in place, without reading the whole jar.
@@ -1124,6 +1129,7 @@ export async function migrationScripts(jar) {
             inner,
             MIGRATION_SCRIPT.exec(inner.name)?.[1],
             label,
+            entry.name,
           );
         }
       }

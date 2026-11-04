@@ -263,18 +263,22 @@ function zip(entries) {
   const locals = [];
   const centrals = [];
   let offset = 0;
-  for (const [index, [name, text, forced]] of entries.entries()) {
+  // An entry may name its method, and carry an extra field in its local
+  // header only, as archivers that add timestamps or alignment do.
+  for (const [index, [name, text, forced, extra = '']] of entries.entries()) {
     const data = Buffer.from(text);
     // Alternate the two methods a jar uses, unless the entry names one.
     const method = forced ?? (index % 2 === 0 ? 8 : 0);
     const body = method === 8 ? deflateRawSync(data) : data;
     const nameBytes = Buffer.from(name);
+    const extraBytes = Buffer.from(extra);
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(method, 8);
     local.writeUInt32LE(body.length, 18);
     local.writeUInt32LE(data.length, 22);
     local.writeUInt16LE(nameBytes.length, 26);
+    local.writeUInt16LE(extraBytes.length, 28);
     const central = Buffer.alloc(46);
     central.writeUInt32LE(0x02014b50, 0);
     central.writeUInt16LE(method, 10);
@@ -282,9 +286,9 @@ function zip(entries) {
     central.writeUInt32LE(data.length, 24);
     central.writeUInt16LE(nameBytes.length, 28);
     central.writeUInt32LE(offset, 42);
-    locals.push(local, nameBytes, body);
+    locals.push(local, nameBytes, extraBytes, body);
     centrals.push(central, nameBytes);
-    offset += 30 + nameBytes.length + body.length;
+    offset += 30 + nameBytes.length + extraBytes.length + body.length;
   }
   const directory = Buffer.concat(centrals);
   const end = Buffer.alloc(22);
@@ -821,6 +825,35 @@ test('reads the Flyway scripts out of the nested jar of a module', async (t) => 
     'db/managed-schema/V3__upper.SQL': sha256('insert;\n'),
   });
 
+  // A local header may carry an extra field the central directory does not:
+  // each entry's data, and a nested jar's start, lie past it.
+  const pad = 'UT\u0005\u0000\u0001abcd';
+  await writeFile(
+    jar,
+    zip([
+      [
+        'BOOT-INF/classes/db/managed-schema/V1__base.sql',
+        'create table a;\n',
+        8,
+        pad,
+      ],
+      [
+        'BOOT-INF/lib/qwen-managed-agent-persistence.jar',
+        zip([
+          ['db/managed-schema/V2__more.sql', 'create table b;\n', 0, pad],
+          ['db/managed-schema/V3__more.sql', 'create table c;\n', 8, pad],
+        ]),
+        0,
+        pad,
+      ],
+    ]),
+  );
+  assert.deepEqual(Object.fromEntries(await migrationScripts(jar)), {
+    'db/managed-schema/V1__base.sql': sha256('create table a;\n'),
+    'db/managed-schema/V2__more.sql': sha256('create table b;\n'),
+    'db/managed-schema/V3__more.sql': sha256('create table c;\n'),
+  });
+
   // One path shipped twice is one script when the copies match, and a
   // misread when they do not.
   const twice = (text) =>
@@ -839,7 +872,7 @@ test('reads the Flyway scripts out of the nested jar of a module', async (t) => 
   await writeFile(jar, twice('create table b;\n'));
   await assert.rejects(
     migrationScripts(jar),
-    /^Error: .*server\.jar ships two different copies of db\/managed-schema\/V1__base\.sql$/,
+    /^Error: .*server\.jar ships two different copies of db\/managed-schema\/V1__base\.sql, in BOOT-INF\/classes and in BOOT-INF\/lib\/qwen-managed-agent-persistence\.jar$/,
   );
 
   // A nested jar that is none, or whose directory runs past its end, is a
