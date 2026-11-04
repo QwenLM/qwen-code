@@ -1467,19 +1467,32 @@ export class ChatRecordingService {
     source: 'manual' | 'auto' | 'prompt',
   ): void {
     if (this.managedSink) return;
-    writeSessionTitleSidecar(this.titleSidecarPath(), displayName, source);
+    try {
+      writeSessionTitleSidecar(this.titleSidecarPath(), displayName, source);
+    } catch {
+      // Best-effort: a missing sidecar must never fail a rename.
+    }
   }
 
   private persistPromptDerivedTitle(message: Content | undefined): void {
     if (this.managedSink) return;
-    const sidecarPath = this.titleSidecarPath();
-    const existing = readSessionTitleSidecar(sidecarPath);
-    if (existing && existing.source !== 'prompt') return;
-    const text = message?.parts?.find(
-      (part): part is { text: string } => 'text' in part,
-    )?.text;
-    if (!text?.trim()) return;
-    writeSessionTitleSidecar(sidecarPath, text.trim().slice(0, 200), 'prompt');
+    try {
+      const sidecarPath = this.titleSidecarPath();
+      const existing = readSessionTitleSidecar(sidecarPath);
+      if (existing && existing.source !== 'prompt') return;
+      const text = message?.parts?.find(
+        (part): part is { text: string } => 'text' in part,
+      )?.text;
+      if (!text?.trim()) return;
+      writeSessionTitleSidecar(
+        sidecarPath,
+        text.trim().slice(0, 200),
+        'prompt',
+      );
+    } catch {
+      // Best-effort: recording the prompt itself must not depend on the label
+      // sidecar, which can be unwritable (read-only home, partial Config).
+    }
   }
 
   private restoreSessionState(
@@ -2595,14 +2608,17 @@ export class ChatRecordingService {
       };
       // Advance rewind associations only after the record is built, so a
       // rejected message cannot skew the projection.
-      if (this.userDisplayTextsForTitle.length === 0) {
-        this.persistPromptDerivedTitle(record.message);
-      }
+      const firstPrompt = this.userDisplayTextsForTitle.length === 0;
       this.trackUserDisplayTextForTitle(promptPayload?.displayText);
       this.turnParentUuids.push(record.parentUuid ?? null);
       this.turnPromptIds.push(getRecordRewindId(record));
       this.turnDaemonPromptIds.push(record.daemonPromptId);
       this.appendRecord(record);
+      // The sidecar write is best-effort and runs after the transcript
+      // append, so an unwritable label path can never drop the message.
+      if (firstPrompt) {
+        this.persistPromptDerivedTitle(record.message);
+      }
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
     }
