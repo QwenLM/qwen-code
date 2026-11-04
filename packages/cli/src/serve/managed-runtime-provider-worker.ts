@@ -43,6 +43,7 @@ import {
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
+import { unescapePath } from '@qwen-code/qwen-code-core/utils/paths.js';
 import {
   authorizeManagedRuntime,
   handleManagedRuntimeJsonError,
@@ -65,6 +66,7 @@ import {
 import {
   ManagedToolConflictError,
   ManagedToolUnavailableError,
+  realpathDeepestExisting,
   type ManagedToolExecutor,
 } from './managed-runtime-tool-executor.js';
 
@@ -85,6 +87,7 @@ interface ProviderRuntime {
   readonly config: Config;
   readonly runtime: ManagedToolRuntime;
   readonly shell: AnyDeclarativeTool;
+  readonly filePaths: Map<string, string>;
   history?: ManagedToolFileHistory;
   historyBinding?: string;
 }
@@ -260,6 +263,9 @@ export class ManagedRuntimeProviderWorker {
   /** Released Sessions that still hold their runtime, oldest first. */
   private readonly released: ProviderSession[] = [];
   private closing = false;
+  private filesRetiring = false;
+  private nonFileContextUsed = false;
+  private retirementFailed = false;
 
   constructor(
     private readonly executor: ManagedToolExecutor,
@@ -316,6 +322,13 @@ export class ManagedRuntimeProviderWorker {
     identity: ManagedRuntimeProviderSession,
     operation: ManagedRuntimeProviderOperation,
   ): Promise<unknown> {
+    if (this.filesRetiring) {
+      if (operation.kind === 'release' && this.lookup(identity)?.closed)
+        return true;
+      throw new ManagedToolUnavailableError(
+        'Managed Runtime provider has retired.',
+      );
+    }
     if (operation.kind === 'workspace-context')
       return this.executor.readWorkspaceContext(identity.runtimeSessionId);
     if (operation.kind === 'raw-file-history')
@@ -453,9 +466,10 @@ export class ManagedRuntimeProviderWorker {
       const index = this.released.findIndex((entry) => entry.pending === 0);
       if (index < 0) return;
       const [entry] = this.released.splice(index, 1);
-      await retire(entry).catch((error: unknown) =>
-        debugLogger.warn('Retiring a released Session failed:', error),
-      );
+      await retire(entry).catch((error: unknown) => {
+        this.retirementFailed = true;
+        debugLogger.warn('Retiring a released Session failed:', error);
+      });
     }
   }
 
@@ -487,6 +501,7 @@ export class ManagedRuntimeProviderWorker {
         'Managed context directory is unavailable.',
       );
     }
+    if (context.filesOnly !== true) this.nonFileContextUsed = true;
     return sessionIdContext.run(sessionId, () => {
       const config = new Config({
         sessionId,
@@ -554,6 +569,7 @@ export class ManagedRuntimeProviderWorker {
         config,
         runtime,
         shell,
+        filePaths: new Map(),
       };
       registerSessionProjectDir(sessionId, config.storage.getProjectDir());
       return value;
@@ -601,6 +617,27 @@ export class ManagedRuntimeProviderWorker {
     operation: ManagedRuntimeProviderOperation,
   ): Promise<unknown> {
     const runtime = value.runtime;
+    if (
+      this.executor.isExternalFilesProfile &&
+      'reference' in operation &&
+      ['confirmation', 'confirm', 'preflight', 'execute'].includes(
+        operation.kind,
+      )
+    ) {
+      const filePath = value.filePaths.get(operation.reference.invocationId);
+      if (filePath === undefined)
+        throw new ManagedToolUnavailableError(
+          'Managed file invocation is unavailable.',
+        );
+      await this.requireWorkspaceFile(value, filePath);
+      if (
+        operation.kind === 'confirm' &&
+        operation.payload?.updatedInput !== undefined
+      )
+        throw new ManagedToolUnavailableError(
+          'Managed file input replacement is unsupported.',
+        );
+    }
     switch (operation.kind) {
       case 'manifest':
         return runtime.manifest();
@@ -610,6 +647,17 @@ export class ManagedRuntimeProviderWorker {
         await runtime.beginTurn(operation.identity);
         return null;
       case 'prepare': {
+        const filePath = this.executor.isExternalFilesProfile
+          ? await this.requireWorkspaceFile(
+              value,
+              typeof operation.input['file_path'] === 'string' &&
+                ['read_file', 'write_file', 'edit'].includes(operation.toolName)
+                ? operation.toolName === 'read_file'
+                  ? operation.input['file_path']
+                  : unescapePath(operation.input['file_path'].trim())
+                : undefined,
+            )
+          : undefined;
         if (operation.toolName === ShellTool.Name) {
           const normalized = structuredClone(operation.input);
           if (
@@ -627,13 +675,16 @@ export class ManagedRuntimeProviderWorker {
           throw new ManagedToolPreparationError(
             'Managed Runtime provider profile does not admit content modification.',
           );
-        return runtime.prepare(
+        const prepared = await runtime.prepare(
           operation.identity,
           operation.toolName,
           operation.input,
           undefined,
           operation.mediaContext,
         );
+        if (filePath !== undefined)
+          value.filePaths.set(prepared.invocationId, filePath);
+        return prepared;
       }
       case 'confirmation':
         return runtime.confirmation(operation.reference);
@@ -676,6 +727,63 @@ export class ManagedRuntimeProviderWorker {
         throw new Error(
           'Managed Runtime Session operation was not dispatched.',
         );
+    }
+  }
+
+  private async requireWorkspaceFile(
+    value: ProviderRuntime,
+    candidate: string | undefined,
+  ): Promise<string> {
+    if (
+      candidate === undefined ||
+      !path.isAbsolute(candidate) ||
+      !isPathWithinRoot(
+        await realpathDeepestExisting(candidate),
+        await fs.promises.realpath(value.context.workspaceRoot),
+      )
+    )
+      throw new ManagedToolUnavailableError(
+        'Managed file path is outside the Workspace.',
+      );
+    return candidate;
+  }
+
+  async retireExternalFiles(): Promise<void> {
+    if (
+      !this.executor.isAdmissionSealed ||
+      this.nonFileContextUsed ||
+      this.retirementFailed
+    )
+      throw new ManagedToolUnavailableError(
+        'Managed Runtime provider retirement is unqualified.',
+      );
+    let sessions = [...this.sessions.values()];
+    if (sessions.some((session) => !session.closed || session.pending > 0))
+      throw new ManagedToolUnavailableError(
+        'Managed Runtime provider still owns unfinished work.',
+      );
+    await Promise.all(sessions.map((session) => session.release));
+    sessions = [...this.sessions.values()];
+    if (
+      this.retirementFailed ||
+      this.nonFileContextUsed ||
+      sessions.some(
+        (session) =>
+          !session.closed ||
+          session.pending > 0 ||
+          session.value?.runtime.hasActiveWork(),
+      )
+    )
+      throw new ManagedToolUnavailableError(
+        'Managed Runtime provider still owns unfinished work.',
+      );
+    this.filesRetiring = true;
+    this.closing = true;
+    try {
+      await Promise.all(sessions.map(retire));
+    } catch (error) {
+      this.retirementFailed = true;
+      throw error;
     }
   }
 

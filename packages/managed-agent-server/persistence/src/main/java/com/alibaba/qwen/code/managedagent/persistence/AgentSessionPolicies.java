@@ -55,6 +55,7 @@ final class AgentSessionPolicies {
     private final boolean workspaceFilesEnabled;
     private final boolean workspaceShellEnabled;
     private final ResidentWorkspaces residentWorkspaces;
+    final ExternalWorkspacePolicy externalWorkspaces;
 
     AgentSessionPolicies(AgentEventJournal eventJournal,
             AgentSessionQueries sessionQueries,
@@ -75,7 +76,7 @@ final class AgentSessionPolicies {
             ManagedSessionSkills creationSkills,
             boolean workspaceFilesEnabled,
             boolean workspaceShellEnabled,
-            ResidentWorkspaces residentWorkspaces) {
+            ResidentWorkspaces residentWorkspaces, com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.RuntimeBroker runtime) {
         this.eventJournal = eventJournal;
         this.sessionQueries = sessionQueries;
         this.storeRows = storeRows;
@@ -96,6 +97,7 @@ final class AgentSessionPolicies {
         this.workspaceFilesEnabled = workspaceFilesEnabled;
         this.workspaceShellEnabled = workspaceShellEnabled;
         this.residentWorkspaces = residentWorkspaces;
+        this.externalWorkspaces = new ExternalWorkspacePolicy(jdbc, runtime, workspaceShellEnabled);
     }
 
     static final Pattern DEFINITION_REVISION = Pattern.compile(
@@ -114,6 +116,21 @@ final class AgentSessionPolicies {
      */
     record AgentPin(String revision, String digest,
             String approvalMode, String toolProfile, boolean hooks, boolean mcp) {
+    }
+
+    void requireWorkspaceTools(SessionRecord session) {
+        if (externalWorkspaces.isExternal(session.workspace())) {
+            externalWorkspaces.requireFiles(session.workspace(), session.toolProfile());
+            if (hasMcpServers(session)) {
+                throw workspaceExecutionUnavailable();
+            }
+        }
+        if (isSshWorkspace(session.workspace())) {
+            requireSshToolProfile(session.toolProfile());
+            if (hasMcpServers(session)) {
+                throw workspaceExecutionUnavailable();
+            }
+        }
     }
 
     boolean isSshWorkspace(ContextBinding binding) {
@@ -222,7 +239,7 @@ final class AgentSessionPolicies {
         }
         if (!WorkspaceToolProfiles.SHELL.equals(session.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(session.toolProfile())
                 || !workspaceFilesEnabled || !workspaceShellEnabled && WorkspaceToolProfiles.SHELL.equals(session.toolProfile())
-                || isSshWorkspace(session.workspace()) || residentWorkspaces.find(session.workspace()) != null
+                || isSshWorkspace(session.workspace()) || externalWorkspaces.isExternal(session.workspace()) || residentWorkspaces.find(session.workspace()) != null
                 || sessionQueries.findChildLineage(tenantId, sessionId) != null) {
             throw new ManagedAgentException(409, "unsupported_feature", "MCP management is unavailable.");
         }

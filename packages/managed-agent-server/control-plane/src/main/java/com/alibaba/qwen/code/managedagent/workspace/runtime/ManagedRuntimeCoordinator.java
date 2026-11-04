@@ -259,7 +259,7 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
         if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(primaryProvisioner.kind())) {
             return supportsWorkspaceClose(binding);
         }
-        return residents.find(binding) == null;
+        return residents.find(binding) == null && (workspaces == null || workspaces.externalStorage(binding) == null);
     }
 
     @Override

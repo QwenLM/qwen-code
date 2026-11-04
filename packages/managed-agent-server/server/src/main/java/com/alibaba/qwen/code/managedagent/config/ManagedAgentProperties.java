@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import jakarta.annotation.PostConstruct;
 import lombok.AccessLevel;
 import lombok.Getter;
@@ -363,7 +364,7 @@ public class ManagedAgentProperties
                 && (!harness.isEnabled()
                         || !sessionStore.isEnabled()
                         || !runtimeBroker.isEnabled()
-                        || !residentFiles && !sshFiles && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
+                        || !residentFiles && !sshFiles && !ExternalRuntimeKinds.isFiles(runtimeBroker.getProvisioner()) && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
                         || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
                         || (runtimeBroker.getWorkspaceMounts().isEmpty()
                                 && runtimeBroker.getWorkspaceCreationRoot().isBlank()

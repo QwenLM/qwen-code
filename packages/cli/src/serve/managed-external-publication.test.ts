@@ -202,69 +202,185 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
     );
   });
 
-  it('exposes publication on a separate port only after admission, with closed lease and revision checks', async () => {
-    const original = Server.prototype.listen;
-    vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
-      this: Server,
-      ...args: unknown[]
-    ) {
-      const callback = args.find((arg) => typeof arg === 'function') as
-        | (() => void)
-        | undefined;
-      return Reflect.apply(original, this, [0, '127.0.0.1', callback]);
-    } as typeof Server.prototype.listen);
-    const parsed = await admitted();
-    const worker = await startManagedRuntimeAttestationWorker(
-      parsed,
-      undefined,
-      undefined,
-      true,
-    );
-    closers.push(worker.close);
-    expect(worker.ready.publication?.url).toBeDefined();
-    expect(worker.ready.publication?.url).not.toBe(worker.ready.url);
-    const endpoint = `${worker.ready.publication!.url}/internal/managed-runtime/v2/publication:begin`;
-    const headers = {
-      authorization: `Bearer ${boot.token}`,
-      'cache-control': 'no-store',
-      'content-type': 'application/json',
-      'X-Qwen-Managed-Lease-Id': boot.leaseId,
-      'X-Qwen-Managed-Lease-Epoch': '1',
-      'X-Qwen-Managed-Storage-Revision': '1',
-      'X-Qwen-Managed-Runtime-Incarnation': boot.runtimeIncarnation,
-    };
-    const body = JSON.stringify({
-      protocolVersion: 2,
-      ...request,
-      expiresAt: Date.now() + 60_000,
-    });
-    for (const [header, value, status] of [
-      ['authorization', 'Bearer incorrect', 401],
-      ['X-Qwen-Managed-Lease-Id', 'unknown', 409],
-      ['X-Qwen-Managed-Storage-Revision', '2', 409],
-      ['X-Qwen-Managed-Runtime-Incarnation', 'stale', 409],
-    ] as const) {
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { ...headers, [header]: value },
-        body,
+  it.each(['legacy', 'files', 'tools'] as const)(
+    'exposes distinct publication HTTP routes with lease and revision checks for %s',
+    async (profile) => {
+      if (profile !== 'legacy')
+        boot = {
+          ...boot,
+          externalFiles: 'external-files/1',
+          ...(profile === 'tools' ? { externalShell: true } : {}),
+        };
+      const original = Server.prototype.listen;
+      vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
+        this: Server,
+        ...args: unknown[]
+      ) {
+        const callback = args.find((arg) => typeof arg === 'function') as
+          | (() => void)
+          | undefined;
+        return Reflect.apply(original, this, [0, '127.0.0.1', callback]);
+      } as typeof Server.prototype.listen);
+      const parsed = await admitted();
+      const worker = await startManagedRuntimeAttestationWorker(
+        parsed,
+        undefined,
+        undefined,
+        true,
+      );
+      closers.push(worker.close);
+      expect(worker.ready.publication?.url).toBeDefined();
+      expect(worker.ready.publication?.url).not.toBe(worker.ready.url);
+      const endpoint = `${worker.ready.publication!.url}/internal/managed-runtime/v2/publication:begin`;
+      const headers = {
+        ...(profile === 'legacy'
+          ? {}
+          : Object.fromEntries(
+              Array.from({ length: 32 }, (_, index) => [
+                `x-proxy-${index}`,
+                'forwarded',
+              ]),
+            )),
+        authorization: `Bearer ${boot.token}`,
+        'cache-control': 'no-store',
+        'content-type': 'application/json',
+        'X-Qwen-Managed-Lease-Id': boot.leaseId,
+        'X-Qwen-Managed-Lease-Epoch': '1',
+        'X-Qwen-Managed-Storage-Revision': '1',
+        'X-Qwen-Managed-Runtime-Incarnation': boot.runtimeIncarnation,
+      };
+      const body = JSON.stringify({
+        protocolVersion: 2,
+        ...request,
+        expiresAt: Date.now() + 60_000,
       });
-      expect(response.status).toBe(status);
-      expect(response.headers.get('cache-control')).toBe('no-store');
-      expect(await response.text()).not.toContain(root);
-    }
-    const response = await fetch(endpoint, { method: 'POST', headers, body });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      protocolVersion: 2,
-      channelId: expect.any(String),
-    });
-    const unavailable = await fetch(
-      `${worker.ready.url}/internal/managed-runtime/v2/publication:begin`,
-      { method: 'POST', headers, body },
-    );
-    expect(unavailable.status).toBe(404);
-  });
+      for (const origin of [worker.ready.url, worker.ready.publication!.url]) {
+        for (const extra of [
+          Object.fromEntries(
+            Array.from({ length: 64 }, (_, index) => [
+              `x-overflow-${index}`,
+              'forwarded',
+            ]),
+          ),
+          { 'x-oversized': 'a'.repeat(17 * 1024) },
+          ...(profile === 'legacy'
+            ? [
+                Object.fromEntries(
+                  Array.from({ length: 32 }, (_, index) => [
+                    `x-proxy-${index}`,
+                    'forwarded',
+                  ]),
+                ),
+              ]
+            : []),
+        ]) {
+          const response = await fetch(
+            origin + '/internal/managed-runtime/v3/attest',
+            {
+              method: 'POST',
+              headers: { ...headers, ...extra },
+              body: '{}',
+            },
+          );
+          expect(response.status).toBe(431);
+          await response.arrayBuffer();
+        }
+      }
+      const attest = await fetch(
+        `${worker.ready.url}/internal/managed-runtime/v3/attest`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            protocolVersion: 3,
+            managedContext: 'managed-context/1',
+            provisionRequestId: boot.provisionRequestId,
+            tenantId: boot.tenantId,
+            workspaceId: boot.workspaceId,
+            workspaceGeneration: boot.workspaceGeneration,
+            storageId: boot.storageId,
+            mountRoot: boot.mountRoot,
+            capabilityDigest: boot.capabilityDigest,
+            isolationClass: boot.isolationClass,
+          }),
+        },
+      );
+      expect(attest.status).toBe(200);
+      expect(await attest.json()).toMatchObject({
+        runtimeIncarnation: boot.runtimeIncarnation,
+      });
+      for (const [header, value, status] of [
+        ['authorization', 'Bearer incorrect', 401],
+        ['X-Qwen-Managed-Lease-Id', 'unknown', 409],
+        ['X-Qwen-Managed-Storage-Revision', '2', 409],
+        ['X-Qwen-Managed-Runtime-Incarnation', 'stale', 409],
+      ] as const) {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { ...headers, [header]: value },
+          body,
+        });
+        expect(response.status).toBe(status);
+        expect(response.headers.get('cache-control')).toBe('no-store');
+        expect(await response.text()).not.toContain(root);
+      }
+      if (profile === 'tools') {
+        const install = await fetch(
+          `${worker.ready.url}/internal/managed-runtime/v3/publications:install`,
+          {
+            method: 'POST',
+            headers,
+            body: '{}',
+          },
+        );
+        expect(install.status).toBe(409);
+        expect(await install.json()).toMatchObject({
+          code: 'managed_tool_publication_conflict',
+        });
+      }
+      const response = await fetch(endpoint, { method: 'POST', headers, body });
+      expect(response.status).toBe(200);
+      const created = (await response.json()) as {
+        protocolVersion: number;
+        channelId: string;
+      };
+      expect(created).toMatchObject({
+        protocolVersion: 2,
+        channelId: expect.any(String),
+      });
+      const read = await fetch(
+        `${worker.ready.publication!.url}/internal/managed-runtime/v2/publication:read`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            protocolVersion: 2,
+            channelId: created.channelId,
+            streamId: 'stdout',
+            sequence: 0,
+            acknowledgedSequence: -1,
+          }),
+        },
+      );
+      expect(read.status).toBe(200);
+      expect(await read.json()).toMatchObject({ state: 'pending' });
+      const stop = await fetch(
+        `${worker.ready.publication!.url}/internal/managed-runtime/v2/publication:${profile === 'legacy' ? 'stop-drained' : profile + '-stop-drained'}`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ protocolVersion: 2, channel: 'all' }),
+        },
+      );
+      expect(stop.status).toBe(200);
+      expect(await stop.json()).toMatchObject({ state: 'undrained' });
+      const unavailable = await fetch(
+        `${worker.ready.url}/internal/managed-runtime/v2/publication:begin`,
+        { method: 'POST', headers, body },
+      );
+      expect(unavailable.status).toBe(404);
+    },
+  );
 });
 
 describe.skipIf(process.platform === 'win32')(

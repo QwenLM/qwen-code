@@ -121,6 +121,7 @@ final class AgentSessionAdmissions {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
+        sessionPolicies.externalWorkspaces.requireUnboundSession();
         requireModelConfiguration(modelConfig);
         AgentSessionPolicies.AgentPin pin = sessionPolicies.resolveAgentPin(tenantId, agentId, requestedRevision,
                 false);
@@ -204,6 +205,7 @@ final class AgentSessionAdmissions {
             extensionPackages.requireSelection(tenantId, actorId, workspace.binding().getWorkspaceId(), extensionPins);
         }
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
+        boolean externalWorkspace = sessionPolicies.externalWorkspaces.requireCreation(workspace.binding(), pin, extensionPins != null);
         boolean sshWorkspace = sessionPolicies.isSshWorkspace(workspace.binding());
         if (sshWorkspace) {
             AgentSessionPolicies.requireSshToolProfile(pin.toolProfile());
@@ -217,13 +219,13 @@ final class AgentSessionAdmissions {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }
             residentWorkspaces.requireCreation(jdbc, workspace.binding(), pin.toolProfile());
-        } else if (!sshWorkspace) {
+        } else if (!sshWorkspace && !externalWorkspace) {
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, workspace.binding().getStorageId());
         }
         if (!resident && !input.isEmpty()
                 && (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
-                        || !sshWorkspace && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
+                        || !sshWorkspace && !externalWorkspace && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         List<Map<String, Object>> merged = new ArrayList<>();
@@ -775,19 +777,8 @@ final class AgentSessionAdmissions {
             String title, List<Map<String, Object>> input,
             String payloadDigest, ResolvedBinding resolved,
             String actorId, AgentSessionPolicies.AgentPin pin) {
-        return insertSession(
-                tenantId,
-                operation,
-                idempotencyKey,
-                requestDigest,
-                agentId,
-                title,
-                input,
-                payloadDigest,
-                resolved,
-                actorId,
-                pin,
-                null);
+        return insertSession(tenantId, operation, idempotencyKey, requestDigest,
+                agentId, title, input, payloadDigest, resolved, actorId, pin, null);
     }
 
     Admission insertSession(

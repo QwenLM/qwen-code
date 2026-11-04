@@ -325,6 +325,8 @@ export function registerManagedContextRoutes(
   mount = new ManagedContextMount(bootDocument.mountRoot),
   ledger?: ManagedRuntimeLedger,
   sshForegroundOnly = false,
+  externalFilesOnly = false,
+  externalShell = false,
 ): ManagedToolExecutor {
   const boot = parseManagedContextBoot(bootDocument);
   if (boot.capabilityDigest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST)
@@ -390,14 +392,15 @@ export function registerManagedContextRoutes(
     extensionConfiguration !== undefined;
   const admissionOpen = (): boolean => executor.isAdmissionOpen;
   const remotePublisher =
-    !capturePublisher && requiresActivation && !resident
+    (externalShell || !capturePublisher) && requiresActivation && !resident
       ? new RemoteShellResultPublisher()
       : undefined;
-  const publisher: ManagedShellCapturePublisher | undefined =
-    capturePublisher ??
-    (remotePublishers && remotePublisher
-      ? selectShellCapturePublisher(remotePublishers, remotePublisher)
-      : (remotePublishers ?? remotePublisher));
+  const publisher: ManagedShellCapturePublisher | undefined = externalShell
+    ? remotePublisher
+    : (capturePublisher ??
+      (remotePublishers && remotePublisher
+        ? selectShellCapturePublisher(remotePublishers, remotePublisher)
+        : (remotePublishers ?? remotePublisher)));
   remotePublisher?.registerInstallRoute(app, boot, admissionOpen);
   const [attestRoute, contextRoute] = MANAGED_CONTEXT_ROUTES;
 
@@ -406,7 +409,11 @@ export function registerManagedContextRoutes(
     managedRuntimeNoStore,
     authorizeManagedRuntime(boot),
     managedRuntimeJsonBody(attestRoute.requestBodyLimitBytes),
-    (req: express.Request, res: express.Response) => {
+    async (req: express.Request, res: express.Response) => {
+      if (externalFilesOnly && (await mount.resolve('')) === undefined) {
+        res.status(409).json({ code: 'managed_context_unavailable' });
+        return;
+      }
       send(res, checkManagedContextAttestation(req.body, boot));
     },
     handleManagedRuntimeJsonError,
@@ -541,13 +548,26 @@ export function registerManagedContextRoutes(
       }
       return {
         ...toolSet,
-        tools: resident
-          ? new Map(
-              [...toolSet.tools].filter(([name]) =>
-                ['read_file', 'write_file', 'edit'].includes(name),
-              ),
-            )
-          : toolSet.tools,
+        tools:
+          resident || externalFilesOnly
+            ? new Map(
+                [...toolSet.tools].filter(([name]) =>
+                  (resident
+                    ? ['read_file', 'write_file', 'edit']
+                    : externalShell
+                      ? [
+                          'read_file',
+                          'write_file',
+                          'edit',
+                          'web_fetch',
+                          'glob',
+                          'run_shell_command',
+                        ]
+                      : ['read_file', 'write_file', 'edit', 'web_fetch']
+                  ).includes(name),
+                ),
+              )
+            : toolSet.tools,
         isActive: toolSet.isActive ?? isActive,
       };
     },
@@ -611,7 +631,7 @@ export function registerManagedContextRoutes(
     backgroundSupervisor,
     backgroundRegistry,
     monitorRegistry,
-    { ledger, sshForegroundOnly },
+    { ledger, sshForegroundOnly, externalFilesOnly },
   );
   if (!sshForegroundOnly) {
     registerManagedShellRoutes(
@@ -672,11 +692,11 @@ export function registerManagedContextRoutes(
             directory,
             workspaceRoot: boot.mountRoot,
             preapproved: true,
-            filesOnly: resident,
+            filesOnly: resident || externalFilesOnly,
             isActive,
           };
     },
-    sshForegroundOnly,
+    sshForegroundOnly && !externalFilesOnly,
   );
 
   if (extensionConfiguration && mcp && hooks && extensionProcesses) {

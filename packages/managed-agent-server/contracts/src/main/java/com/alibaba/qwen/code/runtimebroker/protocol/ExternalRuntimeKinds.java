@@ -17,16 +17,26 @@ public final class ExternalRuntimeKinds {
 
     public static boolean isExternal(String provisionerKind) {
         return com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_SCRATCH.equals(provisionerKind)
-                || com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(provisionerKind);
+                || isWorkspace(provisionerKind);
     }
 
     /** Whether the kind binds registered EXTERNAL storage. */
     public static boolean isWorkspace(String provisionerKind) {
-        return com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(provisionerKind);
+        return com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(provisionerKind)
+                || isFiles(provisionerKind);
+    }
+
+    public static boolean isFiles(String provisionerKind) {
+        return com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE_FILES.equals(provisionerKind) || isTools(provisionerKind);
+    }
+
+    public static boolean isTools(String provisionerKind) {
+        return com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE_TOOLS.equals(provisionerKind);
     }
 
     /** The provisioner names an operator can configure today, for messages. */
     public static String supported() {
-        return com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_SCRATCH + " or " + com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE;
+        return com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_SCRATCH + ", " + com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE
+                + ", " + com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE_FILES + " or " + com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE_TOOLS;
     }
 }

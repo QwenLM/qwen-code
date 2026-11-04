@@ -27,6 +27,7 @@ public final class CreateHarnessSession {
     private final Map<String, Object> publicChildExtensionAgent;
     private final boolean childWorkspaces;
     private final boolean foregroundOnly;
+    private final boolean fileRewindEnabled;
     private final boolean childSnapshots;
 
     private CreateHarnessSession(Builder builder) {
@@ -54,6 +55,7 @@ public final class CreateHarnessSession {
         this.publicChildExtensionAgent = builder.publicChildExtensionAgent;
         this.childWorkspaces = builder.childWorkspaces;
         this.foregroundOnly = builder.foregroundOnly;
+        this.fileRewindEnabled = builder.fileRewindEnabled;
         this.childSnapshots = builder.childWorkspaces && builder.childSnapshots;
     }
 
@@ -123,6 +125,9 @@ public final class CreateHarnessSession {
         if (childWorkspaces) {
             result.put("childWorkspaces", true);
         }
+        if (!fileRewindEnabled) {
+            result.put("fileRewindEnabled", false);
+        }
         if (foregroundOnly) {
             result.put("foregroundOnly", true);
         }
@@ -153,7 +158,13 @@ public final class CreateHarnessSession {
         private Map<String, Object> publicChildExtensionAgent;
         private boolean childWorkspaces;
         private boolean foregroundOnly;
+        private boolean fileRewindEnabled = true;
         private boolean childSnapshots;
+
+        public Builder fileRewindEnabled(boolean value) {
+            this.fileRewindEnabled = value;
+            return this;
+        }
 
         /** Restricts the saved Session to files and foreground Shell on an SSH Runtime. */
         public Builder foregroundOnly(boolean value) {

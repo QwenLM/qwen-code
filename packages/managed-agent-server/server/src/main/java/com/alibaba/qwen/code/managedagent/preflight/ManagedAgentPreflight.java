@@ -1013,7 +1013,7 @@ public final class ManagedAgentPreflight {
                 properties.getRuntimeBroker();
         boolean files = harness.isWorkspaceFilesEnabled();
         boolean shell = harness.isWorkspaceShellEnabled();
-        if (ExternalRuntimeKinds.isExternal(broker.getProvisioner()) && (files || shell)) {
+        if (ExternalRuntimeKinds.isExternal(broker.getProvisioner()) && !ExternalRuntimeKinds.isFiles(broker.getProvisioner()) && (files || shell)) {
             return new Check("tool-path", Status.FAIL,
                     ExternalRuntimeKinds.isWorkspace(broker.getProvisioner())
                                     ? "External Workspace Runtime is a storage provisioning prerequisite"
@@ -1071,6 +1071,14 @@ public final class ManagedAgentPreflight {
             return new Check("tool-path", Status.FAIL,
                     "Workspace files cannot use the static provisioner",
                     "use the local-process provisioner");
+        }
+        if (ExternalRuntimeKinds.isFiles(broker.getProvisioner())) {
+            try {
+                properties.validateRuntimeProvider();
+                return new Check("tool-path", Status.WARN, "External files protocol configured; Cloud mount and execution need live verification", null);
+            } catch (IllegalStateException error) {
+                return new Check("tool-path", Status.FAIL, error.getMessage(), "check the external files Runtime configuration");
+            }
         }
         if ("ssh-process".equals(broker.getProvisioner())) {
             try {

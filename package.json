@@ -26,6 +26,7 @@
     "integrations/external-context-mem0",
     "integrations/test-failure-explorer",
     "integrations/generated-ui",
+    "integrations/e2b-runtime-provider",
     "!packages/desktop",
     "!packages/live-host",
     "!packages/mobile-shell"

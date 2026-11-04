@@ -248,6 +248,35 @@ class ManagedLockScopeConcurrencyMySqlIT {
         }
     }
 
+    @Test
+    void externalAdmissionSharesRegistrationAndOwnerLocks() throws Exception {
+        var registration = new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration(
+                new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.ExternalStorageIdentity("e2b", "volume", 1),
+                new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.StorageAlias("storage", "/external/storage", "/workspace"));
+        new ExternalStorageRegistrationStore(jdbc, new DataSourceTransactionManager(database.source()))
+                .registerExternalStorage(TENANT, "register", registration);
+        try (Connection reader = database.source().getConnection(); var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            reader.setAutoCommit(false);
+            try (var statement = reader.createStatement()) {
+                statement.executeQuery("SELECT alias_key FROM ma_storage FOR SHARE").close();
+                statement.executeQuery("SELECT storage_key FROM ma_storage_owner FOR SHARE").close();
+            }
+            Future<?> admission = executor.submit(() -> transactions.executeWithoutResult(status -> {
+                WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, TENANT, "storage");
+                WorkspaceMigrationAdmission.requirePhysicalOpenForAdmission(jdbc, TENANT, "storage");
+            }));
+            boolean blocked;
+            try {
+                blocked = waitsForLock("external-storage-admission", admission);
+            } finally {
+                reader.rollback();
+            }
+            admission.get(5, TimeUnit.SECONDS);
+            assertThat(blocked).as("external admission retains shared registration and owner reads").isFalse();
+        }
+        assertThat(jdbc.queryForObject("SELECT mount_state FROM ma_storage_owner", String.class)).isEqualTo("UNVERIFIED");
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"alias", "physical"})
     void storageMutationWaitsForReadAdmissionAndThenClosesAdmission(String domain) throws Exception {

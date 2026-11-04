@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
@@ -19,7 +20,8 @@ import java.util.Set;
 public final class ExternalRuntimeProviderFactory implements RuntimeProviderFactory {
     @Override
     public Set<String> kinds() {
-        return Set.of(RuntimeProviderKinds.EXTERNAL_SCRATCH, RuntimeProviderKinds.EXTERNAL_WORKSPACE);
+        return Set.of(RuntimeProviderKinds.EXTERNAL_SCRATCH, RuntimeProviderKinds.EXTERNAL_WORKSPACE,
+                RuntimeProviderKinds.EXTERNAL_WORKSPACE_FILES, RuntimeProviderKinds.EXTERNAL_WORKSPACE_TOOLS);
     }
 
     @Override
@@ -29,12 +31,21 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
         var broker = settings.getRuntimeBroker();
         boolean workspace = ExternalRuntimeKinds.isWorkspace(broker.getProvisioner());
         ExternalStorageRegistry storage = workspace ? dependencies.externalStorage() : null;
+        HttpRuntimeTransport filesTransport = null;
+        if (ExternalRuntimeKinds.isFiles(broker.getProvisioner())) {
+            if (!(transport instanceof HttpRuntimeTransport http)) {
+                throw new IllegalStateException("External files Runtime requires the HTTP retirement transport");
+            }
+            filesTransport = http;
+        }
         ExternalHttpRuntimeClient client = new ExternalHttpRuntimeClient(
                 URI.create(broker.getExternalProviderUrl()), broker.getExternalProviderToken(),
                 broker.getExternalRequestTimeout());
         return workspace
                 ? new ExternalWorkspaceProvisioner(client, storage, broker.getExternalProviderId(),
-                        broker.getExternalStartupTimeout())
+                        broker.getExternalStartupTimeout(),
+                        filesTransport,
+                        ExternalRuntimeKinds.isTools(broker.getProvisioner()))
                 : new ExternalRuntimeProvisioner(client, broker.getExternalProviderId(),
                         broker.getExternalStartupTimeout());
     }
@@ -44,7 +55,8 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
         Check accepted = new Check("broker", Status.PASS,
                 settings.getRuntimeBroker().getProvisioner() + " configuration accepted; provider reachability,"
                         + " worker attestation and storage registration are checked on first use", null);
-        if (ExternalRuntimeKinds.isWorkspace(settings.getRuntimeBroker().getProvisioner())) {
+        if (ExternalRuntimeKinds.isWorkspace(settings.getRuntimeBroker().getProvisioner())
+                && !ExternalRuntimeKinds.isFiles(settings.getRuntimeBroker().getProvisioner())) {
             return List.of(accepted, new Check("external-prerequisite", Status.WARN,
                     "external-workspace can provision a storage-bound worker, but it"
                             + " cannot execute Hosted tools or close a Session yet; every placement fails closed",
@@ -61,7 +73,18 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
         if (!ExternalRuntimeKinds.isExternal(provisioner)) {
             return;
         }
-        if (harness.isWorkspaceFilesEnabled() || harness.isWorkspaceShellEnabled()
+        boolean externalFiles = ExternalRuntimeKinds.isFiles(provisioner);
+        boolean externalTools = ExternalRuntimeKinds.isTools(provisioner);
+        if (externalFiles && (!harness.isWorkspaceFilesEnabled() || !externalTools && harness.isWorkspaceShellEnabled()
+                || settings.getManagedExtensions().isEnabled())) {
+            throw new IllegalStateException("External files Runtime requires Workspace files without Shell or managed extensions");
+        }
+        if (externalTools && (!harness.isWorkspaceShellEnabled() || !settings.getToolPublication().isEnabled()
+                || !settings.getArtifacts().isEnabled() || StringUtils.isBlank(settings.getToolPublication().getServiceBaseUrl())
+                || !settings.getToolPublication().getServiceBaseUrl().startsWith("https://"))) {
+            throw new IllegalStateException("External tools Runtime requires foreground Shell and an HTTPS tool publication service");
+        }
+        if ((!externalFiles && harness.isWorkspaceFilesEnabled()) || (!externalTools && harness.isWorkspaceShellEnabled())
                 || !runtimeBroker.getWorkspaceMounts().isEmpty()
                 || !runtimeBroker.getResidentWorkspaces().isEmpty()
                 || StringUtils.isNotBlank(runtimeBroker.getWorkspaceCreationRoot())

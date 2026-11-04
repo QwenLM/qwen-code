@@ -37,8 +37,15 @@ final class WorkspaceStorageKindGuard {
     }
 
     static void requireExecutionAlias(JdbcTemplate jdbc, String tenantId, String storageId) {
-        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind IN ('CSI', 'EXTERNAL')",
+        requireExecutionAlias(jdbc, tenantId, storageId, false);
+    }
+
+    static void requireExecutionAlias(JdbcTemplate jdbc, String tenantId, String storageId, boolean externalFiles) {
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'CSI'",
                 Long.class, WorkspaceCsiRegistration.aliasKey(tenantId, storageId)) != 0) {
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        }
+        if (ExternalStorageRegistrationStore.executionStorage(jdbc, tenantId, storageId, false) != null && !externalFiles) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
     }

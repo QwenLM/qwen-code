@@ -80,6 +80,12 @@ final class WorkspaceMigrationAdmission {
         if (alias.get("physical_key") == null || "CSI".equals(alias.get("storage_kind"))) {
             return;
         }
+        if ("EXTERNAL".equals(alias.get("storage_kind"))) {
+            if (ExternalStorageRegistrationStore.executionStorage(jdbc, tenant, storage, lock) == null) {
+                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            }
+            return;
+        }
         var owner = "SSH_LOCAL".equals(alias.get("storage_kind"))
                 ? SshWorkspaceStore.requireOwner(jdbc, tenant, storage, alias, lock) : LocalStorageOwners.requireOwner(jdbc, alias, lock);
         if (!"READY".equals(owner.get("mount_state"))) {

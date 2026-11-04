@@ -1,0 +1,21 @@
+{
+  "providerId": "e2b-cloud",
+  "templateId": "replace-with-an-immutable-template-id",
+  "workerEntry": "/opt/qwen/dist/cli.js",
+  "workerDomain": "workers.example.com",
+  "stateDirectory": "/var/lib/qwen-e2b-provider",
+  "sandboxTimeoutMs": 3600000,
+  "port": 8089,
+  "registrations": [
+    {
+      "providerId": "e2b-cloud",
+      "tenantId": "tenant-a",
+      "workspaceId": "workspace-a",
+      "volumeId": "replace-with-volume-id",
+      "physicalKey": "replace-with-volume-id",
+      "registrationRevision": 1,
+      "aliasPath": "/external/workspace-a",
+      "mountRoot": "/workspace"
+    }
+  ]
+}

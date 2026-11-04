@@ -380,6 +380,7 @@ export class ManagedToolExecutor {
     hasActiveSession(sessionId: string): boolean;
     getDrainInspection(): { pendingInvocations: number; hasActivity: boolean };
     close(): Promise<void>;
+    retireExternalFiles?(): Promise<void>;
   };
   private closing = false;
   private csiClosing: Promise<void> | undefined;
@@ -407,6 +408,10 @@ export class ManagedToolExecutor {
 
   get isAdmissionOpen(): boolean {
     return !this.closing && this.retirementId === undefined;
+  }
+
+  get isExternalFilesProfile(): boolean {
+    return this.options.externalFilesOnly === true;
   }
 
   get isAdmissionSealed(): boolean {
@@ -905,6 +910,7 @@ export class ManagedToolExecutor {
       readonly ledger?: ManagedRuntimeLedger;
       readonly groupEvidenceTimeoutMs?: number;
       readonly sshForegroundOnly?: boolean;
+      readonly externalFilesOnly?: boolean;
     } = {},
   ) {
     this.backgroundRegistry =
@@ -2131,6 +2137,21 @@ export class ManagedToolExecutor {
   }
 
   async retireSsh(retirementId: string): Promise<void> {
+    return this.retireWorker(retirementId, false);
+  }
+
+  async retireExternalFiles(retirementId: string): Promise<void> {
+    if (!this.options.externalFilesOnly)
+      throw new ManagedToolUnavailableError(
+        'External file retirement requires its worker profile.',
+      );
+    return this.retireWorker(retirementId, true);
+  }
+
+  private async retireWorker(
+    retirementId: string,
+    externalFiles: boolean,
+  ): Promise<void> {
     this.sealAdmission(retirementId);
     const ledger = this.options.ledger;
     if (
@@ -2145,7 +2166,6 @@ export class ManagedToolExecutor {
     if (
       this.pendingStarts.size > 0 ||
       this.historyControls.size > 0 ||
-      this.providerWasUsed ||
       (!this.extensionLifecycle &&
         (this.mcpCalls.size > 0 ||
           this.mcp?.getDrainInspection().hasActivity ||
@@ -2163,6 +2183,13 @@ export class ManagedToolExecutor {
       throw new ManagedToolUnavailableError(
         'Original Runtime work is not settled and acknowledged.',
       );
+    }
+    if (this.providerWasUsed) {
+      if (!externalFiles || !this.provider?.retireExternalFiles)
+        throw new ManagedToolUnavailableError(
+          'Original Runtime work is not settled and acknowledged.',
+        );
+      await this.provider.retireExternalFiles();
     }
     await Promise.all([
       this.mcp?.close(),

@@ -28,6 +28,12 @@ final class RuntimeBrokerSupport {
             "unknown");
     static final int MAX_CAS_ATTEMPTS = 16;
 
+    static boolean requiresToolDrainAcknowledgement(RuntimeBindingRecord binding) {
+        return binding.getLease() != null
+                && (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
+                        || com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds.isFiles(binding.getRequest().getProvisionerKind()));
+    }
+
     static <T> CompletionStage<T> safeStage(
             Supplier<CompletionStage<T>> supplier) {
         try {
@@ -210,7 +216,8 @@ final class RuntimeBrokerSupport {
     }
 
     static Map<String, Object> sshNoStartReceipt(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
-        if (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
+        if ((!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
+                && !com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds.isFiles(binding.getRequest().getProvisionerKind()))
                 || !execution.isSettled() || !"not_started".equals(execution.getExecutionStatus())
                 || execution.getResult() == null || !execution.getResult().containsKey("capture")
                 || execution.getResult().get("capture") != null

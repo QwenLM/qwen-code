@@ -1,14 +1,26 @@
 package com.alibaba.qwen.code.daemon;
 
+import org.junit.jupiter.api.Test;
+
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.util.Map;
-import org.junit.jupiter.api.Test;
-
 class HostedAgentDefinitionRequestTest {
     private static final String SESSION = "22222222-2222-4222-8222-222222222222";
+
+    @Test
+    void externalFileRewindRestrictionSurvivesEveryLoadCopy() {
+        assertFalse(CreateHarnessSession.builder().harnessSessionId(SESSION).build().toJson().containsKey("fileRewindEnabled"));
+        assertEquals(false, CreateHarnessSession.builder().harnessSessionId(SESSION).fileRewindEnabled(false).build().toJson().get("fileRewindEnabled"));
+        var original = new LoadHarnessSession(SESSION).withFileRewindEnabled(false);
+        for (var load : java.util.List.of(original, original.withChildWorkspaces(true), original.withForegroundOnly(true),
+                original.forLifecycle("close", 1), original.withStoppedMessages())) {
+            assertEquals(false, load.toJson().get("fileRewindEnabled"));
+        }
+    }
 
     @Test
     void initialExtensionSelectionSurvivesCreateAndEveryLoadCopy() {

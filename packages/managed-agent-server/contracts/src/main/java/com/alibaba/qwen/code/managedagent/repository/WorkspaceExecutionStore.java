@@ -11,6 +11,8 @@ public interface WorkspaceExecutionStore {
 
     public boolean verifiedRecoveryEnabled();
 
+    public com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.RegisteredExternalStorage externalStorage(ContextBinding binding);
+
     public void authorize(SessionRecord session);
 
     public void authorizeLifecycle(SessionRecord session, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority);

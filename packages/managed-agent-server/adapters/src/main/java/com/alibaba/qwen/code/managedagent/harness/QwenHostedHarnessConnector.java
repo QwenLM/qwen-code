@@ -373,6 +373,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     .withPublicChildModelRoute(publicChildModelRoute(session))
                     .withPublicChildExtensionAgent(publicChildExtensionAgent(session))
                     .withForegroundOnly(foregroundOnly(session))
+                    .withFileRewindEnabled(!externalWorkspace(session))
                     .withChildWorkspaces(childWorkspaces && session.publicChildAgentsVersion() == 0 && !sshWorkspace(session), childSnapshots && session.publicChildAgentsVersion() == 0 && !sshWorkspace(session))
                     .forLifecycle(operation.operationId(), operation.claimGeneration(), operation.lifecycleProtocolVersion() == 2 ? 2 : 1));
             attachments.put(key, ref);
@@ -1287,6 +1288,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         .withPublicChildModelRoute(publicChildModelRoute(session))
                     .withPublicChildExtensionAgent(publicChildExtensionAgent(session))
                         .withForegroundOnly(foregroundOnly(session))
+                        .withFileRewindEnabled(!externalWorkspace(session))
                         .withChildWorkspaces(childWorkspaces && session.publicChildAgentsVersion() == 0 && !sshWorkspace(session), childSnapshots && session.publicChildAgentsVersion() == 0 && !sshWorkspace(session));
         HarnessSessionRef attached = client().loadSession(
                 stopMessages ? load.withStoppedMessages() : load);
@@ -1558,6 +1560,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                             .approvalTimeoutMs(properties.getApprovalTimeout().toMillis())
                             .toolProfile(profile)
                             .foregroundOnly(foregroundOnly(session))
+                            .fileRewindEnabled(!externalWorkspace(session))
                             .childWorkspaces(childWorkspaces && session.publicChildAgentsVersion() == 0 && !sshWorkspace(session))
                             .childSnapshots(childSnapshots && session.publicChildAgentsVersion() == 0 && !sshWorkspace(session));
             builder.publicChildAgentsVersion(session.publicChildAgentsVersion()).publicChildModelRoute(publicChildModelRoute(session)).publicChildExtensionAgent(publicChildExtensionAgent(session));
@@ -1649,6 +1652,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 .withPublicChildModelRoute(publicChildModelRoute(session))
                     .withPublicChildExtensionAgent(publicChildExtensionAgent(session))
                 .withForegroundOnly(foregroundOnly(session))
+                .withFileRewindEnabled(!externalWorkspace(session))
                 .withChildWorkspaces(childWorkspaces && session.publicChildAgentsVersion() == 0 && !sshWorkspace(session), childSnapshots && session.publicChildAgentsVersion() == 0 && !sshWorkspace(session));
         if (promptId != null) {
             request.withCancellationPromptId(promptId);
@@ -1810,6 +1814,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     .withPublicChildModelRoute(publicChildModelRoute(session))
                     .withPublicChildExtensionAgent(publicChildExtensionAgent(session))
                     .withForegroundOnly(foregroundOnly(session))
+                    .withFileRewindEnabled(!externalWorkspace(session))
                     .withChildWorkspaces(childWorkspaces && session.publicChildAgentsVersion() == 0 && !sshWorkspace(session), childSnapshots && session.publicChildAgentsVersion() == 0 && !sshWorkspace(session))
                     .forRecoveryCleanup(promptId));
             attachments.compute(key, (ignored, held) -> {
@@ -2086,8 +2091,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private boolean foregroundOnly(SessionRecord session) {
-        return sshWorkspace(session) && !(session.publicChildAgentsVersion() == 1
+        return externalWorkspace(session) || sshWorkspace(session) && !(session.publicChildAgentsVersion() == 1
                 && settings.getExtensions().isEnabled() && settings.getManagedExtensions().isEnabled());
+    }
+
+    private boolean externalWorkspace(SessionRecord session) {
+        return session.workspace() != null && workspaceExecution != null && workspaceExecution.externalStorage(session.workspace()) != null;
     }
 
     private boolean sshWorkspace(SessionRecord session) {
@@ -2176,6 +2185,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
         List<Map<String, Object>> pins = AgentDefinitionExtensions.mcpServers(
                 definitions.pinnedContent(session).get("mcp_servers"), session.toolProfile());
+        if (!pins.isEmpty() && externalWorkspace(session)) {
+            throw new IllegalStateException("External Workspace does not admit MCP");
+        }
         if (!pins.isEmpty() && WorkspaceToolProfiles.SHELL.equals(session.toolProfile())
                 && (!client().capabilities().getFeatures().contains("workspace-shell-mcp/1")
                         || !client().capabilities().getLifecycleV2Profiles().contains(WorkspaceToolProfiles.SHELL))) {
@@ -2188,8 +2200,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (session.agentDefinitionDigest() == null || definitions == null) {
             return null;
         }
-        return AgentDefinitionExtensions.hookCatalog(
+        var catalog = AgentDefinitionExtensions.hookCatalog(
                 definitions.pinnedContent(session).get("hook_catalog"), session.workspace() != null);
+        if (catalog != null && externalWorkspace(session)) {
+            throw new IllegalStateException("External Workspace does not admit Hooks");
+        }
+        return catalog;
     }
 
     private ManagedSessionStoreConnection managedSessionStore(

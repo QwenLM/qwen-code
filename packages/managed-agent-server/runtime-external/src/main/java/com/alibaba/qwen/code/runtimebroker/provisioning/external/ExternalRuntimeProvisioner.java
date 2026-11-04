@@ -416,7 +416,7 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
         }
     }
 
-    private String identity(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+    protected final String identity(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         Map<String, Object> boot = new LinkedHashMap<>(bootDocument(request, seed));
         boot.remove("token");
         return digest(Map.of("version", 1, "providerId", providerId,

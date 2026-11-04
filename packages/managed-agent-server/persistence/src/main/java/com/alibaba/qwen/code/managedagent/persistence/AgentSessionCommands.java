@@ -101,12 +101,7 @@ final class AgentSessionCommands {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {
-            if (sessionPolicies.isSshWorkspace(session.workspace())) {
-                AgentSessionPolicies.requireSshToolProfile(session.toolProfile());
-                if (sessionPolicies.hasMcpServers(session)) {
-                    throw AgentSessionPolicies.workspaceExecutionUnavailable();
-                }
-            }
+            sessionPolicies.requireWorkspaceTools(session);
             WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         }
         if (!"ACTIVE".equals(session.status())) {

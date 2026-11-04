@@ -37,6 +37,15 @@ class ExternalWorkspaceFactoryTest {
         broker.setExternalProviderId("placement-service");
         broker.setExternalRequestTimeout(Duration.ofSeconds(7));
         broker.setExternalStartupTimeout(Duration.ofSeconds(90));
+        if (com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds.isFiles(kind)) {
+            properties.getHarness().setWorkspaceFilesEnabled(true);
+        }
+        if (com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds.isTools(kind)) {
+            properties.getHarness().setWorkspaceShellEnabled(true);
+            properties.getToolPublication().setEnabled(true);
+            properties.getToolPublication().setServiceBaseUrl("https://publication.invalid");
+            properties.getArtifacts().setEnabled(true);
+        }
         return properties;
     }
 
@@ -48,6 +57,31 @@ class ExternalWorkspaceFactoryTest {
             assertTrue(provisioner.supportsKind(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE));
             assertFalse(provisioner.supportsKind(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_SCRATCH));
             assertFalse(provisioner.supportsDrainedStop());
+        }
+    }
+
+    @Test
+    void theFilesKindHasItsOwnDrainedStopCapabilityAndRequiresTheRegistry() {
+        try (RuntimeProvisioner provisioner = EmbeddedRuntimeBroker.provisioner(
+                broker(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE_FILES), new HttpRuntimeTransport(), EMPTY)) {
+            assertEquals(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE_FILES, provisioner.kind());
+            assertTrue(provisioner.supportsDrainedStop());
+            assertFalse(provisioner.supportsKind(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE));
+        }
+        assertThrows(IllegalStateException.class, () -> EmbeddedRuntimeBroker.provisioner(
+                broker(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE_FILES), new HttpRuntimeTransport(), RuntimeProviderDependencies.NONE));
+        var transportError = assertThrows(IllegalStateException.class, () -> EmbeddedRuntimeBroker.provisioner(
+                broker(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE_FILES), null, EMPTY));
+        assertTrue(transportError.getMessage().contains("HTTP retirement transport"), transportError.getMessage());
+    }
+
+    @Test
+    void theToolsKindUsesTheForegroundShellProvisioner() {
+        try (RuntimeProvisioner provisioner = EmbeddedRuntimeBroker.provisioner(
+                broker(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE_TOOLS), new HttpRuntimeTransport(), EMPTY)) {
+            assertEquals(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE_TOOLS, provisioner.kind());
+            assertTrue(provisioner.supportsDrainedStop());
+            assertFalse(provisioner.supportsKind(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE_FILES));
         }
     }
 
