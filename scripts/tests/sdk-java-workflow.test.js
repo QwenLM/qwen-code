@@ -42,6 +42,36 @@ const step = (block, name) => {
 };
 
 describe('SDK Java self-hosted workflow guards', () => {
+  it('reports non-database guidelines with the Java 21 reactor dependency cache', () => {
+    const steps = Object.values(parse(workflow).jobs).flatMap(
+      (candidate) => candidate.steps ?? [],
+    );
+    const report = steps.find(
+      (candidate) => candidate.name === 'Run Managed Agent guideline report',
+    );
+    expect(report.if).toContain("matrix.os == 'ubuntu-latest'");
+    expect(report.if).toContain("matrix.java == '21'");
+    expect(report['working-directory']).toBe('packages/managed-agent-server');
+    expect(report.run).toContain(
+      '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
+    );
+    expect(report.run).toContain(
+      '-Palibaba-guidelines -DskipTests compile pmd:pmd',
+    );
+    expect(report.run).not.toContain('pmd:check');
+    const upload = steps.find(
+      (candidate) =>
+        candidate.name === 'Upload Managed Agent guideline reports',
+    );
+    expect(upload.if).toContain('always()');
+    expect(upload.with.path).toContain('**/target/pmd.xml');
+    expect(upload.with.path).toContain('**/target/reports/pmd.html');
+    const pom = readFileSync('packages/managed-agent-server/pom.xml', 'utf8');
+    expect(pom).toContain('<includeTests>false</includeTests>');
+    expect(pom).toContain('/persistence/src/main/java</excludeRoot>');
+    expect(pom).toContain('<skipPmdError>false</skipPmdError>');
+  });
+
   it('runs both ordinary dependency host modes from the verified local reactor', () => {
     const steps = parse(workflow).jobs['mysql-integration'].steps;
     const verify = steps.find((candidate) =>
@@ -1463,7 +1493,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
     expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
       {
-        test: 6,
+        test: 7,
         'mysql-integration': 2,
         'daemon-e2e': 1,
         'event-transport-broker': 2,

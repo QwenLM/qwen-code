@@ -41,6 +41,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /** Owns SSH control sockets and ephemeral forwarding addresses, never remote workers. */
 public final class SshConnectionManager implements com.alibaba.qwen.code.runtimebroker.spi.SshConnections {
+    private static final System.Logger LOG = System.getLogger(SshConnectionManager.class.getName());
     private static final int RECORD_LIMIT = 64 * 1024;
     private static final Duration COMMAND_TIMEOUT = Duration.ofSeconds(60);
     private final URI publicationEndpoint;
@@ -407,7 +408,9 @@ public final class SshConnectionManager implements com.alibaba.qwen.code.runtime
             if (temporary != null) {
                 try {
                     Files.deleteIfExists(temporary);
-                } catch (IOException ignored) {
+                } catch (IOException failure) {
+                    LOG.log(System.Logger.Level.WARNING,
+                            "SSH forwarding record cleanup failed ({0})", failure.getClass().getSimpleName());
                 }
             }
         }
@@ -621,7 +624,9 @@ public final class SshConnectionManager implements com.alibaba.qwen.code.runtime
         }
         try (ownershipChannel) {
             ownershipLock.release();
-        } catch (IOException ignored) {
+        } catch (IOException failure) {
+            LOG.log(System.Logger.Level.WARNING,
+                    "SSH controller ownership cleanup failed ({0})", failure.getClass().getSimpleName());
         }
         if (Thread.currentThread() != exitHook) {
             try {
@@ -638,6 +643,8 @@ public final class SshConnectionManager implements com.alibaba.qwen.code.runtime
             runner.run(List.copyOf(command), new byte[0], Duration.ofSeconds(5));
         } catch (RuntimeException ignored) {
             // Closing a control socket cannot establish remote worker stop proof.
+            LOG.log(System.Logger.Level.WARNING,
+                    "SSH control socket cleanup failed ({0})", ignored.getClass().getSimpleName());
         }
     }
 

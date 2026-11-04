@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ruleset name="Managed Agent non-database guidelines" xmlns="http://pmd.sourceforge.net/ruleset/2.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://pmd.sourceforge.net/ruleset/2.0.0 https://pmd.sourceforge.io/ruleset_2_0_0.xsd">
+    <description>Report-only PMD 7 adaptation of selected Alibaba Java guidelines. Candidates need review; this is not the P3C ruleset or complete handbook coverage. Database and test sources are excluded by Maven.</description>
+    <rule ref="category/java/bestpractices.xml/AvoidPrintStackTrace" />
+    <rule ref="category/java/bestpractices.xml/GuardLogStatement" />
+    <rule ref="category/java/bestpractices.xml/MissingOverride" />
+    <rule ref="category/java/bestpractices.xml/PreserveStackTrace" />
+    <rule ref="category/java/bestpractices.xml/RelianceOnDefaultCharset" />
+    <rule ref="category/java/bestpractices.xml/SystemPrintln" />
+    <rule ref="category/java/bestpractices.xml/UnusedFormalParameter" />
+    <rule ref="category/java/bestpractices.xml/UnusedLocalVariable" />
+    <rule ref="category/java/bestpractices.xml/UnusedPrivateField" />
+    <rule ref="category/java/bestpractices.xml/UnusedPrivateMethod" />
+    <rule ref="category/java/bestpractices.xml/UseCollectionIsEmpty" />
+    <rule ref="category/java/errorprone.xml/AssignmentInOperand" />
+    <rule ref="category/java/errorprone.xml/AvoidCatchingNPE" />
+    <rule ref="category/java/errorprone.xml/AvoidDecimalLiteralsInBigDecimalConstructor" />
+    <rule ref="category/java/errorprone.xml/BrokenNullCheck" />
+    <rule ref="category/java/errorprone.xml/ClassCastExceptionWithToArray" />
+    <rule ref="category/java/errorprone.xml/CompareObjectsWithEquals" />
+    <rule ref="category/java/errorprone.xml/EmptyCatchBlock" />
+    <rule ref="category/java/errorprone.xml/ImplicitSwitchFallThrough" />
+    <rule ref="category/java/errorprone.xml/InvalidLogMessageFormat" />
+    <rule ref="category/java/errorprone.xml/OverrideBothEqualsAndHashcode" />
+    <rule ref="category/java/errorprone.xml/ReturnFromFinallyBlock" />
+    <rule ref="category/java/errorprone.xml/UseCorrectExceptionLogging" />
+    <rule ref="category/java/errorprone.xml/UseEqualsToCompareStrings" />
+    <rule ref="category/java/multithreading.xml/DoubleCheckedLocking" />
+    <rule ref="category/java/multithreading.xml/NonThreadSafeSingleton" />
+    <rule ref="category/java/multithreading.xml/UnsynchronizedStaticFormatter" />
+    <rule ref="category/java/performance.xml/UseStringBufferForStringAppends" />
+    <rule name="AlibabaExecutorsFactoryCandidate" language="java" class="net.sourceforge.pmd.lang.rule.xpath.XPathRule" message="Review factory-created platform executor bounds and rejection policy.">
+        <priority>2</priority>
+        <properties>
+            <property name="xpath">
+                <value><![CDATA[//MethodCall[@MethodName = ('newCachedThreadPool', 'newFixedThreadPool', 'newSingleThreadExecutor', 'newSingleThreadScheduledExecutor', 'newScheduledThreadPool')]]]></value>
+            </property>
+        </properties>
+    </rule>
+    <rule name="AlibabaUnnamedVirtualExecutorCandidate" language="java" class="net.sourceforge.pmd.lang.rule.xpath.XPathRule" message="Review default virtual executor thread names; adapt the guideline to Java 21.">
+        <priority>3</priority>
+        <properties>
+            <property name="xpath">
+                <value><![CDATA[//MethodCall[@MethodName = 'newVirtualThreadPerTaskExecutor']]]></value>
+            </property>
+        </properties>
+    </rule>
+    <rule name="AlibabaRegexPrecompileCandidate" language="java" class="net.sourceforge.pmd.lang.rule.xpath.XPathRule" message="Review repeated literal regex compilation; verify that the receiver is a String.">
+        <priority>3</priority>
+        <properties>
+            <property name="xpath">
+                <value><![CDATA[//MethodCall[@MethodName = ('matches', 'replaceAll', 'replaceFirst')][ArgumentList/StringLiteral]]]></value>
+            </property>
+        </properties>
+    </rule>
+</ruleset>
