@@ -318,6 +318,14 @@ export type RecordToolResultOptions = {
     }
 );
 
+// A prompt a Mod submitted keeps its turn's place in the title projection but
+// offers the title nothing, since the user did not type it.
+function titleText(record: ChatRecord): string | undefined {
+  if (record.provenance === 'mod_prompt') return '';
+  return (record.systemPayload as UserPromptRecordPayload | undefined)
+    ?.displayText;
+}
+
 function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
   return {
     goalId: goalContext.goalId,
@@ -1477,10 +1485,7 @@ export class ChatRecordingService {
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
     for (const record of sessionData.conversation.messages) {
       if (record.type === 'user' && record.subtype === undefined) {
-        this.trackUserDisplayTextForTitle(
-          (record.systemPayload as UserPromptRecordPayload | undefined)
-            ?.displayText,
-        );
+        this.trackUserDisplayTextForTitle(titleText(record));
       }
       if (record.type !== 'system') continue;
       if (record.subtype === 'custom_title') {
@@ -2223,10 +2228,7 @@ export class ChatRecordingService {
         this.userDisplayTextsForTitle.length = 0;
         for (const record of active) {
           if (record.type === 'user' && record.subtype === undefined) {
-            this.trackUserDisplayTextForTitle(
-              (record.systemPayload as UserPromptRecordPayload | undefined)
-                ?.displayText,
-            );
+            this.trackUserDisplayTextForTitle(titleText(record));
           }
         }
         return result;
@@ -2567,7 +2569,7 @@ export class ChatRecordingService {
       };
       // Advance rewind associations only after the record is built, so a
       // rejected message cannot skew the projection.
-      this.trackUserDisplayTextForTitle(promptPayload?.displayText);
+      this.trackUserDisplayTextForTitle(titleText(record));
       this.turnParentUuids.push(record.parentUuid ?? null);
       this.turnPromptIds.push(getRecordRewindId(record));
       this.turnDaemonPromptIds.push(record.daemonPromptId);
@@ -3398,10 +3400,7 @@ export class ChatRecordingService {
           this.turnDaemonPromptIds.push(record.daemonPromptId);
         }
         if (record.type === 'user' && record.subtype === undefined)
-          this.trackUserDisplayTextForTitle(
-            (record.systemPayload as UserPromptRecordPayload | undefined)
-              ?.displayText,
-          );
+          this.trackUserDisplayTextForTitle(titleText(record));
       }
     };
     let committed = false;

@@ -671,14 +671,19 @@ async function hostCall(
   if (!isModMethod(method)) throw new Error('Mod API not supported: ' + method);
   const plugin = realms[call.plugin].plugin;
   // A submitted prompt raises prompt.submit as a typed one does, through
-  // every hook but the caller's, and is queued once it arrives beneath them.
+  // every hook but the caller's. What arrives beneath them last is queued once
+  // they have all answered. Its hooks do not run beneath the caller's, so a
+  // call the caller does not await still queues after the caller returns.
   const submits = method === 'prompt.submit';
   const input = submits ? promptSubmitCall(value, plugin.name) : value;
   if (!submits) validateInput(method, value, {});
-  // No hook hears a prompt the host would not run.
+  // No hook hears a prompt the host would not run, or one with no words.
   else if (!submitsPrompts)
     return { drop: 'this host does not run prompts a Mod submits' };
-  let queued = false;
+  else if (!String((input as ModInput)['text']).trim())
+    return { drop: 'the prompt is empty' };
+  const detached = notice(method) || submits;
+  let arrived: ModInput | undefined;
   const invoke = async () => {
     const result = await dispatch(
       method,
@@ -686,7 +691,7 @@ async function hostCall(
       { plugin: plugin.name, tier: 'user' },
       frames,
       async (e) => {
-        assertLive(notice(method) ? undefined : call);
+        assertLive(detached ? undefined : call);
         if (call.epoch !== epoch)
           throw new Error('Mod call belongs to an ended dispatch.');
         if (method === 'command.register') {
@@ -732,21 +737,12 @@ async function hostCall(
           return { value: undefined };
         }
         if (submits) {
-          const context = e['context'] as string[] | undefined;
-          const origin = e['origin'] as ModInput;
-          const refused = await queuePrompt({
-            plugin: plugin.name,
-            text: String(e['text']),
-            ...(context !== undefined && { context }),
-            ...(origin['asUser'] === true && { asUser: true }),
-          });
-          if (refused !== undefined) return { drop: refused };
-          queued = true;
-          return {
+          arrived = {
             text: e['text'],
-            ...(context !== undefined && { context }),
-            origin,
+            ...(e['context'] !== undefined && { context: e['context'] }),
+            origin: e['origin'],
           };
+          return arrived;
         }
         if (method === 'ui.invalidate') {
           send({
@@ -767,13 +763,10 @@ async function hostCall(
         return { value: undefined };
       },
       0,
-      notice(method) ? undefined : call,
+      detached ? undefined : call,
     );
     if (!record(result)) throw new Error('Invalid Mod API result.');
-    if (submits)
-      return typeof result['drop'] === 'string' || queued
-        ? result
-        : { drop: 'a hook answered without passing the prompt on' };
+    if (submits) return queueArrived(result, arrived, plugin.name);
     if ('deny' in result) throw new Error(String(result['deny']));
     return result['value'];
   };
@@ -817,6 +810,29 @@ function abortTurn(turnId: string): Promise<void> {
     turnAborts.set(id, { resolve, reject });
     send({ type: 'turn-abort', id, turnId });
   }).finally(() => turnAborts.delete(id));
+}
+
+// A hook that passed the prompt on more than once queues it once, as it last
+// arrived, and the call resolves to that.
+async function queueArrived(
+  result: ModInput,
+  arrived: ModInput | undefined,
+  plugin: string,
+): Promise<ModInput> {
+  if (typeof result['drop'] === 'string') return result;
+  if (!arrived)
+    return { drop: 'a hook answered without passing the prompt on' };
+  if (!String(arrived['text']).trim())
+    return { drop: 'a hook left the prompt empty' };
+  const context = arrived['context'] as string[] | undefined;
+  const origin = arrived['origin'] as ModInput;
+  const refused = await queuePrompt({
+    plugin,
+    text: String(arrived['text']),
+    ...(context !== undefined && { context }),
+    ...(origin['asUser'] === true && { asUser: true }),
+  });
+  return refused === undefined ? arrived : { drop: refused };
 }
 
 function queuePrompt(prompt: ModQueuedPrompt): Promise<string | undefined> {

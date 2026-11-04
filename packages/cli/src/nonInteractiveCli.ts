@@ -3486,6 +3486,8 @@ export async function runNonInteractive(
                   modelOverride: itemModelOverride,
                   submittedPrompt: modPrompt.text,
                   submittedByMod: modPrompt.plugin,
+                  // Recall looks for what the Mod asked, not the frame.
+                  memoryRecallQuery: modPrompt.text,
                   ...(modPrompt.context?.length && {
                     promptContext: modPrompt.context,
                   }),
@@ -4079,6 +4081,9 @@ export async function runNonInteractive(
       }
       await handleError(error, config);
     } finally {
+      // A prompt a Mod submitted that this run did not start does not wait
+      // for the next one, which a stream-json session runs on the same Mods.
+      modSession?.discardSubmittedPrompts();
       if (ownsModSession) await modSession?.close();
       await modSession?.flushOutput();
       await failClosedActiveGoalTurn(

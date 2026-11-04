@@ -779,6 +779,18 @@ describe('Mod session ownership', () => {
       expect(queue(prompt('late'))).toBe('the session is ending');
     });
 
+    it('drops what has not started when a run discards it, freeing the limit', async () => {
+      const { session } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      for (let index = 0; index < MOD_PROMPT_TURN_LIMIT; index++)
+        expect(queue(prompt(`p${index}`))).toBeUndefined();
+      session.discardSubmittedPrompts();
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      expect(queue(prompt('after'))).toBeUndefined();
+      expect(session.takeSubmittedPrompt()?.text).toBe('after');
+    });
+
     it('offers no queue to a terminal yet', async () => {
       const { session } = setup(
         { isInteractive: () => true },

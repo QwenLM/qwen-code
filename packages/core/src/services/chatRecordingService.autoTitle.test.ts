@@ -456,6 +456,44 @@ describe('ChatRecordingService - auto-title trigger', () => {
     );
   });
 
+  it("restores a Mod's prompt in its turn's place without offering it to the title", () => {
+    const record = (
+      uuid: string,
+      parentUuid: string | null,
+      extra: Partial<ChatRecord>,
+    ): ChatRecord => ({
+      uuid,
+      parentUuid,
+      sessionId: 'test-session-id',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      provenance: 'real_user',
+      cwd: '/test/project/root',
+      version: '1.0.0',
+      message: { role: 'user', parts: [{ text: 'hidden' }] },
+      ...extra,
+    });
+    const { service } = resume({
+      conversation: {
+        messages: [
+          record('user-1', null, {
+            systemPayload: { displayText: '你好', hookContext: '' },
+          }),
+          record('user-2', 'user-1', {
+            provenance: 'mod_prompt',
+            systemPayload: {
+              displayText: 'Run the linter',
+              hookContext: '',
+              mod: 'lint',
+            },
+          }),
+        ],
+      },
+      lastCompletedUuid: 'user-2',
+    });
+    expect(service.getUserDisplayTextsForTitle()).toEqual(['你好', '']);
+  });
+
   it('retains only display projections relevant to recent title history', () => {
     for (let index = 0; index < 21; index++) {
       chatRecordingService.recordUserMessage(

@@ -493,6 +493,7 @@ describe('runNonInteractive', () => {
       toolCall: () => undefined,
       submitPrompt: vi.fn(async (text: string) => ({ text })),
       takeSubmittedPrompt: () => undefined,
+      discardSubmittedPrompts: () => {},
       notePersonPrompt: vi.fn(),
     } as unknown as ModSession);
   }
@@ -6664,6 +6665,7 @@ describe('runNonInteractive', () => {
               });
             }),
             takeSubmittedPrompt: () => undefined,
+            discardSubmittedPrompts: () => {},
             notePersonPrompt: vi.fn(),
           }) as unknown as ModSession,
       );
@@ -6731,6 +6733,9 @@ describe('runNonInteractive', () => {
       const submitted: ModQueuedPrompt[] = [];
       const takeSubmittedPrompt = vi.fn(() => submitted.shift());
       const notePersonPrompt = vi.fn();
+      const discardSubmittedPrompts = vi.fn(() => {
+        submitted.length = 0;
+      });
       const submitPrompt = vi.fn(
         async (
           text: string,
@@ -6759,6 +6764,7 @@ describe('runNonInteractive', () => {
             submitPrompt,
             takeSubmittedPrompt,
             notePersonPrompt,
+            discardSubmittedPrompts,
           }) as unknown as ModSession,
       );
       return {
@@ -6853,6 +6859,7 @@ describe('runNonInteractive', () => {
         submittedPrompt: 'Run the linter',
         submittedByMod: 'lint',
         promptContext: ['note'],
+        memoryRecallQuery: 'Run the linter',
       });
       expect(calls[1][3]).not.toHaveProperty('notificationDisplayText');
       // Submitted as the person's own words, the model reads it bare.
@@ -6873,6 +6880,52 @@ describe('runNonInteractive', () => {
       // Each turn hears what its own request streamed.
       expect(turn.saw).toHaveBeenCalledTimes(3);
       expect(order.at(-1)).toBe('close');
+    });
+
+    it('does not carry a prompt a Mod submitted into the next run once a run stops early', async () => {
+      setupMetricsMock();
+      const { turn, submitted } = installModTurn();
+      // A stream-json session runs every message on the same Mods.
+      const modSession = ModSession.create(
+        mockConfig,
+        mockSettings,
+        undefined as never,
+      );
+      turn.complete.mockImplementationOnce(async () => {
+        submitted.push({ plugin: 'lint', text: 'Run the linter' });
+      });
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Error,
+            value: { error: { message: 'boom', status: 500 } },
+          },
+        ]),
+      );
+      await runNonInteractive(mockConfig, mockSettings, 'Fix it', 'mod-stop', {
+        modSession,
+      }).catch(() => undefined);
+      expect(submitted).toEqual([]);
+
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+      await runNonInteractive(mockConfig, mockSettings, 'Next', 'mod-next', {
+        modSession,
+      });
+      expect(
+        mockLlmClient.sendMessageStream.mock.calls.map(([request]) =>
+          JSON.stringify(request),
+        ),
+      ).toEqual([
+        expect.stringContaining('Fix it'),
+        expect.stringContaining('Next'),
+      ]);
     });
 
     it('sends the prompt and context the prompt.submit hooks passed on', async () => {

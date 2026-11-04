@@ -4723,7 +4723,11 @@ export class LlmClient {
         // attribution trailer (one user message becomes "10-shotted" when it
         // triggered ten tool calls).
         const attributionService = CommitAttributionService.getInstance();
-        if (messageType === SendMessageType.UserQuery) {
+        // A prompt a Mod submitted is not one the user typed either.
+        if (
+          messageType === SendMessageType.UserQuery &&
+          options?.submittedByMod === undefined
+        ) {
           attributionService.incrementPromptCount();
         }
 

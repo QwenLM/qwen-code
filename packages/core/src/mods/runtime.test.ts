@@ -1401,7 +1401,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
       const { queued, queue } = queueing();
       const submitting = `export function register(on) {
         on('turn.start', async ($, e, next) => {
-          for (const text of ['secret', 'answer', 'full'])
+          for (const text of ['secret', 'answer', 'full', ' ', 'blank'])
             $.ui.log(JSON.stringify(await $.prompt.submit({text})));
           return next(e);
         });
@@ -1409,9 +1409,12 @@ describe('ModRuntime with the real QuickJS worker', () => {
       const runtime = await createTurns(
         [
           `export function register(on) {
-            on('prompt.submit', ($, e, next) =>
-              e.text === 'secret' ? {drop: 'it holds a secret'}
-                : e.text === 'answer' ? {text: 'mine'} : next(e));
+            on('prompt.submit', ($, e, next) => {
+              if (!e.text.trim()) $.ui.log('"heard a blank prompt"');
+              return e.text === 'secret' ? {drop: 'it holds a secret'}
+                : e.text === 'answer' ? {text: 'mine'}
+                : next(e.text === 'blank' ? {...e, text: ''} : e);
+            });
           }`,
           submitting,
         ],
@@ -1425,6 +1428,8 @@ describe('ModRuntime with the real QuickJS worker', () => {
         { drop: 'it holds a secret' },
         { drop: 'a hook answered without passing the prompt on' },
         { drop: 'the queue is full' },
+        { drop: 'the prompt is empty' },
+        { drop: 'a hook left the prompt empty' },
       ]);
 
       logs.length = 0;
@@ -1437,8 +1442,37 @@ describe('ModRuntime with the real QuickJS worker', () => {
       ]);
       await hostless.startTurn({ text: '', turnId: 'turn-1' }, signal());
       expect(logs.map((log) => JSON.parse(log.text))).toEqual(
-        Array(3).fill({ drop: 'this host does not run prompts a Mod submits' }),
+        Array(5).fill({ drop: 'this host does not run prompts a Mod submits' }),
       );
+    });
+
+    it('queues a call its hook does not await, once, as it last arrived', async () => {
+      const { queued, queue } = queueing();
+      const runtime = await createTurns(
+        [
+          `export function register(on) {
+            on('turn.start', ($, e, next) => {
+              void $.prompt.submit({text: 'later'});
+              return next(e);
+            });
+          }`,
+          `export function register(on) {
+            on('prompt.submit', async ($, e, next) => {
+              // Still running once the hook that submitted has returned.
+              await $.clock.sleep(30);
+              $.ui.log('first:' + JSON.stringify(await next(e)));
+              return next({...e, text: e.text + ' retry'});
+            });
+          }`,
+        ],
+        undefined,
+        queue,
+      );
+      await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      expect(queued).toEqual([{ plugin: 'mod-0', text: 'later retry' }]);
+      expect(logs.map((log) => log.text)).toEqual([
+        'first:{"text":"later","origin":{"kind":"plugin","name":"mod-0"}}',
+      ]);
     });
 
     it('lists the method only for a host that runs such prompts', async () => {

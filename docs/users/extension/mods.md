@@ -746,7 +746,11 @@ export function register(on) {
   or drop it, as for a typed prompt.
 - The call resolves once the hooks have answered and the prompt is queued, to
   `{ text, context?, origin }`, or to `{ drop: reason }` when a hook dropped it
-  or Qwen Code refused it.
+  or Qwen Code refused it. A call the hook does not await, as above, still
+  queues after the hook returns.
+- What last arrives beneath the hooks is queued, once, even when a hook calls
+  `next(e)` more than once. A text that is empty or only whitespace, from the
+  call or from a hook's rewrite, is not queued: the call resolves to a drop.
 - The model is told the prompt came from the Mod and that the person did not
   type it. With `asUser: true` the model reads the text as the person's own
   words; `origin` still names the Mod.

@@ -1542,6 +1542,21 @@ describe('ChatRecordingService', () => {
     const displayed = (text: string) =>
       user(`hidden ${text}`, undefined, { displayText: text, hookContext: '' });
 
+    it("keeps a Mod's prompt out of the title, in its turn's place", async () => {
+      displayed('A');
+      user('framed', undefined, {
+        displayText: 'Run the linter',
+        hookContext: '',
+        mod: 'lint',
+      });
+      displayed('B');
+      expect(svc.getUserDisplayTextsForTitle()).toEqual(['A', '', 'B']);
+      svc.rewindRecording(2, { truncatedCount: 1 });
+      expect(svc.getUserDisplayTextsForTitle()).toEqual(['A', '']);
+      await svc.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+    });
+
     it('drops display projections from rewound user turns', async () => {
       displayed('A');
       displayed('B');

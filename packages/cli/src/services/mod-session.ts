@@ -79,14 +79,14 @@ import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOu
 
 const logger = createDebugLogger('MODS');
 
-// A resize redraws the band once it has settled; renders otherwise run at
-// Claude Code's rate for an expanded band, and at its steady rate for a second
-// after one ran longer than that.
 /**
  * How many turns the Mods' own prompts may start before the person sends one:
  * a hook that submits a prompt at every turn's end would otherwise never stop.
  */
 export const MOD_PROMPT_TURN_LIMIT = 8;
+// A resize redraws the band once it has settled; renders otherwise run at
+// Claude Code's rate for an expanded band, and at its steady rate for a second
+// after one ran longer than that.
 const RENDER_SETTLE_MS = 150;
 const RENDER_LIVE_MS = 34;
 const RENDER_STEADY_MS = 100;
@@ -715,13 +715,6 @@ export class ModSession implements ICommandLoader {
     };
   }
 
-  /**
-   * Raises `prompt.submit` for a prompt a person submitted, before
-   * UserPromptSubmit. Returns the prompt that enters, with the context the
-   * hooks attached, or the line saying why it was dropped. A hook that fails
-   * never blocks a prompt, and neither does a prompt too long for a Mod
-   * payload, which no hook hears. `signal` is the prompt's own.
-   */
   // `$.prompt.submit` lands here once the hooks let the prompt through.
   private queuePrompt(prompt: ModQueuedPrompt): string | undefined {
     if (this.closing) return 'the session is ending';
@@ -760,11 +753,26 @@ export class ModSession implements ICommandLoader {
     this.modTurns = 0;
   }
 
+  /**
+   * Drops the prompts the Mods submitted that have not started: a run that
+   * stopped early does not run them, and neither does the next one.
+   */
+  discardSubmittedPrompts(): void {
+    this.submitted.length = 0;
+  }
+
   /** Whether a loaded Mod hooks `prompt.submit`. */
   get hearsPrompts(): boolean {
     return !this.closing && (this.runtime?.promptHooks.length ?? 0) > 0;
   }
 
+  /**
+   * Raises `prompt.submit` for a prompt a person submitted, before
+   * UserPromptSubmit. Returns the prompt that enters, with the context the
+   * hooks attached, or the line saying why it was dropped. A hook that fails
+   * never blocks a prompt, and neither does a prompt too long for a Mod
+   * payload, which no hook hears. `signal` is the prompt's own.
+   */
   async submitPrompt(
     text: string,
     signal: AbortSignal,
