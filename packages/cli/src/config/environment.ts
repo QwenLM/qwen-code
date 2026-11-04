@@ -323,7 +323,7 @@ export function isFileSourcedEnvKey(key: string): boolean {
  * Collects environment variables from user-level `.env` files and returns
  * them as a plain dictionary **without** mutating `process.env`.
  *
- * Candidates are iterated most-specific-first (`~/.qwen/.env` before
+ * Candidates are iterated most-specific-first (the global dir's `.env` before
  * `~/.env`). `??=` ensures the first file to define a key wins, matching
  * dotenv's first-occurrence-wins semantics used elsewhere.
  */
