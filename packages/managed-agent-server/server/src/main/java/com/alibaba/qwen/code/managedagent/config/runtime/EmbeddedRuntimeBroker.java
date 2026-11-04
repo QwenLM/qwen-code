@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.managedagent.config.runtime;
 
 import com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGit;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceProvider;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistrationStore;
@@ -55,7 +55,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final RuntimeBrokerService service;
     private final RuntimeBrokerHttpServer server;
     private final RuntimeRecoveryCoordinator recovery;
-    private final AgentStateStore store;
     private final WorkspaceRuntimeResolver workspaces;
     private final ChildWorkspaceProvider childWorkspaces;
     private final com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog residents;
@@ -68,7 +67,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final RuntimeBindingRepository extensionBindings;
     private final HttpRuntimeTransport extensionTransport;
 
-    public EmbeddedRuntimeBroker(AgentStateStore store,
+    public EmbeddedRuntimeBroker(SessionQueryStore store,
             ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
@@ -76,7 +75,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         this(store, properties, bindingRepository, sessionRepository, executionRepository, null);
     }
 
-    public EmbeddedRuntimeBroker(AgentStateStore store,
+    public EmbeddedRuntimeBroker(SessionQueryStore store,
             ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
@@ -86,7 +85,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 executionRepository, workspaceExecutionStore, null, null);
     }
 
-    public EmbeddedRuntimeBroker(AgentStateStore store,
+    public EmbeddedRuntimeBroker(SessionQueryStore store,
             ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
@@ -98,7 +97,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 workspaceExecutionStore, publications, publicationData, null, null, null, null);
     }
 
-    public EmbeddedRuntimeBroker(AgentStateStore store,
+    public EmbeddedRuntimeBroker(SessionQueryStore store,
             ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
@@ -111,7 +110,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 workspaceExecutionStore, publications, publicationData, null, null, null, ssh);
     }
 
-    public EmbeddedRuntimeBroker(AgentStateStore store, ManagedAgentProperties properties,
+    public EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications, ToolPublicationDataStore publicationData,
@@ -121,7 +120,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 workspaceExecutionStore, publications, publicationData, jdbc, manager, null, null);
     }
 
-    public EmbeddedRuntimeBroker(AgentStateStore store, ManagedAgentProperties properties,
+    public EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications, ToolPublicationDataStore publicationData,
@@ -131,7 +130,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 workspaceExecutionStore, publications, publicationData, jdbc, manager, null, ssh);
     }
 
-    EmbeddedRuntimeBroker(AgentStateStore store, ManagedAgentProperties properties,
+    EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications, ToolPublicationDataStore publicationData,
@@ -142,14 +141,13 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 workspaceExecutionStore, publications, publicationData, jdbc, manager, residentProvisioner, null);
     }
 
-    private EmbeddedRuntimeBroker(AgentStateStore store, ManagedAgentProperties properties,
+    private EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications, ToolPublicationDataStore publicationData,
             org.springframework.jdbc.core.JdbcTemplate jdbc,
             org.springframework.transaction.PlatformTransactionManager manager,
             RuntimeProvisioner residentProvisioner, SshWorkspaceService ssh) {
-        this.store = store;
         this.ssh = ssh;
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();

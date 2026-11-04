@@ -37,6 +37,7 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // Project reloads must not replace or relabel an operator container requirement.
   'QWEN_AGENT_EXECUTION_BACKEND',
   'QWEN_CODE_MCP_APPROVALS_PATH',
+  'QWEN_CODE_HOOK_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
   // These two select which file becomes the System / SystemDefaults settings
   // layer. A project `.env` must never redirect them: the System layer

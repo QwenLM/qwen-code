@@ -25,6 +25,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
@@ -143,6 +144,14 @@ class WorkspaceMigrationMySqlIT {
                 "unrelated", other.sessionId(), "actor", "actor-digest", "other", "digest", ".", 1) : null;
         var otherClaim = cwd ? transaction.execute(status -> store.claimOperation("unrelated", other.sessionId(),
                 otherCwd.operation().operationId(), "owner", Duration.ofSeconds(60)).orElseThrow()) : null;
+        if (cwd) {
+            // Keep the unrelated probe outside the uncommitted fence insert's index gap.
+            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id)"
+                            + " VALUES (?, ?, ?, 'unrelated', 'storage')",
+                    JdbcRuntimeBindingRepository.storageAliasKey("unrelated", "storage"),
+                    JdbcRuntimeBindingRepository.storageFenceKey("unrelated"),
+                    JdbcRuntimeBindingRepository.storageFenceKey("storage"));
+        }
         var binding = store.findSession("migrating", original.sessionId()).orElseThrow().workspace();
         var attemptingLock = new CountDownLatch(1);
         var waitingJdbc = new ManagedSchemaJdbcTemplate(data) {
@@ -159,12 +168,25 @@ class WorkspaceMigrationMySqlIT {
         try (var migration = data.getConnection(); var pool = Executors.newFixedThreadPool(2)) {
             migration.setAutoCommit(false);
             JdbcRuntimeBindingRepository.lockPlacementDomain(migration, "migrating");
+            if (cwd) {
+                installMigrationFence(migration);
+            }
             var creation = pool.submit(() -> cwd
                     ? transaction.execute(status -> waitingStore.completeCwdChangeOperation("migrating", original.sessionId(),
                             originalClaim.operationId(), "owner", originalClaim.claimGeneration()))
                     : create(waitingStore, transaction, "migrating", "racing"));
             try {
-                assertThat(attemptingLock.await(5, TimeUnit.SECONDS)).isTrue();
+                if (cwd) {
+                    MySqlLockProbe.awaitLockWaits(jdbc, schema, 1, "CWD settlement behind the storage fence");
+                    assertThat(jdbc.queryForObject(
+                            "SELECT COUNT(*) FROM performance_schema.data_lock_waits waits"
+                                    + " JOIN performance_schema.data_locks requested ON requested.ENGINE = waits.ENGINE"
+                                    + " AND requested.ENGINE_LOCK_ID = waits.REQUESTING_ENGINE_LOCK_ID"
+                                    + " WHERE requested.OBJECT_SCHEMA = ? AND requested.OBJECT_NAME = 'ma_storage'",
+                            Integer.class, schema)).isPositive();
+                } else {
+                    assertThat(attemptingLock.await(5, TimeUnit.SECONDS)).isTrue();
+                }
                 assertThatThrownBy(() -> creation.get(100, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
                 assertThat(pool.submit(() -> cwd
                         ? transaction.execute(status -> store.completeCwdChangeOperation("unrelated", other.sessionId(),
@@ -172,15 +194,8 @@ class WorkspaceMigrationMySqlIT {
                         : create(store, transaction, "unrelated", "other"))
                         .get(5, TimeUnit.SECONDS)).isNotNull();
                 assertThat(creation.isDone()).isFalse();
-                try (var fence = migration.prepareStatement(
-                                "INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
-                                    + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?,"
-                                    + " 'migrating', 'storage', ?)")) {
-                    fence.setString(1, JdbcRuntimeBindingRepository.storageAliasKey("migrating", "storage"));
-                    fence.setString(2, JdbcRuntimeBindingRepository.storageFenceKey("migrating"));
-                    fence.setString(3, JdbcRuntimeBindingRepository.storageFenceKey("storage"));
-                    fence.setBytes(4, UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8));
-                    fence.executeUpdate();
+                if (!cwd) {
+                    installMigrationFence(migration);
                 }
                 migration.commit();
                 if (cwd) {
@@ -199,7 +214,7 @@ class WorkspaceMigrationMySqlIT {
                                 assertThat(refusal.isRetryable()).isFalse();
                             });
                 }
-            } catch (TimeoutException error) {
+            } catch (TimeoutException | AssertionError error) {
                 error.addSuppressed(new IllegalStateException(MySqlLockProbe.describeLockWaits(jdbc, schema)));
                 throw error;
             } finally {
@@ -225,6 +240,19 @@ class WorkspaceMigrationMySqlIT {
             assertThat(retained.state()).isEqualTo("FAILED");
             assertThat(retained.failureCode()).isEqualTo("workspace_unavailable");
             assertThat(store.requireSession("migrating", original.sessionId()).workspace().getContextRevision()).isEqualTo(1);
+        }
+    }
+
+    private void installMigrationFence(Connection migration) throws SQLException {
+        try (var fence = migration.prepareStatement(
+                "INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
+                        + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?,"
+                        + " 'migrating', 'storage', ?)")) {
+            fence.setString(1, JdbcRuntimeBindingRepository.storageAliasKey("migrating", "storage"));
+            fence.setString(2, JdbcRuntimeBindingRepository.storageFenceKey("migrating"));
+            fence.setString(3, JdbcRuntimeBindingRepository.storageFenceKey("storage"));
+            fence.setBytes(4, UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8));
+            fence.executeUpdate();
         }
     }
 

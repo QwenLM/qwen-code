@@ -18,7 +18,12 @@ const mocks = vi.hoisted(() => ({
   envAuthType: undefined as string | undefined,
 }));
 vi.mock('../config/settings.js', () => ({
-  loadSettings: () => mocks.settings,
+  loadSettings: () => ({
+    getSystemHooks: () => undefined,
+    getUserHooks: () => undefined,
+    getProjectHooks: () => undefined,
+    ...mocks.settings,
+  }),
 }));
 vi.mock('../config/config.js', () => ({
   loadCliConfig: mocks.loadCliConfig,

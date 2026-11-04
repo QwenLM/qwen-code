@@ -90,6 +90,47 @@
   line-height: 1.5;
 }
 
+.advancedTrigger {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.advancedChevron {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  transition: transform 120ms ease;
+}
+
+.advancedTrigger[data-state='open'] .advancedChevron {
+  transform: rotate(180deg);
+}
+
+.advancedBadge {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.advancedContent {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -334,6 +375,36 @@
   color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.repositoryList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.repositoryListTitle {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+
+.repositoryRow {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.repositoryName {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 520px) {

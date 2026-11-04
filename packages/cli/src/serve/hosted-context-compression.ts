@@ -41,6 +41,7 @@ import {
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import type { HostedModelConfigReader } from './hosted-model-config.js';
 import { loadSettings } from '../config/settings.js';
+import { getSeparatedHookSettings } from '../config/hook-approvals.js';
 import { applyHostedModelPin } from './hosted-harness-model.js';
 import type { HostedAgentDefinition } from './hosted-agent-definition.js';
 import type { HostedModelSelection } from './hosted-model-selection.js';
@@ -364,7 +365,7 @@ export class HostedContextCompression {
       argv,
       this.options.cwd,
       undefined,
-      undefined,
+      getSeparatedHookSettings(settings),
       undefined,
       undefined,
       undefined,

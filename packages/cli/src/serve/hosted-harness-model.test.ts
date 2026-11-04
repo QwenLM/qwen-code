@@ -57,7 +57,12 @@ const state = vi.hoisted(() => ({
   },
 }));
 vi.mock('../config/settings.js', () => ({
-  loadSettings: () => ({ merged: {} }),
+  loadSettings: () => ({
+    merged: {},
+    getSystemHooks: () => undefined,
+    getUserHooks: () => undefined,
+    getProjectHooks: () => undefined,
+  }),
 }));
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(async () => state.config),

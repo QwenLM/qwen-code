@@ -284,6 +284,8 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'tools', key: 'workflowsEnabled' },
   { section: 'tools', key: 'lspEnabled' },
   { section: 'security', key: 'allowPrivateNetworkHooks' },
+  // A repository must not switch on the gate that authorizes its own hooks.
+  { section: 'security', key: 'folderTrust' },
   { section: 'security', key: 'allowedInsecureVoiceBaseUrls' },
   { section: 'goals', key: 'modelProposed' },
   { section: 'outboundCorrelation', key: 'allowDynamicHeaderValues' },

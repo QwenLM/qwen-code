@@ -86,7 +86,12 @@ vi.mock('../config/config.js', () => ({
   }),
 }));
 vi.mock('../config/settings.js', () => ({
-  loadSettings: vi.fn(() => ({ merged: {} })),
+  loadSettings: vi.fn(() => ({
+    merged: {},
+    getSystemHooks: () => undefined,
+    getUserHooks: () => undefined,
+    getProjectHooks: () => undefined,
+  })),
 }));
 
 const SCRIPT =
