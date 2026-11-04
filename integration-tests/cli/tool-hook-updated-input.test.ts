@@ -32,6 +32,7 @@ import {
   makeWaitFor,
 } from '../helpers/gated-skill-fixture.js';
 import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
+import { approveProjectHooks } from '../project-hook-approval.js';
 
 const HOOK_SCRIPT = 'rewrite-hook.mjs';
 const HITS_LOG = 'hook-hits.jsonl';
@@ -340,6 +341,7 @@ describe('PreToolUse updatedInput', () => {
     // The agent keeps writing under QWEN_HOME briefly after it exits, so keep
     // it out of rig.testDir, whose teardown would otherwise race those writes.
     const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+    approveProjectHooks(qwenHome, rig.testDir!);
     const child = spawn(
       'node',
       [
