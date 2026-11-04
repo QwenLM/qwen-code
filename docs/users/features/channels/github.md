@@ -174,8 +174,9 @@ final reply in
 `~/.qwen/channels/<workspace-scope>/<channel>-<name-hash>-github-pending-deliveries.json`
 with private file permissions and retries it on the next channel start. That
 retry stops sending at the first stored reply GitHub still rate-limits and
-keeps it and the later ones for the following start, except replies the audit
-already records as posted, which it drops. The corresponding inbound task
+keeps the later ones for the following start, together with that reply when
+GitHub's headers prove it was not posted; replies the audit already records as
+posted are dropped. The corresponding inbound task
 remains in `reply_pending` state until that delivery succeeds or reaches a
 definite terminal failure. Ambiguous delivery failures are not retried
 automatically because GitHub may have created the comment.

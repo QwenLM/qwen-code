@@ -1004,7 +1004,9 @@ function rateLimitRemaining(err: unknown): number | undefined {
   const value = (err as GithubRequestError).response?.headers?.[
     'x-ratelimit-remaining'
   ];
-  if (typeof value === 'number') return value;
+  if (typeof value === 'number') {
+    return Number.isInteger(value) && value >= 0 ? value : undefined;
+  }
   return typeof value === 'string' && /^\d+$/.test(value)
     ? Number(value)
     : undefined;
@@ -1079,19 +1081,10 @@ function isWatchPassAbortError(err: unknown): boolean {
     response?: { headers?: Record<string, string | number> };
   };
   if (e.status === 401 || e.status === 429) return true;
-  if (e.status === 403) {
-    // A secondary/abuse limit comes with quota left and not always with
-    // retry-after; an exhausted budget, retry-after or GitHub's wording each
-    // mark a shared rate limit. A bare permission 403 (remaining > 0, no
-    // retry-after) stays per-PR so it cannot starve the other watched PRs.
-    const headers = e.response?.headers;
-    return (
-      Number(headers?.['x-ratelimit-remaining']) === 0 ||
-      headers?.['retry-after'] !== undefined ||
-      SECONDARY_RATE_LIMIT_MESSAGE.test(String(e.message))
-    );
-  }
-  return false;
+  // A 403 aborts only as a rate limit; a bare permission 403 (quota left, no
+  // retry-after, no limit wording) stays per-PR so it cannot starve the other
+  // watched PRs.
+  return e.status === 403 && isRateLimitAnswer(err);
 }
 
 function parseTriggerKind(metadata: string | undefined): string | undefined {
@@ -1747,11 +1740,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }
         this.removeReplyPendingInboundTask(record);
       } catch (err) {
-        if (signal?.aborted) return;
+        // The abort waits for an in-flight write, so an answer that arrives
+        // with the signal aborted still decides the record; only an attempt
+        // that was never sent leaves it for the next start.
+        if ((err as { notSent?: boolean }).notSent) return;
         if (isDefiniteNoWriteGithubError(err)) {
           rateLimited = true;
           continue;
         }
+        // A rate limit without GitHub's header is no proof the write was
+        // refused, so this record is dropped below, but it would answer the
+        // later records the same way: keep those for the next start.
+        if (isRateLimitAnswer(err)) rateLimited = true;
         this.recordPublicationAudit({
           ...auditBase,
           at: new Date().toISOString(),
@@ -3886,7 +3886,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     signal?: AbortSignal,
   ): Promise<T> {
     for (let attempt = 1; attempt <= retries; attempt++) {
-      if (signal?.aborted) throw new Error(`${label} aborted`);
+      if (signal?.aborted) {
+        // Thrown before this attempt was sent: callers can tell it from the
+        // answer of a request that went out.
+        throw Object.assign(new Error(`${label} aborted`), { notSent: true });
+      }
       try {
         return await fn();
       } catch (err: unknown) {
@@ -3920,22 +3924,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           cooldown = 1000 * 2 ** (attempt - 1);
         }
         cooldown = Math.min(cooldown, MAX_TIMER_DELAY_MS);
-
-        process.stderr.write(
-          `[Channel:${this.name}] ${label} failed (attempt ${attempt}/${retries}, status=${e.status}), retrying in ${cooldown}ms: ${sanitizeLogText(e.message ?? String(err), 200)}\n`,
-        );
-        await this.sleepForRetry(cooldown, signal);
         // After disconnect() — which ends the wait early, skips it for a call
         // that started after the stop, or lets it run out while an in-flight
         // write defers the abort — give up with GitHub's last answer instead
         // of retrying into the same limit. A definite no-write stays
         // definite, so a final reply is kept as a pending delivery.
-        if (
+        const stopped = () =>
           (usableRetryAfter || rateLimited) &&
-          this.pendingFinalDeliveryRetryStopRequested
-        ) {
-          throw err;
-        }
+          this.pendingFinalDeliveryRetryStopRequested;
+        if (stopped()) throw err;
+
+        process.stderr.write(
+          `[Channel:${this.name}] ${label} failed (attempt ${attempt}/${retries}, status=${e.status}), retrying in ${cooldown}ms: ${sanitizeLogText(e.message ?? String(err), 200)}\n`,
+        );
+        await this.sleepForRetry(cooldown, signal);
+        if (stopped()) throw err;
       }
     }
     throw new Error('unreachable');

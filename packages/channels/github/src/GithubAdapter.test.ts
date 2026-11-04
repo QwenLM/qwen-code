@@ -3437,6 +3437,107 @@ describe('GithubChannel', () => {
       ).toEqual(['first', 'second']);
     });
 
+    it('audits and drops an ambiguous answer that arrives after the stop', async () => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({
+          id: 'second',
+          threadId: 'issue:43',
+          sourceMessageId: '1002',
+        }),
+      ]);
+      const abort = new AbortController();
+      // The stop lands while the write is in flight; its abort fires once the
+      // write ends, which here ends with an answer that may have posted it.
+      mockOctokit.rest.issues.createComment.mockImplementationOnce(async () => {
+        abort.abort();
+        throw Object.assign(new Error('Bad Gateway'), { status: 502 });
+      });
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        retryPendingFinalDeliveries: (signal?: AbortSignal) => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+
+      await privateChannel.retryPendingFinalDeliveries(abort.signal);
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['second']);
+      expect(readFileSync(auditPath(), 'utf-8')).toContain(
+        '"outcome":"failed_ambiguous"',
+      );
+    });
+
+    it('keeps a record whose retry an abort stopped before it was sent', async () => {
+      writePending([pendingRecord({ id: 'first', sourceMessageId: '1001' })]);
+      const abort = new AbortController();
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error('You have exceeded a secondary rate limit'), {
+          status: 403,
+          response: { headers: { 'x-ratelimit-remaining': '4999' } },
+        }),
+      );
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        sleepForRetry: (ms: number) => Promise<void>;
+        retryPendingFinalDeliveries: (signal?: AbortSignal) => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      // The abort ends the wait without a stop request (a reconnect).
+      privateChannel.sleepForRetry = vi.fn().mockImplementation(async () => {
+        abort.abort();
+      });
+
+      await privateChannel.retryPendingFinalDeliveries(abort.signal);
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['first']);
+      expect(existsSync(auditPath())).toBe(false);
+    });
+
+    it("stops the pass after a rate limit that GitHub's header does not vouch for", async () => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({
+          id: 'second',
+          threadId: 'issue:43',
+          sourceMessageId: '1002',
+        }),
+        pendingRecord({
+          id: 'third',
+          threadId: 'issue:44',
+          sourceMessageId: '1003',
+        }),
+      ]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error('Too Many Requests'), {
+          status: 429,
+          response: { headers: { 'retry-after': '30' } },
+        }),
+      );
+
+      await retryPendingForTest();
+
+      // The first may have been written, so it is dropped; the others wait.
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['second', 'third']);
+      expect(readFileSync(auditPath(), 'utf-8')).toContain(
+        '"outcome":"failed_ambiguous"',
+      );
+    });
+
     it('starts no further record once the channel stops during the pass', async () => {
       writePending([
         pendingRecord({ id: 'first', sourceMessageId: '1001' }),
@@ -4039,6 +4140,66 @@ describe('GithubChannel', () => {
       },
     );
 
+    it('keeps a reply single-shot when the budget header is a negative number', async () => {
+      await connectForPublication();
+      const error = Object.assign(new Error('Forbidden'), {
+        status: 403,
+        response: {
+          headers: { 'x-ratelimit-remaining': -1, 'retry-after': '30' },
+        },
+      });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toMatchObject({ cause: error });
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(existsSync(pendingPath())).toBe(false);
+    });
+
+    it('neither waits nor retries a reply that starts after the stop', async () => {
+      await connectForPublication();
+      channel.disconnect();
+      const sleep = vi.fn().mockResolvedValue(undefined);
+      (
+        channel as unknown as {
+          sleepForRetry: (ms: number) => Promise<void>;
+        }
+      ).sleepForRetry = sleep;
+      const error = Object.assign(new Error(SECONDARY_LIMIT), {
+        status: 403,
+        response: { headers: { 'x-ratelimit-remaining': '4999' } },
+      });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toMatchObject({ cause: error });
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+      expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toHaveLength(1);
+    });
+
     it('waits and retries again after the channel reconnects', async () => {
       await connectForPublication();
       channel.disconnect();
@@ -4085,6 +4246,18 @@ describe('GithubChannel', () => {
         403,
         'Resource not accessible by personal access token',
         '',
+      ],
+      [
+        'a permission 403 with a leading space in the budget header',
+        403,
+        'Resource not accessible by personal access token',
+        ' 0',
+      ],
+      [
+        'a permission 403 with a trailing space in the budget header',
+        403,
+        'Resource not accessible by personal access token',
+        '0 ',
       ],
       ['a 502 carrying an exhausted budget header', 502, 'Server Error', '0'],
     ])(
@@ -6414,6 +6587,34 @@ describe('GithubChannel', () => {
       await expect(githubApi(fn)).resolves.toBe('ok');
       expect(sleep).toHaveBeenCalledWith(1000);
       dateSpy.mockRestore();
+    });
+
+    it('retries after a second when the budget reset has already passed', async () => {
+      const now = 1_700_000_000_000;
+      const dateSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          httpError(403, {
+            'x-ratelimit-remaining': '0',
+            'x-ratelimit-reset': String(now / 1000 - 10),
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(1000);
+      dateSpy.mockRestore();
+    });
+
+    it('caps a very long retry-after at the timer limit', async () => {
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(httpError(429, { 'retry-after': '1e10' }))
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(2_147_483_647);
     });
 
     it('gives up after a retry-after wait that a stop ended', async () => {
@@ -14091,44 +14292,50 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(2);
     });
 
-    it('keeps watching the other PRs on a per-repo permission 403 (R1-11)', async () => {
-      await initChannel(watchConfig, { boundSessions });
-      boundSessions.listPrBindings.mockResolvedValue({
-        bindings: [
-          makeBinding(),
-          makeBinding({
-            sessionId: 'other-session',
-            updatedAt: '2026-07-03T00:00:00.000Z',
-            prs: [
-              {
-                number: 43,
-                url: 'https://github.com/owner/repo/pull/43',
-                state: 'open',
-              },
-            ],
-          }),
-        ],
-        partial: false,
-      });
-      // A fine-grained token lacking access to ONE repo answers a permission
-      // 403 with x-ratelimit-remaining > 0 and no retry-after. Bindings come
-      // from sessions, not the token's grants, so this is per-PR: the pass
-      // must continue to the next PR, not abort and starve every other
-      // watched PR of detection.
-      mockOctokit.rest.pulls.get
-        .mockRejectedValueOnce(
-          Object.assign(new Error('Resource not accessible by integration'), {
-            status: 403,
-            response: { headers: { 'x-ratelimit-remaining': '4999' } },
-          }),
-        )
-        .mockResolvedValue({ data: makePrMeta() });
-      mockNotificationsOnce([]);
-      mockChecks([{ status: 'completed', conclusion: 'success' }]);
-      await pollOnce();
+    it.each([
+      ['with quota left', '4999'],
+      ['with an empty budget header', ''],
+    ])(
+      'keeps watching the other PRs on a per-repo permission 403 %s (R1-11)',
+      async (_label, remaining) => {
+        await initChannel(watchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding(),
+            makeBinding({
+              sessionId: 'other-session',
+              updatedAt: '2026-07-03T00:00:00.000Z',
+              prs: [
+                {
+                  number: 43,
+                  url: 'https://github.com/owner/repo/pull/43',
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        // A fine-grained token lacking access to ONE repo answers a permission
+        // 403 with x-ratelimit-remaining > 0 and no retry-after. Bindings come
+        // from sessions, not the token's grants, so this is per-PR: the pass
+        // must continue to the next PR, not abort and starve every other
+        // watched PR of detection.
+        mockOctokit.rest.pulls.get
+          .mockRejectedValueOnce(
+            Object.assign(new Error('Resource not accessible by integration'), {
+              status: 403,
+              response: { headers: { 'x-ratelimit-remaining': remaining } },
+            }),
+          )
+          .mockResolvedValue({ data: makePrMeta() });
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
 
-      expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(2);
-    });
+        expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(2);
+      },
+    );
 
     it('re-checks a pending CI aggregate on the pending interval, not every poll (R1-3)', async () => {
       vi.useFakeTimers();
