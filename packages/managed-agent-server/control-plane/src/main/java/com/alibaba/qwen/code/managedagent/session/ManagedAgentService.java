@@ -1847,8 +1847,27 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 && session.deletedAt() == null && store.workspaceFilesEnabled()
                 && ready(worktree)
                 && (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
-                        ? workspaces.externalFilesAllowed(session.workspace())
+                        ? externalContextShapeAllowed(session)
                         : runtimeWarmer == null || runtimeWarmer.supportsWorkspaceContextChange(session.workspace()));
+    }
+
+    /**
+     * Shape-only answer for the external profile, whose eligibility reads the
+     * durable registration. That read refuses an unreadable, ambiguous or
+     * undecodable record by throwing, while this predicate renders a capability
+     * flag for every row of a Session page — letting it propagate would turn one
+     * bad registration into a failed listing for unrelated Sessions.
+     *
+     * A refusal means eligibility is unproven, so the flag is false. Admission
+     * still calls the throwing check on the mutating path, so nothing is
+     * admitted on this weaker answer.
+     */
+    private boolean externalContextShapeAllowed(SessionRecord session) {
+        try {
+            return workspaces.externalFilesAllowed(session.workspace());
+        } catch (RuntimeException unproven) {
+            return false;
+        }
     }
 
     void requireLegacyWorkspace(String tenantId, String actorId,
