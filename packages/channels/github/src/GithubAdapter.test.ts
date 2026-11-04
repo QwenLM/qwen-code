@@ -2655,6 +2655,110 @@ describe('GithubChannel', () => {
         expect(settled.size).toBe(0);
       });
 
+      describe('a local error part-way through a thread', () => {
+        // An unreadable pending-deliveries file throws after a comment was
+        // claimed: no persistence flag is set, the task stays running and
+        // holds the window, and the rest of the thread must be read again.
+        const corruptPending = () => {
+          const path = inboundTaskPath().replace(
+            'github-inbound-tasks.json',
+            'github-pending-deliveries.json',
+          );
+          mkdirSync(dirname(path), { recursive: true });
+          writeFileSync(path, '{not json', 'utf-8');
+          return path;
+        };
+
+        it('still answers the later comments of the thread', async () => {
+          await initFailing();
+          const pending = corruptPending();
+          let poll = 0;
+          mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return poll <= 3 ? [makeNotification()] : [];
+            }
+            return [
+              makeComment({ id: 1001 }),
+              makeComment({
+                id: 1002,
+                body: '@test-bot and this too',
+                created_at: '2026-07-02T09:30:00.000Z',
+                updated_at: '2026-07-02T09:30:00.000Z',
+              }),
+            ];
+          });
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockReturnValue(true);
+          try {
+            await pollOnce();
+            await pollOnce();
+            rmSync(pending, { force: true });
+            await pollOnce();
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+
+          expect(channel.inboundEnvelopes.map((e) => e.messageId)).toContain(
+            '1002',
+          );
+        });
+
+        it('still reads the comment lane after a failed direct dispatch', async () => {
+          await initFailing();
+          const pending = corruptPending();
+          mockOctokit.rest.pulls.get.mockResolvedValue({
+            data: { title: 'PR', user: { login: 'alice' }, state: 'open' },
+          });
+          let poll = 0;
+          mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return poll <= 3
+                ? [
+                    makeNotification({
+                      reason: 'review_requested',
+                      subject: {
+                        title: 'PR',
+                        url: 'https://api.github.com/repos/owner/repo/pulls/42',
+                        type: 'PullRequest',
+                      },
+                    }),
+                  ]
+                : [];
+            }
+            if (method === mockOctokit.rest.issues.listEvents) {
+              return [makeIssueEvent()];
+            }
+            return [
+              makeComment({
+                id: 1001,
+                created_at: '2026-07-02T09:30:00.000Z',
+                updated_at: '2026-07-02T09:30:00.000Z',
+              }),
+            ];
+          });
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockReturnValue(true);
+          try {
+            await pollOnce();
+            await pollOnce();
+            rmSync(pending, { force: true });
+            await pollOnce();
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+
+          expect(channel.inboundEnvelopes.map((e) => e.messageId)).toContain(
+            '1001',
+          );
+        });
+      });
+
       it('bounds the per-thread failure counts', async () => {
         await initFailing();
         const failures = (

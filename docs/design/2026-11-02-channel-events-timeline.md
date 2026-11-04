@@ -252,12 +252,13 @@ must not be the answer when the journal could not be read.
   the reachable cases are a task that failed and is still retryable, a thread
   GitHub failed to read with a 5xx (held for at most 30 polls), and a rate
   limit or credential failure. A held window is read again in full on every
-  poll, except threads that failed permanently or were stale. A real run with
-  a 2 s poll and a turn that kept failing re-journaled one batch of 300 filtered
-  notifications until the journal rotated, pushing the accepted/posted rows out
-  of the page's window. The adapter therefore journals at most 20
-  `reason_filter` rows per poll and collapses the remainder into one
-  row carrying `detail.filtered`, which the page renders as a count. Measured
+  poll, except threads whose read failed with a permanent HTTP answer or on a
+  stale notification. A real run with a 2 s poll and a turn that kept failing
+  re-journaled one batch of 300 filtered notifications until the journal
+  rotated, pushing the accepted/posted rows out of the page's window. The
+  adapter therefore journals at most 20 `reason_filter` rows per poll and
+  collapses the remainder into one row carrying `detail.filtered`, which the
+  page renders as a count. Measured
   against the real adapter: 15 polls served 4,500 notifications and wrote 315
   rows instead of 4,500, and the journal did not rotate. The budget is per
   poll, so a genuinely new batch is still described in full. Rows that would

@@ -1254,9 +1254,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private pendingCursorUpdatedAt: string | undefined;
   private inboundPersistenceBlocked = false;
   /**
-   * Set when a notification failed with a transient GitHub error this poll:
-   * the cursor and mark-as-read must not move past it, or the thread would
-   * never be listed again and its comment would be lost silently.
+   * Set when reading a notification failed this poll with a 5xx or a shared
+   * failure (rate limit, credentials): the cursor and mark-as-read must not
+   * move past it, or the thread would never be listed again and its comment
+   * would be lost silently.
    */
   private notificationRetryPending = false;
   /** Polls since the window was last marked read that a 5xx kept it unread. */
@@ -2345,9 +2346,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           typeof (err as { status?: unknown }).status !== 'number' &&
           (this.inboundPersistenceBlocked || this.publicationAuditBlocked);
         const held = retry || storeHeld;
-        // A permanent answer or a stale notification reads the same on the
-        // next poll: the held window need not read it again.
-        if (!held && (failure === 'permanent' || stale)) {
+        // A permanent HTTP answer or a stale notification reads the same on
+        // the next poll: the held window need not read it again. An error
+        // without a status can come from the channel's own state part-way
+        // through the thread, so that thread is read again, as on main.
+        if (
+          !held &&
+          typeof (err as { status?: unknown }).status === 'number' &&
+          (failure === 'permanent' || stale)
+        ) {
           this.rememberSettledThread(failureKey, notification.updated_at);
         }
         const milestone = (n: number) => n === 1 || n % 10 === 0;
@@ -2457,11 +2464,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
   }
 
-  /**
-   * True the first time `key` is seen in the current notification window (it
-   * resets when the window is marked read), so a held window that re-reads the
-   * same thread or comment every poll journals the repeat once.
-   */
   /** Past the bound a thread is simply read again on the next poll. */
   private rememberSettledThread(threadKey: string, updatedAt: string): void {
     if (
@@ -2472,6 +2474,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
   }
 
+  /**
+   * True the first time `key` is seen in the current notification window (it
+   * resets when the window is marked read), so a held window that re-reads the
+   * same thread or comment every poll journals the repeat once.
+   */
   private journalOncePerWindow(key: string): boolean {
     if (this.windowJournalKeys.has(key)) return false;
     // Past the bound a new key is journaled without being remembered, so only
