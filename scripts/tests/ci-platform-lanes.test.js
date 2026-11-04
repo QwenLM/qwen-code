@@ -833,10 +833,23 @@ describe('post-merge push lane', () => {
           // build failed, while lint has no such dependency — so it is
           // stripped here and each side is pinned explicitly below.
           if (job !== 'test_build' && s.name === 'Install dependencies') {
-            expect(s.env).toEqual({
-              QWEN_SKIP_PREPARE: '1',
-              QWEN_SKIP_NOTICE_GENERATION: '1',
-            });
+            if (job === 'test') {
+              expect(s.env).toEqual({
+                QWEN_SKIP_PREPARE: '1',
+                QWEN_SKIP_NOTICE_GENERATION: '1',
+                // The shards' test step overrides HOME, which would hide the
+                // corepack cache install warms here; pin COREPACK_HOME to a
+                // per-run path so the warmup hits it. lint_and_static routes
+                // HOME and COREPACK_HOME together via GITHUB_ENV, so its
+                // install needs no step-level override.
+                COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack',
+              });
+            } else {
+              expect(s.env).toEqual({
+                QWEN_SKIP_PREPARE: '1',
+                QWEN_SKIP_NOTICE_GENERATION: '1',
+              });
+            }
             const { env: _installEnv, if: _installIf, ...install } = s;
             return [
               s.name,
@@ -883,6 +896,9 @@ describe('post-merge push lane', () => {
     expect(install('test').env).toEqual({
       QWEN_SKIP_PREPARE: '1',
       QWEN_SKIP_NOTICE_GENERATION: '1',
+      // The test step's HOME override would hide the corepack cache install
+      // warms here; pin COREPACK_HOME to a per-run path so the warmup hits it.
+      COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack',
     });
     const namesIn = (job) => (ci.jobs[job].steps ?? []).map((x) => x.name);
     // Values alone are order-blind, and order is load-bearing here: `steps`

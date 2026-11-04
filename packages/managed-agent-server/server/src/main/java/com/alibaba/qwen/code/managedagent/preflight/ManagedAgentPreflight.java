@@ -1738,11 +1738,30 @@ public final class ManagedAgentPreflight {
         return trimmed;
     }
 
+    /**
+     * The verdict the upgrade command takes on the Harness base URL: "skip"
+     * with the Harness disabled, where the server never reads it, as
+     * {@link #harnessCheck} returns before it reads the value; otherwise
+     * whether {@link #harnessOrigin} takes it. The single Harness's connector
+     * refuses to start on any other, even when that row skips or fails for
+     * another reason first. Pooled, the row skips before it reads the value,
+     * but each member's connector checks it by the same rule, and the pool's
+     * refresh drops a member whose connector refuses it, so such a pool
+     * accepts no Session.
+     */
+    static String harnessUrlVerdict(ManagedAgentProperties.Harness harness) {
+        if (!harness.isEnabled()) {
+            return "skip";
+        }
+        String base = harness.getBaseUrl();
+        return String.valueOf(base != null && harnessOrigin(base) != null);
+    }
+
     // Nothing the URL contains reaches the report, so a typo cannot print
     // credentials. Null unless it is an HTTP origin without user information,
     // a query or a fragment; the getUserInfo check is what keeps credentials
     // out, since every URL that carries them is rejected here.
-    private static URI harnessOrigin(String base) {
+    static URI harnessOrigin(String base) {
         try {
             URI origin = URI.create(base);
             String scheme = origin.getScheme();
