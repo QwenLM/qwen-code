@@ -24,6 +24,7 @@ export const THEME_COLORS_KEY = 'theme-colors';
 const DESCRIPTION_COLUMN = 24;
 // border + paddingY + title + subtitle + search + margins + footer
 export const STATUS_LINE_DIALOG_FIXED_ROWS = 12;
+export const STATUS_LINE_DIALOG_MIN_ITEMS = 4;
 export const STATUS_LINE_COMPOSER_ROWS = 7;
 
 export const STATUS_LINE_OPTIONS: Array<MultiSelectItem<StatusLineOption>> = [

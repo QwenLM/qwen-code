@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import chalk from 'chalk';
 import stripAnsi from 'strip-ansi';
 import { darkSemanticColors } from './themes/semantic-tokens.js';
 import { StreamingState } from './types.js';
@@ -24,14 +25,24 @@ import {
 } from './statusLinePresets.js';
 
 describe('statusLinePresets', () => {
+  const originalChalkLevel = chalk.level;
+
+  beforeEach(() => {
+    chalk.level = 3;
+  });
+
+  afterEach(() => {
+    chalk.level = originalChalkLevel;
+  });
+
   it('colors every preset by category, leaving the same text when colors are off', () => {
     const colors = {
       ...darkSemanticColors,
       text: {
         ...darkSemanticColors.text,
-        accent: 'red',
+        accent: '#ff0000',
         link: '#123456',
-        secondary: '',
+        secondary: '#101010',
       },
       status: {
         ...darkSemanticColors.status,
@@ -108,9 +119,12 @@ describe('statusLinePresets', () => {
     expect(
       buildStatusLinePresetLines(config, data, colors).map(stripAnsi),
     ).toEqual(plain);
+    expect(buildStatusLinePresetLines(config, data, colors)[0]).toContain(
+      '\x1b[38;2;16;16;16m · \x1b[39m',
+    );
     const noColor = {
       ...colors,
-      text: { ...colors.text, accent: '', link: '' },
+      text: { ...colors.text, accent: '', link: '', secondary: '' },
       status: { ...colors.status, success: '', warning: '' },
     };
     expect(buildStatusLinePresetLines(config, data, noColor)).toEqual(plain);
@@ -121,6 +135,81 @@ describe('statusLinePresets', () => {
       })[0],
     ).toContain('\x1b[38;2;69;103;137m');
   });
+  it.each([0, 1, 2, 3] as const)(
+    'preserves ANSI palette colors at terminal color level %i',
+    (level) => {
+      chalk.level = level;
+      const colors = {
+        ...darkSemanticColors,
+        text: {
+          ...darkSemanticColors.text,
+          accent: 'magenta',
+          secondary: 'gray',
+        },
+        status: { ...darkSemanticColors.status, success: 'green' },
+      };
+      const data = buildStatusLinePresetData({
+        sessionId: '',
+        version: '',
+        modelDisplayName: 'Model',
+        currentDir: '/repo/project',
+        branch: undefined,
+        contextWindowSize: 0,
+        currentUsage: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
+        streamingState: StreamingState.Idle,
+      });
+      const [line] = buildStatusLinePresetLines(
+        {
+          type: 'preset',
+          items: ['project-name', 'model'],
+          useThemeColors: true,
+        },
+        data,
+        colors,
+      );
+      expect(line).toBe(
+        level === 0
+          ? '➜ project · Model'
+          : '\x1b[32m➜ project\x1b[39m\x1b[90m · \x1b[39m\x1b[35mModel\x1b[39m',
+      );
+    },
+  );
+
+  it.each([0, 1, 2] as const)(
+    'honors terminal color level %i for hexadecimal theme colors',
+    (level) => {
+      chalk.level = level;
+      const data = buildStatusLinePresetData({
+        sessionId: '',
+        version: '',
+        modelDisplayName: 'Model',
+        currentDir: '/repo/project',
+        branch: undefined,
+        contextWindowSize: 0,
+        currentUsage: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
+        streamingState: StreamingState.Idle,
+      });
+      expect(
+        buildStatusLinePresetLines(
+          { type: 'preset', items: ['model'], useThemeColors: true },
+          data,
+          {
+            ...darkSemanticColors,
+            text: { ...darkSemanticColors.text, accent: '#123456' },
+          },
+        ),
+      ).toEqual([chalk.hex('#123456')('Model')]);
+    },
+  );
+
   it('normalizes valid preset configs and orders items by priority', () => {
     expect(
       normalizeStatusLinePresetConfig({

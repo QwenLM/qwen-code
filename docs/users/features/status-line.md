@@ -79,7 +79,7 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 | ---------------------- | ---------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `type`                 | `"preset"` | Yes      | Must be `"preset"`                                                                                                                                                                                                                           |
 | `items`                | string[]   | Yes      | Ordered list of preset item IDs to display (see table below). Items are joined with `\|` as the separator.                                                                                                                                   |
-| `useThemeColors`       | boolean    | No       | Apply the active `/theme` color to the status line text. Defaults to `true`.                                                                                                                                                                 |
+| `useThemeColors`       | boolean    | No       | Use the active `/theme`: success for project/Git, accent for model/reasoning, link for context/tokens, and warning for session metadata. Separators stay neutral. Defaults to `true`.                                                        |
 | `hideContextIndicator` | boolean    | No       | Hide the built-in context usage indicator in the footer right section. When unset, it is hidden automatically if `items` contains `context-used` or `context-remaining`, so context usage is not shown twice. Set `false` to always show it. |
 
 ### Available preset items
@@ -134,15 +134,14 @@ Running `/statusline` opens an interactive multi-select dialog:
 │ [x] context-remaining       Percentage of context remaining   │
 │ ...                                                           │
 │                                                               │
-│ Preview                                                       │
-│ qwen-3-235b high | main | Context 65.7% left                 │
-│                                                               │
 │ Use up/down to navigate, space to select, enter to confirm    │
 └───────────────────────────────────────────────────────────────┘
+> Type your message…
+qwen-3-235b high · git:(main) · Context 65.7% left
 ```
 
 - Type to filter items by name or description
-- A live preview updates as you toggle items
+- The real footer below the input updates as you toggle items
 - Press enter to save the configuration
 
 ---

@@ -468,6 +468,7 @@ describe('InputPrompt', () => {
     await wait();
     expect(props.buffer.text).toBe('draft');
     expect(props.buffer.insert).not.toHaveBeenCalled();
+    expect(props.buffer.handleInput).not.toHaveBeenCalled();
     expect(props.onSubmit).not.toHaveBeenCalled();
     expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
     expect(lastFrame()).not.toContain('inactive-suggestion');

@@ -140,6 +140,7 @@ describe('DefaultAppLayout', () => {
       isStatusLineDialogOpen: true,
     });
     const output = lastFrame() ?? '';
+    expect(output).toContain('DialogManager');
     expect(output).toContain('Composer');
     expect(output.indexOf('DialogManager')).toBeLessThan(
       output.indexOf('Composer'),

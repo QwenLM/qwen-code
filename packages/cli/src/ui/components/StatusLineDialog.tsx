@@ -21,6 +21,7 @@ import {
   getEffectiveStatusLineScope,
   STATUS_LINE_OPTIONS,
   STATUS_LINE_DIALOG_FIXED_ROWS,
+  STATUS_LINE_DIALOG_MIN_ITEMS,
 } from '../status-line-model.js';
 
 interface StatusLineDialogProps {
@@ -48,7 +49,9 @@ export function StatusLineDialog({
   );
 
   const terminalHeight = availableTerminalHeight ?? 18;
-  const hasFullLayout = terminalHeight >= STATUS_LINE_DIALOG_FIXED_ROWS + 1;
+  const hasFullLayout =
+    terminalHeight >=
+    STATUS_LINE_DIALOG_FIXED_ROWS + STATUS_LINE_DIALOG_MIN_ITEMS;
 
   const filteredOptions = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();

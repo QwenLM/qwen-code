@@ -9,7 +9,7 @@ import chalk from 'chalk';
 import type { ReasoningEffort } from '@qwen-code/qwen-code-core';
 import { StreamingState } from './types.js';
 import type { SemanticColors } from './themes/semantic-tokens.js';
-import { toHex } from './themes/color-utils.js';
+import { resolveColor } from './themes/color-utils.js';
 
 export const STATUS_LINE_PRESET_ITEM_IDS = [
   'project-name',
@@ -52,7 +52,19 @@ const PRESET_COLOR_CATEGORIES = {
   'session-id': 'session',
 } as const satisfies Record<StatusLinePresetItemId, string>;
 
-const statusLineChalk = new chalk.Instance({ level: 3 });
+function stylePresetText(
+  text: string,
+  color: string | false | undefined,
+): string {
+  const resolved = color ? resolveColor(color) : undefined;
+  if (!resolved) return text;
+  if (resolved.startsWith('#')) return chalk.hex(resolved)(text);
+  const name = resolved.replace(
+    /bright$/,
+    'Bright',
+  ) as typeof chalk.ForegroundColor;
+  return chalk[name](text);
+}
 
 export interface StatusLinePresetItem {
   id: StatusLinePresetItemId;
@@ -454,8 +466,7 @@ export function buildStatusLinePresetParts(
     if (text) {
       const color =
         config.useThemeColors && palette?.[PRESET_COLOR_CATEGORIES[item]];
-      const hex = color ? toHex(color) : undefined;
-      parts.push(hex ? statusLineChalk.hex(hex)(text) : text);
+      parts.push(stylePresetText(text, color));
     }
   }
   return parts;
@@ -469,8 +480,7 @@ export function buildStatusLinePresetLines(
   // Dynamic path fields may contain line breaks, but valid horizontal
   // whitespace must survive unchanged.
   const separatorColor = config.useThemeColors && colors?.text.secondary;
-  const hex = separatorColor ? toHex(separatorColor) : undefined;
-  const separator = hex ? statusLineChalk.hex(hex)(' \u00b7 ') : ' \u00b7 ';
+  const separator = stylePresetText(' \u00b7 ', separatorColor);
   const line = buildStatusLinePresetParts(config, data, colors)
     .join(separator)
     .replace(/[\n\r\v\f\u0085\u2028\u2029]+/g, ' ');

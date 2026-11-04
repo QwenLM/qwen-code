@@ -351,9 +351,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   useLayoutEffect(() => {
     const editor = editorRef.current;
     if (!editor) return;
-    editor.focusable = focus;
-    if (focus) editor.focus();
-    else editor.blur();
+    if (focus) {
+      editor.focusable = true;
+      editor.focus();
+    } else {
+      editor.blur();
+      editor.focusable = false;
+    }
   }, [focus]);
   const scrollCursorBefore = useRef<number | null>(null);
   const vimModeEnabled = props.vim?.enabled ?? false;

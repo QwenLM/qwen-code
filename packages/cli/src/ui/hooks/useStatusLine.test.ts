@@ -6,6 +6,7 @@
 // @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import chalk from 'chalk';
 import { renderHook, act } from '@testing-library/react';
 import * as child_process from 'child_process';
 import { StreamingState } from '../types.js';
@@ -166,6 +167,7 @@ function setStatusLineConfig(
 }
 
 describe('useStatusLine', () => {
+  const originalChalkLevel = chalk.level;
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
@@ -225,6 +227,7 @@ describe('useStatusLine', () => {
   });
 
   afterEach(() => {
+    chalk.level = originalChalkLevel;
     vi.useRealTimers();
   });
 
@@ -465,6 +468,7 @@ describe('useStatusLine', () => {
 
   describe('preset status line', () => {
     it('repaints semantic colors on theme changes and removes them in a plain preview', () => {
+      chalk.level = 3;
       setStatusLineConfig({
         type: 'preset',
         items: ['model'],
@@ -472,14 +476,10 @@ describe('useStatusLine', () => {
       });
       theme.text.accent = 'red';
       const { result, rerender } = renderHook(() => useStatusLine());
-      expect(result.current.lines).toEqual([
-        '\x1b[38;2;255;0;0mTest Model\x1b[39m',
-      ]);
+      expect(result.current.lines).toEqual(['\x1b[31mTest Model\x1b[39m']);
       theme.text.accent = 'blue';
       rerender();
-      expect(result.current.lines).toEqual([
-        '\x1b[38;2;0;0;255mTest Model\x1b[39m',
-      ]);
+      expect(result.current.lines).toEqual(['\x1b[34mTest Model\x1b[39m']);
       mockUIState.statusLinePreviewConfig = {
         type: 'preset',
         items: ['model'],

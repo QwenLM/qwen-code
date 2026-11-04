@@ -224,8 +224,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // in alternate-screen mode (see RowMouseController's coordinate assumptions).
   const mouseTrackingEnabled = useMouseTrackingEnabled();
   const isVpMode = useVirtualViewport(settings.merged.ui?.useTerminalBuffer);
-  const mouseInteractionsEnabled =
-    isVpMode && mouseTrackingEnabled && !uiState.isStatusLineDialogOpen;
+  const mouseInteractionsEnabled = isVpMode && mouseTrackingEnabled;
   // Bare ↑/↓ belong to input history; the transcript is scrolled with
   // Shift+↑/↓, PgUp/PgDn, Ctrl+Home/End or the mouse wheel (the contract
   // ui.useTerminalBuffer documents). Opt-in only: on a terminal or
@@ -633,8 +632,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     userMessages,
     onSubmit: handleSubmitAndClear,
     // History navigation still owns Ctrl+P/N when the completion menu is not
-    // handling them. Disable while shell mode or the preset picker owns input.
-    isActive: !shellModeActive && !uiState.isStatusLineDialogOpen,
+    // handling them. Only disable in shell mode.
+    isActive: !shellModeActive,
     currentQuery: buffer.text,
     onChange: customSetTextAndResetCompletionSignal,
   });
@@ -937,7 +936,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const handleInput = useCallback(
     (key: Key): boolean => {
-      if (uiState.isStatusLineDialogOpen) return true;
       // While the right-click context menu is open it owns navigation keys
       // (the menu overlay handles them); any other key closes the menu and is
       // then processed normally — mirroring click-away dismissal.

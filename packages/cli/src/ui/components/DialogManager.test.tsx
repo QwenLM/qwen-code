@@ -10,10 +10,20 @@ import { BUILT_IN_OUTPUT_STYLES } from '@qwen-code/qwen-code-core';
 import { renderWithProviders, withProviders } from '../../test-utils/render.js';
 import { DialogManager } from './DialogManager.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
+import { STATUS_LINE_COMPOSER_ROWS } from '../status-line-model.js';
+import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 import {
   UIActionsContext,
   type UIActions,
 } from '../contexts/UIActionsContext.js';
+
+const statusLineDialogProps = vi.hoisted(() => vi.fn());
+vi.mock('./StatusLineDialog.js', () => ({
+  StatusLineDialog: (props: unknown) => {
+    statusLineDialogProps(props);
+    return null;
+  },
+}));
 
 const CUSTOM_STYLE: OutputStyleDefinition = {
   name: 'Reviewer',
@@ -51,6 +61,43 @@ const renderDialogManager = (
   renderWithProviders(dialogTree(uiState), { config: config as Config });
 
 describe('DialogManager', () => {
+  it.each([true, false])(
+    'reserves composer and footer rows for the status line picker (constrained: %s)',
+    (constrainHeight) => {
+      const terminalHeight = 25;
+      const staticExtraHeight = 3;
+      renderDialogManager(
+        createUIState({
+          constrainHeight,
+          terminalHeight,
+          staticExtraHeight,
+          isStatusLineDialogOpen: true,
+        }),
+        {},
+      );
+      expect(statusLineDialogProps).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          availableTerminalHeight:
+            getDialogMaxHeight(terminalHeight, staticExtraHeight) -
+            STATUS_LINE_COMPOSER_ROWS,
+        }),
+      );
+    },
+  );
+
+  it('keeps at least one picker row when the composer fills the terminal', () => {
+    renderDialogManager(
+      createUIState({
+        terminalHeight: 5,
+        isStatusLineDialogOpen: true,
+      }),
+      {},
+    );
+    expect(statusLineDialogProps).toHaveBeenLastCalledWith(
+      expect.objectContaining({ availableTerminalHeight: 1 }),
+    );
+  });
+
   // The picker's list comes from the hook, which re-reads the style
   // directories on every open; wiring it to the built-ins instead would hide
   // every custom style and mount the rows during the disk read.

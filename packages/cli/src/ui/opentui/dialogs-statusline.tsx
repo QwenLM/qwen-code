@@ -17,6 +17,7 @@ import {
   getEffectiveStatusLineScope,
   STATUS_LINE_OPTIONS,
   STATUS_LINE_DIALOG_FIXED_ROWS,
+  STATUS_LINE_DIALOG_MIN_ITEMS,
 } from '../status-line-model.js';
 import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
@@ -47,7 +48,9 @@ export function OpenTuiStatusLineDialog({
   availableTerminalHeight?: number;
 }) {
   const { width } = useTerminalDimensions();
-  const full = availableTerminalHeight >= STATUS_LINE_DIALOG_FIXED_ROWS + 1;
+  const full =
+    availableTerminalHeight >=
+    STATUS_LINE_DIALOG_FIXED_ROWS + STATUS_LINE_DIALOG_MIN_ITEMS;
   const budget = Math.max(
     0,
     full ? dialogContentWidth(width) : dialogAreaWidth(width) - 2,

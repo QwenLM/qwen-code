@@ -378,7 +378,10 @@ describe('StatusLineDialog', () => {
   });
 
   it.each([
-    [13, true],
+    [16, true],
+    [15, false],
+    [14, false],
+    [13, false],
     [12, false],
   ] as const)(
     'uses the expected layout at the %i-row boundary',
@@ -390,6 +393,12 @@ describe('StatusLineDialog', () => {
         availableTerminalHeight,
       );
       expect(frame.includes('Configure Status Line')).toBe(hasFullLayout);
+      expect(frame).toContain('project-name');
+      expect(frame).toContain('git-branch');
+      if (!hasFullLayout) {
+        expect(frame).toContain('model-with-reasoning');
+        expect(frame).toContain('model-only');
+      }
     },
   );
 
