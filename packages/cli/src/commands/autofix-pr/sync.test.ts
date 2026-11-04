@@ -1040,6 +1040,62 @@ describe('runSync (real git, bare remote)', () => {
     expect(runSync(7, true).reason).not.toMatch(/cleanup 7 --force/);
   });
 
+  // What holds the branch decides what frees it: `git worktree remove`
+  // refuses a locked worktree and one whose `.git` is gone, and `git
+  // worktree prune` drops a stale record but not a locked one. The git
+  // commands the reason gives, run as given, let the next round through.
+  it.each<[string, (holder: string) => void, RegExp, RegExp]>([
+    ['a checkout', () => {}, /\. Switch that checkout/, /worktree prune/],
+    [
+      'a directory deleted by hand',
+      (holder) => rmSync(holder, { recursive: true, force: true }),
+      /nothing is checked out there any more\. Drop its record with `git worktree prune`/,
+      /worktree remove|Switch that checkout/,
+    ],
+    [
+      'a checkout whose .git is deleted',
+      (holder) => rmSync(join(holder, '.git')),
+      /nothing is checked out there any more\. Drop its record with `git worktree prune`/,
+      /worktree remove|Switch that checkout/,
+    ],
+    [
+      'a locked checkout',
+      (holder) => run(repo, 'worktree', 'lock', holder),
+      /, which is locked\. Unlock it \(`git worktree unlock .*other-wt`\), then switch that checkout/,
+      /worktree prune/,
+    ],
+    [
+      'a locked directory deleted by hand',
+      (holder) => {
+        run(repo, 'worktree', 'lock', holder);
+        rmSync(holder, { recursive: true, force: true });
+      },
+      /, a locked worktree git still records .*\. Unlock it \(`git worktree unlock .*other-wt`\), then drop its record with `git worktree prune`/,
+      /worktree remove|Switch that checkout/,
+    ],
+  ])(
+    'with --discard says how to free a branch held by %s',
+    (_name, damage, says, saysNot) => {
+      run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
+      const holder = join(base, 'other-wt');
+      run(repo, 'worktree', 'add', '-q', holder, paths.branch);
+      damage(holder);
+      const { synced, reason } = runSync(7, true);
+      expect(synced).toBe(false);
+      expect(reason).toMatch(says);
+      expect(reason).not.toMatch(saysNot);
+      for (const [, command] of String(reason).matchAll(
+        /`(git worktree [^`]+)`/g,
+      )) {
+        run(repo, ...command.split(' ').slice(1));
+      }
+      expect(runSync(7, true)).toMatchObject({
+        synced: true,
+        headSha: featSha,
+      });
+    },
+  );
+
   it('with --discard takes the worktree back to the watch branch from one a fix switched to', () => {
     run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
     const theirs = commitIn(paths.worktreePath, 'on-fix-branch.txt');

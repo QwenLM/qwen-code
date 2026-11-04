@@ -343,7 +343,7 @@ export function requireWorktree(
       const holder = worktreeHolding(worktreePath, paths.branch);
       throw new SwitchBackRefused(
         holder
-          ? `${checkedOut}, and git could not switch it back: ${paths.branch} is checked out in ${holder}. Switch that checkout to another branch or remove it (\`git worktree remove ${holder}\`); until then neither a round nor \`qwen autofix-pr cleanup ${prNumber}\` can use or remove the branch.`
+          ? `${checkedOut}, and git could not switch it back: ${paths.branch} is checked out in ${holder.path}${freeing(holder)}; until then neither a round nor \`qwen autofix-pr cleanup ${prNumber}\` can use or remove the branch.`
           : `${checkedOut}, and git could not switch it back; remove the watch with \`qwen autofix-pr cleanup ${prNumber} --force\` and prepare it again.`,
       );
     }
@@ -354,8 +354,17 @@ export function requireWorktree(
   }
 }
 
+/** Another worktree of the clone that git counts as having a branch checked
+ * out: `stale` once it is no checkout any more (its directory or its `.git`
+ * deleted by hand), which git still counts until the record is pruned. */
+interface Holder {
+  path: string;
+  stale: boolean;
+  locked: boolean;
+}
+
 /** Another worktree of the clone with `branch` checked out, or null. */
-function worktreeHolding(worktreePath: string, branch: string): string | null {
+function worktreeHolding(worktreePath: string, branch: string): Holder | null {
   const list = gitOpt('-C', worktreePath, 'worktree', 'list', '--porcelain');
   if (list === null) return null;
   const self = realpathSync(worktreePath);
@@ -369,9 +378,30 @@ function worktreeHolding(worktreePath: string, branch: string): string | null {
     } catch {
       // Gone since git listed it: still what holds the branch for git.
     }
-    return path;
+    return {
+      path,
+      // What makes git call a record `prunable`, asked here rather than
+      // read: git says it only from 2.31 on, and never of a locked record.
+      stale: !existsSync(join(path, '.git')),
+      locked: /^locked\b/m.test(entry),
+    };
   }
   return null;
+}
+
+/** How the user frees the branch `holder` keeps. `git worktree prune`
+ * drops a stale record but not a locked one, and `git worktree remove`
+ * refuses a locked worktree and one whose `.git` is gone. */
+function freeing({ path, stale, locked }: Holder): string {
+  const gone =
+    'worktree git still records although nothing is checked out there any more';
+  const free = stale
+    ? 'drop its record with `git worktree prune`'
+    : `switch that checkout to another branch or remove it (\`git worktree remove ${path}\`)`;
+  if (locked) {
+    return `, ${stale ? `a locked ${gone}` : 'which is locked'}. Unlock it (\`git worktree unlock ${path}\`), then ${free}`;
+  }
+  return `${stale ? `, a ${gone}` : ''}. ${free[0].toUpperCase()}${free.slice(1)}`;
 }
 
 /** `sync --discard` asked to switch the worktree back to the watch's

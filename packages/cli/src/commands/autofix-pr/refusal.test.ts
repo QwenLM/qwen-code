@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import yargs, { type CommandModule } from 'yargs';
 import { autofixPrCommand } from '../autofix-pr.js';
@@ -407,9 +407,12 @@ describe('the autofix-pr command', () => {
     dir = mkdtempSync(join(tmpdir(), 'autofix-refusal-cli-'));
     const bin = join(dir, 'bin');
     mkdirSync(bin);
-    writeFileSync(join(bin, 'gh'), '#!/bin/sh\necho "gh: no" >&2\nexit 1\n');
+    writeFileSync(
+      join(bin, 'gh'),
+      '#!/bin/sh\necho "$@" >> "$0.calls"\necho "gh: no" >&2\nexit 1\n',
+    );
     chmodSync(join(bin, 'gh'), 0o755);
-    vi.stubEnv('PATH', `${bin}:${process.env['PATH']}`);
+    vi.stubEnv('PATH', `${bin}${delimiter}${process.env['PATH']}`);
     process.chdir(dir);
     mocks.stderr.mockClear();
   });
@@ -421,8 +424,11 @@ describe('the autofix-pr command', () => {
     vi.unstubAllEnvs();
   });
 
-  // Every helper run through the command, in a clone with no watch and a
-  // `gh` that fails: each refuses with its coded line.
+  // Every helper run through the command, in a clone with no watch: each
+  // refuses with its coded line before it asks gh anything. The `gh` first
+  // on the PATH fails and records its calls, and none may be recorded: on
+  // Windows, where `execFile` runs no script named `gh`, a row that asked
+  // would reach the host's.
   // The two that refuse nothing in an empty clone get what makes them.
   const fixInFlight = (root: string) => {
     const paths = autofixPrPaths(root, 7);
@@ -445,7 +451,7 @@ describe('the autofix-pr command', () => {
   };
 
   it.each<[string[], RefusalCode, RefusalNext, ((root: string) => void)?]>([
-    [['prepare', '7', '--repo', 'o/r'], 'failed', 'report'],
+    [['prepare', '7', '--repo', 'o'], 'failed', 'report'],
     [['cleanup', '7'], 'fix_in_flight', 'report', fixInFlight],
     [['status', '7'], 'failed', 'report', unreadableState],
     [['snapshot', '7'], 'not_prepared', 'end_task'],
@@ -474,6 +480,7 @@ describe('the autofix-pr command', () => {
         next,
         message: expect.any(String),
       });
+      expect(existsSync(join(dir, 'bin', 'gh.calls'))).toBe(false);
     },
   );
 });
