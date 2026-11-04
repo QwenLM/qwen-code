@@ -14,7 +14,14 @@ import { Storage } from '../config/storage.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import { SessionHistoryService } from './session-history-service.js';
-import { SessionTranscriptReader } from './session-transcript-reader.js';
+import {
+  SessionTranscriptReader,
+  resetSessionTranscriptIndexCacheForTest,
+} from './session-transcript-reader.js';
+import {
+  applySessionNotesRecord,
+  type SessionNotesState,
+} from './session-notes-state.js';
 import { estimateContextTextTokens } from './tokenEstimation.js';
 
 describe('session history projection', () => {
@@ -23,6 +30,7 @@ describe('session history projection', () => {
   let transcript: string;
   let sessionId: string;
   let service: SessionHistoryService;
+  let reader: SessionTranscriptReader;
   let tail: string | null;
   const signal = new AbortController().signal;
 
@@ -38,11 +46,8 @@ describe('session history projection', () => {
       `${sessionId}.jsonl`,
     );
     await fs.mkdir(path.dirname(transcript), { recursive: true });
-    service = new SessionHistoryService(
-      new SessionTranscriptReader(workspace, undefined, runtime),
-      sessionId,
-      () => 10000,
-    );
+    reader = new SessionTranscriptReader(workspace, undefined, runtime);
+    service = new SessionHistoryService(reader, sessionId, () => 10000);
   });
 
   afterEach(async () => {
@@ -292,5 +297,127 @@ describe('session history projection', () => {
     await expect(lowBudget.query({ action: 'list' }, signal)).rejects.toThrow(
       'Too little context',
     );
+  });
+  it('gives a current-branch error for a rewound history ref', async () => {
+    const root = await append('user', [{ text: 'survives' }]);
+    const abandoned = await append('user', [{ text: 'abandoned' }]);
+    await append('system', [], {
+      subtype: 'rewind',
+      parentUuid: root,
+      systemPayload: { truncatedCount: 1 },
+    });
+    await expect(
+      service.query({ action: 'read', ref: `${abandoned}:0` }, signal),
+    ).rejects.toThrow(
+      'This reference is not available on the current session branch.',
+    );
+  });
+
+  it('gives restart instructions for a rewound history cursor', async () => {
+    const root = await append('user', [{ text: 'survives' }]);
+    await append('user', [{ text: 'abandoned' }]);
+    const first = JSON.parse(
+      await service.query({ action: 'list', limit: 1 }, signal),
+    );
+    expect(first.nextCursor).toBeDefined();
+    await append('system', [], {
+      subtype: 'rewind',
+      parentUuid: root,
+      systemPayload: { truncatedCount: 1 },
+    });
+    await expect(
+      service.query({ action: 'list', cursor: first.nextCursor }, signal),
+    ).rejects.toThrow('History cursor expired. Start a new list or search.');
+  });
+
+  it('returns a valid first page before a later oversized record', async () => {
+    const first = await append('user', [{ text: 'small record' }]);
+    await append('tool_result', [{ text: 'x'.repeat(16 * 1024 * 1024) }]);
+    const page = await reader.readContextHistory(sessionId, { limit: 2 });
+    expect(page.records.map((record) => record.uuid)).toEqual([first]);
+    expect(page.nextOffset).toBe(1);
+    await expect(
+      reader.readContextHistory(sessionId, {
+        snapshot: page.snapshot,
+        offset: 1,
+      }),
+    ).rejects.toThrow('exceeds');
+  });
+
+  it('replays the same latest real-user mention as the live reducer', async () => {
+    await append('user', [{ text: 'original request' }]);
+    const mention = await append('user', [{ text: 'new @worker constraint' }], {
+      subtype: 'agent_mention',
+      provenance: 'real_user',
+    });
+    const live: SessionNotesState = {};
+    const records = (await fs.readFile(transcript, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as ChatRecord);
+    for (const record of records) applySessionNotesRecord(live, record);
+    expect(live.latestUser?.uuid).toBe(mention);
+    expect((await reader.readNotesState(sessionId)).latestUser).toEqual(
+      live.latestUser,
+    );
+  });
+
+  it('excludes internal notifications and cron from user history', async () => {
+    const user = await append('user', [{ text: 'real prompt' }], {
+      provenance: 'real_user',
+    });
+    await append('user', [{ text: 'background tool complete' }], {
+      subtype: 'notification',
+      provenance: 'system',
+    });
+    await append('user', [{ text: 'cron maintenance' }], {
+      subtype: 'cron',
+      provenance: 'system',
+    });
+    const page = JSON.parse(
+      await service.query({ action: 'list', role: 'user' }, signal),
+    );
+    expect(page.entries).toEqual([
+      { ref: `${user}:0`, role: 'user', text: 'real prompt' },
+    ]);
+    const search = JSON.parse(
+      await service.query(
+        { action: 'search', query: 'maintenance', role: 'user' },
+        signal,
+      ),
+    );
+    expect(search.entries).toEqual([]);
+  });
+
+  it('rejects a frozen prefix whose leaf changed after a same-inode rewrite', async () => {
+    const root = await append('user', [{ text: 'root' }]);
+    const leaf = await append('user', [{ text: 'leaf' }]);
+    const page = await reader.readContextHistory(sessionId, { limit: 1 });
+    const before = await fs.stat(transcript);
+    const records = (await fs.readFile(transcript, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as ChatRecord);
+    const [rootRecord, leafRecord] = records;
+    expect(rootRecord.uuid).toBe(root);
+    const replacement = { ...leafRecord, uuid: randomUUID() };
+    const prefix =
+      JSON.stringify(rootRecord) + '\n' + JSON.stringify(replacement) + '\n';
+    expect(Buffer.byteLength(prefix)).toBe(before.size);
+    const rewritten =
+      prefix +
+      JSON.stringify({ ...leafRecord, parentUuid: replacement.uuid }) +
+      '\n';
+    await fs.writeFile(transcript, rewritten);
+    expect((await fs.stat(transcript)).ino).toBe(before.ino);
+    resetSessionTranscriptIndexCacheForTest();
+    const current = await reader.readContextHistory(sessionId);
+    expect(current.records.at(-1)?.uuid).toBe(leaf);
+    await expect(
+      reader.readContextHistory(sessionId, {
+        snapshot: page.snapshot,
+        offset: 1,
+      }),
+    ).rejects.toThrow();
   });
 });

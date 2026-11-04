@@ -34929,6 +34929,84 @@ describe('Session', () => {
         }
       });
 
+      it('re-expands the full loop.md block after notes compaction occurs inside the model stream', async () => {
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-compact-'),
+        );
+        const loopMdPath = path.join(tmpDir, '.qwen', 'loop.md');
+        await fs.mkdir(path.dirname(loopMdPath), { recursive: true });
+        await fs.writeFile(loopMdPath, '- stable task list');
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+
+        mockConfig.getChatCompression = vi
+          .fn()
+          .mockReturnValue({ strategy: 'notes' });
+        let cronSends = 0;
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(
+            async (_model: string, _params: unknown, promptId: string) => {
+              if (String(promptId).includes('cron')) cronSends++;
+              if (cronSends === 2) {
+                return (async function* () {
+                  yield {
+                    type: core.StreamEventType.COMPRESSED,
+                    info: {
+                      originalTokenCount: 1000,
+                      newTokenCount: 200,
+                      compressionStatus: core.CompressionStatus.COMPRESSED,
+                      strategy: 'notes',
+                    },
+                  } as const;
+                })();
+              }
+              return createEmptyStream();
+            },
+          );
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const fullDeliveries = () =>
+            (
+              mockChat.sendMessageStream as ReturnType<typeof vi.fn>
+            ).mock.calls.filter((c) =>
+              (Array.isArray(c[1]?.message) ? c[1].message : [])
+                .map((p: { text?: string }) => p.text ?? '')
+                .join('')
+                .includes('The user configured a loop-tasks file.'),
+            ).length;
+
+          await vi.waitFor(() => {
+            expect(fullDeliveries()).toBe(2);
+          });
+          expect(cronSends).toBe(3);
+          expect(mockLlmClient.tryCompressChat).not.toHaveBeenCalled();
+        } finally {
+          await fs.rm(tmpDir, { recursive: true, force: true });
+        }
+      });
+
       it('stops cron-fired ACP prompt before sending when the session token limit is exceeded', async () => {
         let cronCallback: ((job: { prompt: string }) => void) | undefined;
         const scheduler = {

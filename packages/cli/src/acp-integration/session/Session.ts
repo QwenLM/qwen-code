@@ -11148,6 +11148,7 @@ export class Session implements SessionContext {
     requestRouteKey: string,
   ): void {
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
+      this.loopTickResolver?.resetCache();
       this.#invalidateRouteTokenCountsForCompression(info, requestRouteKey);
       return;
     }

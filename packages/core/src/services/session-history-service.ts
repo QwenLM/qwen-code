@@ -8,7 +8,11 @@ import { randomUUID } from 'node:crypto';
 import type { Part } from '@google/genai';
 import type { ChatRecord } from './chatRecordingService.js';
 import { isSessionContextPart } from './session-notes-state.js';
-import type { SessionTranscriptReader } from './session-transcript-reader.js';
+import {
+  InvalidSessionTranscriptCursorError,
+  SessionTranscriptSnapshotUnavailableError,
+  type SessionTranscriptReader,
+} from './session-transcript-reader.js';
 import { estimateContextTextTokens } from './tokenEstimation.js';
 
 export interface SessionHistoryRequest {
@@ -82,7 +86,11 @@ function historyPartText(part: Part): string {
 }
 
 function projectHistory(record: ChatRecord): HistoryEntry[] {
-  if (record.type === 'system' || record.subtype === 'realtime_message')
+  if (
+    record.type === 'system' ||
+    record.subtype === 'realtime_message' ||
+    (record.type === 'user' && record.provenance === 'system')
+  )
     return [];
   const parts = Array.isArray(record.message?.parts)
     ? record.message.parts
@@ -181,11 +189,20 @@ export class SessionHistoryService {
       const match = /^([^:]+):(\d+)$/u.exec(request.ref ?? '');
       if (!match)
         throw new Error('Use a history ref returned by list or search.');
-      const page = await this.reader.readContextHistory(
-        this.sessionId,
-        { recordId: match[1] },
-        signal,
-      );
+      const page = await this.reader
+        .readContextHistory(this.sessionId, { recordId: match[1] }, signal)
+        .catch((error: unknown) => {
+          if (
+            error instanceof InvalidSessionTranscriptCursorError ||
+            error instanceof SessionTranscriptSnapshotUnavailableError
+          ) {
+            throw new Error(
+              'This reference is not available on the current session branch.',
+              { cause: error },
+            );
+          }
+          throw error;
+        });
       const entry = page.records
         .flatMap(projectHistory)
         .find((item) => item.ref === request.ref);
@@ -225,11 +242,26 @@ export class SessionHistoryService {
     if (request.action === 'search' && !query)
       throw new Error('A nonempty literal search query is required.');
     const offset = saved?.offset ?? 0;
-    const page = await this.reader.readContextHistory(
-      this.sessionId,
-      { snapshot: saved?.snapshot, offset, limit: 100 },
-      signal,
-    );
+    const page = await this.reader
+      .readContextHistory(
+        this.sessionId,
+        { snapshot: saved?.snapshot, offset, limit: 100 },
+        signal,
+      )
+      .catch((error: unknown) => {
+        if (
+          error instanceof InvalidSessionTranscriptCursorError ||
+          error instanceof SessionTranscriptSnapshotUnavailableError
+        ) {
+          throw new Error(
+            'History cursor expired. Start a new list or search.',
+            {
+              cause: error,
+            },
+          );
+        }
+        throw error;
+      });
     const entries: HistoryEntry[] = [];
     const limit = Math.min(request.limit ?? 20, 20);
     let next: HistoryCursor | undefined;

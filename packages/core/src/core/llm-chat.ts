@@ -3253,10 +3253,18 @@ export class LlmChat {
         const summaryPrefixLength = newHistory.length;
         if (options?.pendingUserMessage) {
           newHistory = [...newHistory, options.pendingUserMessage];
-          if (info.strategy !== 'notes') {
-            info.newTokenCount += estimateContentTokens([
-              options.pendingUserMessage,
-            ]);
+          // Effective/override counts already include the pending prompt.
+          // Only the stored API baseline still needs its contribution.
+          if (
+            info.strategy !== 'notes' &&
+            originalTokenCountOverride === undefined &&
+            !originalTokenCountIsEstimated
+          ) {
+            info.newTokenCount += estimateContentTokens(
+              [options.pendingUserMessage],
+              resolveSlimmingConfig(this.config.getChatCompression())
+                .imageTokenEstimate,
+            );
           }
         }
         const { auto } = computeThresholds(
@@ -3354,20 +3362,20 @@ export class LlmChat {
       this.consecutiveFailures = 0;
       this.hardRescueFailureCount = 0;
       if (notesRecorder) {
+        const hookSystem = this.config.getHookSystem();
         try {
-          await this.config
-            .getHookSystem()
-            ?.firePostCompactEvent(
-              (options?.trigger ?? (force ? 'manual' : 'auto')) === 'manual'
-                ? PostCompactTrigger.Manual
-                : PostCompactTrigger.Auto,
-              postCompactSummary ?? '',
-              signal,
-            );
+          await hookSystem?.firePostCompactEvent(
+            (options?.trigger ?? (force ? 'manual' : 'auto')) === 'manual'
+              ? PostCompactTrigger.Manual
+              : PostCompactTrigger.Auto,
+            postCompactSummary ?? '',
+            signal,
+          );
         } catch (error) {
           this.config
             .getDebugLogger()
             .warn(`PostCompact hook failed: ${error}`);
+          if (hookSystem?.isManaged()) throw error;
         }
         if (info.strategy === 'notes') {
           logChatCompression(

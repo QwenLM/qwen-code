@@ -454,8 +454,8 @@ only registers tools on the normal path does not meet this contract.
 - Notes writes, retrieval calls, and extra tool schemas consume tokens. Removing
   summarization calls alone does not establish a total cost or latency benefit.
 - A very large incoming message can skip the warning interval. Summary rescue
-  remains necessary; the system must never require another model call after
-  there is insufficient context to make it safely.
+  remains necessary; the system must never require another notes write after
+  there is insufficient context to make one safely.
 - Session logs may contain sensitive user/tool text. Use the existing local
   storage protections; keep the sidecar under the runtime data directory with
   restrictive file permissions. Do not add notes/history content to ordinary

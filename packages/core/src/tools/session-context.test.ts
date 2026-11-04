@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { Config } from '../config/config.js';
+import { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
@@ -30,6 +30,8 @@ import { EVENT_TOOL_CALL } from '../telemetry/constants.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import { SessionContextTool } from './session-context.js';
 import { ToolNames } from './tool-names.js';
+import { LlmChat } from '../core/llm-chat.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 import { isCodeModeToolCallAllowed } from './code-mode.js';
 
 function fixture(sessionId = 'session') {
@@ -283,4 +285,81 @@ describe('session history concurrent recording', () => {
       await expectQueuedWritesPersisted();
     },
   );
+});
+
+describe('real Config session context ownership', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('owns its llmClient at runtime and permits a write while a derived config is rejected', async () => {
+    const config = new Config({
+      targetDir: path.resolve('.'),
+      cwd: path.resolve('.'),
+      debugMode: false,
+      chatRecording: false,
+      usageStatisticsEnabled: false,
+      overrideExtensions: [],
+    });
+    expect(Object.hasOwn(config, 'llmClient')).toBe(true);
+    const response = { observed: {} };
+    const notes = {
+      sessionId: config.getSessionId(),
+      captureResponse: () => response,
+      assertAvailable: vi.fn(),
+      write: vi.fn().mockResolvedValue({
+        revision: 'note',
+        windowId: 'window',
+        sourceLeafUuid: 'leaf',
+      }),
+    };
+    const chat = { getSessionNotesService: () => notes } as unknown as LlmChat;
+    vi.spyOn(config.getLlmClient(), 'getChat').mockReturnValue(chat);
+    const signal = new AbortController().signal;
+    const result = await new SessionContextTool(config, ToolNames.SESSION_NOTES)
+      .build({ action: 'write', text: 'checkpoint' })
+      .execute(signal);
+    expect(result.error).toBeUndefined();
+    expect(notes.write).toHaveBeenCalledWith('checkpoint', response, signal);
+    const derived = Object.create(config) as Config;
+    expect(Object.hasOwn(derived, 'llmClient')).toBe(false);
+    const rejected = await new SessionContextTool(
+      derived,
+      ToolNames.SESSION_NOTES,
+    )
+      .build({ action: 'write', text: 'second checkpoint' })
+      .execute(signal);
+    expect(rejected.error?.message).toContain('owning main chat');
+    expect(notes.write).toHaveBeenCalledTimes(1);
+  });
+  it('keeps notes tools usable when eager tools only names ReadFile', async () => {
+    const config = new Config({
+      targetDir: path.resolve('.'),
+      cwd: path.resolve('.'),
+      debugMode: false,
+      chatRecording: true,
+      usageStatisticsEnabled: false,
+      overrideExtensions: [],
+      chatCompression: { strategy: 'notes' },
+      eagerTools: ['read_file'],
+      bareMode: true,
+    });
+    const permissions = new PermissionManager(config);
+    permissions.initialize();
+    vi.spyOn(config, 'getPermissionManager').mockReturnValue(permissions);
+    const registry = await config.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    await registry.warmAll();
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    const chat = new LlmChat(config, {}, [], config.getChatRecordingService());
+    const declarations = registry
+      .getFunctionDeclarations()
+      .map(({ name }) => name);
+    expect(registry.getAllToolNames()).toEqual(
+      expect.arrayContaining([...SESSION_CONTEXT_TOOL_NAMES]),
+    );
+    expect
+      .soft(declarations)
+      .toEqual(expect.arrayContaining([...SESSION_CONTEXT_TOOL_NAMES]));
+    expect(chat.getSessionNotesService()).toBeDefined();
+  });
 });

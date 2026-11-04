@@ -518,6 +518,7 @@ interface UuidIndexEntry {
   sessionIdMatchesFile: boolean;
   type: ChatRecord['type'];
   subtype?: TranscriptRecordInput['subtype'];
+  provenance?: ChatRecord['provenance'];
   inherited: boolean;
   sideTaskSource: boolean;
   apiHistoryCompressionCandidate: boolean;
@@ -2144,6 +2145,9 @@ function newIndexEntry(
     sessionIdMatchesFile: record.sessionId === sessionId,
     type: record.type,
     ...(record.subtype !== undefined ? { subtype: record.subtype } : {}),
+    ...(record.provenance !== undefined
+      ? { provenance: record.provenance }
+      : {}),
     inherited: record.forkedFrom !== undefined,
     sideTaskSource:
       record.type === 'system' &&
@@ -2738,8 +2742,10 @@ async function readSessionNotesState(
   const userUuid = lastUuidMatching(
     index,
     (entry) =>
+      entry.substantive &&
       entry.type === 'user' &&
-      (entry.subtype === undefined ||
+      (entry.provenance === 'real_user' ||
+        entry.subtype === undefined ||
         entry.subtype === 'mid_turn_user_message'),
   );
   const state: SessionNotesState = {
@@ -3067,6 +3073,9 @@ export class SessionTranscriptReader {
     const index = frozen
       ? await getCachedIndex({ filePath, ...frozen })
       : current;
+    if (frozen && frozen.leafUuid !== index.leafUuid) {
+      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+    }
     const snapshot =
       options.snapshot ??
       this.encodeSnapshot({
@@ -3096,7 +3105,10 @@ export class SessionTranscriptReader {
     let bytes = 0;
     for (const uuid of index.runtimeUuids.slice(offset, offset + limit)) {
       const size = recordSegmentBytes(index, uuid);
-      if (size > SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES) {
+      if (
+        uuids.length === 0 &&
+        size > SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES
+      ) {
         throw new SessionTranscriptPageTooLargeError(
           sessionId,
           size,

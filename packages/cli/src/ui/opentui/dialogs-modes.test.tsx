@@ -1793,9 +1793,8 @@ describe('OpenTuiSettingsDialog region budget', () => {
   });
 
   it('re-clamps the window when the region shrinks under the highlight', () => {
-    // Walking the highlight to the last painted row at region 25, then
-    // shrinking the region to 19, left the window at [0,3) while the
-    // highlight sat on row eight — invisible, yet Enter still committed it.
+    // Shrinking the region to 19 must keep the selected subdialog row
+    // visible, and Enter must still commit that row.
     // The window re-follows the highlight, the way useDialogSelect's
     // scroll-follow effect does.
     const items = buildSettingsListItems();
@@ -1813,8 +1812,12 @@ describe('OpenTuiSettingsDialog region budget', () => {
         availableTerminalHeight={25}
       />,
     );
-    for (let i = 0; i < 7; i++) press('down');
-    const highlighted = items[7]!;
+    const targetIndex = items.findIndex(
+      (item) => item.key === 'general.preferredEditor',
+    );
+    expect(targetIndex).toBeGreaterThanOrEqual(0);
+    for (let i = 0; i < targetIndex; i++) press('down');
+    const highlighted = items[targetIndex]!;
     expect(screen.getByText(highlighted.label)).not.toBeNull();
 
     rerender(

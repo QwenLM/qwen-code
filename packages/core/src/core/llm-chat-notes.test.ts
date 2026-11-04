@@ -14,6 +14,7 @@ import { SessionNotesService } from '../services/session-notes-service.js';
 import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { SESSION_CONTEXT_TOOL_NAMES } from '../services/session-notes-state.js';
 import * as sideQuery from '../utils/sideQuery.js';
+import { estimateContentTokens } from '../services/tokenEstimation.js';
 
 vi.mock('../telemetry/loggers.js');
 
@@ -41,6 +42,11 @@ describe('notes compaction commit boundary', () => {
       getAdditionalContext: () => 'Preserve the hook context.',
     });
     const post = vi.fn().mockResolvedValue(undefined);
+    const hookSystem = {
+      firePreCompactEvent: pre,
+      firePostCompactEvent: post,
+      isManaged: vi.fn().mockReturnValue(false),
+    };
     const invalidatePendingExtract = vi.fn();
     const recorder = {
       getSessionId: () => 'session',
@@ -69,10 +75,7 @@ describe('notes compaction commit boundary', () => {
           SESSION_CONTEXT_TOOL_NAMES.map((name) => ({ name })),
       }),
       getMemoryManager: () => ({ invalidatePendingExtract }),
-      getHookSystem: () => ({
-        firePreCompactEvent: pre,
-        firePostCompactEvent: post,
-      }),
+      getHookSystem: () => hookSystem,
       getApprovalMode: () => 'default',
       getTargetDir: () => '/tmp/notes-compaction-unit',
       getFileReadCache: () => ({ clear: vi.fn() }),
@@ -111,6 +114,7 @@ describe('notes compaction commit boundary', () => {
       post,
       revision,
       invalidatePendingExtract,
+      hookSystem,
     };
   }
 
@@ -231,4 +235,72 @@ describe('notes compaction commit boundary', () => {
     expect(result.strategy).toBe('summary');
     expect(recorder.recordChatCompressionStrict).toHaveBeenCalledOnce();
   });
+  it('propagates a managed PostCompact hook failure', async () => {
+    const { chat, hookSystem, post } = fixture();
+    hookSystem.isManaged.mockReturnValue(true);
+    post.mockRejectedValueOnce(new Error('managed runtime worker unavailable'));
+    await expect(chat.tryCompress('prompt', true)).rejects.toThrow(
+      'managed runtime worker unavailable',
+    );
+  });
+
+  it('keeps a local PostCompact hook failure nonfatal', async () => {
+    const { chat, post } = fixture();
+    post.mockRejectedValueOnce(new Error('local hook script failed'));
+    await expect(chat.tryCompress('prompt', true)).resolves.toMatchObject({
+      compressionStatus: CompressionStatus.COMPRESSED,
+    });
+  });
+
+  it.each(['effective', 'provider override', 'estimated', 'previous API'])(
+    'counts pending input once in summary fallback with %s tokens',
+    async (source) => {
+      const { chat, config } = fixture();
+      Object.assign(config, { getAllConfiguredModels: () => [] });
+      const pending: Content = {
+        role: 'user',
+        parts: [{ text: 'next request '.repeat(100) }],
+      };
+      const compression = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      vi.spyOn(sideQuery, 'runSideQuery').mockResolvedValue({
+        text: '<state_snapshot>summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 10000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 10500,
+        },
+      });
+      if (source === 'estimated') chat.setLastPromptTokenCount(22000, true);
+      const options =
+        source === 'effective'
+          ? { precomputedEffectiveTokens: 22300 }
+          : source === 'provider override'
+            ? {
+                originalTokenCountOverride: {
+                  count: 22300,
+                  isEstimated: false,
+                },
+              }
+            : {};
+      const result = await chat.tryCompress('prompt', true, undefined, {
+        customInstructions: 'Use summary fallback.',
+        pendingUserMessage: pending,
+        ...options,
+      });
+      const originalCount = compression.mock.calls[0][1].originalTokenCount;
+      expect(sideQuery.runSideQuery).toHaveBeenCalledOnce();
+      expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      // The previous API baseline is the only source that excludes pending
+      // input. Summary usage removes old visible history plus its overhead.
+      const pendingAdjustment =
+        source === 'previous API' ? estimateContentTokens([pending]) : 0;
+      expect(result.newTokenCount).toBe(
+        originalCount - (10000 - 1000) + 500 + pendingAdjustment,
+      );
+      expect(chat.getHistory().at(-1)).toEqual(pending);
+    },
+  );
 });
