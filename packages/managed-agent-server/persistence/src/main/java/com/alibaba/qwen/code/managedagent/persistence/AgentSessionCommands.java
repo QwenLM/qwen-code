@@ -218,6 +218,8 @@ final class AgentSessionCommands {
 
     SessionMutationCommand beginSessionRename(String tenantId, String key,
             String digest, String sessionId, String title, String actorId) {
+        // Empty operation ranges can share an InnoDB gap even across Session scopes.
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         // The Session lock serializes this Session's admissions without gap-locking missing index
         // entries. A different Session reusing the tenant-scoped key loses on the receipt's unique

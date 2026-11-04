@@ -35,20 +35,21 @@ action 响应，都在同一行上排队，而且没有 Turn 提交那样的五�
 （包括 Workspace close）按单个 Session 执行，并在检查未结束操作之前锁定同一 Session 行
 （标准 3）。被调用方向下追踪了两层，都不获取 guard（标准 2）。
 
-| 命令 | 结论 | 理由 |
-| --- | --- | --- |
-| `claimRename`、`settleRename`、`abandonSessionRename`、`retryRename` | 去掉 | 在 Session 锁和操作行条件更新之下，推进本 Session 已有的 `RENAME` 投递。 |
-| `completeSessionMutation`、`settleParkedRename`、`completeCwdChangeOperation` | 去掉 | 结束本 Session 已有的命令或操作，并以锁定读定位它们。 |
-| `changeSessionModel`、`changeSessionApproval` | 去掉 | 回执作用域为（操作、Session、actor），所以 Session 锁会串行化重放。`requirePolicyChange` 会检查 fence。回执以 `COMPLETED` 写入。 |
-| `beginContextCompression`、`beginTaskCancelOperation`、`ManagedActionStore.admit` | 去掉 | 幂等键按 Session 划分。它们在写入 `TASK_CANCEL` 或 `ACTION_RESPONSE` 之前，都通过 `requireOpen` 或 `requireSessionOpen` 检查 fence，迁移 prepare 的修复覆盖了这种情况。 |
-| `requireMcpManagement`、`requireExtensionManagement` | 去掉 | 独立的只读校验事务。配置提交会在自己的事务中再次校验。 |
-| `beginSessionRename`、`beginSessionMutation` | 去掉，并做下述修改 | 命令键按租户划分，两个复用同一键的 Session 原本只由 guard 串行化（标准 5）。现在由回执的唯一键决定这一竞争。 |
-| `insertWorkspaceSessionCommand`、`insertInternalTeamLeadSessionCommand`、`insertChildSession` | 保留 | 本次未审计。创建流程依赖 guard 排在事务首次一致性读之前，且其 Workspace 解析与准入辅助方法尚未追踪（标准 2 与 4）。 |
-| 生命周期（`beginLifecycle`、`beginOperation`、`beginWorkspaceClose`、`beginChildClose`、`unarchiveWorkspaceSession`） | 保留 | L3 生命周期协议，频率低。 |
+| 命令                                                                                                                  | 结论               | 理由                                                                                                                                                                    |
+| --------------------------------------------------------------------------------------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claimRename`、`settleRename`、`abandonSessionRename`、`retryRename`                                                  | 去掉               | 在 Session 锁和操作行条件更新之下，推进本 Session 已有的 `RENAME` 投递。                                                                                                |
+| `completeSessionMutation`、`settleParkedRename`、`completeCwdChangeOperation`                                         | 去掉               | 结束本 Session 已有的命令或操作，并以锁定读定位它们。                                                                                                                   |
+| `changeSessionModel`、`changeSessionApproval`                                                                         | 去掉               | 回执作用域为（操作、Session、actor），所以 Session 锁会串行化重放。`requirePolicyChange` 会检查 fence。回执以 `COMPLETED` 写入。                                        |
+| `beginContextCompression`、`beginTaskCancelOperation`、`ManagedActionStore.admit`                                     | 去掉               | 幂等键按 Session 划分。它们在写入 `TASK_CANCEL` 或 `ACTION_RESPONSE` 之前，都通过 `requireOpen` 或 `requireSessionOpen` 检查 fence，迁移 prepare 的修复覆盖了这种情况。 |
+| `requireMcpManagement`、`requireExtensionManagement`                                                                  | 去掉               | 独立的只读校验事务。配置提交会在自己的事务中再次校验。                                                                                                                  |
+| `beginSessionMutation`                                                                                                | 去掉，并做下述修改 | 命令键按租户划分，由回执唯一键处理跨 Session 竞争。                                                                                                                     |
+| `beginSessionRename`                                                                                                  | 保留               | 保留投递的锁定读与 supersede 更新会锁定操作索引的空范围。即使指定按 Session 划分的 identity 索引，MySQL 并发改名仍会死锁。                                              |
+| `insertWorkspaceSessionCommand`、`insertInternalTeamLeadSessionCommand`、`insertChildSession`                         | 保留               | 本次未审计。创建流程依赖 guard 排在事务首次一致性读之前，且其 Workspace 解析与准入辅助方法尚未追踪（标准 2 与 4）。                                                     |
+| 生命周期（`beginLifecycle`、`beginOperation`、`beginWorkspaceClose`、`beginChildClose`、`unarchiveWorkspaceSession`） | 保留               | L3 生命周期协议，频率低。                                                                                                                                               |
 
 ## 设计
 
-从标记为"去掉"的十六个命令中删除 `WorkspaceMigrationAdmission.lockTenant` 调用。改名与
+从标记为"去掉"的十五个命令中删除 `WorkspaceMigrationAdmission.lockTenant` 调用。
 mutation 准入另有以下修改：
 
 - `beginSessionMutation` 的重放探测对所有类型都改为非锁定读。`UNARCHIVE` 原先使用锁定读；
@@ -59,23 +60,31 @@ mutation 准入另有以下修改：
   的所有唯一键都由它派生。此时尚未写入任何数据。命令以锁定读重新读取该回执，并沿用现有规则：
   Session 或摘要不同则返回 `409 idempotency_conflict`。若引擎仍看不到该回执，同样返回该冲突。
 
-其他代码不变。本改动依赖 Turn 准入设计中的迁移 prepare 修改，因为任务取消和 action 响应会创建
+改名准入继续保留租户 guard，直到能够安全替换其空范围锁定读与更新。已有改名投递和完成命令
+仍会去掉 guard。本改动依赖 Turn 准入设计中的迁移 prepare 修改，因为任务取消和 action 响应会创建
 迁移需要统计的工作。
 
 ## 风险
 
+- 改名准入仍在租户内串行；去掉它的 guard 留待后续。
+
 - 同一 Session 的命令仍在其 Session 行上串行。检查 fence 的命令在迁移或物理 fence 期间，
   会在存储的别名行和目录行上短暂等待。
-- 锁顺序为 Session 行或 root，然后是别名行和目录行，与 Turn 准入和生命周期 begin 一致。
+- 去掉 guard 的命令先锁定 Session 行或 root，然后锁定别名行和目录行，与 Turn 准入和
+  生命周期 begin 一致。
 
 ## 验证与验收
 
 1. `ManagedModelSelectionTest`：另一事务持有租户 placement guard 时，模型修改仍能完成。
 2. `ManagedSchemaSessionStoreTest`（及其 MySQL 子类）：在另一 Session 以同一键提交改名之前
    固定快照，改名仍返回 `idempotency_conflict`，且不写入任何数据。
-3. 现有的改名、模型、审批、MCP、扩展、上下文压缩、任务取消、cwd 变更、action 响应、
+3. 同一租户的两个 Session 使用不同键并发准入首次改名，两者均成功，revision 均为一，
+   两个投递均保持待处理。该用例在 H2 及其 MySQL 子类中执行。
+4. 现有的改名、模型、审批、MCP、扩展、上下文压缩、任务取消、cwd 变更、action 响应、
    迁移以及 CSI Session 拒绝测试继续通过，包括 CI 中的 MySQL profile。
 
 ## 后续工作
+
+- 消除共享空范围的间隙锁，并在 MySQL 上验证并发首次改名后，再去掉改名准入的 guard。
 
 - 审计 Session 创建：追踪其 Workspace 解析与准入辅助方法，并在首次一致性读之前改用对相关行的锁定读，替代 guard 的排序作用。

@@ -44,21 +44,22 @@ Lifecycle begin, including Workspace close, runs per Session and locks the same
 Session row before it checks for open operations (criterion 3). Callees were
 followed two levels deep; none takes the guard (criterion 2).
 
-| Command | Decision | Reason |
-| --- | --- | --- |
-| `claimRename`, `settleRename`, `abandonSessionRename`, `retryRename` | Remove | Advance an existing `RENAME` delivery of this Session under the Session lock and the operation row's conditional update. |
-| `completeSessionMutation`, `settleParkedRename`, `completeCwdChangeOperation` | Remove | Settle an existing command or operation of this Session, located with a locking read. |
-| `changeSessionModel`, `changeSessionApproval` | Remove | The receipt scope is `(operation, Session, actor)`, so the Session lock serializes replays. `requirePolicyChange` checks the fence. The receipt is written `COMPLETED`. |
-| `beginContextCompression`, `beginTaskCancelOperation`, `ManagedActionStore.admit` | Remove | The idempotency key is Session-scoped. Each checks the fence through `requireOpen` or `requireSessionOpen` before writing `TASK_CANCEL` or `ACTION_RESPONSE`, which the migration prepare fix covers. |
-| `requireMcpManagement`, `requireExtensionManagement` | Remove | Standalone read-only validation transactions. The configuration commit validates again in its own transaction. |
-| `beginSessionRename`, `beginSessionMutation` | Remove, with changes below | The command key is tenant-scoped, so two Sessions reusing one key were serialized only by the guard (criterion 5). The receipt's unique key now decides that race. |
-| `insertWorkspaceSessionCommand`, `insertInternalTeamLeadSessionCommand`, `insertChildSession` | Keep | Not audited here. Creation relies on the guard coming before the transaction's first consistent read, and its Workspace resolution and admission helpers were not traced (criteria 2 and 4). |
-| Lifecycle (`beginLifecycle`, `beginOperation`, `beginWorkspaceClose`, `beginChildClose`, `unarchiveWorkspaceSession`) | Keep | The L3 lifecycle protocol. Low frequency. |
+| Command                                                                                                               | Decision                   | Reason                                                                                                                                                                                                |
+| --------------------------------------------------------------------------------------------------------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claimRename`, `settleRename`, `abandonSessionRename`, `retryRename`                                                  | Remove                     | Advance an existing `RENAME` delivery of this Session under the Session lock and the operation row's conditional update.                                                                              |
+| `completeSessionMutation`, `settleParkedRename`, `completeCwdChangeOperation`                                         | Remove                     | Settle an existing command or operation of this Session, located with a locking read.                                                                                                                 |
+| `changeSessionModel`, `changeSessionApproval`                                                                         | Remove                     | The receipt scope is `(operation, Session, actor)`, so the Session lock serializes replays. `requirePolicyChange` checks the fence. The receipt is written `COMPLETED`.                               |
+| `beginContextCompression`, `beginTaskCancelOperation`, `ManagedActionStore.admit`                                     | Remove                     | The idempotency key is Session-scoped. Each checks the fence through `requireOpen` or `requireSessionOpen` before writing `TASK_CANCEL` or `ACTION_RESPONSE`, which the migration prepare fix covers. |
+| `requireMcpManagement`, `requireExtensionManagement`                                                                  | Remove                     | Standalone read-only validation transactions. The configuration commit validates again in its own transaction.                                                                                        |
+| `beginSessionMutation`                                                                                                | Remove, with changes below | The command key is tenant-scoped; the receipt unique key decides cross-Session races.                                                                                                                 |
+| `beginSessionRename`                                                                                                  | Keep                       | Its retained-delivery read and supersede update gap-lock empty operation ranges. Concurrent renames deadlock on MySQL even with a Session-scoped identity-index hint.                                 |
+| `insertWorkspaceSessionCommand`, `insertInternalTeamLeadSessionCommand`, `insertChildSession`                         | Keep                       | Not audited here. Creation relies on the guard coming before the transaction's first consistent read, and its Workspace resolution and admission helpers were not traced (criteria 2 and 4).          |
+| Lifecycle (`beginLifecycle`, `beginOperation`, `beginWorkspaceClose`, `beginChildClose`, `unarchiveWorkspaceSession`) | Keep                       | The L3 lifecycle protocol. Low frequency.                                                                                                                                                             |
 
 ## Design
 
-Delete the `WorkspaceMigrationAdmission.lockTenant` call from the sixteen
-commands marked "Remove". Rename and mutation admission also change:
+Delete the `WorkspaceMigrationAdmission.lockTenant` call from the fifteen
+commands marked "Remove". Mutation admission also changes:
 
 - The replay probe in `beginSessionMutation` becomes a nonlocking read for every
   kind. `UNARCHIVE` used a locking read; on a missing key that gap-locks the
@@ -73,17 +74,21 @@ commands marked "Remove". Rename and mutation admission also change:
   Session or digest answers `409 idempotency_conflict`. If the engine still
   hides the receipt, it answers the same conflict.
 
-Other code is unchanged. This depends on the migration
+Rename admission retains the tenant guard until its empty-range locking reads
+and updates can be replaced safely. Existing rename delivery and completion
+commands still drop the guard. This depends on the migration
 prepare change in the Turn admission design, because task cancel and action
 responses create work that migration counts.
 
 ## Risks
 
+- Rename admission still serializes within a tenant; removing its guard is deferred.
+
 - Commands for one Session still serialize on its Session row. Commands that
   check the fence briefly wait on the storage's alias and directory rows during a
   migration or physical fence.
-- The lock order is Session row or root, then alias and directory, as in Turn
-  admission and lifecycle begin.
+- For commands dropping the guard, the lock order is Session row or root, then
+  alias and directory, as in Turn admission and lifecycle begin.
 
 ## Verification and acceptance
 
@@ -92,11 +97,17 @@ responses create work that migration counts.
 2. `ManagedSchemaSessionStoreTest` (and its MySQL subclass): with a snapshot
    pinned before another Session commits a rename under the same key, the
    rename answers `idempotency_conflict` and writes nothing.
-3. Existing suites for rename, model, approval, MCP, extension, context
+3. Two Sessions in one tenant concurrently admit their first renames under
+   distinct keys; both succeed with revision one and both deliveries remain
+   pending. The case runs in H2 and its MySQL subclass.
+4. Existing suites for rename, model, approval, MCP, extension, context
    compression, task cancel, cwd change, action response, migration and CSI
    Session refusal pass, including the MySQL profiles in CI.
 
 ## Follow-up
+
+- Remove the rename admission guard only after eliminating shared empty-gap
+  locks and validating concurrent first renames on MySQL.
 
 - Audit Session creation: trace its Workspace resolution and admission helpers
   and replace the guard's ordering role with a locking read of the Session's

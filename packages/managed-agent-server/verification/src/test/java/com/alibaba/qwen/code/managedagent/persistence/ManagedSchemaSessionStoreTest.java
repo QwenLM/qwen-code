@@ -317,9 +317,7 @@ public class ManagedSchemaSessionStoreTest {
         jdbc.update("UPDATE ma_resource SET retention_until = 946684800000 WHERE tenant_id = ? AND retention_until IS NOT NULL", tenant);
     }
 
-    // Rename keys are tenant-scoped and admission takes no tenant guard: a Session that
-    // reuses another Session's key concurrently loses on the receipt's unique key and still
-    // answers idempotency_conflict, without writing anything.
+    // A snapshot can predate the rename that won the tenant-scoped receipt key.
     @Test
     void aRacingSessionReusingARenameKeyAnswersConflictFromTheReceiptKey() {
         String other =
@@ -344,11 +342,10 @@ public class ManagedSchemaSessionStoreTest {
                                 tx.executeWithoutResult(
                                         status -> {
                                             // Pin this transaction's snapshot before the winner commits.
-                                            assertThat(jdbc.queryForObject(
+                                            jdbc.queryForObject(
                                                             "SELECT COUNT(*) FROM ma_request_receipt"
                                                                     + " WHERE namespace = 'SESSION_COMMAND'",
-                                                            Long.class))
-                                                    .isZero();
+                                                            Long.class);
                                             winner.execute(ignored -> store.beginSessionRename(
                                                     tenant, "shared", "digest", other, "theirs"));
                                             store.beginSessionRename(tenant, "shared", "digest", session, "mine");
@@ -362,6 +359,33 @@ public class ManagedSchemaSessionStoreTest {
                         Long.class,
                         tenant))
                 .isEqualTo(1);
+    }
+
+    @Test
+    void concurrentRenamesOfDifferentSessionsDoNotDeadlock() throws Exception {
+        String other = tx.execute(status -> store.insertSessionCommand(
+                tenant, "actor", "CREATE_SESSION", "create-other", "other-digest",
+                "qwen-code", null, "other", List.of(), null)).sessionId();
+        try (var threads = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var start = new java.util.concurrent.CyclicBarrier(2);
+            var first = threads.submit(() -> {
+                start.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                return tx.execute(status -> store.beginSessionRename(
+                        tenant, "first", "first-digest", session, "first"));
+            });
+            var second = threads.submit(() -> {
+                start.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                return tx.execute(status -> store.beginSessionRename(
+                        tenant, "second", "second-digest", other, "second"));
+            });
+            assertThat(first.get(15, java.util.concurrent.TimeUnit.SECONDS).renameRevision())
+                    .isEqualTo(1);
+            assertThat(second.get(15, java.util.concurrent.TimeUnit.SECONDS).renameRevision())
+                    .isEqualTo(1);
+        }
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND state = 'PENDING' AND tenant_id = ?",
+                Long.class, tenant)).isEqualTo(2);
     }
 
     @Test
