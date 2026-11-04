@@ -3048,7 +3048,11 @@ describe('LlmChat', async () => {
         mockStream(textStream('done'));
         await sendDrain(`question ${index}`, `memory-next-${index}`);
         const request = requestAt(index + 1).contents as Content[];
-        expect(request.slice(0, firstHistory.length)).toEqual(firstHistory);
+        // Each request extends the previous one: earlier entries are re-sent
+        // byte-identically, so the injected blocks stay inside the cached
+        // prefix instead of being re-prefilled every turn (#16259).
+        const previous = requestAt(index).contents as Content[];
+        expect(request.slice(0, previous.length)).toEqual(previous);
         expect(snapshots(request)).toHaveLength(index + 1);
         expect(snapshots(request).at(-1)?.text).toContain(next);
         expect(snapshots(request).at(-1)?.text).toContain(
@@ -3270,6 +3274,30 @@ describe('LlmChat', async () => {
         hookContext.text,
         snapshot.text,
       ]);
+    });
+
+    it('re-sends a stored entry byte-identically on the next turn (#16259)', async () => {
+      mockConfig.getAutoMemoryContext = () => 'memory catalog';
+      const reminder = {
+        text: '<system-reminder>\nPlan mode is active.\n</system-reminder>',
+      };
+      const hookContext = createUserPromptSubmitContextPart('hook context');
+      mockStream(textStream('first answer'));
+      await sendDrain(
+        [reminder, { text: 'step 1' }, hookContext],
+        'prefix-turn-1',
+      );
+      const firstSent = (requestAt(0).contents as Content[]).at(-1)!;
+
+      mockStream(textStream('second answer'));
+      await sendDrain('follow up', 'prefix-turn-2');
+
+      const replayed = (requestAt(1).contents as Content[]).find((entry) =>
+        entry.parts?.some((part) => part.text === 'step 1'),
+      )!;
+      // Turn 1's entry is re-sent unchanged, so the injected blocks stay inside
+      // the shared provider prefix instead of being re-prefilled every turn.
+      expect(replayed).toEqual(firstSent);
     });
 
     it('keeps tool results first and the volatile request tail last', async () => {

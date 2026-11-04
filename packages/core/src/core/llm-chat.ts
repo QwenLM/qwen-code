@@ -1907,9 +1907,15 @@ function isInjectedPromptContext(part: Part): boolean {
  * before it (#11627).
  */
 function movePromptContextAheadOfUserText(contents: Content[]): Content[] {
-  const last = contents.at(-1);
-  const parts = last?.parts;
-  if (last?.role !== 'user' || !parts || parts.length < 2) return contents;
+  // Every user entry takes the same shape, not only the pending one. The next
+  // request re-sends earlier entries from history, so a position-dependent
+  // shape would cut the shared prefix and re-bill the injected blocks uncached.
+  return contents.map(movePromptContextAheadInEntry);
+}
+
+function movePromptContextAheadInEntry(content: Content): Content {
+  const parts = content.parts;
+  if (content.role !== 'user' || !parts || parts.length < 2) return content;
   const volatileStart = parts.findIndex(
     (part) => part.partMetadata?.[REATTACH_BOUNDARY_METADATA] === true,
   );
@@ -1924,30 +1930,27 @@ function movePromptContextAheadOfUserText(contents: Content[]): Content[] {
     leadingEnd !== -1 &&
     parts.slice(leadingEnd, movableEnd).some((part) => part.functionResponse)
   ) {
-    return contents;
+    return content;
   }
   const lastOwnIndex = parts.findLastIndex(
     (part, index) => index < movableEnd && isOwnPart(part),
   );
-  if (lastOwnIndex === -1 || lastOwnIndex === movableEnd - 1) return contents;
+  if (lastOwnIndex === -1 || lastOwnIndex === movableEnd - 1) return content;
   // Walk back over the contiguous own run only. A reminder the caller placed
   // between two of its own parts bounds the run, so it keeps its position.
   let firstOwnIndex = lastOwnIndex;
   while (firstOwnIndex > 0 && isOwnPart(parts[firstOwnIndex - 1]!)) {
     firstOwnIndex--;
   }
-  return [
-    ...contents.slice(0, -1),
-    {
-      ...last,
-      parts: [
-        ...parts.slice(0, firstOwnIndex),
-        ...parts.slice(lastOwnIndex + 1, movableEnd),
-        ...parts.slice(firstOwnIndex, lastOwnIndex + 1),
-        ...parts.slice(movableEnd),
-      ],
-    },
-  ];
+  return {
+    ...content,
+    parts: [
+      ...parts.slice(0, firstOwnIndex),
+      ...parts.slice(lastOwnIndex + 1, movableEnd),
+      ...parts.slice(firstOwnIndex, lastOwnIndex + 1),
+      ...parts.slice(movableEnd),
+    ],
+  };
 }
 
 function stripThoughtPartsFromContent(content: Content): Content | null {

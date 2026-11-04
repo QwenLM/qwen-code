@@ -71,6 +71,17 @@ re-deliver already-delivered hook context every turn. Only the request copy
 changes, so the transcript, resume, deduplication, and rewind contracts are
 untouched.
 
+**Every user entry, not just the pending one.** The next request re-sends the
+previous turn's entry from stored history, so reordering only the pending entry
+would make an entry's wire shape depend on its position: request N would send
+`[reminder, hook, catalog, ...prompt]` while request N+1 rebuilds the same entry
+as `[reminder, ...prompt, hook, catalog]`. The shared provider prefix would then
+end at the leading reminder and the injected blocks would be re-prefilled at
+full input price on every turn — the failure mode `REATTACH_BOUNDARY_METADATA`
+exists to prevent (#11627). Applying the same rule to every user entry in the
+request copy keeps each entry's wire shape position-independent, so request N+1
+extends request N's prefix exactly. Stored history is still untouched.
+
 **One pass at the send boundary, not per producer.** Reminders, hook context,
 IDE context and the catalog are injected by different modules on different
 frontends (TUI, headless, ACP, the shared agent loop). Fixing the order at the
@@ -109,7 +120,7 @@ token undercount in the always-on-context warning remain separate work
   durable-recovery check now asserts the request holds the same entries and
   parts as history with the catalog moved ahead of the recovery prompt.
 
-`packages/core/src/core/llm-chat.test.ts`: 716 passed.
+`packages/core/src/core/llm-chat.test.ts`: 720 passed.
 
 ## Open questions
 
