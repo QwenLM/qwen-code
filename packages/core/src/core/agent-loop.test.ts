@@ -239,32 +239,50 @@ describe('runAgentLoop', () => {
     expect(raw.recordCompletedToolCall).toHaveBeenCalledWith('read_file', {});
   });
 
-  it('drops the calls of an attempt that a retry replaced', async () => {
-    const stale = toolRequest('stale');
-    const fresh = toolRequest('fresh');
-    const { client } = fakeClient([
-      [requestEvent(stale), { type: LlmEventType.Retry }, requestEvent(fresh)],
-      [content],
-    ]);
-    const { executor, batches } = fakeExecutor();
-    const discarded: Array<readonly ToolCallRequestInfo[]> = [];
-
-    await runAgentLoop({
-      client,
-      config: fakeConfig().config,
-      signal: new AbortController().signal,
-      first: first(),
-      executor,
-      host: {
-        onModelEvent: (event, calls) => {
-          if (event.type === LlmEventType.Retry) discarded.push(calls);
-        },
+  it.each([
+    ['a retry', { type: LlmEventType.Retry }],
+    [
+      'a model fallback',
+      {
+        type: LlmEventType.ModelFallback,
+        fromModel: 'primary-model',
+        toModel: 'fallback-model',
+        fallbackIndex: 1,
       },
-    });
+    ],
+  ] as const)(
+    'drops the calls of an attempt that %s replaced',
+    async (_, replaced) => {
+      const stale = toolRequest('stale');
+      const fresh = toolRequest('fresh');
+      const { client } = fakeClient([
+        [
+          requestEvent(stale),
+          replaced as unknown as ServerLlmStreamEvent,
+          requestEvent(fresh),
+        ],
+        [content],
+      ]);
+      const { executor, batches } = fakeExecutor();
+      const discarded: Array<readonly ToolCallRequestInfo[]> = [];
 
-    expect(discarded).toEqual([[stale]]);
-    expect(batches).toEqual([[fresh]]);
-  });
+      await runAgentLoop({
+        client,
+        config: fakeConfig().config,
+        signal: new AbortController().signal,
+        first: first(),
+        executor,
+        host: {
+          onModelEvent: (event, calls) => {
+            if (event.type === replaced.type) discarded.push(calls);
+          },
+        },
+      });
+
+      expect(discarded).toEqual([[stale]]);
+      expect(batches).toEqual([[fresh]]);
+    },
+  );
 
   it.each([
     [LlmEventType.LoopDetected, 'loop_detected'],

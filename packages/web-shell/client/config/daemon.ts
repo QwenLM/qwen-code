@@ -316,6 +316,18 @@ export function getAllowedDaemonOrigin(raw: string): string {
   }
 }
 
+export function isDaemonMixedContent(daemonOrigin: string): boolean {
+  if (typeof window === 'undefined' || window.location.protocol !== 'https:') {
+    return false;
+  }
+  const target = new URL(daemonOrigin || window.location.origin);
+  return (
+    target.protocol === 'http:' &&
+    !isLoopbackHostname(target.hostname) &&
+    !target.hostname.endsWith('.localhost')
+  );
+}
+
 export function buildDaemonConnectionUrl(
   raw: string,
   currentHref: string,

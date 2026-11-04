@@ -97,7 +97,7 @@ import {
   type OpenTuiRestoredDraft,
   type OpenTuiInputSubmission,
   type OpenTuiCancelSettled,
-  type OpenTuiComposerHandle,
+  type OpenTuiComposerSlot,
 } from './input-submission.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
@@ -278,9 +278,7 @@ export interface InputPromptProps {
   /** Reports the double-Esc armed state (the footer hint). */
   onEscapeArmedChange?: (armed: boolean) => void;
   /** Lets the parent read/clear the composer buffer (Ctrl+Q queue). */
-  composerHandle?: {
-    current: OpenTuiComposerHandle | null;
-  };
+  composerHandle?: OpenTuiComposerSlot;
   /** Queued prompts awaiting the next turn (drives Esc/↑ pop-back parity). */
   queueLength?: number;
   /** Returns editable queued payloads with their attachments and source. */
@@ -1113,7 +1111,14 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       cancelTurn,
       submitDraft,
       invalidateImportedInput,
+      restoreSubmission: (submission) => restoreSubmission(submission, '\n'),
     };
+    // A prompt handed back while a dialog had the composer unmounted.
+    const returned = props.composerHandle.returned;
+    if (returned && editorRef.current) {
+      props.composerHandle.returned = undefined;
+      restoreSubmission(returned, '\n');
+    }
     return () => {
       if (props.composerHandle) props.composerHandle.current = null;
     };
@@ -1123,6 +1128,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     submitDraft,
     invalidateImportedInput,
     replaceText,
+    restoreSubmission,
   ]);
 
   const acceptSuggestion = useCallback(
