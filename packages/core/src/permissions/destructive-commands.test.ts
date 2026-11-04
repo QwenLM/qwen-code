@@ -261,6 +261,9 @@ describe('isDestructiveCommand — git commit --amend', () => {
     // invocation and must not read as an unmodelled expansion.
     "bash -c $'git commit --amend --no-edit'",
     "bash <<< $'git commit --amend --no-edit'",
+    // ANSI-C decoding turns `\n` into a real command boundary, so the amend is
+    // a second command rather than text inside one word (#16075 review, R3-2).
+    "bash -c $'git commit --amend\\ntrue'",
   ])('blocks amend through an execution wrapper: %s', (command) => {
     expectBlocked(command, 'amend the commit', 'amend');
   });
@@ -281,6 +284,10 @@ describe('isDestructiveCommand — git commit --amend', () => {
     `printf '%s\\n' 'git commit --amend'`,
     'grep -n "git commit --amend" CHANGELOG.md',
     'git commit -m --amend',
+    // ANSI-C quoting keeps `--amend` inside `-m`'s value; `\'` is an escape,
+    // not the end of the word, so this stays inert (#16075 review, R3-2).
+    "git commit -m $'fix: remember --amend'",
+    "git commit -m $'fix: don\\'t forget --amend'",
     'git log --grep="git commit --amend"',
     `cat > notes.txt <<'EOF'\ngit commit --amend\nEOF`,
     // After `--` the token is a pathspec, not a flag, so this is not an amend.

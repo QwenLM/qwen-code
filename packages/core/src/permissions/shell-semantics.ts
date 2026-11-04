@@ -108,10 +108,45 @@ function tokenize(
   let bare = '';
   let inSingle = false;
   let inDouble = false;
+  // `$'…'` keeps its own quote state: `\'` does not close it and `\n` is a
+  // newline rather than layout, so decoding escapes here is what keeps
+  // `bash -c $'git commit --amend\ntrue'` from reading as one inert word.
+  let inAnsiC = false;
   let escaped = false;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
+
+    if (inAnsiC) {
+      if (ch === '\\') {
+        const next = command[i + 1];
+        if (next === undefined) {
+          current += '\\';
+          bare += '0';
+          continue;
+        }
+        current +=
+          next === 'n'
+            ? '\n'
+            : next === 't'
+              ? '\t'
+              : next === 'r'
+                ? '\r'
+                : next === '\\'
+                  ? '\\'
+                  : next;
+        bare += '0';
+        i++;
+        continue;
+      }
+      if (ch === "'") {
+        inAnsiC = false;
+        continue;
+      }
+      current += ch;
+      bare += '0';
+      continue;
+    }
 
     if (escaped) {
       current += ch;
@@ -130,9 +165,10 @@ function tokenize(
       escaped = true;
       continue;
     }
-    // `$'…'` is ANSI-C quoting: one word, split exactly like `'…'`. Dropping
-    // the `$` keeps the payload visible to the token scan.
+    // `$'…'`: skip only the `$`; the quote that follows opens the ANSI-C
+    // word, so the payload stays one token instead of splitting on spaces.
     if (ch === '$' && command[i + 1] === "'" && !inSingle && !inDouble) {
+      inAnsiC = true;
       i++;
       continue;
     }
@@ -2633,6 +2669,16 @@ function nestedAmendPayloads(tokens: string[]): {
   return { payloads, unclassifiable };
 }
 
+/**
+ * Decode the escapes an ANSI-C word (`$'…'`) applies, so a payload hidden
+ * behind `\n` is analysed as the two commands bash runs.
+ */
+function decodeAnsiCWord(body: string): string {
+  return body.replace(/\\(.)/g, (_match, char: string) =>
+    char === 'n' ? '\n' : char === 't' ? '\t' : char === 'r' ? '\r' : char,
+  );
+}
+
 function tokensContainGitAmend(segment: string, depth: number): boolean {
   if (depth >= AMEND_UNWRAP_DEPTH_LIMIT) {
     // Fail closed for pathological wrapper nesting in a permission guard.
@@ -2641,7 +2687,13 @@ function tokensContainGitAmend(segment: string, depth: number): boolean {
 
   const unwrapped = stripShellWrapper(segment);
   if (unwrapped !== segment) {
-    return commandContainsGitAmendAtDepth(unwrapped, depth + 1);
+    // Unwrapping `bash -c` leaves a quoted payload as written, so `$'…'` keeps
+    // its introducer and escapes; decode it before scanning the program.
+    const ansiC = /^\$'([\s\S]*)'$/.exec(unwrapped.trim());
+    return commandContainsGitAmendAtDepth(
+      ansiC ? decodeAnsiCWord(ansiC[1]!) : unwrapped,
+      depth + 1,
+    );
   }
 
   // Wrappers embedding the command behind a flag value (`env -S '…'`) are
@@ -2718,9 +2770,26 @@ function extractCommandSubstitutionBodies(command: string): string[] {
   const bodies: string[] = [];
   let index = 0;
   let quote: "'" | '"' | null = null;
+  // `$'…'` is not a substitution host: `$( … )` inside it is literal text, and
+  // its own `\'` must not be read as closing a plain single-quoted span.
+  let ansiC = false;
   while (index < command.length) {
     const char = command[index]!;
+    if (ansiC) {
+      if (char === '\\') {
+        index += 2;
+        continue;
+      }
+      if (char === "'") ansiC = false;
+      index++;
+      continue;
+    }
     if (char === '\\' && quote !== "'") {
+      index += 2;
+      continue;
+    }
+    if (!quote && char === '$' && command[index + 1] === "'") {
+      ansiC = true;
       index += 2;
       continue;
     }
