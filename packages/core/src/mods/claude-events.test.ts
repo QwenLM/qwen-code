@@ -10,8 +10,8 @@ import { MOD_EVENTS, MOD_METHODS } from './dispatch.js';
 
 describe('Claude Code event names', () => {
   it('lists each engine, API and classic event once, including every supported one', () => {
-    expect(CLAUDE_CODE_EVENTS).toHaveLength(146);
-    expect(new Set(CLAUDE_CODE_EVENTS).size).toBe(146);
+    expect(CLAUDE_CODE_EVENTS).toHaveLength(147);
+    expect(new Set(CLAUDE_CODE_EVENTS).size).toBe(147);
     expect(CLAUDE_CODE_EVENTS).toEqual(expect.arrayContaining([...MOD_EVENTS]));
     expect(MOD_EVENTS).toEqual(expect.arrayContaining([...MOD_METHODS]));
   });
