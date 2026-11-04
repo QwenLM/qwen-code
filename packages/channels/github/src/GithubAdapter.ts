@@ -2829,21 +2829,31 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // skipping the re-listed comment for every unclaimed role (the watch
       // path has its pending queue; the comment path's durable intent
       // rides here).
-      let settled = true;
+      // Two phases: claim EVERY target durably before running any. Running
+      // (and removing) the first task before a later claim is persisted
+      // would destroy the only fanout record on a claim-write failure, and
+      // the cursor's event-wide dedupe key would then skip the re-listed
+      // comment for the unclaimed roles forever.
+      const claimed: InboundTaskRecord[] = [];
       let first = true;
       for (const target of targets) {
-        const task = this.claimInboundTask(
-          envelope,
-          issueNumber,
-          dedupe,
-          {
-            kind: 'bound-session',
-            sessionId: target.sessionId,
-            ...(target.role ? { role: target.role } : {}),
-          },
-          first && targets.length > 1 ? targets : undefined,
+        claimed.push(
+          this.claimInboundTask(
+            envelope,
+            issueNumber,
+            dedupe,
+            {
+              kind: 'bound-session',
+              sessionId: target.sessionId,
+              ...(target.role ? { role: target.role } : {}),
+            },
+            first && targets.length > 1 ? targets : undefined,
+          ),
         );
         first = false;
+      }
+      let settled = true;
+      for (const task of claimed) {
         settled = (await this.runInboundTask(task)) && settled;
       }
       return settled;
@@ -3027,7 +3037,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // delivery ring); the public path would duplicate it on the PR.
         // Retire instead — current-follower counts alone cannot prove the
         // event was never delivered after every follower disappeared.
-        this.privatelyRetiredInboundTaskIds.add(task.id);
+        this.markPrivatelyRetired(task);
         this.retireBoundTask(
           task,
           'event already delivered privately to another role; suppressing public duplicate',
@@ -3182,10 +3192,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         continue;
       }
       for (const target of task.fanout) {
+        // A completed target's task was delivered and removed; recreating
+        // it would re-execute the event for that role after a rebind.
+        if (this.boundTargetCompleted(task.envelope, target.sessionId)) {
+          continue;
+        }
         this.claimInboundTask(
           task.envelope,
           task.issueNumber,
-          {},
+          // Preserve the comment-lane identity (dispatchedComments): the
+          // lane-class fallback resolves templates through it, and an empty
+          // dedupe would retire a reconstructed mention-reason sibling.
+          task.dedupe,
           {
             kind: 'bound-session',
             sessionId: target.sessionId,
@@ -3271,10 +3289,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             // Sibling targets get their own durable tasks; this pass's
             // snapshot does not include them, the next recovery runs them.
             for (const target of rest) {
+              if (this.boundTargetCompleted(task.envelope, target.sessionId)) {
+                continue;
+              }
               this.claimInboundTask(
                 task.envelope,
                 task.issueNumber,
-                {},
+                task.dedupe,
                 {
                   kind: 'bound-session',
                   sessionId: target.sessionId,
@@ -4163,10 +4184,42 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private boundEventAlreadyDelivered(envelope: Envelope): boolean {
+    // Scoped to PR-bound delivery: ordinary issue comments can never have
+    // a private bound delivery, so a damaged ring must not retire them —
+    // they stay on the normal channel path.
+    if (envelope.threadId?.startsWith('pr:') !== true) return false;
     return (
       this.boundDeliveredUnreadable ||
       this.boundDeliveredKeys.has(this.boundEventKey(envelope))
     );
+  }
+
+  /**
+   * Per-target completion check for fan-out reconstruction. A missing task
+   * can mean "never claimed" OR "delivered and removed"; recreating a
+   * completed target would re-execute the event for that role after a
+   * rebind (a new session's admission ring has never seen the key). An
+   * unreadable ring cannot prove completion — reconstruct rather than lose
+   * the target (at-least-once; the same-session admission ring still
+   * dedupes).
+   */
+  private boundTargetCompleted(envelope: Envelope, sessionId: string): boolean {
+    if (this.boundDeliveredUnreadable) return false;
+    return this.boundDeliveredKeys.has(
+      `${this.boundEventKey(envelope)}:t:${sessionId}`,
+    );
+  }
+
+  /**
+   * Persist a terminal private retirement BEFORE the routing identity is
+   * cleared or the task removed: if the removal then fails (EIO), restart
+   * must find a non-recoverable task, not a running untargeted one that
+   * falls through to the public reply path.
+   */
+  private markPrivatelyRetired(task: InboundTaskRecord): void {
+    this.privatelyRetiredInboundTaskIds.add(task.id);
+    this.transitionInboundTask(task.id, 'cancelled', { delivery: undefined });
+    task.delivery = undefined;
   }
 
   private loadBoundDeliveredRing(): void {
@@ -4200,18 +4253,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
-   * Record a private acceptance in the durable ring. Best-effort persistence
-   * (the in-memory set still suppresses duplicates for this lifetime); a
-   * write failure is surfaced, never thrown into the delivery path.
+   * Record a private acceptance in the durable ring: the event key (blocks
+   * any public fallback for the event) AND a per-target key (blocks fan-out
+   * reconstruction of an already-completed target after a rebind).
+   * Best-effort persistence (the in-memory set still suppresses duplicates
+   * for this lifetime); a write failure is surfaced, never thrown into the
+   * delivery path.
    */
-  private recordBoundDelivered(envelope: Envelope): void {
-    const key = this.boundEventKey(envelope);
-    if (!this.boundDeliveredKeys.has(key)) {
-      this.boundDeliveredKeys.add(key);
-      this.boundDeliveredOrder.push(key);
-      while (this.boundDeliveredOrder.length > MAX_BOUND_DELIVERED_KEYS) {
-        const evicted = this.boundDeliveredOrder.shift();
-        if (evicted !== undefined) this.boundDeliveredKeys.delete(evicted);
+  private recordBoundDelivered(envelope: Envelope, sessionId: string): void {
+    const eventKey = this.boundEventKey(envelope);
+    for (const key of [eventKey, `${eventKey}:t:${sessionId}`]) {
+      if (!this.boundDeliveredKeys.has(key)) {
+        this.boundDeliveredKeys.add(key);
+        this.boundDeliveredOrder.push(key);
+        while (this.boundDeliveredOrder.length > MAX_BOUND_DELIVERED_KEYS) {
+          const evicted = this.boundDeliveredOrder.shift();
+          if (evicted !== undefined) this.boundDeliveredKeys.delete(evicted);
+        }
       }
     }
     try {
@@ -4536,7 +4594,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         process.stderr.write(
           `[Channel:${this.name}] event ${envelope.messageId} already delivered privately to another role; retiring without public fallback\n`,
         );
-        this.privatelyRetiredInboundTaskIds.add(task.id);
+        this.markPrivatelyRetired(task);
         return true;
       }
       await this.handleInbound(envelope);
@@ -4574,9 +4632,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         process.stderr.write(
           `[Channel:${this.name}] ${isWatch ? 'watch' : 'bound'} event ${envelope.messageId} has no bound candidate left for its role; retiring without public fallback\n`,
         );
-        this.privatelyRetiredInboundTaskIds.add(task.id);
-        this.transitionInboundTask(task.id, 'running', { delivery: undefined });
-        task.delivery = undefined;
+        this.markPrivatelyRetired(task);
         return true;
       }
     }
@@ -4627,7 +4683,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // Durable event-level delivery history: from this acceptance on, no
       // gone-fallback may route the same event publicly, even after every
       // follower disappears (the ring outlives the tasks).
-      this.recordBoundDelivered(envelope);
+      this.recordBoundDelivered(envelope, delivery.sessionId);
     } catch (err) {
       if (!(err instanceof BoundSessionGoneError)) throw err;
       // The daemon's Gone verdict is authoritative deletion evidence. Evict
@@ -4666,7 +4722,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             prompt,
             idempotencyKey,
           );
-          this.recordBoundDelivered(envelope);
+          this.recordBoundDelivered(envelope, next.sessionId);
           return true;
         } catch (retryErr) {
           if (!(retryErr instanceof BoundSessionGoneError)) throw retryErr;
@@ -4708,9 +4764,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         process.stderr.write(
           `[Channel:${this.name}] bound event ${envelope.messageId} lost its role's session but other roles still follow the PR or already received it; retiring without public fallback\n`,
         );
-        this.privatelyRetiredInboundTaskIds.add(task.id);
-        this.transitionInboundTask(task.id, 'running', { delivery: undefined });
-        task.delivery = undefined;
+        this.markPrivatelyRetired(task);
         return true;
       }
       // Comment events keep today's contract: fall back to the normal
