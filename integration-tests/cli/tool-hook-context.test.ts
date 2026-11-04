@@ -11,6 +11,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -167,6 +168,57 @@ describe('tool hook additionalContext delivery', () => {
   function setPreDecision(decision: 'deny' | 'ask'): void {
     writeFileSync(join(rig.testDir!, DECISION_FILE), decision);
   }
+
+  it.each(['allow', 'block'])(
+    'resumes only tool output admitted by UserPromptSubmit (%s)',
+    async (decision) => {
+      const callId = 'call_resume';
+      const secret = 'private-fixture-' + randomUUID();
+      const server = await setup(
+        'tool result resume ' + decision,
+        'read_file',
+        'note.txt',
+        callId,
+        undefined,
+        {
+          hooks: {
+            UserPromptSubmit: [
+              { hooks: [{ type: 'command', command: 'node submit-hook.mjs' }] },
+            ],
+          },
+        },
+      );
+      rig.createFile('note.txt', secret);
+      rig.createFile(
+        'submit-hook.mjs',
+        [
+          "import { readFileSync, appendFileSync } from 'node:fs';",
+          "const {prompt} = JSON.parse(readFileSync(0, 'utf8'));",
+          "if (!prompt) appendFileSync('submit-hits', 'result');",
+          `console.log(JSON.stringify(!prompt ? {decision: '${decision}', reason: 'test policy'} : {}));`,
+        ].join('\n'),
+      );
+      const args = [...fakeModelLaunchArgs(server), '--chat-recording'];
+      const sessionId = randomUUID();
+      await rig.run('Read the note.', ...args, '--session-id', sessionId);
+      expect(rig.readFile('submit-hits')).toBe('result');
+      const before = server.requests.filter((r) => r.body['stream']);
+      expect(before).toHaveLength(decision === 'allow' ? 2 : 1);
+      await rig.run('Next.', ...args, '--resume', sessionId);
+      const after = server.requests
+        .filter((r) => r.body['stream'])
+        .slice(before.length);
+      expect(after).toHaveLength(1);
+      const messages = after[0].body['messages'] as ToolMessage[];
+      const paired = messages.filter(
+        (m) => m.role === 'tool' && m.tool_call_id === callId,
+      );
+      expect(paired).toHaveLength(1);
+      if (decision === 'allow')
+        expect(JSON.stringify(paired[0].content)).toContain(secret);
+      else expect(JSON.stringify(messages)).not.toContain(secret);
+    },
+  );
 
   it('headless: delivers PreToolUse context with a successful result', async () => {
     const server = await setup(

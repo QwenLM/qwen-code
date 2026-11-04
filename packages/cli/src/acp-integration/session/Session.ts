@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isDeepStrictEqual } from 'node:util';
+import type { RecordedToolResultAdmission } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -971,6 +973,7 @@ interface ResponseInterrupt {
 /** A round of a turn on the shared agent loop; see `#runSharedRound`. */
 interface SharedRound {
   message: Content;
+  toolOutputParts: readonly Part[];
   promptId: string;
   type: SendMessageType;
   /** The send options of the round's type and of a Goal turn. */
@@ -1044,6 +1047,39 @@ const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
   'The tool had already completed; its output was discarded.';
 const USER_PROMPT_BLOCKED_TOOL_RESULT =
   'A UserPromptSubmit hook blocked this tool result from reaching the model. Do not rerun the tool to get it.';
+
+// Tool output can include standalone images or text alongside the function
+// response. Preserve admitted parts and input the host added separately.
+function withholdToolOutput(
+  message: Content,
+  toolOutput: readonly Part[],
+  reason: string,
+  admissions: readonly RecordedToolResultAdmission[],
+): Content {
+  return {
+    ...message,
+    parts: (message.parts ?? []).flatMap((part) => {
+      const matching = admissions.filter((admission) =>
+        admission.parts.some((original) => isDeepStrictEqual(original, part)),
+      );
+      if (matching.some((admission) => admission.decision === 'admitted'))
+        return [part];
+      if (part.functionResponse?.id) {
+        const decision = matching[0]?.decision;
+        return buildSyntheticToolResponseParts(
+          [
+            {
+              callId: part.functionResponse.id,
+              name: part.functionResponse.name ?? '',
+            },
+          ],
+          typeof decision === 'object' ? decision.withheld : reason,
+        );
+      }
+      return toolOutput.includes(part) ? [] : [part];
+    }),
+  };
+}
 
 type ManagedConversationBinding = {
   expectation: BridgeConversationDirectoryExpectation;
@@ -7897,6 +7933,7 @@ export class Session implements SessionContext {
             // resolver treats that one as the turn's anchor.
             let nextMessage: Content | null = { role: 'user', parts };
             markApiHistoryPrompt(nextMessage, historyPromptId);
+            let toolOutputParts: readonly Part[] = [];
             let turnCount = 0;
             // Puts a continue's stripped user run back while no request has
             // re-pushed it. A later send's push leaves the counter advanced,
@@ -8065,6 +8102,7 @@ export class Session implements SessionContext {
                   rejectOnLoopDetected,
                   sharedToolBatch,
                 );
+                toolOutputParts = toolRun.parts;
                 nextMessage = nextAfterTools.message;
                 if (nextAfterTools.stoppedByRepeatedToolFailure) {
                   return {
@@ -8155,7 +8193,19 @@ export class Session implements SessionContext {
                     if (isToolLapContinuation(nextMessage)) {
                       markApiHistoryPrompt(nextMessage, responseCapture.turnId);
                     }
-                    chat.addHistory(nextMessage);
+                    chat.addHistory(
+                      sharedModelRound &&
+                        turnCount > 1 &&
+                        isToolLapContinuation(nextMessage) &&
+                        !this.config.getDisableAllHooks?.() &&
+                        this.config.hasHooksForEvent?.('UserPromptSubmit')
+                        ? this.#closeWithheldToolResults(
+                            nextMessage,
+                            toolOutputParts,
+                            TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
+                          )
+                        : nextMessage,
+                    );
                   }
                   if (restorePostAnswerNoticesAttached) {
                     this.#clearPendingRestoreNotices();
@@ -8236,6 +8286,7 @@ export class Session implements SessionContext {
                   roundKeepTurnForInput = responseInterrupt.keepTurnForInput;
                   const roundResult = await this.#runSharedRound({
                     message,
+                    toolOutputParts,
                     promptId,
                     type: roundType,
                     options: {
@@ -8637,6 +8688,7 @@ export class Session implements SessionContext {
                       rejectOnLoopDetected,
                       sharedToolBatch,
                     );
+                  toolOutputParts = toolRun.parts;
                   nextMessage = nextAfterTools.message;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
                     pauseGoalForLoopStop();
@@ -8743,6 +8795,18 @@ export class Session implements SessionContext {
     });
   }
 
+  #closeWithheldToolResults(
+    message: Content,
+    toolOutputParts: readonly Part[],
+    reason: string,
+  ): Content {
+    const admissions =
+      this.config
+        .getChatRecordingService()
+        ?.recordToolResultAdmission?.(toolOutputParts, reason) ?? [];
+    return withholdToolOutput(message, toolOutputParts, reason, admissions);
+  }
+
   /**
    * One round of a turn on the shared agent loop: a request through
    * `LlmClient` and the continuations the client sends at its stop point,
@@ -8760,8 +8824,22 @@ export class Session implements SessionContext {
       functionCalls,
       toolRequests,
       preparationTracker,
-      keepUnsent,
     } = round;
+    const gatedToolResult =
+      roundType === SendMessageType.ToolResult &&
+      !this.config.getDisableAllHooks?.() &&
+      this.config.hasHooksForEvent?.('UserPromptSubmit');
+    const keepUnsent = (unsent: Content, full: boolean) =>
+      round.keepUnsent(
+        gatedToolResult
+          ? this.#closeWithheldToolResults(
+              unsent,
+              round.toolOutputParts,
+              TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
+            )
+          : unsent,
+        full,
+      );
     let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
     let streamStartTime = Date.now();
     const requestRouteKey = await this.#requestRouteKeyForModel(
@@ -9073,31 +9151,14 @@ export class Session implements SessionContext {
       // A tool-result round the hook blocked closes its calls
       // with the block, not with the results it withheld from
       // the model, nor with the repair's "retry if needed".
-      const blockedCalls = (message.parts ?? []).flatMap(
-        ({ functionResponse }) =>
-          functionResponse?.id
-            ? [
-                {
-                  callId: functionResponse.id,
-                  name: functionResponse.name ?? '',
-                },
-              ]
-            : [],
-      );
-      // Input taken with the results, already shown as
-      // delivered, stays in history with the closed calls, as a
-      // stopped tool run keeps it.
-      if (!pushed && blockedCalls.length > 0) {
-        this.#getCurrentChat().addHistory({
-          role: 'user',
-          parts: [
-            ...buildSyntheticToolResponseParts(
-              blockedCalls,
-              USER_PROMPT_BLOCKED_TOOL_RESULT,
-            ),
-            ...(message.parts ?? []).filter((part) => !part.functionResponse),
-          ],
-        });
+      if (!pushed && message.parts?.some((part) => part.functionResponse)) {
+        this.#getCurrentChat().addHistory(
+          this.#closeWithheldToolResults(
+            message,
+            round.toolOutputParts,
+            USER_PROMPT_BLOCKED_TOOL_RESULT,
+          ),
+        );
       }
       return { ended: { stopReason: 'end_turn' } };
     }
@@ -9195,6 +9256,7 @@ export class Session implements SessionContext {
       turn.onMessageKept?.(sent);
     };
     let nextMessage: Content | null = turn.message;
+    let toolOutputParts: readonly Part[] = [];
     let rounds = 0;
     try {
       while (nextMessage !== null) {
@@ -9207,7 +9269,19 @@ export class Session implements SessionContext {
           this.todoStopGuard.suspend();
           // The results of the tools that ran stay in history, as a
           // cancelled prompt keeps them.
-          this.#preserveUnsentMessageHistory(message, true);
+          this.#preserveUnsentMessageHistory(
+            !first &&
+              message.parts?.some((part) => part.functionResponse) &&
+              !this.config.getDisableAllHooks?.() &&
+              this.config.hasHooksForEvent?.('UserPromptSubmit')
+              ? this.#closeWithheldToolResults(
+                  message,
+                  toolOutputParts,
+                  TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
+                )
+              : message,
+            true,
+          );
           if (first) keepMessage(false);
           return { stopReason: 'cancelled' };
         }
@@ -9220,6 +9294,7 @@ export class Session implements SessionContext {
         let requestUnsent = () => true;
         const round = await this.#runSharedRound({
           message,
+          toolOutputParts,
           promptId,
           type: first
             ? turn.type
@@ -9316,6 +9391,7 @@ export class Session implements SessionContext {
           false,
           sharedToolBatch,
         );
+        toolOutputParts = toolRun.parts;
         nextMessage = next.message;
         if (toolRun.loopDetected) {
           this.todoStopGuard.suspend();
@@ -11401,6 +11477,9 @@ export class Session implements SessionContext {
       return false;
     }
     this.todoStopGuard.suspend();
+    this.config
+      .getChatRecordingService()
+      ?.recordToolResultAdmission?.(toolRun.parts);
     this.#preserveUnsentMessageHistory(
       { role: 'user', parts: toolRun.parts },
       true,

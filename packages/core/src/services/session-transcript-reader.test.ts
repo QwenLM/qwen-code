@@ -866,11 +866,14 @@ describe('SessionTranscriptReader', () => {
         goalContext,
         message: [fnCall('update_goal', undefined, id)],
       });
-      recorder.recordToolResult(
-        [fnResponse('update_goal', { readyForVerification: true }, id)],
-        undefined,
-        { goalContext, provenance: 'goal_runtime' },
-      );
+      const parts = [
+        fnResponse('update_goal', { readyForVerification: true }, id),
+      ];
+      recorder.recordToolResult(parts, undefined, {
+        goalContext,
+        provenance: 'goal_runtime',
+      });
+      recorder.recordToolResultAdmission(parts);
       await recorder.recordGoalTurnEnd(id, goalContext);
     };
     await goalTurn('complete the Goal', 'turn', 'finish');

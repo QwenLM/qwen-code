@@ -3089,6 +3089,9 @@ export async function runNonInteractive(
               shouldFinalizeTurn = true;
               if (!activeGoalTurn) break;
               await modTurn?.complete();
+              config
+                .getChatRecordingService?.()
+                ?.recordToolResultAdmission?.(result.parts ?? []);
               llmClient.addHistory({ role: 'user', parts: result.parts ?? [] });
               await config.getChatRecordingService?.()?.flush();
               await finishGoalTurn(activeGoalTurn);
@@ -3260,6 +3263,9 @@ export async function runNonInteractive(
             }
             if (terminateTurn && activeGoalTurn) {
               await modTurn?.complete();
+              config
+                .getChatRecordingService?.()
+                ?.recordToolResultAdmission?.(toolResponseParts);
               llmClient.addHistory({
                 role: 'user',
                 parts: toolResponseParts,

@@ -27,6 +27,7 @@ const NEUTRAL_TAIL_SUBTYPES = new Set([
   'turn_result',
   'turn_attempt',
   'goal_turn_end',
+  'tool_result_admission',
 ]);
 
 export type ConversationBranchClassification =

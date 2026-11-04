@@ -12,9 +12,11 @@ import type {
   GoalTurnEndRecordPayload,
   SlashCommandRecordPayload,
   TurnResultRecordPayload,
+  ToolResultAdmissionPayload,
   UserPromptRecordPayload,
 } from './chatRecordingService.js';
 import { restoreUserPromptSubmitContextReceipt } from '../hooks/user-prompt-submit-context.js';
+import { buildSyntheticToolResponseParts } from '../core/turn-interruption.js';
 import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
 import {
   appendAutoMemorySnapshot,
@@ -343,11 +345,64 @@ export class SessionApiHistoryAccumulator {
   private compressionCandidate: unknown;
   private completedToolCallIds = new Set<string>();
   private lastMaterialRecord?: ChatRecord;
+  private pendingToolResults = new Map<
+    string,
+    { entry: Content; parts: Part[] }
+  >();
+  private withheldEntries = new Set<Content>();
 
   add(record: ChatRecord): void {
     // Internal calls have no model-emitted function-call partner.
     if (isInternalCodeModeToolResult(record)) {
       return;
+    }
+    if (
+      record.type === 'system' &&
+      record.subtype === 'tool_result_admission'
+    ) {
+      const payload = record.systemPayload as
+        | ToolResultAdmissionPayload
+        | undefined;
+      const decision = payload?.decision;
+      if (decision !== 'admitted' && typeof decision?.withheld !== 'string')
+        return;
+      const ids = payload?.recordUuids;
+      if (
+        Array.isArray(ids) &&
+        ids.every((id) => this.pendingToolResults.has(id)) &&
+        new Set(ids).size === ids.length
+      ) {
+        for (const id of ids) {
+          const pending = this.pendingToolResults.get(id)!;
+          const visible =
+            decision === 'admitted'
+              ? pending.parts
+              : buildSyntheticToolResponseParts(
+                  pending.parts.flatMap(({ functionResponse }) =>
+                    functionResponse?.id
+                      ? [
+                          {
+                            callId: functionResponse.id,
+                            name: functionResponse.name ?? '',
+                          },
+                        ]
+                      : [],
+                  ),
+                  decision.withheld,
+                );
+          pending.entry.parts = [...visible, ...(pending.entry.parts ?? [])];
+          this.withheldEntries.delete(pending.entry);
+          this.pendingToolResults.delete(id);
+        }
+      }
+      return;
+    }
+    if (
+      record.type === 'assistant' ||
+      (record.type === 'user' && !record.subtype) ||
+      isApiHistoryCompressionCandidate(record)
+    ) {
+      this.pendingToolResults.clear();
     }
     if (record.type === 'system') {
       if (record.subtype === 'memory_catalog_snapshot') {
@@ -427,6 +482,7 @@ export class SessionApiHistoryAccumulator {
       }
       if (!isApiHistoryCompressionCandidate(record)) return;
       const payload = record.systemPayload as ChatCompressionRecordPayload;
+      this.withheldEntries.clear();
       this.compressionCandidate = payload.compressedHistory;
       const directoryContextIndices = new Set(
         Array.isArray(payload.directoryContextIndices)
@@ -464,6 +520,7 @@ export class SessionApiHistoryAccumulator {
     ) {
       return;
     }
+
     if (!record.message || record.subtype === 'realtime_message') return;
     for (const part of record.message.parts ?? []) {
       if (part.functionCall?.id) {
@@ -479,6 +536,20 @@ export class SessionApiHistoryAccumulator {
     // pushing; only a real append gets a flag, so the two arrays stay aligned.
     if (this.history.length > lengthBeforeAppend) {
       this.systemNotificationFlags.push(isSystemNotificationRecord(record));
+    }
+    if (
+      record.type === 'tool_result' &&
+      record.requiresToolResultAdmission !== undefined
+    ) {
+      // Keep its position: a queued user message can merge into this entry
+      // before the tool result is admitted. Only the tool parts are withheld.
+      const entry = this.history.at(-1)!;
+      this.pendingToolResults.set(record.uuid, {
+        entry,
+        parts: entry.parts ?? [],
+      });
+      this.withheldEntries.add(entry);
+      entry.parts = [];
     }
     this.lastMaterialRecord = record;
   }
@@ -529,11 +600,15 @@ export class SessionApiHistoryAccumulator {
     }
     let apiHistory = this.history;
     let flags = this.systemNotificationFlags;
-    if (options.stripThoughtsFromHistory) {
+    if (this.withheldEntries.size || options.stripThoughtsFromHistory) {
       const keptHistory: Content[] = [];
       const keptFlags: boolean[] = [];
       for (let i = 0; i < apiHistory.length; i++) {
-        const stripped = stripThoughtsFromContent(apiHistory[i]!);
+        const entry = apiHistory[i]!;
+        if (!entry.parts?.length && this.withheldEntries.has(entry)) continue;
+        const stripped = options.stripThoughtsFromHistory
+          ? stripThoughtsFromContent(entry)
+          : entry;
         if (stripped === null) continue;
         keptHistory.push(stripped);
         keptFlags.push(flags[i] === true);

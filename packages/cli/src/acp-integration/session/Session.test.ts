@@ -6244,6 +6244,128 @@ describe('Session', () => {
         );
       });
 
+      it.each([
+        ['cron', 'blocked'],
+        ['notification', 'blocked'],
+        ['cron', 'cancelled'],
+        ['notification', 'cancelled'],
+        ['cron', 'admitted'],
+        ['notification', 'admitted'],
+        ['cron', 'previously-blocked'],
+        ['notification', 'previously-blocked'],
+      ] as const)(
+        'keeps %s tool-result admission consistent after %s',
+        async (origin, outcome) => {
+          const recordAdmission = vi.fn((parts: readonly Part[]) => {
+            if (outcome === 'admitted')
+              return [{ parts, decision: 'admitted' as const }];
+            if (outcome === 'previously-blocked')
+              return [{ parts, decision: { withheld: 'earlier block' } }];
+            return [];
+          });
+          Object.assign(mockChatRecordingService, {
+            recordToolResultAdmission: recordAdmission,
+          });
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((name: string) => name === 'UserPromptSubmit');
+          useTool(core.Kind.Read, 'read_file');
+          const companion = { text: 'private tool companion' };
+          runAcpToolBatchSpy.mockImplementation(async (host, batch) => {
+            const result = await runEachTool(host, batch);
+            return { ...result, parts: [...result.parts, companion] };
+          });
+          const toolRound = origin === 'cron' ? 1 : 0;
+          let release!: () => void;
+          const released = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          const sends = automaticRounds(
+            (index) => {
+              if (index === toolRound) {
+                return [
+                  toolCall({ id: 'private-read', name: 'read_file', args: {} }),
+                  finished(),
+                ];
+              }
+              if (index === toolRound + 1 && outcome === 'blocked') {
+                return [
+                  {
+                    type: core.LlmEventType.UserPromptSubmitBlocked,
+                    value: { reason: 'withheld', originalPrompt: '' },
+                  },
+                ];
+              }
+              return [finished()];
+            },
+            (index) => index !== toolRound + 1,
+            async (index) => {
+              if (index !== toolRound + 1 || outcome === 'blocked') return;
+              await released;
+              const error = new Error('aborted');
+              error.name = 'AbortError';
+              throw error;
+            },
+          );
+          if (origin === 'cron') {
+            fireCron('read the private file');
+            await prompt();
+          } else {
+            await notify();
+          }
+          try {
+            await vi.waitFor(() => expect(sends).toHaveLength(toolRound + 2));
+            if (outcome !== 'blocked') await session.cancelPendingPrompt();
+          } finally {
+            release();
+          }
+          const reason =
+            outcome === 'blocked'
+              ? 'A UserPromptSubmit hook blocked this tool result from reaching the model. Do not rerun the tool to get it.'
+              : 'The tool had already completed; its output was discarded.';
+          await vi.waitFor(() =>
+            expect(recordAdmission).toHaveBeenCalledWith(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  functionResponse: expect.objectContaining({
+                    id: 'private-read',
+                  }),
+                }),
+                companion,
+              ]),
+              reason,
+            ),
+          );
+          const closures = vi
+            .mocked(mockChat.addHistory)
+            .mock.calls.map(([content]) => content)
+            .filter((content) =>
+              content.parts?.some(
+                (part) => part.functionResponse?.id === 'private-read',
+              ),
+            );
+          expect(closures).toHaveLength(1);
+          expect(closures[0].parts).toEqual(
+            outcome === 'admitted'
+              ? sends[toolRound + 1][0]
+              : [
+                  {
+                    functionResponse: {
+                      id: 'private-read',
+                      name: 'read_file',
+                      response: {
+                        error:
+                          outcome === 'previously-blocked'
+                            ? 'earlier block'
+                            : reason,
+                      },
+                    },
+                  },
+                ],
+          );
+        },
+      );
+
       it('runs a background notification as a Notification round and shows its response once', async () => {
         const sends = automaticRounds(() => [
           text('agent '),

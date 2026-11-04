@@ -303,6 +303,16 @@ export type ChatRecordProvenance =
   /** Written on behalf of a workspace agent (session multi-agent). */
   | 'external_agent';
 
+export interface ToolResultAdmissionPayload {
+  recordUuids: string[];
+  decision: 'admitted' | { withheld: string };
+}
+
+export interface RecordedToolResultAdmission {
+  parts: readonly Part[];
+  decision: ToolResultAdmissionPayload['decision'];
+}
+
 export type RecordToolResultOptions = {
   subtype?: 'code_mode_tool_result';
 } & (
@@ -423,6 +433,7 @@ export interface ChatRecord {
     | 'goal_runtime'
     | 'goal_turn_end'
     | 'code_mode_tool_result'
+    | 'tool_result_admission'
     | 'realtime_message'
     | 'turn_result'
     | 'turn_attempt'
@@ -468,6 +479,8 @@ export interface ChatRecord {
    * Pinned by the cap-refusal case in `client.test.ts`.
    */
   deliveredTurn?: boolean;
+  /** New completions require a receipt referencing their immutable record UUID. */
+  requiresToolResultAdmission?: true;
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -541,6 +554,7 @@ export interface ChatRecord {
     | BranchCheckpointRecordPayloadV1
     | GoalStateRecordPayloadV2
     | GoalTurnEndRecordPayload
+    | ToolResultAdmissionPayload
     | TurnResultRecordPayload
     | AgentMessageRecordPayload
     | AgentMentionRecordPayload;
@@ -3143,7 +3157,7 @@ export class ChatRecordingService {
   }
 
   /**
-   * Records tool results (function responses) sent back to the model.
+   * Records completed tool results for the transcript, before the next send.
    * Queues the write immediately on the serialized async writer.
    *
    * @param message The raw PartListUnion object with functionResponse parts
@@ -3162,10 +3176,84 @@ export class ChatRecordingService {
       );
       if (options?.goalContext && options.provenance !== 'goal_runtime')
         this.accumulateGoalTurnToolResult(options.goalContext.turnId);
+      // Session hooks can change between tool completion and the next send.
+      // Only the owner of live model history can admit this result.
+      if (!options?.subtype) record.requiresToolResultAdmission = true;
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving tool result:', error);
     }
+  }
+
+  recordToolResultAdmission(
+    parts: readonly Part[],
+    withheldReason?: string,
+  ): RecordedToolResultAdmission[] {
+    if (!parts.some((part) => part.functionResponse)) return [];
+    const roundStart = this.activeBranchRecords.findLastIndex(
+      (record) =>
+        record.type === 'assistant' ||
+        (record.type === 'user' && !record.subtype),
+    );
+    const pending = new Set<string>();
+    const decisions = new Map<string, ToolResultAdmissionPayload['decision']>();
+    const results: ChatRecord[] = [];
+    for (const record of this.activeBranchRecords.slice(roundStart + 1)) {
+      const result = record.message?.parts;
+      if (
+        record.requiresToolResultAdmission &&
+        result?.some((part) => part.functionResponse?.id)
+      ) {
+        pending.add(record.uuid);
+        // Match the complete result, including companions, before granting visibility.
+        if (
+          result.every((part) =>
+            parts.some((sent) => isDeepStrictEqual(part, sent)),
+          )
+        )
+          results.push(record);
+      }
+      if (
+        record.type !== 'system' ||
+        record.subtype !== 'tool_result_admission'
+      )
+        continue;
+      const payload = record.systemPayload as
+        | ToolResultAdmissionPayload
+        | undefined;
+      const decision = payload?.decision;
+      const ids = payload?.recordUuids;
+      if (decision !== 'admitted' && typeof decision?.withheld !== 'string')
+        continue;
+      if (
+        !Array.isArray(ids) ||
+        new Set(ids).size !== ids.length ||
+        !ids.every((id) => pending.has(id))
+      )
+        continue;
+      for (const id of ids) {
+        decisions.set(id, decision);
+        pending.delete(id);
+      }
+    }
+    const decision: ToolResultAdmissionPayload['decision'] =
+      withheldReason === undefined ? 'admitted' : { withheld: withheldReason };
+    const recordUuids = results
+      .filter((record) => pending.has(record.uuid))
+      .map((record) => record.uuid);
+    if (recordUuids.length) {
+      this.appendRecord({
+        ...this.createBaseRecord('system'),
+        subtype: 'tool_result_admission',
+        systemPayload: { recordUuids, decision },
+      });
+    }
+    // A later setup failure cannot reverse a decision already used by recovery
+    // or a compression checkpoint that includes the admitted pending input.
+    return results.map((record) => ({
+      parts: record.message!.parts!,
+      decision: decisions.get(record.uuid) ?? decision,
+    }));
   }
 
   private createToolResultRecord(

@@ -730,6 +730,35 @@ describe('LlmChat', async () => {
     });
   });
 
+  it('rejects a cancelled tool result before admitting it or acquiring the next send lock', async () => {
+    const recordToolResultAdmission = vi.fn();
+    const target = newChat({
+      recorder: { recordToolResultAdmission, recordAssistantTurn: vi.fn() },
+    });
+    const reason = new Error('tool hook cancelled');
+    const cancelled = await target.sendMessageStream(
+      'test-model',
+      {
+        message: [
+          {
+            functionResponse: {
+              id: 'read',
+              name: 'read_file',
+              response: { output: 'private' },
+            },
+          },
+        ],
+        config: { abortSignal: AbortSignal.abort(reason) },
+      },
+      'first',
+    );
+    await expect(drain(cancelled)).rejects.toBe(reason);
+    expect(recordToolResultAdmission).not.toHaveBeenCalled();
+    expect(target.getHistory()).toEqual([]);
+    mockStream(streamOf(stopResponse([{ text: 'done' }])));
+    await sendDrain('Next.', 'next', target);
+  });
+
   it('resyncs a tool_search response committed through the streaming send path', async () => {
     const syncReviewedDeclarations = vi.fn();
     vi.mocked(mockConfig.getToolRegistry).mockReturnValue({

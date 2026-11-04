@@ -30,6 +30,7 @@ import {
   type SessionModelRecordPayload,
   type TurnResultRecordPayload,
 } from './chatRecordingService.js';
+import { buildApiHistoryFromConversation } from './session-api-history.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import {
@@ -2171,6 +2172,103 @@ describe('ChatRecordingService', () => {
       svc.recordToolResult(...args);
       return flushed();
     }
+    it('only admits a complete result of the current round, including its attachments', async () => {
+      const answer = fnResponse('read_file', { output: 'file body' }, 'read');
+      const attachment = { text: 'attachment body' };
+      const result = await recordTool([answer, attachment]);
+      expect(result.requiresToolResultAdmission).toBe(true);
+      svc.recordToolResultAdmission([
+        fnResponse('read_file', { error: 'blocked' }, 'read'),
+        attachment,
+      ]);
+      svc.recordToolResultAdmission([answer]);
+      await svc.flush();
+      expect(writes()).toHaveLength(1);
+      svc.recordToolResultAdmission([answer, attachment]);
+      expect(await flushed(-1)).toMatchObject({
+        subtype: 'tool_result_admission',
+        systemPayload: { decision: 'admitted', recordUuids: [result.uuid] },
+      });
+      reply('turn finished');
+      svc.recordToolResultAdmission([answer, attachment]);
+      await svc.flush();
+      expect(
+        writes().filter((r) => r.subtype === 'tool_result_admission'),
+      ).toHaveLength(1);
+    });
+
+    it('keeps each completion first decision when a later setup failure withholds the batch', async () => {
+      const allowed = [fnResponse('read_file', { output: 'allowed' }, 'allow')];
+      const blocked = [fnResponse('read_file', { output: 'blocked' }, 'block')];
+      const undecided = [
+        fnResponse('read_file', { output: 'pending' }, 'pending'),
+      ];
+      await recordTool(allowed);
+      await recordTool(blocked);
+      await recordTool(undecided);
+      svc.recordToolResultAdmission(allowed);
+      svc.recordToolResultAdmission(blocked, 'hook blocked');
+      expect(
+        svc.recordToolResultAdmission(
+          [...allowed, ...blocked, ...undecided],
+          'cancelled',
+        ),
+      ).toEqual([
+        { parts: allowed, decision: 'admitted' },
+        { parts: blocked, decision: { withheld: 'hook blocked' } },
+        { parts: undecided, decision: { withheld: 'cancelled' } },
+      ]);
+      await svc.flush();
+      const receipts = writes().filter(
+        (record) => record.subtype === 'tool_result_admission',
+      );
+      expect(receipts).toHaveLength(3);
+      expect(receipts.map((record) => record.systemPayload)).toEqual([
+        { recordUuids: [writes()[0].uuid], decision: 'admitted' },
+        {
+          recordUuids: [writes()[1].uuid],
+          decision: { withheld: 'hook blocked' },
+        },
+        {
+          recordUuids: [writes()[2].uuid],
+          decision: { withheld: 'cancelled' },
+        },
+      ]);
+    });
+
+    it.each([false, true])(
+      'retains an admitted pending input after a setup failure (compression checkpoint %s)',
+      async (compressed) => {
+        const parts = [
+          fnResponse('read_file', { output: 'allowed pending input' }, 'read'),
+        ];
+        const content: Content = { role: 'user', parts };
+        await recordTool(parts);
+        svc.recordToolResultAdmission(parts);
+        if (compressed) {
+          svc.recordChatCompression({
+            info: {
+              originalTokenCount: 100,
+              newTokenCount: 20,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+            compressedHistory: [content],
+          });
+        }
+        expect(svc.recordToolResultAdmission(parts, 'cancelled')).toEqual([
+          { parts, decision: 'admitted' },
+        ]);
+        expect(
+          buildApiHistoryFromConversation({ messages: await flushedAll() }),
+        ).toEqual([content]);
+        expect(
+          writes().filter(
+            (record) => record.subtype === 'tool_result_admission',
+          ),
+        ).toHaveLength(1);
+      },
+    );
+
     type ToolMeta = Parameters<ChatRecordingService['recordToolResult']>[1];
     // One call-1 response plus success metadata echoing it; the metadata
     // carries undefined `error`/`errorType` keys unless `bare`.
