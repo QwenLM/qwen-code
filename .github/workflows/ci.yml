@@ -679,6 +679,9 @@ jobs:
           ( while sleep 10; do sample_disk; done ) &
           SAMPLER_PID=$!
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+          if [ -n "${RUNNER_TEMP:-}" ] && [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
+            node --input-type=module -e "import warmup from './scripts/tests/corepack-warmup.js'; warmup();"
+          fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Report npm cache usage (self-hosted)'
@@ -1078,6 +1081,12 @@ jobs:
         env:
           QWEN_SKIP_PREPARE: '1'
           QWEN_SKIP_NOTICE_GENERATION: '1'
+          # Pin COREPACK_HOME to a per-run path so the corepack cache written
+          # here is visible to the test step below, which overrides HOME for
+          # isolation. corepack does not re-verify extracted entries on cache
+          # hit, so this must NOT be a shared/persistent path (poisoning
+          # channel) — per-run is safe and sufficient.
+          COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack'
         run: |-
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
           echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}] cpus[$(nproc 2>/dev/null || echo unknown)]" > "$DISK_SAMPLES" 2>/dev/null || true
@@ -1091,6 +1100,9 @@ jobs:
           ( while sleep 10; do sample_disk; done ) &
           SAMPLER_PID=$!
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+          if [ -n "${RUNNER_TEMP:-}" ] && [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
+            node --input-type=module -e "import warmup from './scripts/tests/corepack-warmup.js'; warmup();"
+          fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       # Eight shards pull this same artifact at once, so the cap has to clear
@@ -1246,6 +1258,13 @@ jobs:
           QWEN_CI_COVERAGE: "${{ github.event_name == 'push' && '1' || '' }}"
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          # HOME above hides the runner's corepack cache; without this the
+          # vitest globalSetup (scripts/tests/corepack-warmup.js) spawns
+          # `corepack pnpm --version` on a cold cache and downloads the pinned
+          # pnpm from npmjs, which the ECS egress can time out on. Must match
+          # the Install dependencies step's COREPACK_HOME so it hits the cache
+          # install already warmed.
+          COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack'
           # Bound each Vitest process on the shared ECS host. Operators can
           # tune the maximum without changing this workflow.
           VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
@@ -1860,6 +1879,9 @@ jobs:
           ( while sleep 10; do sample_disk; done ) &
           SAMPLER_PID=$!
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+          if [ -n "${RUNNER_TEMP:-}" ] && [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
+            node --input-type=module -e "import warmup from './scripts/tests/corepack-warmup.js'; warmup();"
+          fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Report npm cache usage (self-hosted)'

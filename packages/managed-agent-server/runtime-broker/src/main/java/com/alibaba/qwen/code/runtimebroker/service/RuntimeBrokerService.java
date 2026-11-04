@@ -60,6 +60,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -84,6 +85,7 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.r
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.renewalDelayMillis;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sameReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sshNoStartReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unavailable;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unwrap;
@@ -1979,44 +1981,6 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                 })));
     }
 
-    private static boolean sameReceipt(Map<String, Object> expected,
-            Map<String, Object> actual) {
-        if (actual == null || !actual.keySet().equals(Set.of("executionCallId", "manifest",
-                "deliveryStatus", "historyRevision"))
-                || !java.util.Objects.equals(expected.get("executionCallId"), actual.get("executionCallId"))
-                || !java.util.Objects.equals(expected.get("deliveryStatus"), actual.get("deliveryStatus"))) {
-            return false;
-        }
-        Object leftRevision = expected.get("historyRevision");
-        Object rightRevision = actual.get("historyRevision");
-        if (leftRevision == null ? rightRevision != null
-                : !(rightRevision instanceof Number number)
-                        || ((Number) leftRevision).longValue() != number.longValue()) {
-            return false;
-        }
-        Object left = expected.get("manifest");
-        Object right = actual.get("manifest");
-        if (left == null || right == null) {
-            return left == right;
-        }
-        if (!(left instanceof Map<?, ?> saved) || !(right instanceof Map<?, ?> received)
-                || !saved.keySet().equals(received.keySet())) {
-            return false;
-        }
-        for (String field : List.of("resourceId", "kind", "digest")) {
-            if (!java.util.Objects.equals(saved.get(field), received.get(field))) {
-                return false;
-            }
-        }
-        for (String field : List.of("schemaVersion", "byteLength")) {
-            if (!(saved.get(field) instanceof Number a) || !(received.get(field) instanceof Number b)
-                    || a.longValue() != b.longValue()) {
-                return false;
-            }
-        }
-        return true;
-    }
-
     public CompletionStage<ToolExecutionRecord> cancelExecution(
             String harnessSessionId, String runtimeSessionId,
             String executionCallId) {
@@ -2945,7 +2909,20 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                             boolean retryable = !(cause instanceof RuntimeBrokerException
                                     brokerFailure) || brokerFailure.isRetryable();
                             if (currentClaim != null) {
-                                if (request.isManagedContext() || !retryable) {
+                                if ("local-process".equals(request.getProvisionerKind())
+                                        && cause instanceof RuntimeBrokerException refusal
+                                        && refusal.getStatusCode() == 503 && refusal.isRetryable()
+                                        && "runtime_local_capacity".equals(refusal.getCode())
+                                        && refusal.getCause() instanceof RejectedExecutionException) {
+                                    // Worker admission failed before launch. Only a newly saved non-durable
+                                    // placeholder can be cleared; real resource identities must survive retry.
+                                    if (claimed.getResourceHandle() == null && currentClaim.getResourceHandle() != null
+                                            && !provisioner.supportsStartupRecovery(currentClaim.getResourceHandle())
+                                            && bindingRepository.compareAndSet(currentClaim,
+                                                    currentClaim.withResourceHandle(null, clock.instant())) == null) {
+                                        throw unavailable("runtime_provision_fenced", "Runtime provisioning claim expired");
+                                    }
+                                } else if (request.isManagedContext() || !retryable) {
                                     // A retry cannot succeed once the binding
                                     // is blocked, so say so.
                                     if (blockRecoveryQuietly(currentClaim, cause)
