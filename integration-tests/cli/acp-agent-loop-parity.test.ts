@@ -507,7 +507,11 @@ const allowOnce = () => ({
           if (agent.exitCode !== null || agent.signalCode) resolve(undefined);
           else agent.once('exit', resolve);
         });
-        await removeScratchDir(qwenHome);
+        // Keep the runtime state for post-mortem whenever TestRig.cleanup()
+        // keeps the test directory, which it decides by truthiness.
+        if (!process.env['KEEP_OUTPUT']) {
+          await removeScratchDir(qwenHome);
+        }
       }
       // The scratch runtime keeps the session runtime's `tmp/<hash>` and
       // `usage/` out of the workspace; pin what TestRig wrote there instead
