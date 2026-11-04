@@ -67,8 +67,8 @@ guard，再锁住物理目录行，然后用 `FOR UPDATE` 扫描该目录的成�
   范围锁。更新成员身份仍会获取写入所需的索引记录锁。
 - G2：两个目录，无论属于同一租户还是两个租户，都可以互不阻塞地准入执行、检查
   占用。
-- G3：占用规则的结果保持不变：共享的普通成员、独占的 rewind、维护和上传的
-  互斥、要求零成员的物理步骤、精确释放、只清理一个 binding 加 generation 的
+- G3：占用规则包括：共享的普通成员（含上传）、独占的 rewind、维护互斥、
+  要求零成员的物理步骤、精确释放、只清理一个 binding 加 generation 的
   丢失 worker 清理，以及 retention 保留仍有成员的 binding。
 - G4：每个决定成败的条件要么写在 `UPDATE ... WHERE` 的谓词里，要么读自本事务
   已经用点锁锁住的行的当前锁定读。快照读不决定任何结论。
@@ -78,7 +78,8 @@ guard，再锁住物理目录行，然后用 `FOR UPDATE` 扫描该目录的成�
 ## 非目标
 
 - CSI 预留、CSI 退役，以及 resident 档位的准入。`claim` 和 `release` 的
-  resident 分支保持现状，包括它的租户 guard。
+  resident 分支保持现状；它的租户 guard 由
+  [resident claim 设计](2026-11-03-managed-resident-claim-tenant-guard.zh-CN.md)单独去掉。
 - 其他领域持有的租户 guard：Runtime placement、publication、迁移 fence 的
   安装、lifecycle 准入，以及 retention 清扫。
 - 替换共享基线的主键。本设计以当前基线为前提，即
@@ -92,7 +93,8 @@ guard，再锁住物理目录行，然后用 `FOR UPDATE` 扫描该目录的成�
 给 `ma_storage_owner` 增加两列：
 
 - `member_count BIGINT UNSIGNED NOT NULL DEFAULT 0`，等于 `execution_storage_key` 与该行
-  `storage_key` 相同的 `ma_runtime_session` 行数。
+  `storage_key` 相同的 `ma_runtime_session` 行数，加上 `physical_key` 与之相同、
+  状态为 `RUNNING` 的 `WORKSPACE_UPLOAD` 操作数。
 - `exclusive_member_key CHAR(64)`，仅当有一个成员持有独占 rewind 时非空。取值
   是 binding id、runtime generation 和 runtime session id 的 SHA-256，与运维
   恢复已有的 holder key 使用同一种构造。
@@ -114,6 +116,9 @@ retention、丢失 worker 清理、运维恢复、停止后的 Session 释放、
 它。
 
 ### D2. 每次调用的成员操作不再拿租户 guard
+
+这适用于 Runtime 执行成员操作，以及上传的准入和完成（`WorkspaceFileUploadStore.admit`
+与 `finish`）；参见[共享上传设计](2026-11-03-managed-shared-workspace-uploads.zh-CN.md)。
 
 `claim`、`release`（含 mount handback）、`beginRewind` 和 `endRewind` 在
 LOCAL 与 SSH_LOCAL 路径上不再调用 `WorkspaceStorageKindGuard.lockDomain`。
@@ -174,6 +179,8 @@ UPDATE ma_runtime_session
 
 | 路径                                              | 成员行                                              | 同一事务里的目录行                                                                |
 | ------------------------------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `WorkspaceFileUploadStore.admit`                  | 插入一个运行中的上传操作                            | `mount_revision` 未变且无 holder、维护和独占 rewind 时 `member_count + 1`         |
+| `WorkspaceFileUploadStore.finish`                 | 结束一个运行中的上传操作                            | `member_count - 1`；重放终态时两行均不修改                                        |
 | `WorkspaceExecutionStore.claim`                   | 为一个 session 设置 `execution_storage_key`         | 在 D3 的谓词下 `member_count + 1`                                                 |
 | `WorkspaceExecutionStore.release`                 | 清除一个 session 的 key 和 `is_execution_exclusive` | `member_count - N`；当 `exclusive_member_key` 等于该成员且 `N > 0` 时一并清除     |
 | `WorkspaceExecutionStore.releaseLost`             | 清除一个 binding 加 generation 的全部成员           | 对这些行所在的那一个物理 key 做 `member_count - N`                                |
@@ -183,8 +190,8 @@ UPDATE ma_runtime_session
 | `JdbcRuntimeRetention` 的 session 删除            | 删除 `RELEASED` 或 `FAILED` 的 session 行           | 不涉及；谓词增加 `execution_storage_key IS NULL`，因此成员行不会被删除            |
 
 `N` 是同一事务里成员行语句的影响行数，目录行语句减去的正好是 `N`。目录行语句
-影响行数为 0 时回滚事务。没有任何逻辑会就地修补不一致：计数与成员行不符是
-缺陷，由 `CHECK` 约束拒绝这次写入，而不是事后修正。
+影响行数为 0 时回滚事务。没有任何逻辑会就地修补不一致。带条件的减计数和
+`CHECK` 约束拒绝下溢及相互矛盾的独占状态；不变量测试比较计数与对应的成员行。
 
 retention 删除 session 行时不经过成员写路径，所以它的删除谓词必须排除仍然持有
 成员身份的行。删掉一行成员却不减计数，会让汇总偏大。
@@ -196,8 +203,8 @@ retention 删除 session 行时不经过成员写路径，所以它的删除谓�
 
 - `WorkspaceExecutionStore.holdForMaintenance`，在取得 `holder_key` 和
   `maintenance_id` 之前要求 `member_count = 0`。
-- `WorkspaceFileUploadStore.admit`，在它短暂占用 `holder_key` 之前要求
-  `member_count = 0`。
+- `WorkspaceFileUploadStore.admit`，要求 holder、维护和独占 rewind 的 key 为空，
+  然后加入共享成员身份；允许其他成员存在。
 - `WorkspaceStorageGuard` 的注册、`fence`、`restoreOriginal`、`requireFenced`，
   以及 `inspect` 里表达占用的那一部分。
 
@@ -256,7 +263,8 @@ retention 删除 session 行时不经过成员写路径，所以它的删除谓�
   binding 行。它只需要目录的 `mount_state`，因此目录锁是点锁，前面不必先锁
   别名行。`admitSession` 不锁目录行，它先 binding 后 session 的顺序已经符合。
 
-本领域其余的多行事务已经符合这个顺序：`fence` 和 `restoreOriginal` 先锁
+本领域其余的多行事务已经符合这个顺序：上传 `admit` 先锁别名行，再锁目录行，最后插入
+操作行，上传 `finish` 先锁目录行再锁操作行；`fence` 和 `restoreOriginal` 先锁
 guard，再经 `LocalStorageOwners.lockCovered` 锁别名行，然后锁目录行；注册和
 迁移来源的读取同样如此；`releaseLost` 先锁 guard 和目录行，再锁 binding 行。
 
@@ -299,7 +307,7 @@ guard，再经 `LocalStorageOwners.lockCovered` 锁别名行，然后锁目录�
 | Restore        | `WorkspaceStorageGuard.restoreOriginal`                            | `mount_state = 'READY'`，`mount_revision` 递增         |
 | 注册完成       | `WorkspaceStorageGuard` 的注册、`SshWorkspaceStore.publish`        | `mount_state = 'READY'`，`mount_revision` 被设置或递增 |
 | 维护占用与释放 | `holdForMaintenance`、`releaseMaintenance`、`reconcileAfterReboot` | `holder_key` 与 `maintenance_id` 被设置或清除          |
-| 上传占用       | `WorkspaceFileUploadStore.admit` 与 `finish`                       | `holder_key` 被设置或清除                              |
+| 上传占用       | `WorkspaceFileUploadStore.admit` 与 `finish`                       | `member_count` 增加或减少                              |
 | 独占 rewind    | `beginRewind`、`endRewind`                                         | `exclusive_member_key` 被设置或清除                    |
 | 别名被删除     | `SshWorkspaceStore.releaseParked`                                  | 删除 `SSH_LOCAL` 的 owner 行                           |
 
@@ -327,7 +335,8 @@ fence 会阻塞在这行上。别名改指向在持有别名行时更新别名�
 | `compareAndSet`、`recoverLost`                   | binding control、guard、slot、binding      | 无                         |
 | `WorkspaceOperatorRecoveryStore.prepare`         | guard、binding、目录、session              | 目录行先于 binding         |
 | `WorkspaceStorageGuard.fence`、`restoreOriginal` | guard、别名们、目录，然后成员扫描          | 成员扫描改为读汇总         |
-| `WorkspaceFileUploadStore.admit`                 | guard、operation、目录，然后成员扫描       | 成员扫描改为读汇总         |
+| `WorkspaceFileUploadStore.admit`                 | guard、operation、目录，然后成员扫描       | 去掉 guard；别名先于目录   |
+| `WorkspaceFileUploadStore.finish`                | guard、operation、目录                     | 去掉 guard；目录先于操作   |
 | `WorkspaceMigrationStore` 的 fence 安装          | guard、别名 fence 行                       | 无                         |
 | `JdbcRuntimeRetention` 清扫                      | guard、slot、binding、execution、session   | 无；session 删除排除成员行 |
 
@@ -377,7 +386,8 @@ fence 会阻塞在这行上。别名改指向在持有别名行时更新别名�
   每个物理操作都能成功，作为正向对照。尚未提交的独占 rewind 同样先阻塞、
   再拒绝另一个成员；rewind 结束后，该成员准入成功。
 - 每个场景结束后，`member_count` 等于携带该 `execution_storage_key` 的
-  session 行数，`exclusive_member_key` 要么与唯一的独占成员一致，要么为 null。
+  session 行数加上该物理 key 的运行中上传数；`exclusive_member_key` 要么与
+  唯一的独占成员一致，要么为 null。
 
 H2 不产生 InnoDB 的间隙锁，也不做死锁检测，因此不能作为锁行为的证据。挑选出的
 MySQL 用例在本模块的验证预算内本地运行；完整的 MySQL 矩阵仍由 CI 负责。
@@ -388,8 +398,9 @@ MySQL 用例在本模块的验证预算内本地运行；完整的 MySQL 矩阵�
    不会拖延 `claim`、`release` 或 rewind。
 2. 不同目录的准入和占用检查互不阻塞，占用检查不获取成员索引间隙锁或 next-key
    范围锁。成员写入可以持有索引记录锁。
-3. G3 列出的占用结果在现有测试套件上保持不变。
-4. 每个被测场景结束后，`member_count` 和 `exclusive_member_key` 与成员行一致；
+3. G3 列出的占用结果在受影响测试套件上成立。
+4. 每个被测场景结束后，`member_count` 等于 Runtime 成员加上运行中上传数，
+   `exclusive_member_key` 与唯一的 rewind 成员一致；
    会破坏 `CHECK` 约束的写入被回滚。
 5. 加锁顺序清单里的事务按 D7 的顺序获取锁，并发的 `claim` 与运维准备用例不
    报告死锁。
