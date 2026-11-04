@@ -3615,10 +3615,11 @@ describe('turn-collapse deliverable final answer', () => {
   // A collapsed turn must show its report, not a short closer that
   // follows a substantial answer (a guard or todo-stop line). The final
   // candidate stands only if it is a deliverable: an ordinary assistant
-  // reply (never an agent reply) with at least 1000 characters and a
-  // Markdown heading. Otherwise the nearest preceding deliverable in the
-  // turn stands; with none, the original candidate stands
-  // (fail-toward-showing-more, so nothing extra is hidden).
+  // reply (never an agent reply) with at least 1000 characters. A
+  // Markdown heading is not required: reports often open with a plain
+  // summary line or a pipe table. Otherwise the nearest preceding
+  // deliverable in the turn stands; with none, the original candidate
+  // stands (fail-toward-showing-more, so nothing extra is hidden).
 
   const report = '## RLS-26042 — shard-router v29\n' + 'x'.repeat(1200);
 
@@ -3634,15 +3635,37 @@ describe('turn-collapse deliverable final answer', () => {
     expect(rowIds(rows)).not.toContain('closer');
   });
 
-  it('keeps the short final line when the preceding text carries no heading', () => {
+  it('shows the long log, not the short closer, when the log carries no heading', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
       { ...makeAssistantMessage('log'), content: 'y'.repeat(1500) },
       makeAssistantMessage('done'),
     ]);
     const rows = collapseItems(items);
-    expect(rowIds(rows)).toContain('done');
-    expect(rowIds(rows)).not.toContain('log');
+    expect(collapseOf(rows, 'u1')).toMatchObject({ collapsed: true });
+    expect(rowIds(rows)).toContain('log');
+    expect(rowIds(rows)).not.toContain('done');
+  });
+
+  it('keeps a heading-less long final even when a headed plan precedes it', () => {
+    // Regression: a report that opens with a plain line (no Markdown
+    // heading) used to be folded in favor of an earlier headed plan,
+    // hiding the actual result.
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      {
+        ...makeAssistantMessage('plan'),
+        content: '## Plan\n' + 'p'.repeat(3200),
+      },
+      {
+        ...makeAssistantMessage('final'),
+        content: 'Done. Summary:\n' + 'f'.repeat(1300),
+      },
+    ]);
+    const rows = collapseItems(items);
+    expect(collapseOf(rows, 'u1')).toMatchObject({ collapsed: true });
+    expect(rowIds(rows)).toContain('final');
+    expect(rowIds(rows)).not.toContain('plan');
   });
 
   it('keeps the deliverable final when a plain interim note precedes it', () => {

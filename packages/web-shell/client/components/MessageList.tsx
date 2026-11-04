@@ -898,7 +898,6 @@ function findFinalAnswerIndex(
  * rules compose, because a well-formed ack never carries report text.
  */
 const DELIVERABLE_MIN_LENGTH = 1000;
-const DELIVERABLE_HEADING = /^(#{1,6} )/m;
 
 function isDeliverableAnswer(item: DisplayItem): boolean {
   if (item.type !== 'message' || item.message.role !== 'assistant') {
@@ -907,9 +906,7 @@ function isDeliverableAnswer(item: DisplayItem): boolean {
   if (isAgentReply(item)) return false;
   const content = item.message.content;
   return (
-    typeof content === 'string' &&
-    content.length >= DELIVERABLE_MIN_LENGTH &&
-    DELIVERABLE_HEADING.test(content)
+    typeof content === 'string' && content.length >= DELIVERABLE_MIN_LENGTH
   );
 }
 
