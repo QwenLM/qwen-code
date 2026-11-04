@@ -704,16 +704,28 @@ describe('git-sourced lint lanes', () => {
 
   it.skipIf(process.platform === 'win32')(
     'enrols the sourced apt-mirror probe in the shellcheck lane via its shebang',
-    () => {
-      // The lane filters candidates on file(1) mime type; a sourced-only .sh
-      // without a shebang reports text/plain and is silently dropped, so the
-      // probe must keep its shebang to stay linted (#16278 R1-2).
-      const probe = path.resolve('.github/scripts/apt-mirror-probe.sh');
-      const mime = spawnSync('file', ['--brief', '--mime-type', probe], {
-        encoding: 'utf8',
-      });
-      if (mime.status !== 0) return; // file(1) absent locally; CI gates have it
-      expect(mime.stdout.trim()).toBe('text/x-shellscript');
+    async (ctx) => {
+      // Drive the lane's own candidate selection (name regex + real file(1)
+      // mime filter) with only shellcheck stubbed, so a change to the lane's
+      // filter that drops the probe is caught here (#16278 R2-1). Removing the
+      // probe's shebang makes file(1) report text/plain and reddens this case.
+      const linters = await getLintersOrSkip(ctx);
+      const probeSrc = readFileSync(
+        '.github/scripts/apt-mirror-probe.sh',
+        'utf8',
+      );
+      const { root, repo, bin } = setup({ 'apt-mirror-probe.sh': probeSrc });
+      try {
+        const shellcheckLog = path.join(root, 'shellcheck.log');
+        stub(bin, 'shellcheck', `echo "$@" >> '${shellcheckLog}'`);
+        const result = runLane(linters.shellcheck.run, { repo, bin });
+        expect(result.status).toBe(0);
+        expect(readFileSync(shellcheckLog, 'utf8')).toContain(
+          'apt-mirror-probe.sh',
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     },
   );
 
