@@ -1982,13 +1982,6 @@ public final class ToolPublicationDataStore {
         return ToolPublicationContract.readJson(saved.getBytes(StandardCharsets.UTF_8));
     }
 
-    private void lockTenant(JsonNode key) {
-        // The entry point's first tenant-guard acquisition on this lane, so
-        // it runs bounded with the shared named-failure mapping (#13800).
-        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
-                text(key, "tenantId"), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-    }
-
     private List<Map<String, Object>> sealRows(String scope, String publicationId, String streamId) {
         var pointers = jdbc.query("SELECT seal_manifest_resource_key, seal_manifest_sha256 FROM ma_output_capture"
                         + " WHERE scope_key = ? AND publication_id = ?",

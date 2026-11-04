@@ -4,10 +4,10 @@
 
 状态：C1、C2 已实现；C3 为方案。
 
-## 问题与现状
+## C1/C2 之前的问题与基线状态
 
-工具输出发布（reserve、上传、校验、finish、准入、回执、续期、隔离）的每次调用仍会获取两个
-租户级的行：
+在 C1/C2 之前，工具输出发布（reserve、上传、校验、finish、准入、回执、续期、隔离）的每次调用
+都会获取两个租户级的行：
 
 - **Placement**（`runtime_placement`），最先获取，经由 `lockPublicationPlacement` /
   `lockStagedPlacement`、发布写入方（`lockPublicationWriter`）和 CSI continuation。
@@ -15,11 +15,12 @@
   `ToolPublicationDataStore`、`ToolPublicationAdmissionStore` 和 `ManagedToolResultStore`
   中的 `ToolPublicationRetentionStore.lockTenant`。
 
-因此一个租户内所有发布输出的 Session，其发布步骤只能逐个执行，还要排在 Runtime placement、
-存储工作、迁移、retention 和回收之后。journal commit、Turn 准入和 Session 命令都已不再获取
-这两个行。
+因此一个租户内所有发布输出的 Session，其发布步骤当时只能逐个执行，还要排在 Runtime placement、
+存储工作、迁移、retention 和回收之后。journal commit、Turn 准入和 Session 命令此前已不再获取
+这两个行。下文的 C1/C2 从普通车道移除了 publication guard，placement 仍保留；CSI original
+和带生命周期授权的回执仍保留 publication guard。
 
-## 每个 guard 保护什么
+## 基线中的 guard 职责
 
 | guard       | 保护的内容                                                                                                                                                                             | 另一侧的持有者                                                                                                               |
 | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
@@ -67,6 +68,10 @@ worker：跳过 publication guard，保持 root、head、publication 行的顺�
 CSI original 保留 guard；journal commit 带生命周期授权的回执也保留，因为那个 commit 自己会
 获取 guard。
 
+投影 worker 的 `claim`、`admitsLegacyProjection` 和 `complete` 都遵循相同的无 guard 顺序。
+准入操作加入完成操作的同一事务；完成操作复用已经持有的 root 和 head 锁，并在不获取
+publication guard 的情况下重新检查私有 Session 的拒绝条件。
+
 读租约（`ToolPublicationRetentionStore.read`）也不再获取 guard。所有可能删除租约所保护内容的
 检查（发布、Session 资源与投影回收器）都持有该 Session 的 root 和 head，退役会更新 root；在同一
 root 和 head 下获取的租约本身就能与它们互斥。租约续期也跳过 guard：锁定 root 后重新检查退役
@@ -84,6 +89,9 @@ root 和 head 下获取的租约本身就能与它们互斥。租约续期也跳
 隔离观测用例要求在同样持有 guard 的情况下，完成该 Session 内的状态变更。过期预留观测用例
 持有另一个 Session 的过期 capture 行，检查有界的命名失败，再释放该行并检查新预留能成功
 将其 fence。
+`ToolPublicationLockOrderMySqlIT` 中的完整投影观测用例在另一连接持有 guard 时，要求普通
+完成操作发布结果、Artifact 和事件；claim 后被固定为私有状态的 Session 仍必须拒绝完成，
+既不改变已租赁的操作，也不发布这些输出。
 
 容量核算放在独立的持久化辅助类中，准入入口加锁归入 grant store，使两个现有发布 store
 都低于各自的类大小棘轮；抽取后同步降低上限。门面清单登记了有意新增的 guard 选择 writer
@@ -94,7 +102,7 @@ root 和 head 下获取的租约本身就能与它们互斥。租约续期也跳
 ### C3. 用原始 Runtime binding 取代 placement
 
 在普通（非 CSI）发布车道中，用对原始 binding 行（`ma_runtime_binding`）的共享锁取代
-placement guard，获取位置与目前的 placement 相同。retention 清扫在检查引用之前以
+placement guard，获取位置与目前的 placement 相同，位于 Session root 和 head 之前。retention 清扫在检查引用之前以
 `FOR UPDATE` 锁定该行，因此要么车道等待清扫，随后发现 binding 已不存在而拒绝；要么清扫等待
 车道，随后看到它的引用。CSI 固定的 Session 保留 placement；CSI 退役与应用路径不在范围内。
 
@@ -104,11 +112,9 @@ binding 握手；同一握手之后也可用于这些引用。
 ## 待定问题
 
 1. native journal 快照写入方仍获取 guard（见 C2）。
-2. C3 需要确定 binding 在全局顺序中的位置：清扫在 placement 下先锁 slot 再锁 binding；
-   车道会在 Session root 之后锁 binding。清扫锁定 binding 之后不再锁 Session 行，预计不会
+2. C3 需要验证其提出的 binding 在 root 之前的顺序：清扫在 placement 下先锁 slot 再锁 binding；
+   车道会在 Session root 和 head 之前锁 binding。清扫锁定 binding 之后不再锁 Session 行，预计不会
    形成环路，但审计必须覆盖车道和清扫对 `ma_tool_execution` 的加锁。
-3. `ManagedToolResultStore.claim` 和 `admitsLegacyProjection`（工具结果投影的 worker
-   车道）是按 C2 处理，还是保留 guard。
 
 ## 风险
 

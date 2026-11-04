@@ -4,10 +4,10 @@
 
 Status: C1 and C2 implemented; C3 is a proposal.
 
-## Problem and current state
+## Problem and baseline state before C1/C2
 
 Tool output publication (reserve, upload, verify, finish, admission, receipt,
-renew, quarantine) still takes two tenant-wide rows on every call:
+renew, quarantine) took two tenant-wide rows on every call before C1/C2:
 
 - **Placement** (`runtime_placement`), first, through
   `lockPublicationPlacement` / `lockStagedPlacement`, the publication writer
@@ -17,12 +17,14 @@ renew, quarantine) still takes two tenant-wide rows on every call:
   `ToolPublicationDataStore`, `ToolPublicationAdmissionStore` and
   `ManagedToolResultStore`.
 
-Every Session of a tenant that publishes output therefore runs its publication
+Every Session of a tenant that published output therefore ran its publication
 steps one at a time, behind Runtime placement, storage work, migration,
 retention and collection. Journal commits, Turn admission and the Session
-commands no longer take either row.
+commands had already stopped taking either row. C1/C2 below remove the
+publication guard from ordinary lanes; placement remains, while CSI originals
+and lifecycle-authority receipts keep the publication guard.
 
-## What each guard protects
+## Baseline guard responsibilities
 
 | Guard       | Protects                                                                                                                                                                                                                  | Holder on the other side                                                                                                                             |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -85,6 +87,11 @@ its order. CSI originals keep the guard, and so does a receipt whose journal
 commit carries lifecycle authority, because that commit takes the guard
 itself.
 
+The projection worker's `claim`, `admitsLegacyProjection` and `complete`
+follow the same guard-free order. Admission joins completion's transaction;
+completion reuses its root and head locks and rechecks private-Session refusal
+without acquiring the publication guard.
+
 Read leases (`ToolPublicationRetentionStore.read`) no longer take the guard
 either. Every check that can delete what a lease protects (the publication,
 Session resource and projection collectors) holds the Session's root and
@@ -110,6 +117,10 @@ A quarantine witness requires its Session-local state changes to complete
 under the same held guard. An expired-reservation witness holds a different
 Session's expired capture row, checks the bounded named failure, then releases
 the row and checks that a fresh reservation fences it successfully.
+A complete projection witness in `ToolPublicationLockOrderMySqlIT` holds the
+guard on another connection and requires the ordinary completion to publish
+its result, artifacts and event. A Session pinned after claim must still refuse
+completion without changing its leased operation or publishing those outputs.
 
 Capacity accounting lives in a separate persistence helper, and admission
 entry locking lives with the grant store. This keeps both existing publication
@@ -124,7 +135,7 @@ locks resource rows before the Session; its order needs its own analysis.
 
 Replace the placement guard in ordinary (non-CSI) publication lanes with a
 shared lock on the original binding row (`ma_runtime_binding`), taken where
-placement is taken today. The retention sweep locks that row `FOR UPDATE`
+placement is taken today, before the Session root and head. The retention sweep locks that row `FOR UPDATE`
 before its reference checks, so either the lane waits for the sweep, and then
 finds the binding gone and refuses, or the sweep waits for the lane and then
 sees its references. CSI-pinned Sessions keep placement; the CSI retirement
@@ -137,13 +148,11 @@ cleanup references; the same handshake can then serve those references.
 ## Open questions
 
 1. The native journal snapshot writer still takes the guard (see C2).
-2. C3 needs the binding's position in the global order: the sweep takes slot
-   then binding under placement; lanes would take binding after the Session
-   root. The sweep never locks Session rows after the binding, so no cycle is
+2. C3 needs validation of its proposed binding-before-root order: the sweep takes slot
+   then binding under placement; lanes would take binding before the Session
+   root and head. The sweep never locks Session rows after the binding, so no cycle is
    expected, but the audit must cover `ma_tool_execution` locks taken by
    lanes and by the sweep.
-3. Whether `ManagedToolResultStore.claim` and `admitsLegacyProjection` (worker
-   lanes for tool-result projection) follow C2 or keep the guard.
 
 ## Risks
 

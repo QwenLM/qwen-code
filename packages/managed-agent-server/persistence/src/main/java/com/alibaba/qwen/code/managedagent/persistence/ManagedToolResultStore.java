@@ -317,7 +317,7 @@ public class ManagedToolResultStore
                             if (!admitsLegacyProjection(claim)) {
                                 return false;
                             }
-                            ToolPublicationRetentionStore.lockGenericSession(
+                            ManagedLegacySessionGuard.requireLegacyMutation(
                                     jdbc, source.tenantId(), source.sessionId());
                             var retired =
                                     jdbc.query(
