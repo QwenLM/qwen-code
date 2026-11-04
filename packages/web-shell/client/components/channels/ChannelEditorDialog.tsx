@@ -756,7 +756,17 @@ export function ChannelEditorDialog({
         }
       }
       const updateRecord = (key: string, val: string) => {
-        const next = { ...record, [key]: val };
+        // Clearing a row DELETES the key: the channel validators reject
+        // empty template values, and this renderer offers no other delete
+        // affordance, so a touched-then-cleared row would otherwise strand
+        // an unsavable "" entry (GitHub boundSessionActions, GitLab
+        // action_prompt_template).
+        const next = { ...record };
+        if (val.trim() === '') {
+          delete next[key];
+        } else {
+          next[key] = val;
+        }
         update(JSON.stringify(next));
       };
       return (

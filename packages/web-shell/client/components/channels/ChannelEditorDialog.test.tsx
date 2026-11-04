@@ -936,6 +936,74 @@ describe('ChannelEditorDialog', () => {
     );
   });
 
+  it('deletes a record key when its row is cleared, never stranding an empty value', async () => {
+    // The channel validators reject empty template values. Two layers keep
+    // a touched-then-cleared row from stranding one: the editor drops the
+    // key from the form state on clear, and the save serializer filters
+    // empty values regardless. Pin the end-to-end outcome: the cleared key
+    // is absent from the upsert config, the untouched sibling survives.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: [
+        ...DINGTALK.fields,
+        {
+          key: 'boundSessionActions',
+          label: 'Bound Session Actions',
+          kind: 'record',
+          options: [
+            {
+              value: 'review:watch:head_change',
+              label: 'review:watch:head_change',
+            },
+            { value: 'fix:comment', label: 'fix:comment' },
+          ],
+        },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, instance: INSTANCE, onSave });
+
+    // Record input ids embed the option key (colons included), which is not
+    // a valid CSS selector — resolve through getElementById, not #id.
+    const recordInput = (labelText: string): HTMLInputElement | null => {
+      const label = Array.from(document.querySelectorAll('label')).find(
+        (item) => item.textContent?.includes(labelText),
+      );
+      const id = label?.htmlFor;
+      return id
+        ? (document.getElementById(id) as HTMLInputElement | null)
+        : null;
+    };
+    const reviewRow = recordInput('review:watch:head_change');
+    const fixRow = recordInput('fix:comment');
+    expect(reviewRow).not.toBeNull();
+    expect(fixRow).not.toBeNull();
+
+    await act(async () => {
+      setInputValue(reviewRow!, 'Run /review %pr%');
+      setInputValue(fixRow!, 'Address the comments');
+    });
+    await act(async () => {
+      setInputValue(reviewRow!, '');
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith(
+      'release-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          boundSessionActions: { 'fix:comment': 'Address the comments' },
+        }),
+      }),
+    );
+  });
+
   it('submits a new instance with typed fields and the current revision', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     await renderDialog({ onSave });

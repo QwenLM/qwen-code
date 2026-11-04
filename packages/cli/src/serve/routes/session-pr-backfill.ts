@@ -1342,8 +1342,12 @@ export async function backfillWorkspaceSessionPrs(
               : entry;
           });
         // Command-position roles: the first mention's command names the
-        // job. The convention number alone mints NO role — `fix` is an
-        // explicit metadata-route binding, never inferred from a worktree.
+        // job. The Map constructor is last-wins on a duplicate key, but no
+        // duplicate reaches it: collectCommandPrNumbers.noteMention dedupes
+        // by number upstream and never pushes a second mention, so each
+        // number appears exactly once — with the FIRST command. The
+        // convention number alone mints NO role — `fix` is an explicit
+        // metadata-route binding, never inferred from a worktree.
         const roleByNumber = new Map<number, SessionPrRole>(
           candidate.mentions.map((mention) => [
             mention.number,
