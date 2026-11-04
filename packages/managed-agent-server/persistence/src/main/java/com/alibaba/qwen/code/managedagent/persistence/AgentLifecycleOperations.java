@@ -110,7 +110,6 @@ final class AgentLifecycleOperations {
 
     OperationAdmission beginWorkspaceClose(String tenantId, String sessionId, String actorId,
             String actorDigest, String key, String digest, boolean supported) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         return beginLifecycle(tenantId, sessionId, OperationKind.CLOSE, actorDigest, key, digest, actorId, supported);
     }
 

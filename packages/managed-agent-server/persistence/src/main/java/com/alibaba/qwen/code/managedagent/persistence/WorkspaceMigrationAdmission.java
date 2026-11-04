@@ -68,7 +68,7 @@ final class WorkspaceMigrationAdmission {
         if (storage == null) {
             return;
         }
-        var aliases = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, storage_id, physical_key, storage_kind FROM ma_storage WHERE alias_key = ?"
+        var aliases = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, storage_id, physical_key, storage_kind, registration_state, fence_operation_id FROM ma_storage WHERE alias_key = ?"
                 + lock, JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
         if (aliases.isEmpty()) {
             return;
@@ -80,11 +80,9 @@ final class WorkspaceMigrationAdmission {
         if (alias.get("physical_key") == null || "CSI".equals(alias.get("storage_kind"))) {
             return;
         }
-        String physical = "SSH_LOCAL".equals(alias.get("storage_kind"))
-                ? SshWorkspaceStore.physicalKey(jdbc, tenant, storage, lock) : LocalStorageOwners.key(jdbc, tenant, storage, lock);
-        var states = jdbc.queryForList("SELECT mount_state FROM ma_storage_owner WHERE storage_key = ?"
-                + lock, String.class, physical);
-        if (states.size() != 1 || !"READY".equals(states.getFirst())) {
+        var owner = "SSH_LOCAL".equals(alias.get("storage_kind"))
+                ? SshWorkspaceStore.requireOwner(jdbc, tenant, storage, alias, lock) : LocalStorageOwners.requireOwner(jdbc, alias, lock);
+        if (!"READY".equals(owner.get("mount_state"))) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
     }

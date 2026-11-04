@@ -392,11 +392,7 @@ public class SshWorkspaceStore
     }
 
     static String physicalKey(JdbcTemplate jdbc, String tenant, String storage) {
-        boolean lock = org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive();
-        return physicalKey(jdbc, tenant, storage, lock ? " FOR UPDATE" : "");
-    }
-
-    static String physicalKey(JdbcTemplate jdbc, String tenant, String storage, String lock) {
+        String lock = org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive() ? " FOR UPDATE" : "";
         var rows = jdbc.queryForList("SELECT tenant_id, storage_id, storage_kind, registration_state, physical_key, fence_operation_id"
                 + " FROM ma_storage WHERE alias_key = ?" + lock,
                 JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
@@ -404,6 +400,12 @@ public class SshWorkspaceStore
             return null;
         }
         var row = rows.getFirst();
+        requireOwner(jdbc, tenant, storage, row, lock);
+        return (String) row.get("physical_key");
+    }
+
+    static Map<String, Object> requireOwner(JdbcTemplate jdbc, String tenant, String storage,
+            Map<String, Object> row, String lock) {
         if (!tenant.equals(text(row.get("tenant_id"))) || !storage.equals(text(row.get("storage_id")))
                 || !"REGISTERED".equals(row.get("registration_state")) || row.get("fence_operation_id") != null
                 || !(row.get("physical_key") instanceof String key)) {
@@ -416,7 +418,7 @@ public class SshWorkspaceStore
                 || !storage.equals(text(owners.getFirst().get("storage_id")))) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
-        return key;
+        return owners.getFirst();
     }
 
     private static String text(Object value) {

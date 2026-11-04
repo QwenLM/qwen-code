@@ -74,23 +74,25 @@ final class LocalStorageOwners {
     }
 
     static String key(JdbcTemplate jdbc, String tenant, String storage) {
-        return key(jdbc, tenant, storage, TransactionSynchronizationManager.isActualTransactionActive() ? " FOR UPDATE" : "");
+        String lock = TransactionSynchronizationManager.isActualTransactionActive() ? " FOR UPDATE" : "";
+        var alias = alias(jdbc, tenant, storage, lock);
+        requireOwner(jdbc, alias, lock);
+        return (String) alias.get("physical_key");
     }
 
-    static String key(JdbcTemplate jdbc, String tenant, String storage, String lock) {
-        var alias = alias(jdbc, tenant, storage, lock);
+    static Map<String, Object> requireOwner(JdbcTemplate jdbc, Map<String, Object> alias, String lock) {
         if (alias == null || !"LOCAL".equals(alias.get("storage_kind"))
                 || !java.util.Set.of("REGISTERED", "RETIRING").contains(alias.get("registration_state"))
                 || !(alias.get("physical_key") instanceof String physical)) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
-        var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_key, physical_key, storage_kind FROM ma_storage_owner WHERE storage_key = ?"
+        var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_key, physical_key, storage_kind, mount_state FROM ma_storage_owner WHERE storage_key = ?"
                 + lock, physical);
         if (owners.size() != 1 || !physical.equals(owners.getFirst().get("physical_key"))
                 || !"LOCAL".equals(owners.getFirst().get("storage_kind"))) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
-        return physical;
+        return owners.getFirst();
     }
     static String lockCovered(JdbcTemplate jdbc, String tenant, String storage) {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {

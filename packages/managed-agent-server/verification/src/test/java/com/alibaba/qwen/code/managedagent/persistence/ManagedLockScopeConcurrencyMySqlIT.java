@@ -51,7 +51,7 @@ class ManagedLockScopeConcurrencyMySqlIT {
         jdbc = new ManagedSchemaJdbcTemplate(database.source());
         transactions = new TransactionTemplate(new DataSourceTransactionManager(database.source()));
         agents = VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(),
-                events -> { }, mock(ManagedWorkspaceRegistry.class), new ManagedAgentProperties(), new SdkHarnessRules());
+                events -> {}, mock(ManagedWorkspaceRegistry.class), new ManagedAgentProperties(), new SdkHarnessRules());
     }
 
     @AfterEach
@@ -189,6 +189,29 @@ class ManagedLockScopeConcurrencyMySqlIT {
             assertThat(jdbc.queryForObject("SELECT claim_lease_until FROM ma_session_head WHERE head_kind = 'HARNESS'"
                     + " AND tenant_id = 'tenant' AND harness_session_id = ?", Long.class, fixture.session)).isNull();
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"LOCAL", "SSH_LOCAL"})
+    void physicalRecoveryKeysKeepTheirOriginalFenceSemantics(String kind) {
+        storageWriters(false);
+        jdbc.update("UPDATE ma_storage SET storage_kind = ?", kind);
+        jdbc.update("UPDATE ma_storage_owner SET storage_kind = ?", kind);
+        String readyKey = transactions.execute(status -> "LOCAL".equals(kind)
+                ? LocalStorageOwners.key(jdbc, TENANT, "storage") : SshWorkspaceStore.physicalKey(jdbc, TENANT, "storage"));
+        assertThat(readyKey).isEqualTo("d".repeat(64));
+        jdbc.update(fenceSql("physical"));
+        if ("LOCAL".equals(kind)) {
+            String recoveryKey = transactions.execute(status -> LocalStorageOwners.key(jdbc, TENANT, "storage"));
+            assertThat(recoveryKey).isEqualTo(readyKey);
+        } else {
+            assertThatThrownBy(() -> transactions.execute(status -> SshWorkspaceStore.physicalKey(jdbc, TENANT, "storage")))
+                    .isInstanceOf(RuntimeBrokerException.class);
+        }
+        assertThatThrownBy(() -> transactions.executeWithoutResult(status ->
+                WorkspaceMigrationAdmission.requirePhysicalOpenForAdmission(jdbc, TENANT, "storage")))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        failure -> assertThat(failure.getCode()).isEqualTo("workspace_unavailable"));
     }
 
     @ParameterizedTest
