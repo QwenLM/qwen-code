@@ -828,8 +828,22 @@ export function createDaemonWorkspaceService(
       decision: 'approve' | 'reject',
     ) {
       assertActiveGeneration();
-      // Load the workspace file for review only; this never trusts the
-      // folder or feeds the execution accessors.
+      // The live child rendered the card, so it persists the decision against
+      // that exact read. A re-read here could bind approval to a block the
+      // user never saw.
+      try {
+        const applied = await invokeWorkspaceCommand<{ reloaded?: boolean }>(
+          SERVE_CONTROL_EXT_METHODS.projectHooksApprove,
+          { decision },
+        );
+        if (applied?.reloaded) {
+          return { decision, reloaded: true };
+        }
+      } catch {
+        // No live channel, or the child predates the control method.
+      }
+      // Cold daemon: no child rendered a card, so this read is the subject
+      // the client was shown.
       const settings = loadSettings(boundWorkspace, {
         skipLoadEnvironment: true,
         skipWorkspaceSettings: false,
@@ -845,20 +859,9 @@ export function createDaemonWorkspaceService(
         decision === 'approve' ? 'approved' : 'rejected',
       );
       assertActiveGeneration();
-      // Best-effort live propagation: the persisted decision is
-      // authoritative, and every config re-reads the store on reload. A
-      // cold daemon (no ACP child) simply applies it on next start.
-      let reloaded = false;
-      try {
-        await invokeWorkspaceCommand(
-          SERVE_CONTROL_EXT_METHODS.projectHooksApprove,
-          { decision },
-        );
-        reloaded = true;
-      } catch {
-        // No live channel, or the child predates the control method.
-      }
-      return { decision, reloaded };
+      // The persisted decision is authoritative; every config re-reads the
+      // store on reload, so a cold daemon applies it on next start.
+      return { decision, reloaded: false };
     },
 
     async getWorkspaceTrustStatus(_ctx: WorkspaceRequestContext) {

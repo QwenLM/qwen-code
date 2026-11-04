@@ -160,7 +160,11 @@ async function gotoSession(
   );
 }
 
-/** Facet names requested for one workspace, in request order. */
+/**
+ * Facet names requested for one workspace, in request order. `hooks` stays
+ * out: the project-hooks approval card probes it once per mount, which is not
+ * sidebar overview traffic and would break the exact facet counts below.
+ */
 function overviewRequests(
   daemon: MockDaemonController,
   workspaceCwd: string,
@@ -171,7 +175,7 @@ function overviewRequests(
       (request) =>
         request.method === 'GET' &&
         request.path.startsWith(prefix) &&
-        /\/(mcp|skills|extensions|channels|memory|hooks)$/.test(request.path),
+        /\/(mcp|skills|extensions|channels|memory)$/.test(request.path),
     )
     .map((request) => request.path.slice(prefix.length));
 }
@@ -350,12 +354,6 @@ test('reads workspace metadata only while details or its menu are open @smoke', 
   await page.clock.install({ time: new Date('2026-01-01T00:00:00.000Z') });
   await page.clock.pauseAt(new Date('2026-01-01T01:00:00.000Z'));
   await gotoSession(page, scenario, daemon);
-  // The workspace-level project-hooks approval probe reads this route once
-  // per mount; let it settle before counting sidebar overview traffic.
-  await expect
-    .poll(() => overviewRequests(daemon, PRIMARY_CWD).length)
-    .toBeGreaterThan(0);
-  daemon.requests.length = 0;
   const header = page.getByRole('complementary').getByRole('button', {
     name: /^qwen-web-shell-e2e/,
   });
