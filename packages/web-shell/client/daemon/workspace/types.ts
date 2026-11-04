@@ -518,6 +518,11 @@ export type DaemonWorkspaceDirectoryPickerResult =
     };
 
 export interface DaemonWorkspaceActions {
+  setUiLanguage(
+    language: string,
+    scope: 'user' | 'workspace',
+    workspaceCwd?: string,
+  ): Promise<void>;
   // Sessions
   listSessions(
     options?: DaemonSessionListPageOptions,

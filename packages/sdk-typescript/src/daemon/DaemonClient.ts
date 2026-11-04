@@ -6696,6 +6696,7 @@ export class DaemonClient {
       'POST /language',
       {
         method: 'POST',
+        mode: 'rest',
         body: {
           language,
           syncOutputLanguage: opts?.syncOutputLanguage ?? false,
@@ -8638,6 +8639,18 @@ export class WorkspaceDaemonClient {
       'POST /workspaces/:workspace/memory',
       { ...req, scope: 'workspace' },
       clientId,
+    );
+  }
+
+  setUiLanguage(
+    language: string,
+    clientId?: string,
+  ): Promise<SetUserLanguageResult> {
+    return this.client.workspaceJsonRequest<SetUserLanguageResult>(
+      this.workspaceSelector,
+      '/language',
+      'POST /workspaces/:workspace/language',
+      { method: 'POST', body: { language }, clientId, mode: 'rest' },
     );
   }
 

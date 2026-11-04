@@ -803,6 +803,7 @@ const {
       refreshBrand: vi.fn(),
     },
     mockWorkspaceActions: {
+      setUiLanguage: vi.fn().mockResolvedValue(undefined),
       readWorkspaceFile: vi.fn().mockResolvedValue({
         content: '',
         truncated: false,
@@ -1763,7 +1764,6 @@ vi.mock('./components/messages/SettingsMessage', async () => {
           {
             'data-testid': 'change-language-workspace',
             type: 'button',
-            // Workspace tab language change → /language ui en --project.
             onClick: () => props.onLanguageChange?.('en', 'workspace'),
           },
           'language (workspace)',
@@ -12651,6 +12651,7 @@ beforeEach(() => {
   mockStore.getSnapshot.mockClear();
   mockStore.dispatch.mockClear();
   mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({ skills: [] });
+  mockWorkspaceActions.setUiLanguage.mockReset().mockResolvedValue(undefined);
   mockWorkspaceActions.readWorkspaceFile.mockReset();
   mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
     content: '',
@@ -27667,17 +27668,18 @@ describe('App session callbacks', () => {
     await flush();
 
     expect(accepted).toBe(true);
-    expect(
-      mockSessionActions.sendPrompt.mock.calls.some(
-        (c) => c[0] === '/language ui ru',
-      ),
-    ).toBe(true);
+    expect(mockWorkspaceActions.setUiLanguage).toHaveBeenCalledWith(
+      'ru',
+      'user',
+      expect.any(String),
+    );
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     // The invalid-language toast is the gate rejecting the locale.
     expect(onToast).not.toHaveBeenCalledWith(
       'error',
       expect.stringContaining('Invalid language'),
     );
-    // handleLanguageChange runs on the sendPrompt success path.
+    // Notify the host after the sessionless settings write succeeds.
     expect(onLanguageChange).toHaveBeenCalledWith('ru');
   });
 
@@ -44183,7 +44185,7 @@ describe('App session callbacks', () => {
     expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
   });
 
-  it('sends /language ui --project for a workspace-scoped language change from Settings', async () => {
+  it('syncs a workspace-scoped UI language without sending a prompt', async () => {
     const onLanguageChange = vi.fn();
     const { container } = renderApp({ onLanguageChange });
     await flush();
@@ -44201,11 +44203,12 @@ describe('App session callbacks', () => {
     });
     await flush();
 
-    expect(
-      mockSessionActions.sendPrompt.mock.calls.some(
-        (c) => c[0] === '/language ui en --project',
-      ),
-    ).toBe(true);
+    expect(mockWorkspaceActions.setUiLanguage).toHaveBeenCalledWith(
+      'en',
+      'workspace',
+      expect.any(String),
+    );
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(onLanguageChange).not.toHaveBeenCalled();
   });
 
@@ -44257,7 +44260,7 @@ describe('App session callbacks', () => {
     ).toBe(true);
   });
 
-  it('does not name a session created by a settings language change', async () => {
+  it('does not create a session for a settings UI language change', async () => {
     mockConnection.sessionId = undefined;
     mockConnection.displayName = undefined;
     const { container } = renderApp();
@@ -44276,12 +44279,15 @@ describe('App session callbacks', () => {
     });
     await flush();
 
-    expect(
-      mockSessionActions.sendPrompt.mock.calls.some(
-        (c) => c[0] === '/language ui en --project',
-      ),
-    ).toBe(true);
-    expect(mockSessionActions.createSession).toHaveBeenCalled();
+    expect(mockWorkspaceActions.setUiLanguage).toHaveBeenCalledWith(
+      'en',
+      'workspace',
+      expect.any(String),
+    );
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.setModel).not.toHaveBeenCalled();
+    expect(mockSessionActions.refreshCommands).not.toHaveBeenCalled();
     expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
   });
 
@@ -44368,7 +44374,7 @@ describe('App session callbacks', () => {
     await act(async () => {
       container
         .querySelector<HTMLButtonElement>(
-          '[data-testid="change-language-workspace"]',
+          '[data-testid="change-output-language"]',
         )
         ?.click();
       await Promise.resolve();
@@ -49883,7 +49889,7 @@ describe('settings-derived theme and language (#11955)', () => {
     await flush();
     expect(onLanguageResolved).toHaveBeenLastCalledWith('zh-CN');
 
-    mockSessionActions.sendPrompt.mockRejectedValueOnce(
+    mockWorkspaceActions.setUiLanguage.mockRejectedValueOnce(
       new Error('daemon refused'),
     );
     testState.prompt = '/settings';
@@ -49936,7 +49942,7 @@ describe('settings-derived theme and language (#11955)', () => {
     const onLanguageResolved = vi.fn();
     renderApp({ onLanguageChange, onLanguageResolved });
     await flush();
-    mockSessionActions.sendPrompt.mockRejectedValueOnce(
+    mockWorkspaceActions.setUiLanguage.mockRejectedValueOnce(
       new Error('daemon refused'),
     );
 
@@ -49947,7 +49953,8 @@ describe('settings-derived theme and language (#11955)', () => {
     });
     await flush();
 
-    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.setUiLanguage).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(onLanguageResolved).toHaveBeenLastCalledWith('zh-CN');
     expect(onLanguageChange).not.toHaveBeenCalled();
   });
@@ -49956,7 +49963,7 @@ describe('settings-derived theme and language (#11955)', () => {
     const onLanguageResolved = vi.fn();
     renderApp({ language: 'en', onLanguageResolved });
     await flush();
-    mockSessionActions.sendPrompt.mockRejectedValueOnce(
+    mockWorkspaceActions.setUiLanguage.mockRejectedValueOnce(
       new Error('daemon refused'),
     );
 
@@ -49967,7 +49974,8 @@ describe('settings-derived theme and language (#11955)', () => {
     });
     await flush();
 
-    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.setUiLanguage).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(onLanguageResolved).not.toHaveBeenCalled();
   });
 });

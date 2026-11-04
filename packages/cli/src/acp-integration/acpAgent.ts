@@ -13372,6 +13372,9 @@ class QwenAgent implements Agent {
         // Pick up what the daemon just persisted so this process stops
         // serving a stale merged view.
         this.settings.reloadScopeFromDisk(SettingScope.User);
+        if (params['scope'] === 'workspace') {
+          this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        }
 
         // UI-language-only switches do not change the system instruction;
         // refresh sessions only when the output language moved.

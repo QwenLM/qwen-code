@@ -5,7 +5,7 @@
  */
 
 import type { Application, Request, RequestHandler, Response } from 'express';
-import { SettingScope } from '../../config/settings.js';
+import { loadSettings, SettingScope } from '../../config/settings.js';
 import { getCurrentLanguage, setLanguageAsync } from '../../i18n/index.js';
 import {
   resolveOutputLanguageOrPreserveAuto,
@@ -14,6 +14,12 @@ import {
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import {
+  requireTrustedWorkspaceRuntime,
+  resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
+} from '../workspace-route-runtime.js';
+import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 
 export interface UserLanguageRouteDeps {
   /**
@@ -30,6 +36,7 @@ export interface UserLanguageRouteDeps {
     scope: SettingScope,
     key: string,
     value: unknown,
+    assertGenerationOpen?: () => void,
   ) => Promise<unknown>;
   workspaceRegistry: WorkspaceRegistry;
   parseAndValidateClientId: (
@@ -56,6 +63,99 @@ export function registerUserLanguageRoutes(
   app: Application,
   deps: UserLanguageRouteDeps,
 ): void {
+  // Selected-runtime scoped; cold runtimes read the persisted locale at startup.
+  app.post(
+    '/workspaces/:workspace/language',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const body = deps.safeBody(req);
+      const language = body['language'];
+      if (
+        typeof language !== 'string' ||
+        !deps.languageCodes.includes(language) ||
+        (body['syncOutputLanguage'] !== undefined &&
+          body['syncOutputLanguage'] !== false)
+      ) {
+        res.status(400).json({ code: 'invalid_language' });
+        return;
+      }
+      const clientId = parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        runtime.bridge,
+      );
+      if (clientId === null) return;
+      const assertGenerationOpen = () => runtime.generationGuard?.assertOpen();
+      try {
+        assertGenerationOpen();
+        await deps.persistSetting(
+          runtime.workspaceCwd,
+          SettingScope.Workspace,
+          'general.language',
+          language,
+          assertGenerationOpen,
+        );
+        assertGenerationOpen();
+        const configuredLanguage = loadSettings(runtime.workspaceCwd, {
+          skipLoadEnvironment: true,
+          workspaceTrusted: true,
+        }).merged.general?.language;
+        const effective =
+          typeof configuredLanguage === 'string'
+            ? configuredLanguage
+            : language;
+        let failed = 0;
+        let refreshedRuntimes = 0;
+        let sessions = 0;
+        try {
+          const result = await runtime.bridge.setUserLanguage({
+            language: effective,
+            syncOutputLanguage: false,
+            scope: 'workspace',
+          });
+          refreshedRuntimes = 1;
+          sessions = result.sessions;
+          failed = result.failed;
+        } catch (error) {
+          if (!(error instanceof SessionNotFoundError)) {
+            failed = 1;
+            writeStderrLine(
+              `qwen serve: workspace language sync failed: ${String(error)}`,
+            );
+          }
+        }
+        assertGenerationOpen();
+        try {
+          runtime.bridge.publishWorkspaceEvent({
+            type: 'language_changed',
+            data: { language: effective, outputLanguage: null },
+            ...(clientId ? { originatorClientId: clientId } : {}),
+          });
+        } catch (error) {
+          writeStderrLine(
+            `qwen serve: workspace language event publish failed: ${String(error)}`,
+          );
+        }
+        res.status(200).json({
+          language: effective,
+          outputLanguage: null,
+          refresh: { runtimes: refreshedRuntimes, sessions, failed },
+        });
+      } catch (error) {
+        if (sendGenerationClosedError(res, error)) return;
+        res.status(500).json({
+          code: 'persist_error',
+          error: 'Failed to change workspace UI language',
+        });
+      }
+    },
+  );
   app.post('/language', deps.mutate(), async (req, res) => {
     const body = deps.safeBody(req);
     const language = body['language'];

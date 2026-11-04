@@ -6940,17 +6940,22 @@ export function createSessionControlPlane(
   // re-reads the persisted settings when it starts; a Managed channel that
   // starts later is sent this before its first session request instead.
   let rememberedUserLanguage:
-    | { language: string; syncOutputLanguage: boolean }
+    | { language: string; syncOutputLanguage: boolean; scope?: 'workspace' }
     | undefined;
   const sendUserLanguage = (
     info: ChannelInfo,
-    params: { language: string; syncOutputLanguage: boolean },
+    params: {
+      language: string;
+      syncOutputLanguage: boolean;
+      scope?: 'workspace';
+    },
   ): Promise<{ language: string; sessions: number; failed: number }> => {
     const response = withTimeout(
       raceLongLived(
         info.connection.extMethod(SERVE_CONTROL_EXT_METHODS.userLanguage, {
           language: params.language,
           syncOutputLanguage: params.syncOutputLanguage,
+          ...(params.scope ? { scope: params.scope } : {}),
         }),
         getChannelClosedReject(info),
       ),
@@ -14866,6 +14871,7 @@ export function createSessionControlPlane(
         rememberedUserLanguage = {
           language: params.language,
           syncOutputLanguage: params.syncOutputLanguage,
+          ...(params.scope ? { scope: params.scope } : {}),
         };
       }
       // Sessionless: runs on every channel that is already live — one per

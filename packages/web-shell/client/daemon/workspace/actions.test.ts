@@ -9,6 +9,26 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDaemonWorkspaceActions } from './actions.js';
 
 describe('workspace actions', () => {
+  it('changes UI language without a session and targets the requested workspace', async () => {
+    const setUserLanguage = vi.fn().mockResolvedValue({ language: 'ru' });
+    const setUiLanguage = vi.fn().mockResolvedValue({ language: 'ru' });
+    const workspaceByCwd = vi.fn(() => ({ setUiLanguage }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ setUserLanguage, workspaceByCwd }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/primary',
+      baseUrl: '',
+    });
+    await actions.setUiLanguage('ru', 'user');
+    expect(setUserLanguage).toHaveBeenCalledWith('ru');
+    await actions.setUiLanguage('ru', 'workspace', '/secondary');
+    expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
+    expect(setUiLanguage).toHaveBeenCalledWith('ru');
+    await expect(actions.setUiLanguage('ru', 'workspace')).rejects.toThrow(
+      'unavailable',
+    );
+    expect(setUserLanguage).toHaveBeenCalledTimes(1);
+  });
   afterEach(() => {
     vi.useRealTimers();
   });

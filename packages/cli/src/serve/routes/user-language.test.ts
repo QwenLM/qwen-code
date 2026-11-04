@@ -8,8 +8,9 @@ import { beforeEach, describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import { registerUserLanguageRoutes } from './user-language.js';
-import { SettingScope } from '../../config/settings.js';
+import { loadSettings, SettingScope } from '../../config/settings.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
+import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 import { setLanguageAsync, getCurrentLanguage } from '../../i18n/index.js';
 import { updateOutputLanguageFile } from '../../i18n/languageUtils.js';
 
@@ -36,6 +37,15 @@ vi.mock('../../i18n/languageUtils.js', async (importOriginal) => {
 
 const LANGUAGE_CODES = ['en', 'zh', 'auto'];
 
+vi.mock('../../config/settings.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../config/settings.js')>();
+  return {
+    ...actual,
+    loadSettings: vi.fn(() => ({ merged: { general: {} } })),
+  };
+});
+
 function makeRuntime(overrides: {
   trusted: boolean;
   cwd: string;
@@ -47,7 +57,9 @@ function makeRuntime(overrides: {
   return {
     trusted: overrides.trusted,
     workspaceCwd: overrides.cwd,
+    generationGuard: { assertOpen: vi.fn() },
     bridge: {
+      knownClientIds: vi.fn(() => new Set<string>()),
       setUserLanguage: vi.fn(
         overrides.setUserLanguage ??
           (async (params: { language: string }) => ({
@@ -65,6 +77,12 @@ function makeApp(
   overrides: {
     runtimes?: Array<ReturnType<typeof makeRuntime>>;
     persistSetting?: ReturnType<typeof vi.fn>;
+    entryState?:
+      | 'active'
+      | 'draining'
+      | 'transitioning'
+      | 'blocked'
+      | 'removed';
     parseAndValidateClientId?: (
       req: express.Request,
       res: express.Response,
@@ -85,7 +103,15 @@ function makeApp(
       req.body && typeof req.body === 'object' ? req.body : {},
     languageCodes: LANGUAGE_CODES,
     persistSetting,
-    workspaceRegistry: { list: () => runtimes } as never,
+    workspaceRegistry: {
+      list: () => runtimes,
+      getEntryByWorkspaceId: (id: string) => {
+        const runtime = runtimes.find((r) => r.workspaceCwd === `/${id}`);
+        return runtime
+          ? { state: overrides.entryState ?? 'active', current: { runtime } }
+          : undefined;
+      },
+    } as never,
     parseAndValidateClientId:
       overrides.parseAndValidateClientId ?? (() => undefined),
   });
@@ -95,11 +121,208 @@ function makeApp(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(loadSettings).mockReturnValue({
+    merged: { general: {} },
+  } as ReturnType<typeof loadSettings>);
   vi.mocked(setLanguageAsync).mockReset().mockResolvedValue(undefined);
   vi.mocked(getCurrentLanguage).mockReturnValue('zh');
 });
 
 describe('POST /language', () => {
+  it.each(['draining', 'transitioning', 'blocked', 'removed'] as const)(
+    'rejects a %s workspace without side effects',
+    async (entryState) => {
+      const runtime = makeRuntime({ trusted: true, cwd: '/secondary' });
+      const { app, persistSetting } = makeApp({
+        runtimes: [runtime],
+        entryState,
+      });
+      const res = await request(app)
+        .post('/workspaces/secondary/language')
+        .send({ language: 'zh' });
+      expect(res.status).toBe(503);
+      expect(persistSetting).not.toHaveBeenCalled();
+      expect(runtime.bridge.setUserLanguage).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects a closed runtime generation before writing settings', async () => {
+    const runtime = makeRuntime({ trusted: true, cwd: '/secondary' });
+    runtime.generationGuard.assertOpen.mockImplementation(() => {
+      throw new WorkspaceGenerationClosedError();
+    });
+    const { app, persistSetting } = makeApp({ runtimes: [runtime] });
+    const res = await request(app)
+      .post('/workspaces/secondary/language')
+      .send({ language: 'zh' });
+    expect(res.status).toBe(503);
+    expect(persistSetting).not.toHaveBeenCalled();
+    expect(runtime.bridge.setUserLanguage).not.toHaveBeenCalled();
+  });
+
+  it('does not sync a replaced generation after persistence', async () => {
+    const runtime = makeRuntime({ trusted: true, cwd: '/secondary' });
+    const persistSetting = vi.fn(async () => {
+      runtime.generationGuard.assertOpen.mockImplementation(() => {
+        throw new WorkspaceGenerationClosedError();
+      });
+    });
+    const { app } = makeApp({ runtimes: [runtime], persistSetting });
+    expect(
+      (
+        await request(app)
+          .post('/workspaces/secondary/language')
+          .send({ language: 'zh' })
+      ).status,
+    ).toBe(503);
+    expect(runtime.bridge.setUserLanguage).not.toHaveBeenCalled();
+    expect(runtime.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+  });
+
+  it('validates client ownership against the selected workspace', async () => {
+    const runtime = makeRuntime({ trusted: true, cwd: '/secondary' });
+    const { app, persistSetting } = makeApp({ runtimes: [runtime] });
+    const res = await request(app)
+      .post('/workspaces/secondary/language')
+      .set('x-qwen-client-id', 'foreign-client')
+      .send({ language: 'zh' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_client_id');
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('uses the effective workspace locale after a higher-priority override', async () => {
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { general: { language: 'en' } },
+    } as ReturnType<typeof loadSettings>);
+    const runtime = makeRuntime({ trusted: true, cwd: '/secondary' });
+    const { app } = makeApp({ runtimes: [runtime] });
+    const res = await request(app)
+      .post('/workspaces/secondary/language')
+      .send({ language: 'zh' });
+    expect(res.status).toBe(200);
+    expect(res.body.language).toBe('en');
+    expect(runtime.bridge.setUserLanguage).toHaveBeenCalledWith({
+      language: 'en',
+      syncOutputLanguage: false,
+      scope: 'workspace',
+    });
+  });
+
+  it('does not report a persisted write as failed when event delivery fails', async () => {
+    const runtime = makeRuntime({ trusted: true, cwd: '/secondary' });
+    runtime.bridge.publishWorkspaceEvent.mockImplementation(() => {
+      throw new Error('closed listener');
+    });
+    const { app } = makeApp({ runtimes: [runtime] });
+    expect(
+      (
+        await request(app)
+          .post('/workspaces/secondary/language')
+          .send({ language: 'zh' })
+      ).status,
+    ).toBe(200);
+  });
+
+  it('does not synchronize a locale when persistence fails', async () => {
+    const runtime = makeRuntime({ trusted: true, cwd: '/secondary' });
+    const { app } = makeApp({
+      runtimes: [runtime],
+      persistSetting: vi.fn().mockRejectedValue(new Error('disk full')),
+    });
+    expect(
+      (
+        await request(app)
+          .post('/workspaces/secondary/language')
+          .send({ language: 'zh' })
+      ).status,
+    ).toBe(500);
+    expect(runtime.bridge.setUserLanguage).not.toHaveBeenCalled();
+    expect(runtime.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+  });
+
+  it('persists a secondary workspace UI language without touching user settings or siblings', async () => {
+    const primary = makeRuntime({ trusted: true, cwd: '/primary' });
+    const secondary = makeRuntime({ trusted: true, cwd: '/secondary' });
+    const { app, persistSetting } = makeApp({ runtimes: [primary, secondary] });
+    const res = await request(app)
+      .post('/workspaces/secondary/language')
+      .send({ language: 'zh' });
+    expect(res.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalledExactlyOnceWith(
+      '/secondary',
+      SettingScope.Workspace,
+      'general.language',
+      'zh',
+      expect.any(Function),
+    );
+    expect(secondary.bridge.setUserLanguage).toHaveBeenCalledWith({
+      language: 'zh',
+      syncOutputLanguage: false,
+      scope: 'workspace',
+    });
+    expect(primary.bridge.setUserLanguage).not.toHaveBeenCalled();
+    expect(primary.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+    expect(updateOutputLanguageFile).not.toHaveBeenCalled();
+    expect(setLanguageAsync).not.toHaveBeenCalled();
+  });
+
+  it('accepts a cold workspace without starting an ACP channel', async () => {
+    const runtime = makeRuntime({
+      trusted: true,
+      cwd: '/secondary',
+      setUserLanguage: async () => {
+        throw new SessionNotFoundError('user-language');
+      },
+    });
+    const { app, persistSetting } = makeApp({ runtimes: [runtime] });
+    const res = await request(app)
+      .post('/workspaces/secondary/language')
+      .send({ language: 'en' });
+    expect(res.status).toBe(200);
+    expect(res.body.refresh).toEqual({ runtimes: 0, sessions: 0, failed: 0 });
+    expect(persistSetting).toHaveBeenCalledOnce();
+  });
+
+  it('rejects untrusted workspace writes', async () => {
+    const { app, persistSetting } = makeApp({
+      runtimes: [makeRuntime({ trusted: false, cwd: '/secondary' })],
+    });
+    expect(
+      (
+        await request(app)
+          .post('/workspaces/secondary/language')
+          .send({ language: 'en' })
+      ).status,
+    ).toBe(403);
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown workspace instead of writing primary settings', async () => {
+    const { app, persistSetting } = makeApp();
+    expect(
+      (
+        await request(app)
+          .post('/workspaces/missing/language')
+          .send({ language: 'en' })
+      ).status,
+    ).toBe(400);
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('does not let a workspace UI-language request change output language', async () => {
+    const { app, persistSetting } = makeApp({
+      runtimes: [makeRuntime({ trusted: true, cwd: '/secondary' })],
+    });
+    expect(
+      (
+        await request(app)
+          .post('/workspaces/secondary/language')
+          .send({ language: 'en', syncOutputLanguage: true })
+      ).status,
+    ).toBe(400);
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
   it('rejects an unknown language code without persisting', async () => {
     const { app, persistSetting } = makeApp();
 

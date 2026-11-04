@@ -62,6 +62,18 @@ export function createDaemonWorkspaceActions({
       getClient(),
     )(daemonRoutePath(url, baseUrl), init);
   return {
+    async setUiLanguage(language, scope, workspaceCwd) {
+      const client = requireClient(getClient, 'Change UI language failed');
+      if (scope === 'workspace' && !workspaceCwd) {
+        throw new Error('The selected workspace is unavailable');
+      }
+      await withActionTimeout(
+        scope === 'workspace' && workspaceCwd
+          ? client.workspaceByCwd(workspaceCwd).setUiLanguage(language)
+          : client.setUserLanguage(language),
+        'Change UI language timed out',
+      );
+    },
     async listSessions(options) {
       const client = requireClient(getClient, 'List sessions failed');
       const cwd = getWorkspaceCwd();

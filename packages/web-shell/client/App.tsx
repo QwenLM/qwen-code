@@ -14548,18 +14548,12 @@ export function App({
       // row on the Workspace tab there; keep this guard for a scope that was
       // picked before the session context settled.
       const effectiveScope = sessionIsStandalone ? 'user' : scope;
-      // Forward the settings tab's scope to the command so a Workspace-tab edit
-      // persists to workspace settings instead of always writing user scope
-      // (the /language command otherwise defaults to user). The command still
-      // switches the daemon's live locale so command descriptions re-localize —
-      // which a plain scoped settings write wouldn't do.
-      const scopeFlag =
-        effectiveScope === 'workspace' ? ' --project' : ' --global';
-      const command = `/language ui ${nextLanguage}${scopeFlag}`;
       const refreshSettings = async () => {
         if (!owner.current.isCurrent()) return;
         await Promise.all([
-          sessionActions.refreshCommands(),
+          ...(connectionRef.current.sessionId
+            ? [sessionActions.refreshCommands()]
+            : []),
           reloadWorkspaceSettings(),
         ]);
       };
@@ -14581,10 +14575,12 @@ export function App({
         setSelectedLanguage(nextLanguage);
         onLanguageResolvedRef.current?.(nextLanguage);
       }
-      sendPrompt(command, undefined, undefined, {
-        ownerRef: owner,
-        suppressSessionTitle: true,
-      })
+      workspaceActions
+        .setUiLanguage(
+          nextLanguage === 'zh-CN' ? 'zh' : nextLanguage,
+          effectiveScope,
+          getComposerWorkspaceCwd(),
+        )
         .then(() => {
           if (!owner.current.isCurrent()) return;
           if (effectiveScope === 'user') {
@@ -14613,7 +14609,8 @@ export function App({
       reportError,
       providedLanguage,
       sessionWriteBlocked,
-      sendPrompt,
+      workspaceActions,
+      getComposerWorkspaceCwd,
       selectedLanguage,
       sessionActions,
       sessionOwnerGuard,
@@ -18714,61 +18711,21 @@ export function App({
                 pushToast('error', t('language.invalid'));
                 return true;
               }
-              const owner = { current: sessionOwnerGuard.capture() };
-              const previousLanguage = selectedLanguage;
-              // The daemon sync is what keeps the agent answering in the
-              // language the chrome just switched to, so when it cannot run
-              // (turn in flight, or a Goal owning the session) refuse the
-              // command instead of switching the UI alone — the language
-              // picker treats the identical condition the same way.
               if (commandBlocked) return blockCommand();
-              setSelectedLanguage(nextLanguage);
-              if (providedLanguage === undefined) {
-                onLanguageResolvedRef.current?.(nextLanguage);
+              const projectScope = /(?:^|\s)--project(?:\s|$)/.test(args);
+              const globalScope = /(?:^|\s)--global(?:\s|$)/.test(args);
+              if (projectScope && globalScope) {
+                pushToast('error', t('language.usage'));
+                return true;
               }
-              {
-                const deferComposerCommit =
-                  Boolean(
-                    prepareSubmitRef.current || onSubmitBeforeRef.current,
-                  ) || createSessionPromiseRef.current !== null;
-                const clearComposerOnPromptStart =
-                  !connectionRef.current.sessionId || deferComposerCommit;
-                sendPrompt(
-                  `/language ui ${nextLanguage}`,
-                  undefined,
-                  undefined,
-                  {
-                    ownerRef: owner,
-                    suppressSessionTitle: true,
-                    clearComposerOnPromptStart,
-                    commitComposerAccepted: clearComposerOnPromptStart
-                      ? commitComposerAccepted
-                      : undefined,
-                  },
-                )
-                  .then(() => {
-                    if (!owner.current.isCurrent()) return;
-                    handleLanguageChange(nextLanguage);
-                    return sessionActions
-                      .refreshCommands()
-                      .catch((error: unknown) => {
-                        if (!owner.current.isCurrent()) return;
-                        reportError(
-                          error,
-                          'Failed to refresh commands after /language',
-                        );
-                      });
-                  })
-                  .catch((error: unknown) => {
-                    if (!owner.current.isCurrent()) return;
-                    setSelectedLanguage(previousLanguage);
-                    if (providedLanguage === undefined) {
-                      onLanguageResolvedRef.current?.(previousLanguage);
-                    }
-                    reportError(error, 'Failed to sync /language command');
-                  });
-                return clearComposerOnPromptStart ? false : true;
+              if (projectScope && !workspaceContextActive) {
+                pushToast('info', t('session.workspaceActionUnavailable'));
+                return true;
               }
+              handleSettingsLanguageChange(
+                nextLanguage,
+                projectScope ? 'workspace' : 'user',
+              );
               return true;
             }
           }
@@ -19732,7 +19689,7 @@ export function App({
       handleThemeChange,
       handleSetMode,
       setComposerMode,
-      handleLanguageChange,
+      handleSettingsLanguageChange,
       blockCommand,
       createSideTask,
       sideTasksAvailable,
@@ -19745,7 +19702,6 @@ export function App({
       runVisibleBtw,
       reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
-      providedLanguage,
       selectedLanguage,
       setPendingModel,
       selectWelcomeModel,
