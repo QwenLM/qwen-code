@@ -50,7 +50,7 @@ class ManagedTurnCommandOperationMySqlIT extends ManagedTurnCommandOperationTest
      */
     @Test
     void settlesInTwoSessionsDoNotLockEachOthersPendingCancels() throws Exception {
-        String other = store.insertSessionCommand(TENANT, "CREATE_SESSION",
+        String other = store.insertSessionCommand(TENANT, "actor", "CREATE_SESSION",
                 "create-other", "digest-other", "qwen-code", null, null,
                 List.of(), null).sessionId();
         Map<String, Admission> ended = new HashMap<>();

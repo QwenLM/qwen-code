@@ -204,6 +204,7 @@ class HostedConcurrentTurnBurstMySqlIT {
             MvcResult created = mvc.perform(post(
                             "/api/agent/web-shell/v1/sessions/create")
                             .header(TenantContextFilter.HEADER, tenant)
+                            .principal(VerificationFixtures.actor(tenant, "actor"))
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"idempotencyKey\":\""
                                     + UUID.randomUUID()
@@ -227,6 +228,7 @@ class HostedConcurrentTurnBurstMySqlIT {
             MvcResult submitted = mvc.perform(post(
                             "/api/agent/web-shell/v1/turns/submit")
                             .header(TenantContextFilter.HEADER, tenant)
+                            .principal(VerificationFixtures.actor(tenant, "actor"))
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"idempotencyKey\":\""
                                     + UUID.randomUUID()

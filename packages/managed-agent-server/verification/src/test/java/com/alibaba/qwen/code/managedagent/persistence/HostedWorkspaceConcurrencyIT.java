@@ -284,10 +284,14 @@ class HostedWorkspaceConcurrencyIT {
                 String holderRuntime = UUID.randomUUID().toString();
                 String claim = UUID.randomUUID().toString();
                 assertOk(broker.acquire(firstSession, holderRuntime, claim).get(20, TimeUnit.SECONDS));
-                var held = row(jdbc, tenant);
-                assertThat(member(jdbc, holderRuntime)).isEqualTo(held.get("storage_key"));
+                var single = row(jdbc, tenant);
+                assertThat(single.get("member_count")).isEqualTo(1L);
+                assertThat(member(jdbc, holderRuntime)).isEqualTo(single.get("storage_key"));
                 String rival = UUID.randomUUID().toString();
                 assertOk(broker.acquire(secondSession, rival).get(20, TimeUnit.SECONDS));
+                var held = row(jdbc, tenant);
+                assertThat(held.get("member_count")).isEqualTo(2L);
+                assertThat(member(jdbc, holderRuntime)).isEqualTo(held.get("storage_key"));
                 assertThat(member(jdbc, rival)).isEqualTo(held.get("storage_key"));
 
                 // #13800: unfinished work keeps the mount honestly — the
@@ -333,6 +337,7 @@ class HostedWorkspaceConcurrencyIT {
                 assertThat(mount.body()).contains("\"mountReleased\":true");
 
                 var freed = row(jdbc, tenant);
+                assertThat(freed.get("member_count")).isEqualTo(1L);
                 for (String field : List.of("holder_key", "binding_id", "runtime_generation", "runtime_session_id")) {
                     assertThat(freed.get(field)).as("%s", field).isNull();
                 }
@@ -354,6 +359,7 @@ class HostedWorkspaceConcurrencyIT {
                 assertOk(broker.postAsync("/tool-sessions/" + holderRuntime + ":release",
                         Map.of("harnessSessionId", firstSession)).get(20, TimeUnit.SECONDS));
                 assertThat(row(jdbc, tenant).get("holder_key")).isNull();
+                assertThat(row(jdbc, tenant).get("member_count")).isEqualTo(0L);
                 assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session"
                         + " WHERE runtime_session_id = ?", String.class, holderRuntime)).isEqualTo("RELEASED");
                 // An unreconciled original identity keeps its member without excluding unrelated work.

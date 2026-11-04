@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.RenewWriterRequest;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -63,6 +64,13 @@ public final class ExtensionRecordJournal {
         writerGeneration = store.acquireWriter(tenantId, sessionId, TOKEN,
                 new AcquireWriterRequest(workspaceId, WRITER, 60_000L))
                 .writerGeneration();
+        return this;
+    }
+
+    /** Renews this fixture's existing fenced writer without changing its lease duration. */
+    public ExtensionRecordJournal renew() {
+        store.renewWriter(tenantId, sessionId, TOKEN,
+                new RenewWriterRequest(workspaceId, WRITER, writerGeneration, 60_000L));
         return this;
     }
 

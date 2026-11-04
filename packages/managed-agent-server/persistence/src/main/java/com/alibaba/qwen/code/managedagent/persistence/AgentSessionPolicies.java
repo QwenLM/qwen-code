@@ -611,7 +611,7 @@ final class AgentSessionPolicies {
         var namespace = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace.SESSION_COMMAND;
         var scopeKind = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope.ACTOR;
         ManagedReceipts.Receipt replay = ManagedReceipts.find(jdbc, namespace, tenantId,
-                scopeKind, scope, key, false);
+                scopeKind, scope, key, true);
         if (replay != null) {
             if (!digest.equals(replay.requestDigest())
                     || !sessionId.equals(replay.sessionId())
@@ -636,7 +636,7 @@ final class AgentSessionPolicies {
         if (!WorkspaceToolProfiles.supportsApprovalMode(mode) || "auto".equals(mode) && !autoSupported) {
             throw new ManagedAgentException(400, "unsupported_approval_mode", "The approval mode is unavailable");
         }
-        var currentPolicy = jdbc.queryForMap("SELECT approval_revision, permission_rules_json FROM ma_session WHERE tenant_id=? AND session_id=?",
+        var currentPolicy = jdbc.queryForMap("SELECT approval_revision, permission_rules_json, is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE",
                 tenantId, sessionId);
         Map<String, List<String>> rules = requestedRules == null ? storeRows.readPermissionRules((String) currentPolicy.get("permission_rules_json"))
                 : harnessRules.nonEmptyPermissionRules(harnessRules.permissionRules(requestedRules));
@@ -644,8 +644,7 @@ final class AgentSessionPolicies {
             throw new ManagedAgentException(409, "unsupported_feature", "Permission rules are unavailable");
         }
         boolean planMode = requestedPlanMode == null
-                ? Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
-                        Boolean.class, tenantId, sessionId)) : requestedPlanMode;
+                ? Boolean.TRUE.equals(currentPolicy.get("is_plan_enabled")) : requestedPlanMode;
         if (planMode && (!planModeSupported || !supportsPlanMode(session))) {
             throw new ManagedAgentException(409, "unsupported_feature", "Plan mode is unavailable");
         }
@@ -665,9 +664,12 @@ final class AgentSessionPolicies {
         }
         long revision = current + 1;
         long now = clock.millis();
-        jdbc.update("UPDATE ma_session SET selected_approval_mode = ?, approval_revision = ?, is_plan_enabled = ?, permission_rules_json = ?, gmt_modified = ?,"
+        int changed = jdbc.update("UPDATE ma_session SET selected_approval_mode = ?, approval_revision = ?, is_plan_enabled = ?, permission_rules_json = ?, gmt_modified = ?,"
                 + " version = version + 1 WHERE tenant_id = ? AND session_id = ? AND approval_revision = ?",
                 mode, revision, planMode, rules == null ? null : storeRows.writeJson(rules), now, tenantId, sessionId, current);
+        if (changed != 1) {
+            throw new ManagedAgentException(409, "approval_selection_conflict", "The approval revision changed");
+        }
         ManagedReceipts.insert(jdbc, namespace, tenantId, scopeKind, scope, key, digest,
                 "SET_APPROVAL", actorId.getBytes(StandardCharsets.UTF_8), sessionId, null,
                 "COMPLETED", session.status(), true, now);

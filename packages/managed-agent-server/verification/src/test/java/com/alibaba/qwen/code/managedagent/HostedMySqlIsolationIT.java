@@ -28,10 +28,10 @@ class HostedMySqlIsolationIT {
         var jdbc = new JdbcTemplate(source);
         try (var spring = start()) {
             var store = spring.getBean(ManagedAgentStore.class);
-            String session = store.insertSessionCommand("isolation", "CREATE_SESSION",
+            String session = store.insertSessionCommand("isolation", "actor", "CREATE_SESSION",
                     "close-session", "digest", "qwen-code", null, null, List.of(), null).sessionId();
             store.beginOperation("isolation", session, OperationKind.CLOSE, "", "close", "digest");
-            store.insertSessionCommand("isolation", "CREATE_SESSION", "turn-session", "digest",
+            store.insertSessionCommand("isolation", "actor", "CREATE_SESSION", "turn-session", "digest",
                     "qwen-code", null, null, List.of(Map.of("type", "input_text", "text", "hello")), "digest");
             assertThat(store.findDeliverableOperations(System.currentTimeMillis(), 100)).hasSize(1);
             assertThat(store.findDispatchable(System.currentTimeMillis(), 100)).hasSize(1);
@@ -78,7 +78,7 @@ class HostedMySqlIsolationIT {
             assertThat(store.findDeliverableOperations(System.currentTimeMillis(), 100)).isEmpty();
             assertThat(store.findDispatchable(System.currentTimeMillis(), 100)).isEmpty();
             assertThat(store.findRuntimeRecoveryParked(System.currentTimeMillis(), 100)).isEmpty();
-            assertThat(store.insertSessionCommand("next-class", "CREATE_SESSION", "create", "digest",
+            assertThat(store.insertSessionCommand("next-class", "actor", "CREATE_SESSION", "create", "digest",
                     "qwen-code", null, null, List.of(), null).sessionId()).isNotBlank();
         }
     }

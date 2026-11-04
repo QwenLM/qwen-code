@@ -229,6 +229,7 @@ class HostedEventStreamLivenessIT {
                 new SpringApplicationBuilder(
                         ManagedAgentServerApplication.class).run(
                 "--server.address=127.0.0.1", "--server.port=" + springPort,
+                "--qwen.managed-agent.trusted-actor-header=X-Test-Actor",
                 "--spring.datasource.url=" + database.url(),
                 "--spring.datasource.username=" + required("mysql.user"),
                 "--spring.datasource.password="
@@ -351,6 +352,7 @@ class HostedEventStreamLivenessIT {
                     URI.create("http://127.0.0.1:" + springPort + path))
                     .timeout(Duration.ofSeconds(10))
                     .header("X-Qwen-Tenant-Id", tenant)
+                    .header("X-Test-Actor", "actor")
                     .header("Accept", "application/json")
                     .method(method, body == null
                             ? HttpRequest.BodyPublishers.noBody()

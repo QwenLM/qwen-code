@@ -145,6 +145,10 @@ final class HookAdmissionHistory {
         Admission last = null;
         while (executions < total) {
             int index = executions;
+            // Keep the real writer alive before resetting the admission-only measurement.
+            if (index % 64 == 0) {
+                inTransaction(journal::renew);
+            }
             selects.set(0);
             statements.set(0);
             long started = System.nanoTime();

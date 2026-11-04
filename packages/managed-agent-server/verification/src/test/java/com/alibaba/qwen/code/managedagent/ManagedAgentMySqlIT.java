@@ -178,7 +178,7 @@ class ManagedAgentMySqlIT {
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String createTenant = "mysql-create-mode-" + runId;
         store.insertSessionCommand(
-                createTenant,
+                createTenant, "actor",
                 "CREATE_SESSION",
                 "create-mode",
                 "digest",
@@ -204,7 +204,7 @@ class ManagedAgentMySqlIT {
         List<Map<String, Object>> input = List.of(Map.of("type", "text", "text", "hello"));
         Admission admission =
                 store.insertSessionCommand(
-                        tenant,
+                        tenant, "actor",
                         "CREATE_SESSION",
                         "mysql-create",
                         "sha256:" + "a".repeat(64),
@@ -700,7 +700,7 @@ class ManagedAgentMySqlIT {
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         Admission lower =
                 store.insertSessionCommand(
-                        lowerTenant,
+                        lowerTenant, "actor",
                         "CREATE_SESSION",
                         "case-key",
                         "case-digest",
@@ -711,7 +711,7 @@ class ManagedAgentMySqlIT {
                         null);
         Admission upper =
                 store.insertSessionCommand(
-                        upperTenant,
+                        upperTenant, "actor",
                         "CREATE_SESSION",
                         "case-key",
                         "case-digest",
@@ -724,7 +724,7 @@ class ManagedAgentMySqlIT {
         assertThat(upper.sessionId()).isNotEqualTo(lower.sessionId());
         assertThat(store.findSession(upperTenant, lower.sessionId())).isEmpty();
         assertThat(store.findSession(lowerTenant, upper.sessionId())).isEmpty();
-        assertThat(store.listSessions(upperTenant, null, null, null, 10).sessions())
+        assertThat(store.listSessions(upperTenant, "actor", null, null, 10).sessions())
                 .extracting(session -> session.sessionId())
                 .containsExactly(upper.sessionId());
     }
@@ -1114,7 +1114,7 @@ class ManagedAgentMySqlIT {
         String tenant = "mysql-journal-deleted";
         String session =
                 agents.insertSessionCommand(
-                                tenant,
+                                tenant, "actor",
                                 "CREATE_SESSION",
                                 "delete-journal-founder",
                                 "digest-deleted-journal",
@@ -1295,7 +1295,7 @@ class ManagedAgentMySqlIT {
         String tenant = "mysql-journal-mid-commit";
         String session =
                 agents.insertSessionCommand(
-                                tenant,
+                                tenant, "actor",
                                 "CREATE_SESSION",
                                 "mid-commit-founder",
                                 "digest-mid-commit",
@@ -1444,7 +1444,7 @@ class ManagedAgentMySqlIT {
         String tenant = "mysql-operation-" + UUID.randomUUID();
         String sessionId =
                 store.insertSessionCommand(
-                                tenant,
+                                tenant, "actor",
                                 "CREATE_SESSION",
                                 "create",
                                 "digest-create",
@@ -1596,7 +1596,7 @@ class ManagedAgentMySqlIT {
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_session_not_writable"));
         String leaseSessionId = store.insertSessionCommand(
-                tenant, "CREATE_SESSION", "lease-session", "digest-lease-session",
+                tenant, "actor", "CREATE_SESSION", "lease-session", "digest-lease-session",
                 "qwen-code", null, null, List.of(), null).sessionId();
         // A writer holds the journal until it is sealed or database time
         // passes its lease; the lifecycle worker waits for that.
@@ -1656,7 +1656,7 @@ class ManagedAgentMySqlIT {
         String tenant = "mysql-turns-" + UUID.randomUUID();
         String sessionId =
                 store.insertSessionCommand(
-                                tenant,
+                                tenant, "actor",
                                 "CREATE_SESSION",
                                 "create",
                                 "digest-create",

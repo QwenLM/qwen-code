@@ -38,6 +38,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -579,25 +580,47 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void concurrentChangesCannotBothWinTheSameRevision(boolean custom) throws Exception {
+    @CsvSource({"false,false", "true,false", "false,true", "true,true"})
+    void concurrentChangesCommitOnlyOnceFromAnEarlierSnapshot(boolean custom, boolean sameKey) throws Exception {
         if (custom) {
             session = customSession("hosted-workspace-shell/1", "default");
         }
-        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch snapshots = new CountDownLatch(2);
+        AtomicInteger replays = new AtomicInteger();
         try (var executor = Executors.newFixedThreadPool(2)) {
             Callable<String> call = () -> {
-                start.await();
                 try {
-                    return Long.toString(change("actor", UUID.randomUUID().toString(), "yolo", 0).approvalRevision());
+                    return transaction().execute(status -> {
+                        assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id=? AND session_id=?",
+                                Long.class, tenant, session)).isZero();
+                        snapshots.countDown();
+                        try {
+                            assertThat(snapshots.await(10, TimeUnit.SECONDS)).isTrue();
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(interrupted);
+                        }
+                        var result = change("actor", sameKey ? "shared-race" : UUID.randomUUID().toString(), "yolo", 0);
+                        if (result.replayed()) {
+                            replays.incrementAndGet();
+                        }
+                        return Long.toString(result.approvalRevision());
+                    });
                 } catch (ManagedAgentException conflict) {
                     return conflict.getCode();
                 }
             };
             var first = executor.submit(call);
             var second = executor.submit(call);
-            start.countDown();
-            assertThat(List.of(first.get(), second.get())).containsExactlyInAnyOrder("1", "approval_selection_conflict");
+            var results = List.of(first.get(15, TimeUnit.SECONDS), second.get(15, TimeUnit.SECONDS));
+            assertThat(results).containsExactlyInAnyOrder("1", sameKey ? "1" : "approval_selection_conflict");
+            assertThat(replays.get()).isEqualTo(sameKey ? 1 : 0);
+            assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id=? AND session_id=?",
+                    Long.class, tenant, session)).isEqualTo(1L);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id=? AND session_id=? AND operation='SET_APPROVAL'",
+                    Integer.class, tenant, session)).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id=? AND session_id=? AND event_type='session.approval.changed'",
+                    Integer.class, tenant, session)).isEqualTo(1);
         }
     }
 

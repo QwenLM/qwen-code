@@ -41,7 +41,7 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
         String id = (String) session.get("session_id");
         tx.executeWithoutResult(
                 status -> {
-                    store.beginSessionRename(tenant, "load-rename", "digest", id, "renamed");
+                    store.beginSessionRename(tenant, "load-rename", "digest", id, "renamed", "actor");
                     store.appendPublicEventIfAbsent(
                             tenant,
                             id,
