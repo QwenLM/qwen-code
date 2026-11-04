@@ -174,11 +174,16 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
     @Override
     public Optional<RegisteredExternalStorage> find(String tenant,
             String tenantWorkspaceId) {
-        return registered(jdbc, tenant, tenantWorkspaceId, false);
+        return registered(jdbc, tenant, tenantWorkspaceId, "");
     }
 
     public static RegisteredExternalStorage executionStorage(JdbcTemplate jdbc, String tenant,
             String storage, boolean lock) {
+        return executionStorage(jdbc, tenant, storage, lock ? " FOR UPDATE" : "");
+    }
+
+    static RegisteredExternalStorage executionStorage(JdbcTemplate jdbc, String tenant,
+            String storage, String lock) {
         if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'EXTERNAL'",
                 Long.class, JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage)) == 0) {
             return null;
@@ -192,7 +197,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
     }
 
     private static Optional<RegisteredExternalStorage> registered(JdbcTemplate jdbc, String tenant,
-            String tenantWorkspaceId, boolean lock) {
+            String tenantWorkspaceId, String lock) {
         if (tenant == null || tenant.isEmpty() || tenantWorkspaceId == null
                 || tenantWorkspaceId.isEmpty()) {
             throw new RuntimeBrokerException(400,
@@ -211,7 +216,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                             + " ON o.storage_key = s.physical_key"
                             + " WHERE s.alias_key = ?"
                             + " AND s.storage_kind = 'EXTERNAL'"
-                            + " AND s.registration_state = 'REGISTERED'" + (lock ? " FOR UPDATE" : ""),
+                            + " AND s.registration_state = 'REGISTERED'" + lock,
                     (result, index) -> {
                         var row = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(result);
                         row.put("owner_tenant", result.getString("owner_tenant"));

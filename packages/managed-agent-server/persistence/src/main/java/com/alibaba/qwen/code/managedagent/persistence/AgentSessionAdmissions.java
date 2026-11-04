@@ -121,10 +121,7 @@ final class AgentSessionAdmissions {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
-        if (sessionPolicies.externalFilesEnabled()) {
-            throw new ManagedAgentException(409, "unsupported_feature",
-                    "External Runtime requires a registered Workspace selection.");
-        }
+        sessionPolicies.externalWorkspaces.requireUnboundSession();
         requireModelConfiguration(modelConfig);
         AgentSessionPolicies.AgentPin pin = sessionPolicies.resolveAgentPin(tenantId, agentId, requestedRevision,
                 false);
@@ -208,16 +205,7 @@ final class AgentSessionAdmissions {
             extensionPackages.requireSelection(tenantId, actorId, workspace.binding().getWorkspaceId(), extensionPins);
         }
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
-        boolean externalWorkspace = sessionPolicies.isExternalWorkspace(workspace.binding());
-        if (sessionPolicies.externalFilesEnabled() && !externalWorkspace) {
-            throw AgentSessionPolicies.workspaceExecutionUnavailable();
-        }
-        if (externalWorkspace) {
-            sessionPolicies.requireExternalFiles(workspace.binding(), pin.toolProfile());
-            if (pin.hooks() || pin.mcp() || extensionPins != null) {
-                throw AgentSessionPolicies.workspaceExecutionUnavailable();
-            }
-        }
+        boolean externalWorkspace = sessionPolicies.externalWorkspaces.requireCreation(workspace.binding(), pin, extensionPins != null);
         boolean sshWorkspace = sessionPolicies.isSshWorkspace(workspace.binding());
         if (sshWorkspace) {
             AgentSessionPolicies.requireSshToolProfile(pin.toolProfile());
@@ -789,19 +777,8 @@ final class AgentSessionAdmissions {
             String title, List<Map<String, Object>> input,
             String payloadDigest, ResolvedBinding resolved,
             String actorId, AgentSessionPolicies.AgentPin pin) {
-        return insertSession(
-                tenantId,
-                operation,
-                idempotencyKey,
-                requestDigest,
-                agentId,
-                title,
-                input,
-                payloadDigest,
-                resolved,
-                actorId,
-                pin,
-                null);
+        return insertSession(tenantId, operation, idempotencyKey, requestDigest,
+                agentId, title, input, payloadDigest, resolved, actorId, pin, null);
     }
 
     Admission insertSession(

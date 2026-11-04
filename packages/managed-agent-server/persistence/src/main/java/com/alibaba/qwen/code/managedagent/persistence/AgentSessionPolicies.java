@@ -22,6 +22,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.charset.StandardCharsets;
@@ -54,8 +55,7 @@ final class AgentSessionPolicies {
     private final boolean workspaceFilesEnabled;
     private final boolean workspaceShellEnabled;
     private final ResidentWorkspaces residentWorkspaces;
-    private final String externalFilesProvider;
-    private final boolean externalForegroundShell;
+    final ExternalWorkspacePolicy externalWorkspaces;
 
     AgentSessionPolicies(AgentEventJournal eventJournal,
             AgentSessionQueries sessionQueries,
@@ -76,7 +76,7 @@ final class AgentSessionPolicies {
             ManagedSessionSkills creationSkills,
             boolean workspaceFilesEnabled,
             boolean workspaceShellEnabled,
-            ResidentWorkspaces residentWorkspaces, String externalFilesProvider, boolean externalForegroundShell) {
+            ResidentWorkspaces residentWorkspaces, com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.RuntimeBroker runtime) {
         this.eventJournal = eventJournal;
         this.sessionQueries = sessionQueries;
         this.storeRows = storeRows;
@@ -97,8 +97,7 @@ final class AgentSessionPolicies {
         this.workspaceFilesEnabled = workspaceFilesEnabled;
         this.workspaceShellEnabled = workspaceShellEnabled;
         this.residentWorkspaces = residentWorkspaces;
-        this.externalFilesProvider = externalFilesProvider;
-        this.externalForegroundShell = externalForegroundShell;
+        this.externalWorkspaces = new ExternalWorkspacePolicy(jdbc, runtime, workspaceShellEnabled);
     }
 
     static final Pattern DEFINITION_REVISION = Pattern.compile(
@@ -119,21 +118,18 @@ final class AgentSessionPolicies {
             String approvalMode, String toolProfile, boolean hooks, boolean mcp) {
     }
 
-    boolean externalFilesEnabled() {
-        return externalFilesProvider != null;
-    }
-
-    boolean isExternalWorkspace(ContextBinding binding) {
-        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'EXTERNAL'",
-                Long.class, JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId())) == 1;
-    }
-
-    void requireExternalFiles(ContextBinding binding, String profile) {
-        var storage = ExternalStorageRegistrationStore.executionStorage(jdbc, binding.getTenantId(), binding.getStorageId(), false);
-        if (externalFilesProvider == null || storage == null || !externalFilesProvider.equals(storage.providerId())
-                || !binding.getWorkspaceId().equals(storage.tenantWorkspaceId()) || !".".equals(binding.getCwdRelative())
-                || !(WorkspaceToolProfiles.FILES.equals(profile) || externalForegroundShell && workspaceShellEnabled && WorkspaceToolProfiles.SHELL.equals(profile))) {
-            throw workspaceExecutionUnavailable();
+    void requireWorkspaceTools(SessionRecord session) {
+        if (externalWorkspaces.isExternal(session.workspace())) {
+            externalWorkspaces.requireFiles(session.workspace(), session.toolProfile());
+            if (hasMcpServers(session)) {
+                throw workspaceExecutionUnavailable();
+            }
+        }
+        if (isSshWorkspace(session.workspace())) {
+            requireSshToolProfile(session.toolProfile());
+            if (hasMcpServers(session)) {
+                throw workspaceExecutionUnavailable();
+            }
         }
     }
 
@@ -229,7 +225,6 @@ final class AgentSessionPolicies {
     }
 
     SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
             throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
@@ -244,7 +239,7 @@ final class AgentSessionPolicies {
         }
         if (!WorkspaceToolProfiles.SHELL.equals(session.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(session.toolProfile())
                 || !workspaceFilesEnabled || !workspaceShellEnabled && WorkspaceToolProfiles.SHELL.equals(session.toolProfile())
-                || isSshWorkspace(session.workspace()) || isExternalWorkspace(session.workspace()) || residentWorkspaces.find(session.workspace()) != null
+                || isSshWorkspace(session.workspace()) || externalWorkspaces.isExternal(session.workspace()) || residentWorkspaces.find(session.workspace()) != null
                 || sessionQueries.findChildLineage(tenantId, sessionId) != null) {
             throw new ManagedAgentException(409, "unsupported_feature", "MCP management is unavailable.");
         }
@@ -273,7 +268,6 @@ final class AgentSessionPolicies {
     }
 
     SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
             throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
@@ -538,7 +532,6 @@ final class AgentSessionPolicies {
     WebShellModelChangeResult changeSessionModel(String tenantId, String actorId,
             String sessionId, String key, String digest, String modelId, long expectedRevision,
             boolean supported) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
             throw new ManagedAgentException(400, "unsupported_feature",
@@ -613,7 +606,6 @@ final class AgentSessionPolicies {
             String sessionId, String key, String digest, String mode, long expectedRevision,
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
             boolean liveSupported, Map<String, List<String>> requestedRules, boolean rulesSupported, boolean autoSupported) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
             throw new ManagedAgentException(400, "unsupported_feature",
@@ -632,9 +624,18 @@ final class AgentSessionPolicies {
                 .key("SET_APPROVAL", sessionId, actorId);
         var namespace = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace.SESSION_COMMAND;
         var scopeKind = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope.ACTOR;
-        ManagedReceipts.Receipt replay = ManagedReceipts.find(jdbc, namespace, tenantId,
-                scopeKind, scope, key, false);
-        if (replay != null) {
+        long now = clock.millis();
+        // A locking read of a missing receipt can gap-lock unrelated Sessions.
+        try {
+            ManagedReceipts.insert(jdbc, namespace, tenantId, scopeKind, scope, key, digest,
+                    "SET_APPROVAL", actorId.getBytes(StandardCharsets.UTF_8), sessionId, null,
+                    "COMPLETED", session.status(), true, now);
+        } catch (DuplicateKeyException duplicate) {
+            ManagedReceipts.Receipt replay = ManagedReceipts.find(jdbc, namespace, tenantId,
+                    scopeKind, scope, key, true);
+            if (replay == null) {
+                throw duplicate;
+            }
             if (!digest.equals(replay.requestDigest())
                     || !sessionId.equals(replay.sessionId())
                     || !"SET_APPROVAL".equals(replay.operation())
@@ -656,7 +657,7 @@ final class AgentSessionPolicies {
         if (!WorkspaceToolProfiles.supportsApprovalMode(mode) || "auto".equals(mode) && !autoSupported) {
             throw new ManagedAgentException(400, "unsupported_approval_mode", "The approval mode is unavailable");
         }
-        var currentPolicy = jdbc.queryForMap("SELECT approval_revision, permission_rules_json FROM ma_session WHERE tenant_id=? AND session_id=?",
+        var currentPolicy = jdbc.queryForMap("SELECT approval_revision, permission_rules_json, is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE",
                 tenantId, sessionId);
         Map<String, List<String>> rules = requestedRules == null ? storeRows.readPermissionRules((String) currentPolicy.get("permission_rules_json"))
                 : harnessRules.nonEmptyPermissionRules(harnessRules.permissionRules(requestedRules));
@@ -664,8 +665,7 @@ final class AgentSessionPolicies {
             throw new ManagedAgentException(409, "unsupported_feature", "Permission rules are unavailable");
         }
         boolean planMode = requestedPlanMode == null
-                ? Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
-                        Boolean.class, tenantId, sessionId)) : requestedPlanMode;
+                ? Boolean.TRUE.equals(currentPolicy.get("is_plan_enabled")) : requestedPlanMode;
         if (planMode && (!planModeSupported || !supportsPlanMode(session))) {
             throw new ManagedAgentException(409, "unsupported_feature", "Plan mode is unavailable");
         }
@@ -684,13 +684,12 @@ final class AgentSessionPolicies {
             throw new ManagedAgentException(409, "approval_selection_conflict", "The approval revision changed");
         }
         long revision = current + 1;
-        long now = clock.millis();
-        jdbc.update("UPDATE ma_session SET selected_approval_mode = ?, approval_revision = ?, is_plan_enabled = ?, permission_rules_json = ?, gmt_modified = ?,"
+        int changed = jdbc.update("UPDATE ma_session SET selected_approval_mode = ?, approval_revision = ?, is_plan_enabled = ?, permission_rules_json = ?, gmt_modified = ?,"
                 + " version = version + 1 WHERE tenant_id = ? AND session_id = ? AND approval_revision = ?",
                 mode, revision, planMode, rules == null ? null : storeRows.writeJson(rules), now, tenantId, sessionId, current);
-        ManagedReceipts.insert(jdbc, namespace, tenantId, scopeKind, scope, key, digest,
-                "SET_APPROVAL", actorId.getBytes(StandardCharsets.UTF_8), sessionId, null,
-                "COMPLETED", session.status(), true, now);
+        if (changed != 1) {
+            throw new ManagedAgentException(409, "approval_selection_conflict", "The approval revision changed");
+        }
         Map<String, Object> result = new LinkedHashMap<>(Map.of("mode", mode, "revision", revision, "planMode", planMode));
         if (rules != null) {
             result.put("permissionRules", rules);

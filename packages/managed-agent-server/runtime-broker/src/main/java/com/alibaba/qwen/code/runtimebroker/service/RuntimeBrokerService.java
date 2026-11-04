@@ -778,8 +778,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     }
 
     private CompletionStage<Void> acknowledgeDrainedTools(RuntimeBindingRecord binding, String cursor) {
-        if ((!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
-                && !com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds.isFiles(binding.getRequest().getProvisionerKind())) || binding.getLease() == null) {
+        if (!RuntimeBrokerSupport.requiresToolDrainAcknowledgement(binding)) {
             return CompletableFuture.completedFuture(null);
         }
         var batch = executionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);

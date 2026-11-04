@@ -4,7 +4,7 @@
 
 ## Status and goal
 
-Implementation integrated with `main@9b1fcb8756`, with verification in progress. Managed Agent Server, Hosted Harness, model access, approvals and journals stay in the central deployment. Qwen execution workers run in E2B Cloud and mount persistent Volumes. This is not a Cloud deployment or production acceptance report.
+Implementation integrated with `main@98ef7b2cd3`, with verification in progress. Managed Agent Server, Hosted Harness, model access, approvals and journals stay in the central deployment. Qwen execution workers run in E2B Cloud and mount persistent Volumes. This is not a Cloud deployment or production acceptance report.
 
 The implementation targets E2B Cloud with existing persistent Volumes and an explicitly registered Workspace. Compatible Sandbox APIs on another backend do not by themselves qualify its storage, worker or public Hosted behavior.
 
@@ -92,6 +92,8 @@ Legacy release remains a no-op. TTL expiry or GONE without an earlier qualified 
 | Hosted Harness                      | Persisted rewind restriction before undo admission                                                 |
 
 ## Validation and acceptance
+
+External storage admission preserves the caller's shared or exclusive registration/owner lock mode. A MySQL regression checks that read admission does not upgrade a shared lock, while external mounts retain their `UNVERIFIED` state. External Session policy and execution drain checks are separated from the existing stores to honor the mainline class-size ceilings without raising those ceilings or changing ownership semantics. The smaller stores' ceilings are lowered to their new sizes.
 
 Validation is layered: focused worker/adapter tests; real worker HTTP tests for prepared and raw files plus Shell publication/ACK/drain; selected Java tests; selected real MySQL cases; then the public Hosted and real Cloud path.
 

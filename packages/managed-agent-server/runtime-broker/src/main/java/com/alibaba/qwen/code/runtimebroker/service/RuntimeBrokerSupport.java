@@ -28,6 +28,12 @@ final class RuntimeBrokerSupport {
             "unknown");
     static final int MAX_CAS_ATTEMPTS = 16;
 
+    static boolean requiresToolDrainAcknowledgement(RuntimeBindingRecord binding) {
+        return binding.getLease() != null
+                && (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
+                        || com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds.isFiles(binding.getRequest().getProvisionerKind()));
+    }
+
     static <T> CompletionStage<T> safeStage(
             Supplier<CompletionStage<T>> supplier) {
         try {

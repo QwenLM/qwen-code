@@ -4,7 +4,7 @@
 
 ## 状态与目标
 
-实现已整合 `main@9b1fcb8756`，正在验证。Managed Agent Server、Hosted Harness、模型调用、审批与日志仍放在中央服务，Qwen 执行 worker 放在 E2B Cloud，通过 Volumes 保存文件。本文不代表 Cloud 部署或生产验收完成。
+实现已整合 `main@98ef7b2cd3`，正在验证。Managed Agent Server、Hosted Harness、模型调用、审批与日志仍放在中央服务，Qwen 执行 worker 放在 E2B Cloud，通过 Volumes 保存文件。本文不代表 Cloud 部署或生产验收完成。
 
 本实现面向具有现有持久 Volume 和显式登记 Workspace 的 E2B Cloud。其他 backend 兼容 Sandbox API，并不代表其存储、worker 或公共 Hosted 行为已经通过验收。
 
@@ -92,6 +92,8 @@ adapter 在首次创建前持久化创建意图、请求摘要、不可变 boot 
 | Hosted Harness                      | undo 准入前持久化并检查 rewind 限制                             |
 
 ## 验证与验收
+
+外部存储准入保留调用方选择的登记/owner 共享锁或排他锁模式。MySQL 回归验证读准入不会升级共享锁，外部挂载仍保持 `UNVERIFIED` 状态。外部 Session 策略与执行排空检查从已有 Store 中分离，以遵守主线新增的类大小上限，不提高上限或改变原有归属语义。缩小后的 Store 上限同步降低到新的大小。
 
 验证分层进行：定向 worker/adapter 测试；prepared/raw 文件与 Shell publication/ACK/drain 的真实 worker HTTP 测试；选定 Java 测试；选定真实 MySQL 用例；最后验证公共 Hosted 和真实 Cloud 路径。
 
