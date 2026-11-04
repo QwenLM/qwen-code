@@ -2149,6 +2149,15 @@ test('verify says what the health endpoint answered instead of UP', async (t) =>
         },
       }),
     ],
+    // The parser's message quotes the body, control bytes and all.
+    [
+      `HTTP 200, Unexpected token 'x', "x\uFFFD[2K\uFFFD]52;c;" is not valid JSON`,
+      () => async () => ({
+        ok: true,
+        status: 200,
+        json: async () => JSON.parse('x\u001b[2K\u001b]52;c;'),
+      }),
+    ],
     // fetch words every failure as "fetch failed"; its cause says why.
     [
       'self-signed certificate',
@@ -2646,6 +2655,20 @@ test('start refuses listeners it cannot reach before it starts anything', async 
       'http://127.0.0.1:10080/',
       'is on port 10080, so fetch refuses to dial it',
     ],
+    // The paths are appended to it, so they would land in either.
+    [
+      'http://proxy.test:8443/?tenant=acme',
+      'carries a query or a fragment, where the /actuator/health and API paths appended to it would land',
+    ],
+    [
+      'http://proxy.test:8443/?',
+      'carries a query or a fragment, where the /actuator/health and API paths appended to it would land',
+      'http://proxy.test:8443/?',
+    ],
+    [
+      'http://proxy.test:8443#ingress',
+      'carries a query or a fragment, where the /actuator/health and API paths appended to it would land',
+    ],
   ]) {
     assert.equal(await host.upgrade('start', '--server-url', serverUrl), 1);
     assert.ok(
@@ -3065,6 +3088,7 @@ test('verify says why an API read failed, in text the endpoint cannot steer', as
     ['', ''],
     [false, 'false'],
     [null, 'null'],
+    [{ name: 's1' }, '{"name":"s1"}'],
   ]) {
     host.responses['GET /v1/agents/sessions'] = { data: [entry] };
     assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);

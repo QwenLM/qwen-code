@@ -2591,6 +2591,15 @@ async function listeners(
       );
     }
   }
+  // The paths are appended to --server-url, so a query or a fragment there
+  // would take them in: http://proxy.test/?a probes /?a/actuator/health, and
+  // fetch drops a fragment with the path after it. Past fetchRefusal the URL
+  // carries no user information, so a ? or # can only start one of them.
+  if (options.serverUrl && /[?#]/.test(options.serverUrl)) {
+    throw new Refusal(
+      `--server-url ${JSON.stringify(options.serverUrl)} carries a query or a fragment, where the /actuator/health and API paths appended to it would land.`,
+    );
+  }
   return urls;
 }
 
@@ -2928,9 +2937,11 @@ async function api(system, client, route, init = {}, capMs = Infinity) {
 // nested deeper than the stack, before printable() could say what came back.
 function sessionRoute(session) {
   if (typeof session?.id !== 'string') {
-    // A listed entry that is no object is shown as it came.
+    // An entry that is no object, or that has no id, is shown as it came.
     const shown =
-      session !== null && typeof session === 'object' ? session.id : session;
+      session !== null && typeof session === 'object' && 'id' in session
+        ? session.id
+        : session;
     throw new Error(
       `the API answered a Session without a string id (${printable(shown)})`,
     );
