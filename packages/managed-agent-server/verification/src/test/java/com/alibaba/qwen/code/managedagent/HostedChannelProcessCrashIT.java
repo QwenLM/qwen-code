@@ -15,7 +15,6 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -32,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 
 // FG7c (issue #13802): the channel process-crash gates. The control plane
@@ -109,8 +109,8 @@ class HostedChannelProcessCrashIT {
         startModel();
         // One broker port per method: the control plane re-binds it across
         // every kill, so the long-lived harness keeps one live broker URL.
-        harnessPort = freePort();
-        brokerPort = freePort();
+        harnessPort = reservePort();
+        brokerPort = reservePort();
         // Per-class subroot: wiping it here cannot erase a letter method's
         // evidence, and the fault class wipes only its own letter subtrees.
         Path casesRoot = Path.of(System.getProperty("user.dir"), "target",
@@ -230,7 +230,7 @@ class HostedChannelProcessCrashIT {
         Path stateDir = Files.createDirectories(caseDir.resolve("state"));
         String channelId = "fg7c-" + fault;
         String marker = "fg7-" + fault.replace("spring-kill-", "kill-");
-        int internalPort = freePort();
+        int internalPort = reservePort();
         startFixture(caseDir, tenant, internalPort);
         Map<String, Object> base = support.caseBase(tenant, fault, stateDir,
                 internalPort);
@@ -514,13 +514,6 @@ class HostedChannelProcessCrashIT {
     }
 
     // --- fixture ---
-
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0, 0,
-                java.net.InetAddress.getLoopbackAddress())) {
-            return socket.getLocalPort();
-        }
-    }
 
     private void startModel() throws IOException {
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);

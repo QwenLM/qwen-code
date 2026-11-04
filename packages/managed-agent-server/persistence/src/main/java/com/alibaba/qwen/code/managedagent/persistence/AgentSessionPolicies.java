@@ -207,7 +207,6 @@ final class AgentSessionPolicies {
     }
 
     SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
             throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
@@ -251,7 +250,6 @@ final class AgentSessionPolicies {
     }
 
     SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
             throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
@@ -302,7 +300,7 @@ final class AgentSessionPolicies {
             if (initial.get("operationId").equals(body.path("command").path("operationId").asText())) {
                 boolean beforeModel = jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id=? AND session_id=?", Integer.class,
                         tenantId, sessionId) <= 1
-                        && jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id=? AND session_id=? AND submission_attempted=TRUE LIMIT 1 FOR UPDATE",
+                        && jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id=? AND session_id=? AND is_submission_attempted=TRUE LIMIT 1 FOR UPDATE",
                                 tenantId, sessionId).isEmpty();
                 if (!beforeModel || !isBootstrapRevision(body)
                         || !objectMapper.valueToTree(initial).equals(body.path("command"))) {
@@ -324,7 +322,7 @@ final class AgentSessionPolicies {
         JsonNode command = childExtensionBootstrapCommand(child, lineage);
         boolean onlyInitialTurn = jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id=? AND session_id=?", Integer.class,
                 child.tenantId(), child.sessionId()) <= 1
-                && jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id=? AND session_id=? AND submission_attempted=TRUE LIMIT 1 FOR UPDATE",
+                && jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id=? AND session_id=? AND is_submission_attempted=TRUE LIMIT 1 FOR UPDATE",
                         child.tenantId(), child.sessionId()).isEmpty();
         if (!onlyInitialTurn || !isBootstrapRevision(body) || !command.equals(body.path("command"))) {
             throw new ManagedAgentException(409, "child_launch_snapshot_invalid", "Child extension bootstrap conflicts with its launch snapshot");
@@ -365,7 +363,7 @@ final class AgentSessionPolicies {
         String sessionId = session.sessionId();
         // The journal may already have a consistent-read snapshot; these reads must observe the
         // Plan/Turn admission that won the same Session row before this settings commit.
-        if (Boolean.TRUE.equals(jdbc.queryForObject("SELECT plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE",
+        if (Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE",
                 Boolean.class, tenantId, sessionId))) {
             throw new ManagedAgentException(409, "unsupported_feature", "Disable Plan mode before managing MCP servers.");
         }
@@ -516,7 +514,6 @@ final class AgentSessionPolicies {
     WebShellModelChangeResult changeSessionModel(String tenantId, String actorId,
             String sessionId, String key, String digest, String modelId, long expectedRevision,
             boolean supported) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
             throw new ManagedAgentException(400, "unsupported_feature",
@@ -548,6 +545,9 @@ final class AgentSessionPolicies {
         if (!access.atLeast(WorkspaceAccess.OPERATOR)) {
             throw new ManagedAgentException(403, "session_operation_forbidden",
                     "Only a Workspace operator may change the model");
+        }
+        if (session.modelConfigDigest() != null) {
+            throw new ManagedAgentException(409, "model_config_immutable", "This Session has an immutable model configuration.");
         }
         if (!supported || modelCatalog.isEmpty() || !workspaceFilesEnabled) {
             throw new ManagedAgentException(409, "unsupported_feature", "Model selection is unavailable");
@@ -588,7 +588,6 @@ final class AgentSessionPolicies {
             String sessionId, String key, String digest, String mode, long expectedRevision,
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
             boolean liveSupported, Map<String, List<String>> requestedRules, boolean rulesSupported, boolean autoSupported) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
             throw new ManagedAgentException(400, "unsupported_feature",
@@ -639,7 +638,7 @@ final class AgentSessionPolicies {
             throw new ManagedAgentException(409, "unsupported_feature", "Permission rules are unavailable");
         }
         boolean planMode = requestedPlanMode == null
-                ? Boolean.TRUE.equals(jdbc.queryForObject("SELECT plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
+                ? Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
                         Boolean.class, tenantId, sessionId)) : requestedPlanMode;
         if (planMode && (!planModeSupported || !supportsPlanMode(session))) {
             throw new ManagedAgentException(409, "unsupported_feature", "Plan mode is unavailable");
@@ -660,7 +659,7 @@ final class AgentSessionPolicies {
         }
         long revision = current + 1;
         long now = clock.millis();
-        jdbc.update("UPDATE ma_session SET selected_approval_mode = ?, approval_revision = ?, plan_enabled = ?, permission_rules_json = ?, gmt_modified = ?,"
+        jdbc.update("UPDATE ma_session SET selected_approval_mode = ?, approval_revision = ?, is_plan_enabled = ?, permission_rules_json = ?, gmt_modified = ?,"
                 + " version = version + 1 WHERE tenant_id = ? AND session_id = ? AND approval_revision = ?",
                 mode, revision, planMode, rules == null ? null : storeRows.writeJson(rules), now, tenantId, sessionId, current);
         ManagedReceipts.insert(jdbc, namespace, tenantId, scopeKind, scope, key, digest,

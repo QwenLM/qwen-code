@@ -336,6 +336,36 @@
   line-height: 1.5;
 }
 
+.repositoryList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.repositoryListTitle {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+
+.repositoryRow {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.repositoryName {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 520px) {
   .policyGrid {
     grid-template-columns: 1fr;
