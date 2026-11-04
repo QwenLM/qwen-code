@@ -123,6 +123,8 @@ public final class ResolvedConfiguration {
         // with the preflight's verdict on it: the upgrade command refuses a
         // Harness URL the preflight would fail before it restarts the Harness,
         // without a rule of its own, and judges none the server never reads.
+        // Pooled, the preflight does not read it, but each member's connector
+        // does.
         resolved.put("harnessBaseUrl",
                 StringUtils.defaultString(properties.getHarness().getBaseUrl()));
         resolved.put("harnessOrigin",

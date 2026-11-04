@@ -2275,6 +2275,38 @@ test('verify runs the online preflight and reads the API', async (t) => {
       url.endsWith('/v1/agents/sessions/s2/events?after=4&limit=100'),
     ),
   );
+  // Nothing but a whole number moves it, and only forward: not text Number()
+  // reads as one, nor the Infinity a JSON 1e400 parses to, nor a fraction,
+  // nor an object, nor an earlier sequence after a later one.
+  polls = 0;
+  host.responses['GET /v1/agents/sessions/s2/events'] = () => {
+    polls += 1;
+    return polls === 1
+      ? {
+          data: [
+            { sequence: '4', type: 'turn.started' },
+            ...[
+              'Infinity',
+              '0x10',
+              ' 9 ',
+              '1e3',
+              Infinity,
+              12.5,
+              { toString: 1 },
+              3,
+            ].map((sequence) => ({ sequence, type: 'turn.delta' })),
+          ],
+        }
+      : { data: [{ sequence: 5, type: 'turn.completed', terminal: true }] };
+  };
+  host.requests = [];
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme', '--turn'), 0);
+  assert.deepEqual(
+    host.requests
+      .map(({ url }) => /\/s2\/events\?after=([^&]*)/.exec(url)?.[1])
+      .filter(Boolean),
+    ['0', '4'],
+  );
 });
 
 test('start and verify reach the listeners the server resolves', async (t) => {
@@ -2518,7 +2550,7 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     assert.equal(await host.upgrade('start'), 1, harnessBaseUrl);
     assert.equal(
       host.output.at(-1),
-      `start refused: The control plane reaches qwen-hosted-harness at ${JSON.stringify(harnessBaseUrl)}, which the preflight does not take as an http or https origin, reading it untrimmed as java.net.URI does; correct qwen.managed-agent.harness.base-url.`,
+      `start refused: The control plane reaches qwen-hosted-harness at ${JSON.stringify(harnessBaseUrl)}, which the server does not take as an http or https origin, reading it untrimmed as java.net.URI does; correct qwen.managed-agent.harness.base-url.`,
     );
     assert.ok(!host.output.some((line) => line.startsWith('Restarting')));
   }
@@ -2631,8 +2663,8 @@ test('start asks nothing of a Harness URL the server does not read', async (t) =
   const { host, target } = await backedUp(t);
   assert.equal(await host.upgrade('install', '--backup', target), 0);
   host.responses['GET /actuator/health'] = { status: 'UP' };
-  // Disabled or pooled, the Harness row skips before it reads the value, and
-  // the server never dials it; start still waits for the Harness there.
+  // Disabled, the Harness row skips before it reads the value, and the server
+  // never dials it; start still waits for the Harness there.
   for (const [harnessBaseUrl, address] of [
     [' http://127.0.0.1:4170 ', '127.0.0.1:4170'],
     ['http://qwen_harness:4170', 'qwen_harness:4170'],
@@ -2645,6 +2677,7 @@ test('start asks nothing of a Harness URL the server does not read', async (t) =
     assert.equal(await host.upgrade('start'), 0, harnessBaseUrl);
     assert.ok(host.output.includes(`Starting ${HARNESS}`), harnessBaseUrl);
     assert.deepEqual([...new Set(host.connections)], [address]);
+    assert.ok(!host.output.join('\n').includes('s3cret'), harnessBaseUrl);
   }
   // It has to name a host start can wait on all the same.
   await host.stop();
@@ -2940,10 +2973,7 @@ test('verify says why an API read failed, in text the endpoint cannot steer', as
   const id = encodeURIComponent(steer);
   host.responses['GET /v1/agents/sessions'] = { data: [{ id: steer }] };
   host.responses[`GET /v1/agents/sessions/${id}`] = { id: steer };
-  // A count that is no number, as JSON does not keep it one.
-  host.responses[`GET /v1/agents/sessions/${id}/items`] = {
-    data: { length: `2${steer}` },
-  };
+  host.responses[`GET /v1/agents/sessions/${id}/items`] = { data: [{}, {}] };
   host.responses['POST /v1/agents/sessions'] = { id: steer };
   host.responses[`GET /v1/agents/sessions/${id}/events`] = {
     data: [{ sequence: 1, type: `turn.completed${steer}`, terminal: true }],
@@ -2997,8 +3027,8 @@ test('verify says why an API read failed, in text the endpoint cannot steer', as
         `FAIL the API answered a Session without a string id (${shown})`,
       );
     }
-    // An event's type names no outcome unless it is a string, and its
-    // sequence is skipped.
+    // An event's type names no outcome unless it is a string, and a null
+    // event is passed over.
     host.responses['GET /v1/agents/sessions'] = { data: [{ id: 's1' }] };
     host.responses['POST /v1/agents/sessions'] = { id: 's1' };
     host.responses['GET /v1/agents/sessions/s1/events'] = {
@@ -3009,6 +3039,42 @@ test('verify says why an API read failed, in text the endpoint cannot steer', as
       rowsOf(host.output).turn,
       `FAIL Session s1 ended with ${shown}`,
     );
+  }
+  // A listed entry that is no object is no Session either.
+  for (const [entry, shown] of [
+    [0, '0'],
+    ['', ''],
+    [false, 'false'],
+    [null, 'null'],
+  ]) {
+    host.responses['GET /v1/agents/sessions'] = { data: [entry] };
+    assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
+    assert.equal(
+      rowsOf(host.output).session,
+      `FAIL the API answered a Session without a string id (${shown})`,
+    );
+  }
+  // Data that is no list is not read as one: iterating it would throw, or
+  // walk a string, and its length would be whatever it holds.
+  host.responses['GET /v1/agents/sessions'] = { data: [{ id: 's1' }] };
+  for (const [data, shown] of [
+    [{ length: 2 }, '{"length":2}'],
+    [1, '1'],
+    ['abc', 'abc'],
+  ]) {
+    host.responses['GET /v1/agents/sessions/s1/items'] = { data };
+    host.responses['GET /v1/agents/sessions/s1/events'] = { data };
+    assert.equal(await host.upgrade('verify', '--tenant', 'acme', '--turn'), 1);
+    const listless = rowsOf(host.output);
+    assert.equal(
+      listless.session,
+      `FAIL GET /v1/agents/sessions/s1/items?limit=20 answered data that is no list (${shown})`,
+    );
+    assert.equal(
+      listless.turn,
+      `FAIL Session s1: GET /v1/agents/sessions/s1/events answered data that is no list (${shown})`,
+    );
+    assert.ok(!control.test(listless.session), JSON.stringify(listless));
   }
 });
 

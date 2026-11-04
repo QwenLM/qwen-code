@@ -2556,8 +2556,8 @@ async function listeners(
         server: resolved.serverUrl,
         health: resolved.healthUrl,
         harness: resolved.harnessBaseUrl,
-        // 'false' when the preflight would fail the Harness URL, 'skip' when
-        // the server does not read it.
+        // 'false' when the server would refuse the Harness URL, 'skip' when
+        // it does not read it.
         harnessOrigin: resolved.harnessOrigin,
       };
     }
@@ -2744,13 +2744,14 @@ async function phaseStart(system, deployment, options) {
   // which has a host: an opaque value such as proxy.test:8443 names none to
   // wait on. A value that does not parse gets fetchRefusal's reason, which
   // names an IPv6 zone as --server-url's refusal does.
-  // Past those, the preflight's verdict, which the resolver passes on: it
-  // takes only an http(s) origin, without user information, a query or a
-  // fragment, read untrimmed as java.net.URI reads it, and would fail any
-  // other after the Harness restarts. The reasons below only word a 'false'
-  // verdict. With the Harness disabled or pooled the verdict is 'skip', since
-  // neither the preflight nor the server reads the value; without one, as
-  // when the configuration did not resolve, the preflight judges it later.
+  // Past those, the server's verdict, which the resolver passes on: it takes
+  // only an http(s) origin, without user information, a query or a fragment,
+  // read untrimmed as java.net.URI reads it. The preflight fails any other
+  // after the Harness restarts, and a pool's members, whose row the
+  // preflight skips, would each refuse it. The reasons below only word a
+  // 'false' verdict. With the Harness disabled the verdict is 'skip', since
+  // nothing reads the value; without one, as when the configuration did not
+  // resolve, the preflight judges it once the Harness is up.
   const unusable = !harnessUrl
     ? fetchRefusal(urls.harness)
     : !['http:', 'https:'].includes(harnessUrl.protocol)
@@ -2761,7 +2762,7 @@ async function phaseStart(system, deployment, options) {
           ? 'carries a user name or password'
           : urls.harness.includes('?') || urls.harness.includes('#')
             ? 'carries a query or a fragment'
-            : 'the preflight does not take as an http or https origin, reading it untrimmed as java.net.URI does';
+            : 'the server does not take as an http or https origin, reading it untrimmed as java.net.URI does';
   if (unusable) {
     throw new Refusal(
       `The control plane reaches ${harness.name} at ${JSON.stringify(withoutCredentials(urls.harness))}, which ${unusable}; correct qwen.managed-agent.harness.base-url.`,
@@ -2921,18 +2922,34 @@ async function api(system, client, route, init = {}, capMs = Infinity) {
 // nested deeper than the stack, before printable() could say what came back.
 function sessionRoute(session) {
   if (typeof session?.id !== 'string') {
+    // A listed entry that is no object is shown as it came.
+    const shown =
+      session !== null && typeof session === 'object' ? session.id : session;
     throw new Error(
-      `the API answered a Session without a string id (${printable(session?.id)})`,
+      `the API answered a Session without a string id (${printable(shown)})`,
     );
   }
   return `/v1/agents/sessions/${encodeURIComponent(session.id)}`;
 }
 
+// The list a page of the API answered, or none when it holds no data. Any
+// other value is no list to read: iterating it would throw, or walk a
+// string's characters, and its length would be any value it chose.
+function listed(page, route) {
+  const data = page?.data ?? [];
+  if (!Array.isArray(data)) {
+    throw new Error(
+      `GET ${printable(route)} answered data that is no list (${printable(data)})`,
+    );
+  }
+  return data;
+}
+
 async function sessionRow(system, client) {
   try {
-    const list = await api(system, client, '/v1/agents/sessions?limit=1');
-    const session = list?.data?.[0];
-    if (!session) {
+    const route = '/v1/agents/sessions?limit=1';
+    const [session] = listed(await api(system, client, route), route);
+    if (session === undefined) {
       // Without an actor the API lists only Sessions outside Workspaces.
       return client.actor
         ? row(
@@ -2948,13 +2965,14 @@ async function sessionRow(system, client) {
             'pass --actor <id> to read Workspace Sessions as one of their readers',
           );
     }
-    const route = sessionRoute(session);
-    await api(system, client, route);
-    const items = await api(system, client, `${route}/items?limit=20`);
+    const read = sessionRoute(session);
+    await api(system, client, read);
+    const items = `${read}/items?limit=20`;
+    const count = listed(await api(system, client, items), items).length;
     return row(
       'session',
       'PASS',
-      `read Session ${printable(session.id)} and ${printable(items?.data?.length ?? 0)} item(s)`,
+      `read Session ${printable(session.id)} and ${count} item(s)`,
     );
   } catch (error) {
     return row('session', 'FAIL', error.message);
@@ -2997,13 +3015,17 @@ async function turnRow(system, client, timeout) {
         return undefined;
       }
       lastError = undefined;
-      for (const event of page?.data ?? []) {
-        // A sequence is a number, or a string of one; Number() coerces any
-        // other value as encodeURIComponent() would.
-        const sequence = ['number', 'string'].includes(typeof event?.sequence)
-          ? Number(event.sequence)
-          : Number.NaN;
-        after = Math.max(after, sequence || after);
+      for (const event of listed(page, `${route}/events`)) {
+        // A sequence moves the cursor only as a whole number, or the digits
+        // of one: Number() coerces any other value as encodeURIComponent()
+        // would, and reads "Infinity", "0x10" or " 4 " as numbers.
+        const sequence =
+          typeof event?.sequence === 'string' && /^\d+$/.test(event.sequence)
+            ? Number(event.sequence)
+            : event?.sequence;
+        if (Number.isSafeInteger(sequence) && sequence > after) {
+          after = sequence;
+        }
         if (event?.terminal) {
           return event;
         }

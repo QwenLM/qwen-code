@@ -1,5 +1,9 @@
 package com.alibaba.qwen.code.managedagent.preflight;
 
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.harness.QwenHostedHarnessConnector;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -22,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.mock;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -262,8 +267,8 @@ class ResolvedConfigurationTest {
                 "--qwen.managed-agent.harness.base-url=" + url)
                 .get("harnessOrigin"), url));
 
-        // Disabled or pooled, the Harness row skips before it reads the
-        // value, and the server never dials it: nothing is judged.
+        // Disabled, nothing reads the value: the Harness row skips before it
+        // does, and the server never dials it.
         for (String url : new String[] {"http://qwen_harness:4170",
                 " http://127.0.0.1:4170 ", "http://127.0.0.1:4170"}) {
             assertEquals("skip", resolve(Map.of(),
@@ -273,11 +278,48 @@ class ResolvedConfigurationTest {
                     "QWEN_MANAGED_AGENT_HARNESS_ENABLED", "false"),
                     "--qwen.managed-agent.harness.base-url=" + url)
                     .get("harnessOrigin"), url);
-            assertEquals("skip", resolve(Map.of(
-                    "QWEN_MANAGED_AGENT_HARNESS_POOL_ENABLED", "true"),
-                    "--qwen.managed-agent.harness.enabled=true",
-                    "--qwen.managed-agent.harness.base-url=" + url)
-                    .get("harnessOrigin"), url);
+        }
+        // Pooled, the row skips too, but each member's connector reads it.
+        verdicts.forEach((url, verdict) -> assertEquals(verdict, resolve(
+                Map.of("QWEN_MANAGED_AGENT_HARNESS_POOL_ENABLED", "true"),
+                "--qwen.managed-agent.harness.enabled=true",
+                "--qwen.managed-agent.harness.base-url=" + url)
+                .get("harnessOrigin"), url));
+    }
+
+    @Test
+    void judgesTheHarnessUrlAsTheConnectorThatDialsItDoes() {
+        // The single Harness's connector and each pool member's are built
+        // from the one base-url, and refuse it by the preflight's rule: the
+        // pool's refresh drops a member whose connector refuses it.
+        for (boolean pooled : new boolean[] {false, true}) {
+            for (String url : new String[] {"http://127.0.0.1:4170",
+                    "https://harness.internal:4170/base", "http://[::1]:4170",
+                    "http://qwen_harness:4170", "http://@127.0.0.1:4170",
+                    "http://svc:s3cret@127.0.0.1:4170",
+                    "http://127.0.0.1:4170/?", "http://127.0.0.1:4170#x",
+                    "http://127.0.0.1:4170/a b", "ftp://127.0.0.1:4170",
+                    "proxy.test:4170", "", " http://127.0.0.1:4170 "}) {
+                ManagedAgentProperties properties = new ManagedAgentProperties();
+                ManagedAgentProperties.Harness harness = properties.getHarness();
+                harness.setEnabled(true);
+                harness.getPool().setEnabled(pooled);
+                harness.setBaseUrl(url);
+                harness.setToken("token");
+                harness.setCapabilityDigest("sha256:" + "a".repeat(64));
+                boolean built;
+                try {
+                    new QwenHostedHarnessConnector(properties,
+                            mock(AgentStateStore.class),
+                            mock(WorkspaceExecutionStore.class)).close();
+                    built = true;
+                } catch (IllegalArgumentException | IllegalStateException refused) {
+                    built = false;
+                }
+                assertEquals(String.valueOf(built),
+                        ManagedAgentPreflight.harnessUrlVerdict(harness),
+                        pooled + " " + url);
+            }
         }
     }
 
