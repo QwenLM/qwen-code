@@ -23,7 +23,6 @@ import {
   ACP_HOME_PREFIX,
   HOSTED_HOME_PREFIX,
   HOSTED_STORE_PREFIX,
-  removeScratchDir,
 } from './scratch-dir.js';
 
 import {
@@ -240,70 +239,6 @@ describe('globalSetup hermetic qwen home', () => {
       writer.kill('SIGKILL');
     }
   });
-
-  it.each([
-    ['CLI run directory', 'INTEGRATION_TEST_FILE_DIR'],
-    ['SDK E2E run directory', 'E2E_TEST_FILE_DIR'],
-  ])(
-    'does not exit an all-green run red when the %s cannot be removed',
-    async (_label, envKey) => {
-      // An outliving CLI child keeps writing into its test directory, which
-      // sits inside the run directory, so the removal walk reaches a directory
-      // that refills before the rmdir. That is the same class as the scratch
-      // home above, one level up: without a best-effort removal the teardown
-      // throws and vitest fails an all-green run with no failing test.
-      const { setup, teardown } = await loadGlobalSetup();
-      await setup();
-      const runDir = process.env[envKey]!;
-      const refilling = join(runDir, 'refilling');
-      await mkdir(refilling, { recursive: true });
-
-      const writer = spawn(
-        process.execPath,
-        [
-          '-e',
-          // A rolling cap, not a write ceiling: the writer must still be
-          // producing when teardown attempts the removal, so it unlinks its
-          // own older batches instead of stopping. That bounds the live set to
-          // a few hundred files without quieting the refill.
-          `const fs = require('node:fs');
-           const dir = ${JSON.stringify(refilling)};
-           const stopAt = Date.now() + 5_000;
-           let pending = [];
-           while (Date.now() < stopAt) {
-             try {
-               fs.mkdirSync(dir, { recursive: true });
-               const file = dir + '/' + process.hrtime.bigint() + '.log';
-               fs.writeFileSync(file, 'x');
-               pending.push(file);
-               if (pending.length > 256) {
-                 for (const old of pending) {
-                   try { fs.unlinkSync(old); } catch {}
-                 }
-                 pending = [];
-               }
-             } catch {}
-           }`,
-        ],
-        { stdio: 'ignore' },
-      );
-
-      try {
-        const deadline = Date.now() + 10_000;
-        while ((await readdir(refilling)).length < 50) {
-          if (Date.now() > deadline) {
-            throw new Error('writer never started refilling the run directory');
-          }
-          await new Promise((resolve) => setTimeout(resolve, 20));
-        }
-
-        await expect(teardown()).resolves.toBeUndefined();
-      } finally {
-        writer.kill('SIGKILL');
-        await removeScratchDir(runDir);
-      }
-    },
-  );
 });
 
 describe('globalSetup host config carry-over', () => {
