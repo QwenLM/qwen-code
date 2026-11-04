@@ -13,7 +13,13 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -275,6 +281,8 @@ const allowOnce = () => ({
       });
       const dir = rig.testDir!;
       scenario.prepare?.(rig);
+      // Snapshot the fixture's home writes before the child can touch it.
+      const homeBefore = readdirSync(join(dir, '.qwen-home')).sort();
       let streamingIndex = 0;
       server = await startFakeOpenAIServer(
         ({ body }) =>
@@ -303,9 +311,9 @@ const allowOnce = () => ({
         no_proxy: noProxy,
         QWEN_HOME: qwenHome,
         // TestRig keeps QWEN_RUNTIME_DIR inside the workspace; leaving it
-        // there makes the session runtime write `tmp/<hash>` into the test
-        // directory, which then differs between the two surfaces' request
-        // snapshots. Give both surfaces the same scratch runtime.
+        // there lets the session runtime write `tmp/<hash>` into the directory
+        // each run's request snapshot encodes, so give each run its own
+        // scratch runtime outside the workspace.
         QWEN_RUNTIME_DIR: qwenHome,
       };
       delete env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'];
@@ -507,10 +515,11 @@ const allowOnce = () => ({
           await removeScratchDir(qwenHome);
         }
       }
-      // The scratch runtime is what keeps the session runtime's `tmp/<hash>`
-      // out of the workspace, so pin its absence rather than relying on the
-      // snapshot diff, which only trips on the losing side of a race.
-      expect(existsSync(join(dir, '.qwen-home', 'tmp'))).toBe(false);
+      // The scratch runtime keeps the session runtime's `tmp/<hash>` and
+      // `usage/` out of the workspace. Comparing against the pre-run listing
+      // avoids copying TestRig's seeded names, and a leak fails here directly
+      // rather than only when the request equality loses a race.
+      expect(readdirSync(join(dir, '.qwen-home')).sort()).toEqual(homeBefore);
       return {
         requests: modelRequests(server, dir),
         dateReminders: streamingMessages(server).filter((messages) =>

@@ -1100,6 +1100,11 @@ describe('e2e workflow', () => {
       // outlast the job's 60-minute cap. So neither a single mirror nor a
       // host-name map is correct — the build probes and overrides only on a
       // clear win, which leaves healthy hosts on the built-in source.
+      // The VPC intranet mirror is the durable fix: it bypasses the capped
+      // public egress that throttles the public mirrors (the maven script's
+      // rationale). It must stay a probe candidate — unreachable off-VPC, it
+      // measures 0 and loses, so no host map is needed.
+      expect(e2eRunScript).toContain('mirrors.cloud.aliyuncs.com');
       expect(e2eRunScript).toContain('mirrors.aliyun.com');
       expect(e2eRunScript).toContain('mirrors.tuna.tsinghua.edu.cn');
       expect(e2eRunScript).toContain('--build-arg APT_MIRROR=');
@@ -1122,19 +1127,19 @@ describe('e2e workflow', () => {
       expect(e2eRunScript.indexOf('if ! build_image;')).toBeGreaterThan(
         callIndex,
       );
-      // Three conditions hold the override back, and dropping any one is a real
-      // regression: a healthy default host keeps its source, a mirror has to be
-      // fast in absolute terms rather than merely faster than a broken default,
-      // and it has to beat the default decisively. The literals are pinned, not
-      // just the variable names: a 10x mutation of either threshold leaves the
-      // structure intact but flips the both-slow shape onto a still-slow mirror.
-      // \b, not toContain: 'slow_default=250000' is a substring of the 10x
-      // mutation 'slow_default=2500000', which would keep a naive pin green.
-      expect(e2eRunScript).toMatch(/slow_default=250000\b/);
-      expect(e2eRunScript).toMatch(/-lt "\$\{slow_default\}" \]/);
+      // Two gates hold the override back, both on the mirror side: an absolute
+      // floor (no "slow vs slower" override) and a 4x factor (a genuinely fast
+      // default — the Hong Kong hosts — keeps its source). The literals are
+      // pinned, not just the names: a 10x mutation of the floor flips the
+      // both-slow shape onto a still-slow mirror. \b, not toContain, so the
+      // 10x-up mutation 'fast_mirror=10000000' cannot satisfy the pin.
       expect(e2eRunScript).toMatch(/fast_mirror=1000000\b/);
       expect(e2eRunScript).toMatch(/-gt "\$\{fast_mirror\}" \]/);
       expect(e2eRunScript).toMatch(/-gt \$\(\(default_rate \* 4\)\)/);
+      // There must be NO "default looks healthy" gate: the mainland paths are
+      // bimodal, so a short probe of the default cannot veto the override
+      // (#16214 recurrence on hz4-2, run 41743539611). Pin its absence.
+      expect(e2eRunScript).not.toContain('slow_default');
       // The measurements have to reach the log, or the next slow build is
       // another manual investigation.
       expect(e2eRunScript).toContain('apt probe:');
