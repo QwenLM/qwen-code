@@ -3437,9 +3437,53 @@ describe('GithubChannel', () => {
       ).toEqual(['first', 'second']);
     });
 
+    it('starts no further record once the channel stops during the pass', async () => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({
+          id: 'second',
+          threadId: 'issue:43',
+          sourceMessageId: '1002',
+        }),
+      ]);
+      // The stop lands while the first record's write is in flight; the
+      // pass's own signal stays live, as when another write defers the abort.
+      mockOctokit.rest.issues.createComment.mockImplementationOnce(async () => {
+        channel.disconnect();
+        return {
+          data: {
+            id: 2011,
+            html_url:
+              'https://github.com/owner/repo/issues/42#issuecomment-2011',
+          },
+        };
+      });
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        retryPendingFinalDeliveries: (signal?: AbortSignal) => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+
+      await privateChannel.retryPendingFinalDeliveries(
+        new AbortController().signal,
+      );
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['second']);
+    });
+
     it('still drops a later record already posted once the pass stops on a rate limit', async () => {
       writePending([
         pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({
+          id: 'kept',
+          threadId: 'issue:44',
+          sourceMessageId: '1003',
+        }),
         pendingRecord({
           id: 'second',
           threadId: 'issue:43',
@@ -3492,7 +3536,7 @@ describe('GithubChannel', () => {
         JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
           (record: { id: string }) => record.id,
         ),
-      ).toEqual(['first']);
+      ).toEqual(['first', 'kept']);
       expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
@@ -3923,25 +3967,94 @@ describe('GithubChannel', () => {
       expect(existsSync(pendingPath())).toBe(false);
     });
 
-    it('keeps the final reply pending, without an immediate retry, when a stop ends the rate-limit wait', async () => {
+    it.each([
+      [
+        'retry-after',
+        SECONDARY_LIMIT,
+        { 'x-ratelimit-remaining': '4999', 'retry-after': '30' },
+      ],
+      [
+        'an exhausted budget and its reset',
+        'API rate limit exceeded',
+        {
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': String(Math.ceil(Date.now() / 1000) + 3600),
+        },
+      ],
+      [
+        'an exhausted budget without a reset',
+        'API rate limit exceeded',
+        { 'x-ratelimit-remaining': '0' },
+      ],
+      [
+        'the secondary-limit wording',
+        SECONDARY_LIMIT,
+        { 'x-ratelimit-remaining': '4999' },
+      ],
+    ])(
+      'keeps the final reply pending, without an immediate retry, when a stop ends a wait set by %s',
+      async (_label, message, headers) => {
+        await connectForPublication();
+        // The channel stops while the reply waits out the limit.
+        const sleep = vi.fn().mockImplementation(async () => {
+          channel.disconnect();
+        });
+        (
+          channel as unknown as {
+            sleepForRetry: (ms: number) => Promise<void>;
+          }
+        ).sleepForRetry = sleep;
+        const error = Object.assign(
+          new Error(`${message} - https://docs.github.com/rest`),
+          { status: 403, response: { headers } },
+        );
+        mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+        const publish = (
+          channel as unknown as {
+            publishFinalResponse: (
+              chatId: string,
+              threadId: string,
+              text: string,
+              sessionId: string,
+            ) => Promise<void>;
+          }
+        ).publishFinalResponse.bind(channel);
+
+        await expect(
+          publish(
+            'owner/repo',
+            'issue:42',
+            'Final reply',
+            'session-publication',
+          ),
+        ).rejects.toMatchObject({ cause: error });
+        expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+        expect(sleep).toHaveBeenCalledTimes(1);
+        const audit = readFileSync(auditPath(), 'utf-8');
+        expect(audit).toContain('"outcome":"failed"');
+        expect(audit).not.toContain('"outcome":"failed_ambiguous"');
+        expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toEqual([
+          expect.objectContaining({ fullText: 'Final reply' }),
+        ]);
+      },
+    );
+
+    it('waits and retries again after the channel reconnects', async () => {
       await connectForPublication();
-      // The channel stops while the reply waits out the limit.
-      const sleep = vi.fn().mockImplementation(async () => {
-        channel.disconnect();
-      });
+      channel.disconnect();
+      await connectForPublication();
+      const sleep = vi.fn().mockResolvedValue(undefined);
       (
         channel as unknown as {
           sleepForRetry: (ms: number) => Promise<void>;
         }
       ).sleepForRetry = sleep;
-      const error = Object.assign(
-        new Error(`${SECONDARY_LIMIT} - https://docs.github.com/rest`),
-        {
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error(SECONDARY_LIMIT), {
           status: 403,
           response: { headers: { 'x-ratelimit-remaining': '4999' } },
-        },
+        }),
       );
-      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
       const publish = (
         channel as unknown as {
           publishFinalResponse: (
@@ -3955,15 +4068,9 @@ describe('GithubChannel', () => {
 
       await expect(
         publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
-      ).rejects.toMatchObject({ cause: error });
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
-      expect(sleep).toHaveBeenCalledTimes(1);
-      const audit = readFileSync(auditPath(), 'utf-8');
-      expect(audit).toContain('"outcome":"failed"');
-      expect(audit).not.toContain('"outcome":"failed_ambiguous"');
-      expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toEqual([
-        expect.objectContaining({ fullText: 'Final reply' }),
-      ]);
+      ).rejects.toBeDefined();
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(3);
+      expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([60_000, 120_000]);
     });
 
     it.each([
@@ -3972,6 +4079,12 @@ describe('GithubChannel', () => {
         403,
         'Resource not accessible by personal access token',
         '4999',
+      ],
+      [
+        'a permission 403 with an empty budget header',
+        403,
+        'Resource not accessible by personal access token',
+        '',
       ],
       ['a 502 carrying an exhausted budget header', 502, 'Server Error', '0'],
     ])(
@@ -6208,6 +6321,7 @@ describe('GithubChannel', () => {
     it.each([
       ['an HTTP date', 'Wed, 21 Oct 2026 07:28:00 GMT'],
       ['zero seconds', '0'],
+      ['infinite', 'Infinity'],
     ])(
       'keeps the secondary-limit minimum when retry-after is %s',
       async (_label, retryAfter) => {
@@ -6282,6 +6396,41 @@ describe('GithubChannel', () => {
         .mockResolvedValueOnce('ok');
       await expect(githubApi(fn)).resolves.toBe('ok');
       expect(sleep).toHaveBeenCalledWith(1000);
+    });
+
+    it('keeps the short backoff for a server error carrying an exhausted budget', async () => {
+      const now = 1_700_000_000_000;
+      const dateSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          httpError(502, {
+            'x-ratelimit-remaining': '0',
+            'x-ratelimit-reset': String(now / 1000 + 600),
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(1000);
+      dateSpy.mockRestore();
+    });
+
+    it('gives up after a retry-after wait that a stop ended', async () => {
+      const sleep = vi.fn().mockImplementation(async () => {
+        channel.disconnect();
+      });
+      (
+        channel as unknown as {
+          abortableSleep: (ms: number) => Promise<void>;
+        }
+      ).abortableSleep = sleep;
+      const fn = vi
+        .fn()
+        .mockRejectedValue(httpError(503, { 'retry-after': '7' }));
+      await expect(githubApi(fn)).rejects.toThrow('HTTP 503');
+      expect(fn).toHaveBeenCalledTimes(1);
+      expect(sleep).toHaveBeenCalledWith(7000);
     });
 
     it('falls back to exponential backoff without rate-limit headers', async () => {

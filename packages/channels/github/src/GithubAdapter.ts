@@ -993,32 +993,48 @@ function isNoReplySentinel(text: string): boolean {
 /** GitHub's wording for a secondary (abuse) rate limit. */
 const SECONDARY_RATE_LIMIT_MESSAGE = /secondary rate limit|abuse detection/i;
 
+type GithubRequestError = {
+  status?: number;
+  message?: unknown;
+  response?: { headers?: Record<string, string | number> };
+};
+
+/** `x-ratelimit-remaining` as a count; absent or malformed is undefined. */
+function rateLimitRemaining(err: unknown): number | undefined {
+  const value = (err as GithubRequestError).response?.headers?.[
+    'x-ratelimit-remaining'
+  ];
+  if (typeof value === 'number') return value;
+  return typeof value === 'string' && /^\d+$/.test(value)
+    ? Number(value)
+    : undefined;
+}
+
 /**
- * GitHub's rate limiter rejected the write before creating anything. The
- * `x-ratelimit-remaining` header shows GitHub's API answered rather than, say,
- * a bare 429 from a proxy in front of it. Then any of GitHub's rate-limit
- * signals marks the rejection: an exhausted budget, `retry-after`, or the
- * secondary-limit wording. GitHub sends a secondary limit with quota left and
- * not always with `retry-after`, and its wording has changed before, so no
- * single signal is required. A component that copied GitHub's headers onto
- * its own 403/429 could still be misread, by any of the three alike.
+ * A 403 or 429 carrying one of GitHub's rate-limit signals: an exhausted
+ * budget, `retry-after`, or the secondary-limit wording. GitHub sends a
+ * secondary limit with quota left and not always with `retry-after`, and its
+ * wording has changed before, so no single signal is required.
+ */
+function isRateLimitAnswer(err: unknown): boolean {
+  const e = err as GithubRequestError;
+  return (
+    (e.status === 403 || e.status === 429) &&
+    (rateLimitRemaining(err) === 0 ||
+      e.response?.headers?.['retry-after'] !== undefined ||
+      SECONDARY_RATE_LIMIT_MESSAGE.test(String(e.message)))
+  );
+}
+
+/**
+ * GitHub's rate limiter rejected the write before creating anything: a rate
+ * limit answer that also carries `x-ratelimit-remaining`, which shows GitHub's
+ * API answered rather than, say, a bare 429 from a proxy in front of it. A
+ * component that copied GitHub's headers onto its own 403/429 could still be
+ * misread.
  */
 function isDefiniteNoWriteGithubError(err: unknown): boolean {
-  const e = err as {
-    status?: number;
-    message?: unknown;
-    response?: { headers?: Record<string, string | number> };
-  };
-  const headers = e.response?.headers;
-  const remaining = headers?.['x-ratelimit-remaining'];
-  if ((e.status !== 403 && e.status !== 429) || remaining === undefined) {
-    return false;
-  }
-  return (
-    Number(remaining) === 0 ||
-    headers?.['retry-after'] !== undefined ||
-    SECONDARY_RATE_LIMIT_MESSAGE.test(String(e.message))
-  );
+  return isRateLimitAnswer(err) && rateLimitRemaining(err) !== undefined;
 }
 
 /**
@@ -1662,7 +1678,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const pending = this.readPendingFinalDeliveries();
     let rateLimited = false;
     for (const record of pending) {
-      if (signal?.aborted) return;
+      // A stop defers the abort while another write is in flight; start no
+      // new record meanwhile.
+      if (signal?.aborted || this.pendingFinalDeliveryRetryStopRequested) {
+        return;
+      }
       const auditBase = this.buildPublicationAuditBase({
         chatId: record.chatId,
         threadId: record.threadId,
@@ -3881,34 +3901,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         const headers = e.response?.headers ?? {};
 
         // A retry-after that is not a positive number of seconds (an HTTP
-        // date, "0") is ignored, so the rate-limit headers or the
-        // secondary-limit minimum below set the wait instead.
+        // date, "0") is ignored, so the budget reset or the rate-limit
+        // minimum below sets the wait instead.
         const retryAfter = Number(headers['retry-after'] ?? NaN);
+        const usableRetryAfter = Number.isFinite(retryAfter) && retryAfter > 0;
+        const rateLimited = isRateLimitAnswer(err);
+        const reset = Number(headers['x-ratelimit-reset']);
         let cooldown: number;
-        let rateLimitWait = true;
-        if (Number.isFinite(retryAfter) && retryAfter > 0) {
+        if (usableRetryAfter) {
           cooldown = retryAfter * 1000;
-        } else if (
-          (e.status === 403 || e.status === 429) &&
-          Number(headers['x-ratelimit-remaining']) === 0 &&
-          Number(headers['x-ratelimit-reset']) > 0
-        ) {
-          cooldown =
-            Math.max(
-              0,
-              Number(headers['x-ratelimit-reset']) * 1000 - Date.now(),
-            ) + 1000;
-        } else if (
-          (e.status === 403 || e.status === 429) &&
-          (headers['retry-after'] !== undefined ||
-            SECONDARY_RATE_LIMIT_MESSAGE.test(String(e.message)))
-        ) {
-          // GitHub's guidance for a secondary limit without a usable
-          // retry-after: wait at least a minute, longer on each repeat.
+        } else if (rateLimited && rateLimitRemaining(err) === 0 && reset > 0) {
+          cooldown = Math.max(0, reset * 1000 - Date.now()) + 1000;
+        } else if (rateLimited) {
+          // GitHub's guidance for a rate limit without a usable retry-after
+          // or reset: wait at least a minute, longer on each repeat.
           cooldown = 60_000 * 2 ** (attempt - 1);
         } else {
           cooldown = 1000 * 2 ** (attempt - 1);
-          rateLimitWait = false;
         }
         cooldown = Math.min(cooldown, MAX_TIMER_DELAY_MS);
 
@@ -3916,11 +3925,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           `[Channel:${this.name}] ${label} failed (attempt ${attempt}/${retries}, status=${e.status}), retrying in ${cooldown}ms: ${sanitizeLogText(e.message ?? String(err), 200)}\n`,
         );
         await this.sleepForRetry(cooldown, signal);
-        // disconnect() ends a rate-limit wait early (or skips it when the
-        // call started after the stop). Give up with GitHub's last answer
-        // rather than retry at once into the same limit: a definite no-write
-        // stays definite, so a final reply is kept as a pending delivery.
-        if (rateLimitWait && this.pendingFinalDeliveryRetryStopRequested) {
+        // After disconnect() — which ends the wait early, skips it for a call
+        // that started after the stop, or lets it run out while an in-flight
+        // write defers the abort — give up with GitHub's last answer instead
+        // of retrying into the same limit. A definite no-write stays
+        // definite, so a final reply is kept as a pending delivery.
+        if (
+          (usableRetryAfter || rateLimited) &&
+          this.pendingFinalDeliveryRetryStopRequested
+        ) {
           throw err;
         }
       }
