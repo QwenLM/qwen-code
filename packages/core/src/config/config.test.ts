@@ -1313,6 +1313,9 @@ describe('Server Config (config.ts)', () => {
         });
 
         expect(config.getProjectHooks()).toBe(projectHooks);
+        // The registry loads the approved block; the listing must not add
+        // a second, trust-disabled copy of the same hooks.
+        expect(config.getTrustWithheldProjectHooks()).toBeUndefined();
       },
     );
 
@@ -1324,6 +1327,7 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toBe(projectHooks);
 
       config.setProjectHooksPendingApproval(true, true);
       expect(config.isProjectHooksRejected()).toBe(true);
@@ -1337,6 +1341,7 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toBe(projectHooks);
 
       const trusted = makeConfig({
         interactive: true,
@@ -1345,6 +1350,7 @@ describe('Server Config (config.ts)', () => {
         projectHooks,
       });
       expect(trusted.getProjectHooks()).toBe(projectHooks);
+      expect(trusted.getTrustWithheldProjectHooks()).toBeUndefined();
     });
   });
 

@@ -348,12 +348,11 @@ export function HooksManagementDialog({
                 source: HooksConfigSource.Project,
                 sourceDisplay: sourceDisplayMap[HooksConfigSource.Project],
                 // Match the execution accessor: pending/rejected withholds;
-                // an approved block is its own authority; without a decision
-                // an interactive session still needs explicit folder trust.
+                // otherwise the block runs exactly when getProjectHooks()
+                // serves it (approved, or explicitly trusted, or headless).
                 enabled:
                   !config.isProjectHooksPendingApproval() &&
-                  (config.isProjectHooksApprovalGated() ||
-                    config.getProjectHooks() !== undefined),
+                  config.getProjectHooks() !== undefined,
                 rejected: config.isProjectHooksRejected(),
               },
               groupByMatcher,

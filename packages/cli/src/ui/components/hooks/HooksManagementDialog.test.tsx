@@ -484,4 +484,50 @@ describe('HooksManagementDialog', () => {
       });
     },
   );
+
+  it('marks project hooks disabled when an ungated session lacks folder trust', async () => {
+    const defaultConfig = mockedUseConfig.getMockImplementation();
+    onTestFinished(() => {
+      mockedUseConfig.mockImplementation(defaultConfig!);
+    });
+    mockedUseConfig.mockImplementation(
+      () =>
+        ({
+          ...disabledHooksConfig(),
+          getDisableAllHooks: vi.fn(() => false),
+          isProjectHooksPendingApproval: vi.fn(() => false),
+          isProjectHooksRejected: vi.fn(() => false),
+          getProjectHooks: vi.fn(() => undefined),
+        }) as unknown as ReturnType<typeof useConfig>,
+    );
+    mockSettingsHooks(
+      {},
+      {
+        PreToolUse: [
+          {
+            matcher: 'Bash',
+            hooks: [{ type: 'command', command: './repo-hook.sh' }],
+          },
+        ],
+      },
+    );
+
+    const { lastFrame } = renderWithProviders(
+      <HooksManagementDialog onClose={mockOnClose} />,
+    );
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('Hooks');
+    });
+    pressKey('return');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('Bash');
+    });
+    pressKey('return');
+
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('./repo-hook.sh');
+      expect(lastFrame()).toContain('Local Settings · disabled');
+      expect(lastFrame()).not.toContain('not approved');
+    });
+  });
 });

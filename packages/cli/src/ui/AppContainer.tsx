@@ -1987,7 +1987,11 @@ export const AppContainer = (props: AppContainerProps) => {
       config.getBareMode() ||
       config.isSafeMode() ||
       // With every hook disabled the trust gate is not why they are absent.
-      config.getDisableAllHooks()
+      config.getDisableAllHooks() ||
+      // An approved block is its own execution authority and loads despite
+      // the trust gate; warning about trust would be a false negative.
+      (config.isProjectHooksApprovalGated() &&
+        !config.isProjectHooksPendingApproval())
     ) {
       return;
     }

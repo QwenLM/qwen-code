@@ -1561,7 +1561,13 @@ describe('AppContainer State Management', () => {
     it.each([
       ['the folder is explicitly trusted', { trusted: true }],
       ['every hook is disabled', { trusted: false, disableAllHooks: true }],
-    ] as Array<[string, { trusted: boolean; disableAllHooks?: boolean }]>)(
+      ['the block is approved', { trusted: false, approved: true }],
+    ] as Array<
+      [
+        string,
+        { trusted: boolean; disableAllHooks?: boolean; approved?: boolean },
+      ]
+    >)(
       'does not warn about withheld project hooks when %s',
       async (_, state) => {
         const addItem = vi.fn();
@@ -1579,6 +1585,12 @@ describe('AppContainer State Management', () => {
         );
         vi.spyOn(mockConfig, 'getDisableAllHooks').mockReturnValue(
           state.disableAllHooks ?? false,
+        );
+        vi.spyOn(mockConfig, 'isProjectHooksApprovalGated').mockReturnValue(
+          state.approved ?? false,
+        );
+        vi.spyOn(mockConfig, 'isProjectHooksPendingApproval').mockReturnValue(
+          false,
         );
         const settings = {
           ...mockSettings,

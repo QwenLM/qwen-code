@@ -11839,7 +11839,23 @@ export class Config {
     if (!this.isInteractive() || this.isExplicitlyTrustedFolder()) {
       return undefined;
     }
+    // An approved block is its own execution authority: the registry loads
+    // it, so the listing must not add a second, trust-disabled copy.
+    if (this.hasApprovedProjectHooks()) {
+      return undefined;
+    }
     return this.readProjectHooksBlock();
+  }
+
+  /** Whether a hash-bound approval authorizes the project hooks block. */
+  private hasApprovedProjectHooks(): boolean {
+    // `isProjectHooksApprovalGated()` already accounts for the YOLO
+    // exemption: while exempt the session is ungated and the folder-trust
+    // rule applies on its own.
+    return (
+      this.isProjectHooksApprovalGated() &&
+      this.projectHooksPendingApproval === false
+    );
   }
 
   private readProjectHooks():
@@ -11853,14 +11869,8 @@ export class Config {
     // approved decision), or explicit folder trust. Approval is the finer
     // grant — it authorizes these hooks, not the folder's other executable
     // settings — so the interactive trust gate must not swallow it.
-    // `isProjectHooksApprovalGated()` already accounts for the YOLO
-    // exemption: while exempt the session is ungated and the folder-trust
-    // rule below applies on its own.
-    const approved =
-      this.isProjectHooksApprovalGated() &&
-      this.projectHooksPendingApproval === false;
     if (
-      !approved &&
+      !this.hasApprovedProjectHooks() &&
       this.isInteractive() &&
       !this.isExplicitlyTrustedFolder()
     ) {
