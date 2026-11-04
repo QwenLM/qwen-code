@@ -1056,18 +1056,20 @@ function isWatchFailFastError(err: unknown): boolean {
 function isWatchPassAbortError(err: unknown): boolean {
   const e = err as {
     status?: number;
+    message?: unknown;
     response?: { headers?: Record<string, string | number> };
   };
   if (e.status === 401 || e.status === 429) return true;
   if (e.status === 403) {
-    // GitHub does not always send x-ratelimit-remaining === 0 on a
-    // secondary/abuse limit, but it does send retry-after; either marks a
-    // shared rate limit. A bare permission 403 (remaining > 0, no
+    // A secondary/abuse limit comes with quota left and not always with
+    // retry-after; an exhausted budget, retry-after or GitHub's wording each
+    // mark a shared rate limit. A bare permission 403 (remaining > 0, no
     // retry-after) stays per-PR so it cannot starve the other watched PRs.
     const headers = e.response?.headers;
     return (
       Number(headers?.['x-ratelimit-remaining']) === 0 ||
-      headers?.['retry-after'] !== undefined
+      headers?.['retry-after'] !== undefined ||
+      SECONDARY_RATE_LIMIT_MESSAGE.test(String(e.message))
     );
   }
   return false;
@@ -1655,6 +1657,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     signal?: AbortSignal,
   ): Promise<void> {
     const pending = this.readPendingFinalDeliveries();
+    let rateLimited = false;
     for (const record of pending) {
       if (signal?.aborted) return;
       const auditBase = this.buildPublicationAuditBase({
@@ -1684,6 +1687,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }
         continue;
       }
+      // A rate limit answers every later record the same way: keep them for
+      // the next start instead of spending three more attempts on each. The
+      // already-posted check above needs no request, so it still runs.
+      if (rateLimited) continue;
       try {
         const comment = await this.createIssueComment(
           record.chatId,
@@ -1718,16 +1725,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.removeReplyPendingInboundTask(record);
       } catch (err) {
         if (signal?.aborted) return;
-        // A rate limit answers every remaining record the same way: keep
-        // them all for the next start instead of spending three more
-        // attempts per record against it.
-        if (isDefiniteNoWriteGithubError(err)) return;
+        if (isDefiniteNoWriteGithubError(err)) {
+          rateLimited = true;
+          continue;
+        }
         this.recordPublicationAudit({
           ...auditBase,
           at: new Date().toISOString(),
           type: 'github_publication',
-          // Ambiguous by construction: the definite-no-write branch above
-          // already continued. Keep the key consumed (at-most-once).
+          // Ambiguous by construction: a definite no-write never reaches
+          // here. Keep the key consumed (at-most-once).
           outcome: 'failed_ambiguous',
           failurePhase: 'delivery',
           failureError: sanitizeLogText(
@@ -3870,12 +3877,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         };
         const headers = e.response?.headers ?? {};
 
+        // A retry-after that is not a positive number of seconds (an HTTP
+        // date, "0") is ignored, so the rate-limit headers or the
+        // secondary-limit minimum below set the wait instead.
+        const retryAfter = Number(headers['retry-after'] ?? NaN);
         let cooldown: number;
-        if (headers['retry-after']) {
-          const retryAfter = Number(headers['retry-after']);
-          cooldown = Number.isFinite(retryAfter)
-            ? retryAfter * 1000
-            : 1000 * 2 ** (attempt - 1);
+        let rateLimitWait = true;
+        if (Number.isFinite(retryAfter) && retryAfter > 0) {
+          cooldown = retryAfter * 1000;
         } else if (
           (e.status === 403 || e.status === 429) &&
           Number(headers['x-ratelimit-remaining']) === 0 &&
@@ -3895,6 +3904,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           cooldown = 60_000 * 2 ** (attempt - 1);
         } else {
           cooldown = 1000 * 2 ** (attempt - 1);
+          rateLimitWait = false;
         }
         cooldown = Math.min(cooldown, MAX_TIMER_DELAY_MS);
 
@@ -3902,6 +3912,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           `[Channel:${this.name}] ${label} failed (attempt ${attempt}/${retries}, status=${e.status}), retrying in ${cooldown}ms: ${sanitizeLogText(e.message ?? String(err), 200)}\n`,
         );
         await this.sleepForRetry(cooldown, signal);
+        // disconnect() ends a rate-limit wait early (or skips it when the
+        // call started after the stop). Give up with GitHub's last answer
+        // rather than retry at once into the same limit: a definite no-write
+        // stays definite, so a final reply is kept as a pending delivery.
+        if (rateLimitWait && this.pendingFinalDeliveryRetryStopRequested) {
+          throw err;
+        }
       }
     }
     throw new Error('unreachable');

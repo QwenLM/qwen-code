@@ -166,11 +166,14 @@ The GitHub channel publishes only completed responses. Intermediate model chunks
 If GitHub returns a definite no-write delivery failure — its rate limiter
 rejecting the comment, either because the hourly budget is exhausted or
 because a secondary rate limit was hit — the channel retries the comment
-twice more, waiting as long as GitHub asks (`retry-after`, the budget reset,
-or at least a minute and then two for a secondary limit without
-`retry-after`). If it still fails, the channel stores the final reply in
+twice more, waiting as long as GitHub asks: `retry-after` when GitHub sends
+it, the budget reset when the hourly budget is exhausted, and otherwise one
+minute and then two for a secondary limit. If it still fails, or the channel
+stops during the wait, the channel stores the final reply in
 `~/.qwen/channels/<workspace-scope>/<channel>-<name-hash>-github-pending-deliveries.json`
-with private file permissions and retries it on the next channel start. The
+with private file permissions and retries it on the next channel start. That
+retry stops sending at the first stored reply GitHub still rate-limits and
+keeps it, and every stored reply after it, for the following start. The
 corresponding inbound task remains in `reply_pending` state until that delivery
 succeeds or reaches a definite terminal failure. Ambiguous delivery failures are
 not retried automatically because GitHub may have created the comment.

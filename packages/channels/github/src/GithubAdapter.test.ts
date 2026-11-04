@@ -2917,7 +2917,9 @@ describe('GithubChannel', () => {
     async function connectForPublication() {
       mockOctokit.paginate.mockResolvedValue([]);
       await channel.connect();
-      channel.disconnect();
+      // Stop polling only: disconnect() would also end every rate-limit
+      // retry wait, which these cases exercise.
+      (channel as unknown as { stopPollLoop: () => void }).stopPollLoop();
     }
 
     it('suppresses the exact no-reply sentinel and audits the outcome', async () => {
@@ -3413,6 +3415,87 @@ describe('GithubChannel', () => {
       expect(existsSync(auditPath())).toBe(false);
     });
 
+    it('stops the pass on an exhausted hourly budget as well', async () => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({ id: 'second', sourceMessageId: '1002' }),
+      ]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error('API rate limit exceeded'), {
+          status: 403,
+          response: { headers: { 'x-ratelimit-remaining': '0' } },
+        }),
+      );
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(3);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['first', 'second']);
+    });
+
+    it('still drops a later record already posted once the pass stops on a rate limit', async () => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({
+          id: 'second',
+          threadId: 'issue:43',
+          sourceMessageId: '1002',
+        }),
+      ]);
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          state: 'reply_pending',
+          envelope: undefined,
+          source: {
+            chatId: 'owner/repo',
+            threadId: 'issue:43',
+            messageId: '1002',
+          },
+        }),
+      ]);
+      mkdirSync(join(auditPath(), '..'), { recursive: true });
+      writeFileSync(
+        auditPath(),
+        `${JSON.stringify({
+          at: '2026-07-30T00:01:00.000Z',
+          type: 'github_publication',
+          outcome: 'posted',
+          channel: 'test-github',
+          repository: 'owner/repo',
+          number: 43,
+          sessionId: 'session-publication',
+          threadId: 'issue:43',
+          pendingId: 'second',
+        })}\n`,
+      );
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error('You have exceeded a secondary rate limit'), {
+          status: 403,
+          response: { headers: { 'x-ratelimit-remaining': '4999' } },
+        }),
+      );
+
+      await retryPendingForTest();
+
+      // No request for the posted record: only its stale entry goes.
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(3);
+      expect(
+        mockOctokit.rest.issues.createComment.mock.calls.every(
+          ([request]) => request.issue_number === 42,
+        ),
+      ).toBe(true);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['first']);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
     it('drops and audits an ambiguous pending final retry failure', async () => {
       writePending([
         pendingRecord({ triggerKind: 'mention', sourceMessageId: '1001' }),
@@ -3769,6 +3852,49 @@ describe('GithubChannel', () => {
         ]);
       },
     );
+
+    it('keeps the final reply pending, without an immediate retry, when a stop ends the rate-limit wait', async () => {
+      await connectForPublication();
+      // The channel stops while the reply waits out the limit.
+      const sleep = vi.fn().mockImplementation(async () => {
+        channel.disconnect();
+      });
+      (
+        channel as unknown as {
+          sleepForRetry: (ms: number) => Promise<void>;
+        }
+      ).sleepForRetry = sleep;
+      const error = Object.assign(
+        new Error(`${SECONDARY_LIMIT} - https://docs.github.com/rest`),
+        {
+          status: 403,
+          response: { headers: { 'x-ratelimit-remaining': '4999' } },
+        },
+      );
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toMatchObject({ cause: error });
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(sleep).toHaveBeenCalledTimes(1);
+      const audit = readFileSync(auditPath(), 'utf-8');
+      expect(audit).toContain('"outcome":"failed"');
+      expect(audit).not.toContain('"outcome":"failed_ambiguous"');
+      expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toEqual([
+        expect.objectContaining({ fullText: 'Final reply' }),
+      ]);
+    });
 
     it.each([
       [
@@ -5984,6 +6110,88 @@ describe('GithubChannel', () => {
         .mockResolvedValueOnce('ok');
       await expect(githubApi(fn)).resolves.toBe('ok');
       expect(sleep).toHaveBeenCalledWith(5000);
+    });
+
+    it('waits for the reset, not the secondary minimum, when the budget is exhausted', async () => {
+      const now = 1_700_000_000_000;
+      const dateSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          Object.assign(new Error('You have exceeded a secondary rate limit'), {
+            status: 403,
+            response: {
+              headers: {
+                'x-ratelimit-remaining': '0',
+                'x-ratelimit-reset': String(now / 1000 + 5),
+              },
+            },
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(6000);
+      dateSpy.mockRestore();
+    });
+
+    it.each([
+      ['an HTTP date', 'Wed, 21 Oct 2026 07:28:00 GMT'],
+      ['zero seconds', '0'],
+    ])(
+      'keeps the secondary-limit minimum when retry-after is %s',
+      async (_label, retryAfter) => {
+        const sleep = stubSleep();
+        const fn = vi
+          .fn()
+          .mockRejectedValueOnce(
+            Object.assign(
+              new Error('You have exceeded a secondary rate limit'),
+              {
+                status: 403,
+                response: {
+                  headers: {
+                    'x-ratelimit-remaining': '4999',
+                    'retry-after': retryAfter,
+                  },
+                },
+              },
+            ),
+          )
+          .mockResolvedValueOnce('ok');
+        await expect(githubApi(fn)).resolves.toBe('ok');
+        expect(sleep).toHaveBeenCalledWith(60_000);
+      },
+    );
+
+    it('matches the secondary-limit wording in any letter case', async () => {
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          Object.assign(new Error('Secondary Rate Limit exceeded'), {
+            status: 429,
+            response: { headers: {} },
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(60_000);
+    });
+
+    it('keeps the short backoff for a server error that quotes the secondary-limit wording', async () => {
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          Object.assign(new Error('You have exceeded a secondary rate limit'), {
+            status: 500,
+            response: { headers: {} },
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(1000);
     });
 
     it('falls back to exponential backoff without rate-limit headers', async () => {
@@ -13534,6 +13742,51 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(
           mockOctokit.rest.activity.listNotificationsForAuthenticatedUser,
         ).toHaveBeenCalledTimes(1);
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('aborts the watch pass on a secondary limit named only by its message', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding(),
+          makeBinding({
+            sessionId: 'other-session',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            prs: [
+              {
+                number: 43,
+                url: 'https://github.com/owner/repo/pull/43',
+                state: 'open',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      // Quota left and no retry-after: only GitHub's wording marks the limit.
+      mockOctokit.rest.pulls.get.mockRejectedValue(
+        Object.assign(
+          new Error(
+            'You have exceeded a secondary rate limit. Please wait a few minutes before you try again. - https://docs.github.com/rest',
+          ),
+          {
+            status: 403,
+            response: { headers: { 'x-ratelimit-remaining': '4999' } },
+          },
+        ),
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        mockNotificationsOnce([]);
+        await pollOnce();
+
+        expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(1);
+        expect(
+          stderr.mock.calls.map((call) => String(call[0])).join(''),
+        ).toContain('PR watch pass aborted');
       } finally {
         stderr.mockRestore();
       }
