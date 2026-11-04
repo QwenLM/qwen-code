@@ -6967,6 +6967,18 @@ export function registerHostedHarnessSessionRoutes(
       // the Broker or settle anything. A bare load of a parked Session keeps
       // refusing with 409 so it never drives a Runtime by accident.
       const takeover = !lifecycle && !session.hooks && takeoverFlags;
+      // An extensions Session that also carries a Hook catalog never satisfies
+      // `takeover` (hooks set), yet a parked command-step approval is still
+      // recoverable by an explicit takeover load. Compute it once and use it
+      // for BOTH the file-history settle exemption and the resume arm below,
+      // so a batch that owes file history while a command step parks at
+      // await_action is resumed rather than 409'd on a settle it can never
+      // produce (R8-1 / R7-2).
+      const extensionsCommandStepTakeover =
+        takeoverFlags &&
+        !lifecycle &&
+        !!session.extensions?.enabled &&
+        pendingCommandApproval?.plan.commandStep !== undefined;
       // A Hooks Session recovers only through this load (it never takes
       // over), and the file-history gate below needs every call of the
       // pending round answered. The team and agent calls the dead Harness
@@ -7043,7 +7055,8 @@ export function registerHostedHarnessSessionRoutes(
       // than by whichever conjunct of it the probe trips first.
       const settle: HostedFileHistorySettlement | null =
         !fileHistory?.pendingUndo && fileHistory?.pendingTurn && !channelParked
-          ? takeover && unsettled !== undefined
+          ? (takeover || extensionsCommandStepTakeover) &&
+            unsettled !== undefined
             ? fileHistory.pendingTurn === unsettled
               ? null
               : { blocker: 'pending_turn_mismatch' }
@@ -7193,22 +7206,20 @@ export function registerHostedHarnessSessionRoutes(
         }
       }
       let resumeApproval: RestoredHostedApprovalContinuation | undefined;
-      // The extensions arm still demands an explicit, non-lifecycle takeover:
-      // a bare or lifecycle load must keep refusing with 409, never drive a
-      // parked Turn. It drops only the !session.hooks conjunct of `takeover`,
-      // which would otherwise make the arm unreachable for an extensions
-      // Session that also carries a Hook catalog — and it is scoped to a
-      // command-step plan: a native approval on a hooks/MCP Session is refused
-      // by resumeSavedNativeBatch, so admitting it here would 503 the load
-      // instead of attaching (R7-2). Native approvals stay on the no-hooks arm.
+      // The extensions arm reuses extensionsCommandStepTakeover (computed with
+      // the settle exemption above): an explicit, non-lifecycle takeover of an
+      // extensions Session's parked command-step plan, even when a Hook catalog
+      // makes `takeover` itself false. It is scoped to a command-step plan — a
+      // native approval on a hooks/MCP Session is refused by
+      // resumeSavedNativeBatch, so admitting it here would 503 the load instead
+      // of attaching (R7-2); native approvals stay on the no-hooks arm. Sharing
+      // the boolean with the settle exemption keeps a file-history-owing batch
+      // recoverable instead of 409'ing before this arm is consulted (R8-1).
       if (
         unsettled &&
         session.toolProfile &&
         ((takeover && !session.hooks && !session.mcp) ||
-          (takeoverFlags &&
-            !lifecycle &&
-            session.extensions?.enabled &&
-            pendingCommandApproval?.plan.commandStep !== undefined)) &&
+          extensionsCommandStepTakeover) &&
         brokerOptions
       ) {
         const verdict = await managed.authority.harnessRunAuthorization();
