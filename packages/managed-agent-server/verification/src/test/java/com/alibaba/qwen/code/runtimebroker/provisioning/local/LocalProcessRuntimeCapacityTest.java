@@ -44,7 +44,7 @@ class LocalProcessRuntimeCapacityTest {
                 process.stdin.on('data', chunk => input += chunk);
                 process.stdin.on('end', () => {
                   const boot = JSON.parse(input);
-                  const marker = join(process.argv[2], boot.provisionRequestId + '.pid');
+                  const marker = join(process.argv[2], boot.leaseId + '.pid');
                   writeFileSync(marker + '.tmp', String(process.pid));
                   renameSync(marker + '.tmp', marker);
                   setInterval(() => {}, 1000);
@@ -109,7 +109,7 @@ class LocalProcessRuntimeCapacityTest {
     }
 
     private Path marker(RuntimeProvisionSeed seed) {
-        return directory.resolve(seed.getProvisionRequestId() + ".pid");
+        return directory.resolve(seed.getLeaseId() + ".pid");
     }
 
     private ProcessHandle worker(RuntimeProvisionSeed seed) throws Exception {
