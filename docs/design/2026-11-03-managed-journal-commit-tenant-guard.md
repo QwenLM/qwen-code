@@ -48,11 +48,18 @@ Taking the head first would invert that order.
    again, which is free. The credential check and `validateCommit` make no
    database calls, so the transaction's first consistent read comes after the
    Session lock.
-2. **Fence check without the guard.** The commit calls a variant of
-   `requirePhysicalSessionOpen` that skips the guard and keeps the locking
-   reads of the alias and directory rows. This is the Turn admission argument:
-   migration prepare locks those rows and then checks idleness on committed
-   data (#16223). Other callers of `requirePhysicalSessionOpen` are unchanged.
+2. **Fence check without the guard, after the Session row.** The commit
+   checks the storage fence with `requireSessionStorageOpen`: the locking
+   reads of the alias and directory rows, without the guard. This is the Turn
+   admission argument: migration prepare locks those rows and then checks
+   idleness on committed data (#16223). The two publication lanes
+   (`lockPublicationWriter`, `publishToolResult`) still take the placement
+   guard, but now check the fence after their Session row and before the head,
+   instead of before the Session row. Every lane then locks Session row,
+   storage rows, head in that order. The old publication order (storage rows,
+   then Session row) closed a cycle with any guard-free lane on the same
+   Session (Turn admission since #16223, the Session commands, and now
+   commits), which the guard used to prevent.
 3. **Missing-key locking reads become probe, insert and duplicate
    re-read.** With commits of different Sessions running at once, a
    `FOR UPDATE` on a key that does not exist takes a gap lock. Two Sessions
@@ -106,6 +113,13 @@ Taking the head first would invert that order.
 
 ## Risks
 
+- The fence check locks the storage's alias and directory rows exclusively,
+  so commits of Sessions that share one workspace storage still run one at a
+  time on the alias row. The gain is across storages, not within one. Taking
+  those rows `FOR SHARE` (migration and the fence writers still lock them
+  exclusively) would remove that queue for commits, Turn admission and
+  Session commands alike; it is left as a follow-up because it changes the
+  merged lanes too.
 - One Session's commits still run one at a time on its Session row, which
   they already did through the head row. A Session command (rename, model
   change) and a commit of the same Session now wait on each other, not on the

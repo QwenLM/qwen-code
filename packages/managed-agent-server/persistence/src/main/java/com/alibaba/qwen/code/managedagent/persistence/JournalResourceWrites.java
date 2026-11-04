@@ -134,7 +134,7 @@ final class JournalResourceWrites {
         if (bytes.length != request.byteLength() || !JournalStoreRows.sha256(bytes).equals(request.digest())) {
             throw JournalStoreRows.invalid("Tool result bytes do not match their length or digest.");
         }
-        fencing.requirePhysicalSessionOpen(tenantId, request.workspaceId(), sessionId);
+        fencing.lockPlacementBounded(tenantId);
         // Tool-result publication lane: keeps the tenant CAS row before the
         // Session root the CSI check locks and before the head row, the
         // order retention reads take (CAS row, root, head) and the same as
@@ -149,6 +149,7 @@ final class JournalResourceWrites {
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
         }
+        fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
         JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         // Unlike the other writer paths, a v2 claim fences this lane even

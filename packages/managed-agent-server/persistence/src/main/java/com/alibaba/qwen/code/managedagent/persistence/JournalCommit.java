@@ -79,7 +79,7 @@ final class JournalCommit {
         // writers committed before it. Lifecycle-authority commits took both
         // guards above; CSI-pinned Sessions take them behind this root in
         // lockCsiContinuation (design 2026-11-03-managed-journal-commit-tenant-guard).
-        fencing.lockSessionFirst(tenantId, sessionId);
+        Boolean rootPin = fencing.lockSessionFirst(tenantId, sessionId);
         JournalStoreRows.validateStableId(request.writerId(), "writerId");
         ValidatedCommit validated = validateCommit(request);
         HarnessPlacementStore.Placement placement = fencing.requirePlacement(tenantId, request.workspaceId(),
@@ -95,7 +95,7 @@ final class JournalCommit {
         if (promotes) {
             readerVersion.requireReadable(2);
         }
-        var continuation = fencing.lockCsiContinuation(tenantId, sessionId);
+        var continuation = fencing.lockCsiContinuation(tenantId, sessionId, rootPin);
         var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();

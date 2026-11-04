@@ -40,10 +40,14 @@ commit 改为在**自己的 Session 行**上排队，不再使用租户行。之
    稍后经由 `lockCsiContinuation` 调用它。主键重复时只加记录锁，不加间隙锁。随后
    `requirePlacement` 再次锁定同一行，没有额外代价。凭证检查和 `validateCommit` 都不访问
    数据库，所以事务的第一次一致性读发生在 Session 锁之后。
-2. **不经 guard 的 fence 检查。** commit 调用 `requirePhysicalSessionOpen` 的一个变体：
-   跳过 guard，保留对别名行和目录行的锁定读。理由与 Turn 准入相同：迁移 prepare 先锁这些
-   行，再基于已提交数据检查是否空闲（#16223）。`requirePhysicalSessionOpen` 的其他调用方
-   不变。
+2. **不经 guard、在 Session 行之后的 fence 检查。** commit 用
+   `requireSessionStorageOpen` 检查存储 fence：对别名行和目录行做锁定读，不经过 guard。
+   理由与 Turn 准入相同：迁移 prepare 先锁这些行，再基于已提交数据检查是否空闲（#16223）。
+   两条发布车道（`lockPublicationWriter`、`publishToolResult`）仍获取 placement guard，
+   但 fence 检查从 Session 行之前移到 Session 行之后、head 之前。这样所有车道都按
+   Session 行、存储行、head 的顺序加锁。原来发布车道先锁存储行、再锁 Session 行，会与
+   同一 Session 上任何不持 guard 的车道（#16223 之后的 Turn 准入、Session 命令，以及现在
+   的 commit）形成环路，此前是 guard 避免了这一点。
 3. **对可能不存在的键的锁定读，改为探测、插入、重复时重读。** 不同 Session 的 commit
    并发执行后，对不存在的键做 `FOR UPDATE` 会加间隙锁。两个 Session 的新键落在同一间隙时，
    插入会互相死锁。涉及的键都以 Session scope key 为前缀，但两个 Session 的键之间的间隙
@@ -89,6 +93,10 @@ commit 改为在**自己的 Session 行**上排队，不再使用租户行。之
 
 ## 风险
 
+- fence 检查以排他方式锁定存储的别名行和目录行，因此共享同一 workspace 存储的多个
+  Session 的 commit 仍在别名行上逐个执行。收益在不同存储之间，而不在同一存储内部。改为
+  `FOR SHARE`（迁移与 fence 写入方仍以排他方式锁定）可以同时去掉 commit、Turn 准入和
+  Session 命令在这里的排队；由于它也会改变已合入的车道，留作后续工作。
 - 同一 Session 的 commit 仍在其 Session 行上逐个执行；此前它们本来就经由 head 行串行。
   同一 Session 的 Session 命令（改名、修改模型）与 commit 现在只彼此等待，不再等整个租户。
 - CSI 固定 Session 的 commit 现在先锁 root、后取 guard，而不是先取 guard。与先取 guard
