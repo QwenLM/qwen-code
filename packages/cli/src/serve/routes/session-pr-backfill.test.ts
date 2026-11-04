@@ -466,6 +466,9 @@ describe('backfillWorkspaceSessionPrs', () => {
           createdAt: expect.any(String),
           state: 'open',
           source: 'review',
+          // The /review command stamps its role on every binding form it
+          // mints, the URL form included (role-aware bound delivery).
+          role: 'review',
         },
       ]);
     });
@@ -933,6 +936,7 @@ describe('backfillWorkspaceSessionPrs', () => {
           createdAt: expect.any(String),
           state: 'open',
           source: 'review',
+          role: 'review',
         },
       ]);
     });
@@ -1799,10 +1803,11 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(bridge.setSessionPrs).toHaveBeenCalledTimes(1);
     expect(bridge.setSessionPrs).toHaveBeenCalledWith(
       SESSION_A,
-      persisted?.map(({ number, url, state }) => ({
+      persisted?.map(({ number, url, state, role }) => ({
         number,
         url,
         ...(state ? { state } : {}),
+        ...(role ? { role } : {}),
       })),
     );
 
@@ -5753,6 +5758,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       url: 'https://github.com/me/fork/pull/7',
       createdAt: expect.any(String),
       source: 'review',
+      role: 'review',
     });
   });
 
