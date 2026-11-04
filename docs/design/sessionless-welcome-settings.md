@@ -31,6 +31,16 @@ language route through the SSH boundary; do not write remote project files.
 The Web Shell settings picker and local `/language ui` command share this path.
 Preserve user/workspace scope, host language authority and error rollback.
 Refresh session command metadata only when a session already exists.
+In a Live session, workspace UI language targets the settings provider's bound
+workspace, just like the other settings rows. An unresolved target is refused;
+the composer workspace resolver still returns no project target for Live and
+standalone sessions.
+Scope flags may precede or follow the UI locale, matching the CLI; combining
+`--project` and `--global` remains invalid. Adopt the response's effective locale
+after a successful write, while preserving an explicit host language override.
+Report partial live-refresh failures as a warning without rolling back the
+persisted choice. Workspace validation reports language and unsupported sync
+flags separately, with an explanatory error and allowed locales where relevant.
 
 ## Acceptance
 
@@ -43,5 +53,13 @@ Refresh session command metadata only when a session already exists.
 - User writes affect user settings; workspace writes affect only the resolved,
   trusted workspace, including secondary workspaces. Invalid or removed
   workspaces fail without mutating primary or user settings.
+- In a Live session, the Settings workspace language picker and project-scoped
+  language command use the same bound workspace without creating a session or
+  sending a prompt. Standalone sessions still refuse project-scoped commands.
+- UI language commands accept either scope-flag position; a masked choice uses
+  the effective returned locale. Partial refresh failure warns without rollback.
+- Tests pin strict workspace mutation, selected-workspace settings reads,
+  language events, generation closure during sync, and workspace-scope replay
+  before a late Managed channel's first session.
 - The shared behavior covers Desktop and the current VS Code Web Shell host.
   Native packaged-client acceptance is reported separately from fixture tests.

@@ -4289,40 +4289,50 @@ describe('paired per-engine operations', () => {
       );
     });
 
-    it('sends the remembered language to a Managed channel before its first session', async () => {
-      const log: string[] = [];
-      const p = paired(
-        {},
-        answering('legacy', log, refreshed(0)),
-        answering('managed', log, refreshed(0)),
-      );
-      await expect(p.bridge.setUserLanguage(request)).rejects.toBeInstanceOf(
-        SessionNotFoundError,
-      );
-      await p.bridge.preheat();
-      await expect(p.bridge.setUserLanguage(request)).resolves.toMatchObject({
-        sessions: 0,
-      });
-      await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      expect(log).toEqual([
-        'legacy:userLanguage:zh',
-        'managed:userLanguage:zh',
-        'managed:newSession',
-        'managed:newSession',
-      ]);
-      // A channel that was live for the change is not sent it twice.
-      await p.bridge.setUserLanguage({
-        language: 'en',
-        syncOutputLanguage: false,
-      });
-      await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      expect(log.slice(4)).toEqual([
-        expect.stringMatching(/^(legacy|managed):userLanguage:en$/),
-        expect.stringMatching(/^(legacy|managed):userLanguage:en$/),
-        'managed:newSession',
-      ]);
-    });
+    it.each([undefined, 'workspace'] as const)(
+      'sends the remembered language and scope (%s) before the first Managed session',
+      async (scope) => {
+        const log: string[] = [];
+        const managedLanguage = vi.fn(refreshed(0));
+        const languageRequest = scope
+          ? { ...request, syncOutputLanguage: false, scope }
+          : request;
+        const p = paired(
+          {},
+          answering('legacy', log, refreshed(0)),
+          answering('managed', log, managedLanguage),
+        );
+        await expect(
+          p.bridge.setUserLanguage(languageRequest),
+        ).rejects.toBeInstanceOf(SessionNotFoundError);
+        await p.bridge.preheat();
+        await expect(
+          p.bridge.setUserLanguage(languageRequest),
+        ).resolves.toMatchObject({ sessions: 0 });
+        await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(log).toEqual([
+          'legacy:userLanguage:zh',
+          'managed:userLanguage:zh',
+          'managed:newSession',
+          'managed:newSession',
+        ]);
+        expect(managedLanguage).toHaveBeenCalledExactlyOnceWith(
+          languageRequest,
+        );
+        // A channel that was live for the change is not sent it twice.
+        await p.bridge.setUserLanguage({
+          language: 'en',
+          syncOutputLanguage: false,
+        });
+        await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(log.slice(4)).toEqual([
+          expect.stringMatching(/^(legacy|managed):userLanguage:en$/),
+          expect.stringMatching(/^(legacy|managed):userLanguage:en$/),
+          'managed:newSession',
+        ]);
+      },
+    );
 
     it('sends the remembered language before a Managed restore and its deadline', async () => {
       vi.useFakeTimers();

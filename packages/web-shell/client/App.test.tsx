@@ -803,7 +803,11 @@ const {
       refreshBrand: vi.fn(),
     },
     mockWorkspaceActions: {
-      setUiLanguage: vi.fn().mockResolvedValue(undefined),
+      setUiLanguage: vi.fn().mockImplementation(async (language: string) => ({
+        language,
+        outputLanguage: null,
+        refresh: { runtimes: 1, sessions: 1, failed: 0 },
+      })),
       readWorkspaceFile: vi.fn().mockResolvedValue({
         content: '',
         truncated: false,
@@ -12651,7 +12655,13 @@ beforeEach(() => {
   mockStore.getSnapshot.mockClear();
   mockStore.dispatch.mockClear();
   mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({ skills: [] });
-  mockWorkspaceActions.setUiLanguage.mockReset().mockResolvedValue(undefined);
+  mockWorkspaceActions.setUiLanguage
+    .mockReset()
+    .mockImplementation(async (language: string) => ({
+      language,
+      outputLanguage: null,
+      refresh: { runtimes: 1, sessions: 1, failed: 0 },
+    }));
   mockWorkspaceActions.readWorkspaceFile.mockReset();
   mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
     content: '',
@@ -44186,6 +44196,10 @@ describe('App session callbacks', () => {
   });
 
   it('syncs a workspace-scoped UI language without sending a prompt', async () => {
+    mockConnection.sessionContext = {
+      kind: 'workspace',
+      cwd: '/work/secondary',
+    };
     const onLanguageChange = vi.fn();
     const { container } = renderApp({ onLanguageChange });
     await flush();
@@ -44206,10 +44220,185 @@ describe('App session callbacks', () => {
     expect(mockWorkspaceActions.setUiLanguage).toHaveBeenCalledWith(
       'en',
       'workspace',
-      expect.any(String),
+      '/work/secondary',
     );
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(onLanguageChange).not.toHaveBeenCalled();
+  });
+
+  it('targets the settings workspace for a Live UI language change', async () => {
+    mockConnection.sessionContext = { kind: 'live' };
+    mockConnection.workspaceCwd = '/tmp/live';
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        {
+          id: 'live',
+          cwd: '/tmp/live',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    };
+    const onError = vi.fn();
+    const { container } = renderApp({ onError });
+    await flush();
+    await act(async () => {
+      const settingsButton = container.querySelector<HTMLButtonElement>(
+        '[data-testid="open-sidebar-settings"]',
+      );
+      expect(settingsButton).not.toBeNull();
+      settingsButton!.click();
+    });
+    await flush();
+
+    await act(async () => {
+      const languageButton = container.querySelector<HTMLButtonElement>(
+        '[data-testid="change-language-workspace"]',
+      );
+      expect(languageButton).not.toBeNull();
+      languageButton!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockWorkspaceActions.setUiLanguage).toHaveBeenCalledWith(
+      'en',
+      'workspace',
+      '/tmp/project',
+    );
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('accepts project UI language changes in a Live session', async () => {
+    mockConnection.sessionContext = { kind: 'live' };
+    mockConnection.workspaceCwd = '/tmp/live';
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        {
+          id: 'live',
+          cwd: '/tmp/live',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    };
+    const onToast = vi.fn();
+    renderApp({ onToast });
+    await flush();
+
+    act(() => {
+      expect(
+        testState.latestChatEditorProps?.onSubmit('/language ui en --project'),
+      ).toBe(true);
+    });
+    await flush();
+
+    expect(onToast).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.setUiLanguage).toHaveBeenCalledWith(
+      'en',
+      'workspace',
+      '/tmp/project',
+    );
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it.each(['live', 'standalone'] as const)(
+    'refuses project UI language changes without a settings workspace (%s)',
+    async (kind) => {
+      mockConnection.sessionContext = { kind };
+      const onToast = vi.fn();
+      renderApp({ onToast });
+      await flush();
+
+      act(() => {
+        testState.latestChatEditorProps?.onSubmit('/language ui en --project');
+      });
+      await flush();
+
+      expect(onToast).toHaveBeenCalledWith(
+        'info',
+        'This action is available only in project conversations.',
+      );
+      expect(mockWorkspaceActions.setUiLanguage).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['/language ui --project en', 'en', 'workspace'],
+    ['/language ui en --project', 'en', 'workspace'],
+    ['/language ui --global ru', 'ru', 'user'],
+    ['/language ui ru --global', 'ru', 'user'],
+  ])(
+    'accepts UI language scope flags in %s',
+    async (command, language, scope) => {
+      const onToast = vi.fn();
+      renderApp({ onToast });
+      await flush();
+
+      await act(async () => {
+        expect(testState.latestChatEditorProps).toBeDefined();
+        testState.latestChatEditorProps?.onSubmit(command);
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(mockWorkspaceActions.setUiLanguage).toHaveBeenCalledWith(
+        language,
+        scope,
+        expect.any(String),
+      );
+      expect(onToast).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    '/language ui --project --global en',
+    '/language ui en --global --project',
+  ])('rejects conflicting UI language scope flags in %s', async (command) => {
+    const onToast = vi.fn();
+    renderApp({ onToast });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit(command);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining('Usage:'),
+    );
+    expect(mockWorkspaceActions.setUiLanguage).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('documents UI language scope flags in local command usage', async () => {
+    renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/language');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'status',
+        text: expect.stringContaining('[--project|--global]'),
+      }),
+    ]);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
   });
 
   it('sends /language output for a model output language change from Settings', async () => {
@@ -49874,6 +50063,143 @@ describe('settings-derived theme and language (#11955)', () => {
     ).toBe('zh-CN');
     expect(onLanguageChange).not.toHaveBeenCalled();
     expect(onLanguageResolved).not.toHaveBeenCalled();
+  });
+
+  it('adopts the applied workspace UI language after a higher-priority override', async () => {
+    testState.settings = [languageSetting('zh')];
+    mockWorkspaceActions.setUiLanguage.mockResolvedValueOnce({
+      language: 'zh',
+      outputLanguage: null,
+      refresh: { runtimes: 1, sessions: 1, failed: 0 },
+    });
+    const onLanguageResolved = vi.fn();
+    const onLanguageChange = vi.fn();
+    const { container } = renderApp({ onLanguageResolved, onLanguageChange });
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      const button = container.querySelector<HTMLButtonElement>(
+        '[data-testid="change-language-workspace"]',
+      );
+      expect(button).not.toBeNull();
+      button!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockWorkspaceActions.setUiLanguage).toHaveBeenCalledWith(
+      'en',
+      'workspace',
+      expect.any(String),
+    );
+    expect(
+      container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
+    ).toBe('zh-CN');
+    expect(onLanguageResolved).toHaveBeenLastCalledWith('zh-CN');
+    expect(onLanguageChange).not.toHaveBeenCalled();
+  });
+
+  it('persists the applied user UI language through the host callback', async () => {
+    testState.settings = [languageSetting('en')];
+    mockWorkspaceActions.setUiLanguage.mockResolvedValueOnce({
+      language: 'zh',
+      outputLanguage: null,
+      refresh: { runtimes: 1, sessions: 1, failed: 0 },
+    });
+    const onLanguageResolved = vi.fn();
+    const onLanguageChange = vi.fn();
+    const { container } = renderApp({ onLanguageResolved, onLanguageChange });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/language ui ru');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
+    ).toBe('zh-CN');
+    expect(onLanguageResolved).toHaveBeenLastCalledWith('zh-CN');
+    expect(onLanguageChange).toHaveBeenCalledWith('zh-CN');
+  });
+
+  it('warns about partial UI language refresh without rolling back the saved choice', async () => {
+    testState.settings = [languageSetting('zh')];
+    mockWorkspaceActions.setUiLanguage.mockResolvedValueOnce({
+      language: 'en',
+      outputLanguage: null,
+      refresh: { runtimes: 1, sessions: 0, failed: 1 },
+    });
+    const onToast = vi.fn();
+    const onError = vi.fn();
+    const { container } = renderApp({ onToast, onError });
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      const button = container.querySelector<HTMLButtonElement>(
+        '[data-testid="change-language-workspace"]',
+      );
+      expect(button).not.toBeNull();
+      button!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
+    ).toBe('en');
+    expect(onToast).toHaveBeenCalledWith('warning', expect.any(String));
+    expect(onError).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.setUiLanguage).toHaveBeenCalledOnce();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('keeps explicit host UI language authoritative over the applied route locale', async () => {
+    testState.settings = [languageSetting('en')];
+    mockWorkspaceActions.setUiLanguage.mockResolvedValueOnce({
+      language: 'ru',
+      outputLanguage: null,
+      refresh: { runtimes: 1, sessions: 1, failed: 0 },
+    });
+    const onLanguageResolved = vi.fn();
+    const onLanguageChange = vi.fn();
+    const { container } = renderApp({
+      language: 'zh-CN',
+      onLanguageResolved,
+      onLanguageChange,
+    });
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      const button = container.querySelector<HTMLButtonElement>(
+        '[data-testid="change-language-workspace"]',
+      );
+      expect(button).not.toBeNull();
+      button!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockWorkspaceActions.setUiLanguage).toHaveBeenCalledWith(
+      'en',
+      'workspace',
+      expect.any(String),
+    );
+    expect(
+      container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
+    ).toBe('zh-CN');
+    expect(onLanguageResolved).not.toHaveBeenCalled();
+    expect(onLanguageChange).not.toHaveBeenCalled();
   });
 
   it('never turns a rolled-back settings language pick into a host opinion', async () => {

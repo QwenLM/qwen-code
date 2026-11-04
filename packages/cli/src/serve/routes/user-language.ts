@@ -78,11 +78,26 @@ export function registerUserLanguageRoutes(
       const language = body['language'];
       if (
         typeof language !== 'string' ||
-        !deps.languageCodes.includes(language) ||
-        (body['syncOutputLanguage'] !== undefined &&
-          body['syncOutputLanguage'] !== false)
+        !deps.languageCodes.includes(language)
       ) {
-        res.status(400).json({ code: 'invalid_language' });
+        res.status(400).json({
+          error:
+            '`language` is required and must be one of: ' +
+            deps.languageCodes.join(', '),
+          code: 'invalid_language',
+          allowed: deps.languageCodes,
+        });
+        return;
+      }
+      if (
+        body['syncOutputLanguage'] !== undefined &&
+        body['syncOutputLanguage'] !== false
+      ) {
+        res.status(400).json({
+          error:
+            '`syncOutputLanguage` must be false when provided on this route',
+          code: 'invalid_sync_flag',
+        });
         return;
       }
       const clientId = parseAndValidateWorkspaceClientId(

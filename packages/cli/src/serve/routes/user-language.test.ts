@@ -95,10 +95,13 @@ function makeApp(
   const persistSetting =
     overrides.persistSetting ?? vi.fn(async () => undefined);
   const runtimes = overrides.runtimes ?? [];
+  const mutate = vi.fn(
+    (): express.RequestHandler => (_req, _res, next) => next(),
+  );
 
   registerUserLanguageRoutes(app, {
     boundWorkspace: '/workspace',
-    mutate: () => (_req, _res, next) => next(),
+    mutate,
     safeBody: (req) =>
       req.body && typeof req.body === 'object' ? req.body : {},
     languageCodes: LANGUAGE_CODES,
@@ -116,7 +119,7 @@ function makeApp(
       overrides.parseAndValidateClientId ?? (() => undefined),
   });
 
-  return { app, persistSetting, runtimes };
+  return { app, persistSetting, runtimes, mutate };
 }
 
 beforeEach(() => {
@@ -176,6 +179,24 @@ describe('POST /language', () => {
       ).status,
     ).toBe(503);
     expect(runtime.bridge.setUserLanguage).not.toHaveBeenCalled();
+    expect(runtime.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+  });
+
+  it('does not publish after the generation closes during language sync', async () => {
+    const runtime = makeRuntime({ trusted: true, cwd: '/secondary' });
+    runtime.bridge.setUserLanguage.mockImplementation(async ({ language }) => {
+      runtime.generationGuard.assertOpen.mockImplementation(() => {
+        throw new WorkspaceGenerationClosedError();
+      });
+      return { language, sessions: 1, failed: 0 };
+    });
+    const { app, persistSetting } = makeApp({ runtimes: [runtime] });
+    const res = await request(app)
+      .post('/workspaces/secondary/language')
+      .send({ language: 'zh' });
+    expect(res.status).toBe(503);
+    expect(persistSetting).toHaveBeenCalledOnce();
+    expect(runtime.bridge.setUserLanguage).toHaveBeenCalledOnce();
     expect(runtime.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
   });
 
@@ -244,11 +265,14 @@ describe('POST /language', () => {
   it('persists a secondary workspace UI language without touching user settings or siblings', async () => {
     const primary = makeRuntime({ trusted: true, cwd: '/primary' });
     const secondary = makeRuntime({ trusted: true, cwd: '/secondary' });
-    const { app, persistSetting } = makeApp({ runtimes: [primary, secondary] });
+    const { app, persistSetting, mutate } = makeApp({
+      runtimes: [primary, secondary],
+    });
     const res = await request(app)
       .post('/workspaces/secondary/language')
       .send({ language: 'zh' });
     expect(res.status).toBe(200);
+    expect(mutate).toHaveBeenCalledWith({ strict: true });
     expect(persistSetting).toHaveBeenCalledExactlyOnceWith(
       '/secondary',
       SettingScope.Workspace,
@@ -260,6 +284,16 @@ describe('POST /language', () => {
       language: 'zh',
       syncOutputLanguage: false,
       scope: 'workspace',
+    });
+    expect(loadSettings).toHaveBeenCalledExactlyOnceWith('/secondary', {
+      skipLoadEnvironment: true,
+      workspaceTrusted: true,
+    });
+    expect(
+      secondary.bridge.publishWorkspaceEvent,
+    ).toHaveBeenCalledExactlyOnceWith({
+      type: 'language_changed',
+      data: { language: 'zh', outputLanguage: null },
     });
     expect(primary.bridge.setUserLanguage).not.toHaveBeenCalled();
     expect(primary.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
@@ -310,19 +344,39 @@ describe('POST /language', () => {
     expect(persistSetting).not.toHaveBeenCalled();
   });
 
-  it('does not let a workspace UI-language request change output language', async () => {
-    const { app, persistSetting } = makeApp({
-      runtimes: [makeRuntime({ trusted: true, cwd: '/secondary' })],
-    });
-    expect(
-      (
-        await request(app)
-          .post('/workspaces/secondary/language')
-          .send({ language: 'en', syncOutputLanguage: true })
-      ).status,
-    ).toBe(400);
-    expect(persistSetting).not.toHaveBeenCalled();
-  });
+  it.each([true, 'yes', null])(
+    'rejects unsupported workspace output-language sync (%s)',
+    async (syncOutputLanguage) => {
+      const runtime = makeRuntime({ trusted: true, cwd: '/secondary' });
+      const { app, persistSetting } = makeApp({ runtimes: [runtime] });
+      const res = await request(app)
+        .post('/workspaces/secondary/language')
+        .send({ language: 'en', syncOutputLanguage });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_sync_flag');
+      expect(res.body.error).toEqual(expect.any(String));
+      expect(persistSetting).not.toHaveBeenCalled();
+      expect(runtime.bridge.setUserLanguage).not.toHaveBeenCalled();
+      expect(updateOutputLanguageFile).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['xx', undefined, 123])(
+    'reports the allowed workspace UI languages for invalid input (%s)',
+    async (language) => {
+      const { app, persistSetting } = makeApp({
+        runtimes: [makeRuntime({ trusted: true, cwd: '/secondary' })],
+      });
+      const res = await request(app)
+        .post('/workspaces/secondary/language')
+        .send({ language });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_language');
+      expect(res.body.allowed).toEqual(LANGUAGE_CODES);
+      expect(res.body.error).toEqual(expect.any(String));
+      expect(persistSetting).not.toHaveBeenCalled();
+    },
+  );
   it('rejects an unknown language code without persisting', async () => {
     const { app, persistSetting } = makeApp();
 

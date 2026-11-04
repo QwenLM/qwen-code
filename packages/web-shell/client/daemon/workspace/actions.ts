@@ -67,7 +67,7 @@ export function createDaemonWorkspaceActions({
       if (scope === 'workspace' && !workspaceCwd) {
         throw new Error('The selected workspace is unavailable');
       }
-      await withActionTimeout(
+      return withActionTimeout(
         scope === 'workspace' && workspaceCwd
           ? client.workspaceByCwd(workspaceCwd).setUiLanguage(language)
           : client.setUserLanguage(language),

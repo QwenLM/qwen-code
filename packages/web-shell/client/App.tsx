@@ -14538,6 +14538,10 @@ export function App({
     });
   }, [brandResolved, brandNameValue, brandLogoUri]);
 
+  const uiLanguageWorkspaceCwd =
+    effectiveSessionContext?.kind === 'live'
+      ? (workspace.capabilities?.workspaceCwd ?? workspace.workspaceCwd)
+      : getComposerWorkspaceCwd();
   const handleSettingsLanguageChange = useCallback(
     (nextLanguage: WebShellLanguage, scope: 'user' | 'workspace' = 'user') => {
       if (sessionWriteBlocked) return;
@@ -14579,14 +14583,24 @@ export function App({
         .setUiLanguage(
           nextLanguage === 'zh-CN' ? 'zh' : nextLanguage,
           effectiveScope,
-          getComposerWorkspaceCwd(),
+          uiLanguageWorkspaceCwd,
         )
-        .then(() => {
+        .then((result) => {
           if (!owner.current.isCurrent()) return;
+          const appliedLanguage =
+            languageSettingToWebShellLanguage(result.language) ??
+            normalizeLanguage(result.language);
+          if (!hostControlsLanguage && appliedLanguage !== nextLanguage) {
+            setSelectedLanguage(appliedLanguage);
+            onLanguageResolvedRef.current?.(appliedLanguage);
+          }
           if (effectiveScope === 'user') {
             // A user-scoped choice becomes the host's persisted opinion. A
             // workspace choice remains settings-owned for that workspace.
-            handleLanguageChange(nextLanguage);
+            handleLanguageChange(appliedLanguage);
+          }
+          if (result.refresh.failed > 0) {
+            pushToast('warning', t('language.refreshFailed'));
           }
           return refreshSettings().catch((error: unknown) => {
             if (!owner.current.isCurrent()) return;
@@ -14610,12 +14624,14 @@ export function App({
       providedLanguage,
       sessionWriteBlocked,
       workspaceActions,
-      getComposerWorkspaceCwd,
+      uiLanguageWorkspaceCwd,
       selectedLanguage,
       sessionActions,
       sessionOwnerGuard,
       sessionIsStandalone,
       isGoalGateBlocked,
+      pushToast,
+      t,
     ],
   );
 
@@ -18665,7 +18681,7 @@ export function App({
           }
           if (cmd === 'language') {
             const args = text.slice(match[0].length).trim();
-            const [subCommand, languageArg] = args.split(/\s+/);
+            const [subCommand] = args.split(/\s+/);
             if (!args) {
               store.dispatch([
                 {
@@ -18686,6 +18702,17 @@ export function App({
               return true;
             }
             if (subCommand?.toLowerCase() === 'ui') {
+              const projectScope = /(?:^|\s)--project(?:\s|$)/.test(args);
+              const globalScope = /(?:^|\s)--global(?:\s|$)/.test(args);
+              if (projectScope && globalScope) {
+                pushToast('error', t('language.usage'));
+                return true;
+              }
+              const languageArg = args
+                .slice(subCommand.length)
+                .replace(/(?:^|\s)--project(?:\s|$)/, ' ')
+                .replace(/(?:^|\s)--global(?:\s|$)/, ' ')
+                .trim();
               if (!languageArg) {
                 store.dispatch([
                   {
@@ -18712,13 +18739,7 @@ export function App({
                 return true;
               }
               if (commandBlocked) return blockCommand();
-              const projectScope = /(?:^|\s)--project(?:\s|$)/.test(args);
-              const globalScope = /(?:^|\s)--global(?:\s|$)/.test(args);
-              if (projectScope && globalScope) {
-                pushToast('error', t('language.usage'));
-                return true;
-              }
-              if (projectScope && !workspaceContextActive) {
+              if (projectScope && !uiLanguageWorkspaceCwd) {
                 pushToast('info', t('session.workspaceActionUnavailable'));
                 return true;
               }
@@ -19690,6 +19711,7 @@ export function App({
       handleSetMode,
       setComposerMode,
       handleSettingsLanguageChange,
+      uiLanguageWorkspaceCwd,
       blockCommand,
       createSideTask,
       sideTasksAvailable,
