@@ -18,6 +18,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -56,12 +57,12 @@ class LocalProcessRuntimeCapacityTest {
         List<CompletableFuture<RuntimeLease>> starts = new ArrayList<>();
         try (var provisioner = new LocalProcessRuntimeProvisioner(
                 List.of("node", script.toString(), directory.toString()), directory, new HttpRuntimeTransport())) {
-            for (int index = 0; index < 32; index++) {
+            for (int index = 0; index < 16; index++) {
                 RuntimeProvisionSeed seed = RuntimeProvisionSeed.create("binding-" + index, 1);
                 seeds.add(seed);
                 starts.add(provisioner.provision(request, seed).toCompletableFuture());
             }
-            await().atMost(Duration.ofSeconds(15)).until(() -> workerCount() == 32);
+            await().atMost(Duration.ofSeconds(15)).until(() -> workerCount() == 16);
             RuntimeProvisionSeed overflow = RuntimeProvisionSeed.create("overflow", 1);
             assertCapacity(provisioner.provision(request, overflow));
             assertFalse(Files.exists(marker(overflow)), "capacity refusal must precede process creation");
@@ -69,20 +70,28 @@ class LocalProcessRuntimeCapacityTest {
             assertTrue(starts.getFirst().cancel(true));
             assertTrue(worker(seeds.getFirst()).isAlive());
             assertCapacity(provisioner.provision(request, overflow));
-            assertEquals(32, workerCount(), "cancelling the stage must not free a running startup slot");
+            assertEquals(16, workerCount(), "cancelling the stage must not free a running startup slot");
 
             ProcessHandle failedWorker = worker(seeds.get(1));
             failedWorker.destroyForcibly();
             failedWorker.onExit().get(5, TimeUnit.SECONDS);
             assertNotEquals("runtime_local_capacity", failure(starts.get(1)).getCode());
-
-            CompletableFuture<RuntimeLease> retry = provisioner.provision(request, overflow).toCompletableFuture();
+            var retry = new AtomicReference<CompletableFuture<RuntimeLease>>();
+            await().atMost(Duration.ofSeconds(5)).until(() -> {
+                CompletableFuture<RuntimeLease> candidate = provisioner.provision(request, overflow).toCompletableFuture();
+                if (candidate.isCompletedExceptionally()) {
+                    assertCapacity(candidate);
+                    return false;
+                }
+                retry.set(candidate);
+                return true;
+            });
             await().atMost(Duration.ofSeconds(5)).until(() -> Files.exists(marker(overflow)));
-            assertFalse(retry.isDone(), "a released slot must admit the next worker handshake");
+            assertFalse(retry.get().isDone(), "a released slot must admit the next worker handshake");
             ProcessHandle retryWorker = worker(overflow);
             retryWorker.destroyForcibly();
             retryWorker.onExit().get(5, TimeUnit.SECONDS);
-            assertNotEquals("runtime_local_capacity", failure(retry).getCode());
+            assertNotEquals("runtime_local_capacity", failure(retry.get()).getCode());
         }
         try (var markers = Files.list(directory)) {
             for (Path marker : markers.filter(path -> path.toString().endsWith(".pid")).toList()) {

@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import java.time.Clock;
 import java.util.Map;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.BiPredicate;
 
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
@@ -37,7 +38,8 @@ final class RuntimeProvisionFailureHandler {
         return "local-process".equals(request.getProvisionerKind())
                 && unwrap(error) instanceof RuntimeBrokerException failure
                 && failure.getStatusCode() == 503 && failure.isRetryable()
-                && "runtime_local_capacity".equals(failure.getCode());
+                && "runtime_local_capacity".equals(failure.getCode())
+                && failure.getCause() instanceof RejectedExecutionException;
     }
 
     RuntimeException failure(RuntimeBindingRecord original,
@@ -71,8 +73,13 @@ final class RuntimeProvisionFailureHandler {
         RuntimeResourceHandle placeholder = new RuntimeResourceHandle("local-process", 1,
                 Map.of("provider", "local-process"));
         if (original.getResourceHandle() != null || current.getState() != RuntimeBindingRecord.State.PROVISIONING
-                || current.getLease() != null || current.getAttestationGeneration() != 0
-                || !placeholder.equals(current.getResourceHandle())) {
+                || current.getLease() != null || current.getAttestationGeneration() != 0) {
+            return false;
+        }
+        if (current.getResourceHandle() == null) {
+            return true;
+        }
+        if (!placeholder.equals(current.getResourceHandle())) {
             return false;
         }
         // No start occurred. Removing only this synthetic v1 placeholder lets

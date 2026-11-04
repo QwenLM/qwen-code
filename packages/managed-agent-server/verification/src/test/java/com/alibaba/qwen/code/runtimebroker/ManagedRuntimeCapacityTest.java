@@ -26,6 +26,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -95,7 +96,8 @@ class ManagedRuntimeCapacityTest {
                 attemptedSeeds.add(seed);
                 if (attemptedSeeds.size() == 1) {
                     return CompletableFuture.failedFuture(new RuntimeBrokerException(
-                            503, "runtime_local_capacity", "startup capacity exhausted", true));
+                            503, "runtime_local_capacity", "startup capacity exhausted", true,
+                            new RejectedExecutionException()));
                 }
                 attestedSeed.set(seed);
                 return CompletableFuture.completedFuture(new RuntimeLease(seed.getProvisionalRuntimeId(),
@@ -129,12 +131,14 @@ class ManagedRuntimeCapacityTest {
 
     @ParameterizedTest
     @CsvSource({
-            "local-process,503,runtime_provision_failed,true",
-            "local-process,409,runtime_local_capacity,true",
-            "local-process,503,runtime_local_capacity,false",
-            "custom,503,runtime_local_capacity,true"
+            "local-process,503,runtime_provision_failed,true,true",
+            "local-process,409,runtime_local_capacity,true,true",
+            "local-process,503,runtime_local_capacity,false,true",
+            "custom,503,runtime_local_capacity,true,true",
+            "local-process,503,runtime_local_capacity,true,false"
     })
-    void otherStartupFailuresStillBlockRecovery(String kind, int status, String code, boolean retryable) {
+    void otherStartupFailuresStillBlockRecovery(String kind, int status, String code,
+            boolean retryable, boolean rejected) {
         RuntimeProvisionRequest request = new RuntimeProvisionRequest(REQUEST.getScope(), REQUEST.getIsolationKey(),
                 kind, REQUEST.getStorageId());
         RuntimeProvisioner provisioner = new RuntimeProvisioner() {
@@ -156,7 +160,8 @@ class ManagedRuntimeCapacityTest {
 
             @Override
             public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest requested) {
-                return CompletableFuture.failedFuture(new RuntimeBrokerException(status, code, "startup failed", retryable));
+                return CompletableFuture.failedFuture(new RuntimeBrokerException(status, code, "startup failed", retryable,
+                        rejected ? new RejectedExecutionException() : null));
             }
         };
         var bindings = new InMemoryRuntimeBindingRepository();
@@ -206,7 +211,8 @@ class ManagedRuntimeCapacityTest {
             @Override
             public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request) {
                 return CompletableFuture.failedFuture(new RuntimeBrokerException(
-                        503, "runtime_local_capacity", "startup capacity exhausted", true));
+                        503, "runtime_local_capacity", "startup capacity exhausted", true,
+                        new RejectedExecutionException()));
             }
         };
         try (var service = service(bindings, provisioner)) {
@@ -255,7 +261,8 @@ class ManagedRuntimeCapacityTest {
         };
         RuntimeTransport transport = mock(RuntimeTransport.class);
         when(transport.attest(any(), any(), any())).thenReturn(CompletableFuture.failedFuture(
-                new RuntimeBrokerException(503, "runtime_local_capacity", "attestation unavailable", true)));
+                new RuntimeBrokerException(503, "runtime_local_capacity", "attestation unavailable", true,
+                        new RejectedExecutionException())));
         var bindings = new InMemoryRuntimeBindingRepository();
         try (var service = new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(REQUEST.getScope()),
                 provisioner, transport, bindings, new InMemoryRuntimeSessionRepository(),

@@ -2914,6 +2914,8 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         mapFailure(safeStage(() -> provisioner.ensureResource(request,
                 seed, claimed.getResourceHandle())), "runtime_provision_failed",
                 "Runtime provisioning failed")
+                .whenComplete((handle, error) -> localCapacityRefused.set(
+                        RuntimeProvisionFailureHandler.isLocalCapacityRefusal(request, error)))
                 .thenCompose(handle -> {
                     if (handle == null) {
                         throw unavailable("runtime_provision_failed",
@@ -2985,13 +2987,9 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     private CompletionStage<RuntimeLease> provisionAndAttest(
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed, AtomicBoolean localCapacityRefused) {
         return safeStage(() -> provisioner.provision(request, seed))
-                .whenComplete((lease, error) -> {
-                    // Only the provisioner's pre-start refusal is retryable here;
-                    // the same code from later attestation is not admission evidence.
-                    if (RuntimeProvisionFailureHandler.isLocalCapacityRefusal(request, error)) {
-                        localCapacityRefused.set(true);
-                    }
-                })
+                // Attestation errors after this stage are not pre-start admission evidence.
+                .whenComplete((lease, error) -> localCapacityRefused.set(
+                        RuntimeProvisionFailureHandler.isLocalCapacityRefusal(request, error)))
                 .thenCompose(lease -> {
                     if (lease == null) {
                         throw unavailable("runtime_provision_failed",
