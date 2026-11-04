@@ -5,6 +5,7 @@
  */
 
 import type { ToolErrorType } from './tool-error.js';
+import type { SubscriptionQuotaDisplay } from '../utils/subscription-quota.js';
 
 /**
  * Resolved endpoint and credentials for the search side request, as produced
@@ -68,7 +69,12 @@ export interface WebSearchOutcome {
 
 export type WebSearchBackendResult =
   | { ok: true; outcome: WebSearchOutcome }
-  | { ok: false; message: string; errorType: ToolErrorType };
+  | {
+      ok: false;
+      message: string;
+      errorType: ToolErrorType;
+      quota?: SubscriptionQuotaDisplay;
+    };
 
 export interface WebSearchBackendRequest {
   query: string;

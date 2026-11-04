@@ -7,7 +7,9 @@
 import type React from 'react';
 import { render } from 'ink-testing-library';
 import { describe, expect, it, vi } from 'vitest';
-import { InfoMessage } from './StatusMessages.js';
+import { ErrorMessage, InfoMessage } from './StatusMessages.js';
+import { initializeI18n, setLanguageAsync, t } from '../../../i18n/index.js';
+import { parseAndFormatApiError } from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 
 const mockLink = vi.fn(
   ({ children }: { children: React.ReactNode; url: string }): React.ReactNode =>
@@ -20,6 +22,34 @@ vi.mock('ink-link', () => ({
 }));
 
 describe('InfoMessage', () => {
+  it('renders the shared quota guidance in the CLI language', async () => {
+    await initializeI18n('zh');
+    const { lastFrame, unmount } = render(
+      <ErrorMessage
+        text={parseAndFormatApiError(
+          {
+            message: 'quota fallback',
+            status: 402,
+            subscriptionQuota: {
+              type: 'subscription_quota',
+              memberType: 'plus',
+              resetAt: Math.floor(Date.now() / 1000) + 3 * 3600,
+            },
+          },
+          undefined,
+          t,
+        )}
+      />,
+    );
+    try {
+      expect(lastFrame()).toContain('周额度已用完');
+      expect(lastFrame()).toContain('3小时后恢复');
+      expect(lastFrame()).toContain('/upgrade');
+    } finally {
+      unmount();
+      await setLanguageAsync('en');
+    }
+  });
   it('renders all four subscription summary lines without truncating commands', () => {
     const { lastFrame, unmount } = render(
       <InfoMessage

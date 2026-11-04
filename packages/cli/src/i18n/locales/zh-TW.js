@@ -9,6 +9,19 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    '週額度已用完{{reset}}。您可以等待額度恢復，或執行 /upgrade 升級方案以取得更多額度。',
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    '週額度已用完{{reset}}，請在額度恢復後重試。',
+  "You've used up your credits.{{reset}} Please try again after the reset.":
+    '額度已用完{{reset}}，請在額度恢復後重試。',
+  ' Your credits are expected to reset in {{time}}.':
+    '，預計將於{{time}}後恢復',
+  '{{days}} and {{hours}}': '{{days}} {{hours}}',
+  '1 day': '1天',
+  '{{count}} days': '{{count}}天',
+  '1 hour': '1小時',
+  '{{count}} hours': '{{count}}小時',
   Retry: '重試',
   'Connecting…': '正在連線…',
   'Could not connect Qwen Subscription. Please try again.':

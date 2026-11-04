@@ -2560,6 +2560,7 @@ export const useLlmStream = (
       const formattedErrorText = parseAndFormatApiError(
         eventValue.error,
         config.getContentGeneratorConfig()?.authType,
+        t,
       );
 
       if (!isShowingAutoRetry) {
@@ -4766,8 +4767,9 @@ export const useLlmStream = (
             setPendingRetryErrorItem({
               type: 'error' as const,
               text: parseAndFormatApiError(
-                getErrorMessage(error) || 'Unknown error',
+                error ?? 'Unknown error',
                 config.getContentGeneratorConfig()?.authType,
+                t,
               ),
               hint: retryHint,
             });

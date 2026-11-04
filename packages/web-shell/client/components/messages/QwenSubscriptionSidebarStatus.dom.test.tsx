@@ -97,6 +97,11 @@ describe('QwenSubscriptionSidebarStatus', () => {
         ),
       ).toEqual(['View Plans', 'Switch Provider', 'Use another account']);
       expect(container.querySelectorAll('button')).toHaveLength(3);
+      expect(
+        [...container.querySelectorAll('button')].map(
+          (button) => button.dataset.variant,
+        ),
+      ).toEqual(['default', 'outline', 'link']);
       expect(container.textContent).not.toContain('Sign out');
       expect(container.textContent).not.toContain('Cancel');
       expect(options?.querySelectorAll('p')).toHaveLength(0);
@@ -121,7 +126,9 @@ describe('QwenSubscriptionSidebarStatus', () => {
         email: 'builder@example.com',
       });
 
-      expect(container.textContent).toContain(`Qwen ${plan} is active`);
+      expect(container.textContent).toContain(
+        `Current plan: Qwen ${plan}. Qwen Code is ready.`,
+      );
       expect(container.querySelectorAll('button')).toHaveLength(0);
     },
   );

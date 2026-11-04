@@ -418,12 +418,51 @@ it.each([402, 403, 429, 503])(
     ).rejects.toMatchObject({
       status,
       code: 'PROXY_TEST_ERROR',
-      message: `${status} Public gateway message`,
+      message: 'Public gateway message',
     });
     expect(gatewayLog).toHaveBeenCalledWith('Gateway response', {
       status,
       requestId: 'caller-request',
       gatewayRequestId: 'gateway-request',
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(session.getAccessToken).toHaveBeenCalledOnce();
+  },
+);
+
+it.each([false, true])(
+  'formats quota exhaustion in the real SDK pipeline (stream=%s)',
+  async (streaming) => {
+    fetchMock.mockResolvedValue(
+      Response.json(
+        {
+          error: {
+            type: 'billing_error',
+            code: 'insufficient_quota',
+            message: 'Backend wording may change',
+            quota: {
+              member_type: 'plus',
+              reset_at: Math.floor(Date.now() / 1000) + 26 * 3600,
+            },
+          },
+        },
+        { status: 402, headers: { 'x-request-id': 'quota-request' } },
+      ),
+    );
+    const send = async () => {
+      if (!streaming) return generator().generateContent(request, 'quota');
+      const stream = await generator().generateContentStream(request, 'quota');
+      for await (const chunk of stream) {
+        void chunk;
+      }
+      return undefined;
+    };
+    await expect(send()).rejects.toMatchObject({
+      status: 402,
+      code: 'insufficient_quota',
+      requestID: 'quota-request',
+      message:
+        "You've used up your weekly credits. Your credits are expected to reset in 1 day and 2 hours. You can wait or run /upgrade to get more credits.",
     });
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(session.getAccessToken).toHaveBeenCalledOnce();

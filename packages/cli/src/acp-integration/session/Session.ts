@@ -412,6 +412,7 @@ import {
 } from '../extension-skills.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
+import { subscriptionQuotaFromError } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import type {
   AvailableCommand,
   ContentBlock,
@@ -8922,6 +8923,7 @@ export class Session implements SessionContext {
 
     const errorStatus = getErrorStatus(error);
     const errorMessage = error instanceof Error ? error.message : String(error);
+    const quota = subscriptionQuotaFromError(error);
     const hookSystem = this.config.getHookSystem?.();
     if (
       !this.config.getDisableAllHooks?.() &&
@@ -8939,9 +8941,20 @@ export class Session implements SessionContext {
     }
 
     if (errorStatus === 429) {
-      throw new RequestError(429, 'Rate limit exceeded. Try again later.');
+      throw new RequestError(
+        429,
+        this.config.getAuthType() === AuthType.QWEN_SUBSCRIPTION
+          ? errorMessage
+          : 'Rate limit exceeded. Try again later.',
+      );
     }
 
+    if (quota) {
+      throw new RequestError(-32603, errorMessage, {
+        details: errorMessage,
+        subscriptionQuota: quota,
+      });
+    }
     throw error;
   }
 

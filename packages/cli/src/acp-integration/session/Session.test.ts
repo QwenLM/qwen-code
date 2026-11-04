@@ -46398,6 +46398,50 @@ describe('Session', () => {
       });
 
       describe('StopFailure hook', () => {
+        it('forwards quota display context through the ACP error envelope', async () => {
+          const subscriptionQuota = {
+            type: 'subscription_quota',
+            memberType: 'pro',
+          };
+          const error = Object.assign(new Error('quota fallback'), {
+            status: 402,
+            code: 'insufficient_quota',
+            subscriptionQuota,
+          });
+          mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+            throw error;
+          });
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'hello' }],
+            }),
+          ).rejects.toMatchObject({
+            code: -32603,
+            message: 'quota fallback',
+            data: { details: 'quota fallback', subscriptionQuota },
+          });
+        });
+        it('preserves the subscription backend rate-limit message', async () => {
+          mockConfig.getAuthType = vi
+            .fn()
+            .mockReturnValue(AuthType.QWEN_SUBSCRIPTION);
+          const error = Object.assign(
+            new Error('Concurrent request limit exceeded (principal scope)'),
+            { status: 429 },
+          );
+          mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+            throw error;
+          });
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'hello' }],
+            }),
+          ).rejects.toThrow(
+            'Concurrent request limit exceeded (principal scope)',
+          );
+        });
         it('fires StopFailure hook when API error occurs during sendMessageStream', async () => {
           const mockFireStopFailureEvent = vi.fn().mockResolvedValue({
             success: true,

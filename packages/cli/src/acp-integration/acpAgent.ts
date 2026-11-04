@@ -15455,8 +15455,14 @@ class QwenAgent implements Agent {
               AuthType.QWEN_SUBSCRIPTION,
           )
         ) {
-          const catalog = await this.config.refreshSubscriptionModels();
-          subscriptionModels = catalog.models;
+          try {
+            const catalog = await this.config.refreshSubscriptionModels();
+            subscriptionModels = catalog.models;
+          } catch {
+            debugLogger.debug(
+              'Subscription catalog refresh failed during provider reload',
+            );
+          }
           if (reloadRevision !== this.modelProviderReloadRevision)
             return { configsRefreshed: 0, configsFailed: 0 };
         }

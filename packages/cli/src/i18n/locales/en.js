@@ -8,6 +8,19 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.",
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    "You've used up your weekly credits.{{reset}} Please try again after the reset.",
+  "You've used up your credits.{{reset}} Please try again after the reset.":
+    "You've used up your credits.{{reset}} Please try again after the reset.",
+  ' Your credits are expected to reset in {{time}}.':
+    ' Your credits are expected to reset in {{time}}.',
+  '{{days}} and {{hours}}': '{{days}} and {{hours}}',
+  '1 day': '1 day',
+  '{{count}} days': '{{count}} days',
+  '1 hour': '1 hour',
+  '{{count}} hours': '{{count}} hours',
   Retry: 'Retry',
   'Connecting…': 'Connecting…',
   'Could not connect Qwen Subscription. Please try again.':

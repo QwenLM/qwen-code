@@ -8337,6 +8337,49 @@ describe('createAcpSessionBridge', () => {
     },
   );
 
+  it('forwards subscription quota context on terminal errors', async () => {
+    const subscriptionQuota = { type: 'subscription_quota', memberType: 'pro' };
+    const handle = makeChannel({
+      promptImpl: () => {
+        throw new RequestError(-32603, 'quota fallback', {
+          details: 'quota fallback',
+          subscriptionQuota,
+        });
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const errorEvent = (async () => {
+      for await (const event of bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      })) {
+        if (event.type === 'turn_error') return event;
+      }
+      throw new Error('Missing terminal error');
+    })();
+    try {
+      await expect(
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'quota' }],
+          },
+          undefined,
+          { promptId: 'quota' },
+        ),
+      ).rejects.toThrow('quota fallback');
+      expect(await errorEvent).toMatchObject({
+        type: 'turn_error',
+        data: { message: 'quota fallback', subscriptionQuota },
+      });
+    } finally {
+      abort.abort();
+      await bridge.shutdown();
+    }
+  });
+
   it('keeps the current turn error when refreshing from persisted history', async () => {
     const handle = makeChannel({
       promptImpl: () => {

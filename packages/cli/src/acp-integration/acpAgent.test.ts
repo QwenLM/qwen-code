@@ -35786,6 +35786,84 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it('reloads other model providers after a subscription catalog fails', async () => {
+    const providerConfig = {
+      openai: [{ id: 'local-fallback', baseUrl: 'http://127.0.0.1:9/v1' }],
+    };
+    const settings = {
+      merged: {
+        modelProviders: providerConfig,
+        security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+      },
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    const bootConfig = makeConfig({
+      getModelsConfig: vi.fn().mockReturnValue({
+        getCurrentAuthType: vi.fn().mockReturnValue(AuthType.QWEN_SUBSCRIPTION),
+      }),
+      refreshSubscriptionModels: vi
+        .fn()
+        .mockRejectedValue(new Error('expired subscription catalog')),
+    });
+    const otherConfig = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('other-provider'),
+    });
+    const reloadSession = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValueOnce(
+      otherConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getDefaultReasoningConfig: vi.fn(),
+          getId: otherConfig.getSessionId,
+          getConfig: () => otherConfig,
+          shouldHintAskUserQuestionRestore: () => false,
+          reloadModelProvidersFromDisk: reloadSession,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    const agentPromise = runAcpAgent(
+      bootConfig as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      bootConfig.refreshAuth.mockClear();
+      await expect(
+        agent.extMethod(
+          SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+          { cwd: '/tmp' },
+        ),
+      ).resolves.toEqual({ configsRefreshed: 2, configsFailed: 0 });
+      expect(bootConfig.reloadModelProvidersConfig).toHaveBeenCalledWith(
+        providerConfig,
+        {},
+      );
+      expect(reloadSession).toHaveBeenCalledOnce();
+      expect(bootConfig.syncModelSelection).not.toHaveBeenCalled();
+      expect(bootConfig.refreshAuth).not.toHaveBeenCalled();
+      expect(otherConfig.switchModel).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('reloads model providers for busy sessions without running full reload work', async () => {
     const providerConfig = {
       idealab: [

@@ -22,6 +22,10 @@ import {
 } from '../qwen/subscription-errors.js';
 import { buildRuntimeFetchOptions } from '../utils/runtimeFetchOptions.js';
 import { ToolErrorType } from './tool-error.js';
+import {
+  subscriptionQuotaFromError,
+  type SubscriptionQuotaDisplay,
+} from '../utils/subscription-quota.js';
 import type {
   WebSearchBackend,
   WebSearchBackendRequest,
@@ -29,11 +33,15 @@ import type {
   WebSearchSource,
 } from './web-search-backend.js';
 
-function failure(message: string): WebSearchBackendResult {
+function failure(
+  message: string,
+  quota?: SubscriptionQuotaDisplay,
+): WebSearchBackendResult {
   return {
     ok: false,
     message,
     errorType: ToolErrorType.WEB_SEARCH_BACKEND_FAILED,
+    ...(quota ? { quota } : {}),
   };
 }
 
@@ -171,6 +179,7 @@ export class SubscriptionWebSearchBackend implements WebSearchBackend {
             : error instanceof SubscriptionOAuthError
               ? subscriptionErrorMessage(error)
               : 'Qwen Subscription search failed. Please try again.',
+        subscriptionQuotaFromError(error),
       );
     } finally {
       await client.close().catch(() => undefined);

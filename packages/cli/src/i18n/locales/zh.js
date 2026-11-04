@@ -7,6 +7,19 @@
 // Chinese translations for Qwen Code CLI
 
 export default {
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    '周额度已用完{{reset}}。您可以等待额度恢复，或运行 /upgrade 升级套餐以获取更多额度。',
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    '周额度已用完{{reset}}，请在额度恢复后重试。',
+  "You've used up your credits.{{reset}} Please try again after the reset.":
+    '额度已用完{{reset}}，请在额度恢复后重试。',
+  ' Your credits are expected to reset in {{time}}.':
+    '，预计将于{{time}}后恢复',
+  '{{days}} and {{hours}}': '{{days}} {{hours}}',
+  '1 day': '1天',
+  '{{count}} days': '{{count}}天',
+  '1 hour': '1小时',
+  '{{count}} hours': '{{count}}小时',
   Retry: '重试',
   'Connecting…': '正在连接…',
   'Could not connect Qwen Subscription. Please try again.':

@@ -86,9 +86,17 @@ export function QwenSubscriptionSidebarStatus(
             <Button
               key={action.key}
               type="button"
-              variant={action.key === 'plans' ? 'default' : 'outline'}
+              variant={
+                action.key === 'account'
+                  ? 'link'
+                  : action.key === 'plans'
+                    ? 'default'
+                    : 'outline'
+              }
               aria-label={action.label}
-              className={styles.action}
+              className={
+                action.key === 'account' ? styles.accountAction : styles.action
+              }
               onClick={action.onClick}
               disabled={action.disabled}
             >

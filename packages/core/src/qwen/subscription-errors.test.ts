@@ -21,6 +21,17 @@ vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
 beforeEach(() => log.mockClear());
 
 describe('subscription request errors', () => {
+  it('retains quota display context alongside readable English', () => {
+    const error = subscriptionHttpError(402, {
+      error: { code: 'insufficient_quota', quota: { member_type: 'plus' } },
+    });
+    expect(error).toMatchObject({
+      status: 402,
+      code: 'insufficient_quota',
+      subscriptionQuota: { type: 'subscription_quota', memberType: 'plus' },
+    });
+    expect(subscriptionErrorMessage(error)).toContain('/upgrade');
+  });
   it.each(['access_denied', 'invalid_token', 'invalid_grant'])(
     'uses HTTP 403 and error_description regardless of the returned error string (%s)',
     (code) => {

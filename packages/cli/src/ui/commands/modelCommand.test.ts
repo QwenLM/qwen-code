@@ -3371,7 +3371,7 @@ it('opens the model picker after subscription expiry so other providers remain s
   });
 });
 
-it('shows the backend model permission warning without blocking the picker', async () => {
+it('reports catalog permission failures when explicitly selecting a subscription model', async () => {
   const context = createMockCommandContext({
     services: {
       config: {
@@ -3394,14 +3394,11 @@ it('shows the backend model permission warning without blocking the picker', asy
       },
     },
   });
-  expect(await modelCommand.action!(context, '')).toMatchObject({
-    type: 'dialog',
-    dialog: 'model',
+  expect(
+    await modelCommand.action!(context, 'replacement(qwen-subscription)'),
+  ).toMatchObject({
+    type: 'message',
+    messageType: 'error',
+    content: 'Your account cannot access this model catalog.',
   });
-  expect(context.ui.addItem).toHaveBeenCalledWith(
-    expect.objectContaining({
-      text: 'Your account cannot access this model catalog.',
-    }),
-    expect.any(Number),
-  );
 });

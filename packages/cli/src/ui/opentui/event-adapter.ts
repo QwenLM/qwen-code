@@ -25,6 +25,8 @@ import {
   formatAdvisorDisplay,
 } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { GoalSnapshotLike } from '../utils/goal-card-view.js';
+import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
+import { t } from '../../i18n/index.js';
 import type {
   AnsiToken,
   ChatCompressionInfo,
@@ -330,6 +332,8 @@ export function extractAnsiOutput(
 
 /** Stringifies a ToolResultDisplay (string | FileDiff | structured) losslessly. */
 export function renderResultDisplay(display: unknown): string {
+  const quota = formatSubscriptionQuotaDisplay(display, t);
+  if (quota) return quota;
   if (isAdvisorDisplay(display)) return formatAdvisorDisplay(display);
   if (display == null) return '';
   if (typeof display === 'string') return display;

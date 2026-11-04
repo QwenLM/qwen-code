@@ -92,6 +92,30 @@ const search = (signal = new AbortController().signal, timeout = 5000) =>
   new SubscriptionWebSearchBackend(config, timeout).search({ query, signal });
 
 describe('subscription MCP search', () => {
+  it('shows the shared quota guidance for a 402 without retrying or refreshing', async () => {
+    fetchMock.mockResolvedValue(
+      Response.json(
+        {
+          error: {
+            code: 'insufficient_quota',
+            quota: {
+              member_type: 'pro',
+              reset_at: Math.floor(Date.now() / 1000) + 3 * 3600,
+            },
+          },
+        },
+        { status: 402 },
+      ),
+    );
+    expect(await search()).toMatchObject({
+      ok: false,
+      quota: { type: 'subscription_quota', memberType: 'pro' },
+      message:
+        "You've used up your weekly credits. Your credits are expected to reset in 3 hours. Please try again after the reset.",
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(getAccessToken).toHaveBeenCalledOnce();
+  });
   it('uses the actual SDK handshake and tool schema, preserving text and returned sources', async () => {
     expect(await search()).toEqual({
       ok: true,
@@ -204,7 +228,7 @@ describe('subscription MCP search', () => {
   });
 
   it.each([
-    ['invalid_grant', 400, undefined, 'session has expired'],
+    ['invalid_grant', 400, undefined, 'credentials are no longer valid'],
     [
       'rate_limited',
       429,

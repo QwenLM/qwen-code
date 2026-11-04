@@ -105,6 +105,24 @@ function ruPlural(
 }
 
 const EN: Messages = {
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    (v) =>
+      `You've used up your weekly credits.${v?.['reset'] ?? ''} You can wait or run /upgrade to get more credits.`,
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    (v) =>
+      `You've used up your weekly credits.${v?.['reset'] ?? ''} Please try again after the reset.`,
+  "You've used up your credits.{{reset}} Please try again after the reset.": (
+    v,
+  ) =>
+    `You've used up your credits.${v?.['reset'] ?? ''} Please try again after the reset.`,
+  ' Your credits are expected to reset in {{time}}.': (v) =>
+    ` Your credits are expected to reset in ${v?.['time'] ?? ''}.`,
+  '{{days}} and {{hours}}': (v) =>
+    `${v?.['days'] ?? ''} and ${v?.['hours'] ?? ''}`,
+  '1 day': '1 day',
+  '{{count}} days': (v) => `${v?.['count'] ?? ''} days`,
+  '1 hour': '1 hour',
+  '{{count}} hours': (v) => `${v?.['count'] ?? ''} hours`,
   'subscription.entryTitle': 'Qwen Account with Subscription',
   'subscription.entryDescription':
     'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
@@ -4814,6 +4832,21 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    (v) =>
+      `周额度已用完${v?.['reset'] ?? ''}。您可以等待额度恢复，或运行 /upgrade 升级套餐以获取更多额度。`,
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    (v) => `周额度已用完${v?.['reset'] ?? ''}，请在额度恢复后重试。`,
+  "You've used up your credits.{{reset}} Please try again after the reset.": (
+    v,
+  ) => `额度已用完${v?.['reset'] ?? ''}，请在额度恢复后重试。`,
+  ' Your credits are expected to reset in {{time}}.': (v) =>
+    `，预计将于${v?.['time'] ?? ''}后恢复`,
+  '{{days}} and {{hours}}': (v) => `${v?.['days'] ?? ''} ${v?.['hours'] ?? ''}`,
+  '1 day': '1天',
+  '{{count}} days': (v) => `${v?.['count'] ?? ''}天`,
+  '1 hour': '1小时',
+  '{{count}} hours': (v) => `${v?.['count'] ?? ''}小时`,
   'Third-party Providers': '第三方供应商',
   'Custom Provider': '自定义供应商',
   'Official recommended setup: Token Plan or Standard API Key':

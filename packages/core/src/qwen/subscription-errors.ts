@@ -9,6 +9,10 @@ import {
   retryAfterMs,
 } from './subscription-oauth-client.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  formatSubscriptionQuotaDisplay,
+  subscriptionQuotaDisplay,
+} from '../utils/subscription-quota.js';
 
 const debugLogger = createDebugLogger('QWEN_SUBSCRIPTION');
 
@@ -55,10 +59,12 @@ export function subscriptionHttpError(
       : status === 401
         ? 'invalid_token'
         : 'request_failed';
+  const quota = subscriptionQuotaDisplay(status, detail);
   const description =
-    typeof detail['message'] === 'string' && detail['message'].trim()
+    formatSubscriptionQuotaDisplay(quota) ??
+    (typeof detail['message'] === 'string' && detail['message'].trim()
       ? detail['message']
-      : body['error_description'];
+      : body['error_description']);
   debugLogger.debug('Gateway request failed', {
     status,
     code,
@@ -67,13 +73,16 @@ export function subscriptionHttpError(
         ? detail['request_id']
         : undefined,
   });
-  return new SubscriptionOAuthError(
-    code,
-    status,
-    typeof description === 'string' && description.trim()
-      ? description
-      : undefined,
-    retryAfterMs(retryAfter ?? null),
+  return Object.assign(
+    new SubscriptionOAuthError(
+      code,
+      status,
+      typeof description === 'string' && description.trim()
+        ? description
+        : undefined,
+      retryAfterMs(retryAfter ?? null),
+    ),
+    quota ? { subscriptionQuota: quota } : {},
   );
 }
 

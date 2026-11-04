@@ -252,6 +252,9 @@ export function normalizeDaemonEvent(
       ];
     }
     case 'turn_error': {
+      const subscriptionQuota = isRecord(event.data)
+        ? event.data['subscriptionQuota']
+        : undefined;
       const code = getString(event.data, 'code');
       const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       const promptId = getString(event.data, 'promptId');
@@ -264,6 +267,9 @@ export function normalizeDaemonEvent(
           ...base,
           type: 'error',
           source: 'turn_error',
+          ...(subscriptionQuota !== undefined
+            ? { data: { subscriptionQuota } }
+            : {}),
           recoverable: true,
           ...(code ? { code } : {}),
           ...(errorKind ? { errorKind } : {}),

@@ -16,7 +16,6 @@ import { t } from '../../i18n/index.js';
 import {
   SUBSCRIPTION_MODELS_CACHED,
   SUBSCRIPTION_MODELS_UNAVAILABLE,
-  subscriptionModelUnavailable,
 } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
@@ -1130,8 +1129,8 @@ export const modelCommand: SlashCommand = {
       };
     }
     if (
-      authType === AuthType.QWEN_SUBSCRIPTION &&
-      (!parsed.authType || parsed.authType === AuthType.QWEN_SUBSCRIPTION)
+      modelName &&
+      (parsed.authType ?? authType) === AuthType.QWEN_SUBSCRIPTION
     ) {
       context.ui.addItem(
         { type: MessageType.INFO, text: t('Loading models from provider…') },
@@ -1146,32 +1145,7 @@ export const modelCommand: SlashCommand = {
             { type: MessageType.WARNING, text: SUBSCRIPTION_MODELS_CACHED },
             Date.now(),
           );
-        if (!result.models.includes(config.getModel()))
-          context.ui.addItem(
-            {
-              type: MessageType.WARNING,
-              text: subscriptionModelUnavailable(config.getModel()),
-            },
-            Date.now(),
-          );
       } catch (error) {
-        if (!modelName && context.executionMode === 'interactive') {
-          context.ui.addItem(
-            {
-              type: MessageType.WARNING,
-              text:
-                error instanceof SubscriptionOAuthError
-                  ? t(subscriptionErrorMessage(error))
-                  : SUBSCRIPTION_MODELS_UNAVAILABLE,
-            },
-            Date.now(),
-          );
-          return {
-            type: 'dialog',
-            dialog: 'model',
-            ...persistScopeSpread(scopeOverride),
-          };
-        }
         return {
           type: 'message',
           messageType: 'error',

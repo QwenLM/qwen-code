@@ -75,3 +75,13 @@
   white-space: normal;
   overflow-wrap: anywhere;
 }
+
+.content .accountAction {
+  align-self: center;
+  height: auto;
+  padding: 4px 0;
+  color: var(--muted-foreground);
+  font: inherit;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

@@ -965,7 +965,8 @@ class WebSearchToolInvocation extends BaseToolInvocation<
       onProgress: updateOutput,
     });
     if (!result.ok) {
-      return this.errorResult(result.message, result.errorType);
+      const error = this.errorResult(result.message, result.errorType);
+      return result.quota ? { ...error, returnDisplay: result.quota } : error;
     }
     return this.finishResult(result.outcome, startedAt);
   }

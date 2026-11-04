@@ -13,6 +13,11 @@ import { AuthType } from './auth-type.js';
 import { getErrorMessage } from './errors.js';
 import { getHeaderValue } from './retryPolicy.js';
 import { getRateLimitErrorDetails } from './rateLimit.js';
+import {
+  formatSubscriptionQuotaDisplay,
+  subscriptionQuotaFromError,
+  type SubscriptionQuotaTranslator,
+} from './subscription-quota.js';
 
 const RATE_LIMIT_MESSAGE_BY_AUTH = {
   [AuthType.USE_GEMINI]:
@@ -26,6 +31,7 @@ const RATE_LIMIT_MESSAGE_BY_AUTH = {
 const RATE_LIMIT_SUFFIXES = Object.values(RATE_LIMIT_MESSAGE_BY_AUTH);
 
 function getRateLimitMessage(authType?: AuthType): string {
+  if (authType === AuthType.QWEN_SUBSCRIPTION) return '';
   if (authType === AuthType.USE_GEMINI) {
     return RATE_LIMIT_MESSAGE_BY_AUTH[AuthType.USE_GEMINI];
   }
@@ -176,6 +182,7 @@ function isAlreadyFormatted(value: string): boolean {
 export function parseAndFormatApiError(
   error: unknown,
   authType?: AuthType,
+  translate?: SubscriptionQuotaTranslator,
 ): string {
   if (
     getErrorMessage(error) ===
@@ -201,7 +208,10 @@ export function parseAndFormatApiError(
     }
 
     const message =
-      error instanceof Error ? getErrorMessage(error) : error.message;
+      formatSubscriptionQuotaDisplay(
+        subscriptionQuotaFromError(error),
+        translate,
+      ) ?? (error instanceof Error ? getErrorMessage(error) : error.message);
     // The request id goes INSIDE the closing bracket on purpose: the
     // isAlreadyFormatted() idempotency guard below keys off `endsWith(']')`, so
     // a suffix after the bracket would make a second pass re-wrap the line into
