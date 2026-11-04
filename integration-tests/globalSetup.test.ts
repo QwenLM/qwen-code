@@ -262,13 +262,26 @@ describe('globalSetup hermetic qwen home', () => {
         process.execPath,
         [
           '-e',
+          // A rolling cap, not a write ceiling: the writer must still be
+          // producing when teardown attempts the removal, so it unlinks its
+          // own older batches instead of stopping. That bounds the live set to
+          // a few hundred files without quieting the refill.
           `const fs = require('node:fs');
            const dir = ${JSON.stringify(refilling)};
            const stopAt = Date.now() + 5_000;
+           let pending = [];
            while (Date.now() < stopAt) {
              try {
                fs.mkdirSync(dir, { recursive: true });
-               fs.writeFileSync(dir + '/' + process.hrtime.bigint() + '.log', 'x');
+               const file = dir + '/' + process.hrtime.bigint() + '.log';
+               fs.writeFileSync(file, 'x');
+               pending.push(file);
+               if (pending.length > 256) {
+                 for (const old of pending) {
+                   try { fs.unlinkSync(old); } catch {}
+                 }
+                 pending = [];
+               }
              } catch {}
            }`,
         ],
