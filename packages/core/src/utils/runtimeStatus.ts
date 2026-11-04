@@ -99,13 +99,20 @@ export async function writeRuntimeStatus(
   fields: WriteRuntimeStatusFields,
 ): Promise<string> {
   const pid = fields.pid ?? process.pid;
+  let procStart = fields.procStart;
+  if (procStart === undefined) {
+    procStart = readProcStartToken(pid);
+    // Startup registration runs under fd pressure, and boot-id read failures
+    // are never cached, so one retry is what the sibling writers rely on to
+    // recover instead of persisting a null token for the whole session.
+    if (procStart === null && process.platform === 'linux') {
+      procStart = readProcStartToken(pid);
+    }
+  }
   const payload: RuntimeStatusOnDisk = {
     schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
     pid,
-    proc_start:
-      fields.procStart !== undefined
-        ? fields.procStart
-        : readProcStartToken(pid),
+    proc_start: procStart,
     session_id: fields.sessionId,
     work_dir: fields.workDir,
     hostname: os.hostname(),

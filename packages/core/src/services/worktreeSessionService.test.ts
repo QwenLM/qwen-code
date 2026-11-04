@@ -609,6 +609,7 @@ describe('isSessionRuntimeActive', () => {
     state: string,
     killImpl?: () => never,
     procStart: string | null = null,
+    tokenUnreadable = false,
   ) {
     const repoRoot = path.join(tmpDir, `repo-${state}-${pid}`);
     await fs.mkdir(repoRoot, { recursive: true });
@@ -627,6 +628,11 @@ describe('isSessionRuntimeActive', () => {
       ];
       const statLine = `4242 (node) ${state} ${fields.join(' ')} 1000 2000 3000\n`;
       const readFileSync = ((p: unknown, ...rest: unknown[]) => {
+        if (tokenUnreadable && String(p) === statPath) {
+          throw Object.assign(new Error('permission denied'), {
+            code: 'EACCES',
+          });
+        }
         if (String(p) === statPath) return statLine;
         if (String(p) === bootIdPath) return 'deadbeef\n';
         return (
@@ -708,6 +714,22 @@ describe('isSessionRuntimeActive', () => {
       'S',
       undefined,
       'deadbeef:1000',
+    );
+
+    await expect(probe.liveness()).resolves.toBe('active');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
+  it('degrades to plain liveness when the identity token is unreadable', async () => {
+    // A record written with a real token can be read back where `/proc` is no
+    // longer readable (hidepid=2, EIO). Only a readable mismatch proves reuse,
+    // so this must stay active instead of declaring a live session dead.
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:1000',
+      true,
     );
 
     await expect(probe.liveness()).resolves.toBe('active');
