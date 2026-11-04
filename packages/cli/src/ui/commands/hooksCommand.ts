@@ -24,6 +24,11 @@ import { normalizeMatcher } from '../components/hooks/matcherGrouping.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { MessageType } from '../types.js';
 import { resolveHookSettingsForConfig } from '../../config/hook-settings.js';
+import {
+  applyProjectHooksApproval,
+  getProjectHooksForApproval,
+} from '../../config/hook-approvals.js';
+import { appEvents, AppEvent } from '../../utils/events.js';
 
 const debugLogger = createDebugLogger('HOOKS_COMMAND');
 
@@ -72,7 +77,16 @@ async function reloadHooksFromSettings(
       config.getTopTierMcpServers()?.['external-context'],
     ),
   );
+  // An edited project hooks block has a new hash and so no approval: keep it
+  // out of the registry and let the approval dialog ask again. Keyed like
+  // startup, by the project the settings came from, not the live cwd.
+  const state = config.isProjectHooksApprovalGated()
+    ? applyProjectHooksApproval(config, getProjectHooksForApproval(settings))
+    : undefined;
   await hookSystem.reload();
+  if (state === 'pending') {
+    appEvents.emit(AppEvent.ProjectHooksPendingApprovalChanged);
+  }
   if (!systemReloaded) {
     const paths = systemScopes
       .map((scope) => settings.forScope(scope).path)
