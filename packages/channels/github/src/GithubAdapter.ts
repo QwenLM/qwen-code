@@ -3604,7 +3604,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence. ${
               priorFailureStreak + 1 >= MAX_COLD_EMPTY_PARTIAL_POLLS
                 ? "The binding lookup itself has been failing (see the 'has never succeeded' line above): verify GET /sessions/pr-bindings is reachable and the worker credentials are valid."
-                : "The daemon's stderr names the cause: a workspace without a runtime, a chats directory it cannot list, or a 'PR bindings scan' line for a sidecar, transcript or live session list it could not read."
+                : "The daemon's stderr names the cause: a workspace without a runtime, a chats directory it cannot list, or a 'PR bindings scan' line for a sidecar, transcript or live session list it could not read; the channel worker's stderr names a binding row it had to drop (check that the worker and the daemon run the same version)."
             }\n`,
           );
         }
@@ -3664,11 +3664,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.coldEmptyPartialStreak += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
           process.stderr.write(
-            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence. ${
+            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: ${
+              this.boundSnapshotSeen
+                ? 'opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence.'
+                : 'the comment lane stays closed until a snapshot succeeds; every notification, issue events included, remains stalled.'
+            } ${
               this.boundSnapshotFailureStreak + 1 >=
               MAX_COLD_EMPTY_PARTIAL_POLLS
                 ? "The binding lookup itself has been failing (see the 'has never succeeded' line above): verify GET /sessions/pr-bindings is reachable and the worker credentials are valid."
-                : "The daemon's stderr names the cause: a workspace without a runtime, a chats directory it cannot list, or a 'PR bindings scan' line for a sidecar, transcript or live session list it could not read."
+                : "The daemon's stderr names the cause: a workspace without a runtime, a chats directory it cannot list, or a 'PR bindings scan' line for a sidecar, transcript or live session list it could not read; the channel worker's stderr names a binding row it had to drop (check that the worker and the daemon run the same version)."
             }\n`,
           );
         }

@@ -210,8 +210,10 @@ export interface PrBindingSummary {
  * Result of a PR-binding reverse lookup. `partial` means the daemon could
  * not read part of the catalog — a registry entry with no runtime, a chats
  * directory it could not list, a sidecar or transcript it could not read,
- * or a live session list it could not fetch. A directory-listing snapshot
- * is complete regardless of session count; consumers must not treat a
+ * or a live session list it could not fetch — or that the channel worker
+ * dropped a malformed binding row from the daemon's answer. A
+ * directory-listing snapshot is complete regardless of session count;
+ * consumers must not treat a
  * missing entry in a partial answer as an authoritative absence — in
  * particular they must not destroy state keyed by bindings.
  */

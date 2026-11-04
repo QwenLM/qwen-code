@@ -6845,6 +6845,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(capLine).toBeDefined();
         expect(capLine).toContain('binding lookup itself has been failing');
         expect(capLine).not.toContain('chats directory');
+        // No snapshot has ever succeeded, so the gate keeps the lane closed:
+        // the cap line must not claim it opened.
+        expect(capLine).not.toContain('opening the comment lane');
+        expect(capLine).toContain('remains stalled');
       } finally {
         stderr.mockRestore();
       }

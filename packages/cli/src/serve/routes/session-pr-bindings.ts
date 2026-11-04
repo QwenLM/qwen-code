@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path';
 import type { Application } from 'express';
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import {
+  canonicalSessionPrUrl,
   readSessionPrsDetailed,
   SESSION_PR_LIST_LIMIT,
 } from '@qwen-code/qwen-code-core/services/session-pr-service.js';
@@ -104,6 +105,11 @@ async function resolveAttribution(
   liveSummary: BridgeSessionSummary | undefined,
 ): Promise<Attribution> {
   const item = await sessionService.getSessionListItem(sessionId, 'active');
+  // Ownership first, from whichever record states it: a machine-owned
+  // session is skipped before any read that could fail and degrade the
+  // answer on its behalf.
+  const sourceType = item?.sourceType ?? liveSummary?.sourceType;
+  if (isHiddenCatalogSource(sourceType)) return { kind: 'hidden' };
   if (item === undefined) {
     let stats: Awaited<ReturnType<typeof stat>> | undefined;
     try {
@@ -127,8 +133,6 @@ async function resolveAttribution(
       return { kind: 'archived' };
     }
   }
-  const sourceType = item?.sourceType ?? liveSummary?.sourceType;
-  if (isHiddenCatalogSource(sourceType)) return { kind: 'hidden' };
   // The shared recency rule: an unparseable live value never displaces the
   // persisted one, and the comparison is chronological, not lexicographic.
   const updatedAt = laterActivityTimestamp(
@@ -197,18 +201,16 @@ async function scanWorkspaceBindings(
         sessionId,
         'active',
       );
-      const sidecar = await readSessionPrsDetailed(prPath);
-      // Absent: unbound or archived between the listing and the read.
-      if (sidecar.status === 'absent') continue;
+      // Non-targets are decided before the sidecar is read, so a
+      // machine-owned session's corrupt or unreadable sidecar cannot make
+      // the answer partial — and an empty sidecar of such a session is no
+      // tombstone.
       const attribution = await resolveAttribution(
         sessionService,
         sessionId,
         prPath,
         live.get(sessionId),
       );
-      // Non-targets are decided before any failure is counted, so a
-      // machine-owned session's corrupt sidecar cannot make the answer
-      // partial — and an empty sidecar of such a session is no tombstone.
       if (attribution.kind === 'hidden' || attribution.kind === 'archived') {
         continue;
       }
@@ -217,6 +219,9 @@ async function scanWorkspaceBindings(
         failures.push({ sessionId, cause: 'transcript could not be read' });
         continue;
       }
+      const sidecar = await readSessionPrsDetailed(prPath);
+      // Absent: unbound or archived between the listing and the read.
+      if (sidecar.status === 'absent') continue;
       if (sidecar.status === 'invalid') {
         unknown.add(sessionId);
         failures.push({
@@ -270,9 +275,13 @@ async function scanWorkspaceBindings(
       if (row.prs.length === 0 || row.prs.length >= SESSION_PR_LIST_LIMIT) {
         continue;
       }
-      const known = new Set(row.prs.map((pr) => pr.number));
+      // Keyed by number AND repository: a sidecar can hold same-numbered
+      // PRs from different repositories.
+      const prKey = (pr: { number: number; url: string }) =>
+        `${pr.number}|${canonicalSessionPrUrl(pr.url)}`;
+      const known = new Set(row.prs.map(prKey));
       row.prs.push(
-        ...projectPrs(summary.prs.filter((pr) => !known.has(pr.number))),
+        ...projectPrs(summary.prs.filter((pr) => !known.has(prKey(pr)))),
       );
       row.prs = row.prs.slice(-SESSION_PR_LIST_LIMIT);
       continue;

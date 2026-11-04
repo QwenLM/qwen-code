@@ -399,7 +399,7 @@ describe('GET /sessions/pr-bindings', () => {
     ]);
   });
 
-  it('does not list archived sessions', async () => {
+  it('does not enumerate the archive directory', async () => {
     const cwd = await makeWorkspace();
     await seedTranscript(cwd, SESSION_A, { archived: true });
     await seedBinding(cwd, SESSION_A, [101], { archived: true });
@@ -945,6 +945,47 @@ describe('GET /sessions/pr-bindings', () => {
     expect(lines).toContainEqual(
       expect.stringContaining('1 of 1 sessions could not be read'),
     );
+  });
+
+  it('skips a machine-owned live session before its unreadable transcript can degrade the answer', async () => {
+    const cwd = await makeWorkspace();
+    await seedBinding(cwd, SESSION_A, [101]);
+    await fsp.mkdir(transcriptPath(cwd, SESSION_A), { recursive: true });
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, { sourceType: 'agent' }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('skips a machine-owned session before its unreadable sidecar can degrade the answer', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, { sourceType: 'agent' });
+    await fsp.mkdir(sidecarPath(cwd, SESSION_A), { recursive: true });
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('keeps same-numbered PRs from different repositories apart when merging', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [5]);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: [{ number: 5, url: 'https://github.com/acme/gadgets/pull/5' }],
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.bindings[0]?.prs.map((pr) => pr.url)).toEqual([
+      'https://github.com/acme/widgets/pull/5',
+      'https://github.com/acme/gadgets/pull/5',
+    ]);
   });
 
   it('routes registry failures through sendBridgeError', async () => {
