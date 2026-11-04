@@ -819,7 +819,18 @@ interface InboundTaskRecord {
    * permanently loses the event. Absent on single-target and watch tasks
    * (the watch path reconstructs from its pending queue instead).
    */
-  fanout?: Array<{ sessionId: string; role?: PrBindingRole }>;
+  fanout?: Array<{
+    sessionId: string;
+    role?: PrBindingRole;
+    /**
+     * Durable per-slot completion mark. The slot is the ROLE (one winner
+     * per role), set when the role's delivery is accepted under ANY
+     * session it retargeted to. Lives on the carrier task, so it survives
+     * ring eviction and retargeting for exactly as long as a surviving
+     * sibling can reconstruct the slot.
+     */
+    completed?: boolean;
+  }>;
   /**
    * Set once the daemon accepted the bound prompt (202). Recovery retires a
    * task carrying this mark without re-injecting: a crash between acceptance
@@ -942,7 +953,10 @@ function isInboundTaskRecord(value: unknown): value is InboundTaskRecord {
               (typeof (target as { role?: unknown }).role === 'string' &&
                 (PR_BINDING_ROLES as readonly string[]).includes(
                   (target as { role: string }).role,
-                ))),
+                ))) &&
+            ((target as { completed?: unknown }).completed === undefined ||
+              typeof (target as { completed?: unknown }).completed ===
+                'boolean'),
         ))) &&
     (record.deliveredAt === undefined ||
       typeof record.deliveredAt === 'number') &&
@@ -3066,6 +3080,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         } else {
           this.removeInboundTask(task.id);
         }
+      } else if (this.privatelyRetiredInboundTaskIds.has(task.id)) {
+        // The private retirement already persisted a terminal cancelled
+        // state. A cleanup failure (e.g. the task-removal EIO escaping
+        // retireBoundTask in the ring-guard branch) must not resurrect it
+        // into a public error comment or a recoverable failed state.
+        this.privatelyRetiredInboundTaskIds.delete(task.id);
+        return true;
       } else if (!this.cancelledInboundTaskIds.has(task.id)) {
         // Read the delivery LIVE: a gone-session fallback clears
         // task.delivery mid-run, after which this is a channel-path task
@@ -3192,9 +3213,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         continue;
       }
       for (const target of task.fanout) {
-        // A completed target's task was delivered and removed; recreating
-        // it would re-execute the event for that role after a rebind.
-        if (this.boundTargetCompleted(task.envelope, target.sessionId)) {
+        // A completed slot must never be recreated. The on-task mark is
+        // authoritative: the slot is the ROLE, so it covers acceptance
+        // after retargeting, and it lives on the carrier task, so it
+        // outlives the bounded ring's FIFO eviction. The per-target ring
+        // key stays as a secondary guard for the accepting session.
+        if (
+          target.completed === true ||
+          this.boundTargetCompleted(task.envelope, target.sessionId)
+        ) {
           continue;
         }
         this.claimInboundTask(
@@ -4211,6 +4238,55 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
+   * Mark the event's logical fan-out slot complete on the carrier task.
+   * The slot is the ROLE, not the session: a deferred target that accepts
+   * after retargeting completes the ORIGINAL slot, and the mark lives on
+   * the carrier task — durable for exactly as long as a surviving sibling
+   * can reconstruct it, immune to the bounded ring's FIFO eviction.
+   * Best-effort like the ring: a write failure is surfaced, never thrown
+   * into the delivery path (the per-target ring key still guards this
+   * lifetime).
+   */
+  private markFanoutSlotCompleted(
+    envelope: Envelope,
+    role: PrBindingRole | undefined,
+  ): void {
+    try {
+      const records = this.readInboundTasks();
+      let changed = false;
+      const next = records.map((record) => {
+        if (
+          !record.fanout ||
+          record.source.chatId !== envelope.chatId ||
+          record.source.threadId !== envelope.threadId ||
+          record.source.messageId !== envelope.messageId
+        ) {
+          return record;
+        }
+        let hit = false;
+        const fanout = record.fanout.map((target) => {
+          if (target.role !== role || target.completed === true) {
+            return target;
+          }
+          hit = true;
+          return { ...target, completed: true };
+        });
+        if (!hit) return record;
+        changed = true;
+        return { ...record, fanout };
+      });
+      if (changed) this.writeInboundTasks(next);
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] failed to persist fan-out completion for ${envelope.messageId}: ${sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        )}\n`,
+      );
+    }
+  }
+
+  /**
    * Persist a terminal private retirement BEFORE the routing identity is
    * cleared or the task removed: if the removal then fails (EIO), restart
    * must find a non-recoverable task, not a running untargeted one that
@@ -4254,8 +4330,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   /**
    * Record a private acceptance in the durable ring: the event key (blocks
-   * any public fallback for the event) AND a per-target key (blocks fan-out
-   * reconstruction of an already-completed target after a rebind).
+   * any public fallback for the event) AND a per-target key (secondary
+   * reconstruction guard; the authoritative per-slot completion mark lives
+   * on the carrier task, see markFanoutSlotCompleted).
    * Best-effort persistence (the in-memory set still suppresses duplicates
    * for this lifetime); a write failure is surfaced, never thrown into the
    * delivery path.
@@ -4684,6 +4761,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // gone-fallback may route the same event publicly, even after every
       // follower disappears (the ring outlives the tasks).
       this.recordBoundDelivered(envelope, delivery.sessionId);
+      this.markFanoutSlotCompleted(envelope, delivery.role);
     } catch (err) {
       if (!(err instanceof BoundSessionGoneError)) throw err;
       // The daemon's Gone verdict is authoritative deletion evidence. Evict
@@ -4723,6 +4801,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             idempotencyKey,
           );
           this.recordBoundDelivered(envelope, next.sessionId);
+          this.markFanoutSlotCompleted(envelope, next.role);
           return true;
         } catch (retryErr) {
           if (!(retryErr instanceof BoundSessionGoneError)) throw retryErr;

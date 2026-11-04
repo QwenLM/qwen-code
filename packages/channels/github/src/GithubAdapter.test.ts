@@ -9761,6 +9761,267 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(channel.inboundEnvelopes).toHaveLength(0);
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
     });
+
+    it('completes the original fanout slot when a deferred target accepts after retargeting (R2-2 retarget)', async () => {
+      const config = {
+        deliverToBoundSessions: true,
+        boundSessionActions: {
+          'review:comment': 'review it',
+          'verify:comment': 'verify it',
+        },
+      };
+      await initChannel(config, { boundSessions });
+      const verifyBindingFor = (sessionId: string, updatedAt?: string) =>
+        makeBinding({
+          sessionId,
+          ...(updatedAt ? { updatedAt } : {}),
+          prs: [
+            {
+              number: 42,
+              url: 'https://github.com/owner/repo/pull/42',
+              state: 'open',
+              role: 'verify',
+            },
+          ],
+        });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding(), verifyBindingFor('verify-old')],
+        partial: false,
+      });
+      // Both roles queue-full: the review carrier keeps the full fanout.
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 'review-session' || sessionId === 'verify-old') {
+            throw new BoundSessionQueueFullError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+
+      // verify rebinds to verify-mid while review stays blocked: the
+      // deferred verify task retargets and accepts under the NEW session.
+      // The completion must land on the ORIGINAL fanout slot (the role),
+      // not only on verify-mid's per-target ring key.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          verifyBindingFor('verify-mid', '2026-07-03T00:00:00.000Z'),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      // Count BEFORE the restart: initChannel clears the mock history.
+      const midCalls = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).filter(([id]) => id === 'verify-mid');
+      expect(midCalls).toHaveLength(1);
+
+      // A second rebind must not replay the event for the verify role.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          verifyBindingFor('verify-new', '2026-07-04T00:00:00.000Z'),
+        ],
+        partial: false,
+      });
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          verifyBindingFor('verify-new', '2026-07-04T00:00:00.000Z'),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      const afterRestart = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).map(([id]) => id);
+      expect(afterRestart).not.toContain('verify-new');
+      expect(afterRestart).not.toContain('verify-mid');
+    });
+
+    it('keeps fanout completion durable when background traffic evicts the delivery ring (R2-2 eviction)', async () => {
+      const config = {
+        deliverToBoundSessions: true,
+        boundSessionActions: {
+          'review:comment': 'review it',
+          'verify:comment': 'verify it',
+        },
+      };
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          makeBinding({
+            sessionId: 'verify-old',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 'review-session') {
+            throw new BoundSessionQueueFullError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      // Count BEFORE the restart: initChannel clears the mock history.
+      const oldCalls = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).filter(([id]) => id === 'verify-old');
+      expect(oldCalls).toHaveLength(1);
+
+      // 512 unrelated single-target acceptances (1024 keys) evict the
+      // original completion from the bounded ring while the review
+      // sibling is still at deferCount 1, well inside its retry horizon.
+      // The on-task slot mark must survive the eviction.
+      mkdirSync(dirname(deliveredRingPath()), { recursive: true });
+      writeFileSync(
+        deliveredRingPath(),
+        JSON.stringify({
+          keys: Array.from(
+            { length: 1024 },
+            (_, i) => `github:other/repo:bg-${i}`,
+          ),
+        }),
+        'utf-8',
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          makeBinding({
+            sessionId: 'verify-new',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          makeBinding({
+            sessionId: 'verify-new',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      const afterRestart = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).map(([id]) => id);
+      expect(afterRestart).not.toContain('verify-new');
+      expect(afterRestart).not.toContain('verify-old');
+    });
+
+    it('keeps a ring-retired comment terminal when task removal fails (R2-4 ring branch)', async () => {
+      const config = {
+        deliverToBoundSessions: true,
+        boundSessionActions: { 'review:comment': 'review it' },
+      };
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding()],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledWith(
+        'review-session',
+        expect.any(String),
+        expect.any(String),
+      );
+
+      // Restart with every follower gone AND the cursor lost: the same
+      // event re-lists, is claimed untargeted, and the ring guard retires
+      // it privately. The removal then fails inside the delivery
+      // try/catch — the terminal outcome must survive the cleanup error.
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      const nameHash = createHash('sha256')
+        .update('test-github')
+        .digest('hex')
+        .slice(0, 16);
+      nodeFs.rmSync(
+        join(
+          process.env.QWEN_HOME!,
+          'channels',
+          getWorkspaceScopeDirName('/tmp/test'),
+          `test-github-${nameHash}-poll-cursor.json`,
+        ),
+        { force: true },
+      );
+      const removeSpy = vi
+        .spyOn(
+          channel as unknown as { removeInboundTask: (id: string) => void },
+          'removeInboundTask',
+        )
+        .mockImplementation(() => {
+          throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+        });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce().catch(() => undefined);
+      removeSpy.mockRestore();
+
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      const tasks = readTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!['state']).toBe('cancelled');
+
+      // Restart: the terminal record stays non-recoverable and private.
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
   });
 
   describe('PR state watch', () => {
