@@ -241,6 +241,7 @@ describe('no-AK integration CI wiring', () => {
       './interactive/statusline-parity.test.ts',
       './interactive/tui-editor-parity.test.ts',
       './interactive/tui-input-ownership.test.ts',
+      './interactive/ink-agent-loop-parity.test.ts',
       './sdk-typescript/abort-and-lifecycle.test.ts',
       './sdk-typescript/permission-control.test.ts',
       './sdk-typescript/sdk-mcp-server.test.ts',
