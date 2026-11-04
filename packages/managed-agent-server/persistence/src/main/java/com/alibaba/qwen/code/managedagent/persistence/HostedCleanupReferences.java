@@ -32,6 +32,21 @@ final class HostedCleanupReferences {
         }
         String binding = bindingKey(tenant, workspace, descriptor.path("bindingId").textValue());
         long generation = Long.parseLong(descriptor.path("generation").textValue());
+        if (!"confirmed".equals(payload.path("state").textValue())) {
+            // The caller holds placement before its Session/head locks, matching
+            // retention. A current read also rejects a binding collected before admission.
+            var originals = jdbc.query("SELECT tenant_id, workspace_id, workspace_generation, runtime_generation"
+                            + " FROM ma_runtime_binding WHERE binding_id = ? FOR UPDATE",
+                    (row, index) -> tenant.equals(row.getString("tenant_id"))
+                            && workspace.equals(row.getString("workspace_id"))
+                            && descriptor.path("workspaceGeneration").textValue().equals(row.getString("workspace_generation"))
+                            && generation == row.getLong("runtime_generation"),
+                    descriptor.path("bindingId").textValue().getBytes(StandardCharsets.UTF_8));
+            if (originals.size() != 1 || !originals.getFirst()) {
+                throw new ManagedAgentException(409, "managed_session_cleanup_conflict",
+                        "Cleanup Runtime binding is missing or differs from its original descriptor");
+            }
+        }
         String key = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, resourceId);
         // Only this Session's commits insert its cleanup references, and they
         // queue on its Session row before their first read, so a plain probe

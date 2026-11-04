@@ -404,6 +404,7 @@ try {
     } catch {
       // Collector shutdown must still run when store cleanup fails.
     }
-  await new Promise((resolve) => server.close(resolve));
+  const collectorClosed = new Promise((resolve) => server.close(resolve));
   server.closeAllConnections();
+  await collectorClosed;
 }
