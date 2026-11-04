@@ -826,9 +826,10 @@ printf '%s\\n' '1'
       );
     });
     it('reports a push run whose successor cannot report its result', () => {
-      // The job gate admits only failures, so a successor that ended
-      // cancelled/timed_out/skipped never re-enters this workflow. Crediting
-      // its mere existence would drop the only report of a real regression.
+      // The gate admits failure and timeout/failure-backed cancelled runs, but
+      // a successor that ended skipped, or a plain concurrency/no-jobs
+      // cancellation, never reports itself. Crediting its mere existence would
+      // drop the only report of a real regression.
       const resolved = detect(
         '1',
         {
@@ -2250,9 +2251,16 @@ fi
         ) ?? []
       ).length,
     ).toBe(1);
-    expect(
-      readFileSync('.github/scripts/ci/classify-cancelled-run.sh', 'utf8'),
-    ).toContain('actions/runs/${run_id}/attempts/${attempt}/jobs');
+    // Pin the full fetch (query + --paginate), not a URL fragment: a substring
+    // pin would survive dropping ?per_page=100 or --paginate (#16280 R2-4).
+    const classifierScript = readFileSync(
+      '.github/scripts/ci/classify-cancelled-run.sh',
+      'utf8',
+    );
+    expect(classifierScript).toContain(
+      'actions/runs/${run_id}/attempts/${attempt}/jobs?per_page=100"',
+    );
+    expect(classifierScript).toContain('--paginate > "${pages}"');
     // The ids projection is bound to the array the download loop iterates and to
     // the payload the fetch wrote. Swapping it with the TSV projection below
     // hands the reader whole TSV lines so every log download 404s. Renaming
