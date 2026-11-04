@@ -107,7 +107,7 @@ final class AgentSessionCommands {
                     throw AgentSessionPolicies.workspaceExecutionUnavailable();
                 }
             }
-            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+            WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         }
         if (!"ACTIVE".equals(session.status())) {
             throw new ManagedAgentException(409, "session_not_active",
@@ -590,7 +590,7 @@ final class AgentSessionCommands {
             requireSameMutation(command, requestDigest, sessionId);
             if ("FAILED".equals(command.status())) {
                 if (session.workspace() != null) {
-                    WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+                    WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
                 }
                 sessionPolicies.requireNoOpenOperation(tenantId, sessionId);
                 validateMutationStatus(session, kind);
@@ -607,7 +607,7 @@ final class AgentSessionCommands {
                     true);
         }
         if (session.workspace() != null) {
-            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+            WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         }
         sessionPolicies.requireNoOpenOperation(tenantId, sessionId);
         validateMutationStatus(session, kind);
@@ -690,7 +690,7 @@ final class AgentSessionCommands {
                             + " request was retired.");
         }
         if (session.workspace() != null) {
-            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+            WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         }
         validateMutationStatus(session, kind);
         long now = clock.millis();
