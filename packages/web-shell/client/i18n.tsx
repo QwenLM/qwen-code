@@ -4857,7 +4857,7 @@ const ZH: Messages = {
     '选择内置供应商并使用 API Key 连接',
   'Manually connect a local server, proxy, or unsupported provider':
     '手动连接本地服务、代理或其他供应商',
-  'subscription.entryTitle': 'Qwen Account with Subscription',
+  'subscription.entryTitle': 'Qwen 会员账号',
   'subscription.entryDescription':
     '在 chat.qwen.ai 订阅 Plus/Pro，解锁 Qwen Code 和 Agent 能力',
   'subscription.new': '新',

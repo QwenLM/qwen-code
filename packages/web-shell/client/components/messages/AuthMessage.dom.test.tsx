@@ -748,10 +748,8 @@ describe('subscription development entry', () => {
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog?.getAttribute('aria-label')).toBe('连接供应商');
     expect(
-      dialog?.querySelector(
-        'button[aria-label="Qwen Account with Subscription"]',
-      )?.textContent,
-    ).toContain('Qwen Account with Subscription 新');
+      dialog?.querySelector('button[aria-label="Qwen 会员账号"]')?.textContent,
+    ).toContain('Qwen 会员账号 新');
     expect(dialog?.textContent).toContain('在 chat.qwen.ai 订阅 Plus/Pro');
     expect(dialog?.textContent).toContain('自定义供应商');
     expect(dialog?.textContent).toContain('手动连接本地服务、代理或其他供应商');
@@ -1233,7 +1231,9 @@ describe('subscription development entry', () => {
         await act(async () =>
           document
             .querySelector<HTMLButtonElement>(
-              'button[aria-label="Qwen Account with Subscription"]',
+              language === 'zh-CN'
+                ? 'button[aria-label="Qwen 会员账号"]'
+                : 'button[aria-label="Qwen Account with Subscription"]',
             )!
             .click(),
         );
