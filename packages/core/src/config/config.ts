@@ -170,6 +170,10 @@ import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import {
+  AUTO_MEMORY_SKILL_NAME,
+  buildMainSessionAutoMemoryPrompt,
+} from '../skills/auto-memory-skill.js';
+import {
   authoredSkillName,
   skillRestrictionNames,
   type SkillLevel,
@@ -442,6 +446,8 @@ import {
 import {
   buildAutoMemoryIndexContext,
   buildStructuredAutoMemoryPrompt,
+  type TeamAutoMemorySection,
+  type UserAutoMemorySection,
 } from '../memory/prompt.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { isSafeModeEnv } from '../utils/safe-mode.js';
@@ -3073,6 +3079,20 @@ export class Config {
 
   /** Stable managed-memory policy, separate from the changing catalog. */
   private autoMemoryPrompt = '';
+  /**
+   * What the legacy main-session auto-memory policy was last built from, kept
+   * so it can be rebuilt once the tool registry exists: whether the policy
+   * points at the bundled `auto-memory` reference depends on the Skill tool,
+   * and the first refresh runs before the registry is created.
+   */
+  private mainSessionAutoMemoryInputs:
+    | {
+        memoryDir: string;
+        indexContent: string | null;
+        userSection: UserAutoMemorySection;
+        teamSection: TeamAutoMemorySection | undefined;
+      }
+    | undefined;
   private autoMemoryContext = '';
   private memoryRecallMode: MemoryRecallMode = 'legacy';
   private memoryCorpusRevision = '';
@@ -4788,6 +4808,15 @@ export class Config {
     );
     options?.signal?.throwIfAborted();
     recordStartupEvent('config_initialize_tool_registry_end');
+    // The session-start memory refresh ran before the registry existed, so it
+    // could not see whether the Skill tool is reachable; decide again now.
+    if (
+      this.mainSessionAutoMemoryInputs !== undefined &&
+      this.memoryRecallMode === 'legacy' &&
+      this.autoMemoryPrompt
+    ) {
+      this.autoMemoryPrompt = this.buildMainSessionAutoMemoryPolicy();
+    }
     recordStartupEvent('tool_registry_created', {
       toolCount: this.toolRegistry.getAllToolNames().length,
       mcpInline: !skipInlineMcpDiscovery,
@@ -5734,13 +5763,13 @@ export class Config {
           teamSection?.memoryDir,
         );
       } else {
-        const policy = this.memoryManager.buildAutoMemoryPrompt(
+        this.mainSessionAutoMemoryInputs = {
           memoryDir,
-          managedAutoMemoryIndex,
+          indexContent: managedAutoMemoryIndex,
           userSection,
           teamSection,
-          { includeIndexes: false },
-        );
+        };
+        const policy = this.buildMainSessionAutoMemoryPolicy();
         const catalog = buildAutoMemoryIndexContext(
           memoryDir,
           managedAutoMemoryIndex,
@@ -8539,6 +8568,15 @@ export class Config {
     ) {
       return false;
     }
+    // The auto-memory reference only serves the managed auto-memory policy;
+    // without it the skill would be listed on every request for nothing.
+    if (
+      skill.level === 'bundled' &&
+      skill.name === AUTO_MEMORY_SKILL_NAME &&
+      !this.getManagedAutoMemoryEnabled()
+    ) {
+      return false;
+    }
     const registryName = skill.name.trim().toLowerCase();
     const authoredName = authoredSkillName(skill).trim().toLowerCase();
     const extension =
@@ -9421,6 +9459,23 @@ export class Config {
   }
 
   /** Managed-memory policy for the system prompt, without legacy indexes. */
+  /**
+   * The legacy main-session auto-memory policy: the resident policy with a
+   * pointer to the bundled `auto-memory` reference, or the full policy where
+   * no skill can be loaded (#16291).
+   */
+  private buildMainSessionAutoMemoryPolicy(): string {
+    const inputs = this.mainSessionAutoMemoryInputs;
+    if (inputs === undefined) return '';
+    return buildMainSessionAutoMemoryPrompt(
+      this,
+      inputs.memoryDir,
+      inputs.indexContent,
+      inputs.userSection,
+      inputs.teamSection,
+    );
+  }
+
   getAutoMemoryPrompt(): string {
     return this.autoMemoryPrompt;
   }

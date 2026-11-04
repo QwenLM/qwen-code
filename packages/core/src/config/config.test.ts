@@ -8189,6 +8189,58 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('the main-session policy and the auto-memory reference (#16291)', () => {
+    /** A session that can load skills: a skill manager and a Skill tool. */
+    const withSkillTool = (config: Config) => {
+      vi.spyOn(config, 'getSkillManager').mockReturnValue(
+        {} as unknown as ReturnType<Config['getSkillManager']>,
+      );
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue({
+        getAllToolNames: () => ['skill'],
+        isPermissionDeferred: () => false,
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+    };
+
+    it('sends the resident policy with a pointer when the skill can be loaded', async () => {
+      const config = makeConfig();
+      withSkillTool(config);
+      loadProjectRules();
+
+      await config.refreshHierarchicalMemory();
+
+      const policy = config.getAutoMemoryPrompt();
+      expect(policy).toContain('# auto memory');
+      expect(policy).toContain('load the `auto-memory` skill');
+      expect(policy).not.toContain('<types>');
+    });
+
+    it('keeps the full policy when no skill can be loaded', async () => {
+      const config = makeConfig();
+      vi.spyOn(config, 'getSkillManager').mockReturnValue(null);
+      loadProjectRules();
+
+      await config.refreshHierarchicalMemory();
+
+      const policy = config.getAutoMemoryPrompt();
+      expect(policy).toContain('<types>');
+      expect(policy).not.toContain('auto-memory');
+    });
+
+    it.each([
+      [true, true],
+      [false, false],
+    ])(
+      'lists the bundled auto-memory skill only with managed auto-memory (enabled: %s)',
+      (enableManagedAutoMemory, listed) => {
+        const config = makeConfig({ enableManagedAutoMemory });
+
+        expect(
+          config.isSkillEnabled({ name: 'auto-memory', level: 'bundled' }),
+        ).toBe(listed);
+      },
+    );
+  });
+
   it('delivers each memory tier in the request catalog while keeping indexes out of the policy', async () => {
     const config = makeConfig({ enableTeamMemory: true });
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);

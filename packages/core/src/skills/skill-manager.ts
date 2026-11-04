@@ -55,6 +55,16 @@ import {
 
 const debugLogger = createDebugLogger('SKILL_MANAGER');
 const SKILLS_CONFIG_DIR = 'skills';
+/**
+ * Bundled skills that `Config.isSkillEnabled` hides when the feature they
+ * serve is off: `generated-ui` without the generated-UI runtime, and
+ * `auto-memory` without managed auto-memory. Spelled out rather than imported
+ * from their modules, which sit above this one in the import graph.
+ */
+const CONDITIONAL_BUNDLED_SKILLS: ReadonlySet<string> = new Set([
+  'generated-ui',
+  'auto-memory',
+]);
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
 // Skills have a fixed layout (<skill-name>/SKILL.md), so depth 2 is enough to
@@ -330,7 +340,7 @@ export class SkillManager {
       for (const skill of levelSkills) {
         if (
           level === 'bundled' &&
-          skill.name === 'generated-ui' &&
+          CONDITIONAL_BUNDLED_SKILLS.has(skill.name) &&
           !this.config.isSkillEnabled(skill)
         )
           continue;
