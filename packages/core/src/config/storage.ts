@@ -265,7 +265,9 @@ export class Storage {
       // a volume that is not mounted yet, as missing. Marking the XDG dir now
       // would keep that install out for good once its target is back.
       if (fs.lstatSync(legacyDir, { throwIfNoEntry: false })) return;
-      fs.mkdirSync(dir, { recursive: true });
+      // The mode the XDG spec gives a directory it asks an app to create. This
+      // runs first on a new install, and mkdir ignores mode once it exists.
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       fs.writeFileSync(
         marker,
         'Qwen Code keeps its global directory here even if ~/.qwen exists.\n',

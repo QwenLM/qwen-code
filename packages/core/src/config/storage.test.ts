@@ -567,6 +567,14 @@ describe('Storage – default global dir (XDG Base Directory)', () => {
     expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'creates the XDG directory owner-only when it writes the marker',
+    () => {
+      Storage.markDefaultGlobalQwenDir();
+      expect(actualFs.statSync(xdgDir()).mode & 0o777).toBe(0o700);
+    },
+  );
+
   it('stays in the XDG directory when ~/.qwen is recreated after first run', () => {
     expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
     Storage.markDefaultGlobalQwenDir();

@@ -215,7 +215,7 @@ export function markDefaultGlobalQwenDirLite(): void {
   try {
     // A ~/.qwen that existsSync cannot follow; see core.
     if (fs.lstatSync(legacyDir, { throwIfNoEntry: false })) return;
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(
       marker,
       'Qwen Code keeps its global directory here even if ~/.qwen exists.\n',

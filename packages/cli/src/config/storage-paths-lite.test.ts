@@ -340,6 +340,16 @@ describe('settings locations in a given environment', () => {
       expect(getGlobalQwenDirLite()).toBe(Storage.getGlobalQwenDir());
     });
 
+    it.skipIf(process.platform === 'win32')(
+      'creates the XDG directory owner-only, as core does',
+      () => {
+        markDefaultGlobalQwenDirLite();
+        expect(
+          fs.statSync(path.join(userHome, '.config', 'qwen')).mode & 0o777,
+        ).toBe(0o700);
+      },
+    );
+
     it('writes the marker core keeps a new install by', () => {
       const xdgDir = path.join(userHome, '.config', 'qwen');
       markDefaultGlobalQwenDirLite();
