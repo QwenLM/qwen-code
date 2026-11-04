@@ -1150,7 +1150,8 @@ describe('ChannelEditorDialog', () => {
     };
     const onSave = vi.fn().mockResolvedValue(undefined);
     await renderDialog({ descriptor, onSave });
-    await expandAdvancedSettings();
+    // Operators is a permission grant: it renders in Access control, not in
+    // the advanced panel, so no expansion is needed here.
     await act(async () => {
       setInputValue(inputByLabel('Instance name')!, 'release-bot');
       setInputValue(inputByLabel('Client ID')!, 'ding-client-id');
@@ -1638,13 +1639,12 @@ describe('ChannelEditorDialog', () => {
     await renderDialog({ descriptor: GITHUB_CONFIGURED });
     await expandAdvancedSettings();
 
-    const panel = fieldByLabel('Base URL')?.closest(
+    // The endpoint stays in Connection; only the notification tuning moves.
+    expect(sectionHeadingOf(inputByLabel('Base URL'))).toBe('Connection');
+    const panel = fieldByLabel('Reason Filter')?.closest(
       '[data-slot="collapsible"]',
     );
     expect(panel?.textContent).toContain('Advanced settings');
-    expect(
-      fieldByLabel('Reason Filter')?.closest('[data-slot="collapsible"]'),
-    ).toBe(panel);
     expect(sectionHeadingOf(inputByLabel('Personal Access Token'))).toBe(
       'Credentials',
     );
@@ -1667,13 +1667,13 @@ describe('ChannelEditorDialog', () => {
     await expandAdvancedSettings();
 
     expect(sectionHeadingOfLabel('Personal Access Token')).toBe('Credentials');
+    expect(sectionHeadingOfLabel('Instance URL')).toBe('Connection');
     const panelOf = (labelText: string) =>
       Array.from(document.querySelectorAll('label'))
         .find((item) => item.textContent?.includes(labelText))
         ?.closest('[data-slot="collapsible"]');
-    const panel = panelOf('Instance URL');
+    const panel = panelOf('Message Routes');
     expect(panel?.textContent).toContain('Advanced settings');
-    expect(panelOf('Message Routes')).toBe(panel);
     expect(panelOf('Default Message Route')).toBe(panel);
   });
 
@@ -2632,7 +2632,8 @@ describe('Channel editor progressive disclosure', () => {
     await renderDialog({ descriptor: GITHUB_CONFIGURED });
 
     expect(advancedTrigger()?.getAttribute('data-state')).toBe('closed');
-    expect(inputByLabel('Base URL')).toBeNull();
+    // The primary endpoint stays visible; only tuning collapses.
+    expect(sectionHeadingOf(inputByLabel('Base URL'))).toBe('Connection');
     expect(fieldByLabel('Reason Filter')).toBeNull();
     // No count badge while nothing is configured (the word also occurs in
     // unrelated field copy, so scope the check to the trigger).
@@ -2640,28 +2641,54 @@ describe('Channel editor progressive disclosure', () => {
 
     await clickAdvancedTrigger();
     expect(advancedTrigger()?.getAttribute('data-state')).toBe('open');
-    expect(inputByLabel('Base URL')).not.toBeNull();
     expect(fieldByLabel('Reason Filter')).not.toBeNull();
   });
 
+  it('renders the advanced panel title as a heading outside the trigger', async () => {
+    await renderDialog({ descriptor: GITHUB_CONFIGURED });
+
+    // ARIA makes a button's descendants presentational, so the section title
+    // must be a real heading wrapping the trigger, not a span inside it.
+    const heading = Array.from(document.querySelectorAll('h3')).find((h) =>
+      h.textContent?.includes('Advanced settings'),
+    );
+    expect(heading).toBeDefined();
+    const trigger = advancedTrigger();
+    expect(trigger?.tagName).toBe('BUTTON');
+    expect(heading!.contains(trigger!)).toBe(true);
+  });
+
   it('opens advanced settings for configured values and badges the count when collapsed', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...GITHUB_CONFIGURED,
+      fields: [
+        ...GITHUB_CONFIGURED.fields,
+        {
+          key: 'instructions',
+          label: 'Instructions',
+          kind: 'string',
+          multiline: true,
+        },
+      ],
+    };
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'github-bot',
       config: {
         type: 'github',
         groupPolicy: 'open',
-        baseUrl: 'https://ghe.example.com/api/v3',
         reasonFilter: ['mention'],
+        instructions: 'Review carefully',
       },
       secrets: { token: { present: true, source: 'literal' } },
       startsWithServe: false,
       runtime: { state: 'stopped' },
     };
-    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance });
+    await renderDialog({ descriptor, instance });
 
     expect(advancedTrigger()?.getAttribute('data-state')).toBe('open');
-    expect(inputByLabel('Base URL')?.value).toBe(
-      'https://ghe.example.com/api/v3',
+    expect(fieldByLabel('Instructions')).toHaveProperty(
+      'value',
+      'Review carefully',
     );
 
     await clickAdvancedTrigger();
@@ -2669,7 +2696,47 @@ describe('Channel editor progressive disclosure', () => {
     expect(advancedTrigger()?.textContent).toContain('2 configured');
   });
 
-  it('forces advanced settings open when a collapsed field fails validation', async () => {
+  it('opens advanced settings for a stored boolean value', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...GITHUB_CONFIGURED,
+      fields: [
+        ...GITHUB_CONFIGURED.fields,
+        { key: 'multiSession', label: 'Named Sessions', kind: 'boolean' },
+      ],
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: { type: 'github', groupPolicy: 'open', multiSession: true },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor, instance });
+
+    // Pins the boolean arm of the configured predicate: without it the
+    // stored value would open collapsed out of sight.
+    expect(advancedTrigger()?.getAttribute('data-state')).toBe('open');
+  });
+
+  it('opens advanced settings for stored message routes', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        messageRoutes: { '/qa': 'Answer questions' },
+      },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITLAB_ROUTING, instance });
+
+    // Pins the record arm of the configured predicate, without the tolerant
+    // expand helper so the auto-open itself is what passes the test.
+    expect(advancedTrigger()?.getAttribute('data-state')).toBe('open');
+  });
+
+  it('forces advanced settings open and scrolls the erroring field into view', async () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       ...GITHUB_CONFIGURED,
       fields: [
@@ -2684,38 +2751,64 @@ describe('Channel editor progressive disclosure', () => {
       ],
     };
     const onSave = vi.fn().mockResolvedValue(undefined);
-    await renderDialog({ descriptor, onSave });
-    await expandAdvancedSettings();
-    await act(async () => {
-      setInputValue(inputByLabel('Poll Interval (ms)')!, '2592000000');
-    });
-    await clickAdvancedTrigger();
-    expect(advancedTrigger()?.getAttribute('data-state')).toBe('closed');
+    // jsdom has no scrollIntoView; stub it so the scroll is observable.
+    const scrollIntoView = vi.fn();
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      await renderDialog({ descriptor, onSave });
+      await expandAdvancedSettings();
+      await act(async () => {
+        setInputValue(inputByLabel('Poll Interval (ms)')!, '2592000000');
+      });
+      await clickAdvancedTrigger();
+      expect(advancedTrigger()?.getAttribute('data-state')).toBe('closed');
 
-    await saveDialog();
+      await saveDialog();
 
-    expect(advancedTrigger()?.getAttribute('data-state')).toBe('open');
-    expect(document.body.textContent).toContain(
-      'Enter a number greater than 0 and at most 86400000.',
-    );
-    expect(onSave).not.toHaveBeenCalled();
+      expect(advancedTrigger()?.getAttribute('data-state')).toBe('open');
+      expect(document.body.textContent).toContain(
+        'Enter a number greater than 0 and at most 86400000.',
+      );
+      expect(onSave).not.toHaveBeenCalled();
+      // Opening the panel is not enough: the error must be brought into
+      // view, on the erroring control itself.
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
+      expect(scrollIntoView.mock.instances[0]).toBe(
+        inputByLabel('Poll Interval (ms)'),
+      );
+    } finally {
+      Element.prototype.scrollIntoView = originalScrollIntoView;
+    }
   });
 
   it('saves collapsed advanced values unchanged', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...GITHUB_CONFIGURED,
+      fields: [
+        ...GITHUB_CONFIGURED.fields,
+        {
+          key: 'instructions',
+          label: 'Instructions',
+          kind: 'string',
+          multiline: true,
+        },
+      ],
+    };
     const onSave = vi.fn().mockResolvedValue(undefined);
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'github-bot',
       config: {
         type: 'github',
         groupPolicy: 'open',
-        baseUrl: 'https://ghe.example.com/api/v3',
         reasonFilter: ['mention', 'comment'],
+        instructions: 'Review carefully',
       },
       secrets: { token: { present: true, source: 'literal' } },
       startsWithServe: false,
       runtime: { state: 'stopped' },
     };
-    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance, onSave });
+    await renderDialog({ descriptor, instance, onSave });
     await clickAdvancedTrigger();
     expect(advancedTrigger()?.getAttribute('data-state')).toBe('closed');
 
@@ -2725,14 +2818,14 @@ describe('Channel editor progressive disclosure', () => {
       'github-bot',
       expect.objectContaining({
         config: expect.objectContaining({
-          baseUrl: 'https://ghe.example.com/api/v3',
           reasonFilter: ['mention', 'comment'],
+          instructions: 'Review carefully',
         }),
       }),
     );
   });
 
-  it('keeps wsUrl in Connection while baseUrl moves to advanced', async () => {
+  it('keeps primary endpoints in Connection while tuning moves to advanced', async () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       type: 'wecom',
       displayName: 'WeCom',
@@ -2741,33 +2834,54 @@ describe('Channel editor progressive disclosure', () => {
         { key: 'botId', label: 'Bot ID', kind: 'string', required: true },
         { key: 'wsUrl', label: 'WebSocket URL', kind: 'string' },
         { key: 'baseUrl', label: 'Base URL', kind: 'string' },
+        {
+          key: 'pollInterval',
+          label: 'Poll Interval (ms)',
+          kind: 'number',
+          exclusiveMinimum: 0,
+        },
       ],
     };
     await renderDialog({ descriptor });
     await expandAdvancedSettings();
 
+    // Both endpoints decide where a token is sent, so a fresh draft must
+    // show them; only genuine tuning collapses.
     expect(sectionHeadingOf(fieldByLabel('WebSocket URL'))).toBe('Connection');
-    const panel = fieldByLabel('Base URL')?.closest(
+    expect(sectionHeadingOf(fieldByLabel('Base URL'))).toBe('Connection');
+    const panel = fieldByLabel('Poll Interval (ms)')?.closest(
       '[data-slot="collapsible"]',
     );
     expect(panel?.textContent).toContain('Advanced settings');
   });
 
   it('localizes the advanced panel and its count badge for zh-CN', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...GITHUB_CONFIGURED,
+      fields: [
+        ...GITHUB_CONFIGURED.fields,
+        {
+          key: 'instructions',
+          label: 'Instructions',
+          kind: 'string',
+          multiline: true,
+        },
+      ],
+    };
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'github-bot',
       config: {
         type: 'github',
         groupPolicy: 'open',
-        baseUrl: 'https://ghe.example.com/api/v3',
         reasonFilter: ['mention'],
+        instructions: 'Review carefully',
       },
       secrets: { token: { present: true, source: 'literal' } },
       startsWithServe: false,
       runtime: { state: 'stopped' },
     };
     await renderDialog({
-      descriptor: GITHUB_CONFIGURED,
+      descriptor,
       instance,
       language: 'zh-CN',
     });

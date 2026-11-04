@@ -92,11 +92,15 @@
 
 .advancedTrigger {
   display: flex;
+  width: 100%;
   align-items: center;
   gap: 8px;
   padding: 0;
   border: none;
   background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
   cursor: pointer;
   text-align: left;
 }

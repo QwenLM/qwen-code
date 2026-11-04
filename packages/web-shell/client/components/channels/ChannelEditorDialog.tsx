@@ -68,6 +68,7 @@ import {
   PRIVATE_ONLY_FIELD_KEYS,
   invalidRepositoryGroupEntries,
   projectRepositoryGroup,
+  recordHasRoute,
   repositoryAllowlistIds,
   retainedRepositorySettings,
   toList,
@@ -151,24 +152,23 @@ const FIELD_PLACEHOLDER_KEYS: Record<string, string> = {
 };
 
 const CONNECTION_FIELD_KEYS = new Set(['baseUrl', 'wsUrl', 'pollInterval']);
-const ROUTING_FIELD_KEYS = new Set([
-  'reasonFilter',
-  'messageRoutes',
-  'defaultMessageRoute',
-]);
 /**
- * Rarely changed tuning, collapsed into one disclosure panel. `wsUrl` stays
- * out: it is WeCom's primary endpoint, not a tuning knob.
+ * Rarely changed tuning, collapsed into one disclosure panel. Primary
+ * endpoints stay out: `wsUrl` (WeCom) and `baseUrl` (GitHub Enterprise /
+ * self-hosted GitLab) decide where a token is sent, so a fresh draft must
+ * show them. `operators` stays out too: it grants permissions, which belongs
+ * in Access control, not behind a tuning disclosure. Only non-enum keys
+ * belong here — `initialFieldValue` pre-fills enums from their default, so
+ * an enum key would count every fresh draft as configured and auto-open the
+ * panel, quietly undoing the slim default view.
  */
 const ADVANCED_FIELD_KEYS = new Set([
-  'baseUrl',
   'pollInterval',
   'reasonFilter',
   'messageRoutes',
   'defaultMessageRoute',
   'multiSession',
   'instructions',
-  'operators',
 ]);
 
 /** Every repository starts fully inheriting; nothing is materialized. */
@@ -180,9 +180,8 @@ const EMPTY_GROUP_OVERRIDE: ChannelGroupOverrideDraft = {
 
 function fieldSectionKey(
   field: DaemonChannelConfigFieldDescriptor,
-): 'credentials' | 'connection' | 'routing' {
+): 'credentials' | 'connection' {
   if (CONNECTION_FIELD_KEYS.has(field.key)) return 'connection';
-  if (ROUTING_FIELD_KEYS.has(field.key)) return 'routing';
   return 'credentials';
 }
 
@@ -229,20 +228,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Whether a draft record value holds at least one route, as assignField writes it. */
-function recordHasRoute(value: string | boolean | undefined): boolean {
-  if (typeof value !== 'string' || !value.trim()) return false;
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return (
-      isRecord(parsed) &&
-      Object.values(parsed).some(
-        (entry) => typeof entry === 'string' && entry.trim() !== '',
-      )
-    );
-  } catch {
-    return false;
-  }
+/** Draft-value adapter over the shared record rule in channel-editor-state. */
+function draftHasRoute(value: string | boolean | undefined): boolean {
+  return typeof value === 'string' && recordHasRoute(value);
 }
 
 function isAdvancedFieldConfigured(
@@ -250,7 +238,7 @@ function isAdvancedFieldConfigured(
   value: string | boolean | undefined,
 ): boolean {
   if (field.kind === 'boolean') return value === true;
-  if (field.kind === 'record') return recordHasRoute(value);
+  if (field.kind === 'record') return draftHasRoute(value);
   return typeof value === 'string' && value.trim() !== '';
 }
 
@@ -325,6 +313,7 @@ export function ChannelEditorDialog({
   const [saving, setSaving] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [scrollToErrorKey, setScrollToErrorKey] = useState<string>();
   const dismissedRef = useRef(false);
   /** The token draft as it stood before local gh auth overrode it. */
   const tokenBeforeLocalGh = useRef<ChannelSecretDraft | undefined>(undefined);
@@ -385,11 +374,22 @@ export function ChannelEditorDialog({
     setSubmitError(undefined);
   }, [workspaceCwd]);
 
+  useEffect(() => {
+    if (!advancedOpen || !scrollToErrorKey) return;
+    // Runs after the forced-open panel content mounts; the id is the same one
+    // FieldShell renders, so the scroll lands on the erroring control. The
+    // optional call keeps jsdom (no scrollIntoView) from throwing.
+    document
+      .getElementById(`${formId}-${scrollToErrorKey}`)
+      ?.scrollIntoView?.({ block: 'center' });
+    setScrollToErrorKey(undefined);
+  }, [advancedOpen, scrollToErrorKey, formId]);
+
   const isFieldVisible = (field: DaemonChannelConfigFieldDescriptor) => {
     // A stored default route must stay repairable even with no routes left.
     if (field.key === 'defaultMessageRoute')
       return (
-        recordHasRoute(draft.values['messageRoutes']) ||
+        draftHasRoute(draft.values['messageRoutes']) ||
         String(draft.values['defaultMessageRoute'] ?? '').trim() !== ''
       );
     return true;
@@ -488,9 +488,14 @@ export function ChannelEditorDialog({
       instance,
     );
     if (Object.keys(validation).length > 0) {
-      // An error on a collapsed field would otherwise be invisible.
-      if (Object.keys(validation).some((key) => ADVANCED_FIELD_KEYS.has(key))) {
+      // An error on a collapsed field would otherwise be invisible: open the
+      // panel and bring the first erroring advanced field into view.
+      const advancedErrorKey = Object.keys(validation).find((key) =>
+        ADVANCED_FIELD_KEYS.has(key),
+      );
+      if (advancedErrorKey) {
         setAdvancedOpen(true);
+        setScrollToErrorKey(advancedErrorKey);
       }
       setErrors(
         Object.fromEntries(
@@ -1266,23 +1271,20 @@ export function ChannelEditorDialog({
               </FieldShell>
             </section>
 
-            {(['credentials', 'connection', 'routing'] as const).map(
-              (section) => {
-                const sectionFields = credentialFields.filter(
-                  (field) =>
-                    fieldSectionKey(field) === section && isFieldVisible(field),
-                );
-                if (sectionFields.length === 0) return null;
-                return (
-                  <section key={section} className={styles.section}>
-                    <h3 className={styles.sectionHeading}>
-                      {t(`channels.editor.section.${section}`)}
-                    </h3>
-                    {sectionFields.map(renderField)}
-                  </section>
-                );
-              },
-            )}
+            {(['credentials', 'connection'] as const).map((section) => {
+              const sectionFields = credentialFields.filter(
+                (field) => fieldSectionKey(field) === section,
+              );
+              if (sectionFields.length === 0) return null;
+              return (
+                <section key={section} className={styles.section}>
+                  <h3 className={styles.sectionHeading}>
+                    {t(`channels.editor.section.${section}`)}
+                  </h3>
+                  {sectionFields.map(renderField)}
+                </section>
+              );
+            })}
 
             {sessionFields.length > 0 ? (
               <section className={styles.settingsPanel}>
@@ -1596,23 +1598,26 @@ export function ChannelEditorDialog({
                 onOpenChange={setAdvancedOpen}
                 className={styles.settingsPanel}
               >
-                <CollapsibleTrigger className={styles.advancedTrigger}>
-                  <ChevronDownIcon
-                    size={15}
-                    className={styles.advancedChevron}
-                    aria-hidden="true"
-                  />
-                  <span className={styles.settingsPanelTitle}>
-                    {t('channels.editor.section.advanced')}
-                  </span>
-                  {!advancedOpen && advancedConfiguredCount > 0 ? (
-                    <span className={styles.advancedBadge}>
-                      {t('channels.editor.section.advanced.configuredCount', {
-                        count: advancedConfiguredCount,
-                      })}
-                    </span>
-                  ) : null}
-                </CollapsibleTrigger>
+                {/* Heading outside the trigger: ARIA makes a button's
+                    descendants presentational, so a span-in-button title
+                    would be invisible to heading navigation. */}
+                <h3 className={styles.settingsPanelTitle}>
+                  <CollapsibleTrigger className={styles.advancedTrigger}>
+                    <ChevronDownIcon
+                      size={15}
+                      className={styles.advancedChevron}
+                      aria-hidden="true"
+                    />
+                    <span>{t('channels.editor.section.advanced')}</span>
+                    {!advancedOpen && advancedConfiguredCount > 0 ? (
+                      <span className={styles.advancedBadge}>
+                        {t('channels.editor.section.advanced.configuredCount', {
+                          count: advancedConfiguredCount,
+                        })}
+                      </span>
+                    ) : null}
+                  </CollapsibleTrigger>
+                </h3>
                 <CollapsibleContent className={styles.advancedContent}>
                   <p className={styles.settingsPanelDescription}>
                     {t('channels.editor.section.advanced.description')}
