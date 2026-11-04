@@ -2105,8 +2105,8 @@ fi
     );
     // The download step's two projections share this one fetch of the event's
     // jobs. The cancellation classifier fetches jobs too, but through the shared
-    // cancelled_class helper with parameterized run/attempt (#16272), so it does
-    // not use this literal; pin that helper's fetch separately below.
+    // classify-cancelled-run.sh with parameterized run/attempt (#16272), so it
+    // does not use this literal; that script's fetch is pinned below instead.
     expect(
       (
         workflow.match(
@@ -2114,9 +2114,9 @@ fi
         ) ?? []
       ).length,
     ).toBe(1);
-    expect(workflow).toContain(
-      'actions/runs/${run_id}/attempts/${attempt}/jobs',
-    );
+    expect(
+      readFileSync('.github/scripts/ci/classify-cancelled-run.sh', 'utf8'),
+    ).toContain('actions/runs/${run_id}/attempts/${attempt}/jobs');
     // The ids projection is bound to the array the download loop iterates and to
     // the payload the fetch wrote. Swapping it with the TSV projection below
     // hands the reader whole TSV lines so every log download 404s. Renaming

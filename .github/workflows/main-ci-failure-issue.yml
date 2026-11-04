@@ -42,11 +42,9 @@ jobs:
   # finished failure summary to the privileged job as an output.
   analyze:
     name: 'Identify the failing tests'
-    # A job that hits its execution cap concludes `cancelled`, not `failure`,
-    # so a failure-only gate let timed-out main runs hide for weeks (#16214).
-    # Admit `cancelled` too; the live step then reports only a cancellation
-    # backed by a job-timeout annotation and skips a plain concurrency
-    # supersede (#16272).
+    # A job that hits its execution cap concludes `cancelled`, so a
+    # failure-only gate let timed-out main runs hide for weeks (#16214);
+    # the live step keeps a plain concurrency supersede out (#16272).
     if: >-
       ${{ github.repository == 'QwenLM/qwen-code' &&
       contains(fromJSON('["failure","cancelled"]'), github.event.workflow_run.conclusion) &&
@@ -107,63 +105,6 @@ jobs:
           set -euo pipefail
           superseded=false
           provisional=false
-          # Classify a cancelled run by positive annotation evidence (#16272,
-          # review on #16280). Echoes `timeout`, `concurrency`, or `unknown`:
-          #   timeout     - a job carries the execution-time annotation (a real
-          #                 breakage that concludes cancelled, #16214); wins even
-          #                 when a shutdown annotation coexists on the same job.
-          #   concurrency - shutdown / higher-priority / operation-canceled
-          #                 annotations and no timeout (a deliberate supersede).
-          #   unknown     - neither, or the jobs/annotations could not be read or
-          #                 certified complete; callers fail open on this so an
-          #                 unclassifiable cancellation cannot hide.
-          # Shared by the current-run gate and the successor-ownership check so
-          # the two cannot drift.
-          cancelled_class() {
-            local run_id="$1" attempt="$2" pages
-            pages="${RUNNER_TEMP}/cancel-jobs-${run_id}-${attempt}.json"
-            if ! gh api "repos/${REPO}/actions/runs/${run_id}/attempts/${attempt}/jobs?per_page=100" \
-              --paginate > "${pages}" 2>/dev/null; then
-              echo unknown
-              return 0
-            fi
-            # Certify the merged pages against the total_count receipt, like the
-            # download step: a partial list must read as unknown, not as a
-            # complete one that happens to lack the timed-out job.
-            if ! jq -e -s '([.[].total_count] | max) as $t | ([.[].jobs[]?] | length) as $n | $t != null and $n == $t' \
-              "${pages}" >/dev/null 2>&1; then
-              echo unknown
-              return 0
-            fi
-            local timeout_found=false concurrency_found=false annotations
-            while IFS=$'\t' read -r job_id check_run_id; do
-              [[ -n "${check_run_id}" ]] || continue
-              if ! annotations="$(
-                gh api --paginate \
-                  "repos/${REPO}/check-runs/${check_run_id}/annotations" \
-                  --jq '[.[].message] | join("\n")' 2>/dev/null
-              )"; then
-                echo unknown
-                return 0
-              fi
-              if grep -qiE 'exceeded the maximum execution time' <<< "${annotations}"; then
-                timeout_found=true
-              fi
-              if grep -qiE 'Canceling since a higher priority|shutdown signal|operation was canceled' <<< "${annotations}"; then
-                concurrency_found=true
-              fi
-            done < <(
-              jq -r -s '[.[].jobs[]?] | .[] | select(.conclusion == "cancelled") | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv' \
-                "${pages}" 2>/dev/null
-            )
-            if [[ "${timeout_found}" == 'true' ]]; then
-              echo timeout
-            elif [[ "${concurrency_found}" == 'true' ]]; then
-              echo concurrency
-            else
-              echo unknown
-            fi
-          }
           if live_attempt="$(
             gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}" \
               --jq '.run_attempt'
@@ -176,19 +117,15 @@ jobs:
           else
             echo "::warning::Could not read run ${WORKFLOW_RUN_ID}; assuming this attempt-${RUN_ATTEMPT} event is current and reporting."
           fi
-          # Classify a cancelled run only after the stale-attempt check, so a
-          # stale event is attributed to staleness rather than to a cancellation
-          # cause it never established (review R1-6). Only trusted triggers run
-          # the classifier: on the pull_request / pull_request_review arms the
-          # annotation text is contributor-authored, so it must not decide
-          # whether the PAT-backed reporter files (review R1-4); PR-triggered
-          # cancellations stay on the supersede path.
+          # After the stale-attempt check, so a stale event is attributed to
+          # staleness. PR arms skip the classifier: their annotation text is
+          # contributor-authored and must not decide a PAT-backed filing.
           if [[ "${superseded}" != 'true' && "${RUN_CONCLUSION}" == 'cancelled' ]]; then
             if [[ "${EVENT_NAME}" == 'pull_request' || "${EVENT_NAME}" == 'pull_request_review' ]]; then
               superseded=true
               echo "::notice::Run ${WORKFLOW_RUN_ID} is a PR-triggered cancellation; not reporting (contributor-authored annotations are untrusted)."
             else
-              cancel_class="$(cancelled_class "${WORKFLOW_RUN_ID}" "${RUN_ATTEMPT}")"
+              cancel_class="$(bash .github/scripts/ci/classify-cancelled-run.sh "${WORKFLOW_RUN_ID}" "${RUN_ATTEMPT}")"
               case "${cancel_class}" in
                 concurrency)
                   superseded=true
@@ -257,13 +194,10 @@ jobs:
                       case "${successor_conclusion}" in
                         success | failure) successor_owns=true ;;
                         cancelled)
-                          # A timeout-backed cancelled successor reports itself,
-                          # so it owns this result and filing here would duplicate
-                          # it; a plain concurrency cancellation or an unreadable
-                          # one does not own (review R1-3). Same classifier as the
-                          # current-run gate so the two cannot drift.
+                          # A timeout-backed cancelled successor reports itself;
+                          # a plain concurrency cancellation does not.
                           if [[ -n "${successor_id}" &&
-                            "$(cancelled_class "${successor_id}" "${successor_attempt:-1}")" == 'timeout' ]]; then
+                            "$(bash .github/scripts/ci/classify-cancelled-run.sh "${successor_id}" "${successor_attempt:-1}")" == 'timeout' ]]; then
                             successor_owns=true
                           fi
                           ;;
@@ -404,9 +338,8 @@ jobs:
           # Both bodies read this list; the flag lets them say when it is short.
           echo "jobs_complete=${jobs_complete}" >> "${GITHUB_OUTPUT}"
 
-          # Include cancelled jobs: a job that hit its execution cap concludes
-          # cancelled, and the live gate only lets such a run reach here
-          # (#16272). Naming and fetching it keeps the timeout report legible.
+          # A job that hit its execution cap concludes cancelled; the live gate
+          # only lets such a run reach here, so name and fetch it too (#16272).
           job_ids=()
           while IFS= read -r job_id; do
             job_ids+=("${job_id}")
