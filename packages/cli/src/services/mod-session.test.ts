@@ -728,10 +728,12 @@ describe('Mod session ownership', () => {
       const { session } = setup();
       await session.initialize(new AbortController().signal);
       const queue = queueOf()!;
+      expect(session.hasSubmittedPrompts).toBe(false);
       expect(queue(prompt('one'))).toBeUndefined();
       expect(queue({ ...prompt('two'), context: ['c'], asUser: true })).toBe(
         undefined,
       );
+      expect(session.hasSubmittedPrompts).toBe(true);
       expect(session.takeSubmittedPrompt()).toEqual(prompt('one'));
       expect(session.takeSubmittedPrompt()).toEqual({
         ...prompt('two'),
@@ -739,6 +741,7 @@ describe('Mod session ownership', () => {
         asUser: true,
       });
       expect(session.takeSubmittedPrompt()).toBeUndefined();
+      expect(session.hasSubmittedPrompts).toBe(false);
     });
 
     it(`refuses past ${MOD_PROMPT_TURN_LIMIT} turns until the person sends a prompt`, async () => {
@@ -771,6 +774,7 @@ describe('Mod session ownership', () => {
       const queue = queueOf()!;
       queue(prompt('old'));
       config.getSessionId.mockReturnValue('session-2');
+      expect(session.hasSubmittedPrompts).toBe(false);
       expect(session.takeSubmittedPrompt()).toBeUndefined();
       config.getSessionId.mockReturnValue('session-1');
       expect(queue(prompt('new'))).toBeUndefined();

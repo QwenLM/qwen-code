@@ -6765,6 +6765,9 @@ describe('runNonInteractive', () => {
             takeSubmittedPrompt,
             notePersonPrompt,
             discardSubmittedPrompts,
+            get hasSubmittedPrompts() {
+              return submitted.length > 0;
+            },
           }) as unknown as ModSession,
       );
       return {
@@ -7028,6 +7031,88 @@ describe('runNonInteractive', () => {
         expect.stringContaining('Fix it'),
         expect.stringContaining('Next'),
       ]);
+    });
+
+    it('runs a prompt a Mod command submitted after the command replies', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      setupMetricsMock();
+      const { startTurn, submitted } = installModTurn();
+      // A Mod command answers with a message once it has handed work on.
+      mockGetCommands.mockReturnValue([
+        {
+          name: 'review',
+          description: 'review',
+          kind: CommandKind.FILE,
+          action: vi.fn(async () => {
+            submitted.push({ plugin: 'lint', text: 'Review the diff' });
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: 'Review queued.',
+            };
+          }),
+        },
+      ]);
+      admitting(() =>
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Reviewed.' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/review',
+        'mod-command',
+      );
+
+      expect(exitCode).toBe(0);
+      // The command's reply is no turn: the only request is the Mod's prompt.
+      const calls = mockLlmClient.sendMessageStream.mock.calls;
+      expect(calls).toHaveLength(1);
+      expect(calls[0][0]).toEqual([
+        { text: frameModPrompt({ plugin: 'lint', text: 'Review the diff' }) },
+      ]);
+      expect(calls[0][3]).toMatchObject({
+        type: SendMessageType.UserQuery,
+        submittedByMod: 'lint',
+      });
+      expect(startTurn.mock.calls.map(([text]) => text)).toEqual([
+        'Review the diff',
+      ]);
+      expect(submitted).toEqual([]);
+      const messages = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      const reply = messages.findIndex(
+        (message) =>
+          message.type === 'assistant' &&
+          JSON.stringify(message.message).includes('Review queued.'),
+      );
+      const named = messages.findIndex(
+        (message) =>
+          message.type === 'system' && message.subtype === 'mod_prompt',
+      );
+      // The reply comes first, then the Mod's prompt, and one result ends it.
+      expect(reply).toBeGreaterThan(-1);
+      expect(named).toBeGreaterThan(reply);
+      expect(
+        messages.filter((message) => message.type === 'result'),
+      ).toHaveLength(1);
+      expect(messages.at(-1)).toMatchObject({
+        type: 'result',
+        is_error: false,
+        num_turns: 1,
+      });
     });
 
     it('sends the prompt and context the prompt.submit hooks passed on', async () => {

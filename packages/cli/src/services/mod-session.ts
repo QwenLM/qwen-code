@@ -754,6 +754,15 @@ export class ModSession implements ICommandLoader {
     return prompt;
   }
 
+  /** Whether a prompt a Mod submitted for the current session waits to run. */
+  get hasSubmittedPrompts(): boolean {
+    const sessionId = this.config.getSessionId();
+    return (
+      !this.closing &&
+      this.submitted.some((prompt) => prompt.sessionId === sessionId)
+    );
+  }
+
   /** The person sent a prompt, so the Mods' prompts may start turns again. */
   notePersonPrompt(): void {
     this.modTurns = 0;

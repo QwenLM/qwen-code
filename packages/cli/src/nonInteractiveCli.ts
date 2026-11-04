@@ -377,6 +377,19 @@ function emitLoopDetectedMessage(
   return message;
 }
 
+/** Emits a slash command's reply as an assistant message. */
+function emitNonInteractiveAssistantText(
+  adapter: JsonOutputAdapterInterface,
+  message: string,
+): void {
+  adapter.startAssistantMessage();
+  adapter.processEvent({
+    type: LlmEventType.Content,
+    value: message,
+  } as unknown as Parameters<JsonOutputAdapterInterface['processEvent']>[0]);
+  adapter.finalizeAssistantMessage();
+}
+
 /**
  * Emits a final message for slash command results.
  * Note: systemMessage should already be emitted before calling this function.
@@ -393,12 +406,7 @@ async function emitNonInteractiveFinalMessage(params: {
 
   // JSON output mode: emit assistant message and result
   // (systemMessage should already be emitted by caller)
-  adapter.startAssistantMessage();
-  adapter.processEvent({
-    type: LlmEventType.Content,
-    value: message,
-  } as unknown as Parameters<JsonOutputAdapterInterface['processEvent']>[0]);
-  adapter.finalizeAssistantMessage();
+  emitNonInteractiveAssistantText(adapter, message);
 
   const metrics = uiTelemetryService.getMetrics();
   const usage = computeUsageFromMetrics(metrics);
@@ -1229,6 +1237,9 @@ export async function runNonInteractive(
       let prompt = input;
       let rewrittenText: string | undefined;
       let promptContext: string[] | undefined;
+      // A slash command answered with a message while a Mod's prompt waits:
+      // the run starts no turn of its own and goes on to run that prompt.
+      let commandReplied = false;
 
       if (options.continueInterrupted) {
         // Read the full history, not a bounded tail: the Retry send path in
@@ -1410,6 +1421,21 @@ export async function runNonInteractive(
               break;
             }
             case 'message': {
+              // A Mod command that submitted a prompt hands the work on to
+              // the model: its reply is shown, and the prompt's turn starts
+              // once the run is idle, as after a turn.
+              if (
+                slashCommandResult.messageType !== 'error' &&
+                modSession?.hasSubmittedPrompts
+              ) {
+                emitNonInteractiveAssistantText(
+                  adapter,
+                  slashCommandResult.content,
+                );
+                commandReplied = true;
+                slashHandled = true;
+                break;
+              }
               // systemMessage already emitted above
               await emitNonInteractiveFinalMessage({
                 message: slashCommandResult.content,
@@ -1533,15 +1559,21 @@ export async function runNonInteractive(
       // Continuation turns must not prepend reminder text: a ToolResult
       // payload's functionResponse parts have to stay at the HEAD of the
       // user message or Anthropic-compatible backends reject the pairing.
-      const startupNotice = options.continueInterrupted
-        ? null
-        : config.consumePendingStartupWorktreeNotice();
+      // A command's reply sends the model nothing, so the notices wait.
+      const startupNotice =
+        options.continueInterrupted || commandReplied
+          ? null
+          : config.consumePendingStartupWorktreeNotice();
       if (startupNotice) {
         initialPartList = withReminder(initialPartList, startupNotice);
         adapter.emitSystemMessage('worktree_started', {
           notice: startupNotice,
         });
-      } else if (!options.continueInterrupted && resumedSessionData) {
+      } else if (
+        !options.continueInterrupted &&
+        !commandReplied &&
+        resumedSessionData
+      ) {
         try {
           const sessionPath = config
             .getSessionService()
@@ -1651,7 +1683,11 @@ export async function runNonInteractive(
         continueSendType ??
         options.sendMessageType ??
         SendMessageType.UserQuery;
-      if (!activeGoalTurn && initialSendType === SendMessageType.UserQuery) {
+      if (
+        !activeGoalTurn &&
+        !commandReplied &&
+        initialSendType === SendMessageType.UserQuery
+      ) {
         try {
           const runtime = await config.getGoalRuntimeReady();
           observeGoalRuntime(runtime);
@@ -2940,9 +2976,14 @@ export async function runNonInteractive(
         }
         hasUnsentToolResponse = false;
 
-        turnCount++;
+        // A command's reply is not a turn: the run goes straight on to the
+        // end of a turn, where the Mods' prompts start.
+        const replyOnly = commandReplied;
+        commandReplied = false;
+        if (!replyOnly) turnCount++;
         const goalTurn = activeGoalTurn;
-        await enforceSessionTurnLimit(goalTurn?.origin === 'runtime');
+        if (!replyOnly)
+          await enforceSessionTurnLimit(goalTurn?.origin === 'runtime');
 
         let sendType: SendMessageType;
         if (goalTurn && isFirstGoalSegment) {
@@ -3057,7 +3098,10 @@ export async function runNonInteractive(
             : {}),
         };
         let shouldFinalizeTurn: boolean;
-        if (sharedAgentLoop) {
+        if (replyOnly) {
+          isFirstTurn = false;
+          shouldFinalizeTurn = true;
+        } else if (sharedAgentLoop) {
           const result = await runOnSharedLoop(
             {
               parts: currentMessages[0]?.parts || [],

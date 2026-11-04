@@ -48,7 +48,7 @@ import {
 import { compactToolResultDisplayForRecording } from '../utils/toolResultDisplayCompaction.js';
 import { stripRuntimeSnapshotPrefix } from '../utils/runtimeModelPrefix.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
-import { tryGenerateSessionTitle } from './sessionTitle.js';
+import { modPromptTitleKey, tryGenerateSessionTitle } from './sessionTitle.js';
 import type {
   ChatCompressionInfo,
   ToolCallResponseInfo,
@@ -1290,6 +1290,9 @@ export class ChatRecordingService {
     | undefined;
   private readonly userDisplayTextsForTitle: Array<string | null | undefined> =
     [];
+  // The Mods' prompts as the model read them, which a title drawn from the
+  // conversation leaves out, as the projection does.
+  private readonly modPromptKeysForTitle = new Set<string>();
   /**
    * How many auto-title attempts have been made this process.
    *
@@ -1483,11 +1486,12 @@ export class ChatRecordingService {
     this.activeBranchBaseUuid = null;
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
+    this.modPromptKeysForTitle.clear();
     if (!sessionData) return;
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
     for (const record of sessionData.conversation.messages) {
       if (record.type === 'user' && record.subtype === undefined) {
-        this.trackUserDisplayTextForTitle(titleText(record));
+        this.trackTitleText(record);
       }
       if (record.type !== 'system') continue;
       if (record.subtype === 'custom_title') {
@@ -1536,12 +1540,22 @@ export class ChatRecordingService {
     }
   }
 
-  private trackUserDisplayTextForTitle(
-    displayText: string | null | undefined,
-  ): void {
-    this.userDisplayTextsForTitle.push(displayText);
+  private trackTitleText(record: ChatRecord): void {
+    this.userDisplayTextsForTitle.push(titleText(record));
     if (this.userDisplayTextsForTitle.length > MAX_TITLE_USER_DISPLAY_TEXTS) {
       this.userDisplayTextsForTitle.shift();
+    }
+    const key =
+      record.provenance === 'mod_prompt'
+        ? modPromptTitleKey(record.message?.parts ?? [])
+        : undefined;
+    if (key?.trim()) {
+      this.modPromptKeysForTitle.add(key);
+      // Only recent messages reach a title.
+      if (this.modPromptKeysForTitle.size > MAX_TITLE_USER_DISPLAY_TEXTS) {
+        const [oldest] = this.modPromptKeysForTitle;
+        this.modPromptKeysForTitle.delete(oldest!);
+      }
     }
   }
 
@@ -2230,9 +2244,10 @@ export class ChatRecordingService {
           .records as ChatRecord[];
         this.rebuildTurnBoundaries(active);
         this.userDisplayTextsForTitle.length = 0;
+        this.modPromptKeysForTitle.clear();
         for (const record of active) {
           if (record.type === 'user' && record.subtype === undefined) {
-            this.trackUserDisplayTextForTitle(titleText(record));
+            this.trackTitleText(record);
           }
         }
         return result;
@@ -2573,7 +2588,7 @@ export class ChatRecordingService {
       };
       // Advance rewind associations only after the record is built, so a
       // rejected message cannot skew the projection.
-      this.trackUserDisplayTextForTitle(titleText(record));
+      this.trackTitleText(record);
       this.turnParentUuids.push(record.parentUuid ?? null);
       this.turnPromptIds.push(getRecordRewindId(record));
       this.turnDaemonPromptIds.push(record.daemonPromptId);
@@ -2585,6 +2600,11 @@ export class ChatRecordingService {
 
   getUserDisplayTextsForTitle(): ReadonlyArray<string | null | undefined> {
     return this.userDisplayTextsForTitle;
+  }
+
+  /** The keys of the messages the Mods submitted, which a title leaves out. */
+  getModPromptKeysForTitle(): ReadonlySet<string> {
+    return this.modPromptKeysForTitle;
   }
 
   /** User turns in the active transcript: the boundaries `/rewind` uses. */
@@ -3104,6 +3124,7 @@ export class ChatRecordingService {
           this.config,
           controller.signal,
           this.userDisplayTextsForTitle,
+          this.modPromptKeysForTitle,
         );
         if (!outcome.ok) return;
         if (controller.signal.aborted) return;
@@ -3386,6 +3407,7 @@ export class ChatRecordingService {
       this.turnPromptIds = [];
       this.turnDaemonPromptIds = [];
       this.userDisplayTextsForTitle.length = 0;
+      this.modPromptKeysForTitle.clear();
       for (const record of records) {
         if (
           record.type === 'user' &&
@@ -3404,7 +3426,7 @@ export class ChatRecordingService {
           this.turnDaemonPromptIds.push(record.daemonPromptId);
         }
         if (record.type === 'user' && record.subtype === undefined)
-          this.trackUserDisplayTextForTitle(titleText(record));
+          this.trackTitleText(record);
       }
     };
     let committed = false;

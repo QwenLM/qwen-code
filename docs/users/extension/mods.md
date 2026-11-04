@@ -761,6 +761,9 @@ export function register(on) {
 - UserPromptSubmit hooks hear the prompt, and its turn raises `turn.start` and
   `turn.complete` like any other. It counts toward the session turn limit.
 - `@` references in the text are not read.
+- A Mod command that submits a prompt hands work on to the model: its reply is
+  shown, and the prompt's turn follows in the same run. The command itself
+  starts no turn.
 - The Mods' prompts start at most 8 turns before the person sends a prompt
   again. Past that a call resolves to a drop, and the line
   `$.prompt.submit refused: …` appears where transcript logs do. In a headless
@@ -771,7 +774,7 @@ export function register(on) {
   `session.end` hook for instance, resolves to
   `{ drop: 'the session is ending' }`.
 - A prompt still queued when the run stops early, on an interrupt, a structured
-  result or a detected loop, does not run.
+  result, a detected loop or a slash command that fails, does not run.
 - In the Ink and OpenTUI terminals the method is not listed in `methods` yet,
   and a call resolves to
   `{ drop: 'this host does not run prompts a Mod submits' }`.

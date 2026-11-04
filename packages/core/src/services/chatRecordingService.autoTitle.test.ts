@@ -20,7 +20,10 @@ import type { SessionWriterLease } from './session-writer-lease.js';
 
 const tryGenerateSessionTitleMock = vi.fn();
 
-vi.mock('./sessionTitle.js', () => ({
+vi.mock('./sessionTitle.js', async (importOriginal) => ({
+  modPromptTitleKey: (
+    await importOriginal<typeof import('./sessionTitle.js')>()
+  ).modPromptTitleKey,
   tryGenerateSessionTitle: (...args: unknown[]) =>
     tryGenerateSessionTitleMock(...args),
 }));
@@ -398,6 +401,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       ['你好'],
+      new Set(),
     );
   });
 
@@ -453,6 +457,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       resumedConfig,
       expect.any(AbortSignal),
       ['你好', '再见'],
+      new Set(),
     );
   });
 
@@ -492,6 +497,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       lastCompletedUuid: 'user-2',
     });
     expect(service.getUserDisplayTextsForTitle()).toEqual(['你好', null]);
+    expect([...service.getModPromptKeysForTitle()]).toEqual(['hidden']);
   });
 
   it('retains only display projections relevant to recent title history', () => {

@@ -449,7 +449,8 @@ describe('ChatRecordingService', () => {
         displayText: 'Run the linter',
         hookContext: '',
         mod: 'lint',
-      });
+      }); // A title drawn from the conversation knows the message to leave out.
+      expect([...svc.getModPromptKeysForTitle()]).toEqual(['framed']);
     });
 
     it('should record a user message immediately', async () => {
