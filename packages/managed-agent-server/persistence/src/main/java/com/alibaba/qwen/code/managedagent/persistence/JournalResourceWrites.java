@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.PublishToolResultRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.ToolResultResourceRef;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.charset.StandardCharsets;
@@ -133,20 +134,19 @@ final class JournalResourceWrites {
         if (bytes.length != request.byteLength() || !JournalStoreRows.sha256(bytes).equals(request.digest())) {
             throw JournalStoreRows.invalid("Tool result bytes do not match their length or digest.");
         }
-        fencing.requirePhysicalSessionOpen(tenantId, request.workspaceId(), sessionId);
-        // Tool-result publication lane: keeps the tenant CAS row before the
-        // Session root the CSI check locks and before the head row, the
-        // order retention reads take (CAS row, root, head) and the same as
-        // before #13800 decoupled ordinary traffic.
-        JournalFencing.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
-                JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-        // After both bounded waits, so the CSI check's read does not pin this
-        // transaction's snapshot ahead of them.
+        // Ordinary inline publication queues on its Session, like commit;
+        // lifecycle authority and CSI continuation retain their tenant guards.
+        Boolean rootPin = fencing.lockSessionFirst(tenantId, sessionId);
         fencing.requirePlacement(tenantId, request.workspaceId(), sessionId, writerToken, request.writerId(), false);
-        var continuation = fencing.lockCsiContinuation(tenantId, sessionId);
+        var continuation = fencing.lockCsiContinuation(tenantId, sessionId, rootPin);
         var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
+        }
+        if (authority == null && csiOriginal == null) {
+            fencing.requireSessionStorageOpenForAdmission(tenantId, request.workspaceId(), sessionId);
+        } else {
+            fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
         }
         JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
@@ -159,31 +159,43 @@ final class JournalResourceWrites {
         fencing.requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, now, true);
         fencing.requireInstalledCsiWriter(csiOriginal);
         String scopeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        JournalStoreRows.ResourceRow existing = storeRows.findResource(scopeKey, request.resourceId());
+        JournalStoreRows.ResourceRow existing = storeRows.findResource(scopeKey, request.resourceId(), false);
+        if (existing != null) {
+            existing = storeRows.findResource(scopeKey, request.resourceId());
+        }
         fencing.requireCsiWriterCurrent(
                 continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         if (existing == null) {
-            jdbc.update(
-                    "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
-                        + " workspace_id, session_id, resource_id, kind, schema_version,"
-                        + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
-                        + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                        + " ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scopeKey, request.resourceId()),
-                    scopeKey,
-                    tenantId,
-                    request.workspaceId(),
-                    sessionId,
-                    request.resourceId(),
-                    request.kind(),
-                    request.schemaVersion(),
-                    request.byteLength(),
-                    request.digest(),
-                    bytes,
-                    request.resourceId(),
-                    now.getTime(),
-                    now.getTime());
-        } else {
+            try {
+                jdbc.update(
+                        "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+                            + " workspace_id, session_id, resource_id, kind, schema_version,"
+                            + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
+                            + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
+                            + " ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
+                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scopeKey, request.resourceId()),
+                        scopeKey,
+                        tenantId,
+                        request.workspaceId(),
+                        sessionId,
+                        request.resourceId(),
+                        request.kind(),
+                        request.schemaVersion(),
+                        request.byteLength(),
+                        request.digest(),
+                        bytes,
+                        request.resourceId(),
+                        now.getTime(),
+                        now.getTime());
+            } catch (DuplicateKeyException race) {
+                existing = storeRows.findResource(scopeKey, request.resourceId());
+                if (existing == null) {
+                    throw JournalStoreRows.conflict("managed_session_resource_conflict",
+                            "A resourceId was reused with different content metadata.");
+                }
+            }
+        }
+        if (existing != null) {
             JournalStoreRows.requireResourceScope(existing, tenantId, request.workspaceId(), sessionId, request.resourceId());
             storeRows.verifyStoredResource(existing);
             if (!request.kind().equals(existing.kind()) || request.schemaVersion() != existing.schemaVersion()
@@ -209,8 +221,17 @@ final class JournalResourceWrites {
             if (!resourceIds.add(resource.resourceId())) {
                 throw JournalStoreRows.invalid("resources contains a duplicate resourceId.");
             }
+            // Commits of different Sessions run concurrently, and a locking
+            // read of a missing key would gap-lock the shared unique index so
+            // that two Sessions inserting into one gap deadlock. Probe first;
+            // lock only a row that exists (a record lock), and let the unique
+            // key decide a racing insert.
             JournalStoreRows.ResourceRow existing = storeRows.findResource(scopeKey,
-                    resource.resourceId());
+                    resource.resourceId(), false);
+            if (existing != null || input.bytes() == null) {
+                // A miss without bytes fails below and inserts nothing.
+                existing = storeRows.findResource(scopeKey, resource.resourceId());
+            }
             writeFence.run();
             if (existing == null) {
                 if (input.bytes() == null) {
@@ -219,21 +240,9 @@ final class JournalResourceWrites {
                             "A referenced Managed Session resource is"
                                     + " missing.");
                 }
-                jdbc.update("INSERT INTO ma_resource"
-                                + " (resource_key, session_scope_key, tenant_id,"
-                                + " workspace_id, session_id, resource_id,"
-                                + " kind, schema_version, byte_length, sha256,"
-                                + " storage_kind, inline_bytes,"
-                                + " publish_command_id, state, gmt_create,"
-                                + " last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
-                                + " ?, ?, ?, ?, 'MYSQL_INLINE', ?, ?,"
-                                + " 'REFERENCED', ?, ?)",
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scopeKey, resource.resourceId()), scopeKey, tenantId, request.workspaceId(), sessionId,
-                        resource.resourceId(), resource.kind(),
-                        resource.schemaVersion(), resource.byteLength(),
-                        resource.digest(), input.bytes(), request.commandId(),
-                        now.getTime(), now.getTime());
-            } else {
+                existing = insertResource(scopeKey, tenantId, sessionId, request, now, input);
+            }
+            if (existing != null) {
                 JournalStoreRows.requireResourceScope(existing, tenantId,
                         request.workspaceId(), sessionId,
                         resource.resourceId());
@@ -264,6 +273,39 @@ final class JournalResourceWrites {
                     resource.resourceId(),
                     now.getTime());
         }
+    }
+
+    // Inserts a new resource and answers null, or, when another writer
+    // committed the same key first, the winner's row under a lock for the
+    // caller to verify like any existing resource.
+    private JournalStoreRows.ResourceRow insertResource(String scopeKey, String tenantId,
+            String sessionId, CommitTransactionRequest request, Timestamp now,
+            ValidatedResource input) {
+        CommitResource resource = input.resource();
+        try {
+            jdbc.update("INSERT INTO ma_resource"
+                            + " (resource_key, session_scope_key, tenant_id,"
+                            + " workspace_id, session_id, resource_id,"
+                            + " kind, schema_version, byte_length, sha256,"
+                            + " storage_kind, inline_bytes,"
+                            + " publish_command_id, state, gmt_create,"
+                            + " last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
+                            + " ?, ?, ?, ?, 'MYSQL_INLINE', ?, ?,"
+                            + " 'REFERENCED', ?, ?)",
+                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scopeKey, resource.resourceId()), scopeKey, tenantId, request.workspaceId(), sessionId,
+                    resource.resourceId(), resource.kind(),
+                    resource.schemaVersion(), resource.byteLength(),
+                    resource.digest(), input.bytes(), request.commandId(),
+                    now.getTime(), now.getTime());
+        } catch (DuplicateKeyException race) {
+            JournalStoreRows.ResourceRow winner = storeRows.findResource(scopeKey, resource.resourceId());
+            if (winner == null) {
+                throw JournalStoreRows.conflict("managed_session_resource_conflict",
+                        "A resourceId was reused with different content metadata.");
+            }
+            return winner;
+        }
+        return null;
     }
 
     record ValidatedResource(CommitResource resource, byte[] bytes) {
