@@ -119,6 +119,14 @@ export function getSeparatedHookSettings(
     systemHooks: settings.getSystemHooks(),
     userHooks: settings.getUserHooks(),
     projectHooks,
+    // Display-only: when the settings layer withheld the workspace scope,
+    // the listing still shows the raw block as disabled (untrusted). This
+    // never feeds execution — getProjectHooks() reads projectHooks only.
+    projectHooksDisplayOnly: structuredClone(
+      settings.workspace?.originalSettings?.hooks as
+        | Record<string, unknown>
+        | undefined,
+    ),
     ...(projectHooksApproval ? { projectHooksApproval } : {}),
   };
 }
@@ -206,7 +214,7 @@ function describeHook(
         typeof raw['command'] === 'string' &&
         /\$\{?\w/.test(raw['command'])
       ) {
-        details.push('resolves ${VAR} from the approved project env');
+        details.push('resolves ${VAR} from the environment (project .env/settings.env or shell)');
       }
       add('env', envList(raw['env']));
       if (raw['shell']) add('shell', displayText(raw['shell']));

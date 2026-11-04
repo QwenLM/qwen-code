@@ -1272,6 +1272,39 @@ describe('Server Config (config.ts)', () => {
       expect(config.isProjectHooksApprovalGated()).toBe(true);
     });
 
+    it('a stored approval authorizes the block inside a --yolo session with trust off', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksYoloExempt: true,
+        projectHooksApproved: true,
+        projectHooks,
+      });
+
+      expect(config.isProjectHooksApprovalGated()).toBe(false);
+      expect(config.getProjectHooks()).toBe(projectHooks);
+    });
+
+    it('a --yolo session without approval or trust still withholds the block', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksYoloExempt: true,
+        projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('the display-only block surfaces in diagnostics but never executes', () => {
+      const config = makeConfig({
+        folderTrust: true,
+        trustedFolder: false,
+        projectHooksDisplayOnly: projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toEqual(projectHooks);
+    });
+
     it('withholds the legacy merged hooks from both getters while pending', () => {
       const config = makeConfig({
         hooks: projectHooks,

@@ -381,7 +381,7 @@ describe('summarizeProjectHooks', () => {
         hook('echo $AWS_SECRET_ACCESS_KEY', '${AWS_SECRET_ACCESS_KEY}'),
       ),
     ).toEqual([
-      'Stop  echo $AWS_SECRET_ACCESS_KEY [resolves ${VAR} from the approved project env; env: AUTH=${AWS_SECRET_ACCESS_KEY}; matcher: ${AWS_SECRET_ACCESS_KEY}]',
+      'Stop  echo $AWS_SECRET_ACCESS_KEY [resolves ${VAR} from the environment (project .env/settings.env or shell); env: AUTH=${AWS_SECRET_ACCESS_KEY}; matcher: ${AWS_SECRET_ACCESS_KEY}]',
     ]);
   });
 

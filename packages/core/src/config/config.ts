@@ -1559,6 +1559,21 @@ export interface ConfigParameters {
   projectHooksPendingApproval?: boolean;
   /** The withheld block was rejected, not just left undecided. */
   projectHooksRejected?: boolean;
+  /**
+   * The current project hooks block carries a stored approval. Unlike
+   * `projectHooksPendingApproval === false`, this never doubles as "nothing
+   * to approve": callers set it only for a genuine `approved` decision, so
+   * execution authority survives the YOLO exemption (where the pending flag
+   * is undefined) without mistaking an empty workspace for an approval.
+   */
+  projectHooksApproved?: boolean;
+  /**
+   * The raw workspace hooks block for display only, supplied when the
+   * settings layer withheld the workspace scope (feature on, folder
+   * untrusted). Never reaches the registry: `getProjectHooks()` reads
+   * `projectHooks`, this feeds only `getTrustWithheldProjectHooks()`.
+   */
+  projectHooksDisplayOnly?: Record<string, unknown>;
   /** Started with `--yolo`: the gate is off only while the mode stays YOLO. */
   projectHooksYoloExempt?: boolean;
   noBrowser?: boolean;
@@ -3049,6 +3064,8 @@ export class Config {
   private pendingMcpServers?: string[];
   private projectHooksPendingApproval?: boolean;
   private projectHooksRejected: boolean;
+  private projectHooksApproved: boolean;
+  private readonly projectHooksDisplayOnly?: Record<string, unknown>;
   private readonly projectHooksYoloExempt: boolean;
   private readonly mcpToolIdleTimeoutMs: number;
   /**
@@ -3539,6 +3556,8 @@ export class Config {
     this.pendingMcpServers = params.pendingMcpServers;
     this.projectHooksPendingApproval = params.projectHooksPendingApproval;
     this.projectHooksRejected = params.projectHooksRejected ?? false;
+    this.projectHooksApproved = params.projectHooksApproved ?? false;
+    this.projectHooksDisplayOnly = params.projectHooksDisplayOnly;
     this.projectHooksYoloExempt = params.projectHooksYoloExempt ?? false;
     const envTimeout = process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'];
     const parsedEnv = envTimeout !== undefined ? Number(envTimeout) : NaN;
@@ -9022,6 +9041,9 @@ export class Config {
   setProjectHooksPendingApproval(pending: boolean, rejected = false): void {
     this.projectHooksPendingApproval = pending;
     this.projectHooksRejected = rejected;
+    // A mid-session decision supersedes the startup approval state: clearing
+    // the gate here means the user just approved this exact block.
+    this.projectHooksApproved = !pending && !rejected;
   }
 
   isProjectHooksRejected(): boolean {
@@ -11849,7 +11871,15 @@ export class Config {
     if (this.isProjectHooksApprovalCleared()) {
       return undefined;
     }
-    return this.readProjectHooksBlock();
+    // The settings layer drops the workspace scope entirely when the feature
+    // is on and the folder untrusted; the display-only copy keeps the listing
+    // able to show what is configured but withheld.
+    return (
+      this.readProjectHooksBlock() ??
+      (this.projectHooksDisplayOnly as
+        | { [K in HookEventName]?: HookDefinition[] }
+        | undefined)
+    );
   }
 
   /**
@@ -11862,12 +11892,15 @@ export class Config {
    * ask `getProjectHooks()` whether the hooks actually load.
    */
   private isProjectHooksApprovalCleared(): boolean {
-    // `isProjectHooksApprovalGated()` already accounts for the YOLO
-    // exemption: while exempt the session is ungated and the folder-trust
-    // rule applies on its own.
+    // A genuine stored approval is execution authority on its own — it
+    // survives the YOLO exemption (where the pending flag is undefined).
+    // The legacy cleared-gate reading stays for callers that only clear the
+    // pending flag, but the explicit approved flag never doubles as
+    // "nothing to approve".
     return (
-      this.isProjectHooksApprovalGated() &&
-      this.projectHooksPendingApproval === false
+      this.projectHooksApproved ||
+      (this.isProjectHooksApprovalGated() &&
+        this.projectHooksPendingApproval === false)
     );
   }
 
