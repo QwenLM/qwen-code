@@ -42,9 +42,14 @@ jobs:
   # finished failure summary to the privileged job as an output.
   analyze:
     name: 'Identify the failing tests'
+    # A job that hits its execution cap concludes `cancelled`, not `failure`,
+    # so a failure-only gate let timed-out main runs hide for weeks (#16214).
+    # Admit `cancelled` too; the live step then reports only a cancellation
+    # backed by a job-timeout annotation and skips a plain concurrency
+    # supersede (#16272).
     if: >-
       ${{ github.repository == 'QwenLM/qwen-code' &&
-      github.event.workflow_run.conclusion == 'failure' &&
+      contains(fromJSON('["failure","cancelled"]'), github.event.workflow_run.conclusion) &&
       ((github.event.workflow_run.head_branch == 'main' &&
       (github.event.workflow_run.event == 'push' ||
       (github.event.workflow_run.event == 'schedule' &&
@@ -97,10 +102,45 @@ jobs:
           EVENT_NAME: '${{ github.event.workflow_run.event }}'
           HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+          RUN_CONCLUSION: '${{ github.event.workflow_run.conclusion }}'
         run: |-
           set -euo pipefail
           superseded=false
           provisional=false
+          # A `cancelled` run is reportable only when a job hit its execution
+          # cap: a timeout is a real breakage that concludes `cancelled` rather
+          # than `failure` (#16214 hid this way). A plain concurrency supersede
+          # carries no timeout annotation, so skip it instead of filing an issue
+          # for every displaced run (#16272). Fail safe against noise: if the
+          # jobs or annotations cannot be read, no timeout is proven and the
+          # cancellation is treated as a supersede.
+          if [[ "${RUN_CONCLUSION}" == 'cancelled' ]]; then
+            timeout_found=false
+            while IFS=$'\t' read -r job_id check_run_id; do
+              [[ -n "${check_run_id}" ]] || continue
+              annotations="$(
+                gh api --paginate \
+                  "repos/${REPO}/check-runs/${check_run_id}/annotations" \
+                  --jq '[.[].message] | join("\n")' 2>/dev/null || true
+              )"
+              if grep -qiE 'exceeded the maximum execution time' <<< "${annotations}"; then
+                timeout_found=true
+                break
+              fi
+            done < <(
+              gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
+                --paginate \
+                | jq -rs '[.[].jobs[]?] | .[] | select(.conclusion == "cancelled") | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv' \
+                  2>/dev/null
+            )
+            if [[ "${timeout_found}" != 'true' ]]; then
+              echo "superseded=true" >> "${GITHUB_OUTPUT}"
+              echo "provisional=false" >> "${GITHUB_OUTPUT}"
+              echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled without a job execution-time timeout (concurrency supersede); not reporting."
+              exit 0
+            fi
+            echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled by a job execution-time timeout; reporting it as a failure."
+          fi
           if live_attempt="$(
             gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}" \
               --jq '.run_attempt'
@@ -120,11 +160,11 @@ jobs:
           # #15259 was filed after #15128 fixed its host-lock timeout.
           #
           # Only a SETTLED successor can own the result. The job gate above
-          # admits only `failure` conclusions, so a successor that ends
-          # cancelled, timed_out, skipped or startup_failure never re-enters
-          # this workflow; crediting its mere existence would drop the only
-          # report of a real regression. A completed success means the tree is
-          # green at the tip, and a completed failure reports itself.
+          # admits `failure` and timeout-backed `cancelled` conclusions, but a
+          # successor that ends skipped, startup_failure, or a plain concurrency
+          # cancellation never reports itself; crediting its mere existence would
+          # drop the only report of a real regression. A completed success means
+          # the tree is green at the tip, and a completed failure reports itself.
           #
           # An unsettled successor proves nothing yet, and waiting for it is
           # not possible here: this job runs on a pool that queued it
@@ -298,18 +338,21 @@ jobs:
           # Both bodies read this list; the flag lets them say when it is short.
           echo "jobs_complete=${jobs_complete}" >> "${GITHUB_OUTPUT}"
 
+          # Include cancelled jobs: a job that hit its execution cap concludes
+          # cancelled, and the live gate only lets such a run reach here
+          # (#16272). Naming and fetching it keeps the timeout report legible.
           job_ids=()
           while IFS= read -r job_id; do
             job_ids+=("${job_id}")
           done < <(
-            jq -r '.jobs[] | select(.conclusion == "failure") | .id' \
+            jq -r '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .id' \
               "${jobs_json}" 2>/dev/null
           )
           echo "Failed jobs: ${#job_ids[@]}"
 
           # Even without test results, the jobs payload names the failed job
           # and step. A missing listing costs detail, never the failure report.
-          jq -r '.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure") | .name] | @tsv' \
+          jq -r '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.name] + [.steps[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .name] | @tsv' \
             "${jobs_json}" 2>/dev/null \
             > "${RUNNER_TEMP}/failed-jobs.tsv" || true
 

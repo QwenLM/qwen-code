@@ -71,7 +71,7 @@ describe('main CI failure issue workflow', () => {
     ]);
     expect(workflow).toContain("github.repository == 'QwenLM/qwen-code'");
     expect(workflow).toContain(
-      "github.event.workflow_run.conclusion == 'failure'",
+      'contains(fromJSON(\'["failure","cancelled"]\'), github.event.workflow_run.conclusion)',
     );
     expect(workflow).toContain(
       "github.event.workflow_run.head_branch == 'main'",
@@ -80,7 +80,7 @@ describe('main CI failure issue workflow', () => {
     // that would admit unrelated contributor-triggered runs.
     expect(jobs.analyze.if).toBe(
       "${{ github.repository == 'QwenLM/qwen-code' && " +
-        "github.event.workflow_run.conclusion == 'failure' && " +
+        'contains(fromJSON(\'["failure","cancelled"]\'), github.event.workflow_run.conclusion) && ' +
         "((github.event.workflow_run.head_branch == 'main' && " +
         "(github.event.workflow_run.event == 'push' || " +
         "(github.event.workflow_run.event == 'schedule' && " +
@@ -91,15 +91,22 @@ describe('main CI failure issue workflow', () => {
     );
     // Only a watched workflow ever raises the event, so a schedule-arm name
     // missing from the watch list is dead — and the pin above, updated in
-    // the same edit, would not notice.
+    // the same edit, would not notice. Target the schedule arm's fromJSON
+    // (the one keyed on workflow.name); the conclusion gate now also uses
+    // fromJSON, so the first match is no longer the schedule list.
     const scheduledNames = JSON.parse(
-      /fromJSON\('(\[[^']*\])'\)/.exec(jobs.analyze.if)[1],
+      /fromJSON\('(\[[^']*\])'\), github\.event\.workflow\.name/.exec(
+        jobs.analyze.if,
+      )[1],
     );
     for (const name of scheduledNames) {
       expect(Object.keys(watchedFiles), name).toContain(name);
     }
   });
 
+  // This matrix pins the TRIGGER gate only. A cancelled run now passes the
+  // gate (a job timeout concludes cancelled, #16272); whether it is actually
+  // reported is decided by the live-step timeout classifier, tested below.
   it.each([
     ['SDK Java', 'workflow_dispatch', 'main', 'failure', true],
     ['SDK Java', 'workflow_dispatch', 'feature', 'failure', true],
@@ -107,8 +114,10 @@ describe('main CI failure issue workflow', () => {
     ['SDK Java', 'schedule', 'main', 'failure', true],
     ['tui-parity', 'schedule', 'main', 'failure', true],
     ['tui-parity', 'schedule', 'main', 'success', false],
-    ['tui-parity', 'schedule', 'main', 'cancelled', false],
+    ['tui-parity', 'schedule', 'main', 'cancelled', true],
+    ['E2E Tests', 'push', 'main', 'cancelled', true],
     ['tui-parity', 'schedule', 'main', 'skipped', false],
+    ['tui-parity', 'schedule', 'main', 'timed_out', false],
     ['tui-parity', 'schedule', 'feature', 'failure', false],
     ['tui-parity', 'pull_request', 'feature', 'failure', false],
     ['tui-parity', 'workflow_dispatch', 'feature', 'failure', false],
@@ -119,7 +128,7 @@ describe('main CI failure issue workflow', () => {
     ['Qwen Code CI', 'pull_request', 'feature', 'failure', false],
     ['Managed Agent gate', 'pull_request_review', 'feature', 'success', false],
   ])(
-    'routes %s / %s / %s / %s to reporting: %s',
+    'admits %s / %s / %s / %s at the trigger gate: %s',
     (name, event, branch, conclusion, expected) => {
       const evaluate = new Function(
         'github',
@@ -458,6 +467,7 @@ fi
             EVENT_NAME: '',
             HEAD_BRANCH: '',
             HEAD_SHA: '',
+            RUN_CONCLUSION: 'failure',
             ...overrides,
           },
         });
@@ -477,6 +487,45 @@ fi
         rmSync(tmp, { recursive: true, force: true });
       }
     };
+
+    // #16272: a cancelled run reaches the live step (the trigger now admits
+    // cancelled). Only a job-timeout cancellation is reportable; a plain
+    // concurrency supersede is skipped, and an unreadable annotation fails
+    // safe toward not reporting.
+    const classifyCancel = (annotationBehavior) => {
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == */check-runs/*/annotations* ]]; then
+  ${annotationBehavior}
+fi
+if [[ "$*" == */attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":9001,"conclusion":"cancelled","check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      return detect('1', { RUN_CONCLUSION: 'cancelled' }, { ghScript });
+    };
+
+    it('reports a cancelled run backed by a job execution-time timeout', () => {
+      const resolved = classifyCancel(
+        "printf '%s\\n' 'The job has exceeded the maximum execution time of 1h0m0s'; exit 0",
+      );
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('execution-time timeout');
+    });
+
+    it('skips a plain concurrency cancellation with no timeout annotation', () => {
+      const resolved = classifyCancel(
+        "printf '%s\\n' 'The operation was canceled.'; exit 0",
+      );
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('concurrency supersede');
+    });
+
+    it('fails safe toward not reporting when the annotations cannot be read', () => {
+      const resolved = classifyCancel('exit 1');
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+    });
 
     it('skips reporting when the run has moved on to a later attempt', () => {
       // Measured on run 39237270547: attempt 1 failed on the host lock,
@@ -1955,22 +2004,23 @@ fi
     expect(downloadStep.env.RUN_ATTEMPT).toBe(
       '${{ github.event.workflow_run.run_attempt }}',
     );
-    // Counted over the whole workflow: both projections read the file this one
-    // fetch wrote, so the payload must be fetched exactly once.
+    // Counted over the whole workflow: the download step's two projections
+    // share one fetch, and the live-step cancellation classifier adds a second
+    // fetch that only runs for a cancelled run (#16272). Two static callsites.
     expect(
       (
         workflow.match(
           /actions\/runs\/\$\{WORKFLOW_RUN_ID\}\/attempts\/\$\{RUN_ATTEMPT\}\/jobs/g,
         ) ?? []
       ).length,
-    ).toBe(1);
+    ).toBe(2);
     // The ids projection is bound to the array the download loop iterates and to
     // the payload the fetch wrote. Swapping it with the TSV projection below
     // hands the reader whole TSV lines so every log download 404s. Renaming
     // the array on one side loses failing-test details while the job/step
     // summary still renders.
     expect(download).toContain(
-      'job_ids=() while IFS= read -r job_id; do job_ids+=("${job_id}") done < <( jq -r \'.jobs[] | select(.conclusion == "failure") | .id\' "${jobs_json}" 2>/dev/null )',
+      'job_ids=() while IFS= read -r job_id; do job_ids+=("${job_id}") done < <( jq -r \'.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .id\' "${jobs_json}" 2>/dev/null )',
     );
     expect(download).toContain(
       'for job_id in ${job_ids[@]+"${job_ids[@]}"}; do',
@@ -1980,7 +2030,7 @@ fi
     // before a failure summary is rendered, and the `2>/dev/null` that keeps the
     // resulting jq parse error out of the log.
     expect(download).toContain(
-      'jq -r \'.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure") | .name] | @tsv\' "${jobs_json}" 2>/dev/null > "${RUNNER_TEMP}/failed-jobs.tsv" || true',
+      'jq -r \'.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.name] + [.steps[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .name] | @tsv\' "${jobs_json}" 2>/dev/null > "${RUNNER_TEMP}/failed-jobs.tsv" || true',
     );
     // Keep the TSV job details in the analysis payload. The span ends at the
     // first analysis redirect, so the later comment invocation cannot satisfy it.
