@@ -164,9 +164,10 @@ For an accepted issue or pull-request comment, the channel adds GitHub's `👀` 
 The GitHub channel publishes only completed responses. Intermediate model chunks are never published as separate comments.
 
 If GitHub returns a definite no-write delivery failure — its rate limiter
-rejecting the comment with a 403 or 429 that carries GitHub's rate-limit
-headers, either because the hourly budget is exhausted or because a secondary
-rate limit was hit — the channel retries the comment twice more, waiting as
+rejecting the comment with a 403 or 429 that carries a numeric
+`x-ratelimit-remaining` header and shows the hourly budget exhausted, sends
+`retry-after`, or names a secondary rate limit in its message — the channel
+retries the comment twice more, waiting as
 long as GitHub asks: `retry-after` when GitHub sends it, the budget reset when
 the hourly budget is exhausted, and otherwise one minute and then two (also
 when the reset already looks past, which means the local clock is ahead). If it
@@ -180,7 +181,10 @@ GitHub's headers prove it was not posted; replies the audit already records as
 posted are dropped. The corresponding inbound task
 remains in `reply_pending` state until that delivery succeeds or reaches a
 definite terminal failure. Ambiguous delivery failures are not retried
-automatically because GitHub may have created the comment.
+automatically because GitHub may have created the comment: the audit records
+`failed_ambiguous` and the reply is not kept. A rate-limit answer without a
+numeric `x-ratelimit-remaining` header, such as a 429 with only `retry-after`
+from a proxy in front of GitHub, is one of them.
 
 ## PR-Bound Session Delivery
 

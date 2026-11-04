@@ -2917,8 +2917,11 @@ describe('GithubChannel', () => {
     async function connectForPublication() {
       mockOctokit.paginate.mockResolvedValue([]);
       await channel.connect();
-      // Stop polling only: disconnect() would also end every rate-limit
-      // retry wait, which these cases exercise.
+      // Stop the poll loop but not the publication retries: disconnect()
+      // would also make a rate-limit retry give up, and these cases exercise
+      // the retries. Stopping the loop aborts the controller that a retry wait
+      // without a signal sleeps on, so such a wait ends at once; a case that
+      // checks a wait stubs sleepForRetry and asserts its calls.
       (channel as unknown as { stopPollLoop: () => void }).stopPollLoop();
     }
 
