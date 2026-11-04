@@ -64,12 +64,19 @@ describe('managed host build lane', () => {
   });
 
   it('builds untrusted PR code with a read-only token and no secrets', () => {
-    expect(workflow.permissions).toEqual({ contents: 'read' });
+    // A job-level `permissions:` block replaces the workflow default, so the
+    // job's effective scope is the one the untrusted build actually runs with.
+    expect(job.permissions ?? workflow.permissions).toEqual({
+      contents: 'read',
+    });
     expect(workflowSource).not.toContain('pull_request_target');
-    // Match an actual expression, not the prose in the security comment, and
-    // cover bracket access too: `secrets['TOKEN']` is the same read as
-    // `secrets.TOKEN`, so a dot-only guard would let it through.
-    expect(workflowSource).not.toMatch(/\$\{\{[^}]*\bsecrets\s*[.[]/);
+    // Match any expression that reads the context: `${{ toJSON(secrets) }}` is
+    // as much a read as `secrets.TOKEN`. The conflict check below is the
+    // control — the workflow's own `${{ github.* }}` expressions, which a guard
+    // broadened to every expression would red on instead of passing silently.
+    const secretRef = /\$\{\{[^}]*\bsecrets\b/;
+    expect(workflowSource).not.toMatch(secretRef);
+    expect(workflowSource).toMatch(/\$\{\{\s*github\./);
     expect(job['runs-on']).toBe('ubuntu-latest');
     expect(job.if).toContain("github.repository == 'QwenLM/qwen-code'");
     const checkout = job.steps.find((step) =>
@@ -136,6 +143,12 @@ describe('managed host build lane', () => {
     expect(verify.run).toContain('__qwenWebShellCss');
     expect(verify.run).toContain(
       'grep -qF \'data-qwen-web-shell-entry="managed-host"\'',
+    );
+    // The portal wrapper ships in its own chunk, and every occurrence in the
+    // entry sits inside the injected stylesheet, so the check must search the
+    // whole output for the quoted JSX prop a CSS scope cannot produce.
+    expect(verify.run).toContain(
+      `grep -rqF 'data-web-shell-portal-root":' 'packages/web-shell/dist-managed-host'`,
     );
     expect(verify.run).not.toContain("grep -q 'data-managed-empty'");
   });

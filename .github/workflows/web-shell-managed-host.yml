@@ -117,7 +117,12 @@ jobs:
           grep -q 'renderManagedAgentWebShell' "$entry"
           grep -q '__qwenWebShellCss' "$entry"
           grep -qF 'data-qwen-web-shell-entry="managed-host"' "$entry"
-          grep -q 'data-web-shell-portal-root' "$entry"
+          # The portal wrapper ships in its own chunk, and every
+          # `data-web-shell-portal-root` in the entry sits inside the injected
+          # stylesheet, so grepping the entry passes on a bundle whose wrapper
+          # was deleted. Search the whole output for the quoted JSX prop, which
+          # the scoped CSS cannot produce.
+          grep -rqF 'data-web-shell-portal-root":' 'packages/web-shell/dist-managed-host'
           echo "Managed host entry emitted: $(wc -c < "$entry") bytes"
 
       # The output must stay outside `dist/`: the app build empties that
