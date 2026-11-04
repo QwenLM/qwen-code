@@ -236,6 +236,11 @@ describe('AddMenu', () => {
       }),
     );
     await openMenu();
+    expect(
+      menuItem('composer-add-menu-workflow')!.querySelector(
+        '[data-workflow-summary]',
+      )?.textContent,
+    ).toBe('Let new tasks use workflows');
     await act(async () => menuItem('composer-add-menu-workflow')!.click());
     await settle();
     expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(true);

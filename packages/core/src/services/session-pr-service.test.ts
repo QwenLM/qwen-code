@@ -18,6 +18,7 @@ import {
   mergeSessionPrLists,
   moveSessionPrSidecar,
   readSessionPrs,
+  readSessionPrsDetailed,
   replaceSessionPrs,
   updateSessionPrStates,
   upsertSessionPr,
@@ -125,6 +126,19 @@ describe('readSessionPrs', () => {
     expect(await read()).toBeNull();
   });
 
+  it('reads a well-formed empty list as an authoritative clear (R9-B2)', async () => {
+    // replaceSessionPrs's explicit empty plan writes {prs: []}; that clear
+    // must read back as "no bindings" (ok/[]), NOT as corruption — an
+    // invalid verdict would degrade authoritative snapshots to permanent
+    // partial and shadow the observed unbind.
+    await writeSessionPrs(filePath, []);
+    expect(await read()).toEqual([]);
+    expect(await readSessionPrsDetailed(filePath)).toEqual({
+      status: 'ok',
+      prs: [],
+    });
+  });
+
   it('returns null for invalid JSON', async () => {
     await fs.writeFile(filePath, '{not json', 'utf-8');
     expect(await read()).toBeNull();
@@ -132,7 +146,6 @@ describe('readSessionPrs', () => {
 
   it.each([
     ['bare object (legacy single shape)', entry(1)],
-    ['empty list', { prs: [] }],
     ['entry missing url', { prs: [{ number: 1, createdAt: 'x' }] }],
     ['entry non-integer number', { prs: [{ ...entry(1), number: 1.5 }] }],
     ['entry non-positive number', { prs: [entry(0)] }],
@@ -775,8 +788,9 @@ describe('replaceSessionPrs', () => {
       existing.filter((p) => p.number !== 100),
     );
     expect(persisted).toEqual([]);
-    // An empty list reads back as null (isValidSessionPrList rejects it).
-    expect(await read()).toBeNull();
+    // The explicit empty plan clears the bindings: the well-formed empty
+    // list reads back as an authoritative "no bindings", not as corruption.
+    expect(await read()).toEqual([]);
   });
 
   it('declines entries the reader would reject instead of poisoning the list', async () => {

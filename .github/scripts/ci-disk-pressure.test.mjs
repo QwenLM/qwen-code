@@ -41,6 +41,16 @@ function lintStep(name) {
   return value;
 }
 
+// test_build carries the sampling install and then spends its whole timeout
+// building, so it needs the same collector for the same reason.
+function buildStep(name) {
+  const value = ciJobs.test_build.steps.find(
+    (candidate) => candidate.name === name,
+  );
+  assert.ok(value, `missing ${name} step in test_build`);
+  return value;
+}
+
 describe('ci.yml disk-pressure evidence', () => {
   it('starts sampling before the install and preserves those samples for upload', () => {
     const install = step('Install dependencies').run;
@@ -190,6 +200,55 @@ describe('ci.yml disk-pressure evidence', () => {
     assert.ok(
       names.indexOf('Dump disk state on failure') <
         names.indexOf('Upload disk-pressure samples'),
+    );
+  });
+
+  it('gives test_build the same collector, and keeps it last and uniquely named', () => {
+    // test_build samples during install and then builds for up to its whole
+    // timeout, but its sampler dies with the install step's trap … EXIT. It
+    // shipped without a collector, so an ENOSPC build — or the OOM that took
+    // a shard host out mid-run — kept no telemetry at all.
+    const install = buildStep('Install dependencies').run;
+    assert.match(
+      install,
+      /DISK_SAMPLES="\$\{RUNNER_TEMP\}\/disk-pressure-samples\.log"/,
+    );
+
+    const dump = buildStep('Dump disk state on failure');
+    assert.equal(dump.if, '${{ failure() }}');
+    assert.match(dump.run, /tee -a "\$DISK_SAMPLES"/);
+    assert.doesNotMatch(dump.run, /[^>]> "\$DISK_SAMPLES"/);
+
+    const upload = buildStep('Upload disk-pressure samples');
+    assert.equal(upload.if, '${{ failure() }}');
+    assert.equal(upload.with['if-no-files-found'], 'ignore');
+    assert.equal(
+      upload.with.path,
+      '${{ runner.temp }}/disk-pressure-samples.log',
+    );
+
+    // Same position contract as lint_and_static: failure() is evaluated when
+    // the step is reached, so anything parked earlier only ever collects a
+    // prelude failure.
+    const names = ciJobs.test_build.steps.map((candidate) => candidate.name);
+    assert.equal(
+      names.indexOf('Upload disk-pressure samples'),
+      names.length - 1,
+      'the collector must be the last step of test_build',
+    );
+    assert.ok(
+      names.indexOf('Dump disk state on failure') <
+        names.indexOf('Upload disk-pressure samples'),
+    );
+
+    // upload-artifact v4+ rejects duplicate names when several jobs fail in
+    // one run, so all three collectors must stay distinct.
+    assert.ok(
+      ![
+        step('Upload disk-pressure samples').with.name,
+        lintStep('Upload disk-pressure samples').with.name,
+      ].includes(upload.with.name),
+      'test_build collector artifact name collides with another job',
     );
   });
 
