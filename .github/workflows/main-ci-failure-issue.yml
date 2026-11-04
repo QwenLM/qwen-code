@@ -107,15 +107,20 @@ jobs:
           set -euo pipefail
           superseded=false
           provisional=false
-          # A `cancelled` run is reportable only when a job hit its execution
-          # cap: a timeout is a real breakage that concludes `cancelled` rather
-          # than `failure` (#16214 hid this way). A plain concurrency supersede
-          # carries no timeout annotation, so skip it instead of filing an issue
-          # for every displaced run (#16272). Fail safe against noise: if the
-          # jobs or annotations cannot be read, no timeout is proven and the
-          # cancellation is treated as a supersede.
+          # A `cancelled` run is classified by positive annotation evidence, not
+          # by the absence of a timeout (#16272, review on #16280):
+          #   - a job execution-time timeout is a real breakage that concludes
+          #     `cancelled` rather than `failure` (#16214 hid this way) -> report,
+          #     even when a shutdown annotation coexists on the same job;
+          #   - a concurrency supersede carries the runner shutdown / higher-
+          #     priority / operation-canceled annotations and no timeout -> skip,
+          #     so a push chain does not file an issue per displaced run;
+          #   - neither (or the jobs/annotations cannot be read) -> report, fail
+          #     open like the rest of this step, so an unclassifiable cancellation
+          #     cannot re-create the hiding problem.
           if [[ "${RUN_CONCLUSION}" == 'cancelled' ]]; then
             timeout_found=false
+            concurrency_found=false
             while IFS=$'\t' read -r job_id check_run_id; do
               [[ -n "${check_run_id}" ]] || continue
               annotations="$(
@@ -125,7 +130,9 @@ jobs:
               )"
               if grep -qiE 'exceeded the maximum execution time' <<< "${annotations}"; then
                 timeout_found=true
-                break
+              fi
+              if grep -qiE 'Canceling since a higher priority|shutdown signal|operation was canceled' <<< "${annotations}"; then
+                concurrency_found=true
               fi
             done < <(
               gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
@@ -133,13 +140,17 @@ jobs:
                 | jq -rs '[.[].jobs[]?] | .[] | select(.conclusion == "cancelled") | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv' \
                   2>/dev/null
             )
-            if [[ "${timeout_found}" != 'true' ]]; then
+            if [[ "${timeout_found}" != 'true' && "${concurrency_found}" == 'true' ]]; then
               echo "superseded=true" >> "${GITHUB_OUTPUT}"
               echo "provisional=false" >> "${GITHUB_OUTPUT}"
-              echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled without a job execution-time timeout (concurrency supersede); not reporting."
+              echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled by a concurrency supersede (shutdown/higher-priority annotation, no timeout); not reporting."
               exit 0
             fi
-            echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled by a job execution-time timeout; reporting it as a failure."
+            if [[ "${timeout_found}" == 'true' ]]; then
+              echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled by a job execution-time timeout; reporting it as a failure."
+            else
+              echo "::warning::Run ${WORKFLOW_RUN_ID} was cancelled with no readable timeout or concurrency annotation; failing open and reporting."
+            fi
           fi
           if live_attempt="$(
             gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}" \

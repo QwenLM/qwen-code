@@ -488,10 +488,11 @@ fi
       }
     };
 
-    // #16272: a cancelled run reaches the live step (the trigger now admits
-    // cancelled). Only a job-timeout cancellation is reportable; a plain
-    // concurrency supersede is skipped, and an unreadable annotation fails
-    // safe toward not reporting.
+    // #16272 / review on #16280: a cancelled run reaches the live step (the
+    // trigger admits cancelled) and is classified by positive annotation
+    // evidence: a timeout reports (even with a coexisting shutdown annotation),
+    // a concurrency supersede (shutdown / higher-priority / operation-canceled,
+    // no timeout) is skipped, and neither / unreadable fails open to reporting.
     const classifyCancel = (annotationBehavior) => {
       const ghScript = `#!/usr/bin/env bash
 if [[ "$*" == */check-runs/*/annotations* ]]; then
@@ -514,7 +515,15 @@ printf '%s\\n' '1'
       expect(resolved.stdout).toContain('execution-time timeout');
     });
 
-    it('skips a plain concurrency cancellation with no timeout annotation', () => {
+    it('reports a timeout even when a shutdown annotation coexists on the job', () => {
+      const resolved = classifyCancel(
+        "printf '%s\\n' 'The job has exceeded the maximum execution time of 1h0m0s' 'The runner has received a shutdown signal.'; exit 0",
+      );
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('execution-time timeout');
+    });
+
+    it('skips a concurrency cancellation carrying the operation-canceled annotation', () => {
       const resolved = classifyCancel(
         "printf '%s\\n' 'The operation was canceled.'; exit 0",
       );
@@ -522,9 +531,34 @@ printf '%s\\n' '1'
       expect(resolved.stdout).toContain('concurrency supersede');
     });
 
-    it('fails safe toward not reporting when the annotations cannot be read', () => {
-      const resolved = classifyCancel('exit 1');
+    it('skips a concurrency cancellation carrying the runner shutdown annotation', () => {
+      const resolved = classifyCancel(
+        "printf '%s\\n' 'The runner has received a shutdown signal.'; exit 0",
+      );
       expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('concurrency supersede');
+    });
+
+    it('skips a concurrency cancellation carrying the higher-priority annotation', () => {
+      const resolved = classifyCancel(
+        "printf '%s\\n' 'Canceling since a higher priority waiting request is queued.'; exit 0",
+      );
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('concurrency supersede');
+    });
+
+    it('fails open and reports when the annotations cannot be read', () => {
+      const resolved = classifyCancel('exit 1');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('failing open');
+    });
+
+    it('fails open and reports an unclassifiable cancellation annotation', () => {
+      const resolved = classifyCancel(
+        "printf '%s\\n' 'Some unrelated annotation.'; exit 0",
+      );
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('failing open');
     });
 
     it('skips reporting when the run has moved on to a later attempt', () => {
