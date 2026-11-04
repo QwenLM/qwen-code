@@ -40,7 +40,7 @@ import {
   SelectValue,
 } from '../ui/select';
 import { Spinner } from '../ui/spinner';
-import { githubEventWebUrl } from './channel-platform';
+import { githubEventNumber, githubEventWebUrl } from './channel-platform';
 import styles from './ChannelEventsPage.module.css';
 
 interface ChannelEventsPageProps {
@@ -305,18 +305,23 @@ export function ChannelEventsPage({
                   .reverse()
                   .map((event, index) => {
                     const at = new Date(event.at);
+                    // Same derivation the URL uses: the shared inbound path
+                    // journals without `number`, only `thread: 'pr:42'`.
+                    const number = githubEventNumber(event);
                     const target = event.repository
                       ? `${event.repository}${
-                          event.number !== undefined ? `#${event.number}` : ''
+                          number !== undefined ? `#${number}` : ''
                         }`
                       : event.thread;
                     const targetUrl = githubEventWebUrl(
                       event,
-                      // The management listing is scope-local; channels
-                      // inherited from user/system settings resolve through
-                      // the journal response's merged-link metadata instead.
-                      channels[event.channel]?.config ??
-                        data?.channelLinkMeta?.[event.channel],
+                      // The journal's merged metadata is authoritative:
+                      // system settings can override a same-named workspace
+                      // channel, which the scope-local listing would miss.
+                      // The listing stays as the fallback for older daemons
+                      // that do not send channelLinkMeta.
+                      data?.channelLinkMeta?.[event.channel] ??
+                        channels[event.channel]?.config,
                     );
                     const safeTargetUrl =
                       targetUrl && isSafeHref(targetUrl)

@@ -1244,7 +1244,18 @@ Read-only discovery uses:
 
 `GET .../channels/events` returns the resolved workspace's Channel event
 journal as `{ "events": [...], "truncated": boolean }` with
-`Cache-Control: no-store`. Each event records what a Channel did — an inbound
+`Cache-Control: no-store`, plus an optional `channelLinkMeta` member: a map
+from channel instance name to non-secret link metadata (`type` and `baseUrl`,
+each present only when configured as a string). The metadata is resolved
+from the merged system + user + workspace settings the channel workers run
+with — the scope-local management listing does not contain channels
+configured in another scope — and filtered to channels whose resolved `cwd`
+belongs to the queried workspace, so one workspace never receives another
+workspace's channel metadata. It lets clients link journal rows (for
+example, a GitHub PR or issue reference) even for channels inherited from
+user or system settings. The member is omitted entirely when no channel
+resolves, and older daemons never send it; a settings read failure degrades
+to its absence rather than failing the journal read. Each event records what a Channel did — an inbound
 message it accepted or skipped (with the machine reason: `reason_filter`,
 `mention_required`, `duplicate`, a sender-gate rejection), a publication
 outcome, an inbound task transition, or a poll result — and never carries

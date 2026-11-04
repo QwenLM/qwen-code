@@ -5789,6 +5789,19 @@ describe('GithubChannel', () => {
         ),
       ).resolves.toBe('https://github.example.com');
     });
+
+    it('strips a bare trailing slash from the baseUrl', async () => {
+      await expect(
+        connectAndReadWebOrigin(
+          makeConfig({ baseUrl: 'https://github.example.com/' }),
+        ),
+      ).resolves.toBe('https://github.example.com');
+      await expect(
+        connectAndReadWebOrigin(
+          makeConfig({ baseUrl: 'https://api.github.com/' }),
+        ),
+      ).resolves.toBe('https://github.com');
+    });
   });
 
   describe('event journal', () => {

@@ -7,8 +7,10 @@
 import express, { type RequestHandler } from 'express';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -50,6 +52,7 @@ function runtime(
   workspaceCwd: string,
   trusted = true,
   provenance?: WorkspaceRuntime['provenance'],
+  env?: WorkspaceRuntime['env'],
 ): WorkspaceRuntime {
   return {
     workspaceId,
@@ -57,6 +60,7 @@ function runtime(
     primary: workspaceId === 'primary',
     trusted,
     provenance,
+    env: env ?? { mode: 'parent-process', overlayKeys: [] },
     bridge: {},
   } as WorkspaceRuntime;
 }
@@ -107,8 +111,17 @@ function service(): ChannelManagementService {
   };
 }
 
-function mount(secondaryTrusted = true) {
-  const primary = runtime('primary', '/work/primary');
+function mount(
+  secondaryTrusted = true,
+  primaryOverrides?: { cwd?: string; env?: WorkspaceRuntime['env'] },
+) {
+  const primary = runtime(
+    'primary',
+    primaryOverrides?.cwd ?? '/work/primary',
+    true,
+    undefined,
+    primaryOverrides?.env,
+  );
   const secondary = runtime('secondary', '/work/secondary', secondaryTrusted);
   const primaryService = service();
   const secondaryService = service();
@@ -987,5 +1000,99 @@ describe('workspace Channel event journal', () => {
     expect(response.status).toBe(200);
     expect(response.body.events).toHaveLength(1);
     expect(response.body).not.toHaveProperty('channelLinkMeta');
+  });
+
+  it('never loads the workspace .env into the daemon process environment', async () => {
+    const ws = mkdtempSync(join(tmpdir(), 'channel-link-meta-ws-'));
+    const sentinel = 'QWEN_LINK_META_SENTINEL';
+    const savedSentinel = process.env[sentinel];
+    delete process.env[sentinel];
+    try {
+      mkdirSync(join(ws, '.qwen'), { recursive: true });
+      writeFileSync(join(ws, '.env'), `${sentinel}=leaked-from-workspace\n`);
+      writeFileSync(
+        join(ws, '.qwen', '.env'),
+        `${sentinel}=leaked-from-workspace\n`,
+      );
+      writeFileSync(
+        join(ws, '.qwen', 'settings.json'),
+        JSON.stringify({ channels: { 'ws-gh': { type: 'github' } } }),
+      );
+      const { app } = mount(true, { cwd: ws });
+      append(ws, 1, 'ws-gh');
+
+      const response = await request(app).get('/workspace/channels/events');
+
+      expect(response.status).toBe(200);
+      expect(response.body.channelLinkMeta).toEqual({
+        'ws-gh': { type: 'github' },
+      });
+      expect(process.env[sentinel]).toBeUndefined();
+    } finally {
+      if (savedSentinel === undefined) delete process.env[sentinel];
+      else process.env[sentinel] = savedSentinel;
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves a corrupt workspace settings file untouched and degrades', async () => {
+    const ws = mkdtempSync(join(tmpdir(), 'channel-link-meta-corrupt-'));
+    try {
+      mkdirSync(join(ws, '.qwen'), { recursive: true });
+      const corrupt = '{"channels": ';
+      const settingsPath = join(ws, '.qwen', 'settings.json');
+      writeFileSync(settingsPath, corrupt);
+      const { app } = mount(true, { cwd: ws });
+      append(ws, 1, 'ws-gh');
+
+      const response = await request(app).get('/workspace/channels/events');
+
+      expect(response.status).toBe(200);
+      expect(response.body.events).toHaveLength(1);
+      expect(response.body).not.toHaveProperty('channelLinkMeta');
+      expect(readFileSync(settingsPath, 'utf8')).toBe(corrupt);
+      expect(existsSync(`${settingsPath}.corrupted`)).toBe(false);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves metadata against the runtime effective environment', async () => {
+    const overlayHome = mkdtempSync(join(tmpdir(), 'channel-link-meta-env-'));
+    try {
+      // The process QWEN_HOME (qwenHome) configures no channels; only the
+      // runtime overlay's home does, so a process-env read would find nothing.
+      writeFileSync(
+        join(overlayHome, 'settings.json'),
+        JSON.stringify({
+          channels: {
+            'overlay-gh': {
+              type: 'github',
+              baseUrl: 'https://overlay.example/api/v3',
+            },
+          },
+        }),
+      );
+      const { app } = mount(true, {
+        env: {
+          mode: 'runtime-overlay',
+          overlayKeys: ['QWEN_HOME'],
+          effectiveEnv: { ...process.env, QWEN_HOME: overlayHome },
+        },
+      });
+      append('/work/primary', 1, 'overlay-gh');
+
+      const response = await request(app).get('/workspace/channels/events');
+
+      expect(response.status).toBe(200);
+      expect(response.body.channelLinkMeta).toEqual({
+        'overlay-gh': {
+          type: 'github',
+          baseUrl: 'https://overlay.example/api/v3',
+        },
+      });
+    } finally {
+      rmSync(overlayHome, { recursive: true, force: true });
+    }
   });
 });

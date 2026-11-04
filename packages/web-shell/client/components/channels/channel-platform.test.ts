@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { DaemonChannelTypeDescriptor } from '@qwen-code/sdk/daemon';
 import {
+  githubEventNumber,
   githubEventWebUrl,
   isChannelPlatformAvailable,
   isSupportedChannelType,
@@ -113,6 +114,29 @@ describe('githubEventWebUrl', () => {
     ).toBe('https://tenant.ghe.com/owner/repo/pull/1');
   });
 
+  it('strips trailing slashes so links never double the path separator', () => {
+    for (const baseUrl of [
+      'https://api.github.com/',
+      'https://ghe.example.com/',
+      'https://ghe.example.com/api/v3/',
+      'https://api.tenant.ghe.com/',
+    ]) {
+      const url = githubEventWebUrl(
+        { repository: 'owner/repo', number: 42, thread: 'pr:42' },
+        { type: 'github', baseUrl },
+      );
+      expect(url).toBeDefined();
+      expect(url).not.toContain('//owner');
+      expect(url?.endsWith('/owner/repo/pull/42')).toBe(true);
+    }
+    expect(
+      githubEventWebUrl(
+        { repository: 'owner/repo', number: 42, thread: 'pr:42' },
+        { type: 'github', baseUrl: 'https://api.github.com/' },
+      ),
+    ).toBe('https://github.com/owner/repo/pull/42');
+  });
+
   it('returns undefined for non-GitHub channels or missing config', () => {
     expect(
       githubEventWebUrl(
@@ -189,6 +213,23 @@ describe('githubEventWebUrl origin mapping mirrors the GitHub adapter', () => {
     );
 
     expect(clientChain).toBe(adapterChain);
-    expect(clientChain.match(/\.replace\(/g)).toHaveLength(3);
+    expect(clientChain.match(/\.replace\(/g)).toHaveLength(4);
+  });
+});
+
+describe('githubEventNumber', () => {
+  it('prefers the explicit number and falls back to the thread', () => {
+    expect(githubEventNumber({ number: 42, thread: 'pr:42' })).toBe(42);
+    expect(githubEventNumber({ thread: 'pr:42' })).toBe(42);
+    expect(githubEventNumber({ thread: 'issue:7' })).toBe(7);
+  });
+
+  it('returns undefined without a trustworthy number', () => {
+    expect(githubEventNumber({})).toBeUndefined();
+    expect(githubEventNumber({ thread: 'group-42' })).toBeUndefined();
+    expect(githubEventNumber({ number: 0 })).toBeUndefined();
+    expect(githubEventNumber({ number: -1 })).toBeUndefined();
+    expect(githubEventNumber({ number: 1.5 })).toBeUndefined();
+    expect(githubEventNumber({ thread: 'pr:abc' })).toBeUndefined();
   });
 });

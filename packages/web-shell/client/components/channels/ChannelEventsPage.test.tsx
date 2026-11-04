@@ -12,6 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
+type TauriWindow = { __TAURI__?: { core?: { invoke?: unknown } } };
+
 // jsdom lacks PointerEvent and pointer capture; radix Select needs both to
 // open from a pointerdown (mirrors the sidebar and overview panel tests).
 if (!globalThis.PointerEvent) {
@@ -354,7 +356,41 @@ describe('ChannelEventsPage', () => {
     expect(link?.textContent).toBe('owner/repo#42');
   });
 
-  it('prefers the workspace-local config over journal link metadata', async () => {
+  it('prefers journal metadata over the listing when system settings override', async () => {
+    // mergeSettings applies system settings last, so the effective baseUrl
+    // can differ from the scope-local listing; the merged metadata wins.
+    channelsState.current = {
+      'gh-bot': {
+        config: { type: 'github', baseUrl: 'https://workspace.example/api/v3' },
+      },
+    };
+    eventsState.current.data = {
+      truncated: false,
+      channelLinkMeta: {
+        'gh-bot': { type: 'github', baseUrl: 'https://system.example/api/v3' },
+      },
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'gh-bot',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const link = container.querySelector<HTMLAnchorElement>('li a');
+    expect(link?.getAttribute('href')).toBe(
+      'https://system.example/owner/repo/pull/42',
+    );
+  });
+
+  it('falls back to the listing when the daemon sends no journal metadata', async () => {
     channelsState.current = {
       'gh-bot': {
         config: { type: 'github', baseUrl: 'https://ghe.local/api/v3' },
@@ -362,7 +398,6 @@ describe('ChannelEventsPage', () => {
     };
     eventsState.current.data = {
       truncated: false,
-      channelLinkMeta: { 'gh-bot': { type: 'github' } },
       events: [
         {
           at: '2026-11-02T02:00:00.000Z',
@@ -381,6 +416,50 @@ describe('ChannelEventsPage', () => {
     const link = container.querySelector<HTMLAnchorElement>('li a');
     expect(link?.getAttribute('href')).toBe(
       'https://ghe.local/owner/repo/pull/42',
+    );
+  });
+
+  it('shows the thread-derived number on rows journaled without one', async () => {
+    // ChannelBase.processPreflightedInbound writes thread but no number.
+    channelsState.current = { 'gh-bot': { config: { type: 'github' } } };
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'gh-bot',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          actor: 'alice',
+        },
+        {
+          at: '2026-11-02T02:01:00.000Z',
+          channel: 'gh-bot',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          thread: 'pr:43',
+          actor: 'bob',
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const links = container.querySelectorAll<HTMLAnchorElement>('li a');
+    expect(links).toHaveLength(2);
+    expect(links[0]?.textContent).toBe('owner/repo#43');
+    expect(links[0]?.getAttribute('href')).toBe(
+      'https://github.com/owner/repo/pull/43',
+    );
+    expect(links[0]?.getAttribute('aria-label')).toBe(
+      'Open owner/repo#43 on GitHub',
+    );
+    expect(links[1]?.textContent).toBe('owner/repo#42');
+    expect(links[1]?.getAttribute('href')).toBe(
+      'https://github.com/owner/repo/pull/42',
     );
   });
 
@@ -405,6 +484,70 @@ describe('ChannelEventsPage', () => {
 
     expect(container.querySelectorAll('li a')).toHaveLength(0);
     expect(container.textContent).toContain('owner/repo#42');
+  });
+
+  it('opens the target through the desktop opener when clicked in the desktop shell', async () => {
+    channelsState.current = { 'gh-bot': { config: { type: 'github' } } };
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'gh-bot',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+        },
+      ],
+    };
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as TauriWindow).__TAURI__ = { core: { invoke } };
+    try {
+      await renderPage();
+      const link = container.querySelector<HTMLAnchorElement>('li a');
+      expect(link).toBeTruthy();
+      let event: MouseEvent | undefined;
+      await act(async () => {
+        event = new MouseEvent('click', { bubbles: true, cancelable: true });
+        link?.dispatchEvent(event);
+      });
+      expect(event?.defaultPrevented).toBe(true);
+      expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+        url: 'https://github.com/owner/repo/pull/42',
+      });
+    } finally {
+      delete (window as TauriWindow).__TAURI__;
+    }
+  });
+
+  it('keeps the target a native link in plain browsers', async () => {
+    channelsState.current = { 'gh-bot': { config: { type: 'github' } } };
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'gh-bot',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+        },
+      ],
+    };
+    await renderPage();
+    const link = container.querySelector<HTMLAnchorElement>('li a');
+    expect(link?.href).toBe('https://github.com/owner/repo/pull/42');
+    expect(link?.target).toBe('_blank');
+    let event: MouseEvent | undefined;
+    await act(async () => {
+      event = new MouseEvent('click', { bubbles: true, cancelable: true });
+      link?.dispatchEvent(event);
+    });
+    expect(event?.defaultPrevented).toBe(false);
   });
 
   it('shows how many further notifications a collapsed skip stands for', async () => {

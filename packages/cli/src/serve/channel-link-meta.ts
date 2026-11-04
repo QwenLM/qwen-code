@@ -6,7 +6,6 @@
 
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { resolveChannelCwd } from '../commands/channel/channel-cwd.js';
-import { loadSettings } from '../config/settings.js';
 
 /**
  * Non-secret metadata the channel events page needs to link a journal row to
@@ -28,16 +27,17 @@ export interface ChannelLinkMeta {
  * Workspace isolation mirrors the worker grouping: a channel owns this
  * workspace iff its resolved cwd canonicalizes back to it, so a user-scope
  * channel aimed at another project never leaks its metadata here.
+ *
+ * `loadChannels` must be a side-effect-free merged view (the route builds it
+ * with `readSettingsSnapshot` on the runtime's effective environment): the
+ * default `loadSettings(cwd)` would write the queried workspace's `.env`
+ * into the daemon's process-global environment and could rewrite a corrupt
+ * workspace settings file — both unacceptable on a read-only polling route.
  */
 export function channelLinkMetaForEvents(
   events: ReadonlyArray<{ channel: string }>,
   workspaceCwd: string,
-  loadChannels: (cwd: string) => Record<string, unknown> = (cwd) => {
-    const merged = loadSettings(cwd).merged as {
-      channels?: Record<string, unknown>;
-    };
-    return merged.channels ?? {};
-  },
+  loadChannels: (cwd: string) => Record<string, unknown>,
 ): Record<string, ChannelLinkMeta> {
   const names = new Set(events.map((event) => event.channel));
   if (names.size === 0) return {};

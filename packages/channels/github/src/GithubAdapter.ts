@@ -1127,7 +1127,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // URLs carry the web host, so map the API host to it. Scoped to a
       // single .ghe.com label on purpose: a self-hosted GHE Server may
       // legitimately serve web and API from an `api.`-prefixed host.
-      .replace(/^https:\/\/api\.([^./]+\.ghe\.com)/i, 'https://$1');
+      .replace(/^https:\/\/api\.([^./]+\.ghe\.com)/i, 'https://$1')
+      .replace(/\/+$/, '');
     this.githubHost = new URL(this.webOrigin).hostname.toLowerCase();
     this.octokit = new Octokit({
       auth,

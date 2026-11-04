@@ -18,6 +18,7 @@ import type {
   ChannelEventType,
 } from '@qwen-code/channel-base';
 import { supportedChannelCatalog } from '../../commands/channel/channel-registry.js';
+import { readSettingsSnapshot } from '../../config/settings.js';
 import { channelLinkMetaForEvents } from '../channel-link-meta.js';
 import type {
   ChannelPairingApprovalSubject,
@@ -532,13 +533,27 @@ export function registerWorkspaceChannelManagementRoutes(
         // The management listing is scope-local, but workers run with the
         // merged settings; attach non-secret link metadata so events of
         // user/system-scope channels owned by this workspace stay linkable.
-        // Settings loading can fail (corruption, I/O); the journal itself
-        // must stay readable, so degrade to unlinked rows instead of a 500.
+        // readSettingsSnapshot is side-effect-free (no process.env writes,
+        // no corruption recovery) and resolves ${VAR} against the runtime's
+        // effective environment, so one workspace's read can neither leak
+        // into another's nor mutate the daemon. A corrupt or unreadable
+        // settings layer throws; the journal itself must stay readable, so
+        // degrade to unlinked rows instead of a 500.
         let channelLinkMeta: Record<string, unknown> = {};
         try {
           channelLinkMeta = channelLinkMetaForEvents(
             result.events,
             runtime.workspaceCwd,
+            (cwd) => {
+              const loaded = readSettingsSnapshot(cwd, {
+                environment: runtime.env.effectiveEnv ?? process.env,
+                workspaceTrusted: runtime.trusted,
+              });
+              const merged = loaded.merged as {
+                channels?: Record<string, unknown>;
+              };
+              return merged.channels ?? {};
+            },
           );
         } catch {
           // Link metadata is best-effort decoration on a diagnostic view.
