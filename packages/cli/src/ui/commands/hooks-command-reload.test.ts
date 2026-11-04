@@ -28,10 +28,9 @@ import { readProjectEnvFiles } from '../../config/environment.js';
 const hook = (command: string) => [
   { matcher: '*', hooks: [{ type: 'command' as const, command }] },
 ];
-// Build the fixture from the same env sources the production hash reads:
-// findEnvFiles walks above the temp root, so an ancestor .env (CI runners
-// have one) must land in the recorded hash too, or the reloaded block reads
-// pending on those machines.
+// Build the fixture from the same env sources the production hash reads: the
+// approval hash covers only .env files the workspace owns, while findEnvFiles
+// still walks above it for the runtime env.
 const approvalFor = (
   root: string,
   hooks: Record<string, unknown>,
@@ -48,9 +47,13 @@ describe('/hooks reload with real settings files', () => {
 
   beforeEach(() => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hooks-reload-'));
-    // An ancestor .env of the repo, so the approval hash provably covers
-    // project env files on every machine, not only on CI runners.
-    fs.writeFileSync(path.join(directory, '.env'), 'HOOKS_RELOAD_FIXTURE=1\n');
+    // A .env the repo itself owns, so the approval hash covers it on every
+    // machine; an ancestor .env reaches only the runtime env, not the hash.
+    fs.mkdirSync(path.join(directory, 'repo'), { recursive: true });
+    fs.writeFileSync(
+      path.join(directory, 'repo', '.env'),
+      'HOOKS_RELOAD_FIXTURE=1\n',
+    );
     vi.stubEnv('QWEN_HOME', path.join(directory, 'user'));
     vi.stubEnv(
       'QWEN_CODE_HOOK_APPROVALS_PATH',

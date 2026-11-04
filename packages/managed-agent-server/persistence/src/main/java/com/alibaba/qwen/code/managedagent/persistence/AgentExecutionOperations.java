@@ -111,7 +111,7 @@ final class AgentExecutionOperations {
                     "Hosted context compression is unavailable.");
         }
         AgentSessionPolicies.requireSessionStatus(session.status(), "ACTIVE");
-        WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, binding.getStorageId());
+        WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, binding.getStorageId());
         sessionPolicies.requireCwdChangeRegistryFacts(session);
         if (contextCompressionState(tenantId, sessionId).compactionRevision() != expectedCompactionRevision) {
             throw new ManagedAgentException(409, "compaction_revision_conflict",
@@ -617,7 +617,7 @@ final class AgentExecutionOperations {
         // every sibling bound admission refuses it: a cancel admitted
         // behind the fence would wedge the migration's idle checks.
         if (session.workspace() != null) {
-            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId,
+            WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId,
                     session.workspace().getStorageId());
         }
         sessionPolicies.requireNoOpenOperation(tenantId, sessionId);
