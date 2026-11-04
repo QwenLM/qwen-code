@@ -13,7 +13,13 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -302,6 +308,11 @@ const allowOnce = () => ({
         NO_PROXY: noProxy,
         no_proxy: noProxy,
         QWEN_HOME: qwenHome,
+        // TestRig keeps QWEN_RUNTIME_DIR inside the workspace; leaving it
+        // there lets the session runtime write `tmp/<hash>` into the directory
+        // each run's request snapshot encodes, so give each run its own
+        // scratch runtime outside the workspace.
+        QWEN_RUNTIME_DIR: qwenHome,
       };
       delete env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'];
       if (shared) env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = '1';
@@ -496,8 +507,20 @@ const allowOnce = () => ({
           if (agent.exitCode !== null || agent.signalCode) resolve(undefined);
           else agent.once('exit', resolve);
         });
-        await removeScratchDir(qwenHome);
+        // Keep the runtime state for post-mortem whenever TestRig.cleanup()
+        // keeps the test directory, which it decides by truthiness.
+        if (!process.env['KEEP_OUTPUT']) {
+          await removeScratchDir(qwenHome);
+        }
       }
+      // The scratch runtime keeps the session runtime's `tmp/<hash>` and
+      // `usage/` out of the workspace; pin what TestRig wrote there instead
+      // of relying on the snapshot diff, which only trips on the losing side
+      // of a race.
+      expect(readdirSync(join(dir, '.qwen-home')).sort()).toEqual([
+        'settings.json',
+        'trustedFolders.json',
+      ]);
       return {
         requests: modelRequests(server, dir),
         dateReminders: streamingMessages(server).filter((messages) =>

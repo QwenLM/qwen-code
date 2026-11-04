@@ -379,10 +379,9 @@ public class WorkspaceExecutionStore
     public void claim(ContextBinding binding, RuntimeSessionRecord session) {
         WorkspaceStorageKindGuard.requireFreshTransaction();
         if (residents.find(binding) != null) {
-            transaction.executeWithoutResult(status -> {
-                WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
-                requireResidentHeld(binding, session, false);
-            });
+            // Read-only check with no tenant guard: it writes nothing a concurrent transition could
+            // observe, so it orders before any transition that commits after its snapshot.
+            transaction.executeWithoutResult(status -> requireResidentHeld(binding, session, false));
             return;
         }
         WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
@@ -564,8 +563,8 @@ public class WorkspaceExecutionStore
 
     public void release(ContextBinding binding, RuntimeSessionRecord session) {
         if (residents.find(binding) != null) {
+            // Read-only like the resident claim: no tenant guard.
             transaction.executeWithoutResult(status -> {
-                WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
                 requireResidentHeld(binding, session, true);
                 if (session.getState() != RuntimeSessionRecord.State.RELEASING
                         && session.getState() != RuntimeSessionRecord.State.RELEASED) {

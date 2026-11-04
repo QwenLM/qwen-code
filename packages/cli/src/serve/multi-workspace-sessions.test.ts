@@ -3194,9 +3194,11 @@ describe('multi-workspace session dispatch', () => {
       .set('Host', host())
       .send({ cwd: UNKNOWN_CWD });
 
-    expect(unknownRes.status).toBe(400);
-    expect(unknownRes.body.code).toBe('workspace_mismatch');
-    expect(unknownRes.body.workspaceCount).toBe(2);
+    // An explicit cwd with no registry entry is a permanent absence: 404
+    // workspace_not_found (the channel wake path keys Gone on it), not the
+    // reversible-state 400 workspace_mismatch.
+    expect(unknownRes.status).toBe(404);
+    expect(unknownRes.body.code).toBe('workspace_not_found');
     expect(unknownRes.body.boundWorkspace).toBe(PRIMARY_CWD);
     expect(unknownRes.body.requestedWorkspace).toBe(UNKNOWN_CWD);
     expect(unknown.primaryBridge.restoreCalls).toEqual([]);

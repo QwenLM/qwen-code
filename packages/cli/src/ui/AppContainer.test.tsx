@@ -1558,6 +1558,101 @@ describe('AppContainer State Management', () => {
       }).not.toThrow();
     });
 
+    it.each([
+      ['the folder is explicitly trusted', { trusted: true }],
+      ['every hook is disabled', { trusted: false, disableAllHooks: true }],
+    ] as Array<[string, { trusted: boolean; disableAllHooks?: boolean }]>)(
+      'does not warn about withheld project hooks when %s',
+      async (_, state) => {
+        const addItem = vi.fn();
+        mockedUseHistory.mockReturnValue({
+          history: [],
+          addItem,
+          updateItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+          truncateToItem: vi.fn(),
+        });
+        vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+        vi.spyOn(mockConfig, 'isExplicitlyTrustedFolder').mockReturnValue(
+          state.trusted,
+        );
+        vi.spyOn(mockConfig, 'getDisableAllHooks').mockReturnValue(
+          state.disableAllHooks ?? false,
+        );
+        const settings = {
+          ...mockSettings,
+          workspace: { settings: { hooks: { SessionStart: [] } } },
+        } as unknown as LoadedSettings;
+
+        const { unmount } = render(
+          <AppContainer
+            config={mockConfig}
+            settings={settings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        await act(async () => {});
+
+        expect(addItem).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            text: expect.stringContaining(
+              'Project hooks in .qwen/settings.json',
+            ),
+          }),
+          expect.any(Number),
+        );
+        unmount();
+      },
+    );
+
+    it('warns once when an untrusted interactive session withholds project hooks', async () => {
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'isExplicitlyTrustedFolder').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'getDisableAllHooks').mockReturnValue(false);
+      const settings = {
+        ...mockSettings,
+        workspace: {
+          settings: {
+            hooks: {
+              SessionStart: [
+                { hooks: [{ type: 'command', command: 'echo x' }] },
+              ],
+            },
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      const { unmount } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await act(async () => {});
+
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.WARNING,
+          text: expect.stringContaining('Project hooks in .qwen/settings.json'),
+        }),
+        expect.any(Number),
+      );
+      unmount();
+    });
+
     it('renders with startup warnings', () => {
       const startupWarnings = ['Warning 1', 'Warning 2'];
 

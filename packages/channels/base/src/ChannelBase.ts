@@ -1,6 +1,7 @@
 import { basename, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type {
+  ChannelBoundSessions,
   ChannelConfig,
   ChannelMemoryCallbacks,
   ChannelMemoryEntry,
@@ -257,6 +258,12 @@ export interface ChannelBaseOptions {
   bridgeRecovery?: () => Promise<void> | undefined;
   groupHistoryPath?: string;
   loopController?: ChannelLoopController;
+  /**
+   * Daemon-backed delivery into PR-bound sessions the channel does not own.
+   * Only the daemon channel worker provides it; adapters must treat its
+   * absence as "feature unavailable" and keep channel-session routing.
+   */
+  boundSessions?: ChannelBoundSessions;
   observedContacts?: {
     observe(
       channelName: string,
@@ -493,6 +500,7 @@ export abstract class ChannelBase {
   // re-post once per still-pending request, but never per trigger.
   private readonly groupPairingNotified = new Map<string, string>();
   private readonly loopController?: ChannelLoopController;
+  protected readonly boundSessions?: ChannelBoundSessions;
   private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
   private readonly namedSessions?: NamedSessionManager;
   private readonly observedContactEnvelopes = new WeakSet<Envelope>();
@@ -1440,6 +1448,7 @@ export abstract class ChannelBase {
         ),
     );
     this.loopController = options?.loopController;
+    this.boundSessions = options?.boundSessions;
     this.observedContacts = options?.observedContacts;
     this.bridgeRecovery = options?.bridgeRecovery;
 
