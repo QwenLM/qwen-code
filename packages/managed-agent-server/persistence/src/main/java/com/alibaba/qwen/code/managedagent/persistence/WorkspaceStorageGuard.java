@@ -228,8 +228,26 @@ public class WorkspaceStorageGuard {
         return root(binding.getTenantId(), binding.getStorageId());
     }
 
+    Path verifiedRootForRead(ContextBinding binding) {
+        if (!enabled) {
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        }
+        String tenant = binding.getTenantId();
+        String storage = binding.getStorageId();
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenant, storage);
+        WorkspaceMigrationAdmission.requireOpenForRead(jdbc, tenant, storage);
+        return verify(tenant, storage, binding.getCwdRelative(), row(LocalStorageOwners.key(jdbc, tenant, storage, false), false));
+    }
+
     Map<String, String> fileRoot(ContextBinding binding) {
-        Path path = verifiedRoot(binding);
+        return fileRoot(verifiedRoot(binding));
+    }
+
+    Map<String, String> fileRootForRead(ContextBinding binding) {
+        return fileRoot(verifiedRootForRead(binding));
+    }
+
+    private Map<String, String> fileRoot(Path path) {
         Identity actual = identity(path);
         return Map.of("root", path.toString(), "device", actual.device(), "inode", actual.inode());
     }
@@ -459,9 +477,12 @@ public class WorkspaceStorageGuard {
     }
 
     private void verify(String tenantId, String storageId, String cwd, boolean lock) {
+        verify(tenantId, storageId, cwd, row(key(tenantId, storageId), lock));
+    }
+
+    private Path verify(String tenantId, String storageId, String cwd, Registration row) {
         Path root = root(tenantId, storageId);
         Identity actual = identity(root);
-        Registration row = row(key(tenantId, storageId), lock);
         if (row == null || !"READY".equals(row.state()) || row.operationId() != null
                 || row.revision() <= 0) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
@@ -481,6 +502,7 @@ public class WorkspaceStorageGuard {
         } catch (IOException | IllegalArgumentException error) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
+        return root;
     }
 
     private void requireNoExecutionMembers(String physical) {

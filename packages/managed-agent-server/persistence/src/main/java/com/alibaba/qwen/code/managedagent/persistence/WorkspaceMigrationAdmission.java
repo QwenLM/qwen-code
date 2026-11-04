@@ -45,6 +45,10 @@ final class WorkspaceMigrationAdmission {
         requireOpen(jdbc, tenant, storage, lockClause(jdbc, false));
     }
 
+    static void requireOpenForRead(JdbcTemplate jdbc, String tenant, String storage) {
+        requireOpen(jdbc, tenant, storage, "");
+    }
+
     static void requireOpenForAdmission(JdbcTemplate jdbc, String tenant, String storage) {
         requireOpen(jdbc, tenant, storage, lockClause(jdbc, true));
     }
