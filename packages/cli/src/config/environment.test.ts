@@ -2264,7 +2264,8 @@ describe('project hook approval env files stay inside the workspace', () => {
       const hashOf = (
         files: Record<string, unknown>,
         settingsEnv: unknown,
-      ): string => hashProjectHooks({ hooks, env: { files, settings: settingsEnv } });
+      ): string =>
+        hashProjectHooks({ hooks, env: { files, settings: settingsEnv } });
 
       const before = hashOf(readProjectEnvFiles(settings, root), null);
       fs.writeFileSync(path.join(root, '.env'), 'INSIDE_ROOT=1\n');
