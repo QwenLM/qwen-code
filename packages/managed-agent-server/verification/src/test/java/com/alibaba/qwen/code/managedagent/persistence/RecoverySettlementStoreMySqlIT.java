@@ -34,7 +34,7 @@ class RecoverySettlementStoreMySqlIT extends RecoverySettlementStoreTest {
     @ParameterizedTest
     @ValueSource(strings = {"cancel", "fail", "recovery-blocked"})
     void removingThePreReadWouldChangeAnOldSnapshotOwnerDecision(String route) {
-        jdbc.update("UPDATE ma_turn SET harness_event_epoch = NULL, submission_attempted = FALSE"
+        jdbc.update("UPDATE ma_turn SET harness_event_epoch = NULL, is_submission_attempted = FALSE"
                 + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?", TENANT, sessionId, turnId);
         transactions.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         transactions.executeWithoutResult(status -> {
@@ -55,7 +55,7 @@ class RecoverySettlementStoreMySqlIT extends RecoverySettlementStoreTest {
                     String.class, TENANT, sessionId, turnId)).isEqualTo("RUNNING");
             // The proposed UPDATE-first decision sees the committed owner, unlike requireTurn's snapshot.
             String predicates = route.equals("cancel")
-                    ? " AND harness_event_epoch IS NULL AND submission_attempted = FALSE"
+                    ? " AND harness_event_epoch IS NULL AND is_submission_attempted = FALSE"
                     : " AND status IN ('ACCEPTED', 'RUNNING'" + (route.equals("fail") ? ", 'CANCELLING')" : ")");
             assertThat(jdbc.update("UPDATE ma_turn SET status = ? WHERE tenant_id = ? AND session_id = ? AND turn_id = ?"
                     + " AND dispatch_owner = ? AND dispatch_lease_until >= ?" + predicates,
