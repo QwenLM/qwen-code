@@ -8,7 +8,7 @@ import * as fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
 import { Storage } from '../config/storage.js';
-import { QWEN_DIR } from '../utils/paths.js';
+import { isSubpath, QWEN_DIR } from '../utils/paths.js';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
 import {
   isBinary,
@@ -413,14 +413,16 @@ export function getUserOutputStylesDir(): string {
  * The root a user style file must resolve inside. It is the home directory
  * rather than `~/.qwen`, because `~/.qwen/output-styles/x.md ->
  * ~/dotfiles/x.md` is an ordinary dotfiles setup and has to keep working;
- * an explicit `QWEN_HOME` relocates the root with it.
+ * an explicit `QWEN_HOME`, or an `XDG_CONFIG_HOME` outside the home directory,
+ * relocates the root with it.
  */
 export function getUserOutputStylesRoot(): string {
-  const envDir = process.env['QWEN_HOME'];
-  if (envDir) {
-    return Storage.getGlobalQwenDir();
+  const globalDir = Storage.getGlobalQwenDir();
+  const home = os.homedir();
+  if (process.env['QWEN_HOME'] || (home && !isSubpath(home, globalDir))) {
+    return globalDir;
   }
-  return os.homedir() || path.dirname(Storage.getGlobalQwenDir());
+  return home || path.dirname(globalDir);
 }
 
 export function getProjectOutputStylesDir(projectRoot: string): string {

@@ -539,6 +539,23 @@ describe('loadOutputStyleCatalog', () => {
     expect(labels(catalog)).toContain('qwenhome:user');
   });
 
+  it('reads the user level from an XDG_CONFIG_HOME outside the home directory', async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const stylesDir = path.join(root, 'xdg', 'qwen', 'output-styles');
+    await fs.rm(path.join(fakeHome, '.qwen'), { recursive: true });
+    await fs.mkdir(stylesDir, { recursive: true });
+    await writeFiles(stylesDir, { 'xdgstyle.md': 'XDG' });
+    vi.stubEnv('QWEN_HOME', undefined);
+    vi.stubEnv('XDG_CONFIG_HOME', path.join(root, 'xdg'));
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    try {
+      const catalog = await loadOutputStyleCatalog();
+      expect(labels(catalog)).toContain('xdgstyle:user');
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
+  });
+
   it('keeps the project level when QWEN_HOME points away from the home directory', async () => {
     vi.stubEnv('QWEN_HOME', path.join(root, 'elsewhere', '.qwen'));
     await writeFiles(userDir, { 'homestyle.md': 'Home' });
