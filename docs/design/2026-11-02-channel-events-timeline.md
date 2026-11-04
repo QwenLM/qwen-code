@@ -105,22 +105,22 @@ handling.
 
 ### 2. Emit points
 
-| Where                                                              | Event                                                                                                                |
-| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
-| `ChannelBase.logPreflightRejected`                                 | `inbound` / `skipped` with the rejection reason                                                                      |
-| `ChannelBase.preflightInbound` (message route, `mention_required`) | `inbound` / `skipped` with `message_route` or `group_mention_required`                                               |
-| `ChannelBase.processPreflightedInbound`                            | `inbound` / `accepted`                                                                                               |
-| `PollingChannelBase.runLoop`                                       | `poll` / `ok` with `durationMs` and the adapter's detail, `poll` / `failed` with `consecutiveErrors`                 |
-| `GithubAdapter` reason filter                                      | `inbound` / `skipped`, reason `reason_filter`; past 20 in one poll, one row with `detail.filtered` counting the rest |
-| `GithubAdapter` comment lane (`onlyMentioned` miss)                | `inbound` / `skipped`, reason `mention_required`                                                                     |
-| `GithubAdapter` dedupe hit                                         | `inbound` / `skipped`, reason `duplicate`                                                                            |
-| `GithubAdapter.claimInboundTask`                                   | `task` / `accepted`, with `sessionId` when the target is a bound session                                             |
-| `GithubAdapter.transitionInboundTask`                              | `task` / `<state>` with `attempts`, `error` and the bound `sessionId`; §5 overrides the terminal word                |
-| `GithubAdapter.recordPublicationAudit`                             | `outbound` / `<outcome>` (also keep the audit file)                                                                  |
-| `GithubAdapter.runInboundTask` (bound verdict)                     | `task` / `delivered`, or `task` / `retired` with a reason (§5)                                                       |
-| `GithubAdapter.retireBoundTask`                                    | `task` / `retired`, reason `dead_letter`; `task` / `failed`, reason `dead_letter_write_failed` (§5)                  |
-| `GithubAdapter.drainPendingWatch` (retire before claim)            | `inbound` / `skipped`, reason `watch_no_candidate` (§5)                                                              |
-| `GithubAdapter` binding scan and watch guard                       | `poll` / `degraded` with a reason and `detail.streak`, at the existing throttles or on a state edge (§5)             |
+| Where                                                              | Event                                                                                                                              |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `ChannelBase.logPreflightRejected`                                 | `inbound` / `skipped` with the rejection reason                                                                                    |
+| `ChannelBase.preflightInbound` (message route, `mention_required`) | `inbound` / `skipped` with `message_route` or `group_mention_required`                                                             |
+| `ChannelBase.processPreflightedInbound`                            | `inbound` / `accepted`                                                                                                             |
+| `PollingChannelBase.runLoop`                                       | `poll` / `ok` with `durationMs` and the adapter's detail, `poll` / `failed` with `consecutiveErrors`                               |
+| `GithubAdapter` reason filter                                      | `inbound` / `skipped`, reason `reason_filter`; past 20 in one poll, one row with `detail.filtered` counting the rest               |
+| `GithubAdapter` comment lane (`onlyMentioned` miss)                | `inbound` / `skipped`, reason `mention_required`                                                                                   |
+| `GithubAdapter` dedupe hit                                         | `inbound` / `skipped`, reason `duplicate`                                                                                          |
+| `GithubAdapter.claimInboundTask`                                   | `task` / `accepted`, with `sessionId` when the target is a bound session                                                           |
+| `GithubAdapter.transitionInboundTask`                              | `task` / `<state>` with `attempts`, `error` and the bound `sessionId`; §5 overrides the terminal word                              |
+| `GithubAdapter.recordPublicationAudit`                             | `outbound` / `<outcome>` (also keep the audit file)                                                                                |
+| `GithubAdapter.runInboundTask` (bound verdict)                     | `task` / `delivered`, or `task` / `retired` with a reason (§5)                                                                     |
+| `GithubAdapter.retireBoundTask`                                    | `task` / `retired`, reason `dead_letter`; `task` / `failed`, reason `dead_letter_write_failed` (§5)                                |
+| `GithubAdapter.drainPendingWatch` (retire before claim)            | `inbound` / `skipped`, reason `watch_no_candidate` (§5)                                                                            |
+| `GithubAdapter` binding scan and watch guard                       | `poll` / `degraded` with a reason, at the existing throttles or on a state edge; binding-scan rows also carry `detail.streak` (§5) |
 
 `PollingChannelBase` gains a `setPollEventDetail` seam so an adapter can attach
 its own counters (GitHub reports how many notifications a poll returned)
@@ -202,8 +202,9 @@ must not be the answer when the journal could not be read.
   duration, and error. A bound delivery also shows the session it reached as a
   chip truncated to 8 characters, with the full identity in `title` — a UUID
   would otherwise push the reason and the counters out of the column. A
-  degraded poll shows `detail.streak` and, for a partial binding scan,
-  `detail.sessions`. The workspace selector lists the registered, non-live
+  binding-scan `degraded` row shows `detail.streak` (a count of scans, not
+  polls) and, when the scan is partial, `detail.sessions`; the watch-guard
+  rows carry only their reason. The workspace selector lists the registered, non-live
   workspaces exactly as the management page does, because the provider's cwd is
   the daemon-wide primary workspace and a Channel started in a secondary
   workspace would otherwise be unreachable. Changing the workspace resets the
@@ -241,33 +242,50 @@ flight ended on the same word.
 **A verdict, not a boolean.** `deliverToBoundSession` is private and has one
 caller. Its `boolean` meant "settled", which conflated an injected prompt, a
 private retire and the public fallback — only the first is a delivery. It now
-returns `{ kind: 'delivered' }`, `{ kind: 'retired', reason }`,
+returns `{ kind: 'delivered' }`, `{ kind: 'retired', reason, sessionId? }`,
 `{ kind: 'public' }` or `{ kind: 'deferred' }`, and `runInboundTask` derives the
 journal's terminal word from it. No routing, fallback, budget or cursor
 decision changed: the deferred verdict is the old `false`, and every other
 verdict is the old `true`. The public verdict emits nothing because the public
-path journals its own acceptance and publication.
+path journals its own acceptance and publication. A retire carries the session
+it lost, because those exits clear the delivery before returning.
 
 `transitionInboundTask` takes an optional journal override so the bound
 acceptance mark can be persisted as `running` (there is no `delivered` task
 state — the record is removed immediately after) while the journal's last word
-is terminal. Without the override a preflight-rejected event would be recorded
-as delivered, because that exit consumes the task with its delivery still set.
+is terminal. Without the override a preflight-rejected event would still end on
+`running` — indistinguishable from a delivery in flight — because that exit
+consumes the task with its delivery still set. The same method remembers the
+target a task held going in, so the rows written while a delivery is cleared
+keep their `sessionId` instead of losing the session they are about.
 
 **New outcomes.** `task` / `delivered` and `task` / `retired` are journal-only
 terminal words, not persisted task states. `retired` carries a reason:
 `preflight_rejected`, `watch_no_target`, `watch_no_candidate`,
 `watch_session_gone`, `dead_letter`. A failed dead-letter append journals
 `task` / `failed` with reason `dead_letter_write_failed`, because the task is
-kept and stays recoverable — it is not a retire. Both dead-letter rows are
-written after the durable step they describe, so a throwing removal or save
-cannot leave a retire claim behind.
+kept and stays recoverable — it is not a retire. Every terminal row is written
+after the durable step it describes, so a throwing removal or save cannot leave
+a retire claim behind for an event the next poll re-runs.
 
-**No new event type, no protocol change.** `outcome` is a free string in the
-journal, the SDK and the route, so the four types and both routes are unchanged;
-only the page's label catalog grows. Reusing `outbound` for a private injection
-was rejected: that type means "published to GitHub", and a bound reply is
-explicitly not published.
+Two watch retires happen before any task is claimed, so they have no task row to
+close and journal `inbound` / `skipped` instead: `watch_no_candidate` when a
+complete snapshot has no candidate left, and `watch_pending_overflow` when the
+per-PR pending queue passes its cap and the oldest event is retired undelivered.
+The pre-claim retire rolls its slice back if the watch-state save throws: the
+slice mutates the loaded state before the save, and a failed save does not clear
+the loaded flag, so without the rollback the next poll would skip the entry and
+the end-of-pass save would persist the truncation — losing the event with no
+trace at all.
+
+**No new event type, no wire change.** `outcome` is a free string in the
+journal, the SDK and the route, so the four types, both routes and the response
+shape are unchanged; only the page's label catalog grows. The protocol
+_reference_ is updated, because it is where integrators read the vocabulary:
+it now documents the open outcome string, the new terminals and reasons, and
+which rows carry `sessionId` and `detail`. Reusing `outbound` for a private
+injection was rejected: that type means "published to GitHub", and a bound
+reply is explicitly not published.
 
 **Never the message body.** The dead-letter record carries `text` for operator
 recovery, and its write-failure path dumps the whole payload to stderr. Neither
@@ -284,13 +302,36 @@ notification stalls, yet the poll itself reports `ok`. The adapter now journals
 — and `watch_reconcile_blocked` / `watch_pending_unreconciled` on the false→true
 edge of the existing `watchReconcileBlocked` flag. Reusing those throttles and
 that flag means no new adapter state and no new flood: a permanent outage
-cannot rotate the useful rows out of the journal. Recovery is implicit in the
-`poll` / `ok` rows that follow.
+cannot rotate the useful rows out of the journal.
 
-Attaching this to the existing poll detail instead was considered and rejected:
-`setPollEventDetail` is called by the comment lane, and both cold-start gates
-return _before_ it — the detail would be missing in exactly the case it exists
-to report.
+`detail.streak` counts **binding scans, not polls**: `refreshBoundSessions` also
+runs on every gone-session retry, so one poll can advance it more than once.
+The label and the stderr wording say scans for that reason. Likewise
+`detail.sessions` is the scan's own row count, not the routing map's size —
+the map is keyed per PR, so one session following two PRs would otherwise be
+reported as two sessions and send the operator chasing an under-read that never
+happened.
+
+**Recovery is journalled on the clearing edge**, as `watch_reconcile_recovered`.
+A `poll` / `ok` row cannot serve as that signal: the base writes one after every
+poll that does not throw, including every poll of a sustained outage, so it is
+present throughout the degraded window and unchanged at its end. Only the
+watch-guard reasons have a recovery row; the binding-scan reasons recover
+implicitly, because a successful scan simply stops producing degraded rows and
+the next `bindings_*` streak starts over.
+
+The watch-guard row also classifies its cause. `hasUnreconciledWatchPending()`
+is fail-closed on a read error, so an unreadable sidecar blocks recovery too —
+but reporting that as a pending backlog would name a remedy (re-enable
+subscriptions) that cannot clear it. With subscriptions off, the state is loaded
+first: a read failure journals `watch_reconcile_blocked` with the error, and
+`watch_pending_unreconciled` is reserved for a state that really holds a pending
+event. The gate itself is unchanged and stays fail-closed.
+
+Attaching the binding-scan health to the existing poll detail instead was
+considered and rejected: `setPollEventDetail` is called by the comment lane, and
+both cold-start gates return _before_ it — the detail would be missing in
+exactly the case it exists to report.
 
 Two stderr sites are deliberately not journaled: the watch pass failure and the
 "keeping previous map" refresh failure. Both run on every poll with no throttle
@@ -325,10 +366,12 @@ It is now labelled in both languages and coloured as a failure.
   `components/sidebar/WebShellSidebar.tsx`, `utils/navigationUrl.ts`,
   `i18n.tsx`
 
-§5 touches only `packages/channels/github/src/GithubAdapter.ts` and its test,
-`ChannelEventsPage.tsx` / `.module.css` / `.test.tsx`, and
-`channel-events-messages.ts`. The journal module, the base classes, the daemon
-route, the SDK types and the protocol are unchanged.
+§5 touches `packages/channels/github/src/GithubAdapter.ts` and its test,
+`ChannelEventsPage.tsx` / `.module.css` / `.test.tsx`,
+`channel-events-messages.ts`, and `docs/developers/qwen-serve-protocol.md` —
+the reference integrators read, which now publishes the outcome vocabulary and
+says which rows carry `sessionId` and `detail`. The journal module, the base
+classes, the daemon route, the SDK types and the wire shape are unchanged.
 
 ## Design decisions
 
@@ -387,10 +430,16 @@ route, the SDK types and the protocol are unchanged.
   trigger, a task transition, and the publication outcome appear in order.
 - §5 unit: a private delivery ends on `delivered` naming the session; a
   preflight rejection ends on `retired` and never on `delivered`; a rebind
-  shows both session ids; each watch retire and the dead-letter (both outcomes)
-  are journaled; the body reaches stderr but no journal row; each degraded
-  reason appears once per throttle window or state edge, and the cold-start
-  escape is journaled at the horizon. Every one of these guards was
+  shows both session ids and pins the retarget row's word; every watch retire
+  — including the pre-claim skip and the pending-queue overflow — and the
+  dead-letter (both outcomes) are journaled; the body reaches the dead-letter
+  file and stderr but no journal row; each degraded reason appears once per
+  throttle window, re-emits on the later windows and restarts after a reset;
+  the cold-start escape is journaled at the horizon on both the success and the
+  failure path; a retire is not claimed when the removal or the save throws;
+  and the watch guard's clearing edge is journalled, because a `poll` / `ok`
+  row is written throughout the outage and cannot mark its end. Every one of
+  these guards was
   mutation-verified: 22 mutations, 22 killed. Two of them exist only to prove
   the privacy assertion is load-bearing — one smuggles the body into another
   field of a retire row, the other appends it after the write error so the

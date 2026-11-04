@@ -84,7 +84,7 @@
 | `GithubAdapter.runInboundTask`（私投递判定）                   | `task` / `delivered`，或 `task` / `retired` 带原因（§5）                                                     |
 | `GithubAdapter.retireBoundTask`                                | `task` / `retired`，原因 `dead_letter`；`task` / `failed`，原因 `dead_letter_write_failed`（§5）             |
 | `GithubAdapter.drainPendingWatch`（claim 前退休）              | `inbound` / `skipped`，原因 `watch_no_candidate`（§5）                                                       |
-| `GithubAdapter` 绑定扫描与 watch 守卫                          | `poll` / `degraded`，带原因与 `detail.streak`，只打在既有限流点或状态边沿上（§5）                            |
+| `GithubAdapter` 绑定扫描与 watch 守卫                          | `poll` / `degraded`，带原因，只打在既有限流点或状态边沿上；绑定扫描行另带 `detail.streak`（§5）              |
 
 `PollingChannelBase` 增加 `setPollEventDetail` 挂点，适配器可以挂自己的计数（GitHub 报告本次轮询取到多少条通知），基类不需要知道这些字段。基类在轮询开始前清空该字段，并在本次轮询结束后才消费它，因此事件绝不会把上一次轮询的计数记到本次的时间戳上。
 
@@ -110,7 +110,7 @@ GET /workspaces/:workspace/channels/events
 ### 4. Web Shell
 
 - `useChannelEvents` 在页面挂载且可见期间轮询该路由（5 秒），标签页隐藏时暂停、重新可见时刷新；页面另提供手动刷新。**同一时刻只允许一个轮询周期在途**：请求未完成时恢复可见绝不能再启动一个，否则两者结束时都会 schedule，而只保留最后一个定时器句柄，另一个成为永远轮询的孤儿——慢响应下的普通标签页切换会永久倍增日志读取。因此请求在途时恢复可见，是让该请求结束后再重新排程。两条读取路径都有时间上界（SDK 默认 30 秒 fetch 超时与 action 超时），所以该守卫不会让循环停摆。每份快照都带上产生它的查询（工作区、渠道、类型、limit），不匹配的数据会被遮蔽，做法与 `useDaemonChannels` 一致：底层 resource 在请求进行中或失败后仍保留旧数据，没有这个标记的话，上一个工作区的行——以及过滤选项里它的渠道名——就会显示在新选中的工作区下。
-- `ChannelEventsPage` 渲染按时间倒序的时间线，带工作区选择器、渠道过滤、类型过滤，每行显示：时间、渠道、类型、结果、目标（`owner/repo#12`）、操作者、原因或触发类型、耗时、错误。私投递还会显示它到达的会话：一个截断到 8 个字符的标记，完整标识放在 `title` 里——否则一个 UUID 会把原因和计数挤出该列。降级轮询显示 `detail.streak`，绑定扫描不完整时还显示 `detail.sessions`。工作区选择器与管理页一样列出已注册的非 live 工作区，因为 provider 的 cwd 是 daemon 全局的主工作区，否则在次工作区启动的渠道将无法查看。切换工作区会重置渠道过滤。
+- `ChannelEventsPage` 渲染按时间倒序的时间线，带工作区选择器、渠道过滤、类型过滤，每行显示：时间、渠道、类型、结果、目标（`owner/repo#12`）、操作者、原因或触发类型、耗时、错误。私投递还会显示它到达的会话：一个截断到 8 个字符的标记，完整标识放在 `title` 里——否则一个 UUID 会把原因和计数挤出该列。绑定扫描的 `degraded` 行显示 `detail.streak`（扫描次数，不是轮询次数），扫描不完整时还显示 `detail.sessions`；watch 守卫行只显示原因。工作区选择器与管理页一样列出已注册的非 live 工作区，因为 provider 的 cwd 是 daemon 全局的主工作区，否则在次工作区启动的渠道将无法查看。切换工作区会重置渠道过滤。
 - 适配器能写出的每个结果都有中英文标签。`KNOWN_OUTCOMES` 被导出，以便测试断言两份目录都覆盖它：翻译器会先回退到英文、再回退到原始键，所以缺一个中文标签只会静默显示英文。页面不认识的结果仍按原始 token 渲染——不好读，但安全。
 - 它是独立页面：`activePanel` 取值 `channel-events`，URL 为 `/channel-events`，侧边栏主导航项为 `channelEvents`。
 - 由 `channel_management` 能力位与受信任工作区门禁，与管理页一致。
@@ -130,19 +130,27 @@ PR #16117 增加了第二条投递通道：开启 `deliverToBoundSessions` 后�
 
 第一行最糟：已投递的事件和仍在途的事件，最后一个词是同一个。
 
-**用判定结果，而不是布尔值。** `deliverToBoundSession` 是私有方法且只有一个调用方。它原来的 `boolean` 含义是「已了结」，把「注入成功」「私下退休」「公开回退」混为一谈——只有第一个才是投递。现在它返回 `{ kind: 'delivered' }`、`{ kind: 'retired', reason }`、`{ kind: 'public' }` 或 `{ kind: 'deferred' }`，由 `runInboundTask` 据此推导日志的终态用词。路由、回退、预算与游标判定一个都没改：deferred 就是原来的 `false`，其余判定都是原来的 `true`。public 判定不发任何事件，因为公开路径自己会记接受与发表。
+**用判定结果，而不是布尔值。** `deliverToBoundSession` 是私有方法且只有一个调用方。它原来的 `boolean` 含义是「已了结」，把「注入成功」「私下退休」「公开回退」混为一谈——只有第一个才是投递。现在它返回 `{ kind: 'delivered' }`、`{ kind: 'retired', reason, sessionId? }`、`{ kind: 'public' }` 或 `{ kind: 'deferred' }`，由 `runInboundTask` 据此推导日志的终态用词。路由、回退、预算与游标判定一个都没改：deferred 就是原来的 `false`，其余判定都是原来的 `true`。public 判定不发任何事件，因为公开路径自己会记接受与发表。退休判定会带上它失去的那个会话，因为那些出口在返回前就清掉了 delivery。
 
-`transitionInboundTask` 增加一个可选的日志覆盖参数，使私投递的接受标记仍能按 `running` 持久化（不存在 `delivered` 这个任务状态——记录紧接着就被删除），而日志的最后一个词是终态。没有这个覆盖，被 preflight 拒绝的事件会被记成已投递，因为那个出口在 delivery 仍然挂着的情况下就消费掉了任务。
+`transitionInboundTask` 增加一个可选的日志覆盖参数，使私投递的接受标记仍能按 `running` 持久化（不存在 `delivered` 这个任务状态——记录紧接着就被删除），而日志的最后一个词是终态。没有这个覆盖，被 preflight 拒绝的事件仍会以 `running` 收尾——和「还在投递中」无法区分——因为那个出口在 delivery 仍然挂着的情况下就消费掉了任务。同一个方法还会记住任务进来时持有的目标，因此清除 delivery 时写的那些行仍带着 `sessionId`，不会丢掉它们所指的那个会话。
 
-**新增结果词。** `task` / `delivered` 与 `task` / `retired` 只是日志用的终态词，不是持久化的任务状态。`retired` 带原因：`preflight_rejected`、`watch_no_target`、`watch_no_candidate`、`watch_session_gone`、`dead_letter`。死信追加失败记 `task` / `failed`，原因 `dead_letter_write_failed`，因为任务被保留、仍可恢复——那不是退休。两条死信记录都写在它们所描述的持久化步骤**之后**，因此删除或保存抛错时不会留下一个虚假的退休声明。
+**新增结果词。** `task` / `delivered` 与 `task` / `retired` 只是日志用的终态词，不是持久化的任务状态。`retired` 带原因：`preflight_rejected`、`watch_no_target`、`watch_no_candidate`、`watch_session_gone`、`dead_letter`。死信追加失败记 `task` / `failed`，原因 `dead_letter_write_failed`，因为任务被保留、仍可恢复——那不是退休。每一条终态行都写在它所描述的持久化步骤**之后**，因此删除或保存抛错时，不会为一个下一轮还会重跑的事件留下退休声明。
 
-**不新增事件类型，不改协议。** `outcome` 在日志、SDK 和路由里都是自由字符串，所以四个类型与两条路由都不变，只有页面的标签目录变大。曾考虑用 `outbound` 表示私投递注入，被否掉了：那个类型的含义是「已发表到 GitHub」，而绑定会话的回复明确不发表。
+有两处 watch 退休发生在任何任务被 claim 之前，因此没有 task 行可收尾，改记 `inbound` / `skipped`：完整快照下已无候选时记 `watch_no_candidate`；按 PR 的待办队列超过上限、最老的事件被未投递退休时记 `watch_pending_overflow`。claim 前退休在 watch 状态保存抛错时会回滚它的 slice：slice 在保存之前就改了已加载的内存态，而保存失败不会清除已加载标志，因此不回滚的话下一轮会跳过该条目、随后一次保存又把截断后的状态写回磁盘——事件就此丢失且不留任何痕迹。
+
+**不新增事件类型，不改线上形状。** `outcome` 在日志、SDK 和路由里都是自由字符串，所以四个类型、两条路由与响应形状都不变，只有页面的标签目录变大。协议**参考文档**是要更新的，因为集成方正是在那里读词汇：它现在写明了开放的 outcome 字符串、新的终态与原因，以及哪些行带 `sessionId` 与 `detail`。曾考虑用 `outbound` 表示私投递注入，被否掉了：那个类型的含义是「已发表到 GitHub」，而绑定会话的回复明确不发表。
 
 **绝不记录消息正文。** 死信记录为了运维恢复会带 `text`，其写失败路径还会把整个 payload dump 到 stderr。两者都不进日志：失败行只带写盘错误。有一条测试断言正文出现在 stderr、且不出现在任何日志行里。
 
-**依赖降级。** 绑定扫描是一个新的硬依赖：只要它从未成功过，冷启动门就会推迟评论通道，于是**所有**通知停摆，而轮询本身仍报 `ok`。适配器现在在它**本来就限流**的那几行 stderr 旁边记 `poll` / `degraded`——`bindings_unreachable`（首次失败，之后每十次）、`bindings_partial`（第十次，之后每六十次，带 `detail.sessions`）、`bindings_cold_empty`（首次，之后每十次，以及有界逃逸打开评论通道时再记一次）——并在既有 `watchReconcileBlocked` 标志的 false→true 边沿记 `watch_reconcile_blocked` / `watch_pending_unreconciled`。复用这些限流和这个标志意味着不新增适配器状态、也不新增洪水：永久故障不会把有用的行挤出日志轮转窗口。恢复由随后的 `poll` / `ok` 行隐含表达。
+**依赖降级。** 绑定扫描是一个新的硬依赖：只要它从未成功过，冷启动门就会推迟评论通道，于是**所有**通知停摆，而轮询本身仍报 `ok`。适配器现在在它**本来就限流**的那几行 stderr 旁边记 `poll` / `degraded`——`bindings_unreachable`（首次失败，之后每十次）、`bindings_partial`（第十次，之后每六十次，带 `detail.sessions`）、`bindings_cold_empty`（首次，之后每十次，以及有界逃逸打开评论通道时再记一次）——并在既有 `watchReconcileBlocked` 标志的 false→true 边沿记 `watch_reconcile_blocked` / `watch_pending_unreconciled`。复用这些限流和这个标志意味着不新增适配器状态、也不新增洪水：永久故障不会把有用的行挤出日志轮转窗口。
 
-曾考虑把这些信息挂到现有轮询 detail 上，被否掉了：`setPollEventDetail` 由评论通道调用，而两个冷启动门都在它**之前**就 return——恰恰在它最该报告的那种情况下，detail 永远设不上。
+`detail.streak` 统计的是**绑定扫描次数，不是轮询次数**：`refreshBoundSessions` 在每次 gone 会话重试时也会跑，所以一次轮询可能让它加不止一次。标签与 stderr 措辞因此都说「扫描」。同理 `detail.sessions` 用的是本次扫描自己的行数，而不是路由映射的大小——映射按 PR 建键，一个会话关注两个 PR 就会被报成两个会话，把运维支使去查一个根本没发生的漏读。
+
+**恢复记在清零边沿上**，即 `watch_reconcile_recovered`。`poll` / `ok` 行不能充当这个信号：基类在每次不抛错的轮询后都会写一条，包括持续故障期间的每一次，所以它在整个降级窗口都存在、结束时也没有变化。只有 watch 守卫这几个原因有恢复行；绑定扫描那几个原因是隐含恢复的——扫描一旦成功就不再产生降级行，下一次 `bindings_*` 的 streak 从头开始。
+
+watch 守卫行还会区分成因。`hasUnreconciledWatchPending()` 在读取错误时 fail-closed，所以不可读的 sidecar 同样会阻塞恢复——但把它报成待办积压，给出的补救（重新开启订阅）根本解决不了。订阅关闭时先加载状态：读取失败记 `watch_reconcile_blocked` 并带上错误，`watch_pending_unreconciled` 只留给确实持有待办事件的状态。门本身不变，仍然 fail-closed。
+
+曾考虑把绑定扫描的健康信息挂到现有轮询 detail 上，被否掉了：`setPollEventDetail` 由评论通道调用，而两个冷启动门都在它**之前**就 return——恰恰在它最该报告的那种情况下，detail 永远设不上。
 
 有两处 stderr 是刻意不记的：watch pass 失败，以及「保留旧映射」的刷新失败。两者每轮都打、没有限流，也没有现成标志可做边沿触发，覆盖它们就得为诊断新增适配器状态。
 
@@ -166,7 +174,7 @@ PR #16117 增加了第二条投递通道：开启 `deliverToBoundSessions` 后�
   `components/sidebar/WebShellSidebar.tsx`、`utils/navigationUrl.ts`、
   `i18n.tsx`
 
-§5 只动 `packages/channels/github/src/GithubAdapter.ts` 及其测试、`ChannelEventsPage.tsx` / `.module.css` / `.test.tsx`，以及 `channel-events-messages.ts`。日志模块、基类、daemon 路由、SDK 类型与协议均未改动。
+§5 改动 `packages/channels/github/src/GithubAdapter.ts` 及其测试、`ChannelEventsPage.tsx` / `.module.css` / `.test.tsx`、`channel-events-messages.ts`，以及 `docs/developers/qwen-serve-protocol.md`——集成方读的那份参考，现在公开了结果词汇并写明哪些行带 `sessionId` 与 `detail`。日志模块、基类、daemon 路由、SDK 类型与线上形状均未改动。
 
 ## 设计决策
 
@@ -187,7 +195,7 @@ PR #16117 增加了第二条投递通道：开启 `deliverToBoundSessions` 后�
 - 单元测试：日志的追加/读取/过滤/轮转/上限与被吞掉的写失败；GitHub 的入站跳过、任务与发表事件；路由按渠道和类型过滤、夹在解析后的工作区内、支持 `since`。
 - Web Shell：页面渲染行、两个过滤器生效、空态与错误态正确。
 - 手工：用一个测试仓库跑 GitHub 渠道，确认页面能看到会话创建之前的过滤跳过，并按顺序看到接受的触发、任务状态变化与发表结果。
-- §5 单元测试：私投递以 `delivered` 收尾并点名会话；preflight 拒绝以 `retired` 收尾、绝不是 `delivered`；rebind 能看到两个会话 id；每一处 watch 退休与死信（两种结果）都被记录；正文进了 stderr 但没进任何日志行；每个降级原因在一个限流窗口或状态边沿上只出现一次，冷启动逃逸在上限处被记录。以上每个守卫都做了变异验证：22 个变异，22 个被杀。其中两个专门用来证明隐私断言是真的在起作用——一个把正文塞进退休行的另一个字段，另一个把正文拼在写盘错误后面、让错误断言仍然通过。
+- §5 单元测试：私投递以 `delivered` 收尾并点名会话；preflight 拒绝以 `retired` 收尾、绝不是 `delivered`；rebind 能看到两个会话 id，并钉住重定向那一行的用词；每一处 watch 退休——含 claim 前跳过与待办队列溢出——与死信（两种结果）都被记录；正文进了死信文件与 stderr 但没进任何日志行；每个降级原因在一个限流窗口只出现一次、在后续窗口重复发射、并在归零后重新开始；冷启动逃逸在成功与失败两条路径上都于上限处被记录；删除或保存抛错时不声称退休；watch 守卫的清零边沿被记录，因为 `poll` / `ok` 行在整个故障期间都在写、无法标记它的结束。以上每个守卫都做了变异验证。其中两个专门用来证明隐私断言是真的在起作用——一个把正文塞进退休行的另一个字段，另一个把正文拼在写盘错误后面、让错误断言仍然通过。
 - §5 Web Shell：`failed_ambiguous` 在中英文下都渲染标签而不是原始 token；会话标记截断显示、完整 id 在 `title` 里；降级计数正确渲染；两份目录覆盖 `KNOWN_OUTCOMES` 的每一项。
 
 ## 验收标准

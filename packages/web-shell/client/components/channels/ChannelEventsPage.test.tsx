@@ -170,6 +170,14 @@ describe('ChannelEventsPage', () => {
     expect(rows[1]?.textContent).toContain('owner/repo#42');
     expect(rows[1]?.textContent).toContain('@alice');
     expect(rows[1]?.textContent).toContain('reason_filter');
+    // Absence coverage for the new counters. The catalogs format a missing
+    // count as zero, so dropping a `typeof … === 'number'` guard would not
+    // leave a blank — it would print a confident wrong number on every poll
+    // row, including this healthy one.
+    expect(rows[0]?.textContent).not.toContain('0 binding scans');
+    expect(rows[0]?.textContent).not.toContain('binding scan');
+    expect(rows[0]?.textContent).not.toContain('sessions listed');
+    expect(rows[1]?.textContent).not.toContain('session ');
   });
 
   it('shows how many further notifications a collapsed skip stands for', async () => {
@@ -396,7 +404,7 @@ describe('ChannelEventsPage', () => {
 
     const rows = container.querySelectorAll('li');
     expect(rows[0]?.textContent).toContain('bindings_partial');
-    expect(rows[0]?.textContent).toContain('10 polls');
+    expect(rows[0]?.textContent).toContain('10 binding scans');
     expect(rows[0]?.textContent).toContain('1 session listed');
   });
 

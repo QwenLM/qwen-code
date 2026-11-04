@@ -50,8 +50,11 @@ export const CHANNEL_EVENTS_MESSAGES_EN: Record<string, ChannelEventsMessage> =
     'channelEvents.moreFiltered': (v) =>
       `${v?.count ?? 0} more filtered this poll`,
     'channelEvents.session': (v) => `session ${v?.id ?? ''}`,
+    // The streak counts binding scans, not polls: a gone-session retry
+    // refreshes the bindings again inside the same poll, so one poll can
+    // advance it more than once.
     'channelEvents.streak': (v) =>
-      `${v?.count ?? 0} poll${v?.count === 1 ? '' : 's'}`,
+      `${v?.count ?? 0} binding scan${v?.count === 1 ? '' : 's'}`,
     'channelEvents.sessions': (v) =>
       `${v?.count ?? 0} session${v?.count === 1 ? '' : 's'} listed`,
   };
@@ -95,6 +98,6 @@ export const CHANNEL_EVENTS_MESSAGES_ZH: Record<string, ChannelEventsMessage> =
     'channelEvents.notifications': (v) => `${v?.count ?? 0} 条通知`,
     'channelEvents.moreFiltered': (v) => `本轮另有 ${v?.count ?? 0} 条被过滤`,
     'channelEvents.session': (v) => `会话 ${v?.id ?? ''}`,
-    'channelEvents.streak': (v) => `连续 ${v?.count ?? 0} 轮`,
+    'channelEvents.streak': (v) => `连续 ${v?.count ?? 0} 次绑定扫描`,
     'channelEvents.sessions': (v) => `列出 ${v?.count ?? 0} 个会话`,
   };

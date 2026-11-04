@@ -710,12 +710,16 @@ interface InboundTaskRecord {
  * What bound delivery actually did. A boolean cannot express it: "settled"
  * covers an injected prompt, a private retire AND the public fallback, and
  * only the first of those is a delivery. The event journal's terminal word
- * is derived from this, so a preflight-rejected event is never recorded as
- * delivered just because its task was consumed.
+ * is derived from this, so an event that was consumed without being
+ * delivered still ends on a terminal word rather than on `running`.
+ *
+ * `sessionId` on a retire is the target the event LOST: those exits clear the
+ * delivery before returning, so the row could not otherwise name the session
+ * that vanished — the one fact the private lane adds.
  */
 type BoundDeliveryResult =
   | { kind: 'delivered' }
-  | { kind: 'retired'; reason: string }
+  | { kind: 'retired'; reason: string; sessionId?: string }
   | { kind: 'public' }
   | { kind: 'deferred' };
 
@@ -1804,7 +1808,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (this.prWatchEvents.size > 0) {
       try {
         await this.reconcilePendingWatch();
+        const wasBlocked = this.watchReconcileBlocked;
         this.watchReconcileBlocked = false;
+        // The clearing edge is the recovery signal. A `poll` / `ok` row is
+        // not: the base writes one after every poll that does not throw,
+        // including every poll of a sustained outage, so it is present
+        // throughout the degraded window and cannot mark its end.
+        if (wasBlocked) {
+          this.recordPollDegraded('watch_reconcile_recovered');
+        }
       } catch (err) {
         // Recovery must not deliver accepted watch tasks while their pending
         // records are unreconciled (a later drain would deliver them again).
@@ -1818,8 +1830,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           `[Channel:${this.name}] pending watch reconciliation failed, will retry next poll: ${message}\n`,
         );
         // Edge-triggered: this catch runs on EVERY poll while the watch state
-        // stays unreadable, so a per-poll row would rotate the journal. The
-        // following `poll` / `ok` rows are the implicit recovery signal.
+        // stays unreadable, so a per-poll row would rotate the journal.
         if (!wasBlocked) {
           this.recordPollDegraded(
             'watch_reconcile_blocked',
@@ -1833,6 +1844,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // still own their accepted tasks: recovery must not deliver and
       // remove a task that a later re-enabled drain would claim and
       // deliver again. Keep the guard until no watch pending remains.
+      //
+      // Classify the cause first. hasUnreconciledWatchPending() is fail-closed
+      // on a read error, so an unreadable sidecar also blocks recovery — but
+      // reporting that as a pending backlog names a remedy (re-enable
+      // subscriptions) that cannot clear it. The gate below is unchanged.
+      let watchStateError: string | undefined;
+      try {
+        this.loadPrWatchState();
+      } catch (err) {
+        watchStateError = sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        );
+      }
       const wasBlocked = this.watchReconcileBlocked;
       this.watchReconcileBlocked = this.hasUnreconciledWatchPending();
       if (this.watchReconcileBlocked) {
@@ -1860,13 +1885,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           // Task store unreadable/unwritable: fail closed, retry next poll.
         }
         process.stderr.write(
-          `[Channel:${this.name}] watch subscriptions are disabled but pending watch events remain unreconciled; watch task recovery stays blocked until subscriptions are re-enabled and the pending events reconcile (legacy watch tasks parked as backpressure so the notification cursor keeps flowing)\n`,
+          `[Channel:${this.name}] watch subscriptions are disabled but pending watch events remain unreconciled; watch task recovery stays blocked until subscriptions are re-enabled and the pending events reconcile (legacy watch tasks parked as backpressure so the notification cursor keeps flowing)${watchStateError ? ` — the watch state is also unreadable, which alone blocks recovery: ${watchStateError}` : ''}\n`,
         );
         // Edge-triggered for the same reason as the reconcile failure above:
         // this branch runs on every poll until an operator re-enables watch.
         if (!wasBlocked) {
-          this.recordPollDegraded('watch_pending_unreconciled');
+          if (watchStateError) {
+            this.recordPollDegraded(
+              'watch_reconcile_blocked',
+              undefined,
+              watchStateError,
+            );
+          } else {
+            this.recordPollDegraded('watch_pending_unreconciled');
+          }
         }
+      } else if (wasBlocked) {
+        this.recordPollDegraded('watch_reconcile_recovered');
       }
     }
 
@@ -1932,7 +1967,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.coldEmptyPartialStreak % 10 === 0
       ) {
         process.stderr.write(
-          `[Channel:${this.name}] binding snapshot is an empty partial (${this.coldEmptyPartialStreak}/${MAX_COLD_EMPTY_PARTIAL_POLLS} cold polls): the comment lane stays deferred until a complete or non-empty snapshot arrives, so no event is misrouted publicly.\n`,
+          `[Channel:${this.name}] binding snapshot is an empty partial (${this.coldEmptyPartialStreak}/${MAX_COLD_EMPTY_PARTIAL_POLLS} cold binding scans): the comment lane stays deferred until a complete or non-empty snapshot arrives, so no event is misrouted publicly.\n`,
         );
         // This gate returns before the comment lane sets its poll detail, so
         // the degraded row is the ONLY journal trace of a stalled cold start.
@@ -2908,8 +2943,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (task.delivery?.kind === 'bound-session') {
       // Only a delivered or retired verdict reaches here with the delivery
       // still set — the public-fallback exits clear it. The verdict supplies
-      // the journal's terminal word, so an event the channel gates rejected
-      // is not recorded as delivered just because its task was consumed.
+      // the journal's terminal word: without it a preflight-rejected event
+      // would still end on `running`, indistinguishable from a delivery in
+      // flight, because that exit consumes the task with its delivery set.
       const journal =
         boundResult.kind === 'delivered'
           ? { outcome: 'delivered' }
@@ -2933,10 +2969,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // published, so they can have no pending final delivery: reading the
       // public reply lane's store here would wedge the retired task — and
       // with it the shared cursor — on an unrelated file's readability.
-      if (boundResult.kind === 'retired') {
-        this.recordBoundTaskEvent(task, 'retired', boundResult.reason);
-      }
       this.removeInboundTask(task.id);
+      // After the removal, like the dead-letter site: a throwing removal
+      // leaves the task recoverable, and the journal must not claim a retire
+      // that did not happen — the next poll would then write a second
+      // terminal row with a different, false reason.
+      if (boundResult.kind === 'retired') {
+        this.recordBoundTaskEvent(
+          task,
+          'retired',
+          boundResult.reason,
+          undefined,
+          boundResult.sessionId,
+        );
+      }
       return true;
     }
     if (this.hasPendingFinalDeliveryForTask(task)) {
@@ -3252,21 +3298,33 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
      */
     journal?: { outcome: string; reason?: string },
   ): void {
+    // The exits that hand an event back to the public lane persist
+    // `delivery: undefined`, and the record is re-read AFTER the update, so
+    // the row would lose the session it is about. Remember the target the
+    // task held going in: "which session lost this event" is the question
+    // the private lane's attribution exists to answer.
+    let previousSessionId: string | undefined;
     const records = this.updateInboundTasks((existing) =>
-      existing.map((record) =>
-        record.id === taskId
-          ? {
-              ...record,
-              ...updates,
-              state,
-              updatedAt: new Date().toISOString(),
-            }
-          : record,
-      ),
+      existing.map((record) => {
+        if (record.id !== taskId) return record;
+        if (record.delivery?.kind === 'bound-session') {
+          previousSessionId = record.delivery.sessionId;
+        }
+        return {
+          ...record,
+          ...updates,
+          state,
+          updatedAt: new Date().toISOString(),
+        };
+      }),
     );
     const task = records.find((record) => record.id === taskId);
     if (!task) return;
     const envelope = task.envelope;
+    const sessionId =
+      task.delivery?.kind === 'bound-session'
+        ? task.delivery.sessionId
+        : previousSessionId;
     this.recordChannelEvent({
       type: 'task',
       outcome: journal?.outcome ?? state,
@@ -3281,9 +3339,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       thread: task.source.threadId,
       number: task.issueNumber,
       messageId: task.source.messageId,
-      ...(task.delivery?.kind === 'bound-session'
-        ? { sessionId: task.delivery.sessionId }
-        : {}),
+      ...(sessionId ? { sessionId } : {}),
       ...(updates.attempts !== undefined
         ? { detail: { attempts: updates.attempts } }
         : {}),
@@ -3295,14 +3351,22 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * Journals a terminal decision about a bound event that never reached a
    * session: a private retire or a dead-letter. Identifiers only — the
    * dead-letter record's `text` (the message body) must never be copied here.
+   * `sessionId` names the target the event lost when the delivery was already
+   * cleared from the record.
    */
   private recordBoundTaskEvent(
     task: InboundTaskRecord,
     outcome: string,
     reason: string,
     error?: string,
+    sessionId?: string,
   ): void {
     const envelope = task.envelope;
+    const target =
+      sessionId ??
+      (task.delivery?.kind === 'bound-session'
+        ? task.delivery.sessionId
+        : undefined);
     this.recordChannelEvent({
       type: 'task',
       outcome,
@@ -3317,9 +3381,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       thread: task.source.threadId,
       number: task.issueNumber,
       messageId: task.source.messageId,
-      ...(task.delivery?.kind === 'bound-session'
-        ? { sessionId: task.delivery.sessionId }
-        : {}),
+      ...(target ? { sessionId: target } : {}),
       ...(error ? { error } : {}),
     });
   }
@@ -3734,7 +3796,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.coldEmptyPartialStreak += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
           process.stderr.write(
-            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence — verify the daemon's workspaces are active and readable.\n`,
+            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive binding scans: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence — verify the daemon's workspaces are active and readable.\n`,
           );
           this.recordPollDegraded('bindings_cold_empty', {
             streak: this.coldEmptyPartialStreak,
@@ -3753,12 +3815,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           (this.partialSnapshotStreak === 10 ||
             this.partialSnapshotStreak % 60 === 0)
         ) {
+          // The routing map is keyed per PR, so its size counts bound PRs,
+          // not sessions: one session following two PRs would be reported as
+          // two. The scan's own row count is the session count.
+          const listedSessions = snapshot.bindings.length;
           process.stderr.write(
-            `[Channel:${this.name}] binding snapshot has been partial for ${this.partialSnapshotStreak} consecutive polls (${map.size} sessions listed): a multi-page scan — more active sessions than one page — is always partial, so unmatched PR events defer to the dead-letter horizon instead of the channel (issue events are unaffected). Verify the daemon's per-workspace session counts.\n`,
+            `[Channel:${this.name}] binding snapshot has been partial for ${this.partialSnapshotStreak} consecutive binding scans (${listedSessions} sessions listed): a multi-page scan — more active sessions than one page — is always partial, so unmatched PR events defer to the dead-letter horizon instead of the channel (issue events are unaffected). Verify the daemon's per-workspace session counts.\n`,
           );
           this.recordPollDegraded('bindings_partial', {
             streak: this.partialSnapshotStreak,
-            sessions: map.size,
+            sessions: listedSessions,
           });
         }
       } else {
@@ -3792,7 +3858,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.coldEmptyPartialStreak += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
           process.stderr.write(
-            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence — verify the daemon's workspaces are active and readable.\n`,
+            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive binding scans: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence — verify the daemon's workspaces are active and readable.\n`,
           );
           this.recordPollDegraded('bindings_cold_empty', {
             streak: this.coldEmptyPartialStreak,
@@ -3992,7 +4058,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
         this.transitionInboundTask(task.id, 'running', { delivery: undefined });
         task.delivery = undefined;
-        return { kind: 'retired', reason: 'watch_no_candidate' };
+        return {
+          kind: 'retired',
+          reason: 'watch_no_candidate',
+          sessionId: delivery.sessionId,
+        };
       }
     }
     // The channel path runs the group/sender/pairing gates inside
@@ -4094,7 +4164,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
         this.transitionInboundTask(task.id, 'running', { delivery: undefined });
         task.delivery = undefined;
-        return { kind: 'retired', reason: 'watch_session_gone' };
+        return {
+          kind: 'retired',
+          reason: 'watch_session_gone',
+          sessionId: delivery.sessionId,
+        };
       }
       // Comment events keep today's contract: fall back to the normal
       // channel path so the event is not lost — but only when absence is
@@ -4724,6 +4798,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           process.stderr.write(
             `[Channel:${this.name}] watch pending overflow for ${key}: retired ${oldest.key} to dead-letter (cap ${MAX_PENDING_WATCH_PER_ENTRY})\n`,
           );
+          // The overflow retire is a silent consumption otherwise: the event
+          // was never claimed, so there is no task row to close, and the
+          // dead-letter file plus stderr are its only trace. Identifiers only
+          // — `record.text` above carries the body and must not be copied.
+          // After the durable shift, so a failed append leaves no retire
+          // claim for an event that is still queued.
+          this.recordChannelEvent({
+            type: 'inbound',
+            outcome: 'skipped',
+            reason: 'watch_pending_overflow',
+            repository: chatId,
+            thread: `pr:${number}`,
+            number,
+            messageId: oldest.key,
+          });
         } catch (err) {
           // Same fail-safe as retireBoundTask: if the exhaustion surface
           // cannot be written, keep the event queued (over cap) and retry
@@ -4802,13 +4891,26 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           process.stderr.write(
             `[Channel:${this.name}] watch event ${pending.key} has no bound candidate left; retiring without public fallback\n`,
           );
+          const pendingBefore = entry.pending;
           entry.pending = entry.pending.slice(1);
           this.prWatchState.entries[key] = entry;
-          this.savePrWatchState();
+          try {
+            this.savePrWatchState();
+          } catch (err) {
+            // The slice already mutated the loaded state, and a failed save
+            // does not clear prWatchStateLoaded — without this rollback the
+            // next poll skips the entry and the end-of-pass save persists the
+            // truncation, losing the event with no trace at all. Mirrors the
+            // claim path's rollback below.
+            entry.pending = pendingBefore;
+            this.prWatchState.entries[key] = entry;
+            throw err;
+          }
           // Retired before any task was claimed, so there is no task row to
           // close: the skip is the event's only journal trace. After the
-          // save — a throwing save leaves the event queued for the next
-          // poll, and the journal must not claim a retire that did not happen.
+          // durable save — the rollback above keeps the event queued when the
+          // save throws, and the journal must not claim a retire that did not
+          // happen.
           this.recordChannelEvent({
             type: 'inbound',
             outcome: 'skipped',

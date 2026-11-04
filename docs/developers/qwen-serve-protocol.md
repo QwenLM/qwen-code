@@ -1253,9 +1253,15 @@ the publication outcomes `posted`, `suppressed`, `posting`, `failed` and
 `failed_ambiguous` (the write may have landed, so it is never retried publicly),
 the private-delivery terminals `delivered` and `retired` (with a reason such as
 `preflight_rejected`, `watch_no_candidate` or `dead_letter`), and `degraded` for
-a dependency the poll survived. A `task` event whose target is a PR-bound
-session carries that session's `sessionId`; a `degraded` poll carries
-`detail.streak`. A GitHub poll that filters more than 20 notifications journals
+a dependency the poll survived. A `task` event about a PR-bound session carries
+that session's `sessionId`, including the rows written while the delivery is
+cleared and the retire that follows, which name the session the event lost.
+`detail` is optional on every event: a binding-scan `degraded` row carries
+`detail.streak` (a count of binding scans, which a gone-session retry can
+advance more than once per poll) and `detail.sessions` when the scan is partial,
+while the watch-guard rows (`watch_reconcile_blocked`,
+`watch_pending_unreconciled`, `watch_reconcile_recovered`) carry only `reason`
+and, for a read failure, `error`. A GitHub poll that filters more than 20 notifications journals
 the first 20 individually and one further `reason_filter` row whose
 `detail.filtered` counts the rest, so a pinned poll cursor cannot flood the
 journal with repeats of the same batch. Query parameters: `limit` (1-500, default 100), `type`
