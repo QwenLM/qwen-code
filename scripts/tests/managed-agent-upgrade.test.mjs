@@ -2259,6 +2259,22 @@ test('verify runs the online preflight and reads the API', async (t) => {
     rowsOf(host.output).turn,
     /^FAIL Session s2 ended with turn.failed/,
   );
+
+  // A sequence written as a string moves the cursor all the same.
+  polls = 0;
+  host.responses['GET /v1/agents/sessions/s2/events'] = () => {
+    polls += 1;
+    return polls === 1
+      ? { data: [{ sequence: '4', type: 'turn.started' }] }
+      : { data: [{ sequence: '5', type: 'turn.completed', terminal: true }] };
+  };
+  host.requests = [];
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme', '--turn'), 0);
+  assert.ok(
+    host.requests.some(({ url }) =>
+      url.endsWith('/v1/agents/sessions/s2/events?after=4&limit=100'),
+    ),
+  );
 });
 
 test('start and verify reach the listeners the server resolves', async (t) => {
@@ -2376,6 +2392,23 @@ test('start and verify use server.env when the configuration does not resolve', 
     'PASS http://127.0.0.1:18081/actuator/health is UP',
   );
 
+  // Without the resolver's verdict, the preflight judges the Harness URL
+  // once the Harness listens, as it does without the upgrade command.
+  await host.stop();
+  await writeFile(
+    path.join(host.etc, 'server.env'),
+    'QWEN_MANAGED_AGENT_HARNESS_BASE_URL=http://127.0.0.1:4172/?tenant=acme\n',
+    { flag: 'a' },
+  );
+  host.preflightStatus = 1;
+  assert.equal(await host.upgrade('start'), 1);
+  assert.ok(host.output.includes(`Starting ${HARNESS}`));
+  assert.equal(
+    host.output.at(-1),
+    `start refused: The preflight failed, so ${SERVER} stays stopped; fix its FAIL rows and run start again.`,
+  );
+  host.preflightStatus = 0;
+
   // An address from server.env that no URL can carry is refused as well.
   await host.stop();
   await writeFile(
@@ -2428,7 +2461,8 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     /start refused: The control plane reaches qwen-hosted-harness at "http:\/\/\[fe80::1%eth0\]:4170", which is not a URL: a URL cannot carry an IPv6 zone; correct qwen\.managed-agent\.harness\.base-url\./,
   );
   // The preflight takes only an http(s) origin, so whatever else it would
-  // fail after the Harness restarts is refused first, credentials masked.
+  // fail after the Harness restarts is refused first, credentials masked:
+  // the resolver passes on its verdict, and the refusal words it.
   for (const [harnessBaseUrl, shown, reason] of [
     [
       'http://127.0.0.1:4170/?tenant=acme',
@@ -2456,14 +2490,15 @@ test('start refuses listeners it cannot reach before it starts anything', async 
       'is not an http or https URL',
     ],
   ]) {
-    host.resolved = { harnessBaseUrl };
+    host.resolved = { harnessBaseUrl, harnessOrigin: 'false' };
     assert.equal(await host.upgrade('start'), 1, harnessBaseUrl);
     assert.equal(
       host.output.at(-1),
       `start refused: The control plane reaches qwen-hosted-harness at ${JSON.stringify(shown)}, which ${reason}; correct qwen.managed-agent.harness.base-url.`,
     );
+    // Each run prints afresh, so each is searched for the password.
+    assert.ok(!host.output.join('\n').includes('s3cret'), harnessBaseUrl);
   }
-  assert.ok(!host.output.join('\n').includes('s3cret'), host.output.join('\n'));
   // Past those, the preflight's own verdict, which the resolver passes on:
   // java.net.URI reads no host in a name with an underscore, and an empty
   // user name or padding fails there too. A Harness an earlier start left
@@ -2568,9 +2603,12 @@ test('start refuses listeners it cannot reach before it starts anything', async 
       ),
       host.output.join('\n'),
     );
+    // The password the operator typed stays out of what each run prints.
+    assert.ok(
+      !host.output.join('\n').includes('secret'),
+      host.output.join('\n'),
+    );
   }
-  // The password the operator typed stays out of what start prints.
-  assert.ok(!host.output.join('\n').includes('secret'), host.output.join('\n'));
   assert.equal(host.units[HARNESS].ActiveState, 'inactive');
   assert.equal(host.units[SERVER].ActiveState, 'inactive');
   assert.ok(host.services.every(({ args }) => args.includes(RESOLVER)));
@@ -2587,6 +2625,36 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     host.output.join('\n'),
     /verify refused: The server's configuration gives the health endpoint no fixed port/,
   );
+});
+
+test('start asks nothing of a Harness URL the server does not read', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  // Disabled or pooled, the Harness row skips before it reads the value, and
+  // the server never dials it; start still waits for the Harness there.
+  for (const [harnessBaseUrl, address] of [
+    [' http://127.0.0.1:4170 ', '127.0.0.1:4170'],
+    ['http://qwen_harness:4170', 'qwen_harness:4170'],
+    ['http://127.0.0.1:4170/?tenant=acme', '127.0.0.1:4170'],
+    ['http://svc:s3cret@127.0.0.1:4170', '127.0.0.1:4170'],
+  ]) {
+    await host.stop();
+    host.connections = [];
+    host.resolved = { harnessBaseUrl, harnessOrigin: 'skip' };
+    assert.equal(await host.upgrade('start'), 0, harnessBaseUrl);
+    assert.ok(host.output.includes(`Starting ${HARNESS}`), harnessBaseUrl);
+    assert.deepEqual([...new Set(host.connections)], [address]);
+  }
+  // It has to name a host start can wait on all the same.
+  await host.stop();
+  host.resolved = { harnessBaseUrl: 'proxy.test:4170', harnessOrigin: 'skip' };
+  assert.equal(await host.upgrade('start'), 1);
+  assert.equal(
+    host.output.at(-1),
+    'start refused: The control plane reaches qwen-hosted-harness at "proxy.test:4170", which is not an http or https URL; correct qwen.managed-agent.harness.base-url.',
+  );
+  assert.equal(host.units[HARNESS].ActiveState, 'inactive');
 });
 
 test('start dials only the health endpoint, and verify reads the API only with --tenant', async (t) => {
@@ -2906,6 +2974,42 @@ test('verify says why an API read failed, in text the endpoint cannot steer', as
     /^FAIL GET \/v1\/agents\/sessions\/S{180}… \(100020 characters\): 404/,
   );
   assert.ok(unserved.length < 300, unserved.length);
+
+  // A value the API chose is typed before a route or a verdict uses it:
+  // coercing an object calls its toString, and an array nested deeper than
+  // the stack cannot be joined, so either would throw before the row could
+  // say what came back.
+  const deep = JSON.parse('['.repeat(20000) + ']'.repeat(20000));
+  host.responses['GET /v1/agents/sessions/s1'] = { id: 's1' };
+  host.responses['GET /v1/agents/sessions/s1/items'] = { data: [] };
+  for (const [value, shown] of [
+    [{ toString: 1 }, '{"toString":1}'],
+    [deep, '[unprintable]'],
+    [7, '7'],
+  ]) {
+    host.responses['GET /v1/agents/sessions'] = { data: [{ id: value }] };
+    host.responses['POST /v1/agents/sessions'] = { id: value };
+    assert.equal(await host.upgrade('verify', '--tenant', 'acme', '--turn'), 1);
+    const typed = rowsOf(host.output);
+    for (const name of ['session', 'turn']) {
+      assert.equal(
+        typed[name],
+        `FAIL the API answered a Session without a string id (${shown})`,
+      );
+    }
+    // An event's type names no outcome unless it is a string, and its
+    // sequence is skipped.
+    host.responses['GET /v1/agents/sessions'] = { data: [{ id: 's1' }] };
+    host.responses['POST /v1/agents/sessions'] = { id: 's1' };
+    host.responses['GET /v1/agents/sessions/s1/events'] = {
+      data: [null, { sequence: value, type: value, terminal: true }],
+    };
+    assert.equal(await host.upgrade('verify', '--tenant', 'acme', '--turn'), 1);
+    assert.equal(
+      rowsOf(host.output).turn,
+      `FAIL Session s1 ended with ${shown}`,
+    );
+  }
 });
 
 test('verify refuses a URL fetch refuses before it probes', async (t) => {

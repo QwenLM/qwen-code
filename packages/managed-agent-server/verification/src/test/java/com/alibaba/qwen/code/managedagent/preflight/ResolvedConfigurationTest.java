@@ -184,12 +184,17 @@ class ResolvedConfigurationTest {
         assertEquals("http://127.0.0.1:8080/actuator/health",
                 defaults.get("healthUrl"));
         assertEquals("http://127.0.0.1:4170", defaults.get("harnessBaseUrl"));
-        assertEquals("true", defaults.get("harnessOrigin"));
+        // The Harness is disabled by default, so the server never reads it.
+        assertEquals("skip", defaults.get("harnessOrigin"));
+        assertEquals("true", resolve(Map.of(
+                "QWEN_MANAGED_AGENT_HARNESS_ENABLED", "true"))
+                .get("harnessOrigin"));
 
         // The port in the launcher's file, where server.env cannot see it.
         Path config = write("config/application.yml", """
                 server:
                   port: 9090
+                qwen.managed-agent.harness.enabled: true
                 qwen.managed-agent.harness.base-url: ' http://127.0.0.1:4171 '
                 """);
         Map<String, String> file = resolve(additional(config));
@@ -236,9 +241,9 @@ class ResolvedConfigurationTest {
 
     @Test
     void passesOnThePreflightsVerdictOnTheHarnessUrl() {
-        // The preflight's harness row fails each false one on its setting
-        // alone; the upgrade command refuses start over them before it
-        // restarts the Harness.
+        // With the single Harness enabled, the preflight's harness row fails
+        // each false one on its setting alone; the upgrade command refuses
+        // start over them before it restarts the Harness.
         Map<String, String> verdicts = new LinkedHashMap<>();
         verdicts.put("http://127.0.0.1:4170", "true");
         verdicts.put("https://harness.internal:4170/base", "true");
@@ -251,9 +256,29 @@ class ResolvedConfigurationTest {
         verdicts.put("http://127.0.0.1:4170/a b", "false");
         verdicts.put("ftp://127.0.0.1:4170", "false");
         verdicts.put("", "false");
+        verdicts.put(" http://127.0.0.1:4170 ", "false");
         verdicts.forEach((url, verdict) -> assertEquals(verdict, resolve(
-                Map.of(), "--qwen.managed-agent.harness.base-url=" + url)
+                Map.of(), "--qwen.managed-agent.harness.enabled=true",
+                "--qwen.managed-agent.harness.base-url=" + url)
                 .get("harnessOrigin"), url));
+
+        // Disabled or pooled, the Harness row skips before it reads the
+        // value, and the server never dials it: nothing is judged.
+        for (String url : new String[] {"http://qwen_harness:4170",
+                " http://127.0.0.1:4170 ", "http://127.0.0.1:4170"}) {
+            assertEquals("skip", resolve(Map.of(),
+                    "--qwen.managed-agent.harness.base-url=" + url)
+                    .get("harnessOrigin"), url);
+            assertEquals("skip", resolve(Map.of(
+                    "QWEN_MANAGED_AGENT_HARNESS_ENABLED", "false"),
+                    "--qwen.managed-agent.harness.base-url=" + url)
+                    .get("harnessOrigin"), url);
+            assertEquals("skip", resolve(Map.of(
+                    "QWEN_MANAGED_AGENT_HARNESS_POOL_ENABLED", "true"),
+                    "--qwen.managed-agent.harness.enabled=true",
+                    "--qwen.managed-agent.harness.base-url=" + url)
+                    .get("harnessOrigin"), url);
+        }
     }
 
     @Test

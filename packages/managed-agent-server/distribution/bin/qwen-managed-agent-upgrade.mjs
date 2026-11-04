@@ -2556,7 +2556,8 @@ async function listeners(
         server: resolved.serverUrl,
         health: resolved.healthUrl,
         harness: resolved.harnessBaseUrl,
-        // 'false' when the preflight would fail the Harness URL.
+        // 'false' when the preflight would fail the Harness URL, 'skip' when
+        // the server does not read it.
         harnessOrigin: resolved.harnessOrigin,
       };
     }
@@ -2739,25 +2740,28 @@ async function phaseStart(system, deployment, options) {
   const harnessUrl = URL.canParse(urls.harness)
     ? new URL(urls.harness)
     : undefined;
-  // The preflight takes only an http(s) origin, without user information, a
-  // query or a fragment, and would fail any other after the Harness restarts;
-  // an opaque value such as proxy.test:8443 names no host to wait on at all.
-  // A value that does not parse gets fetchRefusal's reason, which names an
-  // IPv6 zone as --server-url's refusal does. Past the reasons this can name,
-  // the resolver passes on the preflight's own verdict, which reads the value
-  // as java.net.URI does: a host with an underscore, an empty user name or a
-  // padded value fails there only.
+  // start waits for the Harness at this URL, so it takes only an http(s) URL,
+  // which has a host: an opaque value such as proxy.test:8443 names none to
+  // wait on. A value that does not parse gets fetchRefusal's reason, which
+  // names an IPv6 zone as --server-url's refusal does.
+  // Past those, the preflight's verdict, which the resolver passes on: it
+  // takes only an http(s) origin, without user information, a query or a
+  // fragment, read untrimmed as java.net.URI reads it, and would fail any
+  // other after the Harness restarts. The reasons below only word a 'false'
+  // verdict. With the Harness disabled or pooled the verdict is 'skip', since
+  // neither the preflight nor the server reads the value; without one, as
+  // when the configuration did not resolve, the preflight judges it later.
   const unusable = !harnessUrl
     ? fetchRefusal(urls.harness)
     : !['http:', 'https:'].includes(harnessUrl.protocol)
       ? 'is not an http or https URL'
-      : harnessUrl.username || harnessUrl.password
-        ? 'carries a user name or password'
-        : urls.harness.includes('?') || urls.harness.includes('#')
-          ? 'carries a query or a fragment'
-          : urls.harnessOrigin === 'false'
-            ? 'the preflight does not take as an http or https origin, reading it untrimmed as java.net.URI does'
-            : undefined;
+      : urls.harnessOrigin !== 'false'
+        ? undefined
+        : harnessUrl.username || harnessUrl.password
+          ? 'carries a user name or password'
+          : urls.harness.includes('?') || urls.harness.includes('#')
+            ? 'carries a query or a fragment'
+            : 'the preflight does not take as an http or https origin, reading it untrimmed as java.net.URI does';
   if (unusable) {
     throw new Refusal(
       `The control plane reaches ${harness.name} at ${JSON.stringify(withoutCredentials(urls.harness))}, which ${unusable}; correct qwen.managed-agent.harness.base-url.`,
@@ -2911,6 +2915,19 @@ async function api(system, client, route, init = {}, capMs = Infinity) {
   return body;
 }
 
+// The route of a Session the API answered, which only a string id names:
+// encodeURIComponent() coerces any other, and coercing a JSON object or array
+// calls its toString or joins it, which throws on {"toString":1} or on one
+// nested deeper than the stack, before printable() could say what came back.
+function sessionRoute(session) {
+  if (typeof session?.id !== 'string') {
+    throw new Error(
+      `the API answered a Session without a string id (${printable(session?.id)})`,
+    );
+  }
+  return `/v1/agents/sessions/${encodeURIComponent(session.id)}`;
+}
+
 async function sessionRow(system, client) {
   try {
     const list = await api(system, client, '/v1/agents/sessions?limit=1');
@@ -2931,13 +2948,9 @@ async function sessionRow(system, client) {
             'pass --actor <id> to read Workspace Sessions as one of their readers',
           );
     }
-    const id = encodeURIComponent(session.id);
-    await api(system, client, `/v1/agents/sessions/${id}`);
-    const items = await api(
-      system,
-      client,
-      `/v1/agents/sessions/${id}/items?limit=20`,
-    );
+    const route = sessionRoute(session);
+    await api(system, client, route);
+    const items = await api(system, client, `${route}/items?limit=20`);
     return row(
       'session',
       'PASS',
@@ -2962,7 +2975,7 @@ async function turnRow(system, client, timeout) {
         input: [{ type: 'input_text', text: 'Reply with the single word OK.' }],
       }),
     });
-    const id = encodeURIComponent(session.id);
+    const route = sessionRoute(session);
     let after = 0;
     let lastError;
     const terminal = await waitFor(system, client.deadline, async () => {
@@ -2971,7 +2984,7 @@ async function turnRow(system, client, timeout) {
         page = await api(
           system,
           client,
-          `/v1/agents/sessions/${id}/events?after=${after}&limit=100`,
+          `${route}/events?after=${after}&limit=100`,
           {},
           PROBE_TIMEOUT_MS,
         );
@@ -2985,8 +2998,13 @@ async function turnRow(system, client, timeout) {
       }
       lastError = undefined;
       for (const event of page?.data ?? []) {
-        after = Math.max(after, Number(event.sequence) || after);
-        if (event.terminal) {
+        // A sequence is a number, or a string of one; Number() coerces any
+        // other value as encodeURIComponent() would.
+        const sequence = ['number', 'string'].includes(typeof event?.sequence)
+          ? Number(event.sequence)
+          : Number.NaN;
+        after = Math.max(after, sequence || after);
+        if (event?.terminal) {
           return event;
         }
       }
@@ -2999,22 +3017,18 @@ async function turnRow(system, client, timeout) {
         `Session ${printable(session.id)}: no terminal event within ${timeout}s${lastError ? `; the last poll failed: ${lastError.message}` : ''}`,
       );
     }
-    return /fail|error|cancel/i.test(terminal.type)
-      ? row(
-          'turn',
-          'FAIL',
-          `Session ${printable(session.id)} ended with ${printable(terminal.type)}`,
-        )
-      : row(
-          'turn',
-          'PASS',
-          `Session ${printable(session.id)} ended with ${printable(terminal.type)}; archive it when done`,
-        );
+    const ended = `Session ${printable(session.id)} ended with ${printable(terminal.type)}`;
+    // Only a string type names an outcome: matching coerces any other value,
+    // as encodeURIComponent() would, and none of them names a success.
+    return typeof terminal.type !== 'string' ||
+      /fail|error|cancel/i.test(terminal.type)
+      ? row('turn', 'FAIL', ended)
+      : row('turn', 'PASS', `${ended}; archive it when done`);
   } catch (error) {
     return row(
       'turn',
       'FAIL',
-      `${session ? `Session ${printable(session.id)}: ` : ''}${error.message}`,
+      `${typeof session?.id === 'string' ? `Session ${printable(session.id)}: ` : ''}${error.message}`,
     );
   }
 }

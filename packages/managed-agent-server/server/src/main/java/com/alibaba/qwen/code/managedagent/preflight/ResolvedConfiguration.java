@@ -122,11 +122,11 @@ public final class ResolvedConfiguration {
         // As the server parses it, untrimmed, so a refusal shows any padding,
         // with the preflight's verdict on it: the upgrade command refuses a
         // Harness URL the preflight would fail before it restarts the Harness,
-        // without a rule of its own.
-        String harnessBaseUrl = properties.getHarness().getBaseUrl();
-        resolved.put("harnessBaseUrl", StringUtils.defaultString(harnessBaseUrl));
-        resolved.put("harnessOrigin", String.valueOf(harnessBaseUrl != null
-                && ManagedAgentPreflight.harnessOrigin(harnessBaseUrl) != null));
+        // without a rule of its own, and judges none the server never reads.
+        resolved.put("harnessBaseUrl",
+                StringUtils.defaultString(properties.getHarness().getBaseUrl()));
+        resolved.put("harnessOrigin",
+                ManagedAgentPreflight.harnessUrlVerdict(properties.getHarness()));
         Binder binder = Binder.get(environment);
         int port = binder.bind("server.port", Integer.class)
                 .orElse(DEFAULT_SERVER_PORT);
