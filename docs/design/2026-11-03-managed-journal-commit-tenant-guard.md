@@ -60,17 +60,22 @@ Taking the head first would invert that order.
    question is prefixed by its Session scope key, but the gap between two
    Sessions' keys is shared. Each such site switches to: plain read, insert if
    absent, and on `DuplicateKeyException` a locking re-read and the existing
-   identity check. This is the pattern #16225 uses for receipts. Known sites:
+   identity check. This is the pattern #16225 uses for receipts. A sweep of
+   every `FOR UPDATE` reachable from `commit` found two such sites:
 
-   | Site                                                       | Row                                      | Missing when             |
-   | ---------------------------------------------------------- | ---------------------------------------- | ------------------------ |
-   | `JournalResourceWrites.commitResources` → `findResource`   | `ma_resource (scope_key, resource_id)`   | Every new resource       |
-   | `HostedCleanupReferences.apply`                            | `ma_resource_ref` `HOSTED_CLEANUP` owner | First state of a cleanup |
-   | `ManagedExtensionRecordStore.reconcileNeverStartedVerdict` | `ma_session_record` lineage record       | Verdict before mint      |
+   | Site                                                     | Row                                      | Missing when             |
+   | -------------------------------------------------------- | ---------------------------------------- | ------------------------ |
+   | `JournalResourceWrites.commitResources` → `findResource` | `ma_resource (scope_key, resource_id)`   | Every new resource       |
+   | `HostedCleanupReferences.apply`                          | `ma_resource_ref` `HOSTED_CLEANUP` owner | First state of a cleanup |
 
-   Implementation starts with a full sweep of `FOR UPDATE` statements reachable
-   from `commit`. Any site found later joins this table or gets a reason why its
-   key always exists.
+   The other locking reads hit rows that always exist (the Session row, the
+   head row, a referenced resource whose absence fails the commit), or serve a
+   deliberate seam. `reconcileNeverStartedVerdict` locks a child run record and
+   the parent's child lineage, so a never-started verdict serializes with child
+   Session creation. A commit never inserts into the lineage index. The run
+   record exists unless it is first written in the same commit as its verdict;
+   that rare case keeps a gap lock, and a deadlock there is rolled back like
+   any other.
 4. **Unchanged paths.** Lifecycle-authority commits (`authority != null`)
    still take both guards in `checkLifecycleWriter`, before anything else.
    CSI-pinned Sessions still take both guards in `lockCsiContinuation`, after
@@ -122,18 +127,25 @@ Taking the head first would invert that order.
 1. While another transaction holds the tenant placement guard, an ordinary
    commit completes. `ManagedSessionGuardConvoyIT` asserts commit is not
    guard-bound.
-2. Lifecycle ordering: a begin holds a Session row lock and inserts a v2
-   claim. A concurrent commit on that Session waits on the row, not the guard,
-   then answers `workspace_lifecycle_claim_fenced`. With the order reversed,
-   begin's `requireIdleJournal` sees the committed revision.
-3. MySQL only: two Sessions of one tenant commit new resources and hosted
-   cleanup references in parallel loops with adjacent keys, with no deadlock.
-   H2 does not take gap locks, so this needs the MySQL profile.
+2. Ordering on the Session row. A duplicate commit parked behind an
+   uncommitted winner waits on the Session row, not the tenant guard, and
+   replays the winner once it commits. This shows that the plain lookups after
+   the lock read a snapshot taken after it
+   (`duplicateCommitReplaysOnceTheWinnerReleasesItsGuards`). A deletion
+   admission started behind a blocked record commit waits on that commit's
+   Session row and completes after it
+   (`ManagedAgentMySqlIT.serializesDeletionBehindTheRecordCommit`).
+3. MySQL only: four writers open Sessions of one tenant and commit the monitor
+   chain fixtures in parallel. Every revision publishes a new resource, and all
+   of them complete without a deadlock (`concurrentCommitsOfOneTenantDoNotDeadlock`).
+   H2 does not take gap locks, so this needs the MySQL profile. Hosted cleanup
+   references are covered by the existing hosted cleanup suites only.
 4. Existing journal, lifecycle, Harness placement, migration, retention, CSI
    and hosted recovery suites pass, including the MySQL profiles in CI.
 
 ## Delivery
 
-One PR stacked on #16223. Commit 1 converts the missing-key sites (step 3);
-it is safe with the guard still in place. Commit 2 removes the guard and adds
-the guard-free fence check variant (steps 1 and 2), with tests 1 to 3.
+One PR stacked on #16223. Commit 1 converts the two missing-key sites
+(step 3); it is safe with the guard still in place. Commit 2 removes the guard
+and adds the guard-free fence check variant (steps 1 and 2), with tests 1
+to 3.

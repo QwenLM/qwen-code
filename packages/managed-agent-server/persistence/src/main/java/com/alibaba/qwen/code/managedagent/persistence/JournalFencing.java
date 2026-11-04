@@ -152,8 +152,34 @@ final class JournalFencing {
         // out-waiting the caller (#13800).
         lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        requireSessionStorageOpen(tenantId, workspaceId, sessionId);
+    }
+
+    // The fence check alone: locking reads of the storage's alias and
+    // directory rows, without the tenant placement guard. For a caller that
+    // already ordered on its Session row.
+    void requireSessionStorageOpen(String tenantId, String workspaceId, String sessionId) {
         WorkspaceMigrationAdmission.requirePhysicalOpen(jdbc, tenantId,
                 WorkspaceMigrationAdmission.sessionStorage(jdbc, tenantId, sessionId, workspaceId));
+    }
+
+    // Locks the Session root by primary key (a record lock, never a gap) as
+    // the transaction's first statement. Outside a transaction the lock
+    // would be released at once, and lockCsiContinuation keeps its
+    // standalone check, so nothing is taken there.
+    void lockSessionFirst(String tenantId, String sessionId) {
+        if (transactional()) {
+            ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
+        }
+    }
+
+    private boolean transactional() {
+        Boolean transactional = jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection -> {
+            var target = org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection);
+            return !target.getAutoCommit() && org.springframework.jdbc.datasource.DataSourceUtils
+                    .isConnectionTransactional(target, jdbc.getDataSource());
+        });
+        return Boolean.TRUE.equals(transactional);
     }
 
     // An ordinary write against a v2-claimed Session must fail with the
@@ -282,12 +308,7 @@ final class JournalFencing {
     JournalStoreRows.HeadRow requireHeadAfterCsiCheck(String tenantId, String sessionId) {
         // A null continuation proves nothing in standalone mode. Only the CSI check
         // on this DataSource's transaction connection has retained the root lock.
-        Boolean transactional = jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection -> {
-            var target = org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection);
-            return !target.getAutoCommit() && org.springframework.jdbc.datasource.DataSourceUtils
-                    .isConnectionTransactional(target, jdbc.getDataSource());
-        });
-        return Boolean.TRUE.equals(transactional)
+        return transactional()
                 ? storeRows.requireHeadWithRootLocked(tenantId, sessionId)
                 : storeRows.requireHeadForUpdate(tenantId, sessionId);
     }

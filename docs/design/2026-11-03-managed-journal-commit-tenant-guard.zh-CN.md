@@ -48,16 +48,19 @@ commit 改为在**自己的 Session 行**上排队，不再使用租户行。之
    并发执行后，对不存在的键做 `FOR UPDATE` 会加间隙锁。两个 Session 的新键落在同一间隙时，
    插入会互相死锁。涉及的键都以 Session scope key 为前缀，但两个 Session 的键之间的间隙
    是共享的。每处改为：普通读；不存在则插入；出现 `DuplicateKeyException` 时做锁定重读，
-   并执行原有的身份校验。这与 #16225 处理回执的方式相同。已知位置：
+   并执行原有的身份校验。这与 #16225 处理回执的方式相同。排查从 `commit` 可达的全部
+   `FOR UPDATE` 后，找到两处：
 
-   | 位置                                                       | 行                                          | 何时不存在           |
-   | ---------------------------------------------------------- | ------------------------------------------- | -------------------- |
-   | `JournalResourceWrites.commitResources` → `findResource`   | `ma_resource (scope_key, resource_id)`      | 每个新资源           |
-   | `HostedCleanupReferences.apply`                            | `ma_resource_ref` 的 `HOSTED_CLEANUP` owner | cleanup 的第一个状态 |
-   | `ManagedExtensionRecordStore.reconcileNeverStartedVerdict` | `ma_session_record` 血缘记录                | verdict 先于 mint    |
+   | 位置                                                     | 行                                          | 何时不存在           |
+   | -------------------------------------------------------- | ------------------------------------------- | -------------------- |
+   | `JournalResourceWrites.commitResources` → `findResource` | `ma_resource (scope_key, resource_id)`      | 每个新资源           |
+   | `HostedCleanupReferences.apply`                          | `ma_resource_ref` 的 `HOSTED_CLEANUP` owner | cleanup 的第一个状态 |
 
-   实现的第一步，是完整排查从 `commit` 可达的所有 `FOR UPDATE` 语句。之后新发现的位置要么
-   加入此表，要么说明其键为何一定存在。
+   其余锁定读针对的行一定存在（Session 行、head 行、被引用的资源，缺失时 commit 会失败），
+   或者是有意设置的串行点。`reconcileNeverStartedVerdict` 锁定子运行记录和父 Session 的子
+   血缘，使"从未启动"的 verdict 与子 Session 创建串行。commit 从不向血缘索引插入数据。
+   子运行记录通常已存在，只有在它与 verdict 由同一个 commit 首次写入时才不存在；这种少见
+   情况下仍会加间隙锁，若因此死锁，会像其他死锁一样回滚。
 4. **不变的路径。** 带生命周期授权的 commit（`authority != null`）仍在
    `checkLifecycleWriter` 中最先获取两个 guard。CSI 固定的 Session 仍在
    `lockCsiContinuation` 中、在锁定 root 之后获取两个 guard。这是 root → guard 的顺序，
@@ -101,16 +104,20 @@ commit 改为在**自己的 Session 行**上排队，不再使用租户行。之
 
 1. 另一事务持有租户 placement guard 时，普通 commit 仍能完成。
    `ManagedSessionGuardConvoyIT` 断言 commit 不受 guard 约束。
-2. 生命周期排序：begin 持有 Session 行锁并插入 v2 claim。同一 Session 的并发 commit
-   在该行（而不是 guard）上等待，随后返回 `workspace_lifecycle_claim_fenced`。顺序反过来
-   时，begin 的 `requireIdleJournal` 能看到已提交的 revision。
-3. 仅 MySQL：同一租户的两个 Session 用相邻的键，循环并发提交新资源和 hosted cleanup
-   引用，不出现死锁。H2 不加间隙锁，所以这一项需要 MySQL profile。
+2. 在 Session 行上排序。排在未提交赢家之后的重复 commit，在 Session 行（而不是租户
+   guard）上等待，赢家提交后重放赢家的结果。这说明加锁之后的普通查询读到的快照晚于该锁
+   （`duplicateCommitReplaysOnceTheWinnerReleasesItsGuards`）。在被阻塞的 record commit
+   之后发起的删除准入，在该 commit 的 Session 行上等待，并在它之后完成
+   （`ManagedAgentMySqlIT.serializesDeletionBehindTheRecordCommit`）。
+3. 仅 MySQL：四个 writer 在同一租户内打开 Session，并发提交 monitor chain fixture。
+   每个 revision 都发布一个新资源，全部完成且不出现死锁
+   （`concurrentCommitsOfOneTenantDoNotDeadlock`）。H2 不加间隙锁，所以这一项需要
+   MySQL profile。hosted cleanup 引用只由现有的 hosted cleanup 测试覆盖。
 4. 现有的 journal、生命周期、Harness placement、迁移、retention、CSI 与 hosted
    recovery 测试继续通过，包括 CI 中的 MySQL profile。
 
 ## 交付
 
-一个叠加在 #16223 之上的 PR。提交 1 改造不存在键的位置（第 3 步），在保留 guard 时也
-是安全的。提交 2 去掉 guard，并加入不经 guard 的 fence 检查变体（第 1、2 步），附带
+一个叠加在 #16223 之上的 PR。提交 1 改造这两处不存在键的位置（第 3 步），在保留 guard
+时也是安全的。提交 2 去掉 guard，并加入不经 guard 的 fence 检查变体（第 1、2 步），附带
 测试 1 到 3。
