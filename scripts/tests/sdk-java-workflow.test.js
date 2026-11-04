@@ -189,24 +189,27 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(scripts.bundle).toBeTruthy();
   });
 
-  it('fails Java pool jobs before disk exhaustion reaches their suites', () => {
+  it('gates every pool-capable Java job and calibrates its floor', () => {
     const jobs = parse(workflow).jobs;
-    // Derive the corpus from runs-on, not a closed name list: a lane joins
-    // the pool with a one-line runs-on ternary, and a hardcoded list stays
-    // green through exactly that move (same hazard as the setup-java corpus
-    // below). Every pool-capable lane must carry the gate.
-    const poolJobs = Object.entries(jobs).filter(([, definition]) =>
-      String(definition['runs-on'] ?? '').includes('self-hosted'),
-    );
-    expect(poolJobs.length).toBeGreaterThan(0);
+    // Fail closed: only these two jobs are hosted by construction, so every
+    // other job — including one routed through a runs-on expression or a job
+    // output — must carry the gate. The allowlist is the thing a reviewer
+    // sees; rewording an expression can no longer walk a lane out of the
+    // corpus while the suite stays green.
+    const hostedOnly = new Set(['hosted-harness-mysql', 'hosted-failover-e2e']);
+    const gated = new Set();
 
-    for (const [name, definition] of poolJobs) {
+    for (const [name, definition] of Object.entries(jobs)) {
       const steps = definition.steps ?? [];
       const gateIndex = steps.findIndex(
         (candidate) => candidate.name === 'Disk floor gate (self-hosted)',
       );
-      // Skipping ungated jobs is how a newly pool-routed lane silently walks
-      // into the suites on a saturated host; require the gate instead.
+      if (hostedOnly.has(name)) {
+        // runner.environment is github-hosted there, so the step's `if:` is
+        // permanently false and a gate reads as protection without being any.
+        expect(gateIndex, name).toBe(-1);
+        continue;
+      }
       expect(gateIndex, name).toBeGreaterThan(-1);
       expect(steps[gateIndex - 1]?.uses, name).toMatch(/^actions\/checkout@/);
       expect(steps[gateIndex].if, name).toBe(
@@ -218,7 +221,46 @@ describe('SDK Java self-hosted workflow guards', () => {
       // continue-on-error would neuter the gate while every other assertion
       // stays true; the job must actually stop on a saturated host.
       expect(steps[gateIndex]['continue-on-error'], name).toBeUndefined();
+      gated.add(name);
     }
+
+    // A job that matches neither list fails here instead of shipping ungated.
+    expect(gated.size + hostedOnly.size).toBe(Object.keys(jobs).length);
+
+    // The shared 2 GiB default is a light-lane floor. These lanes install,
+    // build and fork JUnit, so they need the repo's build-sized figure; the
+    // broker lanes are refused by RocketMQ's own used-ratio rule long before
+    // free bytes run out, which no absolute floor can express (#16003).
+    const heavyFloors = {
+      test: 8388608,
+      'mysql-integration': 8388608,
+      'event-transport-broker': 8388608,
+      'event-transport-multi-node': 8388608,
+      'daemon-e2e': 8388608,
+    };
+    for (const [name, kib] of Object.entries(heavyFloors)) {
+      expect(
+        Number(jobs[name].env?.DISK_FLOOR_MIN_FREE_KB),
+        `${name}: DISK_FLOOR_MIN_FREE_KB`,
+      ).toBe(kib);
+    }
+    // Remaining on the shared default on purpose: its Maven run is a single
+    // migration pass, and raising the shared value would move every other
+    // lane's gate (run-release-docker-integration.sh depends on that split).
+    expect(
+      jobs['flyway-migrations'].env?.DISK_FLOOR_MIN_FREE_KB,
+    ).toBeUndefined();
+
+    for (const name of [
+      'event-transport-broker',
+      'event-transport-multi-node',
+    ]) {
+      expect(
+        Number(jobs[name].env?.DISK_FLOOR_MAX_USED_PCT),
+        `${name}: DISK_FLOOR_MAX_USED_PCT`,
+      ).toBe(90);
+    }
+    expect(jobs['test'].env?.DISK_FLOOR_MAX_USED_PCT).toBeUndefined();
   });
 
   it('serializes the host-shared Maven cache write-back on each physical ECS host', () => {
@@ -1817,6 +1859,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(mysql.strategy).toBeUndefined();
     expect(JSON.stringify(mysql)).not.toMatch(/mariadb|matrix\./i);
     expect(mysql.env).toEqual({
+      // The lane writes a database, two Maven runs and the JUnit forks into
+      // the same host volume, so it carries the heavy floor (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608',
       MYSQL_CONTAINER:
         'qwen-code-sdk-java-mysql-${{ github.run_id }}-${{ github.run_attempt }}',
     });

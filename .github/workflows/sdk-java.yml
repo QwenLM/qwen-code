@@ -65,6 +65,13 @@ jobs:
         include: >-
           ${{ fromJSON(inputs.tier == 'fast' && '[{"os":"ubuntu-latest","java":"21"}]' ||
           '[{"os":"ubuntu-latest","java":"11"},{"os":"ubuntu-latest","java":"17"},{"os":"ubuntu-latest","java":"21"},{"os":"macos-latest","java":"21"},{"os":"windows-latest","java":"21"}]') }}
+    env:
+      # The shared 2 GiB default is a build-sized floor for a light lane,
+      # not for this one: install, build and the JUnit forks together write
+      # far more, and a host with 2-4 GiB free passes the shared gate and
+      # then dies mid-suite (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608'
+
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -671,6 +678,7 @@ jobs:
     # not as an expected duration.
     timeout-minutes: 310
     env:
+      DISK_FLOOR_MIN_FREE_KB: '8388608'
       MYSQL_CONTAINER: 'qwen-code-sdk-java-mysql-${{ github.run_id }}-${{ github.run_attempt }}'
     steps:
       - name: 'Restore workspace ownership'
@@ -1674,6 +1682,17 @@ jobs:
     # 10 + 20 capped minutes plus the uncapped setup, which a loaded pool
     # host stretches (daemon-e2e measured its setup at up to 4x).
     timeout-minutes: 60
+    env:
+      # The shared 2 GiB default is a build-sized floor for a light lane,
+      # not for this one: install, build and the JUnit forks together write
+      # far more, and a host with 2-4 GiB free passes the shared gate and
+      # then dies mid-suite (#16003).
+      # The broker refuses writes on its own used-ratio rule at ~94% while
+      # the 952 GiB volume still reports tens of GiB free, so no absolute
+      # floor can catch it (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608'
+      DISK_FLOOR_MAX_USED_PCT: '90'
+
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -1952,6 +1971,11 @@ jobs:
     # stretches (daemon-e2e measured its setup at up to 4x).
     timeout-minutes: 130
     env:
+      # The broker refuses writes on its own used-ratio rule at ~94% while
+      # the 952 GiB volume still reports tens of GiB free, so no absolute
+      # floor can catch it (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608'
+      DISK_FLOOR_MAX_USED_PCT: '90'
       MYSQL_CONTAINER: 'qwen-code-mq3-mysql-${{ github.run_id }}-${{ github.run_attempt }}'
     steps:
       - name: 'Restore workspace ownership'
@@ -2329,6 +2353,13 @@ jobs:
     # stretched-setup tail above far more often than a 45 ceiling leaves room
     # for.
     timeout-minutes: "${{ inputs.tier == 'fast' && 90 || 45 }}"
+    env:
+      # The shared 2 GiB default is a build-sized floor for a light lane,
+      # not for this one: install, build and the JUnit forks together write
+      # far more, and a host with 2-4 GiB free passes the shared gate and
+      # then dies mid-suite (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608'
+
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
