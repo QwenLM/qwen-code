@@ -2439,6 +2439,231 @@ describe('GithubChannel', () => {
         ]);
       });
 
+      it('journals a skip after a retried store failure of the same thread', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (isListNotifications(method)) {
+            poll += 1;
+            return [makeNotification()];
+          }
+          if (poll === 1) return [makeComment()];
+          throw Object.assign(new Error('Not Found'), { status: 404 });
+        });
+        const originalRename = nodeFs.renameSync;
+        const spy = vi.spyOn(nodeFs, 'renameSync').mockImplementation(((
+          from: string,
+          to: string,
+        ) => {
+          if (poll === 1 && to.endsWith('-github-inbound-tasks.json')) {
+            throw Object.assign(new Error('ENOSPC: no space left on device'), {
+              code: 'ENOSPC',
+            });
+          }
+          return (originalRename as (a: string, b: string) => void)(from, to);
+        }) as unknown as typeof nodeFs.renameSync);
+        try {
+          await pollOnce();
+          await pollOnce();
+        } finally {
+          spy.mockRestore();
+        }
+
+        expect(journalRows().map((row) => row['outcome'])).toEqual([
+          'failed',
+          'skipped',
+        ]);
+      });
+
+      it('skips an HTTP error on another thread while the task store is failing', async () => {
+        await initFailing();
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              return [issueNotification(1), issueNotification(2)];
+            }
+            if (params.issue_number === 2) {
+              throw Object.assign(new Error('Not Found'), { status: 404 });
+            }
+            const at = '2026-07-02T00:30:00.000Z';
+            return [makeComment({ id: 2001, created_at: at, updated_at: at })];
+          },
+        );
+        const originalRename = nodeFs.renameSync;
+        const spy = vi.spyOn(nodeFs, 'renameSync').mockImplementation(((
+          from: string,
+          to: string,
+        ) => {
+          if (to.endsWith('-github-inbound-tasks.json')) {
+            throw Object.assign(new Error('ENOSPC: no space left on device'), {
+              code: 'ENOSPC',
+            });
+          }
+          return (originalRename as (a: string, b: string) => void)(from, to);
+        }) as unknown as typeof nodeFs.renameSync);
+        try {
+          await pollOnce();
+        } finally {
+          spy.mockRestore();
+        }
+
+        expect(
+          journalRows().map((row) => [row['number'], row['outcome']]),
+        ).toEqual([
+          [1, 'failed'],
+          [2, 'skipped'],
+        ]);
+      });
+
+      it('journals the give-up of a thread first seen stale', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (isListNotifications(method)) {
+            poll += 1;
+            // Stale on poll 1, then new activity moves it past the cursor.
+            return [
+              issueNotification(
+                1,
+                poll === 1
+                  ? '2026-07-01T00:00:00.000Z'
+                  : '2026-07-02T01:00:00.000Z',
+              ),
+            ];
+          }
+          throw transient();
+        });
+
+        for (let i = 0; i < 31; i++) await pollOnce();
+
+        expect(
+          journalRows().map((row) => [
+            row['outcome'],
+            (row['detail'] as { failures?: number } | undefined)?.failures,
+          ]),
+        ).toEqual([
+          ['skipped', undefined],
+          ['failed', 1],
+          ['failed', 10],
+          ['failed', 20],
+          ['skipped', 30],
+        ]);
+      });
+
+      it('holds the window when a stale notification hits a rate limit', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return [
+                issueNotification(1, '2026-07-01T00:00:00.000Z'),
+                issueNotification(2),
+              ];
+            }
+            if (params.issue_number === 1) {
+              if (poll === 1) {
+                throw Object.assign(new Error('Too Many Requests'), {
+                  status: 429,
+                  response: { headers: {} },
+                });
+              }
+              return [];
+            }
+            const at = '2026-07-02T01:30:00.000Z';
+            return [makeComment({ id: 5001, created_at: at, updated_at: at })];
+          },
+        );
+
+        await pollOnce();
+        // The limit stopped the poll before the newer thread was read.
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '5001',
+        ]);
+      });
+
+      it('still reads a thread it gave up on while a rate limit holds the window', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return [issueNotification(1), issueNotification(2)];
+            }
+            if (params.issue_number === 1) {
+              // Fails past the budget, then recovers on poll 31.
+              if (poll <= 30) throw transient();
+              const at = '2026-07-02T00:30:00.000Z';
+              return [
+                makeComment({ id: 6001, created_at: at, updated_at: at }),
+              ];
+            }
+            // Thread 2 is rate-limited until poll 31 and holds the window.
+            if (poll <= 30) {
+              throw Object.assign(new Error('Too Many Requests'), {
+                status: 429,
+                response: { headers: {} },
+              });
+            }
+            return [];
+          },
+        );
+
+        for (let i = 0; i < 31; i++) await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '6001',
+        ]);
+      });
+
+      it('reads a permanently failing thread once per held window', async () => {
+        await initFailing();
+        const read: number[] = [];
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              return [issueNotification(1), issueNotification(2)];
+            }
+            read.push(params.issue_number!);
+            if (params.issue_number === 1) {
+              throw Object.assign(new Error('Not Found'), { status: 404 });
+            }
+            throw transient();
+          },
+        );
+
+        for (let i = 0; i < 3; i++) await pollOnce();
+
+        // Three in-call attempts on poll 1, none after.
+        expect(read.filter((n) => n === 1)).toEqual([1, 1, 1]);
+      });
+
+      it('bounds the per-thread failure counts', async () => {
+        await initFailing();
+        const failures = (
+          channel as unknown as {
+            transientNotificationFailures: Map<string, number>;
+          }
+        ).transientNotificationFailures;
+        for (let i = 0; i < 8192; i++) failures.set(`x|issue:${i}`, 1);
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (isListNotifications(method)) return [issueNotification(1)];
+          throw transient();
+        });
+
+        await pollOnce();
+
+        expect(failures.size).toBe(8192);
+        expect(failures.has('owner/repo|issue:1')).toBe(false);
+      });
+
       it('bounds the once-per-window journal keys', async () => {
         await initFailing();
         const journalOnce = (

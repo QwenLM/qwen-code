@@ -2307,17 +2307,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // A failing task store or audit holds the window and must see the
         // thread again.
         if (!this.inboundPersistenceBlocked && !this.publicationAuditBlocked) {
-          if (this.windowReadThreads.size < MAX_WINDOW_KEYS) {
-            this.windowReadThreads.set(failureKey, notification.updated_at);
-          }
+          this.rememberWindowRead(failureKey, notification.updated_at);
         }
       } catch (err) {
         const failure = classifyThreadFailure(err);
         let failures = 0;
-        if (failure === 'transient') {
+        if (failure === 'transient' && !stale) {
           failures =
             (this.transientNotificationFailures.get(failureKey) ?? 0) + 1;
-          this.transientNotificationFailures.set(failureKey, failures);
+          if (
+            this.transientNotificationFailures.has(failureKey) ||
+            this.transientNotificationFailures.size < MAX_WINDOW_KEYS
+          ) {
+            this.transientNotificationFailures.set(failureKey, failures);
+          }
         }
         const transientPoll = this.transientHoldPolls + 1;
         const retry =
@@ -2330,25 +2333,34 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           if (failure === 'shared') sharedHeld = true;
           else transientHeld = true;
         }
-        // A held window re-reads the thread every poll. Report a 5xx streak
-        // when it starts and on every tenth failing poll, a shared failure on
-        // the first and every tenth poll it stops, and a skip once.
+        // A held window re-reads the thread every poll. Report a thread's
+        // first and every tenth failing poll in the window, a shared failure
+        // on the first and every tenth poll it stops, and each other outcome
+        // once per window under a key of its own.
         const heldPolls =
           failure === 'shared' ? this.sharedHoldPolls + 1 : transientPoll;
-        // A local error raised by a failing task store is not this thread's
-        // fault, and the store failure already holds the window: report it as
-        // retried, not skipped.
+        // A local error (no HTTP status) raised while the task store or the
+        // publication audit is failing is not this thread's fault, and that
+        // failure already holds the window: report it as retried.
         const storeHeld =
           failure === 'permanent' &&
+          typeof (err as { status?: unknown }).status !== 'number' &&
           (this.inboundPersistenceBlocked || this.publicationAuditBlocked);
         const held = retry || storeHeld;
+        // A permanent answer or a stale notification reads the same on the
+        // next poll: the held window need not read it again.
+        if (!held && (failure === 'permanent' || stale)) {
+          this.rememberWindowRead(failureKey, notification.updated_at);
+        }
         const milestone = (n: number) => n === 1 || n % 10 === 0;
         const report =
           failure === 'shared'
             ? milestone(heldPolls)
             : retry
               ? milestone(failures)
-              : this.journalOncePerWindow(`skip\0${failureKey}`);
+              : this.journalOncePerWindow(
+                  `${storeHeld ? 'held' : stale ? 'stale' : 'skip'}\0${failureKey}`,
+                );
         if (report) {
           const error = sanitizeLogText(
             err instanceof Error ? err.message : String(err),
@@ -2360,11 +2372,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
               : retry
                 ? `[Channel:${this.name}] API error processing ${threadId} (${heldPolls}/${MAX_TRANSIENT_FAILURE_POLLS}), keeping it unread for the next poll: ${error}\n`
                 : storeHeld
-                  ? `[Channel:${this.name}] error processing ${threadId} while the task store is failing, keeping it unread for the next poll: ${error}\n`
+                  ? `[Channel:${this.name}] error processing ${threadId} while channel state cannot be persisted, keeping it unread for the next poll: ${error}\n`
                   : `[Channel:${this.name}] API error processing ${threadId}, skipping: ${error}\n`,
           );
           let detail: Record<string, number> | undefined;
-          if (failure === 'transient') {
+          if (failure === 'transient' && !stale) {
             detail = retry ? { failures, heldPolls } : { failures };
           } else if (failure === 'shared') {
             detail = { heldPolls };
@@ -2452,6 +2464,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * resets when the window is marked read), so a held window that re-reads the
    * same thread or comment every poll journals the repeat once.
    */
+  /** Past the bound a thread is simply read again on the next poll. */
+  private rememberWindowRead(threadKey: string, updatedAt: string): void {
+    if (
+      this.windowReadThreads.has(threadKey) ||
+      this.windowReadThreads.size < MAX_WINDOW_KEYS
+    ) {
+      this.windowReadThreads.set(threadKey, updatedAt);
+    }
+  }
+
   private journalOncePerWindow(key: string): boolean {
     if (this.windowJournalKeys.has(key)) return false;
     // Past the bound a new key is journaled without being remembered, so only
