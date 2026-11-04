@@ -16,7 +16,8 @@ New 与列表刷新；没有 ID 时等待宿主选择，不自动选择或创建
 非 React 宿主可使用本地 ESM 入口：
 
 ```ts
-import { renderManagedAgentWebShell } from './managed-host/index.js';
+// 相对于产物目录根（dist-managed-host/）；该目录已整体提供给宿主。
+import { renderManagedAgentWebShell } from './index.js';
 
 const shell = renderManagedAgentWebShell(container, {
   managedAgentProvider: provider,

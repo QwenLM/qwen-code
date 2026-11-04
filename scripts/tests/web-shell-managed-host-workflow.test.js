@@ -66,8 +66,10 @@ describe('managed host build lane', () => {
   it('builds untrusted PR code with a read-only token and no secrets', () => {
     expect(workflow.permissions).toEqual({ contents: 'read' });
     expect(workflowSource).not.toContain('pull_request_target');
-    // Match an actual expression, not the prose in the security comment.
-    expect(workflowSource).not.toMatch(/\$\{\{\s*secrets\./);
+    // Match an actual expression, not the prose in the security comment, and
+    // cover bracket access too: `secrets['TOKEN']` is the same read as
+    // `secrets.TOKEN`, so a dot-only guard would let it through.
+    expect(workflowSource).not.toMatch(/\$\{\{[^}]*\bsecrets\s*[.[]/);
     expect(job['runs-on']).toBe('ubuntu-latest');
     expect(job.if).toContain("github.repository == 'QwenLM/qwen-code'");
     const checkout = job.steps.find((step) =>
@@ -83,23 +85,43 @@ describe('managed host build lane', () => {
     );
   });
 
-  it('builds the managed-host mode and skips the monorepo prepare build', () => {
+  it('builds the managed-host mode without the monorepo prepare build', () => {
     expect(stepNamed('Build the managed host entry').run).toBe(
       'npm run build:managed-host --workspace=@qwen-code/web-shell',
     );
     expect(pkg.scripts['build:managed-host']).toBe(
       'vite build --config vite.lib.config.ts --mode managed-host',
     );
-    // The entry externalizes nothing, so it needs no sibling workspace dist/.
+    // `prepare` would rebuild every workspace; the three targeted steps below
+    // build only the dists this entry actually resolves through.
     expect(stepNamed('Install dependencies').env.QWEN_SKIP_PREPARE).toBe('1');
   });
 
   it('builds every workspace dist the entry imports', () => {
     // The client imports `@qwen-code/sdk/daemon`, whose `exports` points into
-    // that package's `dist/`; building only core left the lane red.
+    // that package's `dist/`, and the SDK in turn resolves core and acp-bridge
+    // through their own `dist/`. All three are load-bearing: dropping any one
+    // reds the lane on an unresolved import, so pin each rather than just the
+    // last. `tsconfig.reference.json` references only ../core, so `tsc --build`
+    // never produces acp-bridge — hence its own step and this fixed order.
+    expect(stepNamed('Build core for the managed host entry').run).toBe(
+      'corepack pnpm --filter @qwen-code/qwen-code-core build',
+    );
+    expect(stepNamed('Build acp-bridge for the SDK reference build').run).toBe(
+      'corepack pnpm --filter @qwen-code/acp-bridge build',
+    );
     expect(stepNamed('Build the SDK for the managed host entry').run).toBe(
       'corepack pnpm --filter @qwen-code/sdk build',
     );
+    const buildOrder = job.steps
+      .map((step) => step.name)
+      .filter((name) => String(name).startsWith('Build '));
+    expect(buildOrder).toEqual([
+      'Build core for the managed host entry',
+      'Build acp-bridge for the SDK reference build',
+      'Build the SDK for the managed host entry',
+      'Build the managed host entry',
+    ]);
   });
 
   it('asserts an emitted bundle rather than trusting a green exit code', () => {
@@ -107,6 +129,15 @@ describe('managed host build lane', () => {
     expect(verify.run).toContain('dist-managed-host/index.js');
     expect(verify.run).toContain('test -s');
     expect(verify.run).toContain('renderManagedAgentWebShell');
+    // The CSS half must key on the injection preamble. A JSX prop name such as
+    // `data-managed-empty` survives minification as an object key even when the
+    // plugin's per-entry guard stops matching and no stylesheet is injected,
+    // so grepping it would pass on an unstyled bundle.
+    expect(verify.run).toContain('__qwenWebShellCss');
+    expect(verify.run).toContain(
+      'grep -qF \'data-qwen-web-shell-entry="managed-host"\'',
+    );
+    expect(verify.run).not.toContain("grep -q 'data-managed-empty'");
   });
 
   it('keeps the output outside the directory the app build empties', () => {

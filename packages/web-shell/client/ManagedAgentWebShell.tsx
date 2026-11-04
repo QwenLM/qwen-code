@@ -212,9 +212,13 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   const controlled =
     hostSessionOnly ||
     (sessionId !== undefined && onSessionChange !== undefined);
+  const providerKey = provider?.storageKey;
   let selectedSessionId: string | undefined;
   if (
-    selection.storageKey !== provider?.storageKey ||
+    // A provider-less render keeps the stored identity, so comparing it to
+    // `undefined` here would hold this branch open forever and setState on
+    // every render. Only a mounted provider can change the identity.
+    (providerKey !== undefined && selection.storageKey !== providerKey) ||
     selection.hostSessionOnly !== hostSessionOnly ||
     selection.externalSessionId !== sessionId
   ) {
@@ -223,14 +227,21 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
     // would paint one stale frame first. Only an id carried over from the
     // previous identity is dropped, never an explicit new selection. Without a
     // provider there is no previous identity to carry an id over from.
+    // Compare against the last real identity, not the stored one: a
+    // provider-less render in between must not erase the scope a carried id
+    // belongs to, or A -> none -> C would hand A's session to C.
     selectedSessionId =
+      providerKey !== undefined &&
       selection.storageKey !== undefined &&
-      selection.storageKey !== provider?.storageKey &&
+      selection.storageKey !== providerKey &&
       sessionId === selection.externalSessionId
         ? undefined
         : sessionId;
     setSelection({
-      storageKey: provider?.storageKey,
+      // Retain the identity while no provider is mounted. Gating the
+      // comparison on providerKey above is what keeps this from making the
+      // branch condition permanently true and looping setState per render.
+      storageKey: providerKey ?? selection.storageKey,
       hostSessionOnly,
       externalSessionId: sessionId,
       selectedSessionId,

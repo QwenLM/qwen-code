@@ -317,6 +317,28 @@ describe('ManagedAgentWebShell', () => {
     });
   });
 
+  it('drops a carried sessionId when the identity switch passes through a provider-less render', async () => {
+    const first = { storageKey: 'tenant-a:actor-a' } as ManagedAgentProvider;
+    const third = { storageKey: 'tenant-c:actor-c' } as ManagedAgentProvider;
+    const render = (provider?: ManagedAgentProvider) =>
+      act(async () =>
+        root.render(
+          <ManagedAgentWebShell
+            managedAgentProvider={provider}
+            hostSessionOnly
+            sessionId="s1"
+          />,
+        ),
+      );
+    await render(first);
+    await render(undefined);
+    await render(third);
+    expect(captured.props).toMatchObject({
+      managedAgentProvider: third,
+      sessionId: undefined,
+    });
+  });
+
   it('styles both wrappers when the host reuses one slot element', async () => {
     const provider = { storageKey: 'slot-reused' } as ManagedAgentProvider;
     const target = document.createElement('div');

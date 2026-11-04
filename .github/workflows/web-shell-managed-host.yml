@@ -104,14 +104,20 @@ jobs:
         run: 'npm run build:managed-host --workspace=@qwen-code/web-shell'
 
       # A green build that emitted nothing would not catch the rot this lane
-      # exists for, so assert the entry point and its injected scoped CSS.
+      # exists for, so assert the entry point and its injected scoped CSS. The
+      # CSS check must key on the injection preamble, not a JSX prop name:
+      # `data-managed-empty` compiles to an object key that survives minification
+      # even when the plugin's per-entry guard stops matching and no stylesheet
+      # is injected at all — a green lane serving an unstyled bundle.
       - name: 'Verify the host entry emitted a usable bundle'
         run: |-
           set -euo pipefail
           entry='packages/web-shell/dist-managed-host/index.js'
           test -s "$entry"
           grep -q 'renderManagedAgentWebShell' "$entry"
-          grep -q 'data-managed-empty' "$entry"
+          grep -q '__qwenWebShellCss' "$entry"
+          grep -qF 'data-qwen-web-shell-entry="managed-host"' "$entry"
+          grep -q 'data-web-shell-portal-root' "$entry"
           echo "Managed host entry emitted: $(wc -c < "$entry") bytes"
 
       # The output must stay outside `dist/`: the app build empties that
