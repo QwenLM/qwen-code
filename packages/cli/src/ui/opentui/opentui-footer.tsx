@@ -26,12 +26,14 @@ import type {
   useStatusLineState,
 } from '../hooks/useStatusLine.js';
 import { t } from '../../i18n/index.js';
+import type { VimMode } from '../contexts/VimModeContext.js';
 import {
   SPINNER_FRAMES,
   SPINNER_INTERVAL_MS,
   WAITING_SPINNER_FRAME,
 } from '../constants.js';
 import { usePhraseCycler } from '../hooks/usePhraseCycler.js';
+import { useWorkflowMode } from '../hooks/use-workflow-mode.js';
 import { useTimer } from '../hooks/useTimer.js';
 import { useAnimationFrame } from '../hooks/useAnimationFrame.js';
 import { formatApprovalModeName } from '../utils/approvalModeDisplay.js';
@@ -195,6 +197,7 @@ export interface OpenTuiFooterProps {
   approvalMode?: ApprovalMode;
   /** `!` shell mode: takes the hint slot over the steer/approval segments. */
   shellModeActive?: boolean;
+  vimMode?: VimMode;
   /** Armed two-press quit warning: takes the bottom hint slot and gates the
    * status line off, as it does in ink. */
   exitHint?: string | null;
@@ -211,8 +214,10 @@ export function OpenTuiFooter({
   queueLength = 0,
   approvalMode,
   shellModeActive = false,
+  vimMode,
   exitHint = null,
 }: OpenTuiFooterProps) {
+  const workflowMode = useWorkflowMode(config);
   const { width } = useTerminalDimensions();
   const generationConfig = config.getContentGeneratorConfig();
   const promptTokenCount = sessionStats.lastPromptTokenCount;
@@ -238,27 +243,29 @@ export function OpenTuiFooter({
       ? t('(tab to cycle)')
       : t('(shift + tab to cycle)');
   const pausePrefix = approvalMode === ApprovalMode.DEFAULT ? '⏸ ' : '';
-  const modeHint: HintPart[] = shellModeActive
-    ? [{ text: 'shell mode enabled (esc to disable)', color: C.dim }]
-    : [
-        ...(streaming
-          ? [
-              { text: t('Enter to steer · Ctrl+Q to queue'), color: C.dim },
-              // ink's leftBottomContent puts ' · ' between its own segments,
-              // but only where two of them are actually present.
-              ...(approvalMode ? [{ text: ' · ', color: C.dim }] : []),
-            ]
-          : []),
-        ...(approvalMode
-          ? [
-              {
-                text: `${pausePrefix}${formatApprovalModeName(approvalMode)}`,
-                color: approvalModeColor(approvalMode),
-              },
-              { text: ` ${cycleText}`, color: C.dim },
-            ]
-          : []),
-      ];
+  const modeHint: HintPart[] = vimMode
+    ? [{ text: `-- ${vimMode} --`, color: C.dim }]
+    : shellModeActive
+      ? [{ text: 'shell mode enabled (esc to disable)', color: C.dim }]
+      : [
+          ...(streaming
+            ? [
+                { text: t('Enter to steer · Ctrl+Q to queue'), color: C.dim },
+                // ink's leftBottomContent puts ' · ' between its own segments,
+                // but only where two of them are actually present.
+                ...(approvalMode ? [{ text: ' · ', color: C.dim }] : []),
+              ]
+            : []),
+          ...(approvalMode
+            ? [
+                {
+                  text: `${pausePrefix}${formatApprovalModeName(approvalMode)}`,
+                  color: approvalModeColor(approvalMode),
+                },
+                { text: ` ${cycleText}`, color: C.dim },
+              ]
+            : []),
+        ];
   const queuedHint =
     queueLength > 0
       ? `⏳ ${t('{{count}} queued', { count: String(queueLength) })}`
@@ -355,6 +362,16 @@ export function OpenTuiFooter({
                 )}
               </text>
             )}
+          {workflowMode?.requested && (
+            <text fg={workflowMode.effective ? C.accent : C.yellow}>
+              {truncateToWidth(
+                workflowMode.effective
+                  ? 'Workflow mode: on'
+                  : 'Workflow mode: on (unavailable)',
+                statusWidth,
+              )}
+            </text>
+          )}
           {hintRow.length > 0 && (
             <box flexDirection="row">
               {hintRow.map((part, i) => (

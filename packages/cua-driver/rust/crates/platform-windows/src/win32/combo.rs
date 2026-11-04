@@ -228,7 +228,9 @@ pub fn combo_for_window(raw: isize) -> Option<Combo> {
     let style = unsafe { GetWindowLongW(hwnd(combo), GWL_STYLE) };
     Some(Combo {
         hwnd: combo,
-        editable: style_is_editable(style),
+        // Explorer's editable file-name ComboBoxEx can give its inner combo
+        // CBS_DROPDOWNLIST while still exposing the writable Edit child.
+        editable: style_is_editable(style) || edit_child(combo).is_some(),
     })
 }
 

@@ -66,7 +66,6 @@ describe('useManagedTurnCancel', () => {
       capabilities: {
         canSend: false,
         canCancel: true,
-        durableOperations: true,
       },
     };
     refresh = vi.fn().mockImplementation(async () => summary);
@@ -91,7 +90,7 @@ describe('useManagedTurnCancel', () => {
     vi.mocked(provider.cancel).mockImplementation(
       async (_session, _turn, options) => {
         expect(sessionStorage.getItem(key)).toContain(options.idempotencyKey);
-        expect(options.admissionProfile).toBe('java_durable');
+        expect(options).not.toHaveProperty('admissionProfile');
         return { sessionId: 's1', turnId: 't1', operationId: 'op1' };
       },
     );
@@ -100,7 +99,7 @@ describe('useManagedTurnCancel', () => {
       await current.request();
     });
     expect(current.pending).toBe(true);
-    vi.mocked(provider.queryCancelOperation!).mockResolvedValue({
+    vi.mocked(provider.queryCancelOperation).mockResolvedValue({
       ...operation,
       status: 'completed',
     });
@@ -116,16 +115,27 @@ describe('useManagedTurnCancel', () => {
       await current.request();
     });
     summary = { ...summary, activeTurnId: 't2', phase: 'agent_running' };
-    vi.mocked(provider.queryCancelOperation!).mockResolvedValue({
+    vi.mocked(provider.queryCancelOperation).mockResolvedValue({
       ...operation,
       status: 'completed',
     });
     await render();
     await tick();
     expect(current.pending).toBe(false);
+    vi.mocked(provider.cancel).mockResolvedValue({
+      sessionId: 's1',
+      turnId: 't2',
+      operationId: 'op2',
+    });
+    vi.mocked(provider.queryCancelOperation).mockResolvedValue({
+      ...operation,
+      operationId: 'op2',
+    });
     await act(async () => {
       await current.request();
     });
+    expect(current.pending).toBe(true);
+    expect(JSON.parse(sessionStorage.getItem(key)!).operationId).toBe('op2');
     expect(vi.mocked(provider.cancel).mock.calls[1][1]).toBe('t2');
     expect(vi.mocked(provider.cancel).mock.calls[1][2].idempotencyKey).not.toBe(
       vi.mocked(provider.cancel).mock.calls[0][2].idempotencyKey,
@@ -139,9 +149,7 @@ describe('useManagedTurnCancel', () => {
         sessionId: 's1',
         turnId: 't1',
         idempotencyKey: 'original',
-        durable: true,
         operationId: 'op1',
-        submitted: true,
       }),
     );
     await render();
@@ -172,197 +180,6 @@ describe('useManagedTurnCancel', () => {
     expect(current.pending).toBe(true);
   });
 
-  function compatibilityCancellation() {
-    summary.capabilities.durableOperations = false;
-    vi.mocked(provider.cancel).mockImplementation(
-      async (sessionId, turnId) => ({
-        sessionId,
-        turnId,
-      }),
-    );
-  }
-
-  it.each([false, true])(
-    'retires only an acknowledged compatibility delivery slot and stops the explicitly selected later Turn (poll first: %s)',
-    async (pollFirst) => {
-      compatibilityCancellation();
-      await render();
-      await act(async () => {
-        await current.request();
-      });
-      const original = vi.mocked(provider.cancel).mock.calls[0];
-      expect(current.pending).toBe(true);
-      summary = {
-        ...summary,
-        activeTurnId: 't2',
-        phase: 'agent_running',
-        updatedAt: 3,
-      };
-      await render();
-      if (pollFirst) {
-        await tick();
-        expect(current.pending).toBe(false);
-        expect(provider.cancel).toHaveBeenCalledTimes(1);
-        expect(summary.phase).toBe('agent_running');
-        expect(summary.capabilities.canSend).toBe(false);
-      }
-      await act(async () => {
-        await current.request();
-      });
-      expect(provider.cancel).toHaveBeenCalledTimes(2);
-      const later = vi.mocked(provider.cancel).mock.calls[1];
-      expect(later[1]).toBe('t2');
-      expect(later[2].idempotencyKey).not.toBe(original[2].idempotencyKey);
-      expect(later[2].admissionProfile).toBeUndefined();
-      expect(provider.queryCancelOperation).not.toHaveBeenCalled();
-      expect(JSON.parse(sessionStorage.getItem(key)!).turnId).toBe('t2');
-      expect(current.pending).toBe(true);
-    },
-  );
-
-  it('retires a restored acknowledged compatibility slot when the fresh summary has a different Turn', async () => {
-    compatibilityCancellation();
-    summary = {
-      ...summary,
-      activeTurnId: 't2',
-      phase: 'agent_running',
-      updatedAt: 3,
-    };
-    sessionStorage.setItem(
-      key,
-      JSON.stringify({
-        sessionId: 's1',
-        turnId: 't1',
-        idempotencyKey: 'original',
-        durable: false,
-        submitted: true,
-      }),
-    );
-    await render();
-    await tick();
-    expect(current.pending).toBe(false);
-    expect(sessionStorage.getItem(key)).toBeNull();
-    expect(provider.cancel).not.toHaveBeenCalled();
-    await act(async () => {
-      await current.request();
-    });
-    expect(vi.mocked(provider.cancel).mock.calls[0][1]).toBe('t2');
-    expect(vi.mocked(provider.cancel).mock.calls[0][2].idempotencyKey).not.toBe(
-      'original',
-    );
-  });
-
-  it.each(['missing', 'unknown', 'foreign'] as const)(
-    'keeps an acknowledged compatibility intent on FAILED without original ready evidence (%s)',
-    async (evidence) => {
-      compatibilityCancellation();
-      await render();
-      await act(async () => {
-        await current.request();
-      });
-      const original = vi.mocked(provider.cancel).mock.calls[0];
-      summary = {
-        ...summary,
-        phase: 'failed',
-        updatedAt: 3,
-        recovery:
-          evidence === 'missing'
-            ? undefined
-            : {
-                state: evidence === 'unknown' ? 'operator_required' : 'ready',
-                reasonCode:
-                  evidence === 'unknown' ? 'inputs_unsettled' : 'ready',
-                turnId: evidence === 'foreign' ? 'other-turn' : 't1',
-                nextTurnAllowed: evidence !== 'unknown',
-                actions: {
-                  recheck: false,
-                  cancel: false,
-                  continueInNewSession: true,
-                },
-              },
-      };
-      await render();
-      await tick();
-      expect(current.pending).toBe(true);
-      expect(sessionStorage.getItem(key)).toContain(original[2].idempotencyKey);
-      expect(provider.cancel).toHaveBeenCalledTimes(1);
-    },
-  );
-
-  it('retires an original FAILED compatibility intent only after matching ready evidence', async () => {
-    compatibilityCancellation();
-    await render();
-    await act(async () => {
-      await current.request();
-    });
-    summary = {
-      ...summary,
-      phase: 'failed',
-      updatedAt: 3,
-      recovery: {
-        state: 'ready',
-        reasonCode: 'ready',
-        turnId: 't1',
-        nextTurnAllowed: true,
-        actions: { recheck: false, cancel: false, continueInNewSession: true },
-      },
-    };
-    await render();
-    await tick();
-    expect(current.pending).toBe(false);
-    expect(current.status).toBeUndefined();
-    expect(summary.phase).toBe('failed');
-    expect(summary.capabilities.canSend).toBe(false);
-    expect(sessionStorage.getItem(key)).toBeNull();
-  });
-
-  it('keeps a lost compatibility reply on the original key and Turn despite an explicit later Stop', async () => {
-    compatibilityCancellation();
-    vi.mocked(provider.cancel).mockRejectedValue(new Error('connection lost'));
-    await render();
-    await act(async () => {
-      await current.request();
-    });
-    const original = vi.mocked(provider.cancel).mock.calls[0];
-    summary = {
-      ...summary,
-      activeTurnId: 't2',
-      phase: 'agent_running',
-      updatedAt: 3,
-    };
-    await render();
-    await act(async () => {
-      await current.request();
-    });
-    const retried = vi.mocked(provider.cancel).mock.calls[1];
-    expect(retried[1]).toBe('t1');
-    expect(retried[2].idempotencyKey).toBe(original[2].idempotencyKey);
-    expect(current.pending).toBe(true);
-    expect(current.status).toBe('unconfirmed');
-  });
-
-  it.each(['foreign-session', 'older-summary'] as const)(
-    'keeps acknowledged compatibility tracking on a non-current summary (%s)',
-    async (answer) => {
-      compatibilityCancellation();
-      await render();
-      await act(async () => {
-        await current.request();
-      });
-      refresh.mockResolvedValue({
-        ...summary,
-        activeTurnId: 't2',
-        phase: 'agent_running',
-        sessionId: answer === 'foreign-session' ? 'other-session' : 's1',
-        updatedAt: answer === 'older-summary' ? 1 : 3,
-      });
-      await tick();
-      expect(current.pending).toBe(true);
-      expect(JSON.parse(sessionStorage.getItem(key)!).turnId).toBe('t1');
-      expect(provider.cancel).toHaveBeenCalledTimes(1);
-    },
-  );
-
   it('keeps the original durable operation pending when a later Turn is visible', async () => {
     await render();
     await act(async () => {
@@ -381,42 +198,72 @@ describe('useManagedTurnCancel', () => {
     expect(JSON.parse(sessionStorage.getItem(key)!).operationId).toBe('op1');
   });
 
-  it('does not cancel a third Turn that appears during compatibility preflight', async () => {
-    compatibilityCancellation();
+  it('does not retire a blocked cancellation from a terminal summary or ready recovery', async () => {
+    vi.mocked(provider.queryCancelOperation).mockResolvedValue({
+      ...operation,
+      status: 'recovery_blocked',
+      failureCode: 'cancel_unconfirmed',
+    });
     await render();
     await act(async () => {
       await current.request();
     });
     summary = {
       ...summary,
-      activeTurnId: 't2',
-      phase: 'agent_running',
-      updatedAt: 3,
+      phase: 'cancelled',
+      recovery: {
+        state: 'ready',
+        reasonCode: 'ready',
+        turnId: 't1',
+        nextTurnAllowed: true,
+        actions: { recheck: false, cancel: false, continueInNewSession: true },
+      },
     };
     await render();
-    let release!: (value: ManagedAgentSessionSummary) => void;
-    const gate = new Promise<ManagedAgentSessionSummary>((resolve) => {
-      release = resolve;
+    await tick();
+    expect(current.pending).toBe(true);
+    expect(current.status).toBe('unconfirmed');
+    expect(provider.cancel).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(sessionStorage.getItem(key)!).operationId).toBe('op1');
+  });
+
+  it('reports the original operation failure and permits a new explicit cancellation', async () => {
+    vi.mocked(provider.queryCancelOperation).mockResolvedValue({
+      ...operation,
+      status: 'failed',
+      failureCode: 'turn_already_settled',
     });
-    refresh.mockReturnValueOnce(gate);
-    let requesting!: Promise<void>;
-    await act(async () => {
-      requesting = current.request();
-    });
-    summary = { ...summary, activeTurnId: 't3', updatedAt: 4 };
     await render();
     await act(async () => {
-      release(summary);
-      await requesting;
+      await current.request();
     });
-    expect(provider.cancel).toHaveBeenCalledTimes(1);
     expect(current.pending).toBe(false);
+    expect(current.status).toBe('failed');
+    expect(current.error).toBe('turn_already_settled');
     expect(sessionStorage.getItem(key)).toBeNull();
+    summary = { ...summary, activeTurnId: 't2', phase: 'agent_running' };
+    vi.mocked(provider.cancel).mockResolvedValue({
+      sessionId: 's1',
+      turnId: 't2',
+      operationId: 'op2',
+    });
+    vi.mocked(provider.queryCancelOperation).mockResolvedValue({
+      ...operation,
+      operationId: 'op2',
+    });
+    await render();
+    await act(async () => {
+      await current.request();
+    });
+    expect(current.status).toBe('stopping');
+    expect(current.error).toBeUndefined();
+    expect(current.pending).toBe(true);
+    expect(vi.mocked(provider.cancel).mock.calls[1][1]).toBe('t2');
   });
 
   it('pauses polling when inactive and never treats foreign operation evidence as cancellation', async () => {
     await render();
-    vi.mocked(provider.queryCancelOperation!).mockResolvedValue({
+    vi.mocked(provider.queryCancelOperation).mockResolvedValue({
       ...operation,
       sessionId: 'other',
     });
@@ -427,7 +274,7 @@ describe('useManagedTurnCancel', () => {
     expect(current.pending).toBe(true);
     interactive = false;
     await render();
-    const count = vi.mocked(provider.queryCancelOperation!).mock.calls.length;
+    const count = vi.mocked(provider.queryCancelOperation).mock.calls.length;
     await tick();
     expect(provider.queryCancelOperation).toHaveBeenCalledTimes(count);
   });

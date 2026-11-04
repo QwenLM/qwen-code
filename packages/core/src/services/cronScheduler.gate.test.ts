@@ -123,6 +123,8 @@ describe('CronScheduler gate', () => {
     // The stored job keeps its own prompt; only the delivered copy carries
     // the output.
     expect(job.prompt).toBe('Handle the events below.');
+    // The task's own prompt rides along, to title a fresh per-run session.
+    expect(fired[0]!.taskPrompt).toBe('Handle the events below.');
     expect(job.gateStatus).toMatchObject({
       lastOutcome: 'delivered',
       quietSinceDelivery: 0,
@@ -182,6 +184,58 @@ describe('CronScheduler gate', () => {
     expect(fired).toHaveLength(1);
     expect(fired[0]!.prompt).toContain('was not run because it has not been');
     expect(fired[0]!.prompt).toContain('`Monitor(./probe.sh)`');
+  });
+
+  it('reports again when a blocked streak turns into failures, and back', async () => {
+    const job = createGated();
+    const blocked: CronGateResult = {
+      kind: 'blocked',
+      reason: 'it has not been approved to run unattended in this session',
+      rule: 'Monitor(./probe.sh)',
+    };
+    scheduler.tick(at(10, 30, 59));
+    await script.release(blocked);
+    expect(fired).toHaveLength(1);
+    // The rule is added, the gate runs and fails: the blocked notice promised
+    // silence only until then.
+    scheduler.tick(at(10, 31, 59));
+    await script.release(failed);
+    expect(fired).toHaveLength(2);
+    expect(fired[1]!.prompt).toContain('its gate command failed');
+    scheduler.tick(at(10, 32, 59));
+    await script.release(failed);
+    expect(fired).toHaveLength(2);
+    scheduler.tick(at(10, 33, 59));
+    await script.release(blocked);
+    expect(fired).toHaveLength(3);
+    expect(fired[2]!.prompt).toContain('was not run because');
+    expect(job.gateStatus).toMatchObject({
+      lastOutcome: 'blocked',
+      consecutiveFailures: 4,
+    });
+  });
+
+  it('reports a gate blocked for another reason, so the rule to add reaches the session', async () => {
+    // A deny rule is removed: the gate is now only unapproved, and that
+    // notice is the one that names the rule.
+    createGated();
+    scheduler.tick(at(10, 30, 59));
+    await script.release({
+      kind: 'blocked',
+      reason: 'a permission rule denies it',
+    });
+    const unapproved: CronGateResult = {
+      kind: 'blocked',
+      reason: 'it has not been approved to run unattended in this session',
+      rule: 'Monitor(./probe.sh)',
+    };
+    scheduler.tick(at(10, 31, 59));
+    await script.release(unapproved);
+    expect(fired).toHaveLength(2);
+    expect(fired[1]!.prompt).toContain('`Monitor(./probe.sh)`');
+    scheduler.tick(at(10, 32, 59));
+    await script.release(unapproved);
+    expect(fired).toHaveLength(2);
   });
 
   it('blocks every gated fire when the scheduler has no runner', async () => {
@@ -322,6 +376,13 @@ describe('CronScheduler gate', () => {
   describe('durable tasks', () => {
     let tmpDir: string;
 
+    // The chain every background write is appended to. Dereferenced per call:
+    // the field is reassigned on each tracked write, so a value captured once
+    // would await a chain that has already resolved.
+    const persisted = (): Promise<unknown> =>
+      (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+
     beforeEach(async () => {
       tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cron-gate-test-'));
       Storage.setRuntimeBaseDir(tmpDir);
@@ -334,8 +395,7 @@ describe('CronScheduler gate', () => {
 
     afterEach(async () => {
       scheduler.destroy();
-      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
-        .pendingPersist;
+      await persisted();
       Storage.setRuntimeBaseDir(null);
       await fs.rm(tmpDir, {
         recursive: true,
@@ -411,15 +471,13 @@ describe('CronScheduler gate', () => {
         // The stamp lands before the gate decides, so a restart cannot
         // replay the catch-up; the run does not.
         let task: DurableCronTask | undefined;
-        await vi.waitFor(async () => {
-          [task] = await readCronTasks(tmpDir);
-          expect(task?.lastFiredAt).toBe(at(10, 29).getTime());
-        });
+        await persisted();
+        [task] = await readCronTasks(tmpDir);
+        expect(task?.lastFiredAt).toBe(at(10, 29).getTime());
         expect(task?.runs ?? []).toHaveLength(0);
         await script.release(result);
         expect(fired).toHaveLength(runs);
-        await (scheduler as unknown as { pendingPersist: Promise<unknown> })
-          .pendingPersist;
+        await persisted();
         [task] = await readCronTasks(tmpDir);
         expect(task?.runs ?? []).toHaveLength(runs);
         if (runs > 0) {
@@ -455,10 +513,10 @@ describe('CronScheduler gate', () => {
       scheduler.tick(at(10, 30, 59));
       await script.release(quiet);
       scheduler.tick(at(10, 31, 59));
-      await vi.waitFor(async () => {
-        [task] = await readCronTasks(tmpDir);
-        expect(task?.lastFiredAt).toBe(at(10, 31).getTime());
-      });
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+      [task] = await readCronTasks(tmpDir);
+      expect(task?.lastFiredAt).toBe(at(10, 31).getTime());
       expect(task?.runs ?? []).toHaveLength(0);
       expect(task?.gateStatus).toMatchObject({
         lastOutcome: 'quiet',
@@ -467,10 +525,10 @@ describe('CronScheduler gate', () => {
 
       await script.release(output('event: comment\n'));
       expect(fired).toHaveLength(1);
-      await vi.waitFor(async () => {
-        [task] = await readCronTasks(tmpDir);
-        expect(task?.runs).toHaveLength(1);
-      });
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+      [task] = await readCronTasks(tmpDir);
+      expect(task?.runs).toHaveLength(1);
       expect(task?.runs?.[0]).toMatchObject({
         at: at(10, 31).getTime(),
         kind: 'scheduled',
@@ -485,6 +543,233 @@ describe('CronScheduler gate', () => {
       expect(scheduler.list().find((j) => j.id === job.id)?.gateApproved).toBe(
         true,
       );
+    });
+
+    it('carries a confirmation to a task another component writes, once it loads', async () => {
+      // The daemon's current-session creator writes the task file; this
+      // scheduler only meets the task on its next reload.
+      const task = (id: string, gate: string) =>
+        withTaskGate(
+          {
+            id,
+            cron: '* * * * *',
+            prompt: 'p',
+            recurring: true,
+            createdAt: at(10, 29).getTime(),
+            // Stamped at creation: no catch-up runs, only the tick below.
+            lastFiredAt: at(10, 29).getTime(),
+          },
+          gate,
+        );
+      scheduler.approveGate('confirmed', './probe.sh');
+      scheduler.approveGate('swapped', './probe.sh');
+      // A turn cancelled before the reload stops and re-enables the
+      // scheduler: the confirmations must survive that.
+      scheduler.stop();
+      await writeCronTasks(tmpDir, [
+        task('confirmed', './probe.sh'),
+        task('swapped', './other.sh'),
+      ]);
+      await scheduler.enableDurable('session-1');
+      scheduler.start((j) => fired.push(j));
+      const approved = (id: string) =>
+        scheduler.list().find((j) => j.id === id)?.gateApproved === true;
+      expect(approved('confirmed')).toBe(true);
+      // Confirmed for another command than the one on disk.
+      expect(approved('swapped')).toBe(false);
+
+      scheduler.tick(at(10, 30, 59));
+      expect(script.calls).toHaveLength(2);
+      const byGate = Object.fromEntries(
+        script.calls.map((c) => [c.gate, c.options.approvedInProcess]),
+      );
+      // Settle both runs before asserting, so a failure here cannot leave
+      // pending runs for the next test's releases.
+      await script.release(quiet);
+      await script.release(quiet);
+      expect(byGate).toEqual({ './probe.sh': true, './other.sh': false });
+
+      // A loaded job takes a confirmation at once, but only for its own
+      // command: one for a command another client has since swapped out
+      // must not approve the new one.
+      scheduler.approveGate('swapped', './probe.sh');
+      expect(approved('swapped')).toBe(false);
+      scheduler.approveGate('swapped', './other.sh');
+      expect(approved('swapped')).toBe(true);
+    });
+
+    it('stores a quiet fire that ends a failure streak at once, so a restart cannot revive the streak', async () => {
+      const job = await scheduler.createDurable(
+        '* * * * *',
+        'p',
+        true,
+        './probe.sh',
+      );
+      job.gateApproved = true;
+      await scheduler.enableDurable('session-1');
+      scheduler.start((j) => fired.push(j));
+      scheduler.tick(at(10, 30, 59));
+      await script.release(failed);
+      scheduler.tick(at(10, 31, 59));
+      await script.release(quiet);
+      // Before the next slot's tick persist: the file already has the
+      // streak ended, so a scheduler that reloads it reports its next
+      // failure.
+      await persisted();
+      const [task] = await readCronTasks(tmpDir);
+      expect(task?.gateStatus).toMatchObject({
+        lastOutcome: 'quiet',
+        consecutiveFailures: 0,
+      });
+      expect(task?.runs).toEqual([expect.objectContaining({ gate: 'failed' })]);
+    });
+
+    it('books a gated fire at its own slot when the job was stamped again while the gate ran', async () => {
+      // A manual run (or the next slot) stamps the job while the gate runs:
+      // the run record and the delivered fire keep the slot the gate ran for.
+      const job = await scheduler.createDurable(
+        '* * * * *',
+        'p',
+        true,
+        './probe.sh',
+      );
+      job.gateApproved = true;
+      await scheduler.enableDurable('session-1');
+      scheduler.start((j) => fired.push(j));
+      scheduler.tick(at(10, 30, 59));
+      const live = scheduler.list().find((j) => j.id === job.id)!;
+      expect(live.lastFiredAt).toBe(at(10, 30).getTime());
+      live.lastFiredAt = at(10, 45).getTime();
+      await script.release(output('event: comment\n'));
+      expect(fired[0]!.lastFiredAt).toBe(at(10, 30).getTime());
+      await persisted();
+      const [task] = await readCronTasks(tmpDir);
+      expect(task?.runs).toEqual([
+        expect.objectContaining({
+          at: at(10, 30).getTime(),
+          gate: 'delivered',
+        }),
+      ]);
+      expect(task?.gateStatus?.lastAt).toBe(at(10, 30).getTime());
+    });
+
+    it('keeps a late result of the replaced command off the new gate', async () => {
+      // The old command settles after the PATCH rewrote the file and before
+      // the watcher reloads the task: its status must not land on the new
+      // gate, or the new command's first failure is counted silently.
+      const job = await scheduler.createDurable(
+        '* * * * *',
+        'p',
+        true,
+        './old.sh',
+      );
+      job.gateApproved = true;
+      await scheduler.enableDurable('session-1');
+      scheduler.start((j) => fired.push(j));
+      scheduler.tick(at(10, 30, 59)); // ./old.sh starts and stays running
+      await updateCronTasks(tmpDir, (tasks) =>
+        tasks.map(({ gateStatus: _dropped, ...t }) =>
+          withTaskGate(t, './new.sh'),
+        ),
+      );
+      await script.release(failed); // the old command's late failure
+      expect(fired).toHaveLength(1);
+      await persisted();
+      let [task] = await readCronTasks(tmpDir);
+      expect(task?.gate).toBe('./new.sh');
+      expect(task?.gateStatus).toBeUndefined();
+      // The fire still happened and keeps its run record.
+      expect(task?.runs).toEqual([expect.objectContaining({ gate: 'failed' })]);
+
+      await reload();
+      scheduler.tick(at(10, 31, 59));
+      await script.release(failed); // the new command's first failure
+      expect(fired).toHaveLength(2);
+      expect(fired[1]!.prompt).toContain('./new.sh');
+      await persisted();
+      [task] = await readCronTasks(tmpDir);
+      expect(task?.gateStatus?.consecutiveFailures).toBe(1);
+    });
+
+    it('keeps the tick from writing the old command’s streak onto a replaced gate', async () => {
+      // The old command already failed once; the PATCH swaps the command and
+      // drops the status; a tick lands before the watcher reloads the task.
+      // Its persist must not put the old streak back on the new gate.
+      const job = await scheduler.createDurable(
+        '* * * * *',
+        'p',
+        true,
+        './old.sh',
+      );
+      job.gateApproved = true;
+      await scheduler.enableDurable('session-1');
+      scheduler.start((j) => fired.push(j));
+      scheduler.tick(at(10, 30, 59));
+      await script.release(failed); // the old command's first failure
+      expect(fired).toHaveLength(1);
+      await persisted();
+      let [task] = await readCronTasks(tmpDir);
+      expect(task?.gateStatus?.consecutiveFailures).toBe(1);
+
+      await updateCronTasks(tmpDir, (tasks) =>
+        tasks.map(({ gateStatus: _dropped, ...t }) =>
+          withTaskGate(t, './new.sh'),
+        ),
+      );
+      scheduler.tick(at(10, 31, 59)); // the old job is still loaded
+      await persisted();
+      await reload(); // cancels the old command's run
+      await script.release(quiet); // its late answer is superseded
+      // Read after the old run settled, so a failure here leaves nothing
+      // pending for the next test; the reload itself writes nothing.
+      [task] = await readCronTasks(tmpDir);
+      expect(task?.gate).toBe('./new.sh');
+      expect(task?.gateStatus).toBeUndefined();
+
+      scheduler.tick(at(10, 32, 59));
+      await script.release(failed); // the new command's first failure
+      expect(fired).toHaveLength(2);
+      expect(fired[1]!.prompt).toContain('./new.sh');
+      await persisted();
+      [task] = await readCronTasks(tmpDir);
+      expect(task?.gateStatus?.consecutiveFailures).toBe(1);
+    });
+
+    it('starts a fresh failure streak when the gate is replaced on disk', async () => {
+      // The daemon's PATCH swaps the command and drops the file's status; the
+      // running session must not carry the old command's streak over, or the
+      // new command's first failure would be counted silently.
+      const job = await scheduler.createDurable(
+        '* * * * *',
+        'p',
+        true,
+        './probe.sh',
+      );
+      job.gateApproved = true;
+      await scheduler.enableDurable('session-1');
+      scheduler.start((j) => fired.push(j));
+      scheduler.tick(at(10, 30, 59));
+      await script.release(failed); // reported
+      scheduler.tick(at(10, 31, 59));
+      await script.release(failed); // counted only
+      expect(fired).toHaveLength(1);
+      const current = () => scheduler.list().find((j) => j.id === job.id);
+      expect(current()?.gateStatus?.consecutiveFailures).toBe(2);
+      await persisted();
+
+      await updateCronTasks(tmpDir, (tasks) =>
+        tasks.map(({ gateStatus: _dropped, ...t }) =>
+          withTaskGate(t, './other.sh'),
+        ),
+      );
+      await reload();
+      expect(current()?.gate).toBe('./other.sh');
+      expect(current()?.gateStatus).toBeUndefined();
+      scheduler.tick(at(10, 32, 59));
+      await script.release(failed);
+      expect(fired).toHaveLength(2);
+      expect(fired[1]!.prompt).toContain('./other.sh');
+      expect(current()?.gateStatus?.consecutiveFailures).toBe(1);
     });
   });
 });

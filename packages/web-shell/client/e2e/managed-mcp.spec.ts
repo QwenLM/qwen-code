@@ -22,6 +22,19 @@ for (const width of [1280, 390]) {
     await page.route('**/api/agent/web-shell/v1/**', async (route) => {
       const path = new URL(route.request().url()).pathname;
       const body = route.request().postDataJSON();
+      if (path.endsWith('/user-messages/query'))
+        return route.fulfill({ json: { paused: false, messages: [] } });
+      if (path.endsWith('/workspace-extensions/query'))
+        return route.fulfill({ json: { supported: false, extensions: [] } });
+      if (path.endsWith('/workspaces/worktrees/options'))
+        return route.fulfill({
+          json: {
+            supported: true,
+            baseCommit: 'a'.repeat(40),
+            branches: ['main'],
+            currentBranch: 'main',
+          },
+        });
       if (path.endsWith('/runtime-nodes/query'))
         return route.fulfill({ json: { supported: false, data: [] } });
       if (path.endsWith('/sessions/query'))
@@ -68,7 +81,7 @@ for (const width of [1280, 390]) {
         return route.fulfill({ json: summary });
       if (path.endsWith('/transcript/query'))
         return route.fulfill({
-          json: { events: [], lastSequence: 0, hasMore: false },
+          json: { items: [], events: [], lastSequence: 0, hasMore: false },
         });
       if (path.endsWith('/events/stream'))
         return route.fulfill({ contentType: 'text/event-stream', body: '' });
@@ -108,6 +121,9 @@ for (const width of [1280, 390]) {
           json: {
             sessionId: summary!.sessionId,
             turnId: 'mcp-turn',
+            operationId: 'submit-mcp-turn',
+            admissionStage: 'java_durable',
+            deliveryState: 'pending',
             status: 'accepted',
             replayed: false,
           },

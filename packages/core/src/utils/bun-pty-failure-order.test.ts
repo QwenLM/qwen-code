@@ -16,6 +16,7 @@ const fake = vi.hoisted(() => {
     pid: 987654321,
     fd: 987654322,
     retryWrites: false,
+    processRows: '',
     captureWrite: false,
     writeCallback: undefined as
       | undefined
@@ -67,6 +68,13 @@ vi.mock('node:module', async (importOriginal) => {
   };
 });
 
+vi.mock('node:child_process', () => ({
+  spawnSync: (command: string) => {
+    if (command !== 'ps') throw new Error(`Blocked command: ${command}`);
+    return { status: 0, stdout: fake.processRows };
+  },
+}));
+
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
@@ -110,6 +118,7 @@ beforeEach(() => {
   fake.nativeExit = undefined;
   fake.readCallback = undefined;
   fake.retryWrites = false;
+  fake.processRows = '';
   fake.captureWrite = false;
   fake.writeCallback = undefined;
 });
@@ -604,19 +613,40 @@ it
     'exit-during-kill-group',
     'still-live-after-fd-close',
   ])(
-  'preserves group fallback after %s without signalling a reaped leader',
+  'preserves owned-child fallback after %s without signalling a reaped leader',
   async (mode) => {
     vi.useFakeTimers();
     let descendantAlive = true;
+    const childPid = fake.pid + 1;
+    const unrelatedPid = fake.pid + 2;
+    const scope =
+      process.platform === 'linux' || process.platform === 'darwin'
+        ? `${fake.pid} `
+        : '';
+    const row = (pid: number, parent: number, started: string) =>
+      `${pid} ${parent} ${scope}${started}`;
+    fake.processRows = [
+      row(fake.pid, 1, 'old-root'),
+      row(childPid, fake.pid, 'old-child'),
+    ].join('\n');
+    const reapLeader = () => {
+      fake.nativeExit!(0, 15);
+      fake.processRows = [
+        row(fake.pid, 1, 'recycled-root'),
+        row(childPid, 1, 'old-child'),
+        row(unrelatedPid, fake.pid, 'new-child'),
+      ].join('\n');
+    };
     const kill = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
-      if (Math.abs(pid) !== fake.pid) throw new Error('Blocked unknown PID');
-      if (pid === -fake.pid && signal === 'SIGKILL') descendantAlive = false;
+      if (![fake.pid, -fake.pid, childPid, unrelatedPid].includes(pid))
+        throw new Error('Blocked unknown PID');
+      if (pid === childPid && signal === 'SIGKILL') descendantAlive = false;
       if (
         pid === -fake.pid &&
         ((mode === 'exit-during-term-group' && signal === 'SIGTERM') ||
           (mode === 'exit-during-kill-group' && signal === 'SIGKILL'))
       ) {
-        fake.nativeExit!(0, 15);
+        reapLeader();
       }
       return true;
     });
@@ -631,19 +661,21 @@ it
       pty.write(Buffer.alloc(8192));
       expect(kill.mock.calls).toEqual(
         mode === 'exit-during-term-group'
-          ? [[-fake.pid, 'SIGTERM']]
+          ? [
+              [-fake.pid, 'SIGTERM'],
+              [childPid, 'SIGTERM'],
+            ]
           : [
               [-fake.pid, 'SIGTERM'],
               [fake.pid, 'SIGTERM'],
+              [childPid, 'SIGTERM'],
             ],
       );
       expect(vi.getTimerCount()).toBe(1);
-      if (mode === 'exit-before-fallback') {
-        fake.nativeExit!(0, 15);
-      }
+      if (mode === 'exit-before-fallback') reapLeader();
       // Native leader exit does not prove TERM-resistant descendants exited.
       expect(descendantAlive).toBe(true);
-      // Closing the fd and refunding budgets must also preserve group fallback.
+      // Closing the fd and refunding budgets must preserve owned-child cleanup.
       fake.readCallback!(
         Object.assign(new Error('mock EIO'), { code: 'EIO' }),
         0,
@@ -668,9 +700,16 @@ it
           ? [
               [-fake.pid, 'SIGKILL'],
               [fake.pid, 'SIGKILL'],
+              [childPid, 'SIGKILL'],
             ]
-          : [[-fake.pid, 'SIGKILL']],
+          : mode === 'exit-during-kill-group'
+            ? [
+                [-fake.pid, 'SIGKILL'],
+                [childPid, 'SIGKILL'],
+              ]
+            : [[childPid, 'SIGKILL']],
       );
+      expect(kill.mock.calls.some(([pid]) => pid === unrelatedPid)).toBe(false);
       expect(vi.getTimerCount()).toBe(0);
       expect(descendantAlive).toBe(false);
       const signals = kill.mock.calls.slice();

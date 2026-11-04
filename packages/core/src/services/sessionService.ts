@@ -3214,6 +3214,26 @@ export class SessionService {
       assertCanMutate: () => void;
     },
   ): Promise<boolean | undefined> {
+    const removed = await this.removeSessionArtifactsForLibrary(
+      sessionId,
+      [artifactId],
+      guards,
+    );
+    return removed === undefined ? undefined : removed.length > 0;
+  }
+
+  async removeSessionArtifactsForLibrary(
+    sessionId: string,
+    artifactIds: readonly string[],
+    guards: {
+      assertStorageUnchanged: () => Promise<void>;
+      assertCanMutate: () => void;
+    },
+  ): Promise<string[] | undefined> {
+    const requestedIds = new Set(artifactIds);
+    if (requestedIds.size > 800) {
+      throw new RangeError('Artifact removal supports at most 800 unique ids.');
+    }
     const state = await this.readArtifactLibraryState(sessionId);
     if (!state) return undefined;
     if (isManagedExecutionTranscriptSync(state.identity.filePath)) {
@@ -3237,10 +3257,10 @@ export class SessionService {
         'The artifact journal cannot establish an authoritative mutation sequence.',
       );
     }
-    const artifact = state.snapshot?.artifacts.find(
-      (item) => item.id === artifactId,
+    const artifacts = (state.snapshot?.artifacts ?? []).filter((item) =>
+      requestedIds.has(item.id),
     );
-    if (!artifact) return false;
+    if (artifacts.length === 0) return [];
     const recordedAt = new Date().toISOString();
     const first = state.records[0];
     const record: ChatRecord = {
@@ -3257,31 +3277,41 @@ export class SessionService {
         sessionId,
         sequence: (state.snapshot?.sequence ?? 0) + 1,
         recordedAt,
-        changes: [
-          { action: 'removed', artifactId, artifact, reason: 'explicit' },
-        ],
+        changes: artifacts.map((artifact) => ({
+          action: 'removed',
+          artifactId: artifact.id,
+          artifact,
+          reason: 'explicit',
+        })),
       },
     };
     await guards.assertStorageUnchanged();
     guards.assertCanMutate();
     this.assertMaintainableSessionUnchanged(sessionId, state.physical);
     jsonl.writeLineSync(state.identity.filePath, record);
-    const snapshotId = getWebPreviewSnapshotId(artifact);
-    if (
-      snapshotId &&
-      !state.snapshot?.artifacts.some(
-        (kept) =>
-          kept.id !== artifactId &&
-          getWebPreviewSnapshotId(kept) === snapshotId,
-      )
-    ) {
+    const retainedSnapshots = new Set(
+      (state.snapshot?.artifacts ?? [])
+        .filter((artifact) => !requestedIds.has(artifact.id))
+        .map(getWebPreviewSnapshotId),
+    );
+    const releasedSnapshots = new Set<string>();
+    for (const artifact of artifacts) {
+      const snapshotId = getWebPreviewSnapshotId(artifact);
+      if (
+        !snapshotId ||
+        retainedSnapshots.has(snapshotId) ||
+        releasedSnapshots.has(snapshotId)
+      ) {
+        continue;
+      }
+      releasedSnapshots.add(snapshotId);
       await deleteArtifactSnapshot(
         artifact,
         this.storage.getRuntimeBaseDir(),
         sessionId,
       );
     }
-    return true;
+    return artifacts.map((artifact) => artifact.id);
   }
 
   async readSessionSources(
