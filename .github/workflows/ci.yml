@@ -1093,11 +1093,13 @@ jobs:
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
-      # Eight shards pull this same artifact at once, so the cap has to cover
-      # the blob's tail latency rather than the median: main measured 4m52s on
-      # the slow host class and expired twice at five minutes, which skipped
-      # the unpack and failed the required check. Fifteen minutes plus one
-      # retry absorbs that tail without letting a hung transfer reach the job
+      # Eight shards pull this same artifact at once, so the cap has to clear
+      # the slow tail rather than the median: on main four shards finished
+      # inside a minute, three needed between 2m40s and just under five
+      # minutes, and one exceeded the old five-minute cap on two consecutive
+      # runs, which skipped the unpack and failed the required check. Fifteen
+      # minutes leaves that measured tail about three times the headroom; if
+      # main still expires, the fix is fewer concurrent fetches, not a bigger
       # cap.
       - name: 'Download the built tree'
         id: 'download_tree'
