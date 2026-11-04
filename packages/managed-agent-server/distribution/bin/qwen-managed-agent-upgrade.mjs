@@ -544,10 +544,19 @@ export function withoutCredentials(url) {
       parsed.password = '';
       return parsed.href;
     }
+    // An authority without user information: an @ after it is in the path.
+    if (parsed.host) {
+      return url;
+    }
   }
   // A value the parser rejects, or reads without an authority, may still
-  // spell user information before an @.
-  return url.replace(/^([a-zA-Z][a-zA-Z0-9+.-]*:(?:\/\/)?)?[^/?#]*@/, '$1***@');
+  // spell user information before an @, and a password may hold a / ? or #
+  // that would end it: everything up to the last @ shows as ***, which only
+  // ever hides more of a value that is refused anyway.
+  return url.replace(
+    /^([a-zA-Z][a-zA-Z0-9+.-]*:(?:\/\/)?|\/\/)?[\s\S]*@/,
+    '$1***@',
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2547,6 +2556,8 @@ async function listeners(
         server: resolved.serverUrl,
         health: resolved.healthUrl,
         harness: resolved.harnessBaseUrl,
+        // 'false' when the preflight would fail the Harness URL.
+        harnessOrigin: resolved.harnessOrigin,
       };
     }
   }
@@ -2637,14 +2648,21 @@ function printable(text) {
       shown = '[unprintable]';
     }
   }
-  // eslint-disable-next-line no-control-regex -- matching control bytes is the point
-  const flat = shown.replace(/[\u0000-\u001F\u007F-\u009F]/g, '\uFFFD');
   // Nor can an endpoint scroll the report away: the text stops at
-  // PRINTABLE_LIMIT code points, cut after the control bytes are gone.
-  const points = [...flat];
-  return points.length > PRINTABLE_LIMIT
-    ? `${points.slice(0, PRINTABLE_LIMIT).join('')}… (${points.length} characters)`
-    : flat;
+  // PRINTABLE_LIMIT code points. One pass counts them and keeps the head, so
+  // a status of many megabytes costs no copy of itself; each control byte is
+  // one code point, as its replacement is, so the count is the shown text's.
+  let head = '';
+  let points = 0;
+  for (const point of shown) {
+    if (points < PRINTABLE_LIMIT) {
+      head += point;
+    }
+    points += 1;
+  }
+  // eslint-disable-next-line no-control-regex -- matching control bytes is the point
+  const flat = head.replace(/[\u0000-\u001F\u007F-\u009F]/g, '\uFFFD');
+  return points > PRINTABLE_LIMIT ? `${flat}… (${points} characters)` : flat;
 }
 
 // Why fetch rejected: fetch itself words every failure as "fetch failed", and
@@ -2725,7 +2743,10 @@ async function phaseStart(system, deployment, options) {
   // query or a fragment, and would fail any other after the Harness restarts;
   // an opaque value such as proxy.test:8443 names no host to wait on at all.
   // A value that does not parse gets fetchRefusal's reason, which names an
-  // IPv6 zone as --server-url's refusal does.
+  // IPv6 zone as --server-url's refusal does. Past the reasons this can name,
+  // the resolver passes on the preflight's own verdict, which reads the value
+  // as java.net.URI does: a host with an underscore, an empty user name or a
+  // padded value fails there only.
   const unusable = !harnessUrl
     ? fetchRefusal(urls.harness)
     : !['http:', 'https:'].includes(harnessUrl.protocol)
@@ -2734,7 +2755,9 @@ async function phaseStart(system, deployment, options) {
         ? 'carries a user name or password'
         : urls.harness.includes('?') || urls.harness.includes('#')
           ? 'carries a query or a fragment'
-          : undefined;
+          : urls.harnessOrigin === 'false'
+            ? 'the preflight does not take as an http or https origin, reading it untrimmed as java.net.URI does'
+            : undefined;
   if (unusable) {
     throw new Refusal(
       `The control plane reaches ${harness.name} at ${JSON.stringify(withoutCredentials(urls.harness))}, which ${unusable}; correct qwen.managed-agent.harness.base-url.`,
@@ -2846,7 +2869,8 @@ class ApiError extends Error {
  * and the deadline.
  */
 async function api(system, client, route, init = {}, capMs = Infinity) {
-  const label = `${init.method ?? 'GET'} ${route}`;
+  // A route can carry an id the API returned, as long as the API made it.
+  const label = `${init.method ?? 'GET'} ${printable(route)}`;
   let response;
   try {
     response = await system.fetch(`${client.baseUrl}${route}`, {
@@ -3007,9 +3031,47 @@ async function phaseVerify(system, deployment, options) {
       `${down.map((unit) => unit.name).join(' and ')} not running; run start first.`,
     );
   }
+  // Whether the session row reads the API comes first, from the resolver run
+  // the listeners take too: the API URL is checked only when it is read.
+  const ingress = 'read a Session through the ingress';
+  const resolved = options.tenant
+    ? await resolvedConfiguration(system, deployment)
+    : undefined;
+  let unread;
+  if (!options.tenant) {
+    unread = row(
+      'session',
+      'SKIP',
+      'no --tenant',
+      'pass --tenant <id> to read an existing Session',
+    );
+  } else if (resolved.error) {
+    unread = row(
+      'session',
+      'SKIP',
+      `cannot resolve the API's auth mode: ${resolved.error}`,
+      ingress,
+    );
+  } else if (resolved.authMode !== 'open') {
+    unread = row(
+      'session',
+      'SKIP',
+      resolved.authMode === 'signed'
+        ? 'the API takes signed requests only'
+        : `the API's auth mode is ${resolved.authMode}`,
+      ingress,
+    );
+  } else if (options.actor && !resolved.trustedActorHeader) {
+    unread = row(
+      'session',
+      'FAIL',
+      '--actor needs a trusted actor header, which the server does not name',
+      'set QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER, or leave --actor out',
+    );
+  }
   const urls = await listeners(system, deployment, options, {
     reachesHarness: false,
-    readsApi: Boolean(options.tenant),
+    readsApi: !unread,
   });
   const rows = [];
   system.out(
@@ -3034,48 +3096,8 @@ async function phaseVerify(system, deployment, options) {
       ? row('health', 'PASS', `${urls.health} is UP`)
       : row('health', 'FAIL', `${urls.health} is not UP: ${probe.answer}`),
   );
-  const ingress = 'read a Session through the ingress';
-  const resolved = options.tenant
-    ? await resolvedConfiguration(system, deployment)
-    : undefined;
-  if (!options.tenant) {
-    rows.push(
-      row(
-        'session',
-        'SKIP',
-        'no --tenant',
-        'pass --tenant <id> to read an existing Session',
-      ),
-    );
-  } else if (resolved.error) {
-    rows.push(
-      row(
-        'session',
-        'SKIP',
-        `cannot resolve the API's auth mode: ${resolved.error}`,
-        ingress,
-      ),
-    );
-  } else if (resolved.authMode !== 'open') {
-    rows.push(
-      row(
-        'session',
-        'SKIP',
-        resolved.authMode === 'signed'
-          ? 'the API takes signed requests only'
-          : `the API's auth mode is ${resolved.authMode}`,
-        ingress,
-      ),
-    );
-  } else if (options.actor && !resolved.trustedActorHeader) {
-    rows.push(
-      row(
-        'session',
-        'FAIL',
-        '--actor needs a trusted actor header, which the server does not name',
-        'set QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER, or leave --actor out',
-      ),
-    );
+  if (unread) {
+    rows.push(unread);
   } else {
     const client = {
       baseUrl: urls.server,

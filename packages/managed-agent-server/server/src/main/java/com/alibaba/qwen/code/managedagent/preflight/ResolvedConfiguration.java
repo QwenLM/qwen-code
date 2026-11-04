@@ -119,8 +119,13 @@ public final class ResolvedConfiguration {
         resolved.put("authMode", "auto".equals(mode) ? "open" : mode);
         resolved.put("trustedActorHeader",
                 StringUtils.trimToEmpty(properties.getTrustedActorHeader()));
-        resolved.put("harnessBaseUrl",
-                StringUtils.trimToEmpty(properties.getHarness().getBaseUrl()));
+        String harnessBaseUrl = properties.getHarness().getBaseUrl();
+        resolved.put("harnessBaseUrl", StringUtils.trimToEmpty(harnessBaseUrl));
+        // The preflight's verdict on the value the server parses, untrimmed,
+        // so the upgrade command can refuse a Harness URL the preflight would
+        // fail before it restarts the Harness, without a rule of its own.
+        resolved.put("harnessOrigin", String.valueOf(harnessBaseUrl != null
+                && ManagedAgentPreflight.harnessOrigin(harnessBaseUrl) != null));
         Binder binder = Binder.get(environment);
         int port = binder.bind("server.port", Integer.class)
                 .orElse(DEFAULT_SERVER_PORT);

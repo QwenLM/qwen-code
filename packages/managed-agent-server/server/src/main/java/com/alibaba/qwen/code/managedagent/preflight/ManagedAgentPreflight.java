@@ -1774,7 +1774,7 @@ public final class ManagedAgentPreflight {
     // credentials. Null unless it is an HTTP origin without user information,
     // a query or a fragment; the getUserInfo check is what keeps credentials
     // out, since every URL that carries them is rejected here.
-    private static URI harnessOrigin(String base) {
+    static URI harnessOrigin(String base) {
         try {
             URI origin = URI.create(base);
             String scheme = origin.getScheme();

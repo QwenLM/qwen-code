@@ -18,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -183,6 +184,7 @@ class ResolvedConfigurationTest {
         assertEquals("http://127.0.0.1:8080/actuator/health",
                 defaults.get("healthUrl"));
         assertEquals("http://127.0.0.1:4170", defaults.get("harnessBaseUrl"));
+        assertEquals("true", defaults.get("harnessOrigin"));
 
         // The port in the launcher's file, where server.env cannot see it.
         Path config = write("config/application.yml", """
@@ -193,6 +195,8 @@ class ResolvedConfigurationTest {
         Map<String, String> file = resolve(additional(config));
         assertEquals("http://127.0.0.1:9090", file.get("serverUrl"));
         assertEquals("http://127.0.0.1:4171", file.get("harnessBaseUrl"));
+        // The server parses the value untrimmed, and so does the verdict.
+        assertEquals("false", file.get("harnessOrigin"));
         assertEquals("http://127.0.0.1:9091",
                 resolve(Map.of("SERVER_PORT", "9091")).get("serverUrl"));
         assertEquals("http://127.0.0.1:9092",
@@ -228,6 +232,28 @@ class ResolvedConfigurationTest {
             assertEquals("", resolved.get("serverUrl"), port);
             assertEquals("", resolved.get("healthUrl"), port);
         }
+    }
+
+    @Test
+    void passesOnThePreflightsVerdictOnTheHarnessUrl() {
+        // The preflight's harness row fails each false one on its setting
+        // alone; the upgrade command refuses start over them before it
+        // restarts the Harness.
+        Map<String, String> verdicts = new LinkedHashMap<>();
+        verdicts.put("http://127.0.0.1:4170", "true");
+        verdicts.put("https://harness.internal:4170/base", "true");
+        verdicts.put("http://[::1]:4170", "true");
+        verdicts.put("http://qwen_harness:4170", "false");
+        verdicts.put("http://@127.0.0.1:4170", "false");
+        verdicts.put("http://svc:s3cret@127.0.0.1:4170", "false");
+        verdicts.put("http://127.0.0.1:4170/?", "false");
+        verdicts.put("http://127.0.0.1:4170#x", "false");
+        verdicts.put("http://127.0.0.1:4170/a b", "false");
+        verdicts.put("ftp://127.0.0.1:4170", "false");
+        verdicts.put("", "false");
+        verdicts.forEach((url, verdict) -> assertEquals(verdict, resolve(
+                Map.of(), "--qwen.managed-agent.harness.base-url=" + url)
+                .get("harnessOrigin"), url));
     }
 
     @Test

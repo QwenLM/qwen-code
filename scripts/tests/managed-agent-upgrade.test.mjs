@@ -305,6 +305,24 @@ test('refuses only the URLs fetch refuses', async () => {
     ],
     ['ops:secret@127.0.0.1:8080', 'ops:***@127.0.0.1:8080'],
     ['ghp_abc123@127.0.0.1:8080', '***@127.0.0.1:8080'],
+    // A password with a / ? or # ends the authority early, so the value does
+    // not parse, and nor does one without a scheme: all up to the last @ goes.
+    [
+      'https://svc:Pa?ss@cp.example.com:8443',
+      'https://***@cp.example.com:8443',
+    ],
+    [
+      'https://svc:Pa/ss@cp.example.com:8443',
+      'https://***@cp.example.com:8443',
+    ],
+    [
+      'https://svc:s3#ret@cp.example.com:8443',
+      'https://***@cp.example.com:8443',
+    ],
+    ['//svc:s3cret@cp.example.com:8443', '//***@cp.example.com:8443'],
+    ['http://a:b@c@127.0.0.1:70000/x', 'http://***@127.0.0.1:70000/x'],
+    // An empty user name parses, and leaves nothing to hide.
+    ['http://@127.0.0.1:4170', 'http://@127.0.0.1:4170'],
     ['http://127.0.0.1:6000', 'http://127.0.0.1:6000'],
     ['http://127.0.0.1:8080/a@b?c=d@e', 'http://127.0.0.1:8080/a@b?c=d@e'],
     ['proxy.test:8443', 'proxy.test:8443'],
@@ -771,6 +789,7 @@ async function rig(t, overrides = {}) {
           harnessBaseUrl:
             environment.get('QWEN_MANAGED_AGENT_HARNESS_BASE_URL') ??
             'http://127.0.0.1:4170',
+          harnessOrigin: 'true',
           ...host.resolved,
         };
         return {
@@ -2445,6 +2464,32 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     );
   }
   assert.ok(!host.output.join('\n').includes('s3cret'), host.output.join('\n'));
+  // Past those, the preflight's own verdict, which the resolver passes on:
+  // java.net.URI reads no host in a name with an underscore, and an empty
+  // user name or padding fails there too. A Harness an earlier start left
+  // running is not restarted for a URL the preflight would fail.
+  Object.assign(host.units[HARNESS], {
+    ActiveState: 'active',
+    SubState: 'running',
+  });
+  const entered = host.units[HARNESS].ActiveEnterTimestampMonotonic;
+  for (const harnessBaseUrl of [
+    'http://qwen_harness:4170',
+    'http://@127.0.0.1:4170',
+  ]) {
+    host.resolved = { harnessBaseUrl, harnessOrigin: 'false' };
+    assert.equal(await host.upgrade('start'), 1, harnessBaseUrl);
+    assert.equal(
+      host.output.at(-1),
+      `start refused: The control plane reaches qwen-hosted-harness at ${JSON.stringify(harnessBaseUrl)}, which the preflight does not take as an http or https origin, reading it untrimmed as java.net.URI does; correct qwen.managed-agent.harness.base-url.`,
+    );
+    assert.ok(!host.output.some((line) => line.startsWith('Restarting')));
+  }
+  assert.equal(host.units[HARNESS].ActiveEnterTimestampMonotonic, entered);
+  Object.assign(host.units[HARNESS], {
+    ActiveState: 'inactive',
+    SubState: 'dead',
+  });
   // A link-local listener keeps its zone, which no URL can carry.
   const zoned = 'http://[fe80:0:0:0:0:0:0:1%1]';
   host.resolved = {
@@ -2572,6 +2617,19 @@ test('start dials only the health endpoint, and verify reads the API only with -
     'verify refused: The server\'s configuration puts the control plane at "http://127.0.0.1:6000", which is on port 6000, so fetch refuses to dial it. Bind it where fetch can reach it, or pass --server-url <a URL that serves the API and /actuator/health>.',
   );
   assert.deepEqual(host.requests, []);
+  // --actor without a trusted actor header reads no API either: its session
+  // row fails, and the API URL is not checked.
+  host.resolved.trustedActorHeader = '';
+  assert.equal(
+    await host.upgrade('verify', '--tenant', 'acme', '--actor', 'alice'),
+    1,
+  );
+  assert.match(
+    rowsOf(host.output).session,
+    /^FAIL --actor needs a trusted actor header/,
+  );
+  assert.ok(!host.output.some((line) => line.startsWith('verify refused')));
+  delete host.resolved.trustedActorHeader;
   // An API port picked at start, the same way.
   host.resolved = {
     serverUrl: '',
@@ -2665,6 +2723,18 @@ test('health reports neutralize terminal control bytes from the endpoint', async
     `FAIL http://127.0.0.1:18080/actuator/health is not UP: HTTP 200, status ${'😀'.repeat(150)}${'A'.repeat(50)}… (100000 characters)`,
   );
   assert.ok(host.output.join('\n').length < 2000);
+  // Text of exactly the bound shows whole, a control byte counted as one.
+  host.responses['GET /actuator/health'] = {
+    status: `${'😀'.repeat(150)}\u001b${'A'.repeat(49)}`,
+  };
+  assert.equal(await host.upgrade('verify'), 1);
+  assert.equal(
+    rowsOf(host.output).health,
+    `FAIL http://127.0.0.1:18080/actuator/health is not UP: HTTP 200, status ${'😀'.repeat(150)}\uFFFD${'A'.repeat(49)}`,
+  );
+  host.responses['GET /actuator/health'] = {
+    status: `${'😀'.repeat(150)}${'A'.repeat(99850)}`,
+  };
   assert.equal(await host.upgrade('stop'), 0);
   assert.equal(await host.upgrade('start', '--timeout', '2'), 1);
   assert.ok([...host.output.at(-1)].length < 600, host.output.at(-1));
@@ -2822,6 +2892,18 @@ test('verify says why an API read failed, in text the endpoint cannot steer', as
   const turn = rowsOf(host.output).turn;
   assert.ok(turn.startsWith('FAIL Session x'), turn);
   assert.ok(!control.test(turn), JSON.stringify(turn));
+  // An id the API lists and then fails to serve: the request the row names
+  // stops at the bound, as the id itself does.
+  host.responses['GET /v1/agents/sessions'] = {
+    data: [{ id: 'S'.repeat(100000) }],
+  };
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
+  const unserved = rowsOf(host.output).session;
+  assert.match(
+    unserved,
+    /^FAIL GET \/v1\/agents\/sessions\/S{180}… \(100020 characters\): 404/,
+  );
+  assert.ok(unserved.length < 300, unserved.length);
 });
 
 test('verify refuses a URL fetch refuses before it probes', async (t) => {
@@ -2868,6 +2950,28 @@ test('verify leaves signed APIs to the ingress', async (t) => {
   assert.equal(
     rowsOf(host.output).turn,
     'SKIP no Turn without the Session read above',
+  );
+  // verify reads no API under signed auth, so an API port fetch would refuse
+  // is no reason to refuse it; the health endpoint is checked all the same.
+  host.resolved = {
+    serverUrl: 'http://127.0.0.1:6000',
+    healthUrl: 'http://127.0.0.1:9091/actuator/health',
+  };
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 0);
+  assert.equal(
+    rowsOf(host.output).health,
+    'PASS http://127.0.0.1:9091/actuator/health is UP',
+  );
+  assert.match(
+    rowsOf(host.output).session,
+    /^SKIP the API takes signed requests only/,
+  );
+  assert.ok(!host.requests.some(({ url }) => url.includes('/v1/')));
+  host.resolved.healthUrl = 'http://127.0.0.1:6000/actuator/health';
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
+  assert.match(
+    host.output.at(-1),
+    /^verify refused: The server's configuration puts the health endpoint at "http:\/\/127\.0\.0\.1:6000\/actuator\/health", which is on port 6000/,
   );
 });
 
