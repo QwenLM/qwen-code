@@ -1550,6 +1550,17 @@ export interface ConfigParameters {
    * discovery layer must not connect them. See issue #4615.
    */
   pendingMcpServers?: string[];
+  /**
+   * Settings-file project hooks have no approval bound to their current
+   * configuration (pending or rejected); `getProjectHooks()` withholds them
+   * until `setProjectHooksPendingApproval(false)`. `undefined` means the
+   * session does not gate them (bare, safe, all hooks off).
+   */
+  projectHooksPendingApproval?: boolean;
+  /** The withheld block was rejected, not just left undecided. */
+  projectHooksRejected?: boolean;
+  /** Started with `--yolo`: the gate is off only while the mode stays YOLO. */
+  projectHooksYoloExempt?: boolean;
   noBrowser?: boolean;
   folderTrustFeature?: boolean;
   folderTrust?: boolean;
@@ -3036,6 +3047,9 @@ export class Config {
   private readonly cliAllowedMcpServerNames?: string[];
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
+  private projectHooksPendingApproval?: boolean;
+  private projectHooksRejected: boolean;
+  private readonly projectHooksYoloExempt: boolean;
   private readonly mcpToolIdleTimeoutMs: number;
   /**
    * Guards against concurrent MCP reconcile passes (hot-reload watcher vs.
@@ -3523,6 +3537,9 @@ export class Config {
     this.cliAllowedMcpServerNames = params.cliAllowedMcpServerNames;
     this.excludedMcpServers = params.excludedMcpServers;
     this.pendingMcpServers = params.pendingMcpServers;
+    this.projectHooksPendingApproval = params.projectHooksPendingApproval;
+    this.projectHooksRejected = params.projectHooksRejected ?? false;
+    this.projectHooksYoloExempt = params.projectHooksYoloExempt ?? false;
     const envTimeout = process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'];
     const parsedEnv = envTimeout !== undefined ? Number(envTimeout) : NaN;
     this.mcpToolIdleTimeoutMs =
@@ -8984,6 +9001,35 @@ export class Config {
     );
   }
 
+  isProjectHooksPendingApproval(): boolean {
+    return this.projectHooksPendingApproval === true;
+  }
+
+  isProjectHooksApprovalGated(): boolean {
+    return (
+      this.projectHooksPendingApproval !== undefined &&
+      !(
+        this.projectHooksYoloExempt &&
+        this.getApprovalMode() === ApprovalMode.YOLO
+      )
+    );
+  }
+
+  /**
+   * Set by the CLI when the user decides on the project hooks mid-session
+   * (approval dialog, `/hooks` reload). Takes effect on the next hook reload.
+   */
+  setProjectHooksPendingApproval(pending: boolean, rejected = false): void {
+    this.projectHooksPendingApproval = pending;
+    this.projectHooksRejected = rejected;
+  }
+
+  isProjectHooksRejected(): boolean {
+    return (
+      this.projectHooksPendingApproval === true && this.projectHooksRejected
+    );
+  }
+
   addMcpServers(servers: Record<string, MCPServerConfig>): void {
     this.assertGeneratedUiServerNotReplaced(servers);
     if (this.shellExecutionSandbox && Object.keys(servers).length)
@@ -11764,26 +11810,28 @@ export class Config {
    * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
-    if (this.getBareMode() || this.isSafeMode()) {
-      return undefined;
-    }
-    // Repo-supplied hooks always need explicit trust, in every mode. The
-    // CLI's settings layer additionally drops workspace settings entirely
-    // for an undecided folder once the trust feature is enabled, so the
-    // operator's opt-in plus a trust decision is the single contract for
-    // interactive and non-interactive callers alike. Embedders enable the
-    // feature and record their managed directories in the trust store.
-    if (!this.isExplicitlyTrustedFolder()) {
-      return undefined;
-    }
-    // The legacy merged `hooks` stands in only when no scope was supplied.
-    const hooks =
-      this.projectHooks ?? (this.hasScopedHooks() ? undefined : this.hooks);
-    return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
+    return this.projectHooksPendingApproval === true
+      ? undefined
+      : this.readProjectHooks();
   }
 
   /**
-   * The project hooks block the trust gate withholds, for diagnostics only.
+   * The project hooks block `getProjectHooks()` withholds while approval is
+   * pending or rejected. Reads the raw block, not the execution accessor, so
+   * the listing can name the approval reason even when the trust gate would
+   * also withhold it.
+   */
+  getWithheldProjectHooks():
+    | { [K in HookEventName]?: HookDefinition[] }
+    | undefined {
+    return this.projectHooksPendingApproval === true
+      ? this.readProjectHooksBlock()
+      : undefined;
+  }
+
+  /**
+   * The project hooks block the interactive trust gate withholds, for the
+   * `/hooks` listing only — it shows what is configured but switched off.
    * Never feed this to the registry; `getProjectHooks()` is the execution
    * accessor. `undefined` when the trust gate is not what withholds them.
    */
@@ -11796,6 +11844,60 @@ export class Config {
     if (this.isExplicitlyTrustedFolder()) {
       return undefined;
     }
+    // A cleared approval gate serves the block (approved, or nothing to
+    // approve); the listing must not add a second, trust-disabled copy.
+    if (this.isProjectHooksApprovalCleared()) {
+      return undefined;
+    }
+    return this.readProjectHooksBlock();
+  }
+
+  /**
+   * Whether the approval gate lets the project hooks block through: the gate
+   * is active and not withholding. `pending === false` covers BOTH a genuine
+   * approval and "no approvable object" (the CLI passes false when the
+   * workspace contributes no hooks, e.g. an untrusted folder with the trust
+   * feature on). In the latter case the block is empty, so execution is
+   * unaffected — but diagnostic surfaces must not read this as "approved";
+   * ask `getProjectHooks()` whether the hooks actually load.
+   */
+  private isProjectHooksApprovalCleared(): boolean {
+    // `isProjectHooksApprovalGated()` already accounts for the YOLO
+    // exemption: while exempt the session is ungated and the folder-trust
+    // rule applies on its own.
+    return (
+      this.isProjectHooksApprovalGated() &&
+      this.projectHooksPendingApproval === false
+    );
+  }
+
+  private readProjectHooks():
+    | { [K in HookEventName]?: HookDefinition[] }
+    | undefined {
+    if (this.getBareMode() || this.isSafeMode()) {
+      return undefined;
+    }
+    // Repo-supplied hooks run with either authority: a cleared approval gate
+    // (an approved block, or no approvable object — then the block is empty),
+    // or explicit folder trust. Approval is the finer grant — it authorizes
+    // these hooks, not the folder's other executable settings — so the trust
+    // gate must not swallow it. Without an approval, explicit trust is
+    // required in EVERY mode: a disabled folder-trust feature never
+    // authorizes repo hooks, headless included. Embedders enable the feature
+    // and record their managed directories in the trust store, or approve.
+    if (
+      !this.isProjectHooksApprovalCleared() &&
+      !this.isExplicitlyTrustedFolder()
+    ) {
+      return undefined;
+    }
+    return this.readProjectHooksBlock();
+  }
+
+  private readProjectHooksBlock():
+    | { [K in HookEventName]?: HookDefinition[] }
+    | undefined {
+    // The legacy merged `hooks` stands in only when no scope was supplied.
     const hooks =
       this.projectHooks ?? (this.hasScopedHooks() ? undefined : this.hooks);
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
@@ -11811,8 +11913,12 @@ export class Config {
       return undefined;
     }
     // The legacy merged `hooks` stands in only when no scope was supplied.
+    // It may carry workspace hooks, so it shares the project approval gate.
     const hooks =
-      this.userHooks ?? (this.hasScopedHooks() ? undefined : this.hooks);
+      this.userHooks ??
+      (this.hasScopedHooks() || this.projectHooksPendingApproval === true
+        ? undefined
+        : this.hooks);
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
   }
 

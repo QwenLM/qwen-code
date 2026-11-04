@@ -37,6 +37,7 @@ import {
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
 import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
+import { approveProjectHooks } from '../project-hook-approval.js';
 
 // The agent trusts a client that presents the capability it was started with.
 const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
@@ -301,14 +302,16 @@ const allowOnce = () => ({
         ? CONTAINER_SANDBOX_NO_PROXY
         : '127.0.0.1,localhost';
       const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
-      // Project hooks in scenario settings need the trust model enabled.
-      // Enable only the feature — no trust-store file here, because the
-      // request snapshot encodes this directory's tree; the inherited rig
-      // trust store (QWEN_CODE_TRUSTED_FOLDERS_PATH) grants the workspace.
+      // Project hooks need both authorities available: enable the trust
+      // feature (the inherited rig trust store grants the workspace; no
+      // trust-store file here because the request snapshot encodes this
+      // directory's tree) and record the approval an interactive user
+      // would give for scenarios that declare hooks.
       writeFileSync(
         join(qwenHome, 'settings.json'),
         JSON.stringify({ security: { folderTrust: { enabled: true } } }),
       );
+      if (scenario.settings?.['hooks']) approveProjectHooks(qwenHome, dir);
       const env: NodeJS.ProcessEnv = {
         ...process.env,
         OPENAI_API_KEY: 'fake-key',

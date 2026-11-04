@@ -45,7 +45,9 @@ function makeConfig(options: {
   systemHooks?: Record<string, unknown>;
   userHooks?: Record<string, unknown>;
   projectHooks?: Record<string, unknown>;
-  trustWithheldProjectHooks?: { [K in HookEventName]?: HookDefinition[] };
+  withheldProjectHooks?: Record<string, unknown>;
+  trustWithheldProjectHooks?: Record<string, unknown>;
+  rejected?: boolean;
   extensions?: Array<{ isActive: boolean; hooks?: Record<string, unknown> }>;
 }): HooksListingConfig {
   const session = options.session ?? new SessionHooksManager();
@@ -68,9 +70,13 @@ function makeConfig(options: {
     getSystemHooks: vi.fn().mockReturnValue(options.systemHooks),
     getUserHooks: vi.fn().mockReturnValue(options.userHooks),
     getProjectHooks: vi.fn().mockReturnValue(options.projectHooks),
+    getWithheldProjectHooks: vi
+      .fn()
+      .mockReturnValue(options.withheldProjectHooks),
     getTrustWithheldProjectHooks: vi
       .fn()
       .mockReturnValue(options.trustWithheldProjectHooks),
+    isProjectHooksRejected: vi.fn().mockReturnValue(options.rejected ?? false),
     getExtensions: vi.fn().mockReturnValue(options.extensions ?? []),
   } as unknown as HooksListingConfig;
 }
@@ -328,29 +334,6 @@ describe('buildHooksListing', () => {
   });
 
   describe('enabled and disabledReason', () => {
-    it('lists trust-withheld project hooks as disabled (untrusted)', () => {
-      const list = rows({
-        trustWithheldProjectHooks: LINT_SETTINGS,
-      });
-
-      expect(list).toHaveLength(1);
-      expect(list[0]).toMatchObject({
-        source: HooksConfigSource.Project,
-        origin: 'registry',
-        enabled: false,
-        disabledReason: 'untrusted',
-      });
-    });
-
-    it('does not duplicate the withheld block when hooks are all disabled', () => {
-      const list = rows({
-        disableAll: true,
-        trustWithheldProjectHooks: LINT_SETTINGS,
-      });
-
-      expect(list).toHaveLength(0);
-    });
-
     it('reports registryDisabled for an entry switched off in the registry', async () => {
       const [row] = await lintRows({}, true);
 
@@ -490,6 +473,63 @@ describe('buildHooksListing', () => {
     });
   });
 
+  it.each([
+    [false, 'pendingApproval'],
+    [true, 'rejected'],
+  ] as const)(
+    'lists withheld project hooks (rejected: %s) with the reason %s',
+    async (rejected, reason) => {
+      const listed = await lintRows({
+        withheldProjectHooks: LINT_SETTINGS,
+        rejected,
+      });
+
+      expect(
+        listed.map((row) => [row.source, row.enabled, row.disabledReason]),
+      ).toEqual([
+        [HooksConfigSource.User, true, undefined],
+        [HooksConfigSource.Project, false, reason],
+      ]);
+    },
+  );
+
+  it('lists trust-withheld project hooks as disabled with the trust reason', async () => {
+    const listed = await lintRows({
+      trustWithheldProjectHooks: LINT_SETTINGS,
+    });
+
+    expect(
+      listed.map((row) => [row.source, row.enabled, row.disabledReason]),
+    ).toEqual([
+      [HooksConfigSource.User, true, undefined],
+      [HooksConfigSource.Project, false, 'untrusted'],
+    ]);
+    expect(listed[1]).toMatchObject({ trustGated: true });
+  });
+
+  it.each([
+    [false, 'pendingApproval'],
+    [true, 'rejected'],
+  ] as const)(
+    'names the approval decision (rejected: %s) even when trust also withholds',
+    async (rejected, reason) => {
+      // Pending/rejected plus an untrusted folder: both accessors serve the
+      // block, but the listing names the decision once, not the trust gate.
+      const listed = await lintRows({
+        withheldProjectHooks: LINT_SETTINGS,
+        trustWithheldProjectHooks: LINT_SETTINGS,
+        rejected,
+      });
+
+      expect(
+        listed.map((row) => [row.source, row.enabled, row.disabledReason]),
+      ).toEqual([
+        [HooksConfigSource.User, true, undefined],
+        [HooksConfigSource.Project, false, reason],
+      ]);
+    },
+  );
+
   describe('without a hook system', () => {
     const hook = (command: string) => ({
       [HookEventName.PreToolUse]: [
@@ -523,6 +563,23 @@ describe('buildHooksListing', () => {
         ['user', './user.sh', 'Bash', false, 'allHooksDisabled'],
         ['project', './project.sh', 'Bash', false, 'allHooksDisabled'],
         ['extensions', './extension.sh', 'Bash', false, 'allHooksDisabled'],
+      ]);
+    });
+
+    it('still lists trust-withheld project hooks under disableAllHooks', () => {
+      const listed = rows({
+        hookSystem: false,
+        disableAll: true,
+        trustWithheldProjectHooks: hook('./project.sh'),
+      });
+
+      expect(listed).toMatchObject([
+        {
+          source: 'project',
+          displayText: './project.sh',
+          enabled: false,
+          disabledReason: 'allHooksDisabled',
+        },
       ]);
     });
 
