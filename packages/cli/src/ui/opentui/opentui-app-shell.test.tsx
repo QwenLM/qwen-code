@@ -87,7 +87,11 @@ import {
   expandCollapsedHistory,
 } from '../utils/resumeHistoryUtils.js';
 import { projectHistoryToStreamEvents } from './item-projection.js';
-import { framePasteExpansion } from '../utils/paste-placeholders.js';
+import type { OpenTuiComposerSlot } from './input-submission.js';
+import {
+  CLIPBOARD_PASTE_FRAMING,
+  framePasteExpansion,
+} from '../utils/paste-placeholders.js';
 
 const mocks = vi.hoisted(() => {
   const state = {
@@ -2089,6 +2093,7 @@ describe('OpenTuiApp shell wiring', () => {
       modelOverride: 'qwen3-max',
       refreshContextFilesOnWrite: true,
       onComplete,
+      promptContext: ['Use the runbook'],
     } satisfies OpenTuiDispatchOutcome;
 
     await submit('/model summarize');
@@ -2096,6 +2101,7 @@ describe('OpenTuiApp shell wiring', () => {
       modelOverride: 'qwen3-max',
       refreshContextFilesOnWrite: true,
       onComplete,
+      promptContext: ['Use the runbook'],
       invocationEchoed: true,
     });
   });
@@ -3140,9 +3146,53 @@ describe('OpenTuiApp shell wiring', () => {
     ]);
     const restored = restoreSubmission.mock.calls[0][0];
     expect(restored.text).toBe(`${alpha.displayText}\n\n${beta.displayText}`);
-    expect(restored.text).not.toContain('<clipboard-paste>');
     expect(restored.restoredDraft.pasteExpansions).toEqual(
       new Map([...alpha.pastes, ...beta.pastes]),
+    );
+    // What the resubmit sends carries both pastes, framed once.
+    const modelText: string = restored.restoredDraft.modelText;
+    for (const { pastes } of [alpha, beta])
+      expect(modelText).toContain([...pastes.values()][0]);
+    expect(modelText.endsWith(CLIPBOARD_PASTE_FRAMING)).toBe(true);
+    expect(modelText.split(CLIPBOARD_PASTE_FRAMING)).toHaveLength(2);
+  });
+
+  it('keeps refused queued input for the composer a dialog opened behind it unmounts', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.handleResults.push(
+      { kind: 'refused' },
+      { kind: 'open_dialog', request: { dialog: 'help' } },
+    );
+    const restoreSubmission = vi.fn();
+    const composerHandle: OpenTuiComposerSlot = {
+      current: { getText: () => '', setText: vi.fn(), restoreSubmission },
+    };
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      composerHandle,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('?compress now');
+    await submit('/help');
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(screen.getByText('dialog:help')).toBeTruthy(),
+    );
+    expect(mocks.state.handledTexts).toEqual(['?compress now', '/help']);
+    // The composer is about to unmount, so the text waits for its next mount.
+    expect(restoreSubmission).not.toHaveBeenCalled();
+    expect(composerHandle.returned).toEqual(
+      expect.objectContaining({ text: '?compress now' }),
     );
   });
 

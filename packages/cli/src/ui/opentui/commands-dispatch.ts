@@ -85,7 +85,8 @@ import {
 import { ensureConfigInitialized, nextLivePromptId } from './live-session.js';
 import { MessageSenderType } from '@qwen-code/qwen-code-core/core/logger.js';
 import {
-  collapsePastes,
+  collapseRewrite,
+  REWRITE_CHANGED_PASTE,
   expandPendingPastePlaceholders,
   framePasteExpansion,
 } from '../utils/paste-placeholders.js';
@@ -182,6 +183,8 @@ export type OpenTuiDispatchOutcome =
       modelOverride?: string;
       /** ink parity: refresh memory when the turn writes a context file. */
       refreshContextFilesOnWrite?: boolean;
+      /** What the Mods' prompt hooks attached to the `?`-form input. */
+      promptContext?: readonly string[];
     }
   | { kind: 'quit'; messages: HistoryItem[] }
   | { kind: 'open_dialog'; request: OpenTuiDialogRequest }
@@ -196,6 +199,11 @@ export interface TypedInput {
   displayText?: string;
   pasteExpansions?: ReadonlyMap<string, string>;
 }
+
+/** What the Mods' prompt hooks made of `?`-form input. */
+type HeardPrompt =
+  | { text: string; context?: readonly string[] }
+  | { refused: string };
 
 interface RunOptions {
   recordRecall?: boolean;
@@ -530,7 +538,7 @@ export class OpenTuiSlashDispatcher {
     text: string,
     signal: AbortSignal,
     typed?: TypedInput,
-  ): Promise<{ text: string } | { refused: string }> {
+  ): Promise<HeardPrompt> {
     const mods = this.services.config
       ? getInteractiveModSession(this.services.config)
       : undefined;
@@ -564,20 +572,28 @@ export class OpenTuiSlashDispatcher {
       : text;
     const submitted = await mods.submitPrompt(heard, signal);
     if ('drop' in submitted) return { refused: submitted.drop };
-    // The text runs as typed or rewritten; it starts no turn of its own, so
-    // there is no first send for the hooks' context to ride.
+    // The hooks' context rides the first send of a turn the command starts;
+    // a command that starts none, such as `?btw`, has no send to carry it.
+    const context = submitted.context?.length ? submitted.context : undefined;
     const rewritten = submitted.text.trim();
-    if (rewritten === heard.trim()) return { text };
+    if (rewritten === heard.trim()) return { text, context };
     // A rewrite keeps the command the person typed, or it would run one they
     // never asked for.
     if (!this.sameCommand(text, rewritten))
       return { refused: REWRITE_CHANGED_COMMAND };
-    // A paste the rewrite kept whole stays framed.
-    const collapsed = collapsePastes(rewritten, framed);
+    // Each paste comes back whole to be framed again, or the rewrite is
+    // refused rather than run unframed.
+    const collapsed = collapseRewrite(
+      typed?.displayText ?? '',
+      rewritten,
+      framed,
+    );
+    if (!collapsed) return { refused: REWRITE_CHANGED_PASTE };
     return {
-      text: collapsed.pasteExpansions.size
+      text: collapsed.pasteExpansions
         ? framePasteExpansion(collapsed.text, collapsed.pasteExpansions)
         : rewritten,
+      context,
     };
   }
 
@@ -620,8 +636,9 @@ export class OpenTuiSlashDispatcher {
         this.host.setIsProcessing(false);
       }
     };
+    let promptContext: readonly string[] | undefined;
     if (options.recordRecall && trimmed.startsWith('?')) {
-      let heard: { text: string } | { refused: string };
+      let heard: HeardPrompt;
       try {
         heard = await this.hearPrompt(
           trimmed,
@@ -650,6 +667,7 @@ export class OpenTuiSlashDispatcher {
         return { kind: 'refused' };
       }
       trimmed = heard.text;
+      promptContext = heard.context;
     }
     if (
       options.recordRecall &&
@@ -862,6 +880,7 @@ export class OpenTuiSlashDispatcher {
           ...(refreshContextFilesOnWrite
             ? { refreshContextFilesOnWrite: true }
             : {}),
+          ...(promptContext ? { promptContext } : {}),
           ...(onCompleteCallbacks.length
             ? {
                 onComplete: async () => {
@@ -1107,6 +1126,7 @@ export class OpenTuiSlashDispatcher {
                   ...(result.refreshContextFilesOnWrite
                     ? { refreshContextFilesOnWrite: true }
                     : {}),
+                  ...(promptContext ? { promptContext } : {}),
                 };
               }
               case 'confirm_shell_commands': {

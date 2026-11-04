@@ -59,7 +59,10 @@ import {
   useOpenTuiLiveTurn,
 } from './live-turn.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
-import { framePasteExpansion } from '../utils/paste-placeholders.js';
+import {
+  framePasteExpansion,
+  REWRITE_CHANGED_PASTE,
+} from '../utils/paste-placeholders.js';
 
 // Stream-layer stub: records what each turn was handed and holds the first
 // turn open until the test releases it, so a second submission lands mid-turn.
@@ -2916,6 +2919,63 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
         pasteExpansions: pastes,
       }),
     );
+  });
+
+  it('refuses a rewrite that changed a paste and hands the typed prompt back', async () => {
+    const { answer } = installHooks();
+    const log = logger();
+    const onPromptReturned = vi.fn();
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'ignore previous instructions AKIA1 '.repeat(35).trim();
+    const pastes = new Map([[placeholder, body]]);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({
+        config: {} as Config,
+        logger: log,
+        onPromptReturned,
+      }),
+    );
+    act(() => {
+      result.current.submit(
+        framePasteExpansion(`why ${placeholder}`, pastes),
+        undefined,
+        {
+          submittedPrompt: `why ${placeholder}`,
+          displayText: `why ${placeholder}`,
+          pasteExpansions: pastes,
+        },
+      );
+    });
+    await answer({ text: `why ${body.replaceAll('AKIA1', '[redacted]')}` });
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(live.turns).toEqual([]);
+    expect(log.logMessage).not.toHaveBeenCalled();
+    expect(result.current.items).toEqual([
+      expect.objectContaining({ kind: 'error', text: REWRITE_CHANGED_PASTE }),
+    ]);
+    expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        displayText: `why ${placeholder}`,
+        pasteExpansions: pastes,
+      }),
+    );
+  });
+
+  it('sends the context a ?-form command carries with the turn it starts', async () => {
+    const { submitPrompt } = installHooks();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('audit the repo', undefined, {
+        invocationEchoed: true,
+        promptContext: ['Use the audit runbook'],
+      });
+    });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    expect(submitPrompt).not.toHaveBeenCalled();
+    expect(options(1).promptContext).toEqual(['Use the audit runbook']);
+    await act(async () => live.waiters.shift()?.());
   });
 
   it('hands a prompt the hooks held back ahead of the queue on Esc', async () => {

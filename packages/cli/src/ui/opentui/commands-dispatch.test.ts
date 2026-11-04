@@ -39,7 +39,10 @@ import {
   type OpenTuiDispatchOutcome,
   type TypedInput,
 } from './commands-dispatch.js';
-import { framePasteExpansion } from '../utils/paste-placeholders.js';
+import {
+  framePasteExpansion,
+  REWRITE_CHANGED_PASTE,
+} from '../utils/paste-placeholders.js';
 import type { OpenTuiCommandHost } from './commands-context.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
 import { helpCommand } from '../commands/helpCommand.js';
@@ -539,7 +542,9 @@ describe('guards (ink handleSlashCommand parity)', () => {
 describe('prompt.submit for ?-form input', () => {
   const run = async (
     input: string,
-    answer: (text: string) => { text: string } | { drop: string },
+    answer: (
+      text: string,
+    ) => { text: string; context?: string[] } | { drop: string },
     mods: Record<string, unknown> = {},
     {
       commands = [],
@@ -641,6 +646,34 @@ describe('prompt.submit for ?-form input', () => {
     );
   });
 
+  it('refuses a rewrite into the slash form of the same command', async () => {
+    const { outcome, action, logMessage } = await run(
+      '?btw what is prod',
+      () => ({ text: '/btw what is prod' }),
+    );
+    expect(outcome).toEqual({ kind: 'refused' });
+    expect(action).not.toHaveBeenCalled();
+    expect(logMessage).not.toHaveBeenCalled();
+  });
+
+  it("carries the hooks' context into the turn a ?-form command starts", async () => {
+    const audit = vi.fn(async () => ({
+      type: 'submit_prompt' as const,
+      content: 'audit the repo',
+    }));
+    const { outcome } = await run(
+      '?audit the repo',
+      (text) => ({ text, context: ['Use the audit runbook'] }),
+      {},
+      { commands: [stub({ name: 'audit', action: audit })] },
+    );
+    expect(audit).toHaveBeenCalledOnce();
+    expect(outcome).toMatchObject({
+      kind: 'submit_prompt',
+      promptContext: ['Use the audit runbook'],
+    });
+  });
+
   it('refuses ?-form input sent to Mods that failed to load', async () => {
     const { outcome, submitPrompt, action, host } = await run(
       '?btw question',
@@ -735,6 +768,21 @@ describe('prompt.submit for ?-form input', () => {
       );
       expect(outcome).toEqual({ kind: 'handled' });
       expect(logMessage).toHaveBeenCalledWith('user', framedTwice);
+    });
+
+    it('refuses a rewrite that changed the paste, so it never runs unframed', async () => {
+      const { outcome, action, logMessage, host } = await run(
+        framed,
+        (text) => ({ text: text.replace('.aws', '[redacted]') }),
+        {},
+        { typed },
+      );
+      expect(outcome).toEqual({ kind: 'refused' });
+      expect(action).not.toHaveBeenCalled();
+      expect(logMessage).not.toHaveBeenCalled();
+      expect(host.items).toContainEqual(
+        expect.objectContaining({ type: 'error', text: REWRITE_CHANGED_PASTE }),
+      );
     });
 
     it('keeps a paste the rewrite kept whole framed', async () => {

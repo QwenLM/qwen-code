@@ -117,7 +117,8 @@ import {
   stripLeadingSystemReminders,
 } from '../utils/historyUtils.js';
 import {
-  collapsePastes,
+  collapseRewrite,
+  REWRITE_CHANGED_PASTE,
   expandPendingPastePlaceholders,
   framePasteExpansion,
 } from '../utils/paste-placeholders.js';
@@ -1939,11 +1940,22 @@ export const useLlmStream = (
             const ahead = found
               ? trimmedQuery.slice(0, trimmedQuery.length - typed.length)
               : '';
-            // A paste the rewrite kept whole stays collapsed and framed.
-            const collapsed = collapsePastes(rewritten, pasteExpansions);
-            pasteExpansions = collapsed.pasteExpansions.size
-              ? collapsed.pasteExpansions
-              : undefined;
+            // Each paste comes back whole to be collapsed and framed again,
+            // or the rewrite is refused rather than sent unframed.
+            const collapsed = collapseRewrite(
+              userText,
+              rewritten,
+              pasteExpansions,
+            );
+            if (!collapsed) {
+              addItem(
+                { type: MessageType.ERROR, text: REWRITE_CHANGED_PASTE },
+                userMessageTimestamp,
+              );
+              onPromptReturned?.(userText, pasteExpansions);
+              return { queryToSend: null, shouldProceed: false };
+            }
+            pasteExpansions = collapsed.pasteExpansions;
             userText = collapsed.text;
             recallText = rewritten;
             trimmedQuery =

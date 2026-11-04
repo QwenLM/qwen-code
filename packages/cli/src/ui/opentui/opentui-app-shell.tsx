@@ -1159,6 +1159,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               return true;
             }
           }
+          // Read before the render that mounts the dialog, so a drain that
+          // opened it sees the composer is about to unmount.
+          dialogRef.current = outcome.request;
           setDialog(outcome.request);
           return true;
         case 'submit_prompt':
@@ -1168,6 +1171,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               modelOverride: outcome.modelOverride,
               refreshContextFilesOnWrite: outcome.refreshContextFilesOnWrite,
               onComplete: outcome.onComplete,
+              promptContext: outcome.promptContext,
               invocationEchoed: true,
             });
           notify('The live prompt turn is not wired in this shell.');
@@ -1500,6 +1504,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           returnToComposer(
             props.composerHandle,
             restoreInputSubmissions(refused),
+            { unmounting: dialogRef.current !== null },
           );
         drainingRef.current = false;
         // Entries that arrived mid-drain strand unless the completion re-arms

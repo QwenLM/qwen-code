@@ -136,8 +136,13 @@ export interface OpenTuiComposerSlot {
 export function returnToComposer(
   slot: OpenTuiComposerSlot,
   submission: OpenTuiInputSubmission,
+  options?: { unmounting?: boolean },
 ): void {
-  const restore = slot.current?.restoreSubmission;
+  // A composer about to unmount would lose what it was handed, so the text
+  // waits for the next mount instead.
+  const restore = options?.unmounting
+    ? undefined
+    : slot.current?.restoreSubmission;
   if (restore) {
     restore(submission);
     return;

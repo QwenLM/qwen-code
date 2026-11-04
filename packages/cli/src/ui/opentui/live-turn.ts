@@ -26,7 +26,8 @@
 
 import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import {
-  collapsePastes,
+  collapseRewrite,
+  REWRITE_CHANGED_PASTE,
   expandPendingPastePlaceholders,
   framePasteExpansion,
 } from '../utils/paste-placeholders.js';
@@ -171,6 +172,11 @@ export interface OpenTuiSubmitOptions {
    * returns before adding a USER history item for it.
    */
   invocationEchoed?: boolean;
+  /**
+   * What the Mods' `prompt.submit` hooks attached to a `?`-form command that
+   * starts this turn; it rides the turn's first send.
+   */
+  promptContext?: readonly string[];
 }
 
 export interface ForegroundShellOwner {
@@ -543,7 +549,7 @@ export function useOpenTuiLiveTurn(
       let failed = false;
       failedRequestRef.current = null;
       skipRetryDelayRef.current = undefined;
-      let promptContext: readonly string[] | undefined;
+      let promptContext = turnOptions?.promptContext;
       try {
         // Every turn but slash-form text waits for the Mods to load, as it
         // does in ink, so no prompt or steering reaches the model before a
@@ -622,12 +628,20 @@ export function useOpenTuiLiveTurn(
             : undefined;
           const rewritten = submitted.text.trim();
           if (rewritten !== heard.trim()) {
-            // A paste the rewrite kept whole stays collapsed and framed;
-            // attached images stay attached.
-            const collapsed = collapsePastes(rewritten, pastes);
-            const pasteExpansions = collapsed.pasteExpansions.size
-              ? collapsed.pasteExpansions
-              : undefined;
+            // Each paste comes back whole to be collapsed and framed again,
+            // or the rewrite is refused rather than sent unframed; attached
+            // images stay attached.
+            const collapsed = collapseRewrite(
+              typed.displayText ?? typed.text,
+              rewritten,
+              pastes,
+            );
+            if (!collapsed) {
+              apply({ type: 'error', text: REWRITE_CHANGED_PASTE });
+              onPromptReturnedRef.current?.(typed);
+              return;
+            }
+            const pasteExpansions = collapsed.pasteExpansions;
             const modelText = pasteExpansions
               ? framePasteExpansion(collapsed.text, pasteExpansions)
               : rewritten;

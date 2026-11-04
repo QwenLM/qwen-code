@@ -686,10 +686,14 @@ on('prompt.submit', guard).catch(($, e, next) =>
 
 In the Ink and OpenTUI terminals:
 
-- The hooks hear what the person typed, with pasted text expanded. Attachment
-  references and the notices Qwen Code adds to a prompt for the model alone,
-  such as a resumed worktree, stay ahead of a rewritten prompt, images attached
-  in OpenTUI stay attached, and a paste the rewrite keeps whole stays collapsed.
+- The hooks hear what the person typed, with pasted text expanded. A paste the
+  rewrite gives back whole stays collapsed, and the model is still told it was
+  pasted. A rewrite that edits inside a paste, removes it or repeats it is
+  refused with an error line, and the prompt comes back to the input box; a
+  hook keeps a paste out by dropping the prompt.
+- Images attached in OpenTUI stay attached to a rewritten prompt. In Ink,
+  attachment references and the notices Qwen Code adds to a prompt for the
+  model alone, such as a resumed worktree, stay ahead of it.
 - In OpenTUI, the prompt's row appears once the hooks let it through.
 - A prompt sent while the Mods are still loading waits for them, so their
   hooks hear it too.
@@ -703,10 +707,11 @@ In the Ink and OpenTUI terminals:
 - Slash commands, shell-mode commands, `/btw` questions and scheduled prompts
   raise no `prompt.submit`. In OpenTUI, slash-form text sent with an attached
   image goes to the model as a prompt, so the hooks hear it like any prompt.
-- A `?btw` question is typed text, so the hooks hear it. In OpenTUI it starts no
-  turn, so context they attach to it is not used, and a rewrite must keep the
-  same command: one that leaves `?`-form or names another command is refused
-  with an error line.
+- A `?`-form command, such as a `?btw` question, is typed text, so the hooks
+  hear it. In OpenTUI a rewrite must keep the same command: one that leaves
+  `?`-form or names another command is refused with an error line. Context
+  they attach goes with the turn the command starts; a `?btw` question starts
+  none, so its context is not used.
 - In OpenTUI, a prompt typed during a turn shows in the queued-messages strip
   until it is sent; the hooks hear it then.
 - While a Mod hooks `prompt.submit`, a prompt typed during a turn is not sent
@@ -721,7 +726,8 @@ These differ from Claude Code:
 
 - Slash commands, background notifications and the continuation of an
   interrupted turn raise no `prompt.submit`, so `command` and `isMeta` never
-  appear.
+  appear. Slash-form text that OpenTUI sends as a prompt, as above, is heard
+  as a prompt.
 - `attachments` never appears, and `$.prompt.media` does not exist.
 - A UserPromptSubmit hook that blocks the prompt beneath does not turn `next(e)`
   into `{drop}`: the Mod hooks have settled by the time it runs.
