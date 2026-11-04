@@ -59,17 +59,21 @@ Qwen Code 在所有平台上都把设置、凭据和其他全局状态保存在 
     echo "HOME is not set" >&2; false
   elif [ "${dest#/}" = "$dest" ]; then
     echo "XDG_CONFIG_HOME must be unset or absolute" >&2; false
-  elif [ -e "$dest" ]; then
-    echo "$dest already exists; merge it with ~/.qwen by hand" >&2; false
   elif [ ! -d "$HOME/.qwen" ]; then
     echo "there is no ~/.qwen to move" >&2; false
+  elif [ -L "$HOME/.qwen" ]; then
+    echo "~/.qwen is a symlink; move its target by hand" >&2; false
+  elif grep -qsE '^[[:space:]]*(export[[:space:]]+)?QWEN_HOME[[:space:]]*=' "$HOME/.qwen/.env" "$HOME/.env"; then
+    echo "a home .env sets QWEN_HOME; remove it first" >&2; false
+  elif [ -e "$dest" ]; then
+    echo "$dest already exists; merge it with ~/.qwen by hand" >&2; false
   else
     mkdir -p "$(dirname "$dest")" && mv "$HOME/.qwen" "$dest" &&
       touch "$dest/.qwen-global-dir"
   fi
   ```
 
-  它在移动之后写入标记，因此在下一次启动之前被重新创建的 `~/.qwen` 无法把安装拉回去。在 macOS 和 Windows 上、设置了 `QWEN_HOME` 或未设置 `HOME` 时、`XDG_CONFIG_HOME` 为相对路径时、不存在 `~/.qwen` 时，或者目标已存在时，它不做任何改动并说明原因；最后一种情况请手动合并两个目录。复制而保留 `~/.qwen` 的做法会继续使用 `~/.qwen`。当两个目录都存在时，删除 XDG 目录中的 `.qwen-global-dir` 会让 Qwen Code 重新使用 `~/.qwen`。
+  请先停止正在运行的会话和 `qwen serve`：它们每次使用时都会重新解析目录，否则会在中途切换到新位置。它在移动之后写入标记，因此在下一次启动之前被重新创建的 `~/.qwen` 无法把安装拉回去。在 macOS 和 Windows 上、设置了 `QWEN_HOME` 或未设置 `HOME` 时、`XDG_CONFIG_HOME` 为相对路径时、不存在 `~/.qwen` 时、`~/.qwen` 是符号链接时、`~/.qwen/.env` 或 `~/.env` 设置了 `QWEN_HOME` 时，或者目标已存在时，它不做任何改动并说明原因。上述文件中的 `QWEN_HOME` 会让下一次启动重新指向已不存在的 `~/.qwen`。目标已存在时，请手动合并两个目录。复制而保留 `~/.qwen` 且不写入标记的做法会继续使用 `~/.qwen`。当两个目录都存在时，删除 XDG 目录中的 `.qwen-global-dir` 会让 Qwen Code 重新使用 `~/.qwen`。
 
 - 要在新机器上保留 `~/.qwen`，设置 `QWEN_HOME=~/.qwen`，或在首次运行前创建 `~/.qwen`。带 `--source` 参数的独立安装脚本会写入 `~/.qwen/source.json`，因此也会产生后一种效果。
 - 自定义的 `XDG_CONFIG_HOME` 只在设置了它的地方生效。没有设置它的启动环境（例如桌面启动器、systemd 用户服务或 cron）会解析到 `~/.config/qwen`，在没有 `~/.qwen` 时把它当作另一个独立的安装。标记规则只保护 `~/.qwen`。请把它设置在所有启动环境都会读取的位置，例如 systemd 的 `environment.d` 文件或 `/etc/environment`，而不只是 shell 配置文件。

@@ -12,6 +12,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -52,9 +53,9 @@ describe.skipIf(process.platform === 'win32')(
       });
     };
 
-    const expectRefused = (result) => {
+    const expectRefused = (result, reason) => {
       expect(result.status).not.toBe(0);
-      expect(result.stderr.trim()).not.toBe('');
+      expect(result.stderr).toContain(reason);
     };
 
     beforeEach(() => {
@@ -97,24 +98,67 @@ describe.skipIf(process.platform === 'win32')(
       expect(existsSync(join(home, '.config'))).toBe(false);
     });
 
+    it('treats an empty XDG_CONFIG_HOME as unset, as the resolver does', () => {
+      expect(migrate({ XDG_CONFIG_HOME: '' }).status).toBe(0);
+      expect(
+        existsSync(join(home, '.config', 'qwen', 'oauth_creds.json')),
+      ).toBe(true);
+      expect(existsSync(join(home, '.config', 'qwen', marker))).toBe(true);
+    });
+
     it.each([
       [
         'XDG_CONFIG_HOME=relative-config',
         { XDG_CONFIG_HOME: 'relative-config' },
+        'must be unset or absolute',
       ],
-      ['XDG_CONFIG_HOME=~/.config', { XDG_CONFIG_HOME: '~/.config' }],
-      ['QWEN_HOME set', { QWEN_HOME: join(tmpdir(), 'qwen-home') }],
-      ['HOME unset', { HOME: undefined }],
-    ])('leaves ~/.qwen alone with %s', (_, env) => {
-      expectRefused(migrate(env));
+      [
+        'XDG_CONFIG_HOME=~/.config',
+        { XDG_CONFIG_HOME: '~/.config' },
+        'must be unset or absolute',
+      ],
+      [
+        'QWEN_HOME set',
+        { QWEN_HOME: join(tmpdir(), 'qwen-home') },
+        'unset QWEN_HOME first',
+      ],
+      ['HOME unset', { HOME: undefined }, 'HOME is not set'],
+    ])('leaves ~/.qwen alone with %s', (_, env, reason) => {
+      expectRefused(migrate(env), reason);
       expect(existsSync(join(home, '.qwen', 'oauth_creds.json'))).toBe(true);
       expect(readdirSync(cwd)).toEqual([]);
+    });
+
+    it.each([
+      ['~/.qwen/.env', () => join(home, '.qwen', '.env'), 'QWEN_HOME=~/.qwen'],
+      ['~/.env', () => join(home, '.env'), 'export QWEN_HOME=/data/qwen'],
+    ])('leaves ~/.qwen alone when %s sets QWEN_HOME', (_, file, line) => {
+      writeFileSync(file(), `${line}\n`);
+      expectRefused(migrate(), 'a home .env sets QWEN_HOME');
+      expect(existsSync(join(home, '.qwen', 'oauth_creds.json'))).toBe(true);
+      expect(existsSync(join(home, '.config'))).toBe(false);
+    });
+
+    it('moves ~/.qwen when its .env only mentions QWEN_HOME in a comment', () => {
+      writeFileSync(join(home, '.qwen', '.env'), '# QWEN_HOME=~/.qwen\n');
+      expect(migrate().status).toBe(0);
+      expect(existsSync(join(home, '.config', 'qwen', '.env'))).toBe(true);
+    });
+
+    it('leaves a symlinked ~/.qwen alone', () => {
+      mkdirSync(join(home, 'dotfiles'));
+      writeFileSync(join(home, 'dotfiles', 'oauth_creds.json'), '{}');
+      rmSync(join(home, '.qwen'), { recursive: true });
+      symlinkSync('dotfiles', join(home, '.qwen'));
+      expectRefused(migrate(), '~/.qwen is a symlink');
+      expect(existsSync(join(home, '.qwen', 'oauth_creds.json'))).toBe(true);
+      expect(existsSync(join(home, '.config'))).toBe(false);
     });
 
     it.each(['Darwin', 'MINGW64_NT-10.0', 'MSYS_NT-10.0', 'CYGWIN_NT-10.0'])(
       'leaves ~/.qwen alone on %s',
       (uname) => {
-        expectRefused(migrate({}, uname));
+        expectRefused(migrate({}, uname), 'keep using ~/.qwen');
         expect(existsSync(join(home, '.qwen', 'oauth_creds.json'))).toBe(true);
         expect(existsSync(join(home, '.config'))).toBe(false);
       },
@@ -122,19 +166,19 @@ describe.skipIf(process.platform === 'win32')(
 
     it('leaves ~/.qwen alone when the destination exists', () => {
       mkdirSync(join(home, '.config', 'qwen'), { recursive: true });
-      expectRefused(migrate());
+      expectRefused(migrate(), 'already exists');
       expect(existsSync(join(home, '.qwen', 'oauth_creds.json'))).toBe(true);
     });
 
     it('creates nothing when there is no ~/.qwen', () => {
       rmSync(join(home, '.qwen'), { recursive: true });
-      expectRefused(migrate());
+      expectRefused(migrate(), 'there is no ~/.qwen to move');
       expect(existsSync(join(home, '.config'))).toBe(false);
     });
 
     it('says so when run again after a migration', () => {
       expect(migrate().status).toBe(0);
-      expectRefused(migrate());
+      expectRefused(migrate(), 'there is no ~/.qwen to move');
       expect(
         existsSync(join(home, '.config', 'qwen', 'oauth_creds.json')),
       ).toBe(true);
