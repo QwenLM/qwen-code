@@ -60,8 +60,7 @@ com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT 
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT 1 FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND (status IN ('RECOVERY_BLOCKED', 'CANCELLING') OR status IN ('ACCEPTED', 'RUNNING') AND error_code IN (?, ?, ?)) LIMIT 1
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT COUNT(*) FROM ma_turn WHERE tenant_id=? AND session_id=?
-com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT approval_revision, permission_rules_json FROM ma_session WHERE tenant_id=? AND session_id=?
-com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?
+com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT approval_revision, permission_rules_json, is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT model_revision FROM ma_session WHERE tenant_id = ? AND session_id = ?
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT turn_id FROM ma_turn WHERE tenant_id=? AND session_id=? AND is_submission_attempted=TRUE LIMIT 1 FOR UPDATE
