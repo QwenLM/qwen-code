@@ -85,14 +85,17 @@ Read leases (`ToolPublicationRetentionStore.read`) no longer take the guard
 either. Every check that can delete what a lease protects (the publication,
 Session resource and projection collectors) holds the Session's root and
 head, and retirement updates the root; a lease taken under that root and
-head therefore excludes them on its own. This also removes the guard from
-evidence reads after a lane's root (the cycle C1 found) and from Artifact and
-journal resource reads.
+head therefore excludes them on its own. Lease renewal also skips the guard:
+it locks the root and rechecks retirement generation and expiry before
+extending the lease. This also removes the guard from evidence reads after a
+lane's root (the cycle C1 found) and from Artifact and journal resource reads.
 
 The audit is a test: with the guard held on another connection, reserve,
 dispatch, finish, admission and receipt must all complete
 (`ManagedSessionGuardConvoyIT`); a lane that took the guard after its root
-would stall there.
+would stall there. A separate witness backdates an unexpired read lease into
+the renewal window while the guard is held and requires the lease's expiry
+to advance inside the transaction that holds its root.
 
 Not covered: the native journal snapshot writer, whose build transaction
 locks resource rows before the Session; its order needs its own analysis.

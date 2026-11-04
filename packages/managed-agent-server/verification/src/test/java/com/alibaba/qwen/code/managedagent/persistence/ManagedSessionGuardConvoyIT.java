@@ -596,6 +596,33 @@ class ManagedSessionGuardConvoyIT {
     }
 
     @Test
+    void readLeaseRenewalCompletesWhileTenantGuardIsHeld() throws Exception {
+        var journal = PublicationJournalFixture.create(source);
+        var jdbc = journal.jdbc;
+        var retention = new ToolPublicationRetentionStore(jdbc, journal.manager);
+        var transactions = new TransactionTemplate(journal.manager);
+        var hold = journal.manager.getTransaction(new DefaultTransactionDefinition());
+        try {
+            ToolPublicationRetentionStore.lockTenant(jdbc, "tenant-1");
+            completesWhileHeld(() -> transactions.execute(ignored -> {
+                jdbc.execute("SET SESSION innodb_lock_wait_timeout = 5");
+                try (var lease = retention.read("tenant-1", "session-1")) {
+                    long expiry = ToolPublicationRetentionStore.now(jdbc)
+                            + ToolPublicationRetentionStore.READ_BUDGET_MILLIS / 2;
+                    assertThat(jdbc.update("UPDATE ma_read_lease SET expires_at = ?", expiry)).isEqualTo(1);
+                    lease.check();
+                    assertThat(jdbc.queryForObject("SELECT expires_at FROM ma_read_lease", Long.class))
+                            .isGreaterThan(expiry);
+                }
+                return null;
+            }));
+        } finally {
+            journal.manager.rollback(hold);
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_read_lease", Integer.class)).isZero();
+    }
+
+    @Test
     void heldSessionRowsBoundRetentionReads() throws Exception {
         var journal = PublicationJournalFixture.create(source);
         var retention = new ToolPublicationRetentionStore(journal.jdbc, journal.manager);

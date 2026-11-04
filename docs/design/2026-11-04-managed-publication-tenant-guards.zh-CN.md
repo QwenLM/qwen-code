@@ -66,11 +66,14 @@ CSI original 保留 guard；journal commit 带生命周期授权的回执也保�
 
 读租约（`ToolPublicationRetentionStore.read`）也不再获取 guard。所有可能删除租约所保护内容的
 检查（发布、Session 资源与投影回收器）都持有该 Session 的 root 和 head，退役会更新 root；在同一
-root 和 head 下获取的租约本身就能与它们互斥。这同时去掉了车道在 root 之后读取证据时的 guard
-（C1 发现的环路），以及 Artifact 与 journal 资源读取中的 guard。
+root 和 head 下获取的租约本身就能与它们互斥。租约续期也跳过 guard：锁定 root 后重新检查退役
+世代与过期时间，再延长租约。这同时去掉了车道在 root 之后读取证据时的 guard（C1 发现的环路），
+以及 Artifact 与 journal 资源读取中的 guard。
 
 审计以测试形式完成：另一连接持有 guard 时，reserve、派发、finish、准入和回执都必须能完成
-（`ManagedSessionGuardConvoyIT`）；任何在 root 之后获取 guard 的车道都会在这里卡住。
+（`ManagedSessionGuardConvoyIT`）；任何在 root 之后获取 guard 的车道都会在这里卡住。另一个
+观测用例在 guard 被持有时，把尚未过期的读租约回拨到续期窗口，要求它在持有 root 的事务中
+成功延长过期时间。
 
 未覆盖：native journal 快照写入方，其 build 事务在锁 Session 之前先锁资源行，顺序需要单独分析。
 

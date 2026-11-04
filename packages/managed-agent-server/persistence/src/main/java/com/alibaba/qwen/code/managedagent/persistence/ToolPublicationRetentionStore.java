@@ -485,7 +485,6 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                     && number(row, "expires_at") - number(row, "db_now")
                             <= READ_BUDGET_MILLIS * 3 / 4) {
                 Boolean renewed = transactions.execute(status -> {
-                    lockTenant(jdbc, tenant);
                     var roots = jdbc.query(
                                                     "SELECT retirement_generation, retired_at FROM"
                                                             + " ma_session WHERE tenant_id = ? AND"
