@@ -193,7 +193,7 @@ describe('refusalOf', () => {
     const { message } = refusalOf(
       'push',
       new Error(
-        'hook:\n\t\u001b[31mfatal\u001b[0m \u009b31mred \u202eevil\u202c \u200bzero\r\n',
+        'hook:\n\t\u001b[31mfatal\u001b[0m \u009b31mred \u202eevil\u202c \u200bzero\u0085\r\n',
       ),
     );
     expect(message).toBe('hook:\n\tfatal red evil zero\n');
