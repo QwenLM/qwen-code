@@ -9,7 +9,7 @@
 - 范围：`packages/managed-agent-server` —— `persistence` 与 `runtime-broker` 的生产源码。
 - 基线：`origin/main` `14a5a2d98d`，store 分解（#16090、#16142）与 broker 提取簇落地之后。
 
-本文解决[结构评审](2026-10-31-managed-agent-structure-review.zh-CN.md)留下的开放问题：类体量棘轮门禁是在 P1 之前引入（阻止再长），还是在拆分落地之后才引入。两个头号上帝类现已分解——`ManagedAgentStore` 是 1,170 行门面、`ManagedSessionStore` 是 357 行门面，`RuntimeBrokerService` 是九个协作者之上的 4,270 行门面——因此门禁在**拆分落地之后**引入，以锁住这些成果。结构评审的验收标准早已点名此门禁："P1 完成＝`persistence` 或 `runtime-broker` 中没有任何类超过约定的体量棘轮"。
+本文解决[结构评审](2026-10-31-managed-agent-structure-review.zh-CN.md)留下的开放问题：类体量棘轮门禁是在 P1 之前引入（阻止再长），还是在拆分落地之后才引入。两个头号上帝类现已分解——`ManagedAgentStore` 是 1,170 行门面、`ManagedSessionStore` 是 357 行门面，`RuntimeBrokerService` 是十个协作者之上的 4,255 行门面——因此门禁在**拆分落地之后**引入，以锁住这些成果。结构评审的验收标准早已点名此门禁："P1 完成＝`persistence` 或 `runtime-broker` 中没有任何类超过约定的体量棘轮"。
 
 ## 问题
 
@@ -19,7 +19,7 @@
 
 单个 verification 测试 `ClassSizeRatchetTest`（置于 `architecture` 包、与 `ModuleArchitectureTest` 并列）遍历 `persistence/src/main/java` 与 `runtime-broker/src/main/java` 的生产源码树，按顶层类统计源码行数，并对照 pin 资源 `class-size-ratchet.properties` 强制四条规则：
 
-1. **全局上限。** 任何类不得超过 `GLOBAL_MAX_LINES`（4,270）。这就是验收标准里的"约定体量棘轮"，以当前最大类（`RuntimeBrokerService`）作种子，只降不升。
+1. **全局上限。** 任何类不得超过 `GLOBAL_MAX_LINES`（4,255）。这就是验收标准里的"约定体量棘轮"，以当前最大类（`RuntimeBrokerService`）作种子，只降不升。
 2. **按类上限。** pin 中列出的每个类，行数不得超过其钉住值。pin 以每个大类的当前行数作种子，故被钉住的类完全不能再长。
 3. **大类必须入 pin。** 任何达到或超过 `LARGE_CLASS_THRESHOLD`（800 行）却不在 pin 中的类都会失败。因此一个类无法悄悄长成大类；跨过 800 行就强制按其当时行数显式入 pin。
 4. **无失效 pin。** 每条 pin 必须对应一个存在的生产类。删除或重命名一个类就强制剪掉它的 pin，保持 pin 诚实。
@@ -29,7 +29,7 @@
 ### 阈值及其理由
 
 - **`LARGE_CLASS_THRESHOLD = 800`。** 一个略低于当前最小大类（802 行）的整数行界。它覆盖当前每个聚合与门面，并把"达到 800 行"视为一个类大到值得拥有一个显式、经评审的上限的临界点。低于它的类可自由改动，故对小 helper 的普通编辑不会触发门禁。
-- **`GLOBAL_MAX_LINES = 4270`。** 今天能通过的最紧值（当前最大值）。它是一道任何类——无论是否入 pin——都不得超过的兜底，并随剩余大类（`WorkspaceCsiApplicationInventory` 3,329、`ToolPublicationDataStore` 2,709、`JdbcRuntimeBindingRepository` 2,671、`ManagedExtensionRecordStore` 2,170，以及 broker 门面）被分解而下调。
+- **`GLOBAL_MAX_LINES = 4255`。** 今天能通过的最紧值（当前最大值）。它是一道任何类——无论是否入 pin——都不得超过的兜底，并随剩余大类（`WorkspaceCsiApplicationInventory` 3,329、`ToolPublicationDataStore` 2,709、`JdbcRuntimeBindingRepository` 2,671、`ManagedExtensionRecordStore` 2,170，以及 broker 门面）被分解而下调。
 - **范围恰为 `persistence` + `runtime-broker`。** 这是验收标准点名的两个模块。`runtime-*` provider 模块（`runtime-http`/`host`/`local`/`external`/`kubernetes`/`ssh`/`static`）是独立顶层模块、不在范围；`contracts`、`control-plane`、`adapters`、`server` 同样不在此棘轮之列。
 
 ### 棘轮纪律

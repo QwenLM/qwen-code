@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRep
 import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocolTest;
+import com.alibaba.qwen.code.runtimebroker.provisioning.local.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
@@ -15,6 +16,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -44,8 +46,7 @@ class ManagedRuntimeCapacityTest {
     @ParameterizedTest
     @ValueSource(ints = {1, 2})
     void capacityRefusalRetriesTheSameBindingAndSeed(int handleVersion) throws Exception {
-        RuntimeResourceHandle handle = new RuntimeResourceHandle("local-process", handleVersion,
-                Map.of("provider", "local-process"));
+        RuntimeResourceHandle handle = localResourceHandle(handleVersion);
         AtomicReference<RuntimeProvisionSeed> attestedSeed = new AtomicReference<>();
         List<RuntimeProvisionSeed> attemptedSeeds = new ArrayList<>();
         List<RuntimeResourceHandle> knownHandles = new ArrayList<>();
@@ -267,6 +268,17 @@ class ManagedRuntimeCapacityTest {
             assertNull(blocked.getOperationOwner());
             assertEquals("runtime_broker_recovery_blocked", failure(service.warm("harness")).getCode());
             assertEquals(1, launches.get(), "attestation failure must not permit another launch");
+        }
+    }
+
+    private static RuntimeResourceHandle localResourceHandle(int version) {
+        if (version == 2) {
+            return new RuntimeResourceHandle("local-process", version, Map.of("provider", "local-process"));
+        }
+        // Use the real producer so a changed placeholder cannot silently disable retries.
+        try (var local = new LocalProcessRuntimeProvisioner(List.of("unused-worker"),
+                Path.of("."), new HttpRuntimeTransport())) {
+            return local.ensureResource(REQUEST, ManagedContextProtocolTest.seed(), null).toCompletableFuture().join();
         }
     }
 

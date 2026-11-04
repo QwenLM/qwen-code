@@ -30,7 +30,9 @@ Broker 私有 HTTP 分发使用显式平台线程池：最多 64 个线程、`Sy
 
 ## 可维护性
 
-从较长的 Broker 启动方法中提取失败分类，并分离本地 READY 等待与完整生命周期的 stdout reader。进程生成和登记继续位于既有生命周期锁内，清理仍保留在 `finally`。为重复 cursor 与协议大小限制命名。根据实际调用方补充 RuntimeWarmer 生命周期责任与 RuntimeObservation 结果语义。避免通用辅助框架、批量格式化和无关方法拆分。
+将持久化启动失败分类与本地容量识别移入包内可见的处理类，并分离本地 READY 等待与完整生命周期的 stdout reader。失败分类以续租后的持久化 claim 请求为准；既有恢复封堵回调保留其 CAS 和 suppressed-error 行为。进程生成与登记、关闭快照、释放时集合转移及回收继续使用同一把生命周期锁，改用 `ReentrantLock`，避免 Java 21 上竞争进入 monitor 时固定载体线程。清理仍保留在 `finally`。为重复 cursor 与协议大小限制命名。根据实际调用方补充 RuntimeWarmer 生命周期责任与 RuntimeObservation 结果语义。避免通用辅助框架、批量格式化和无关方法拆分。
+
+清除前只识别首次启动时精确匹配的非持久化占位句柄；仅凭不支持启动恢复，不能证明句柄可以安全丢弃。重试回归测试从真实本地 provisioner 获取占位句柄，使生成格式变更会触发测试失败。不新增 provider SPI。提取后下调 Broker 类 pin 和全局类大小上限，不提高任一限制。
 
 公共 snake_case 字段、语义错误码、JSON 规范化、精确二进制浮点转换及现有持久化和租约协议保持原有语义。特别是用于规范化摘要的精确 `BigDecimal(double)` 转换属于有意设计。
 

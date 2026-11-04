@@ -30,7 +30,9 @@ Replace the deferred-reference `NullPointerException` catch with an explicit nul
 
 ## Maintainability
 
-Extract failure classification from the long Broker provisioning method and separate the local READY wait from the lifetime stdout reader. Keep spawn-and-register under its existing lifecycle lock and preserve cleanup in `finally`. Name repeated cursor and protocol size limits. Document RuntimeWarmer lifecycle obligations and RuntimeObservation outcomes from their actual callers. Avoid generic helpers, wholesale formatting, and unrelated method decomposition.
+Move durable provisioning failure classification and local-capacity recognition into a package-private handler, and separate the local READY wait from the lifetime stdout reader. Failure classification uses the renewed durable claim's request as its authority; the existing recovery-blocking callback retains its CAS and suppressed-error behavior. Keep spawn-and-register, shutdown snapshots, release transfers and reaping under the same lifecycle lock, using `ReentrantLock` to avoid carrier pinning from contended monitor entry on Java 21. Preserve cleanup in `finally`. Name repeated cursor and protocol size limits. Document RuntimeWarmer lifecycle obligations and RuntimeObservation outcomes from their actual callers. Avoid generic helpers, wholesale formatting, and unrelated method decomposition.
+
+Recognize only the exact first-start non-durable placeholder before clearing it; lack of startup-recovery support alone does not prove a handle is safe to discard. The retry regression obtains this placeholder from the real local provisioner so a producer-format change fails the test. No new provider SPI is required. Lower the Broker class pin and global class-size ceiling after extraction; do not raise either limit.
 
 Public snake_case fields, semantic error codes, JSON canonicalization, exact binary floating-point conversion, and existing persistence/lease protocols retain their semantics. In particular, exact `BigDecimal(double)` conversions used for canonical digests are intentional.
 
