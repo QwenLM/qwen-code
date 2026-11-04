@@ -656,6 +656,13 @@ type InboundTaskState =
 
 const MAX_INBOUND_TASK_ATTEMPTS = 3;
 /**
+ * Consecutive polls one notification may fail with a transient GitHub error
+ * while it holds the cursor back (~30 minutes at the default 60s poll). Past
+ * that it is skipped like a permanent failure, so a thread GitHub keeps
+ * failing cannot freeze mark-as-read for every other thread.
+ */
+const MAX_TRANSIENT_NOTIFICATION_FAILURES = 30;
+/**
  * The poll cursor does not advance while an inbound task is recoverable, so a
  * slow or stuck turn makes GitHub return the same notifications on every poll.
  * Filtered notifications are skipped before any dedupe, so journaling each one
@@ -881,6 +888,24 @@ function isWatchPassAbortError(err: unknown): boolean {
   return false;
 }
 
+/**
+ * A per-thread failure GitHub may not repeat: no HTTP status (network,
+ * timeout), a 5xx, or a shared credential/rate-limit answer. A secondary
+ * limit can arrive as a bare 403 whose only marker is the message. Other 4xx
+ * (a deleted, transferred or inaccessible thread) come back the same on every
+ * retry.
+ */
+function isTransientGithubError(err: unknown): boolean {
+  const e = err as { status?: unknown; message?: unknown };
+  if (typeof e.status !== 'number') return true;
+  return (
+    e.status >= 500 ||
+    isWatchPassAbortError(err) ||
+    (e.status === 403 &&
+      /secondary rate limit|abuse detection/i.test(String(e.message)))
+  );
+}
+
 function parseTriggerKind(metadata: string | undefined): string | undefined {
   return metadata?.match(/^Trigger: ([\w-]+)\./m)?.[1];
 }
@@ -1015,6 +1040,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private cancelledInboundTaskIds = new Set<string>();
   private pendingCursorUpdatedAt: string | undefined;
   private inboundPersistenceBlocked = false;
+  /**
+   * Set when a notification failed with a transient GitHub error this poll:
+   * the cursor and mark-as-read must not move past it, or the thread would
+   * never be listed again and its comment would be lost silently.
+   */
+  private notificationRetryPending = false;
+  private transientNotificationFailures = new Map<string, number>();
 
   constructor(
     name: string,
@@ -1778,6 +1810,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   protected async pollOnce(): Promise<void> {
     this.inboundPersistenceBlocked = false;
+    this.notificationRetryPending = false;
     this.publicationAuditBlocked = false;
     this.publicationAuditKeysCache = undefined;
 
@@ -1995,6 +2028,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         reason,
       };
 
+      const failureKey = `${chatId}|${threadId}`;
       try {
         switch (reason) {
           case 'mention':
@@ -2019,10 +2053,38 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           default:
             await this.processCommentLane(ctx, false);
         }
+        this.transientNotificationFailures.delete(failureKey);
       } catch (err) {
-        process.stderr.write(
-          `[Channel:${this.name}] API error processing ${threadId}, skipping: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+        const failures =
+          (this.transientNotificationFailures.get(failureKey) ?? 0) + 1;
+        const retry =
+          isTransientGithubError(err) &&
+          failures < MAX_TRANSIENT_NOTIFICATION_FAILURES;
+        if (retry) {
+          this.transientNotificationFailures.set(failureKey, failures);
+          this.notificationRetryPending = true;
+        } else {
+          this.transientNotificationFailures.delete(failureKey);
+        }
+        const error = sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
         );
+        process.stderr.write(
+          retry
+            ? `[Channel:${this.name}] API error processing ${threadId} (${failures}/${MAX_TRANSIENT_NOTIFICATION_FAILURES}), keeping it unread for the next poll: ${error}\n`
+            : `[Channel:${this.name}] API error processing ${threadId}, skipping: ${error}\n`,
+        );
+        this.recordChannelEvent({
+          type: 'inbound',
+          outcome: retry ? 'failed' : 'skipped',
+          reason: 'github_api_error',
+          triggerKind: reason,
+          repository: chatId,
+          thread: threadId,
+          number: issueNumber,
+          error,
+        });
         continue;
       }
     }
@@ -2049,6 +2111,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (
         !this.inboundPersistenceBlocked &&
         !this.publicationAuditBlocked &&
+        !this.notificationRetryPending &&
         !this.hasCursorBlockingTasks() &&
         this.pendingCursorUpdatedAt
       ) {
@@ -2058,6 +2121,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           this.cursor.lastProcessedAt = committedAt;
         }
         this.pendingCursorUpdatedAt = undefined;
+        // Nothing is retrying past a commit; drop streaks of threads that
+        // stopped being listed (read elsewhere) so the map cannot grow.
+        this.transientNotificationFailures.clear();
       }
     } finally {
       // Bound the comment-time map EVERY poll, independent of dispatch: fetch
@@ -2453,47 +2519,43 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const { chatId, threadId, issueNumber } = ctx;
     const bodyKey = `${chatId}|${threadId}`;
     if (this.cursor.dispatchedBodies?.includes(bodyKey)) return;
-    try {
-      const issue = await this.fetchIssueMeta(ctx);
-      const body = issue.body || '';
+    // Fetch and dispatch failures reach pollOnce, which keeps the
+    // notification unread when GitHub may answer differently next poll.
+    const issue = await this.fetchIssueMeta(ctx);
+    const body = issue.body || '';
 
-      if (issue.user?.login === this.botUsername) return;
+    if (issue.user?.login === this.botUsername) return;
 
-      const isMentioned = this.botUsername
-        ? testBotMention(body, this.botUsername)
-        : false;
-      if (requireMention && !isMentioned) return;
+    const isMentioned = this.botUsername
+      ? testBotMention(body, this.botUsername)
+      : false;
+    if (requireMention && !isMentioned) return;
 
-      const text = this.botUsername
-        ? stripBotMention(body, this.botUsername)
-        : body;
+    const text = this.botUsername
+      ? stripBotMention(body, this.botUsername)
+      : body;
 
-      const envelope: Envelope = {
-        channelName: this.name,
-        senderId: (issue.user?.login || 'unknown').toLowerCase(),
-        senderName: issue.user?.login || 'unknown',
-        chatId,
-        threadId,
-        messageId: `issue-body-${issueNumber}`,
-        text,
-        isGroup: true,
-        isMentioned,
-        isReplyToBot: false,
-        metadata: this.buildRouteMetadata(ctx),
-      };
+    const envelope: Envelope = {
+      channelName: this.name,
+      senderId: (issue.user?.login || 'unknown').toLowerCase(),
+      senderName: issue.user?.login || 'unknown',
+      chatId,
+      threadId,
+      messageId: `issue-body-${issueNumber}`,
+      text,
+      isGroup: true,
+      isMentioned,
+      isReplyToBot: false,
+      metadata: this.buildRouteMetadata(ctx),
+    };
 
-      const dispatched = await this.dispatchEnvelope(envelope, issueNumber, {
-        dispatchedBodies: [bodyKey],
-      });
-      // Same contract as the direct lane: a refused dispatch (audit
-      // freeze) claimed no task, so the key must not be recorded.
-      if (dispatched) {
-        this.recordDispatchedBody(bodyKey);
-      }
-    } catch (err) {
-      process.stderr.write(
-        `[Channel:${this.name}] failed to fetch issue for first contact: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
-      );
+    const dispatched = await this.dispatchEnvelope(envelope, issueNumber, {
+      dispatchedBodies: [bodyKey],
+    });
+    // Same contract as the direct lane: a refused dispatch (audit
+    // freeze) claimed no task, so the key must not be recorded.
+    if (dispatched) {
+      this.recordDispatchedBody(bodyKey);
     }
   }
 

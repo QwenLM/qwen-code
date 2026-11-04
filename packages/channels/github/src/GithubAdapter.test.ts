@@ -1493,7 +1493,7 @@ describe('GithubChannel', () => {
       expect(markOrder).toBeGreaterThan(commentOrder);
     });
 
-    it('marks all fetched notifications read even on failure', async () => {
+    it('marks all fetched notifications read when a thread fails permanently', async () => {
       const good = makeNotification({
         id: '1',
         updated_at: '2026-07-02T08:00:00.000Z',
@@ -1507,7 +1507,9 @@ describe('GithubChannel', () => {
       mockOctokit.paginate
         .mockResolvedValueOnce([good, bad])
         .mockResolvedValueOnce([makeComment()])
-        .mockRejectedValue(new Error('rate limit'));
+        .mockRejectedValue(
+          Object.assign(new Error('Not Found'), { status: 404 }),
+        );
 
       await pollOnce();
 
@@ -1519,11 +1521,195 @@ describe('GithubChannel', () => {
       });
     });
 
+    describe('transient per-thread GitHub errors', () => {
+      const transient = () =>
+        Object.assign(new Error('Server Error'), { status: 502 });
+
+      function journalRows(): Array<Record<string, unknown>> {
+        const path = inboundTaskPath().replace(
+          'github-inbound-tasks.json',
+          'channel-events.jsonl',
+        );
+        try {
+          return readFileSync(path, 'utf-8')
+            .split('\n')
+            .filter(Boolean)
+            .map((line) => JSON.parse(line) as Record<string, unknown>)
+            .filter((event) => event['reason'] === 'github_api_error');
+        } catch {
+          return [];
+        }
+      }
+
+      async function initFailing() {
+        await initWithoutLoop();
+        (
+          channel as unknown as {
+            abortableSleep: (ms: number) => Promise<void>;
+          }
+        ).abortableSleep = vi.fn().mockResolvedValue(undefined);
+      }
+
+      it('keeps the notification unread and answers the comment on the next poll', async () => {
+        await initFailing();
+        mockOctokit.paginate
+          .mockResolvedValueOnce([makeNotification()])
+          .mockRejectedValueOnce(transient())
+          .mockRejectedValueOnce(transient())
+          .mockRejectedValueOnce(transient());
+
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes).toHaveLength(0);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+        expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+        expect(journalRows()).toEqual([
+          expect.objectContaining({
+            type: 'inbound',
+            outcome: 'failed',
+            repository: 'owner/repo',
+            thread: 'issue:42',
+            number: 42,
+          }),
+        ]);
+
+        mockOctokit.paginate
+          .mockResolvedValueOnce([makeNotification()])
+          .mockResolvedValueOnce([makeComment()]);
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '1001',
+        ]);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledWith({
+          last_read_at: '2026-07-02T10:00:00.000Z',
+          read: true,
+        });
+      });
+
+      it('retries a first-contact body whose issue fetch failed transiently', async () => {
+        await initFailing();
+        mockOctokit.paginate
+          .mockResolvedValueOnce([makeNotification()])
+          .mockResolvedValueOnce([]);
+        mockOctokit.rest.issues.get
+          .mockRejectedValueOnce(transient())
+          .mockRejectedValueOnce(transient())
+          .mockRejectedValueOnce(transient());
+
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes).toHaveLength(0);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+
+        mockOctokit.rest.issues.get.mockResolvedValueOnce({
+          data: {
+            title: 'Test Issue',
+            body: '@test-bot the build is red',
+            user: { login: 'alice' },
+          },
+        });
+        mockOctokit.paginate
+          .mockResolvedValueOnce([makeNotification()])
+          .mockResolvedValueOnce([]);
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          'issue-body-42',
+        ]);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+      });
+
+      it.each([
+        [
+          'a secondary rate limit without retry-after',
+          403,
+          'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.',
+          false,
+        ],
+        [
+          'a SAML-protected repository',
+          403,
+          'Resource protected by organization SAML enforcement.',
+          true,
+        ],
+        ['a deleted issue', 404, 'Not Found', true],
+      ])(
+        'classifies %s (HTTP %i) for the cursor',
+        async (_label, status, message, marksRead) => {
+          await initFailing();
+          mockOctokit.paginate
+            .mockResolvedValueOnce([makeNotification()])
+            .mockRejectedValue(
+              Object.assign(new Error(message), {
+                status,
+                response: { headers: { 'x-ratelimit-remaining': '4999' } },
+              }),
+            );
+
+          await pollOnce();
+
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead.mock.calls.length,
+          ).toBe(marksRead ? 1 : 0);
+          expect(journalRows()).toEqual([
+            expect.objectContaining({
+              outcome: marksRead ? 'skipped' : 'failed',
+            }),
+          ]);
+        },
+      );
+
+      it('gives up on a thread GitHub keeps failing so the cursor cannot freeze', async () => {
+        await initFailing();
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (
+            method ===
+            mockOctokit.rest.activity.listNotificationsForAuthenticatedUser
+          ) {
+            return [makeNotification()];
+          }
+          throw transient();
+        });
+
+        for (let poll = 1; poll < 30; poll++) await pollOnce();
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+
+        await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+        const rows = journalRows();
+        expect(rows).toHaveLength(30);
+        expect(rows.at(-1)).toMatchObject({ outcome: 'skipped' });
+        expect(
+          rows.slice(0, -1).every((row) => row['outcome'] === 'failed'),
+        ).toBe(true);
+      });
+    });
+
     it('aborts the poll cycle without advancing cursor when markNotificationsAsRead fails', async () => {
       await initWithoutLoop();
-      mockOctokit.paginate.mockResolvedValueOnce([
-        makeNotification({ updated_at: '2026-07-02T10:00:00.000Z' }),
-      ]);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            updated_at: '2026-07-02T10:00:00.000Z',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([]);
       mockOctokit.rest.activity.markNotificationsAsRead.mockRejectedValue(
         new Error('server error'),
       );
@@ -4678,12 +4864,14 @@ describe('GithubChannel', () => {
     it('commits the recovered notification window after restart', async () => {
       writeInboundTasks([makeInboundTaskRecord()]);
       channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
-      mockOctokit.paginate.mockResolvedValueOnce([
-        makeNotification({
-          last_read_at: '2026-07-02T09:00:00.000Z',
-          updated_at: '2026-07-02T10:00:00.000Z',
-        }),
-      ]);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            last_read_at: '2026-07-02T09:00:00.000Z',
+            updated_at: '2026-07-02T10:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([]);
 
       const privateChannel = channel as unknown as {
         octokit: typeof mockOctokit;
