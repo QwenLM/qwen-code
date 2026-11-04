@@ -681,16 +681,19 @@ describe('GET /sessions/pr-bindings', () => {
     expect(body.bindings.map((b) => b.sessionId)).toEqual([SESSION_B]);
   });
 
-  it('scans a draining workspace that still has a runtime', async () => {
-    const cwd = await makeWorkspace();
-    await seedTranscript(cwd, SESSION_A);
-    await seedBinding(cwd, SESSION_A, [101]);
+  it.each(['draining', 'transitioning', 'blocked'] as const)(
+    'scans a %s workspace that still has a runtime',
+    async (state) => {
+      const cwd = await makeWorkspace();
+      await seedTranscript(cwd, SESSION_A);
+      await seedBinding(cwd, SESSION_A, [101]);
 
-    const body = await fetchBindings([makeEntry(makeRuntime(cwd), 'draining')]);
+      const body = await fetchBindings([makeEntry(makeRuntime(cwd), state)]);
 
-    expect(body.partial).toBe(false);
-    expect(body.bindings.map((b) => b.sessionId)).toEqual([SESSION_A]);
-  });
+      expect(body.partial).toBe(false);
+      expect(body.bindings.map((b) => b.sessionId)).toEqual([SESSION_A]);
+    },
+  );
 
   it('flags partial when an entry has no current runtime', async () => {
     const cwd = await makeWorkspace();
@@ -905,6 +908,43 @@ describe('GET /sessions/pr-bindings', () => {
     const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
 
     expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('does not re-list a session with an unreadable sidecar from the bridge subset', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await corruptSidecar(cwd, SESSION_A);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: [{ number: 102, url: 'https://github.com/acme/widgets/pull/102' }],
+      }),
+    ]);
+    captureStderr();
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    // The session's persisted bindings are unknown: listing its live subset
+    // would make it look enumerated and cost it the bindings the adapter
+    // retains across partial answers.
+    expect(body).toEqual({ bindings: [], partial: true });
+  });
+
+  it('counts a live-only session in the diagnostic denominator when its transcript is unreadable', async () => {
+    const cwd = await makeWorkspace();
+    await fsp.mkdir(transcriptPath(cwd, SESSION_A), { recursive: true });
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: [{ number: 55, url: 'https://github.com/acme/widgets/pull/55' }],
+      }),
+    ]);
+    const lines = captureStderr();
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: true });
+    expect(lines).toContainEqual(
+      expect.stringContaining('1 of 1 sessions could not be read'),
+    );
   });
 
   it('routes registry failures through sendBridgeError', async () => {

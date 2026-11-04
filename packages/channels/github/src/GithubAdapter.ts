@@ -3518,6 +3518,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.lastBindingsPartial = snapshot.partial;
       this.boundRefreshFailed = false;
       this.boundSnapshotSeen = true;
+      // Remembered for the cold-empty cap message: a cap reached by failed
+      // lookups followed by one empty partial must still name the lookup.
+      const priorFailureStreak = this.boundSnapshotFailureStreak;
       this.boundSnapshotFailureStreak = 0;
       if (!snapshot.partial) this.boundSnapshotTrusted = true;
       const map = new Map<string, PrBindingSummary>();
@@ -3598,7 +3601,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.coldEmptyPartialStreak += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
           process.stderr.write(
-            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence. The daemon's stderr names the cause: a workspace without a runtime, a chats directory it cannot list, or a 'PR bindings scan' line for a sidecar, transcript or live session list it could not read.\n`,
+            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence. ${
+              priorFailureStreak + 1 >= MAX_COLD_EMPTY_PARTIAL_POLLS
+                ? "The binding lookup itself has been failing (see the 'has never succeeded' line above): verify GET /sessions/pr-bindings is reachable and the worker credentials are valid."
+                : "The daemon's stderr names the cause: a workspace without a runtime, a chats directory it cannot list, or a 'PR bindings scan' line for a sidecar, transcript or live session list it could not read."
+            }\n`,
           );
         }
       } else {
@@ -3617,7 +3624,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             this.partialSnapshotStreak % 60 === 0)
         ) {
           process.stderr.write(
-            `[Channel:${this.name}] binding snapshot has been partial for ${this.partialSnapshotStreak} consecutive polls (${snapshot.bindings.length} sessions listed): the daemon could not read every PR sidecar, transcript or live session list, or a registered workspace has no runtime, so unmatched PR events defer to the dead-letter horizon instead of the channel (issue events are unaffected). Check the daemon's stderr for the failing workspace, and its \`PR bindings scan\` lines for the session it could not read.\n`,
+            `[Channel:${this.name}] binding snapshot has been partial for ${this.partialSnapshotStreak} consecutive polls (${snapshot.bindings.length} sessions listed): the daemon could not read every PR sidecar, transcript or live session list, or a registered workspace has no runtime. ${
+              !this.boundSnapshotTrusted &&
+              map.size === 0 &&
+              this.coldEmptyPartialStreak < MAX_COLD_EMPTY_PARTIAL_POLLS
+                ? `The comment lane is still deferred (${this.coldEmptyPartialStreak}/${MAX_COLD_EMPTY_PARTIAL_POLLS} cold polls), so PR and issue events are both stalled.`
+                : 'Unmatched PR events defer to the dead-letter horizon instead of the channel (issue events are unaffected).'
+            } Check the daemon's stderr for the failing workspace, and its \`PR bindings scan\` lines for the session it could not read.\n`,
           );
         }
       } else {

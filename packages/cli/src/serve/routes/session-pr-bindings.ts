@@ -104,7 +104,7 @@ async function resolveAttribution(
   liveSummary: BridgeSessionSummary | undefined,
 ): Promise<Attribution> {
   const item = await sessionService.getSessionListItem(sessionId, 'active');
-  if (item === undefined && liveSummary === undefined) {
+  if (item === undefined) {
     let stats: Awaited<ReturnType<typeof stat>> | undefined;
     try {
       stats = await stat(join(dirname(prPath), `${sessionId}.jsonl`));
@@ -112,12 +112,15 @@ async function resolveAttribution(
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
     // getSessionListItem swallows read errors into "no records"; a
-    // non-empty (or non-file) transcript that produced none is unreadable.
+    // non-empty (or non-file) transcript that produced none is unreadable,
+    // live or not. An absent transcript is a binding before the first
+    // flush (kept), unless the session is archived.
     if (stats !== undefined && (!stats.isFile() || stats.size > 0)) {
       return { kind: 'unreadable' };
     }
     if (
       stats === undefined &&
+      liveSummary === undefined &&
       (await sessionService.getSessionListItem(sessionId, 'archived')) !==
         undefined
     ) {
@@ -172,6 +175,12 @@ async function scanWorkspaceBindings(
   }
   const rows = new Map<string, SessionPrBindingSummary>();
   const failures: Array<{ sessionId: string; cause: string }> = [];
+  let examined = sessionIds.length;
+  // Sessions whose persisted bindings are UNKNOWN this scan. The merge below
+  // must not re-list them from the bridge's live subset: a listed row makes
+  // the session look enumerated, and the adapter would drop the row it was
+  // retaining with the persisted PR numbers.
+  const unknown = new Set<string>();
   for (const sessionId of sessionIds) {
     try {
       // The sidecar enumeration also sees sessions of other projects whose
@@ -204,10 +213,12 @@ async function scanWorkspaceBindings(
         continue;
       }
       if (attribution.kind === 'unreadable') {
+        unknown.add(sessionId);
         failures.push({ sessionId, cause: 'transcript could not be read' });
         continue;
       }
       if (sidecar.status === 'invalid') {
+        unknown.add(sessionId);
         failures.push({
           sessionId,
           cause: 'sidecar is invalid JSON or failed the shape check',
@@ -238,6 +249,7 @@ async function scanWorkspaceBindings(
         prs: projectPrs(sidecar.prs),
       });
     } catch (err) {
+      unknown.add(sessionId);
       failures.push({
         sessionId,
         cause: err instanceof Error ? err.message : String(err),
@@ -252,7 +264,7 @@ async function scanWorkspaceBindings(
   // list is below SESSION_PR_LIST_LIMIT, then trimmed to the newest. An
   // empty row is an observed unbind and stays a tombstone.
   for (const [sessionId, summary] of live) {
-    if (!summary.prs?.length) continue;
+    if (unknown.has(sessionId) || !summary.prs?.length) continue;
     const row = rows.get(sessionId);
     if (row !== undefined) {
       if (row.prs.length === 0 || row.prs.length >= SESSION_PR_LIST_LIMIT) {
@@ -265,21 +277,34 @@ async function scanWorkspaceBindings(
       row.prs = row.prs.slice(-SESSION_PR_LIST_LIMIT);
       continue;
     }
+    examined += 1;
     try {
-      // Ownership comes from the persisted record first: a restored agent
-      // task session carries no sourceType on its bridge entry.
-      const item = await sessionService.getSessionListItem(sessionId, 'active');
-      const sourceType = item?.sourceType ?? summary.sourceType;
-      if (isHiddenCatalogSource(sourceType)) continue;
-      const updatedAt = laterActivityTimestamp(
-        validTimestamp(summary.updatedAt ?? summary.createdAt),
-        item ? new Date(item.mtime).toISOString() : undefined,
+      // Same attribution as a sidecar row: the persisted record decides
+      // ownership first (a restored agent task session carries no
+      // sourceType on its bridge entry), and an unreadable transcript makes
+      // the session unknown.
+      const attribution = await resolveAttribution(
+        sessionService,
+        sessionId,
+        sessionService.getPrSessionPathForArchiveState(sessionId, 'active'),
+        summary,
       );
+      if (attribution.kind === 'hidden' || attribution.kind === 'archived') {
+        continue;
+      }
+      if (attribution.kind === 'unreadable') {
+        failures.push({ sessionId, cause: 'transcript could not be read' });
+        continue;
+      }
       rows.set(sessionId, {
         sessionId,
         workspaceCwd: runtime.workspaceCwd,
-        ...(sourceType !== undefined ? { sourceType } : {}),
-        ...(updatedAt !== undefined ? { updatedAt } : {}),
+        ...(attribution.sourceType !== undefined
+          ? { sourceType: attribution.sourceType }
+          : {}),
+        ...(attribution.updatedAt !== undefined
+          ? { updatedAt: attribution.updatedAt }
+          : {}),
         prs: projectPrs(summary.prs).slice(-SESSION_PR_LIST_LIMIT),
       });
     } catch (err) {
@@ -295,7 +320,7 @@ async function scanWorkspaceBindings(
     // the route is polled every channel cycle.
     const first = failures[0]!;
     process.stderr.write(
-      `[serve] PR bindings scan: ${failures.length} of ${sessionIds.length} sessions could not be read in workspace ${runtime.workspaceCwd}, answer partial (first: ${sanitizeLogText(first.sessionId, 64)}: ${sanitizeLogText(first.cause, 200)})\n`,
+      `[serve] PR bindings scan: ${failures.length} of ${examined} sessions could not be read in workspace ${runtime.workspaceCwd}, answer partial (first: ${sanitizeLogText(first.sessionId, 64)}: ${sanitizeLogText(first.cause, 200)})\n`,
     );
   }
   return liveReadFailed || failures.length > 0;

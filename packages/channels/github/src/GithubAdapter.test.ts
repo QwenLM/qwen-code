@@ -6870,6 +6870,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(hint).toContain('(1 sessions listed)');
         expect(hint).toContain('PR bindings scan');
         expect(hint).toContain('no runtime');
+        // The lane is still deferred on the tenth cold poll: no claim that
+        // issue events flow.
+        expect(hint).toContain('PR and issue events are both stalled');
+        expect(hint).not.toContain('issue events are unaffected');
       } finally {
         stderr.mockRestore();
       }
@@ -6900,6 +6904,8 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           .find((line) => line.includes('has been partial for 10'));
         expect(hint).toBeDefined();
         expect(hint).toContain('(0 sessions listed)');
+        // The lane opened on the complete snapshot: issue events do flow.
+        expect(hint).toContain('issue events are unaffected');
       } finally {
         stderr.mockRestore();
       }
@@ -6927,6 +6933,30 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(capLine).toBeDefined();
         expect(capLine).not.toContain('binding lookup itself has been failing');
         expect(capLine).toContain("'PR bindings scan' line");
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('names the binding lookup when failed lookups seeded the cold-empty cap and one empty partial lands it (R4-5)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValue([]);
+      boundSessions.listPrBindings.mockRejectedValue(new Error('daemon cold'));
+      for (let i = 0; i < 29; i++) {
+        await pollOnce();
+      }
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await pollOnce();
+        const capLine = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been an empty partial for 30'));
+        expect(capLine).toBeDefined();
+        expect(capLine).toContain('binding lookup itself has been failing');
       } finally {
         stderr.mockRestore();
       }
