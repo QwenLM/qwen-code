@@ -15,6 +15,7 @@
         { "url": "mailto:*" }
       ]
     },
-    "allow-change-zoom"
+    "allow-change-zoom",
+    "allow-show-turn-notification"
   ]
 }

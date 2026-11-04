@@ -15,6 +15,7 @@ import {
 } from 'react';
 import { notificationExcerpt } from './notification-text';
 import { getTranslator, type WebShellLanguage } from './i18n';
+import { isMacOSDesktopShell } from './utils/externalOpen';
 import {
   createTurnNotificationObserver,
   TurnNotificationContext,
@@ -75,6 +76,23 @@ function permission(): Permission {
   return window.isSecureContext && typeof window.Notification === 'function'
     ? window.Notification.permission
     : 'unavailable';
+}
+
+// Invoke a desktop host command from the daemon-served Web Shell. On the
+// packaged macOS desktop WebKit never grants Web Notification permission to
+// the embedded web shell, so the host posts the system notification itself.
+function desktopInvoke(): (
+  command: string,
+  args?: Record<string, unknown>,
+) => Promise<unknown> {
+  const core = (window as { __TAURI__?: { core?: { invoke?: unknown } } })
+    .__TAURI__?.core;
+  if (typeof core?.invoke !== 'function')
+    throw new Error('The desktop bridge is unavailable.');
+  return core.invoke as (
+    command: string,
+    args?: Record<string, unknown>,
+  ) => Promise<unknown>;
 }
 
 function readStoredPreference(): string | null | undefined {
@@ -209,7 +227,11 @@ function StandaloneNotifications({
         setPreference(next);
         return;
       }
-      if (nextPermission === 'granted') savePreference(true);
+      // WebKit never grants the Web Notification permission in the macOS
+      // desktop shell, but the host posts the system notification itself,
+      // so the toggle must stick on anyway.
+      if (nextPermission === 'granted' || isMacOSDesktopShell())
+        savePreference(true);
     },
     [savePreference, defaultEnabled],
   );
@@ -244,14 +266,49 @@ function StandaloneNotifications({
 
   notifyRef.current = (turn) => {
     const request = version.current;
+    // In the macOS desktop shell WebKit never grants the Web Notification
+    // permission, so deliver the system notification through the desktop
+    // host once the user has enabled task notifications.
+    const nativeHost = isMacOSDesktopShell() && permission() !== 'granted';
     const canShow = () =>
       mounted.current &&
       activeRef.current &&
       request === version.current &&
       enabledRef.current &&
-      permission() === 'granted' &&
+      (nativeHost || permission() === 'granted') &&
       (document.visibilityState !== 'visible' || !document.hasFocus());
     if (turn.outcome === 'cancelled' || !canShow()) return;
+    if (nativeHost) {
+      const t = getTranslator(appLanguage ?? language);
+      const appName = options?.appName?.trim() || 'QwenCode';
+      const title = notificationExcerpt(turn.sessionTitle ?? '', 60);
+      const prompt = notificationExcerpt(turn.promptText ?? '', 80);
+      const excerpt =
+        turn.outcome === 'failed'
+          ? ''
+          : notificationExcerpt(turn.responseText ?? '', 120);
+      const status = t(`browserNotifications.${turn.outcome}`);
+      let invoke: ReturnType<typeof desktopInvoke>;
+      try {
+        invoke = desktopInvoke();
+      } catch {
+        if (mounted.current) setError(true);
+        return;
+      }
+      void invoke('show_turn_notification', {
+        title: title ? `${appName} · ${title}` : appName,
+        body: [
+          status,
+          prompt && t('browserNotifications.prompt', { text: prompt }),
+          excerpt && t('browserNotifications.reply', { text: excerpt }),
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      }).catch(() => {
+        if (mounted.current) setError(true);
+      });
+      return;
+    }
     const show = async () => {
       // Hash identities so notification tags and shared storage contain no paths.
       const digest = await crypto.subtle.digest(

@@ -9,6 +9,7 @@ const COMMANDS: &[&str] = &[
     "install_update",
     "open_logs",
     "restart_runtime",
+    "show_turn_notification",
 ];
 
 fn main() {

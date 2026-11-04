@@ -143,6 +143,30 @@ it('explains when the preference cannot persist', () => {
   );
 });
 
+it('shows enabled status in the macOS desktop shell when Web Notifications are denied', () => {
+  settings.enabled = true;
+  settings.permission = 'denied';
+  (window as Window & { __TAURI__?: unknown }).__TAURI__ = {
+    core: { invoke: async () => {} },
+  };
+  vi.stubGlobal('navigator', {
+    userAgent:
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15',
+  });
+  try {
+    render();
+    hover();
+    const help = document.querySelector(popup)!;
+    expect(help.querySelector('[role="status"]')?.textContent).toBe(
+      'Enabled for this site.',
+    );
+    expect(help.querySelector('button')?.disabled).toBe(true);
+  } finally {
+    delete (window as Window & { __TAURI__?: unknown }).__TAURI__;
+    vi.unstubAllGlobals();
+  }
+});
+
 it('keeps authorization help open through pending blur and restores focus after grant', async () => {
   settings.enabled = false;
   settings.permission = 'default';

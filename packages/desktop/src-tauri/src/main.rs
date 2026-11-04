@@ -2,6 +2,8 @@
 
 mod desktop_state;
 mod runtime;
+#[cfg(target_os = "macos")]
+mod turn_notification;
 
 use command_group::GroupChild;
 use desktop_state::{default_window_size, restore_window, zoom_after, SettingsStore, DEFAULT_ZOOM};
@@ -175,6 +177,7 @@ fn main() {
             open_logs,
             restart_runtime,
             install_update,
+            show_turn_notification,
         ])
         .setup(setup_app);
 
@@ -257,6 +260,11 @@ fn main() {
 
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
+    // Ask for host-level notification authorization at launch so turn
+    // notifications can be posted even though the embedded web shell can
+    // never be granted Web Notification permission.
+    #[cfg(target_os = "macos")]
+    turn_notification::request_authorization();
     let settings = SettingsStore::load(&handle).map_err(std::io::Error::other)?;
     let window_state = settings.window();
     let zoom = settings.zoom().unwrap_or(DEFAULT_ZOOM);
@@ -423,6 +431,20 @@ fn change_zoom(
     state.settings.stage_zoom(zoom);
     state.window_dirty.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+// WebKit never grants Web Notification permission to the embedded web shell,
+// so on macOS the host posts the system notification itself and the
+// daemon-served Web Shell triggers it over IPC. Non-macOS builds no-op (the
+// Web Shell keeps the standard Web Notification path there).
+#[tauri::command]
+fn show_turn_notification(title: String, body: String) {
+    #[cfg(target_os = "macos")]
+    turn_notification::show(&title, &body);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (title, body);
+    }
 }
 
 #[tauri::command]

@@ -27,6 +27,21 @@ export function isDesktopShell(): boolean {
   return tauriInvoke() !== undefined;
 }
 
+/**
+ * True in the packaged desktop shell on macOS, where WebKit (WKWebView)
+ * never grants Web Notification permission to the embedded web shell. The
+ * macOS desktop host posts system notifications itself (see the
+ * `show_turn_notification` Tauri command); other platforms keep the
+ * standard Web Notification path.
+ */
+export function isMacOSDesktopShell(): boolean {
+  return (
+    isDesktopShell() &&
+    typeof navigator !== 'undefined' &&
+    /macintosh|mac os x/i.test(navigator.userAgent)
+  );
+}
+
 export function isExternalOpenUrl(url: string | undefined): boolean {
   return Boolean(url?.trim() && EXTERNAL_OPEN_SCHEMES.test(url.trim()));
 }
