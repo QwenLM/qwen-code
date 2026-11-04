@@ -80,6 +80,7 @@ import {
   readSessionTitleSidecar,
   removeSessionTitleSidecar,
   sessionTitleSidecarPath,
+  truncateTitleForList,
   writeSessionTitleSidecar,
   type SessionTitleSidecar,
 } from './session-title-sidecar.js';
@@ -2439,14 +2440,7 @@ export class SessionService {
   }
 
   private truncatePromptForDisplay(text: string): string {
-    const codePoints: string[] = [];
-    for (const codePoint of text) {
-      if (codePoints.length === 200) {
-        return `${codePoints.join('')}...`;
-      }
-      codePoints.push(codePoint);
-    }
-    return text;
+    return truncateTitleForList(text);
   }
 
   /**
@@ -4708,6 +4702,19 @@ export class SessionService {
         await fs.promises.rename(stagedTranscriptPath, targetPath);
       }
       committed = true;
+      if (options.title !== undefined) {
+        if (
+          !writeSessionTitleSidecar(
+            sessionTitleSidecarPath(chatsDir, newSessionId),
+            options.title,
+            'manual',
+          )
+        ) {
+          this.warn(
+            `branch committed session=${newSessionId} but its title sidecar could not be written`,
+          );
+        }
+      }
       try {
         await fsyncDirectoryBestEffort(chatsDir);
       } catch (error) {

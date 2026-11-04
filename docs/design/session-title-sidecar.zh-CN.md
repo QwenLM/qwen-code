@@ -49,11 +49,18 @@ id 的前八个字符，而那不是名字。
 ### 写入时机
 
 - `ChatRecordingService.recordUserMessage` 在首条真实用户 prompt 时写入
-  `source: "prompt"`，按列表读取使用的 200 个码点上限截断。后续 prompt 不覆盖。
+  `source: "prompt"`，使用与列表读取相同的「200 个码点 + 省略号」策略
+  （`truncateTitleForList`），并优先使用 prompt 的 `systemPayload.displayText`
+  而不是 wire 文本。后续 prompt 不覆盖；首条 prompt 若没有文本 part（只有图片）
+  则不产生标签。
 - `ChatRecordingService.recordCustomTitle` 写入自定义标题及其来源。`prompt`
   条目永远不会覆盖 `auto`/`manual` 条目，因此重命名不会被后续 prompt 冲掉。
 - `SessionService.renameSession`（没有 live recording 时使用的回退路径）在追加
   `custom_title` 记录后写入 sidecar。
+- `ChatRecordingService` 在恢复 transcript 时补写 sidecar：优先已解析的自定义
+  标题，否则使用记录中的首条 prompt 展示文本。没有这一步，sidecar 机制之前创建
+  的会话永远不会获得 sidecar，因为恢复的会话不会再记录一次首条 prompt。
+- `SessionService.forkSession` 在分支 transcript 提交后写入新会话的标题 sidecar。
 - Managed 会话日志跳过：它们自己管理元数据投影。
 
 ### 读取时机
@@ -85,7 +92,8 @@ id 的前八个字符，而那不是名字。
   prompt 本来就是列表使用的标签。
 - **best-effort 写入。** sidecar 写失败绝不能导致 prompt 或重命名失败；缺失的
   sidecar 视为“没有持久化标签”。
-- **热路径不新增读取。** 只有 transcript 既没有标题也没有 prompt 时才读 sidecar。
+- **transcript 已经能命名的会话不读 sidecar。** 只有 transcript 既没有自定义
+  标题也没有首条 prompt 时才读 sidecar，而这正是 sidecar 要修复的状态。
 
 ## 风险
 

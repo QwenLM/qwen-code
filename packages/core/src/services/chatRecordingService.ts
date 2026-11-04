@@ -52,6 +52,7 @@ import { tryGenerateSessionTitle } from './sessionTitle.js';
 import {
   readSessionTitleSidecar,
   sessionTitleSidecarPath,
+  truncateTitleForList,
   writeSessionTitleSidecar,
 } from './session-title-sidecar.js';
 import type {
@@ -1474,24 +1475,64 @@ export class ChatRecordingService {
     }
   }
 
-  private persistPromptDerivedTitle(message: Content | undefined): void {
+  private persistPromptDerivedTitle(
+    message: Content | undefined,
+    displayText?: string,
+  ): void {
     if (this.managedSink) return;
     try {
       const sidecarPath = this.titleSidecarPath();
       const existing = readSessionTitleSidecar(sidecarPath);
       if (existing && existing.source !== 'prompt') return;
-      const text = message?.parts?.find(
-        (part): part is { text: string } => 'text' in part,
-      )?.text;
-      if (!text?.trim()) return;
+      const preferred = displayText?.trim();
+      const text =
+        preferred ||
+        message?.parts
+          ?.find((part): part is { text: string } => 'text' in part)
+          ?.text?.trim();
+      if (!text) return;
       writeSessionTitleSidecar(
         sidecarPath,
-        text.trim().slice(0, 200),
+        truncateTitleForList(text),
         'prompt',
       );
     } catch {
       // Best-effort: recording the prompt itself must not depend on the label
       // sidecar, which can be unwritable (read-only home, partial Config).
+    }
+  }
+
+  /**
+   * Restores the list label from a resolved transcript on resume. Without
+   * this, sessions created before the sidecar existed (or before the current
+   * writer attached) would only gain one on their next prompt, which a resumed
+   * session never gets because the first prompt is already in its history.
+   */
+  private seedTitleSidecar(promptDisplayText?: string): void {
+    if (this.managedSink) return;
+    try {
+      const sidecarPath = this.titleSidecarPath();
+      const existing = readSessionTitleSidecar(sidecarPath);
+      if (existing && existing.source !== 'prompt') return;
+      const customTitle = this.currentCustomTitle?.trim();
+      if (customTitle) {
+        writeSessionTitleSidecar(
+          sidecarPath,
+          customTitle,
+          this.currentTitleSource ?? 'manual',
+        );
+        return;
+      }
+      const prompt = promptDisplayText?.trim();
+      if (prompt) {
+        writeSessionTitleSidecar(
+          sidecarPath,
+          truncateTitleForList(prompt),
+          'prompt',
+        );
+      }
+    } catch {
+      // Best-effort: a missing sidecar is a label gap, not a resume failure.
     }
   }
 
@@ -1571,6 +1612,7 @@ export class ChatRecordingService {
     if (this.currentSourceType) {
       this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
+    this.seedTitleSidecar(this.userDisplayTextsForTitle[0]);
   }
 
   private trackUserDisplayTextForTitle(displayText: string | undefined): void {
@@ -1614,6 +1656,7 @@ export class ChatRecordingService {
     if (this.currentSourceType) {
       this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
+    this.seedTitleSidecar();
   }
 
   activate(
@@ -2617,7 +2660,10 @@ export class ChatRecordingService {
       // The sidecar write is best-effort and runs after the transcript
       // append, so an unwritable label path can never drop the message.
       if (firstPrompt) {
-        this.persistPromptDerivedTitle(record.message);
+        this.persistPromptDerivedTitle(
+          record.message,
+          promptPayload?.displayText,
+        );
       }
     } catch (error) {
       debugLogger.error('Error saving user message:', error);

@@ -27,6 +27,25 @@ export const SESSION_TITLE_SIDECAR_SUFFIX = '.title.json';
 /** Matches the cap `PATCH /session/:id/metadata` applies to display names. */
 const MAX_DISPLAY_NAME_CHARS = 256;
 
+/**
+ * The list reader's prompt policy: at most 200 code points, then an ellipsis.
+ * Shared by every writer so the sidecar never stores a string the list would
+ * have rendered differently (UTF-16 `slice` could also split a surrogate pair).
+ */
+export function truncateTitleForList(
+  text: string,
+  maxCodePoints = 200,
+): string {
+  const codePoints: string[] = [];
+  for (const codePoint of text) {
+    if (codePoints.length === maxCodePoints) {
+      return `${codePoints.join('')}...`;
+    }
+    codePoints.push(codePoint);
+  }
+  return text;
+}
+
 export function sessionTitleSidecarPath(
   chatsDir: string,
   sessionId: string,

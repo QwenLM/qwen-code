@@ -52,13 +52,21 @@ Add a per-session sidecar next to the transcript:
 ### Write points
 
 - `ChatRecordingService.recordUserMessage` writes the first real user prompt as
-  `source: "prompt"`, truncated to the same 200-code-point display limit the
-  list reader uses. Later prompts do not overwrite it.
+  `source: "prompt"`, using the same 200-code-point-plus-ellipsis policy the
+  list reader applies (`truncateTitleForList`) and preferring the prompt's
+  `systemPayload.displayText` over the wire text. Later prompts do not overwrite
+  it, and a first prompt with no text part (image only) produces no label.
 - `ChatRecordingService.recordCustomTitle` writes the custom title with its
   title source. A `prompt` entry never overwrites an `auto`/`manual` entry, so a
   rename survives a later prompt.
 - `SessionService.renameSession` — the fallback used when no live recording is
   attached — writes the sidecar after appending its `custom_title` record.
+- `ChatRecordingService` seeds the sidecar from a resumed transcript: the
+  resolved custom title, otherwise the first recorded prompt display text.
+  Without this, sessions created before the sidecar existed would never gain
+  one, because a resumed session does not record another first prompt.
+- `SessionService.forkSession` writes the new session's title sidecar after the
+  forked transcript commits.
 - Managed session logs are skipped: they own their metadata projection.
 
 ### Read points
@@ -96,8 +104,9 @@ fallback, because the id is the only stable identifier there.
   list already uses.
 - **Best-effort writes.** A failed sidecar write must never fail a prompt or a
   rename; missing sidecars are treated as “no persisted label”.
-- **No new read on the hot path.** The sidecar is read only when the transcript
-  yields no title or prompt.
+- **No sidecar read for a session the transcript can already name.** The list
+  path reads the sidecar only when the transcript yields neither a custom title
+  nor a first prompt, which is exactly the state the sidecar exists to repair.
 
 ## Risks
 

@@ -131,6 +131,23 @@ describe('SessionService - title sidecar fallback', () => {
     });
   });
 
+  it('writes the title sidecar for a forked session', async () => {
+    writeHeadlessTranscript([
+      record('user', {
+        message: { role: 'user', parts: [{ text: '源会话' }] },
+      }),
+    ]);
+    const forkId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+
+    await service.forkSession(SESSION_ID, forkId, { title: '分支标题' });
+
+    expect(
+      readSessionTitleSidecar(
+        sessionTitleSidecarPath(path.dirname(transcriptPath), forkId),
+      ),
+    ).toMatchObject({ displayName: '分支标题', source: 'manual' });
+  });
+
   it('drops the sidecar together with the session', async () => {
     writeHeadlessTranscript([record('system', { subtype: 'ui_telemetry' })]);
     writeSessionTitleSidecar(sidecarPath, 'CI 验证与复验', 'manual');
