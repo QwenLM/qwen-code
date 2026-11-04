@@ -110,6 +110,51 @@ describe('contextLengthError', () => {
     });
   });
 
+  describe('Ollama context overflow wording', () => {
+    it('detects the prompt-longer-than-context wording', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          '400 the prompt is longer than the context length currently available to the model; shorten the prompt, adjust the context length in settings, or use a model with a longer context length',
+        ),
+      );
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBeUndefined();
+      expect(info.limitTokens).toBeUndefined();
+    });
+
+    it('detects the input-length wording', () => {
+      expect(
+        isContextLengthExceededError(
+          new Error('the input length exceeds the context length'),
+        ),
+      ).toBe(true);
+    });
+
+    it('detects the wording in an OpenAI-compatible error body', () => {
+      expect(
+        isContextLengthExceededError({
+          status: 400,
+          error: {
+            message:
+              'the prompt is longer than the context length currently available to the model; shorten the prompt, adjust the context length in settings, or use a model with a longer context length',
+            type: 'api_error',
+          },
+        }),
+      ).toBe(true);
+    });
+
+    it('does not match a context length setting that is only mentioned', () => {
+      expect(
+        isContextLengthExceededError(
+          new Error(
+            'invalid option: the context length must be a positive integer',
+          ),
+        ),
+      ).toBe(false);
+    });
+  });
+
   describe('llama.cpp context overflow wording (#13415)', () => {
     const LLAMA_CPP_OVERFLOW =
       'request (279935 tokens) exceeds the available context size (262144 tokens), try increasing it';
