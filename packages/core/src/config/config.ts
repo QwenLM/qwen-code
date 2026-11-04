@@ -11848,14 +11848,22 @@ export class Config {
     if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
-    // Interactive sessions need explicit trust for repo-supplied hooks: a
-    // disabled folder-trust feature must not silently authorize them.
-    // Non-interactive invocations (`-p`, piped stdin, ACP/SDK embeddings)
-    // treat trust as implicit — the caller chose the directory and there is
-    // no prompt surface; only run them in directories you trust. An explicit
-    // refusal is already enforced upstream: an untrusted workspace
-    // contributes no settings, so it supplies no project hooks.
-    if (this.isInteractive() && !this.isExplicitlyTrustedFolder()) {
+    // Repo-supplied hooks run with either authority: a hash-bound approval
+    // of this exact block (the CLI clears the pending flag only for an
+    // approved decision), or explicit folder trust. Approval is the finer
+    // grant — it authorizes these hooks, not the folder's other executable
+    // settings — so the interactive trust gate must not swallow it.
+    // `isProjectHooksApprovalGated()` already accounts for the YOLO
+    // exemption: while exempt the session is ungated and the folder-trust
+    // rule below applies on its own.
+    const approved =
+      this.isProjectHooksApprovalGated() &&
+      this.projectHooksPendingApproval === false;
+    if (
+      !approved &&
+      this.isInteractive() &&
+      !this.isExplicitlyTrustedFolder()
+    ) {
       return undefined;
     }
     return this.readProjectHooksBlock();

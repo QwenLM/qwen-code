@@ -1295,6 +1295,57 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getProjectHooks()).toBeUndefined();
     });
+
+    it.each([
+      ['the trust feature is off (default)', {}],
+      [
+        'the feature is on but the folder is untrusted',
+        { folderTrust: true, trustedFolder: false },
+      ],
+    ] as Array<[string, Partial<ConfigParameters>]>)(
+      'an approved block runs in an interactive session when %s',
+      (_label, trust) => {
+        const config = makeConfig({
+          interactive: true,
+          ...trust,
+          projectHooks,
+          projectHooksPendingApproval: false,
+        });
+
+        expect(config.getProjectHooks()).toBe(projectHooks);
+      },
+    );
+
+    it('a pending block stays withheld in an interactive untrusted session', () => {
+      const config = makeConfig({
+        interactive: true,
+        projectHooks,
+        projectHooksPendingApproval: true,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+
+      config.setProjectHooksPendingApproval(true, true);
+      expect(config.isProjectHooksRejected()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('an ungated interactive session still needs explicit folder trust', () => {
+      const config = makeConfig({
+        interactive: true,
+        projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+
+      const trusted = makeConfig({
+        interactive: true,
+        folderTrust: true,
+        trustedFolder: true,
+        projectHooks,
+      });
+      expect(trusted.getProjectHooks()).toBe(projectHooks);
+    });
   });
 
   describe('setHooksFromSettings', () => {

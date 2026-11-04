@@ -200,6 +200,14 @@ function describeHook(
   switch (hook['type']) {
     case 'command':
       head = displayText(raw['command']);
+      // The approval hash binds the project env, but the row shows the
+      // unresolved text; say so when a variable decides what actually runs.
+      if (
+        typeof raw['command'] === 'string' &&
+        /\$\{?\w/.test(raw['command'])
+      ) {
+        details.push('resolves ${VAR} from the approved project env');
+      }
       add('env', envList(raw['env']));
       if (raw['shell']) add('shell', displayText(raw['shell']));
       if (hook['async'] === true) details.push('async');

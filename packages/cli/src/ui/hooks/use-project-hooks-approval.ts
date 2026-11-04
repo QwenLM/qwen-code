@@ -89,7 +89,7 @@ export const useProjectHooksApproval = (
       if (choice === ProjectHooksApprovalChoice.DISMISS) {
         dismissedHashRef.current = hashProjectHooks(pending.approval);
         addInfoRef.current?.(
-          'Project hooks in .qwen/settings.json were not loaded. Open /hooks or restart Qwen Code to review them.',
+          'Project hooks in .qwen/settings.json were not loaded. Restart Qwen Code to decide in the approval dialog; /hooks shows them as not approved.',
         );
         return;
       }
