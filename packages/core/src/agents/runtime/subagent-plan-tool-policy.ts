@@ -234,8 +234,8 @@ export function toolConfigAllowsSkill(
     ) ||
     matchesAgentToolBlocklist(toolConfig?.disallowedTools, ToolNames.TOOL_CALL);
   // The execution allowlist also bounds the bridge: under hybrid code_mode it
-  // narrows the declarations, and in every mode a call outside it is rejected
-  // (an empty list denies every direct call).
+  // narrows the declarations, and a half outside it cannot be called in Direct
+  // or Hybrid (an empty list denies every direct call).
   const bridgeExecutionAllowed =
     toolConfig?.executionAllowedTools === undefined ||
     (toolConfig.executionAllowedTools.includes(ToolNames.TOOL_SEARCH) &&
