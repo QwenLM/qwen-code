@@ -3921,6 +3921,10 @@ describe('GithubChannel', () => {
         ).rejects.toMatchObject({ cause: error });
         expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
         expect(existsSync(pendingPath())).toBe(false);
+        // It may have been posted: the key stays consumed.
+        expect(readFileSync(auditPath(), 'utf-8')).toContain(
+          '"outcome":"failed_ambiguous"',
+        );
       },
     );
 
@@ -4235,9 +4239,24 @@ describe('GithubChannel', () => {
         }
       ).publishFinalResponse.bind(channel);
 
-      await expect(
-        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
-      ).rejects.toMatchObject({ cause: error });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await expect(
+          publish(
+            'owner/repo',
+            'issue:42',
+            'Final reply',
+            'session-publication',
+          ),
+        ).rejects.toMatchObject({ cause: error });
+        expect(
+          stderr.mock.calls.some((call) =>
+            String(call[0]).includes('retrying in'),
+          ),
+        ).toBe(false);
+      } finally {
+        stderr.mockRestore();
+      }
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
       expect(sleep).not.toHaveBeenCalled();
       expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toHaveLength(1);
@@ -14194,51 +14213,64 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       }
     });
 
-    it('aborts the whole watch pass on a shared 403 instead of one doomed call per PR (R1-11)', async () => {
-      await initChannel(watchConfig, { boundSessions });
-      boundSessions.listPrBindings.mockResolvedValue({
-        bindings: [
-          makeBinding(),
-          makeBinding({
-            sessionId: 'other-session',
-            updatedAt: '2026-07-03T00:00:00.000Z',
-            prs: [
-              {
-                number: 43,
-                url: 'https://github.com/owner/repo/pull/43',
-                state: 'open',
-              },
-            ],
-          }),
-        ],
-        partial: false,
-      });
-      mockOctokit.rest.pulls.get.mockRejectedValue(
+    it.each([
+      [
+        'a shared 403',
         Object.assign(new Error('API rate limit exceeded'), {
           status: 403,
           response: { headers: { 'x-ratelimit-remaining': '0' } },
         }),
-      );
-      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-      try {
-        mockNotificationsOnce([]);
-        await pollOnce();
+      ],
+      [
+        'a bare 429',
+        Object.assign(new Error('Too Many Requests'), {
+          status: 429,
+          response: { headers: {} },
+        }),
+      ],
+    ])(
+      'aborts the whole watch pass on %s instead of one doomed call per PR (R1-11)',
+      async (_label, rejection) => {
+        await initChannel(watchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding(),
+            makeBinding({
+              sessionId: 'other-session',
+              updatedAt: '2026-07-03T00:00:00.000Z',
+              prs: [
+                {
+                  number: 43,
+                  url: 'https://github.com/owner/repo/pull/43',
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        mockOctokit.rest.pulls.get.mockRejectedValue(rejection);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          mockNotificationsOnce([]);
+          await pollOnce();
 
-        // Two watched PRs, ONE rejected call: the pass aborts instead of
-        // walking the rest of the set against an unreset budget.
-        expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(1);
-        const errText = stderr.mock.calls
-          .map((call) => String(call[0]))
-          .join('');
-        expect(errText).toContain('PR watch pass aborted');
-        // The notification lane still runs in the same poll.
-        expect(
-          mockOctokit.rest.activity.listNotificationsForAuthenticatedUser,
-        ).toHaveBeenCalledTimes(1);
-      } finally {
-        stderr.mockRestore();
-      }
-    });
+          // Two watched PRs, ONE rejected call: the pass aborts instead of
+          // walking the rest of the set against an unreset budget.
+          expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(1);
+          const errText = stderr.mock.calls
+            .map((call) => String(call[0]))
+            .join('');
+          expect(errText).toContain('PR watch pass aborted');
+          // The notification lane still runs in the same poll.
+          expect(
+            mockOctokit.rest.activity.listNotificationsForAuthenticatedUser,
+          ).toHaveBeenCalledTimes(1);
+        } finally {
+          stderr.mockRestore();
+        }
+      },
+    );
 
     it('aborts the watch pass on a secondary limit named only by its message', async () => {
       await initChannel(watchConfig, { boundSessions });
