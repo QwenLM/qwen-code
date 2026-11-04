@@ -44206,6 +44206,8 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
+    expect(mockConnection.sessionId).toBe('session-1');
+    mockSessionActions.refreshCommands.mockClear();
 
     await act(async () => {
       container
@@ -44223,7 +44225,25 @@ describe('App session callbacks', () => {
       '/work/secondary',
     );
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(mockSessionActions.refreshCommands).toHaveBeenCalledOnce();
     expect(onLanguageChange).not.toHaveBeenCalled();
+  });
+
+  it('maps a Chinese UI language choice to the daemon language code', async () => {
+    renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/language ui zh-CN --project');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockWorkspaceActions.setUiLanguage).toHaveBeenCalledWith(
+      'zh',
+      'workspace',
+      expect.any(String),
+    );
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
   });
 
   it('targets the settings workspace for a Live UI language change', async () => {

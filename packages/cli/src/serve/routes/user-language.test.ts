@@ -13,6 +13,14 @@ import { SessionNotFoundError } from '../acp-session-bridge.js';
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 import { setLanguageAsync, getCurrentLanguage } from '../../i18n/index.js';
 import { updateOutputLanguageFile } from '../../i18n/languageUtils.js';
+import { FatalConfigError } from '@qwen-code/qwen-code-core/utils/errors.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
+
+vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/stdioHelpers.js')>();
+  return { ...actual, writeStderrLine: vi.fn() };
+});
 
 vi.mock('../../i18n/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../i18n/index.js')>();
@@ -212,6 +220,43 @@ describe('POST /language', () => {
     expect(persistSetting).not.toHaveBeenCalled();
   });
 
+  it.each(['selected', 'sibling'] as const)(
+    'checks a known %s-workspace client against the addressed bridge',
+    async (registration) => {
+      const primary = makeRuntime({ trusted: true, cwd: '/primary' });
+      const secondary = makeRuntime({ trusted: true, cwd: '/secondary' });
+      const owner = registration === 'selected' ? secondary : primary;
+      owner.bridge.knownClientIds.mockReturnValue(new Set(['client-1']));
+      const { app, persistSetting } = makeApp({
+        runtimes: [primary, secondary],
+      });
+      const res = await request(app)
+        .post('/workspaces/secondary/language')
+        .set('x-qwen-client-id', 'client-1')
+        .send({ language: 'zh' });
+
+      if (registration === 'selected') {
+        expect(res.status).toBe(200);
+        expect(persistSetting).toHaveBeenCalledOnce();
+        expect(
+          secondary.bridge.publishWorkspaceEvent,
+        ).toHaveBeenCalledExactlyOnceWith({
+          type: 'language_changed',
+          data: { language: 'zh', outputLanguage: null },
+          originatorClientId: 'client-1',
+        });
+      } else {
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_client_id');
+        expect(persistSetting).not.toHaveBeenCalled();
+        expect(secondary.bridge.setUserLanguage).not.toHaveBeenCalled();
+        expect(secondary.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+      }
+      expect(primary.bridge.setUserLanguage).not.toHaveBeenCalled();
+      expect(primary.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+    },
+  );
+
   it('uses the effective workspace locale after a higher-priority override', async () => {
     vi.mocked(loadSettings).mockReturnValue({
       merged: { general: { language: 'en' } },
@@ -260,7 +305,105 @@ describe('POST /language', () => {
     ).toBe(500);
     expect(runtime.bridge.setUserLanguage).not.toHaveBeenCalled();
     expect(runtime.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('disk full'),
+    );
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('/secondary'),
+    );
   });
+
+  it('distinguishes a failed read-back from an already committed settings write', async () => {
+    const runtime = makeRuntime({ trusted: true, cwd: '/secondary' });
+    const { app, persistSetting } = makeApp({ runtimes: [runtime] });
+    vi.mocked(loadSettings).mockImplementation(() => {
+      throw new FatalConfigError('invalid post-write settings');
+    });
+    const res = await request(app)
+      .post('/workspaces/secondary/language')
+      .send({ language: 'zh' });
+
+    expect(persistSetting).toHaveBeenCalledOnce();
+    expect(res.status).toBe(200);
+    expect(res.body.code).not.toBe('persist_error');
+    expect(res.body).toMatchObject({
+      language: 'zh',
+      outputLanguage: null,
+      refresh: { runtimes: 0, sessions: 0, failed: 1 },
+    });
+    expect(runtime.bridge.setUserLanguage).not.toHaveBeenCalled();
+    expect(runtime.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('invalid post-write settings'),
+    );
+  });
+
+  it('keeps the generation fence when post-write settings reload fails', async () => {
+    const runtime = makeRuntime({ trusted: true, cwd: '/secondary' });
+    const { app, persistSetting } = makeApp({ runtimes: [runtime] });
+    vi.mocked(loadSettings).mockImplementation(() => {
+      runtime.generationGuard.assertOpen.mockImplementation(() => {
+        throw new WorkspaceGenerationClosedError();
+      });
+      throw new FatalConfigError('invalid post-write settings');
+    });
+    const res = await request(app)
+      .post('/workspaces/secondary/language')
+      .send({ language: 'zh' });
+
+    expect(res.status).toBe(503);
+    expect(persistSetting).toHaveBeenCalledOnce();
+    expect(runtime.bridge.setUserLanguage).not.toHaveBeenCalled();
+    expect(runtime.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+  });
+
+  it.each(['transport-error', 'partial-refresh'] as const)(
+    'reports workspace %s without losing the persisted write or event',
+    async (failure) => {
+      const primary = makeRuntime({ trusted: true, cwd: '/primary' });
+      const secondary = makeRuntime({ trusted: true, cwd: '/secondary' });
+      if (failure === 'transport-error') {
+        secondary.bridge.setUserLanguage.mockRejectedValue(
+          new Error('transport closed'),
+        );
+      } else {
+        secondary.bridge.setUserLanguage.mockResolvedValue({
+          language: 'zh',
+          sessions: 2,
+          failed: 1,
+        });
+      }
+      const { app, persistSetting } = makeApp({
+        runtimes: [primary, secondary],
+      });
+      const res = await request(app)
+        .post('/workspaces/secondary/language')
+        .send({ language: 'zh' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.refresh).toEqual({
+        runtimes: failure === 'transport-error' ? 0 : 1,
+        sessions: failure === 'transport-error' ? 0 : 2,
+        failed: 1,
+      });
+      expect(persistSetting).toHaveBeenCalledExactlyOnceWith(
+        '/secondary',
+        SettingScope.Workspace,
+        'general.language',
+        'zh',
+        expect.any(Function),
+      );
+      expect(
+        secondary.bridge.publishWorkspaceEvent,
+      ).toHaveBeenCalledExactlyOnceWith({
+        type: 'language_changed',
+        data: { language: 'zh', outputLanguage: null },
+      });
+      expect(primary.bridge.setUserLanguage).not.toHaveBeenCalled();
+      expect(primary.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+      expect(updateOutputLanguageFile).not.toHaveBeenCalled();
+    },
+  );
 
   it('persists a secondary workspace UI language without touching user settings or siblings', async () => {
     const primary = makeRuntime({ trusted: true, cwd: '/primary' });

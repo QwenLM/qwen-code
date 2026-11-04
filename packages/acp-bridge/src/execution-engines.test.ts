@@ -4334,6 +4334,68 @@ describe('paired per-engine operations', () => {
       },
     );
 
+    it.each([false, true])(
+      'keeps a cold workspace locale across user updates with output sync %s',
+      async (syncOutputLanguage) => {
+        const log: string[] = [];
+        const managedLanguage = vi.fn(refreshed(0));
+        const p = paired(
+          {},
+          answering('legacy', log, refreshed(0)),
+          answering('managed', log, managedLanguage),
+        );
+        await expect(
+          p.bridge.setUserLanguage({
+            language: 'zh',
+            syncOutputLanguage: false,
+            scope: 'workspace',
+          }),
+        ).rejects.toBeInstanceOf(SessionNotFoundError);
+        for (const language of ['en', 'ru']) {
+          await expect(
+            p.bridge.setUserLanguage({ language, syncOutputLanguage }),
+          ).rejects.toBeInstanceOf(SessionNotFoundError);
+        }
+        await p.bridge.loadSession({
+          workspaceCwd: WS_A,
+          sessionId: 'persisted',
+        });
+
+        expect(managedLanguage.mock.calls.at(-1)?.[0]).toMatchObject({
+          language: 'zh',
+          scope: 'workspace',
+        });
+        expect(
+          managedLanguage.mock.calls.some(
+            ([params]) => params['syncOutputLanguage'] === true,
+          ),
+        ).toBe(syncOutputLanguage);
+        expect(log.at(-1)).toBe('managed:loadSession:persisted');
+      },
+    );
+
+    it('replays the latest cold user locale when no workspace override exists', async () => {
+      const managedLanguage = vi.fn(refreshed(0));
+      const p = paired(
+        {},
+        engineChannel('legacy'),
+        answering('managed', [], managedLanguage),
+      );
+      for (const language of ['en', 'ru']) {
+        await expect(
+          p.bridge.setUserLanguage({
+            language,
+            syncOutputLanguage: true,
+          }),
+        ).rejects.toBeInstanceOf(SessionNotFoundError);
+      }
+      await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(managedLanguage).toHaveBeenCalledExactlyOnceWith({
+        language: 'ru',
+        syncOutputLanguage: true,
+      });
+    });
+
     it('sends the remembered language before a Managed restore and its deadline', async () => {
       vi.useFakeTimers();
       const log: string[] = [];

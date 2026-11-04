@@ -41,6 +41,11 @@ after a successful write, while preserving an explicit host language override.
 Report partial live-refresh failures as a warning without rolling back the
 persisted choice. Workspace validation reports language and unsupported sync
 flags separately, with an explanatory error and allowed locales where relevant.
+If settings cannot be reloaded after a committed write, return the saved request
+with a failed refresh summary and log the cause, without syncing an unverified
+locale or publishing it. Generation closure still returns 503. A cold paired
+Bridge retains its workspace language across later user writes while preserving
+the latest output-language refresh request for a late Managed channel.
 
 ## Acceptance
 
@@ -61,5 +66,8 @@ flags separately, with an explanatory error and allowed locales where relevant.
 - Tests pin strict workspace mutation, selected-workspace settings reads,
   language events, generation closure during sync, and workspace-scope replay
   before a late Managed channel's first session.
+- A settings read-back failure after a committed write warns without claiming a
+  persistence failure or syncing an unverified locale. Cold workspace language
+  overrides survive subsequent user changes and output-refresh requests.
 - The shared behavior covers Desktop and the current VS Code Web Shell host.
   Native packaged-client acceptance is reported separately from fixture tests.

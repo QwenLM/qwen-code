@@ -27,6 +27,11 @@ describe('workspace actions', () => {
     await expect(actions.setUiLanguage('ru', 'user')).resolves.toEqual(result);
     expect(setUserLanguage).toHaveBeenCalledWith('ru');
     await expect(
+      actions.setUiLanguage('ru', 'user', '/secondary'),
+    ).resolves.toEqual(result);
+    expect(setUserLanguage).toHaveBeenCalledTimes(2);
+    expect(workspaceByCwd).not.toHaveBeenCalled();
+    await expect(
       actions.setUiLanguage('ru', 'workspace', '/secondary'),
     ).resolves.toEqual(result);
     expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
@@ -34,7 +39,7 @@ describe('workspace actions', () => {
     await expect(actions.setUiLanguage('ru', 'workspace')).rejects.toThrow(
       'unavailable',
     );
-    expect(setUserLanguage).toHaveBeenCalledTimes(1);
+    expect(setUserLanguage).toHaveBeenCalledTimes(2);
   });
   afterEach(() => {
     vi.useRealTimers();

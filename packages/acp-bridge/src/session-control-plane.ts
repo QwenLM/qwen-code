@@ -14868,10 +14868,16 @@ export function createSessionControlPlane(
 
     async setUserLanguage(params) {
       if (executionEngines) {
+        // A user write cannot clear a persisted workspace language override.
+        const workspaceOverride =
+          params.scope !== 'workspace' &&
+          rememberedUserLanguage?.scope === 'workspace'
+            ? rememberedUserLanguage
+            : undefined;
         rememberedUserLanguage = {
-          language: params.language,
+          language: workspaceOverride?.language ?? params.language,
           syncOutputLanguage: params.syncOutputLanguage,
-          ...(params.scope ? { scope: params.scope } : {}),
+          ...(params.scope || workspaceOverride ? { scope: 'workspace' } : {}),
         };
       }
       // Sessionless: runs on every channel that is already live — one per

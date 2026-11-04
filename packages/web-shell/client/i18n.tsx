@@ -2760,7 +2760,7 @@ const EN: Messages = {
   'language.options': 'Available options:',
   'language.set': 'Set UI language',
   'language.refreshFailed':
-    'UI language saved, but some active sessions could not be updated.',
+    'UI language saved, but it could not be fully applied.',
   'language.usage': `Usage: /language ui [${WEB_SHELL_LANGUAGES.join('|')}] [--project|--global] | output <language>`,
   'localCommand.noSession':
     'No active session yet. Send your first message before using this command.',
@@ -7392,7 +7392,7 @@ const ZH: Messages = {
   'language.invalid': `语言无效。可用值：${WEB_SHELL_LANGUAGES.join(', ')}`,
   'language.options': '可用选项：',
   'language.set': '设置 UI 语言',
-  'language.refreshFailed': 'UI 语言已保存，但部分运行中的会话未能同步。',
+  'language.refreshFailed': 'UI 语言已保存，但未能完全生效。',
   'language.usage': `用法：/language ui [${WEB_SHELL_LANGUAGES.join('|')}] [--project|--global] | output <language>`,
   'localCommand.noSession':
     '当前还没有会话。请先发送第一条消息，再使用这个命令。',

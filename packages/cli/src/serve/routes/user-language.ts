@@ -15,8 +15,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
-  requireTrustedWorkspaceRuntime,
-  resolveWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
@@ -68,12 +67,8 @@ export function registerUserLanguageRoutes(
     '/workspaces/:workspace/language',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveWorkspaceRuntimeFromParam(
-        deps.workspaceRegistry,
-        req,
-        res,
-      );
-      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
+      if (!runtime) return;
       const body = deps.safeBody(req);
       const language = body['language'];
       if (
@@ -117,14 +112,28 @@ export function registerUserLanguageRoutes(
           assertGenerationOpen,
         );
         assertGenerationOpen();
-        const configuredLanguage = loadSettings(runtime.workspaceCwd, {
-          skipLoadEnvironment: true,
-          workspaceTrusted: true,
-        }).merged.general?.language;
-        const effective =
-          typeof configuredLanguage === 'string'
-            ? configuredLanguage
-            : language;
+        let effective: string;
+        try {
+          const configuredLanguage = loadSettings(runtime.workspaceCwd, {
+            skipLoadEnvironment: true,
+            workspaceTrusted: true,
+          }).merged.general?.language;
+          effective =
+            typeof configuredLanguage === 'string'
+              ? configuredLanguage
+              : language;
+        } catch (error) {
+          assertGenerationOpen();
+          writeStderrLine(
+            `qwen serve: workspace language saved but settings reload failed for ${runtime.workspaceCwd}: ${String(error)}`,
+          );
+          res.status(200).json({
+            language,
+            outputLanguage: null,
+            refresh: { runtimes: 0, sessions: 0, failed: 1 },
+          });
+          return;
+        }
         let failed = 0;
         let refreshedRuntimes = 0;
         let sessions = 0;
@@ -164,6 +173,9 @@ export function registerUserLanguageRoutes(
         });
       } catch (error) {
         if (sendGenerationClosedError(res, error)) return;
+        writeStderrLine(
+          `qwen serve: workspace language persist error for ${runtime.workspaceCwd}: ${String(error)}`,
+        );
         res.status(500).json({
           code: 'persist_error',
           error: 'Failed to change workspace UI language',
