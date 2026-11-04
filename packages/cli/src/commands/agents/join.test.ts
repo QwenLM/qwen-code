@@ -126,6 +126,22 @@ it('says "no detail" when the daemon gives no reason for the failed save', async
   ]);
 });
 
+it('reports a JSON null answer as a failed join rather than crashing', async () => {
+  const { value, err } = deps({
+    fetch: vi.fn(
+      async () => new Response('null', { status: 502 }),
+    ) as unknown as typeof fetch,
+  });
+
+  const code = await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  expect(code).toBe(1);
+  expect(err.join('\n')).toContain('Join failed (502)');
+});
+
 it('points at `qwen serve --join` when no daemon is running', async () => {
   const { value, err } = deps({
     fetch: vi.fn(async () => {
@@ -197,6 +213,22 @@ it.each([
         },
       }) as unknown as Response,
   ],
+  [
+    'answers 200 with a body that is not JSON',
+    () =>
+      ({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new SyntaxError('Unexpected end of JSON input');
+        },
+      }) as unknown as Response,
+  ],
+  ['answers 200 with JSON null', () => new Response('null', { status: 200 })],
+  [
+    'answers 200 without saying it connected',
+    () => Response.json({ providers: ['qwen'] }),
+  ],
 ] as const)(
   'says the join may still complete when the daemon %s',
   async (_label, answer) => {
@@ -213,9 +245,43 @@ it.each([
     expect(code).toBe(1);
     expect(err.join('\n')).toContain('the join may still complete');
     expect(err.join('\n')).not.toContain('No running qwen serve daemon');
+    expect(err.join('\n')).not.toContain('Join failed');
     expect(err.join('\n')).not.toContain('qwen serve --join');
   },
 );
+
+it.each([
+  [
+    'an answer that is not JSON',
+    () => new SyntaxError('Unexpected end of JSON input'),
+    'answered without confirming the join',
+  ],
+  [
+    'an answer cut off by a timeout',
+    () => new DOMException('timed out', 'TimeoutError'),
+    'did not finish answering',
+  ],
+] as const)('tells %s apart', async (_label, failure, phrase) => {
+  const { value, err } = deps({
+    fetch: vi.fn(
+      async () =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw failure();
+          },
+        }) as unknown as Response,
+    ) as unknown as typeof fetch,
+  });
+
+  await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  expect(err.join('\n')).toContain(phrase);
+});
 
 it('prompts for the token when the environment has none, and refuses without one', async () => {
   const promptToken = vi.fn(async () => undefined);

@@ -36,8 +36,12 @@ function mayHaveReachedDaemon(error: unknown): boolean {
   return code === 'ECONNRESET' || code === 'EPIPE' || code === 'UND_ERR_SOCKET';
 }
 
-function mayStillComplete(baseUrl: string): string {
-  return `The daemon at ${baseUrl} did not finish answering; the join may still complete. Check its log before trying again, with a new token if it did not.`;
+/**
+ * `answered`: an answer arrived without the connection failing under it,
+ * but it is not one a join gives (not JSON, or without `connected`).
+ */
+function mayStillComplete(baseUrl: string, answered = false): string {
+  return `The daemon at ${baseUrl} ${answered ? 'answered without confirming the join' : 'did not finish answering'}; the join may still complete. Check its log before trying again, with a new token if it did not.`;
 }
 
 export interface JoinArgs {
@@ -215,18 +219,27 @@ export async function runAgentsJoin(
     return 1;
   }
   let bodyError: unknown;
-  const result = (await response.json().catch((error: unknown) => {
+  // `?? {}`: a proxy may answer JSON `null`.
+  const result = ((await response.json().catch((error: unknown) => {
     bodyError = error;
     return {};
-  })) as {
+  })) ?? {}) as {
     error?: string;
     connected?: boolean;
     saved?: boolean;
     saveError?: string;
     providers?: string[];
   };
-  if (response.ok && mayHaveReachedDaemon(bodyError)) {
-    deps.err(mayStillComplete(baseUrl));
+  // The daemon answers 2xx only once the join went through, with
+  // `connected: true`: any other 2xx (cut off, not JSON, or saying nothing
+  // of the join) leaves the outcome unknown, not failed.
+  if (response.ok && (bodyError !== undefined || result.connected !== true)) {
+    deps.err(
+      mayStillComplete(
+        baseUrl,
+        bodyError === undefined || !mayHaveReachedDaemon(bodyError),
+      ),
+    );
     return 1;
   }
   if (!response.ok || !result.connected) {

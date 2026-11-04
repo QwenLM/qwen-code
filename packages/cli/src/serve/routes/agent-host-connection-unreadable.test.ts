@@ -25,8 +25,15 @@ import {
 import { registerAgentHostRuntimeRoutes } from './agent-host-connection.js';
 import {
   agentHostConnectionsPath,
+  findAgentHostConnection,
   saveAgentHostConnection,
 } from '../agent-host-connections.js';
+
+// Passed through; one case makes a write fail.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+});
 
 const { stopConnection, startConnection } = vi.hoisted(() => ({
   stopConnection: vi.fn(),
@@ -94,6 +101,38 @@ it('forgets and stops a connection whose record is readable', async () => {
   expect(response.status).toBe(200);
   expect(response.body).toEqual({ disconnected: true });
   expect(stopConnection).toHaveBeenCalledTimes(1);
+  // Gone from the disk, or the restore loop would bring it back.
+  expect(await findAgentHostConnection(record)).toBeUndefined();
+});
+
+it('refuses for a corrupt file it cannot replace, says how to get past it, and stops once it is gone', async () => {
+  // A file that reads as corrupt now may read whole later, and the restore
+  // loop would then reconnect: not "no record". Removing it is.
+  await fs.mkdir(path.dirname(agentHostConnectionsPath()), { recursive: true });
+  await fs.writeFile(agentHostConnectionsPath(), '{not json');
+  vi.mocked(fs.writeFile).mockRejectedValueOnce(
+    Object.assign(new Error('EROFS: read-only file system'), {
+      code: 'EROFS',
+    }),
+  );
+  stopConnection.mockReturnValue(true);
+
+  const refused = await disconnect();
+
+  expect(refused.status).toBe(400);
+  expect(refused.body).toEqual({
+    error: `Could not read the saved Agent Host connections, so nothing was stopped: unexpected content in ${agentHostConnectionsPath()}. Fix or remove that file, then retry. Forgetting the connection failed with: EROFS: read-only file system`,
+  });
+  expect(stopConnection).not.toHaveBeenCalled();
+  expect(await fs.readFile(agentHostConnectionsPath(), 'utf8')).toBe(
+    '{not json',
+  );
+
+  await fs.rm(agentHostConnectionsPath());
+  const retried = await disconnect();
+
+  expect(retried.status).toBe(200);
+  expect(stopConnection).toHaveBeenCalledTimes(1);
 });
 
 it('refuses the disconnect when the connections file is unreadable', async () => {
@@ -110,8 +149,9 @@ it('refuses the disconnect when the connections file is unreadable', async () =>
 
   expect(response.status).toBe(400);
   expect(response.body).toEqual({
-    error:
-      'Could not read the saved Agent Host connections, so nothing was stopped. Retry the request.',
+    error: expect.stringMatching(
+      /^Could not read the saved Agent Host connections, so nothing was stopped: EISDIR/,
+    ),
   });
   expect(stopConnection).not.toHaveBeenCalled();
 });

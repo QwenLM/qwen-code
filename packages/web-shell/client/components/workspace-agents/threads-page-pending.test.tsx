@@ -85,6 +85,12 @@ it.each([
 
     expect(button('New agent')?.disabled).toBe(held);
     expect(button('Role templates')?.disabled).toBe(held);
+    // And says why, for as long as it lasts.
+    expect(
+      Array.from(document.querySelectorAll('[role="status"]')).some((item) =>
+        item.textContent?.includes('Connecting a runtime…'),
+      ),
+    ).toBe(held);
   },
 );
 

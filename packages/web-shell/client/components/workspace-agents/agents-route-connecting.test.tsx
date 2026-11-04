@@ -151,11 +151,16 @@ it.each([
 
     expect(button('New agent')?.disabled).toBe(true);
     expect(button('Role templates')?.disabled).toBe(true);
+    // The dialog is closed, so the page says why.
+    expect(document.body.textContent).toContain(
+      'Connecting a runtime… Actions that leave this page wait until it finishes.',
+    );
 
     await act(async () => settle({ connected: true, saved: true }));
 
     expect(button('New agent')?.disabled).toBe(false);
     expect(button('Role templates')?.disabled).toBe(false);
+    expect(document.body.textContent).not.toContain('Connecting a runtime…');
     spy.mockRestore();
   },
 );

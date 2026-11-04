@@ -18,7 +18,12 @@ import {
   type AgentShareSummary,
 } from './share-agent-dialog';
 import { useState, type FormEvent } from 'react';
-import { MoreHorizontalIcon, PlusIcon, ServerIcon } from 'lucide-react';
+import {
+  LoaderCircle,
+  MoreHorizontalIcon,
+  PlusIcon,
+  ServerIcon,
+} from 'lucide-react';
 
 import { AuthorAvatar } from '../messages/AuthorAvatar';
 import { Badge } from '../ui/badge';
@@ -330,6 +335,20 @@ export function ThreadsPage({
           <p className="mt-1 text-sm text-muted-foreground">
             {t(`collab.tabs.${view}Hint`)}
           </p>
+          {/* Why the page's actions are disabled, for as long as they are:
+              a join can take a minute and a half, a remote connect two. */}
+          {connecting ? (
+            <p
+              role="status"
+              className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground"
+            >
+              <LoaderCircle
+                aria-hidden="true"
+                className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none"
+              />
+              {t('collab.runtime.connectingHint')}
+            </p>
+          ) : null}
         </div>
         <div className="flex shrink-0 gap-2">
           {view === 'agents' && onOpenDefinitions ? (

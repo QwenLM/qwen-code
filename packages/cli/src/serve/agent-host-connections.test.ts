@@ -11,6 +11,7 @@ import lockfile from 'proper-lockfile';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import { createWorkspaceGenerationGuard } from './workspace-registry.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   type AgentHostRestoreRuntime,
   agentHostConnectionsPath,
@@ -113,10 +114,35 @@ it('tells an absent record apart from an unreadable file', async () => {
     kind: 'found',
     record,
   });
-  // A corrupt file is not a readable empty one.
+  // Nor is a corrupt file: one that reads as corrupt now may read whole
+  // later, and the restore loop would then reconnect from it.
   await fs.writeFile(agentHostConnectionsPath(), '{not json');
   expect(await findAgentHostConnectionChecked(record)).toEqual({
     kind: 'unreadable',
+    error: expect.objectContaining({ code: 'ECORRUPT' }),
+  });
+  for (const content of [
+    '{"schemaVersion":1}',
+    'null',
+    '{}',
+    '{"schemaVersion":"2","connections":[]}',
+  ]) {
+    await fs.writeFile(agentHostConnectionsPath(), content);
+    expect(await findAgentHostConnectionChecked(record)).toEqual({
+      kind: 'unreadable',
+      error: expect.objectContaining({ code: 'ECORRUPT' }),
+    });
+  }
+  // A newer version's file may: that version would reconnect from it.
+  await fs.writeFile(
+    agentHostConnectionsPath(),
+    JSON.stringify({ schemaVersion: 2, connections: [record] }),
+  );
+  expect(await findAgentHostConnectionChecked(record)).toEqual({
+    kind: 'unreadable',
+    error: expect.objectContaining({
+      message: expect.stringMatching(/newer version of Qwen Code \(schema 2\)/),
+    }),
   });
   // Nor is a read failure: a path that is a directory reads as EISDIR, a
   // non-ENOENT error the strict reader must surface rather than swallow.
@@ -124,6 +150,7 @@ it('tells an absent record apart from an unreadable file', async () => {
   await fs.mkdir(agentHostConnectionsPath());
   expect(await findAgentHostConnectionChecked(record)).toEqual({
     kind: 'unreadable',
+    error: expect.objectContaining({ code: 'EISDIR' }),
   });
   // The resilient lookup the restore loop uses still reads unreadable as none.
   await fs.rm(agentHostConnectionsPath(), { recursive: true, force: true });
@@ -566,6 +593,66 @@ it('does not replace a file that a newer version wrote', async () => {
     message: expect.stringMatching(/newer version of Qwen Code \(schema 2\)/),
   });
   expect(await fs.readFile(agentHostConnectionsPath(), 'utf8')).toBe(newer);
+});
+
+it('reads a newer version’s file as none, saying so once rather than calling it unreadable', async () => {
+  // The restore loop reads it every few seconds: a line each time would
+  // fill the log, and the file is intact, only not this version's.
+  await fs.mkdir(path.dirname(agentHostConnectionsPath()), { recursive: true });
+  await fs.writeFile(
+    agentHostConnectionsPath(),
+    JSON.stringify({ schemaVersion: 2, connections: [record] }),
+  );
+  expect(await readAgentHostConnections()).toEqual([]);
+  expect(await readAgentHostConnections()).toEqual([]);
+  expect(vi.mocked(writeStderrLine).mock.calls).toEqual([
+    [
+      `qwen serve: not reconnecting from ${agentHostConnectionsPath()}, which a newer version of Qwen Code wrote.`,
+    ],
+  ]);
+  vi.mocked(writeStderrLine).mockClear();
+
+  // Read here again, then taken over again: said again.
+  await fs.writeFile(
+    agentHostConnectionsPath(),
+    JSON.stringify({ schemaVersion: 1, connections: [] }),
+  );
+  expect(await readAgentHostConnections()).toEqual([]);
+  await fs.writeFile(
+    agentHostConnectionsPath(),
+    JSON.stringify({ schemaVersion: 3, connections: [] }),
+  );
+  expect(await readAgentHostConnections()).toEqual([]);
+  expect(writeStderrLine).toHaveBeenCalledTimes(1);
+  vi.mocked(writeStderrLine).mockClear();
+
+  await fs.writeFile(agentHostConnectionsPath(), '{not json');
+  expect(await readAgentHostConnections()).toEqual([]);
+  expect(writeStderrLine).toHaveBeenCalledWith(
+    expect.stringMatching(/^qwen serve: ignoring unreadable /),
+  );
+});
+
+it('leaves a corrupt file that it could not replace, and still calls it unreadable', async () => {
+  // The removal's write fails (a read-only remount after a torn write); the
+  // file stays as it was, and the disconnect guard is told it is corrupt.
+  await fs.mkdir(path.dirname(agentHostConnectionsPath()), { recursive: true });
+  await fs.writeFile(agentHostConnectionsPath(), '{not json');
+  vi.mocked(fs.writeFile).mockRejectedValueOnce(
+    Object.assign(new Error('EROFS: read-only file system'), {
+      code: 'EROFS',
+    }),
+  );
+  await expect(removeAgentHostConnection(record)).rejects.toMatchObject({
+    code: 'EROFS',
+  });
+  expect(await fs.readFile(agentHostConnectionsPath(), 'utf8')).toBe(
+    '{not json',
+  );
+  expect(await findAgentHostConnectionChecked(record)).toEqual({
+    kind: 'unreadable',
+    error: expect.objectContaining({ code: 'ECORRUPT' }),
+  });
 });
 
 it('refuses to write over a file it cannot read right now', async () => {

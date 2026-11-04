@@ -77,21 +77,49 @@ async function readConnectionsText(): Promise<string | undefined> {
   }
 }
 
-/** The records in the file's text, or a throw when it is corrupt. */
+/**
+ * The records in the file's text, or a throw that says why there are none:
+ * `ENEWERSCHEMA` for a file a newer version wrote (intact, only not this
+ * version's to read or replace), `ECORRUPT` for anything else that is not
+ * this version's file.
+ */
 function parseConnections(raw: string): AgentHostConnectionRecord[] {
-  const parsed = (JSON.parse(raw) ?? {}) as Partial<ConnectionsFile>;
-  if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.connections)) {
-    throw new Error(`unexpected schema in ${agentHostConnectionsPath()}`);
+  let parsed: Partial<ConnectionsFile> | null;
+  try {
+    parsed = JSON.parse(raw) as Partial<ConnectionsFile> | null;
+  } catch {
+    throw corruptFile();
+  }
+  const version = parsed?.schemaVersion;
+  if (typeof version === 'number' && version > 1) {
+    throw Object.assign(
+      new Error(
+        `${agentHostConnectionsPath()} was written by a newer version of Qwen Code (schema ${version}); not replacing it.`,
+      ),
+      { code: 'ENEWERSCHEMA' },
+    );
+  }
+  if (version !== 1 || !Array.isArray(parsed?.connections)) {
+    throw corruptFile();
   }
   return parsed.connections.filter(isRecord);
 }
 
+const corruptFile = () =>
+  Object.assign(
+    new Error(`unexpected content in ${agentHostConnectionsPath()}`),
+    {
+      code: 'ECORRUPT',
+    },
+  );
+
+const codeOf = (error: unknown) => (error as NodeJS.ErrnoException).code;
+
 /**
  * Every saved connection, or a throw when the file cannot be trusted: a
  * missing file (ENOENT) is legitimately empty, but an unreadable one (a
- * transient `EMFILE`/`EIO`, a mode change) or a corrupt one is NOT "no
- * connections". A caller that must not mistake unreadable for absent — the
- * disconnect guard — reads through this and refuses on a throw.
+ * transient `EMFILE`/`EIO`, a mode change), a corrupt one or a newer
+ * version's is NOT "no connections".
  */
 async function readAgentHostConnectionsStrict(): Promise<
   AgentHostConnectionRecord[]
@@ -100,16 +128,30 @@ async function readAgentHostConnectionsStrict(): Promise<
   return raw === undefined ? [] : parseConnections(raw);
 }
 
+// Files reported as a newer version's since they last read here. This runs
+// on every restore tick, and such a file stays as it is until that version
+// changes it.
+const reportedNewer = new Set<string>();
+
 /** Every saved connection; an unreadable file reads as none (restore loop). */
 export async function readAgentHostConnections(): Promise<
   AgentHostConnectionRecord[]
 > {
+  const filePath = agentHostConnectionsPath();
   try {
-    return await readAgentHostConnectionsStrict();
-  } catch {
-    writeStderrLine(
-      `qwen serve: ignoring unreadable ${agentHostConnectionsPath()}.`,
-    );
+    const connections = await readAgentHostConnectionsStrict();
+    // Read here again: a newer version taking it over later is news.
+    reportedNewer.delete(filePath);
+    return connections;
+  } catch (error) {
+    if (codeOf(error) !== 'ENEWERSCHEMA') {
+      writeStderrLine(`qwen serve: ignoring unreadable ${filePath}.`);
+    } else if (!reportedNewer.has(filePath)) {
+      reportedNewer.add(filePath);
+      writeStderrLine(
+        `qwen serve: not reconnecting from ${filePath}, which a newer version of Qwen Code wrote.`,
+      );
+    }
     return [];
   }
 }
@@ -286,31 +328,14 @@ function updateConnections(
 async function connectionsToUpdate(): Promise<AgentHostConnectionRecord[]> {
   const raw = await readConnectionsText();
   if (raw === undefined) return [];
-  const version = schemaVersionOf(raw);
-  if (typeof version === 'number' && version > 1) {
-    throw Object.assign(
-      new Error(
-        `${agentHostConnectionsPath()} was written by a newer version of Qwen Code (schema ${version}); not replacing it.`,
-      ),
-      { code: 'ENEWERSCHEMA' },
-    );
-  }
   try {
     return parseConnections(raw);
-  } catch {
+  } catch (error) {
+    if (codeOf(error) !== 'ECORRUPT') throw error;
     writeStderrLine(
       `qwen serve: replacing unreadable ${agentHostConnectionsPath()}.`,
     );
     return [];
-  }
-}
-
-function schemaVersionOf(raw: string): unknown {
-  try {
-    return (JSON.parse(raw) as { schemaVersion?: unknown } | null)
-      ?.schemaVersion;
-  } catch {
-    return undefined;
   }
 }
 
@@ -380,11 +405,15 @@ export async function findAgentHostConnection(
  * A lookup that tells "no record" apart from "could not read": the disconnect
  * guard may only stop a connection it can confirm is forgotten, and an
  * unreadable file is not an absent record — the restore loop would reconnect.
+ * Nor is a newer version's, which that version may reconnect from, nor a
+ * corrupt one (`ECORRUPT`): a file that reads as corrupt now may read whole
+ * later (a read through a mount that is being replaced), and the restore
+ * loop would then reconnect from it.
  */
 export type AgentHostConnectionLookup =
   | { kind: 'found'; record: AgentHostConnectionRecord }
   | { kind: 'absent' }
-  | { kind: 'unreadable' };
+  | { kind: 'unreadable'; error: Error };
 
 export async function findAgentHostConnectionChecked(
   target: ConnectionKey,
@@ -392,8 +421,11 @@ export async function findAgentHostConnectionChecked(
   let connections: AgentHostConnectionRecord[];
   try {
     connections = await readAgentHostConnectionsStrict();
-  } catch {
-    return { kind: 'unreadable' };
+  } catch (error) {
+    return {
+      kind: 'unreadable',
+      error: error instanceof Error ? error : new Error(String(error)),
+    };
   }
   const record = connections.find((entry) => sameConnection(entry, target));
   return record ? { kind: 'found', record } : { kind: 'absent' };

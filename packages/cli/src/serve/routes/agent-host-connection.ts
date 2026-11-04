@@ -23,6 +23,7 @@ import { issueAgentHostEnrollment } from '@qwen-code/qwen-code-core/agents/works
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { isLoopbackBind } from '../loopback-binds.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
+import type { AgentHostConnectionLookup } from '../agent-host-connections.js';
 import {
   availablePrograms,
   getHostProgramProbe,
@@ -55,6 +56,32 @@ function isCleartext(value: string): boolean {
 }
 
 type RuntimeFor = (req: Request, res: Response) => WorkspaceRuntime | undefined;
+
+/**
+ * Why a disconnect stopped nothing, and what helps. Retrying helps a
+ * transient read error, not a permission, so the error itself is named. A
+ * file that cannot be parsed stays that way until it is fixed or removed. A
+ * newer version's file cannot be changed here, but this version does not
+ * reconnect from it, so stopping this daemon ends the connection.
+ */
+function disconnectRefusal(
+  lookup: Exclude<AgentHostConnectionLookup, { kind: 'absent' }>,
+  reason: string,
+): string {
+  if (lookup.kind === 'found') {
+    return `Could not forget the saved connection, so nothing was stopped: ${reason}`;
+  }
+  const { code } = lookup.error as NodeJS.ErrnoException;
+  if (code === 'ENEWERSCHEMA') {
+    return `Could not forget the saved connection, so nothing was stopped: ${lookup.error.message} This version does not reconnect from that file, so the connection ends when this daemon stops.`;
+  }
+  if (code === 'ECORRUPT') {
+    // With why forgetting failed (a read-only directory, a mount), which is
+    // what stands in the way of the next try.
+    return `Could not read the saved Agent Host connections, so nothing was stopped: ${lookup.error.message}. Fix or remove that file, then retry. Forgetting the connection failed with: ${reason}`;
+  }
+  return `Could not read the saved Agent Host connections, so nothing was stopped: ${lookup.error.message}`;
+}
 
 /** The saved connections were held by, or lost to, another writer. */
 function isStoreBusy(error: unknown): boolean {
@@ -237,25 +264,15 @@ export function registerAgentHostRuntimeRoutes(
           // join that was not saved) has nothing for the restore loop to
           // bring back, so stop it anyway. An UNREADABLE file is not "no
           // record" — the restore loop would reconnect and undo the
-          // disconnect — so refuse rather than stop. So is a file a newer
-          // version wrote, which that version may reconnect from; retrying
-          // cannot help, but stopping this daemon ends the connection, since
-          // this version does not reconnect from that file.
+          // disconnect — so refuse rather than stop, saying why.
           if (isStoreBusy(error)) throw error;
           const reason = error instanceof Error ? error.message : String(error);
-          const newer =
-            (error as NodeJS.ErrnoException).code === 'ENEWERSCHEMA';
-          const lookup = newer
-            ? { kind: 'found' as const }
-            : await findAgentHostConnectionChecked(target);
-          if (lookup.kind !== 'absent') {
-            throw new Error(
-              lookup.kind === 'unreadable'
-                ? 'Could not read the saved Agent Host connections, so nothing was stopped. Retry the request.'
-                : `Could not forget the saved connection, so nothing was stopped: ${reason}${newer ? ' This version does not reconnect from that file, so the connection ends when this daemon stops.' : ''}`,
-            );
-          }
-          return false;
+          const lookup =
+            (error as NodeJS.ErrnoException).code === 'ENEWERSCHEMA'
+              ? { kind: 'unreadable' as const, error: error as Error }
+              : await findAgentHostConnectionChecked(target);
+          if (lookup.kind === 'absent') return false;
+          throw new Error(disconnectRefusal(lookup, reason));
         },
       );
       const stopped = stopAgentHostConnection(target);

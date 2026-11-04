@@ -323,6 +323,47 @@ it('reports a join as saved when an earlier record for it still stands', async (
   );
 });
 
+it.each([
+  [
+    'cannot be parsed',
+    Object.assign(new Error('unexpected content in /q/connections.json'), {
+      code: 'ECORRUPT',
+    }),
+    'Could not read the saved Agent Host connections, so nothing was stopped: unexpected content in /q/connections.json. Fix or remove that file, then retry. Forgetting the connection failed with: EROFS: read-only file system',
+  ],
+  [
+    'was written by a newer version',
+    Object.assign(
+      new Error(
+        'connections.json was written by a newer version of Qwen Code (schema 2); not replacing it.',
+      ),
+      { code: 'ENEWERSCHEMA' },
+    ),
+    'Could not forget the saved connection, so nothing was stopped: connections.json was written by a newer version of Qwen Code (schema 2); not replacing it. This version does not reconnect from that file, so the connection ends when this daemon stops.',
+  ],
+] as const)(
+  'says what helps when the saved connections %s',
+  async (_label, cause, message) => {
+    // The removal failed before it read the file (a read-only directory);
+    // the lookup finds why the file cannot be used.
+    removeConnection.mockRejectedValue(
+      Object.assign(new Error('EROFS: read-only file system'), {
+        code: 'EROFS',
+      }),
+    );
+    findConnectionChecked.mockResolvedValue({
+      kind: 'unreadable',
+      error: cause,
+    });
+
+    const response = await disconnect();
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({ error: message });
+    expect(stopConnection).not.toHaveBeenCalled();
+  },
+);
+
 it('saves nothing for a join that fails', async () => {
   startConnection.mockRejectedValue(
     new Error('Invalid or expired Agent Host enrollment token.'),
@@ -339,18 +380,24 @@ it('saves nothing for a join that fails', async () => {
 
 it('passes on, unchanged, a remote join that could not be saved', async () => {
   const runtime = selected();
+  // Each leg answers as its handler does, so passing on the probe's answer
+  // instead of the join's would show.
   vi.stubGlobal(
     'fetch',
     vi.fn(
-      async () =>
+      async (url: string) =>
         new Response(
-          JSON.stringify({
-            protocol: 2,
-            providers: ['qwen'],
-            connected: true,
-            saved: false,
-            saveError: 'disk full',
-          }),
+          JSON.stringify(
+            url.endsWith('/service')
+              ? { protocol: 2, providers: ['qwen'] }
+              : {
+                  protocol: 2,
+                  providers: ['qwen'],
+                  connected: true,
+                  saved: false,
+                  saveError: 'disk full',
+                },
+          ),
         ),
     ),
   );
@@ -553,14 +600,21 @@ it('refuses to stop when the saved connections cannot be read', async () => {
   removeConnection.mockRejectedValue(
     Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }),
   );
-  findConnectionChecked.mockResolvedValue({ kind: 'unreadable' });
+  findConnectionChecked.mockResolvedValue({
+    kind: 'unreadable',
+    error: Object.assign(
+      new Error("EACCES: permission denied, open '/q/connections.json'"),
+      { code: 'EACCES' },
+    ),
+  });
 
   const response = await disconnect();
 
+  // Says why: a retry helps a transient error, not a permission.
   expect(response.status).toBe(400);
   expect(response.body).toEqual({
     error:
-      'Could not read the saved Agent Host connections, so nothing was stopped. Retry the request.',
+      "Could not read the saved Agent Host connections, so nothing was stopped: EACCES: permission denied, open '/q/connections.json'",
   });
   expect(stopConnection).not.toHaveBeenCalled();
 });
