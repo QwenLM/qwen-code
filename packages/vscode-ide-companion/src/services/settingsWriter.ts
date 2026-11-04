@@ -251,6 +251,9 @@ function writeSettings(settings: Record<string, unknown>): void {
     // Best effort — surface nothing to the user if the FS rejects chmod
     // (e.g. Windows, mounted FS without POSIX permissions).
   }
+  // This can be the first thing a new install stores, so claim the directory
+  // as the CLI would. After the writes above, which created it owner-only.
+  Storage.markDefaultGlobalQwenDir();
 }
 
 /**

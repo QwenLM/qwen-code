@@ -9,9 +9,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockGetGlobalSettingsPath } = vi.hoisted(() => ({
-  mockGetGlobalSettingsPath: vi.fn(),
-}));
+const { mockGetGlobalSettingsPath, mockMarkDefaultGlobalQwenDir } = vi.hoisted(
+  () => ({
+    mockGetGlobalSettingsPath: vi.fn(),
+    mockMarkDefaultGlobalQwenDir: vi.fn(),
+  }),
+);
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -22,6 +25,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     Storage: {
       ...actual.Storage,
       getGlobalSettingsPath: mockGetGlobalSettingsPath,
+      markDefaultGlobalQwenDir: mockMarkDefaultGlobalQwenDir,
     },
   };
 });
@@ -62,8 +66,45 @@ describe('settingsWriter', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps a new Linux install in the XDG directory once it has written settings',
+    async () => {
+      const { Storage: actualStorage } = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core')
+      >('@qwen-code/qwen-code-core');
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      const home = path.join(tempDir, 'home');
+      const xdgSettings = path.join(home, '.config', 'qwen', 'settings.json');
+      fs.mkdirSync(home);
+      vi.stubEnv('HOME', home);
+      vi.stubEnv('QWEN_HOME', undefined);
+      vi.stubEnv('XDG_CONFIG_HOME', undefined);
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      mockGetGlobalSettingsPath.mockImplementation(() =>
+        actualStorage.getGlobalSettingsPath(),
+      );
+      mockMarkDefaultGlobalQwenDir.mockImplementation(() =>
+        actualStorage.markDefaultGlobalQwenDir(),
+      );
+      try {
+        writeCodingPlanConfig('global', 'coding-plan-key');
+        expect(fs.existsSync(xdgSettings)).toBe(true);
+        expect(fs.statSync(path.dirname(xdgSettings)).mode & 0o777).toBe(0o700);
+
+        // e.g. the Live discovery rendezvous, which still uses ~/.qwen.
+        fs.mkdirSync(path.join(home, '.qwen'));
+        expect(actualStorage.getGlobalSettingsPath()).toBe(xdgSettings);
+      } finally {
+        Object.defineProperty(process, 'platform', platform);
+        mockGetGlobalSettingsPath.mockReset();
+        mockMarkDefaultGlobalQwenDir.mockReset();
+      }
+    },
+  );
 
   it.each(
     [AuthType.USE_OPENAI, AuthType.USE_ANTHROPIC].flatMap((protocol) =>
