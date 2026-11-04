@@ -88,10 +88,13 @@ public class ManagedMcpManagementService {
         }
         Map<String, Object> request = new LinkedHashMap<>();
         try {
+            // A principal without a business actor carries a null subject, so
+            // the identity list must tolerate it; List.of rejects nulls.
             request.put("operationId", UUID.nameUUIDFromBytes(json.writeValueAsBytes(
-                    List.of("managed-mcp-command", principal.tenantId(),
-                            principal.userId(), principal.actorSubjectId(),
-                            sessionId, idempotencyKey))).toString());
+                    java.util.Arrays.asList("managed-mcp-command",
+                            principal.tenantId(), principal.userId(),
+                            principal.actorSubjectId(), sessionId,
+                            idempotencyKey))).toString());
         } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
             throw new IllegalStateException("Cannot encode MCP command identity", error);
         }
