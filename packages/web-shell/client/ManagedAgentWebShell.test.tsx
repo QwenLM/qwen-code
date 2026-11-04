@@ -240,6 +240,9 @@ describe('ManagedAgentWebShell', () => {
   it('themes a wrapper that mounts after a commit the sync effect does not watch', async () => {
     const provider = { storageKey: 'slot-late' } as ManagedAgentProvider;
     const target = document.createElement('div');
+    // One identity for both renders: a fresh literal per render would re-run
+    // the sync effect and hide a root ref a child's ref callback cannot see.
+    const tokenStyle = { ['--background' as string]: 'oklch(0.2 0 0)' };
     document.body.appendChild(target);
     try {
       // No provider: the page — and with it the slot wrapper — does not exist
@@ -249,7 +252,7 @@ describe('ManagedAgentWebShell', () => {
           <ManagedAgentWebShell
             navigationTarget={target}
             language="zh-CN"
-            style={{ ['--background' as string]: 'oklch(0.2 0 0)' }}
+            style={tokenStyle}
           />,
         ),
       );
@@ -260,7 +263,7 @@ describe('ManagedAgentWebShell', () => {
             managedAgentProvider={provider}
             navigationTarget={target}
             language="zh-CN"
-            style={{ ['--background' as string]: 'oklch(0.2 0 0)' }}
+            style={tokenStyle}
           />,
         ),
       );

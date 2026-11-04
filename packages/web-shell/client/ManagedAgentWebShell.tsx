@@ -240,6 +240,12 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   }
   const [portalRoot, setPortalRoot] = useState<HTMLDivElement | null>(null);
   const shellRootRef = useRef<HTMLDivElement | null>(null);
+  // Stable, or React detaches the inline callback with null in every commit's
+  // mutation phase and `syncSlot` below sees no root.
+  const setShellRoot = useCallback((element: HTMLDivElement | null) => {
+    shellRootRef.current = element;
+    setPortalRoot(element);
+  }, []);
   // A wrapper can mount in a commit where none of the sync effect's deps
   // changed (the provider arrives later, hostSessionOnly flips, the provider
   // identity remounts the page), so the ref callback themes the element it
@@ -300,10 +306,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
                 <TodoContextsProvider timeline={emptyMap} details={emptyMap}>
                   <CompactModeContext.Provider value={false}>
                     <div
-                      ref={(element) => {
-                        shellRootRef.current = element;
-                        setPortalRoot(element);
-                      }}
+                      ref={setShellRoot}
                       className={`${shellStyles.app} ${shellStyles.managedHome} ${theme === WebShellThemeId.Dark ? `${shellStyles.themeDark} dark` : shellStyles.themeLight} ${className ?? ''}`}
                       style={style}
                       data-web-shell-root

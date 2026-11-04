@@ -1785,7 +1785,9 @@ function ManagedSessionsContent({
             home &&
             messages.length === 0 &&
             !detail.loading &&
-            !busy &&
+            // A failed restore keeps `busy` until the user discards, and the
+            // pane is still empty then (the base marker ignored `busy`).
+            (!busy || pendingRestoreFailed) &&
             !summary?.failure
               ? true
               : undefined

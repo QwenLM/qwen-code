@@ -4239,6 +4239,29 @@ describe('ManagedSessionsPage', () => {
     failureTarget.remove();
   });
 
+  it('keeps the empty-state marker when a pending record cannot be restored', async () => {
+    sessionStorage.setItem(
+      `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}:host:s1`,
+      JSON.stringify({ storage: 'indexeddb', pendingId: 'missing' }),
+    );
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
+    await render('s1', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    expect(container.textContent).toContain('may already have been submitted');
+    // The failed restore holds `busy` until Discard, but the pane is still an
+    // empty home — the marker (and the centring/overflow rule it drives) must
+    // not disappear while the banner is up.
+    expect(
+      container
+        .querySelector('[data-managed-home]')
+        ?.getAttribute('data-managed-empty'),
+    ).toBe('true');
+  });
+
   it('renders Chinese Managed labels and states without English fallback overriding them', async () => {
     await render('s1', 'zh-CN');
     expect(container.querySelector('nav')?.getAttribute('aria-label')).toBe(
