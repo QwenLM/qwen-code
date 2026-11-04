@@ -1673,16 +1673,24 @@ describe('GithubChannel', () => {
           true,
         ],
         ['a deleted issue', 404, 'Not Found', true],
+        ['a 403 whose only signal is retry-after', 403, 'Forbidden', false],
       ])(
         'classifies %s (HTTP %i) for the cursor',
-        async (_label, status, message, marksRead) => {
+        async (label, status, message, marksRead) => {
           await initFailing();
           mockOctokit.paginate
             .mockResolvedValueOnce([makeNotification()])
             .mockRejectedValue(
               Object.assign(new Error(message), {
                 status,
-                response: { headers: { 'x-ratelimit-remaining': '4999' } },
+                response: {
+                  headers: {
+                    'x-ratelimit-remaining': '4999',
+                    ...(label.includes('retry-after')
+                      ? { 'retry-after': '60' }
+                      : {}),
+                  },
+                },
               }),
             );
 
@@ -1838,18 +1846,20 @@ describe('GithubChannel', () => {
         ]);
       });
 
-      it('shares one budget between threads that fail in turn', async () => {
+      it('shares one budget between threads that fail one after another', async () => {
         await initFailing();
         let poll = 0;
         mockOctokit.paginate.mockImplementation(
           async (method: unknown, params: { issue_number?: number }) => {
             if (isListNotifications(method)) {
               poll += 1;
-              return [issueNotification(1), issueNotification(2)];
+              return poll < 15
+                ? [issueNotification(1)]
+                : [issueNotification(1), issueNotification(2)];
             }
-            // Thread 1 fails on odd polls and thread 2 on even ones: neither
-            // fails twice in a row, yet every poll has a failing thread.
-            if (params.issue_number === (poll % 2 === 1 ? 1 : 2)) {
+            // Thread 1 fails through poll 15; thread 2 arrives on poll 15
+            // and keeps failing.
+            if (params.issue_number === 1 ? poll <= 15 : true) {
               throw transient();
             }
             return [];
@@ -1866,19 +1876,219 @@ describe('GithubChannel', () => {
         expect(
           mockOctokit.rest.activity.markNotificationsAsRead,
         ).toHaveBeenCalledTimes(1);
+        // The window's 30th failing poll is thread 2's 16th failure.
+        expect(
+          journalRows()
+            .filter((row) => row['outcome'] === 'skipped')
+            .map((row) => [
+              row['number'],
+              (row['detail'] as { failures: number }).failures,
+            ]),
+        ).toEqual([[2, 16]]);
+      });
+
+      it('reads a thread once per held window while its notification is unchanged', async () => {
+        await initFailing();
+        const read: number[] = [];
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              // Thread 1 sees new activity on poll 3.
+              return [
+                issueNotification(
+                  1,
+                  poll < 3
+                    ? '2026-07-02T01:00:00.000Z'
+                    : '2026-07-02T01:30:00.000Z',
+                ),
+                issueNotification(2),
+              ];
+            }
+            read.push(params.issue_number!);
+            if (params.issue_number === 2) throw transient();
+            return [];
+          },
+        );
+
+        for (let i = 0; i < 4; i++) await pollOnce();
+
+        // Thread 2 holds the window throughout; thread 1 is read on poll 1
+        // and again only after its notification moved.
+        expect(read.filter((n) => n === 1)).toEqual([1, 1]);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+      });
+
+      it('resumes where a rate limit stopped the previous poll', async () => {
+        await initFailing();
+        const read: number[] = [];
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return [
+                issueNotification(1),
+                issueNotification(2),
+                issueNotification(3),
+              ];
+            }
+            read.push(params.issue_number!);
+            if (poll === 1 && params.issue_number === 2) {
+              throw Object.assign(new Error('Too Many Requests'), {
+                status: 429,
+                response: { headers: {} },
+              });
+            }
+            return [];
+          },
+        );
+
+        await pollOnce();
+        expect(read).toEqual([1, 2, 2, 2]);
+        await pollOnce();
+
+        expect(read.slice(4)).toEqual([2, 3]);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        // The commit starts the next window with nothing marked as read.
+        expect(
+          (channel as unknown as { windowReadThreads: Map<string, string> })
+            .windowReadThreads.size,
+        ).toBe(0);
+      });
+
+      it('reads a thread again after a poll that could not read the publication audit', async () => {
+        await initFailing();
+        const audit = inboundTaskPath().replace(
+          'github-inbound-tasks.json',
+          'github-audit.jsonl',
+        );
+        // A directory where the audit file belongs cannot be read.
+        mkdirSync(audit, { recursive: true });
+        mockOctokit.paginate.mockImplementation(async (method: unknown) =>
+          isListNotifications(method) ? [makeNotification()] : [makeComment()],
+        );
+
+        await pollOnce();
+        expect(channel.inboundEnvelopes).toHaveLength(0);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+
+        rmSync(audit, { recursive: true });
+        await pollOnce();
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '1001',
+        ]);
+      });
+
+      it('reads a thread again when the read-thread set is full', async () => {
+        await initFailing();
+        const readThreads = (
+          channel as unknown as { windowReadThreads: Map<string, string> }
+        ).windowReadThreads;
+        for (let i = 0; i < 8192; i++) readThreads.set(`x|issue:${i}`, 'at');
+        const read: number[] = [];
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              return [issueNotification(1), issueNotification(2)];
+            }
+            read.push(params.issue_number!);
+            if (params.issue_number === 2) throw transient();
+            return [];
+          },
+        );
+
+        await pollOnce();
+        await pollOnce();
+
+        expect(read.filter((n) => n === 1)).toEqual([1, 1]);
+        expect(readThreads.size).toBe(8192);
+      });
+
+      it('keeps the budget when the commit itself fails', async () => {
+        await initFailing();
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (isListNotifications(method)) return [makeNotification()];
+          throw transient();
+        });
+        const markReadError = () =>
+          Object.assign(new Error('Server Error'), { status: 500 });
+        mockOctokit.rest.activity.markNotificationsAsRead
+          .mockRejectedValueOnce(markReadError())
+          .mockRejectedValueOnce(markReadError())
+          .mockRejectedValueOnce(markReadError());
+
+        for (let i = 0; i < 29; i++) await pollOnce();
+        // The 30th poll gives up but cannot mark the window read (three
+        // in-call attempts).
+        await expect(pollOnce()).rejects.toThrow('Server Error');
+
+        // Still out of budget: the next poll commits instead of holding.
+        await pollOnce();
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(4);
+        expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+      });
+
+      it('keeps threads of two repositories with the same number apart', async () => {
+        await initFailing();
+        const other = makeNotification({
+          id: '200',
+          subject: {
+            title: 'Other Issue',
+            url: 'https://api.github.com/repos/owner/other/issues/42',
+            type: 'Issue',
+          },
+          repository: { full_name: 'owner/other' },
+        });
+        const read: string[] = [];
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { repo?: string }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return [makeNotification(), other];
+            }
+            read.push(`${params.repo}:${poll}`);
+            // Both fail on poll 1; on poll 2 only the second one still does.
+            if (poll === 1 || params.repo === 'other') throw transient();
+            return [];
+          },
+        );
+
+        await pollOnce();
+        await pollOnce();
+
         expect(
           journalRows().map((row) => [
-            row['number'],
-            row['outcome'],
+            row['repository'],
             (row['detail'] as { failures: number }).failures,
           ]),
         ).toEqual([
-          [1, 'failed', 1],
-          [2, 'failed', 1],
-          [1, 'failed', 10],
-          [2, 'failed', 10],
-          // The window's 30th failing poll is thread 2's 15th failure.
-          [2, 'skipped', 15],
+          ['owner/repo', 1],
+          ['owner/other', 1],
+        ]);
+        // Reading owner/repo#42 on poll 2 does not count as reading
+        // owner/other#42, which is read again on poll 3.
+        await pollOnce();
+        expect(read.filter((entry) => entry.startsWith('other:'))).toEqual([
+          'other:1',
+          'other:1',
+          'other:1',
+          'other:2',
+          'other:2',
+          'other:2',
+          'other:3',
+          'other:3',
+          'other:3',
         ]);
       });
 
@@ -2031,10 +2241,17 @@ describe('GithubChannel', () => {
 
       it('journals a skip of a comment re-read by a held window once', async () => {
         await initFailing();
+        let poll = 0;
         mockOctokit.paginate.mockImplementation(
           async (method: unknown, params: { issue_number?: number }) => {
             if (isListNotifications(method)) {
-              return [issueNotification(1), issueNotification(2)];
+              poll += 1;
+              // New activity moves thread 1's notification on every poll,
+              // so the held window reads its comments again each time.
+              return [
+                issueNotification(1, `2026-07-02T01:0${poll}:00.000Z`),
+                issueNotification(2),
+              ];
             }
             if (params.issue_number === 2) throw transient();
             const at = '2026-07-02T00:30:00.000Z';
@@ -2160,7 +2377,8 @@ describe('GithubChannel', () => {
         for (let i = 0; i < 32; i++) await pollOnce();
 
         // Thread 2's first failure holds the new window; its comment is
-        // answered on the next poll.
+        // answered on the next poll, and the stale thread's failures do not
+        // keep that window from being marked read.
         expect(
           journalRows()
             .filter((row) => row['number'] === 2)
@@ -2169,6 +2387,14 @@ describe('GithubChannel', () => {
         expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
           '2001',
         ]);
+        expect(
+          journalRows()
+            .filter((row) => row['number'] === 1)
+            .map((row) => row['outcome']),
+        ).toEqual(['skipped']);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
       });
 
       it('reports a thread as retried while a failing task store holds the window', async () => {
@@ -2227,8 +2453,11 @@ describe('GithubChannel', () => {
         expect(keys.size).toBe(8192);
         expect(journalOnce('k0')).toBe(false);
 
+        // Past the bound a key is journaled every time, the rest stay quiet.
         expect(journalOnce('one more')).toBe(true);
-        expect(keys.size).toBe(1);
+        expect(journalOnce('one more')).toBe(true);
+        expect(journalOnce('k1')).toBe(false);
+        expect(keys.size).toBe(8192);
       });
     });
 

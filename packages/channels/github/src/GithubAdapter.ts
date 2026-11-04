@@ -775,8 +775,8 @@ const MAX_INBOUND_TASK_ATTEMPTS = 3;
  * fail in turn cannot keep mark-as-read and the cursor frozen indefinitely.
  */
 const MAX_TRANSIENT_FAILURE_POLLS = 30;
-/** Bounds the once-per-window journal keys of a window held for very long. */
-const MAX_WINDOW_JOURNAL_KEYS = 8192;
+/** Bounds the per-window key sets of a window held for very long. */
+const MAX_WINDOW_KEYS = 8192;
 /**
  * The poll cursor does not advance while an inbound task is recoverable, so a
  * slow or stuck turn makes GitHub return the same notifications on every poll.
@@ -1274,6 +1274,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * nothing new (a repeated skip) are written once per window.
    */
   private windowJournalKeys = new Set<string>();
+  /**
+   * Threads of the current window already read without error, by their
+   * notification's `updated_at`. A held window is listed again on every
+   * poll, but a thread whose notification has not changed since it was read
+   * has nothing new (new activity moves `updated_at`), so it is not read again
+   * until the window commits. A hold then re-reads only the threads that
+   * failed, and a poll a rate limit stopped resumes where it stopped.
+   */
+  private windowReadThreads = new Map<string, string>();
 
   constructor(
     name: string,
@@ -2263,6 +2272,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       };
 
       const failureKey = `${chatId}|${threadId}`;
+      if (this.windowReadThreads.get(failureKey) === notification.updated_at) {
+        continue;
+      }
+      // A notification at or before the cursor was already handled in a
+      // committed window and is listed again only because its mark-as-read did
+      // not apply: nothing in its comment window is new, so a failure reading
+      // it holds nothing.
+      const stale = notification.updated_at <= this.cursor.lastProcessedAt;
       try {
         switch (reason) {
           case 'mention':
@@ -2287,6 +2304,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           default:
             await this.processCommentLane(ctx, false);
         }
+        // A failing task store or audit holds the window and must see the
+        // thread again.
+        if (!this.inboundPersistenceBlocked && !this.publicationAuditBlocked) {
+          if (this.windowReadThreads.size < MAX_WINDOW_KEYS) {
+            this.windowReadThreads.set(failureKey, notification.updated_at);
+          }
+        }
       } catch (err) {
         const failure = classifyThreadFailure(err);
         let failures = 0;
@@ -2299,6 +2323,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         const retry =
           failure === 'shared' ||
           (failure === 'transient' &&
+            !stale &&
             transientPoll < MAX_TRANSIENT_FAILURE_POLLS);
         if (retry) {
           this.notificationRetryPending = true;
@@ -2361,11 +2386,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         continue;
       }
     }
-    // Only a window that can commit spends the budget: a thread left unread
-    // at the cursor with nothing newer to mark read holds nothing.
-    if (transientHeld && this.pendingCursorUpdatedAt) {
-      this.transientHoldPolls += 1;
-    }
+    if (transientHeld) this.transientHoldPolls += 1;
     if (sharedHeld) this.sharedHoldPolls += 1;
     if (reasonFilterCollapsed > 0) {
       // One counted row instead of a row per notification: the threads differ,
@@ -2406,6 +2427,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.sharedHoldPolls = 0;
         this.transientNotificationFailures.clear();
         this.windowJournalKeys.clear();
+        this.windowReadThreads.clear();
       }
     } finally {
       // Bound the comment-time map EVERY poll, independent of dispatch: fetch
@@ -2432,10 +2454,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    */
   private journalOncePerWindow(key: string): boolean {
     if (this.windowJournalKeys.has(key)) return false;
-    if (this.windowJournalKeys.size >= MAX_WINDOW_JOURNAL_KEYS) {
-      this.windowJournalKeys.clear();
+    // Past the bound a new key is journaled without being remembered, so only
+    // the overflow repeats instead of every key at once.
+    if (this.windowJournalKeys.size < MAX_WINDOW_KEYS) {
+      this.windowJournalKeys.add(key);
     }
-    this.windowJournalKeys.add(key);
     return true;
   }
 
