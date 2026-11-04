@@ -722,6 +722,27 @@ export interface WebShellCustomization {
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
+  /**
+   * 数据源覆盖：提供时 ChatPane 用它替代 daemon 的 useConnection()。
+   * Managed 会话据此复用同一套 ChatPane UI 与交互，只把底层数据换成宿主投影，
+   * 避免维护第二套页面外壳与文案。普通实例不提供此项，行为完全不变。
+   */
+  connectionOverride?: import('./daemon/session/types.js').DaemonConnectionState;
+  /**
+   * 与普通会话对齐 Managed 对话区文案与能力提示口径。默认 false 保持独立版行为。
+   *
+   * 宿主已有自己的外壳与能力表达：控件不可用即灰掉，不额外解释。
+   * 置 true 后 Managed 会：
+   * - placeholder 改用与普通会话相同的 `splitView.composerPlaceholder`
+   * - 不再渲染「模型已固定 / 审批模式已固定 / 请新建任务后发送」这类解释文案
+   *   （能力仍由后端 capabilities 决定并静默禁用，不放宽任何限制）
+   */
+  alignManagedChatWithHost?: boolean;
+  /**
+   * Show the managed session header (title / workspace / phase badge). Defaults to true.
+   * 宿主外壳已展示会话身份（如宿主侧栏）时置 false，避免对话区重复一遍。
+   */
+  showManagedSessionHeader?: boolean;
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
   parseUserMessageContent?: UserMessageContentParser;

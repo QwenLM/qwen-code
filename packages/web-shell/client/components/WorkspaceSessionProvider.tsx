@@ -319,8 +319,17 @@ function WorkspaceSessionProviderWorkspace({
     lockWorkspaceCwd,
   ]);
 
+  // Managed 的工作区/会话由 managedAgentProvider 经宿主 HTTP provider 提供，不存在 daemon workspace/capabilities。
+  // 这些门禁对 Managed 不成立；但 provider 链必须保留——App 普通分支与 managed 分支是兄弟节点都会挂载。
+  // 仅注入 provider 还不够：URL 显式 managed=0 表示用户要看本地 daemon 会话，
+  // 此时必须保留 daemon 门禁（含「工作区不存在」拒绝），否则会掩盖真实的本地错误。
+  // 与 App 的 managedMode 同一口径：provider 存在且 managed 选择未被关闭。
+  const managedProvided = appProps.managedAgentProvider !== undefined
+    && !(typeof window !== 'undefined'
+      && new URLSearchParams(window.location.search).get('managed') === '0');
   // Keep an unscoped session mounted when a later refresh fails.
   if (
+    !managedProvided &&
     (effectiveWorkspaceCwd ||
       effectiveWorkspaceId ||
       (effectiveSessionId && !workspace.capabilities)) &&
@@ -348,6 +357,7 @@ function WorkspaceSessionProviderWorkspace({
     );
   }
   if (
+    !managedProvided &&
     (effectiveSessionId || effectiveWorkspaceCwd || effectiveWorkspaceId) &&
     !workspace.capabilities
   ) {
@@ -364,7 +374,7 @@ function WorkspaceSessionProviderWorkspace({
       </div>
     );
   }
-  if (lockWorkspaceCwd && registrationErrorCwd === lockWorkspaceCwd) {
+  if (!managedProvided && lockWorkspaceCwd && registrationErrorCwd === lockWorkspaceCwd) {
     return (
       <WorkspaceUnavailableState
         title={t('workspace.loadFailed')}
@@ -379,7 +389,7 @@ function WorkspaceSessionProviderWorkspace({
       />
     );
   }
-  if (lockWorkspaceCwd && !targetWorkspace) {
+  if (!managedProvided && lockWorkspaceCwd && !targetWorkspace) {
     return (
       <div
         data-web-shell-root
@@ -393,7 +403,9 @@ function WorkspaceSessionProviderWorkspace({
       </div>
     );
   }
-  if ((effectiveWorkspaceCwd || effectiveWorkspaceId) && !targetWorkspace) {
+  // Managed 的工作区由 managedAgentProvider 经宿主 HTTP provider 提供（session.workspace 已 ready），
+  // 不存在 daemon targetWorkspace；沿用此门禁会把可用会话误报成「工作区不存在」。
+  if (!managedProvided && (effectiveWorkspaceCwd || effectiveWorkspaceId) && !targetWorkspace) {
     return (
       <WorkspaceUnavailableState
         title={t('workspace.notFound')}
@@ -586,7 +598,11 @@ function StandaloneSessionGate({
   }
 
   const capabilities = workspace.capabilities;
-  if (workspace.status === 'error') {
+  // 与上方 workspace 分支同口径：provider 存在且 URL 未显式 managed=0 时才豁免 daemon 门禁。
+  const managedProvided = appProps.managedAgentProvider !== undefined
+    && !(typeof window !== 'undefined'
+      && new URLSearchParams(window.location.search).get('managed') === '0');
+  if (!managedProvided && workspace.status === 'error') {
     return (
       <WorkspaceUnavailableState
         title={t('session.loadFailed')}
@@ -604,7 +620,7 @@ function StandaloneSessionGate({
       />
     );
   }
-  if (!capabilities) {
+  if (!managedProvided && !capabilities) {
     return (
       <div
         data-web-shell-root
@@ -618,7 +634,7 @@ function StandaloneSessionGate({
       </div>
     );
   }
-  if (!standaloneSupported) {
+  if (!managedProvided && !standaloneSupported) {
     return (
       <WorkspaceUnavailableState
         title={t('session.standaloneUnavailable')}
