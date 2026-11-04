@@ -8,7 +8,10 @@ import { stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Application } from 'express';
 import { sanitizeLogText } from '@qwen-code/channel-base';
-import { readSessionPrsDetailed } from '@qwen-code/qwen-code-core/services/session-pr-service.js';
+import {
+  readSessionPrsDetailed,
+  SESSION_PR_LIST_LIMIT,
+} from '@qwen-code/qwen-code-core/services/session-pr-service.js';
 import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type { BridgeSessionSummary } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isHiddenCatalogSource } from '../../runtime/agent-session-source.js';
@@ -244,32 +247,47 @@ async function scanWorkspaceBindings(
   // Bindings the bridge holds but no sidecar has yet (the metadata route
   // updates the bridge before persisting the sidecar; the write can fail)
   // are still bindings: a session without a row gets one from the live
-  // summary, and a non-empty row gains the PR numbers it lacks. An empty
-  // row is an observed unbind and stays a tombstone.
+  // summary, and a non-empty row gains the PR numbers it lacks under the
+  // same cap rule as the session list's merge — only while the persisted
+  // list is below SESSION_PR_LIST_LIMIT, then trimmed to the newest. An
+  // empty row is an observed unbind and stays a tombstone.
   for (const [sessionId, summary] of live) {
     if (!summary.prs?.length) continue;
     const row = rows.get(sessionId);
     if (row !== undefined) {
-      if (row.prs.length === 0) continue;
+      if (row.prs.length === 0 || row.prs.length >= SESSION_PR_LIST_LIMIT) {
+        continue;
+      }
       const known = new Set(row.prs.map((pr) => pr.number));
       row.prs.push(
         ...projectPrs(summary.prs.filter((pr) => !known.has(pr.number))),
       );
+      row.prs = row.prs.slice(-SESSION_PR_LIST_LIMIT);
       continue;
     }
-    if (summary.isArchived || isHiddenCatalogSource(summary.sourceType)) {
-      continue;
+    try {
+      // Ownership comes from the persisted record first: a restored agent
+      // task session carries no sourceType on its bridge entry.
+      const item = await sessionService.getSessionListItem(sessionId, 'active');
+      const sourceType = item?.sourceType ?? summary.sourceType;
+      if (isHiddenCatalogSource(sourceType)) continue;
+      const updatedAt = laterActivityTimestamp(
+        validTimestamp(summary.updatedAt ?? summary.createdAt),
+        item ? new Date(item.mtime).toISOString() : undefined,
+      );
+      rows.set(sessionId, {
+        sessionId,
+        workspaceCwd: runtime.workspaceCwd,
+        ...(sourceType !== undefined ? { sourceType } : {}),
+        ...(updatedAt !== undefined ? { updatedAt } : {}),
+        prs: projectPrs(summary.prs).slice(-SESSION_PR_LIST_LIMIT),
+      });
+    } catch (err) {
+      failures.push({
+        sessionId,
+        cause: err instanceof Error ? err.message : String(err),
+      });
     }
-    const updatedAt = validTimestamp(summary.updatedAt ?? summary.createdAt);
-    rows.set(sessionId, {
-      sessionId,
-      workspaceCwd: runtime.workspaceCwd,
-      ...(summary.sourceType !== undefined
-        ? { sourceType: summary.sourceType }
-        : {}),
-      ...(updatedAt !== undefined ? { updatedAt } : {}),
-      prs: projectPrs(summary.prs),
-    });
   }
   out.push(...rows.values());
   if (failures.length > 0) {

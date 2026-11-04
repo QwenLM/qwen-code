@@ -4,7 +4,7 @@
 
 状态：提案（维护者已于 2026-11-02 确认决策：prompt 注入投递、channel 内状态监视、事件范围 = CI 失败 + 合并冲突 + 新评论 + head 前进 / merged / closed）。
 
-修订 2026-11-04：第 1 层改为直接读取 PR sidecar（每个 workspace 一次目录列表），不再按活动序分页会话列表，因此 `partial` 只表示 I/O 失败；会话数量不再让快照变成 partial。
+修订 2026-11-04：第 1 层改为直接读取 PR sidecar（每个 workspace 一次目录列表），不再按活动序分页会话列表，因此 `partial` 只表示目录的一部分读不到（没有 runtime 的 registry 条目、无法列出的 chats 目录、无法读取的 sidecar 或 transcript、无法获取的 live 会话列表）；会话数量不再让快照变成 partial。
 
 ## 问题
 
@@ -47,9 +47,9 @@ GET /sessions/pr-bindings
 
 - 所有权类别：**进程级**（与 `POST /sessions/backfill-prs` 同类）。遍历 registry 的 workspace 条目（`listAllEntries()`），对每个持有 runtime 且能服务会话的条目（受信，或豁免信任门的 untrusted primary），直接列出该 workspace 的 active PR sidecar——`listSessionIdsWithPrSidecar('active')`，与 PR 刷新定时器相同的基于 `readdir` 的枚举——再用 `readSessionPrsDetailed` 逐个读取。归属信息来自会话的持久化记录（`getSessionListItem`：`sourceType`，transcript 的 mtime 作为 `updatedAt`），会话在线时再用 bridge 的 live 会话列表补充（首次 transcript 刷盘前写下的绑定还没有持久化记录；live 会话的活动可能比最后一次刷盘更新——取较晚的时间戳）。transcript 属于共用同一 chats 目录的其它项目的 sidecar 会被跳过；transcript 存在但无法读取时该会话视为未知（partial），transcript 位于归档目录而 sidecar 仍在 active 目录的是归档会话的残留，跳过。bridge 内存中持有但尚未写入 sidecar 的绑定（metadata 路由先更新 bridge 再持久化 sidecar，而写入可能失败）从 live 会话列表补入；已列出的行以文件为准，空行绝不会被 live 状态填充。条目状态不限制扫描：draining 或 transitioning 的 workspace 仍在服务会话，文件照常可读。Untrusted 非 primary workspace 跳过（它们无法创建或恢复会话，缺席是合法的）。
 - 排除归档会话（其 sidecar 位于 `chats/archive/` 下，扫描不列该目录）。携带 `sourceType` 以便调用方排除 channel 自有会话。`prs` 条目投影为 `{number, url, state?}`。**每个可读的 sidecar 都输出一行，包括空行**：`prs: []` 的行是 tombstone，意为「已扫描、无绑定」（观测到的解绑），调用方必须能把它与「本次答案未枚举到该会话」区分开——否则任何 partial 答案都会在显式解绑后复活过期绑定。tombstone 不指向任何投递目标，因此不带归属信息；但它仍要做归属判定，因为隐藏目录或归档会话的空 sidecar 是残留而非观测到的解绑。sidecar 存在但读取失败（I/O 错误、JSON 非法、形状校验失败——core 的 `readSessionPrsDetailed` 区分 absent 与 invalid）的会话被省略并置 `partial`：其绑定是未知而非为空。**隐藏目录会话**（`agent-host` / `agent`，任何会话列表或计数都不显示的机器自有任务会话）被显式排除，**不**置 `partial`。这些会话不是交互式投递目标，所以只绑定到此类会话的 PR——prompt 路由的绑定（`/review <N>` / `/verify-pr`）不按 source type 把关，agent 任务会话也能获得绑定——视为未绑定，其事件走公开 channel 路径。公开回复是安全的（无丢失、无重复）；私有投递契约刻意不延伸到机器自有的 agent 任务会话。
-- **`partial`** 只在因 I/O 原因答案不完整时为 true：某个 registry 条目没有 runtime（无法定位其会话存储）、某个 workspace 的 chats 目录无法列出、或某个 sidecar / transcript 无法读取。目录列表是一次快照，所以会话数量永远不会让答案变成 partial——有数百个 active 会话的 workspace 仍然产出完整快照。调用方不得把 partial 答案中缺失的条目当作权威的缺席（适配器把 partial 答案合并进已知绑定并跳过 watch 状态修剪）。chats 目录无法列出的 workspace 按 workspace 写一行 stderr；逐会话的失败被计数并按每次 workspace 扫描写一行（数量、workspace、首个失败会话及原因），而不是每会话每轮一行，持续的 partial 因此有诊断面又不会刷屏。
+- **`partial`** 只在目录的一部分读不到时为 true：某个 registry 条目没有 runtime（无法定位其会话存储）、某个 workspace 的 chats 目录无法列出、某个 sidecar / transcript 无法读取、或该 workspace 的 live 会话列表无法获取（它是尚未写入 sidecar 的绑定的唯一来源）。目录列表是一次快照，所以会话数量永远不会让答案变成 partial——有数百个 active 会话的 workspace 仍然产出完整快照。调用方不得把 partial 答案中缺失的条目当作权威的缺席（适配器把 partial 答案合并进已知绑定并跳过 watch 状态修剪）。chats 目录无法列出的 workspace 按 workspace 写一行 stderr；逐会话的失败被计数并按每次 workspace 扫描写一行（数量、workspace、首个失败会话及原因），而不是每会话每轮一行，持续的 partial 因此有诊断面又不会刷屏。
 - 与其他会话路由一样鉴权（`--require-auth` 时 bearer）。不新增写入面。
-- 该路由是扫描而非索引：每个 workspace 一次目录列表，每个可读的 sidecar 付出项目归属的头部读取、sidecar 读取和列表项投影（有界的记录扫描加标题扫描）——合计约四次 open、两次 stat；tombstone 付出同样的成本，因为它同样需要判定归属（隐藏目录或归档），只是行里省略归属信息。只触碰有 sidecar 的会话，成本随已绑定会话数而非整个目录规模增长；适配器将结果缓存一个轮询周期。刻意不设页数上限：扫描受 sidecar 数量约束，每个 sidecar 只需几次小读取，且严格便宜于它取代的全目录 live 合并列表，设上限只会重新引入 partial 状态。
+- 该路由是扫描而非索引：每个 workspace 一次目录列表，每个可读的 sidecar 付出项目归属的头部读取、sidecar 读取和列表项投影（有界的记录扫描加标题扫描）——合计约四次 open、两次 stat；tombstone 付出同样的成本，因为它同样需要判定归属（隐藏目录或归档），只是行里省略归属信息。文件系统这一腿只触碰有 sidecar 的会话，成本随已绑定会话数而非整个目录规模增长；内存这一腿（`listWorkspaceSessions`，每 workspace 每轮取一次，用于归属与 live-only 绑定）会为每个 live 会话物化一份摘要，成本随该 workspace 的 live 会话数增长。适配器将结果缓存一个轮询周期。文件系统这一腿刻意不设页数上限：它受 sidecar 数量约束，每个 sidecar 只需几次小读取，且严格便宜于它取代的全目录 live 合并列表，设上限只会重新引入 partial 状态。
 
 ### 第 2 层 —— worker 提供的投递访问器
 

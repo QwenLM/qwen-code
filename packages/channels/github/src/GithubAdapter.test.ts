@@ -6875,6 +6875,63 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       }
     });
 
+    it('keeps hinting while retention holds bindings the partial answers no longer list (R1-8)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValue([]);
+      // One complete snapshot lands a binding; then the chats dir becomes
+      // unlistable and every poll answers an empty partial. Retention keeps
+      // the binding in the map, so the hint must still fire.
+      boundSessions.listPrBindings.mockResolvedValueOnce({
+        bindings: [makeBinding()],
+        partial: false,
+      });
+      await pollOnce();
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        for (let i = 0; i < 10; i++) {
+          await pollOnce();
+        }
+        const hint = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been partial for 10'));
+        expect(hint).toBeDefined();
+        expect(hint).toContain('(0 sessions listed)');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('does not blame the binding lookup when the cold-empty cap was reached by successful empty partials (R3-2)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValue([]);
+      // 29 successful empty partials, then one transient failure lands the
+      // cap on the failure path; the wording must name the storage causes.
+      for (let i = 0; i < 29; i++) {
+        boundSessions.listPrBindings.mockResolvedValueOnce({
+          bindings: [],
+          partial: true,
+        });
+        await pollOnce();
+      }
+      boundSessions.listPrBindings.mockRejectedValue(new Error('502'));
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await pollOnce();
+        const capLine = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been an empty partial for 30'));
+        expect(capLine).toBeDefined();
+        expect(capLine).not.toContain('binding lookup itself has been failing');
+        expect(capLine).toContain("'PR bindings scan' line");
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
     it('opens the lane on a non-empty partial snapshot and delivers known targets (R1-7)', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
       // A partial answer that LISTS the binding is enough for the known

@@ -3612,7 +3612,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // listed session count so the operator is not left with only a
         // dead-letter alert hours later.
         if (
-          snapshot.bindings.length > 0 &&
+          (snapshot.bindings.length > 0 || map.size > 0) &&
           (this.partialSnapshotStreak === 10 ||
             this.partialSnapshotStreak % 60 === 0)
         ) {
@@ -3651,7 +3651,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.coldEmptyPartialStreak += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
           process.stderr.write(
-            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence. The binding lookup itself has been failing (see the 'has never succeeded' line above): verify GET /sessions/pr-bindings is reachable and the worker credentials are valid.\n`,
+            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence. ${
+              this.boundSnapshotFailureStreak + 1 >=
+              MAX_COLD_EMPTY_PARTIAL_POLLS
+                ? "The binding lookup itself has been failing (see the 'has never succeeded' line above): verify GET /sessions/pr-bindings is reachable and the worker credentials are valid."
+                : "The daemon's stderr names the cause: a workspace without a runtime, a chats directory it cannot list, or a 'PR bindings scan' line for a sidecar, transcript or live session list it could not read."
+            }\n`,
           );
         }
         // Surface the stall distinctly and actionably, throttled so a

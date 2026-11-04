@@ -516,15 +516,78 @@ describe('GET /sessions/pr-bindings', () => {
     });
   });
 
-  it('does not append live-only bindings of archived or machine-owned sessions', async () => {
+  it('does not append live-only bindings of machine-owned sessions', async () => {
     const cwd = await makeWorkspace();
     const prs = [
       { number: 55, url: 'https://github.com/acme/widgets/pull/55' },
     ];
     liveSessions.set(cwd, [
-      liveSummary(cwd, SESSION_A, { prs, isArchived: true }),
       liveSummary(cwd, SESSION_B, { prs, sourceType: 'agent' }),
     ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('decides live-only ownership from the persisted record when the bridge entry carries no source', async () => {
+    const cwd = await makeWorkspace();
+    // A restored agent task session: persisted sourceType 'agent', no
+    // sourceType on its bridge entry, bindings only in bridge memory.
+    await seedTranscript(cwd, SESSION_A, { sourceType: 'agent' });
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: [{ number: 55, url: 'https://github.com/acme/widgets/pull/55' }],
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('caps the bridge merge like the session list: below the cap the newest live numbers win', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: [
+          { number: 101, url: 'https://github.com/acme/widgets/pull/101' },
+          { number: 102, url: 'https://github.com/acme/widgets/pull/102' },
+        ],
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    const numbers = body.bindings[0]?.prs.map((pr) => pr.number);
+    expect(numbers).toHaveLength(10);
+    expect(numbers).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 101, 102]);
+  });
+
+  it('caps the bridge merge like the session list: a full persisted list is not extended', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: Array.from({ length: 10 }, (_, i) => ({
+          number: 100 + i,
+          url: `https://github.com/acme/widgets/pull/${100 + i}`,
+        })),
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.bindings[0]?.prs.map((pr) => pr.number)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    ]);
+  });
+
+  it('answers complete for a registered workspace whose chats directory does not exist yet', async () => {
+    const cwd = await makeWorkspace();
 
     const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
 
@@ -634,6 +697,8 @@ describe('GET /sessions/pr-bindings', () => {
     await seedTranscript(cwd, SESSION_A);
     await seedBinding(cwd, SESSION_A, [101]);
 
+    const lines = captureStderr();
+
     const body = await fetchBindings([
       makeEntry(undefined, 'transitioning'),
       makeEntry(makeRuntime(cwd)),
@@ -641,6 +706,11 @@ describe('GET /sessions/pr-bindings', () => {
 
     expect(body.partial).toBe(true);
     expect(body.bindings.map((b) => b.sessionId)).toEqual([SESSION_A]);
+    expect(lines).toContainEqual(
+      expect.stringContaining(
+        'workspace /ws/absent has no runtime (state transitioning)',
+      ),
+    );
   });
 
   it('aggregates bindings across workspaces', async () => {
