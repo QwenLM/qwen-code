@@ -72,7 +72,14 @@ if [ "$sandbox" = 'sandbox:docker' ]; then
     local default_rate best_rate=0 best='' mirror rate
     default_rate="$(apt_mirror_probe_rate deb.debian.org)"
     default_rate="${default_rate:-0}"
-    for mirror in mirrors.aliyun.com mirrors.tuna.tsinghua.edu.cn; do
+    # mirrors.cloud.aliyuncs.com is the Alibaba Cloud VPC intranet mirror: it
+    # answers from inside the VPC and does not consume the instance's capped
+    # 100 Mbps public egress that throttles the public mirrors under concurrent
+    # load — the same reason configure-maven-mirror.sh prefers it for Central.
+    # Hosted runners and the Hong Kong hosts cannot reach it, so the probe just
+    # measures 0 there and it loses to a reachable public mirror; no host map is
+    # needed. Listed first because where it answers it is the fastest path.
+    for mirror in mirrors.cloud.aliyuncs.com mirrors.aliyun.com mirrors.tuna.tsinghua.edu.cn; do
       rate="$(apt_mirror_probe_rate "${mirror}")"
       rate="${rate:-0}"
       if [ "${rate}" -gt "${best_rate}" ]; then

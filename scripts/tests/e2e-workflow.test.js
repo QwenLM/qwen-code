@@ -1100,6 +1100,11 @@ describe('e2e workflow', () => {
       // outlast the job's 60-minute cap. So neither a single mirror nor a
       // host-name map is correct — the build probes and overrides only on a
       // clear win, which leaves healthy hosts on the built-in source.
+      // The VPC intranet mirror is the durable fix: it bypasses the capped
+      // public egress that throttles the public mirrors (the maven script's
+      // rationale). It must stay a probe candidate — unreachable off-VPC, it
+      // measures 0 and loses, so no host map is needed.
+      expect(e2eRunScript).toContain('mirrors.cloud.aliyuncs.com');
       expect(e2eRunScript).toContain('mirrors.aliyun.com');
       expect(e2eRunScript).toContain('mirrors.tuna.tsinghua.edu.cn');
       expect(e2eRunScript).toContain('--build-arg APT_MIRROR=');
