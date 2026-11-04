@@ -1032,7 +1032,7 @@ describe('runSync (real git, bare remote)', () => {
       headSha: featSha,
       moved: false,
       reason: expect.stringMatching(
-        /could not switch it back: qwen-autofix\/pr-7 is checked out in .*other-wt\. .*git worktree remove .*other-wt/,
+        /could not switch it back: qwen-autofix\/pr-7 is checked out in .*other-wt\. .*worktree remove .*other-wt/,
       ),
     });
     // The cleanup it names last could not delete the branch either: the
@@ -1043,27 +1043,28 @@ describe('runSync (real git, bare remote)', () => {
   // What holds the branch decides what frees it: `git worktree remove`
   // refuses a locked worktree and one whose `.git` is gone, and `git
   // worktree prune` drops a stale record but not a locked one. The git
-  // commands the reason gives, run by a shell as printed, let the next round
-  // through, wherever the holder is: its path quoted, spaces and quotes in it
-  // are one argument. POSIX shell syntax, run by `sh`.
+  // commands the reason gives, run by a shell as printed from outside the
+  // clone, let the next round through, wherever the holder is: its path
+  // quoted, spaces, quotes and a newline in it are one argument. POSIX shell
+  // syntax, run by `sh`.
   const holders: Array<[string, (holder: string) => void, RegExp, RegExp]> = [
     ['a checkout', () => {}, /\. Switch that checkout/, /worktree prune/],
     [
       'a directory deleted by hand',
       (holder) => rmSync(holder, { recursive: true, force: true }),
-      /nothing is checked out there any more\. Drop its record with `git worktree prune`/,
+      /nothing is checked out there any more\. Drop its record with `git -C '.*' worktree prune`/,
       /worktree remove|Switch that checkout/,
     ],
     [
       'a checkout whose .git is deleted',
       (holder) => rmSync(join(holder, '.git')),
-      /nothing is checked out there any more\. Drop its record with `git worktree prune`/,
+      /nothing is checked out there any more\. Drop its record with `git -C '.*' worktree prune`/,
       /worktree remove|Switch that checkout/,
     ],
     [
       'a locked checkout',
       (holder) => run(repo, 'worktree', 'lock', holder),
-      /, which is locked\. Unlock it \(`git worktree unlock '.*'`\), then switch that checkout/,
+      /, which is locked\. Unlock it \(`git -C '.*' worktree unlock '[^`]*'`\), then switch that checkout/,
       /worktree prune/,
     ],
     [
@@ -1072,7 +1073,7 @@ describe('runSync (real git, bare remote)', () => {
         run(repo, 'worktree', 'lock', holder);
         rmSync(holder, { recursive: true, force: true });
       },
-      /, a locked worktree git still records .*\. Unlock it \(`git worktree unlock '.*'`\), then drop its record with `git worktree prune`/,
+      /, a locked worktree git still records .*\. Unlock it \(`git -C '.*' worktree unlock '[^`]*'`\), then drop its record with `git -C '.*' worktree prune`/,
       /worktree remove|Switch that checkout/,
     ],
   ];
@@ -1086,6 +1087,7 @@ describe('runSync (real git, bare remote)', () => {
           `other wt "q" it's`,
           ...rest,
         ] as const,
+        [`${name} at a path with a newline`, 'other\nwt', ...rest] as const,
       ]),
     )(
     'with --discard says how to free a branch held by %s',
@@ -1098,11 +1100,11 @@ describe('runSync (real git, bare remote)', () => {
       expect(synced).toBe(false);
       expect(reason).toMatch(says);
       expect(reason).not.toMatch(saysNot);
-      for (const [, command] of String(reason).matchAll(
-        /`(git worktree [^`]+)`/g,
-      )) {
+      const commands = [...String(reason).matchAll(/`(git -C [^`]+)`/g)];
+      expect(commands.length).toBeGreaterThan(0);
+      for (const [, command] of commands) {
         execFileSync('sh', ['-c', command], {
-          cwd: repo,
+          cwd: tmpdir(),
           env: { ...process.env, GIT_CONFIG_GLOBAL: gitConfig },
           stdio: 'pipe',
         });
@@ -1113,6 +1115,43 @@ describe('runSync (real git, bare remote)', () => {
       });
     },
   );
+
+  it('with --discard asks only for a switch of the clone checkout that holds the branch', () => {
+    run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
+    // git removes no main worktree: switching it is all there is.
+    run(repo, 'switch', '-q', paths.branch);
+    const { synced, reason } = runSync(7, true);
+    expect(synced).toBe(false);
+    expect(reason).toMatch(
+      /is checked out in .*\. Switch that checkout to another branch; until then/,
+    );
+    expect(reason).not.toMatch(/worktree (?:remove|prune|unlock)/);
+    run(repo, 'switch', '-q', 'main');
+    expect(runSync(7, true)).toMatchObject({ synced: true, headSha: featSha });
+  });
+
+  it('with --discard sends to cleanup a switch git refuses for no other checkout', () => {
+    run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
+    // A lock git left behind stops the switch; no worktree holds the branch.
+    writeFileSync(
+      run(
+        paths.worktreePath,
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-path',
+        'index.lock',
+      ),
+      '',
+    );
+    expect(runSync(7, true)).toEqual({
+      synced: false,
+      headSha: featSha,
+      moved: false,
+      reason: expect.stringMatching(
+        /could not switch it back; remove the watch with `qwen autofix-pr cleanup 7 --force` and prepare it again\.$/,
+      ),
+    });
+  });
 
   it('with --discard takes the worktree back to the watch branch from one a fix switched to', () => {
     run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');

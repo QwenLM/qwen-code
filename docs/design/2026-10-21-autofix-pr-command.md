@@ -1629,7 +1629,9 @@ tool returns a coded refusal with that line first, verbatim —
 helper printed (git's or `gh`'s output). It takes the line only from a
 helper that exited 1, and only the last coded line with nothing but Node's
 warnings after it: a line a hook printed before the helper crashed is not
-its refusal. A message carries at most 8,000 characters as JSON, its head
+its refusal. The tool runs its helpers with Node's warnings off
+(`NODE_NO_WARNINGS=1`), so a warning Node flushes after the line, which may
+run over several lines, cannot hide it. A message carries at most 8,000 characters as JSON, its head
 and its tail, with terminal controls dropped, so the line fits the 16 KiB
 of stderr the tool keeps. A refusal without the line — one of the tool's own, which
 says why in words, arguments yargs refused, or a CLI older than the codes

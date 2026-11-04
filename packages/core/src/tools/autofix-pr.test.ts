@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -57,6 +57,7 @@ if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'refuse') { process.stderr.write('another session watches PR #12\\n'); process.exit(1); }
 else if (mode === 'lost' && command === 'fix-end') { process.stdout.write(JSON.stringify({ attempt: 'x', lostSnapshot: true }) + '\\n'); }
 else if (mode === 'crash-after-coded') { process.stderr.write(JSON.stringify({ refused: 'busy', next: 'retry', message: 'printed by a hook' }) + '\\n'); process.exit(2); }
+else if (mode === 'warn-after-coded') { process.stderr.write(JSON.stringify({ refused: 'not_prepared', next: 'end_task', message: 'PR #12 is not prepared here' }) + '\\n'); process.emitWarning('disk quota low: prune.\\n run: git gc --prune=now'); process.exitCode = 1; }
 else if (mode === 'refuse-coded') { process.stderr.write('Error: gh said something first\\n' + JSON.stringify({ refused: 'busy', next: 'retry', message: 'another autofix-pr helper is working on PR #12' }) + '\\n'); process.exit(1); }
 else if (mode === 'refuse-stack') { process.stderr.write('Error: gh said something first\\nAn unexpected critical error occurred:\\nError: no round of PR #12 has a fix to start\\n    at runFixStart (fix.js:1:1)\\n    at handler (fix.js:2:2)\\n'); process.exit(1); }
 else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePath: process.env.FAKE_WORKTREE, preparedAt: process.env.FAKE_PREPARED_AT, host: process.env.FAKE_HOST || undefined, authorCanPush: process.env.FAKE_CAN_PUSH === '1', tookOver: process.env.FAKE_TOOK_OVER === '1', inPlace: process.env.FAKE_IN_PLACE === '1' }) + '\\n');
@@ -913,6 +914,34 @@ describe('running a helper', () => {
     expect(result.error?.message).toMatch(
       /^autofix-pr sync refused \(exit 2\)\./,
     );
+  });
+
+  // Node flushes a warning raised as the helper refuses after its coded
+  // line, and a warning's text may run over several lines: the helper runs
+  // with Node's warnings off, whatever this process has.
+  it('reads the coded line of a helper that raised a warning as it refused', async () => {
+    vi.stubEnv('FAKE_AUTOFIX_MODE', 'warn-after-coded');
+    vi.stubEnv('NODE_NO_WARNINGS', '0');
+    const line = JSON.stringify({
+      refused: 'not_prepared',
+      next: 'end_task',
+      message: 'PR #12 is not prepared here',
+    });
+    // The fake, run with warnings on, prints the warning after the line.
+    const direct = spawnSync(
+      process.execPath,
+      [process.env['QWEN_CODE_CLI']!, 'autofix-pr', 'sync'],
+      { env: process.env, encoding: 'utf8' },
+    );
+    expect(direct.status).toBe(1);
+    expect(direct.stderr).toMatch(
+      /^\{.*\}\n\(node:\d+\) Warning: disk quota low: prune\.\n run: git gc/,
+    );
+    expect(codedRefusal(direct.stderr)).toBeNull();
+    const result = await invocation({ command: 'sync', pr: 12 }).execute(
+      signal(),
+    );
+    expect(result.error?.message).toBe(`autofix-pr sync refused: ${line}`);
   });
 
   it('puts a coded refusal first, verbatim, with what the helper printed before it', async () => {

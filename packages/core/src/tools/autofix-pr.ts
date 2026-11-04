@@ -431,6 +431,10 @@ export async function runAutofixPrHelper(
         QWEN_CODE: '1',
         ...sessionIdContext.run(sessionId, getShellContextEnvVars),
         QWEN_CODE_SESSION_ID: sessionId,
+        // A refusal's coded line is the last on stderr, and only the
+        // helper's own output may follow it for `codedRefusal`: a warning
+        // Node flushes after the line, in whatever shape, would hide it.
+        NODE_NO_WARNINGS: '1',
       }).filter(
         (entry): entry is [string, string] => typeof entry[1] === 'string',
       ),
@@ -767,7 +771,8 @@ interface PreparedLike {
 const FIX_STOP_WAIT_MS = 15_000;
 
 /** A warning Node prints on stderr: its line, the hint it adds, and the
- * frames `--trace-warnings` adds. */
+ * frames `--trace-warnings` adds. The helpers this tool runs print none
+ * (`NODE_NO_WARNINGS`); this covers one started otherwise. */
 const NODE_WARNING = /^\(node:\d+\) |^\(Use `node --trace-|^at /;
 
 /**

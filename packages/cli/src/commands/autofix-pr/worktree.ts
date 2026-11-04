@@ -344,7 +344,7 @@ export function requireWorktree(
       const holder = worktreeHolding(worktreePath, paths.branch);
       throw new SwitchBackRefused(
         holder
-          ? `${checkedOut}, and git could not switch it back: ${paths.branch} is checked out in ${holder.path}${freeing(holder)}; until then neither a round nor \`qwen autofix-pr cleanup ${prNumber}\` can use or remove the branch.`
+          ? `${checkedOut}, and git could not switch it back: ${paths.branch} is checked out in ${holder.path}${freeing(holder, worktreePath)}; until then neither a round nor \`qwen autofix-pr cleanup ${prNumber}\` can use or remove the branch.`
           : `${checkedOut}, and git could not switch it back; remove the watch with \`qwen autofix-pr cleanup ${prNumber} --force\` and prepare it again.`,
       );
     }
@@ -356,24 +356,35 @@ export function requireWorktree(
 }
 
 /** Another worktree of the clone that git counts as having a branch checked
- * out: `stale` once it is no checkout any more (its directory or its `.git`
+ * out: `main` for the clone's own checkout, which git never removes;
+ * `stale` once it is no checkout any more (its directory or its `.git`
  * deleted by hand), which git still counts until the record is pruned. */
 interface Holder {
   path: string;
+  main: boolean;
   stale: boolean;
   locked: boolean;
 }
 
 /** Another worktree of the clone with `branch` checked out, or null. */
 function worktreeHolding(worktreePath: string, branch: string): Holder | null {
-  const list = gitOpt('-C', worktreePath, 'worktree', 'list', '--porcelain');
-  if (list === null) return null;
+  // NUL-separated from git 2.36 on, so that a path keeps a newline in it;
+  // an older git has only the line form.
+  const z = gitOpt('-C', worktreePath, 'worktree', 'list', '--porcelain', '-z');
+  const out =
+    z ?? gitOpt('-C', worktreePath, 'worktree', 'list', '--porcelain');
+  if (out === null) return null;
+  const end = z === null ? '\n' : '\0';
   const self = realpathSync(worktreePath);
-  for (const entry of list.split('\n\n')) {
-    const path = /^worktree (.+)$/m.exec(entry)?.[1];
-    if (!path || /^branch (.+)$/m.exec(entry)?.[1] !== `refs/heads/${branch}`) {
-      continue;
-    }
+  // git lists the main worktree first.
+  for (const [index, entry] of out.split(end.repeat(2)).entries()) {
+    const fields = entry.split(end);
+    const value = (name: string) =>
+      fields
+        .find((field) => field.startsWith(`${name} `))
+        ?.slice(name.length + 1);
+    const path = value('worktree');
+    if (!path || value('branch') !== `refs/heads/${branch}`) continue;
     try {
       if (realpathSync(path) === self) continue;
     } catch {
@@ -381,10 +392,11 @@ function worktreeHolding(worktreePath: string, branch: string): Holder | null {
     }
     return {
       path,
+      main: index === 0,
       // What makes git call a record `prunable`, asked here rather than
       // read: git says it only from 2.31 on, and never of a locked record.
       stale: !existsSync(join(path, '.git')),
-      locked: /^locked\b/m.test(entry),
+      locked: fields.some((field) => /^locked(?: |$)/.test(field)),
     };
   }
   return null;
@@ -392,17 +404,24 @@ function worktreeHolding(worktreePath: string, branch: string): Holder | null {
 
 /** How the user frees the branch `holder` keeps. `git worktree prune`
  * drops a stale record but not a locked one, and `git worktree remove`
- * refuses a locked worktree and one whose `.git` is gone. The path in a
- * command is quoted, so the command runs as printed. */
-function freeing({ path, stale, locked }: Holder): string {
+ * refuses a locked worktree, one whose `.git` is gone, and the clone's own
+ * checkout. Each command runs as printed from any directory: the path in it
+ * is quoted, and it names the watch's worktree, the one path here that git
+ * has just been run in, to run in. */
+function freeing(
+  { path, main, stale, locked }: Holder,
+  worktreePath: string,
+): string {
+  if (main) return '. Switch that checkout to another branch';
+  const git = `git -C ${shellQuotePath(worktreePath)} worktree`;
   const quoted = shellQuotePath(path);
   const gone =
     'worktree git still records although nothing is checked out there any more';
   const free = stale
-    ? 'drop its record with `git worktree prune`'
-    : `switch that checkout to another branch or remove it (\`git worktree remove ${quoted}\`)`;
+    ? `drop its record with \`${git} prune\``
+    : `switch that checkout to another branch or remove it (\`${git} remove ${quoted}\`)`;
   if (locked) {
-    return `, ${stale ? `a locked ${gone}` : 'which is locked'}. Unlock it (\`git worktree unlock ${quoted}\`), then ${free}`;
+    return `, ${stale ? `a locked ${gone}` : 'which is locked'}. Unlock it (\`${git} unlock ${quoted}\`), then ${free}`;
   }
   return `${stale ? `, a ${gone}` : ''}. ${free[0].toUpperCase()}${free.slice(1)}`;
 }
