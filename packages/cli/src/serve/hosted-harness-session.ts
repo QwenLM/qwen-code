@@ -7197,12 +7197,18 @@ export function registerHostedHarnessSessionRoutes(
       // a bare or lifecycle load must keep refusing with 409, never drive a
       // parked Turn. It drops only the !session.hooks conjunct of `takeover`,
       // which would otherwise make the arm unreachable for an extensions
-      // Session that also carries a Hook catalog.
+      // Session that also carries a Hook catalog — and it is scoped to a
+      // command-step plan: a native approval on a hooks/MCP Session is refused
+      // by resumeSavedNativeBatch, so admitting it here would 503 the load
+      // instead of attaching (R7-2). Native approvals stay on the no-hooks arm.
       if (
         unsettled &&
         session.toolProfile &&
         ((takeover && !session.hooks && !session.mcp) ||
-          (takeoverFlags && !lifecycle && session.extensions?.enabled)) &&
+          (takeoverFlags &&
+            !lifecycle &&
+            session.extensions?.enabled &&
+            pendingCommandApproval?.plan.commandStep !== undefined)) &&
         brokerOptions
       ) {
         const verdict = await managed.authority.harnessRunAuthorization();

@@ -440,13 +440,13 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
       // without registering it — adding it would fire the enumeration
       // check below for exactly the snapshots this keeps readable
       // (#13930 R1-43). The same backward-compatibility applies to the
-      // extension bundle's contributions child: a snapshot committed
-      // before that closure edge shipped recorded the bundle but never
-      // its contributions, so an absent contributions ref degrades
-      // instead of condemning the whole snapshot (R3-1).
+      // extension closure's legacy kinds: a snapshot committed before that
+      // closure edge shipped recorded the bundle but never its contributions
+      // child (nor the manifest's parts), so an absent one degrades instead of
+      // condemning the whole snapshot (R3-1 / R7-1).
       if (
         ref.kind === MANAGED_TOOL_RESULT_KINDS.page ||
-        ref.kind === 'managed-extension-contributions'
+        LEGACY_EXTENSION_CLOSURE_KINDS.has(ref.kind)
       )
         continue;
       throw corrupt('snapshot resource is missing.');
@@ -616,6 +616,15 @@ const EXTENSION_RECORD_KINDS = new Set(
   ),
 );
 
+// Resources a pre-closure-edge snapshot may name without having staged them:
+// a bundle's contributions child and the contributions manifest's parts. The
+// inspection, native-page and commit walks degrade an absent one instead of
+// condemning the snapshot. One constant so the walks cannot drift (R7-1).
+const LEGACY_EXTENSION_CLOSURE_KINDS = new Set([
+  'managed-extension-contributions',
+  'managed-extension-contributions-part',
+]);
+
 class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   private readonly staged = new Map<
     string,
@@ -708,11 +717,20 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       if (staged !== undefined) {
         requireSameRef(staged.ref, ref);
         const nested = collectNestedResourceRefs(ref, staged.bytes);
-        pending.push(
-          ...(ref.kind === CHECKPOINT_HISTORY_KIND
+        const children =
+          ref.kind === CHECKPOINT_HISTORY_KIND
             ? nested.filter((child) => this.staged.has(child.resourceId))
-            : nested),
-        );
+            : nested;
+        for (const child of children) {
+          // A re-staged legacy bundle may name a contributions child (or part)
+          // that was never uploaded; degrade it like the persisted arm (R7-1).
+          if (
+            LEGACY_EXTENSION_CLOSURE_KINDS.has(child.kind) &&
+            !(await this.has(child))
+          )
+            continue;
+          pending.push(child);
+        }
       } else if (
         ref.kind !== CHECKPOINT_HISTORY_KIND &&
         isReferenceContainer(ref.kind)
@@ -721,12 +739,12 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
           ref,
           await this.read(ref),
         )) {
-          // A legacy bundle may name a contributions child that was never
-          // staged — the commit-side counterpart of the read-side tolerance
-          // (R6-1). Drop only an absent contributions child from the closure;
+          // A legacy bundle may name a contributions child (or part) that was
+          // never staged — the commit-side counterpart of the read-side
+          // tolerance (R6-1 / R7-1). Drop only an absent one from the closure;
           // a present or conflicting one stays fatal.
           if (
-            nested.kind === 'managed-extension-contributions' &&
+            LEGACY_EXTENSION_CLOSURE_KINDS.has(nested.kind) &&
             !(await this.has(nested))
           )
             continue;
@@ -1542,12 +1560,13 @@ class ManagedSessionStoreHttpClient {
         }
         // Transitive refs collected from resource bodies: a bundle committed
         // before the contributions closure edge shipped names a contributions
-        // child the snapshot never staged. Degrade only those absent children,
-        // mirroring the inspection walk's tolerance (R3-1 / R4-6); a directly
-        // declared contributions ref stays on the strict path above.
+        // child (and manifest parts) the snapshot never staged. Degrade only
+        // those absent legacy kinds, mirroring the inspection walk's tolerance
+        // (R3-1 / R4-6 / R7-1); a directly declared ref stays on the strict
+        // path above.
         for (const resource of nested) {
           if (
-            resource.kind === 'managed-extension-contributions' &&
+            LEGACY_EXTENSION_CLOSURE_KINDS.has(resource.kind) &&
             !resources.has(resource.resourceId)
           )
             continue;

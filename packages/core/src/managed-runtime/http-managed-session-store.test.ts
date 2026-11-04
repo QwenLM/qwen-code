@@ -6292,6 +6292,158 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('inspects a snapshot whose contributions manifest names an unstaged part (R7-1)', async () => {
+    // Entrance 1: pre-edge snapshots hold the contributions manifest but never
+    // its part rows. The inspection walk must degrade the absent part, not
+    // condemn the snapshot; a directly declared missing ref stays fatal.
+    const server = new FakeManagedSessionStore();
+    const { session } = await bootStoresAndSession(server);
+    try {
+      const partRef = await session.resources.publish(
+        'managed-extension-contributions-part',
+        Buffer.from('{}', 'utf8'),
+      );
+      const contributionsRef = await session.resources.publish(
+        'managed-extension-contributions',
+        Buffer.from(JSON.stringify({ parts: [partRef] }), 'utf8'),
+      );
+      const bundleRef = await session.resources.publish(
+        'managed-extension-config-bundle',
+        Buffer.from(
+          JSON.stringify({ packages: [{ contributionsRef }] }),
+          'utf8',
+        ),
+      );
+      const outcomeRef = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      );
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: 'receipt-legacy-part',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'receipt:legacy-part',
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: 'execution-legacy-part',
+            toolOutcomeRef: outcomeRef,
+            resultRef: null,
+            resources: [bundleRef],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      const transactions = server.commits.map((commit, index) => ({
+        ...commit,
+        journalRevision: index + 1,
+        recordEncoding: 'identity',
+        byteLength: Buffer.from(String(commit['recordBytesBase64']), 'base64')
+          .length,
+      }));
+      const resources = [] as Array<{
+        ref: ManagedSessionDurableRef;
+        bytesBase64: string;
+        referencedRevisions: number[];
+      }>;
+      for (const [index, commit] of server.commits.entries()) {
+        for (const raw of commit['resources'] as ManagedSessionDurableRef[]) {
+          const ref = {
+            resourceId: raw.resourceId,
+            kind: raw.kind,
+            schemaVersion: raw.schemaVersion,
+            byteLength: raw.byteLength,
+            digest: raw.digest,
+          };
+          resources.push({
+            ref,
+            bytesBase64: (await session.resources.read(ref)).toString('base64'),
+            referencedRevisions: [index + 1],
+          });
+        }
+      }
+      const snapshotInput = {
+        format: 'qwen-csi-receipt-checkpoint-snapshot/1',
+        sessionKey: SESSION_KEY,
+        head: {
+          state: 'ACTIVE',
+          storageVersion: 1,
+          writerGeneration: 1,
+          journalRevision: transactions.length,
+          committedSequence: session.authority.committedSequence,
+          lastCommitDigest: session.authority.commitProof.committedPrefixHash,
+          activationEpoch: session.activation.epoch,
+          latestCheckpointResourceId: null,
+          compactedThroughRevision: 0,
+          recoveryStatus: 'READY',
+          recoveryDetailCode: null,
+        },
+        transactions,
+        resources,
+      };
+      // Drop only the part body — the manifest and bundle remain.
+      const snapshot = readOnlyManagedSessionSnapshot({
+        ...snapshotInput,
+        resources: snapshotInput.resources.filter(
+          ({ ref }) => ref.resourceId !== partRef.resourceId,
+        ),
+      });
+      expect(await snapshot.resources.read(contributionsRef)).toEqual(
+        await session.resources.read(contributionsRef),
+      );
+      await expect(snapshot.resources.read(partRef)).rejects.toThrow(
+        'snapshot resource is missing.',
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('commits a staged legacy bundle whose contributions child was never uploaded (R7-1)', async () => {
+    // Entrance 2: hosted-extension-session re-publishes the active bundle on
+    // every apply, so the bundle is STAGED while its legacy contributions child
+    // was never uploaded. The staged arm must degrade the absent child too.
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      const absentChild: ManagedSessionDurableRef = {
+        resourceId: 'legacy-contributions-never-uploaded',
+        kind: 'managed-extension-contributions',
+        schemaVersion: 1,
+        byteLength: 2,
+        digest: 'a'.repeat(64),
+      };
+      // Stage the bundle naming the absent child; do not commit it first.
+      const bundleRef = await stores.resourceStore.publish(
+        'managed-extension-config-bundle',
+        Buffer.from(
+          JSON.stringify({ packages: [{ contributionsRef: absentChild }] }),
+          'utf8',
+        ),
+      );
+      const census = await (
+        stores.resourceStore as unknown as {
+          commitResources(
+            refs: readonly ManagedSessionDurableRef[],
+          ): Promise<Array<{ resourceId: string }>>;
+        }
+      ).commitResources([bundleRef]);
+      const ids = census.map((resource) => resource.resourceId);
+      expect(ids).toContain(bundleRef.resourceId);
+      expect(ids).not.toContain(absentChild.resourceId);
+    } finally {
+      await session.close();
+    }
+  });
+
   function nativeSnapshotFixture(
     server: FakeManagedSessionStore,
     coverage: number,
