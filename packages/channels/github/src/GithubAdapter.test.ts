@@ -1659,6 +1659,7 @@ describe('GithubChannel', () => {
           'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.',
           false,
         ],
+        ['a network failure, reported as 500', 500, 'fetch failed', false],
         [
           'the older abuse-detection wording',
           403,
@@ -1710,12 +1711,25 @@ describe('GithubChannel', () => {
           throw transient();
         });
 
-        for (let poll = 1; poll < 30; poll++) await pollOnce();
-        expect(
-          mockOctokit.rest.activity.markNotificationsAsRead,
-        ).not.toHaveBeenCalled();
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          for (let poll = 1; poll < 30; poll++) await pollOnce();
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).not.toHaveBeenCalled();
 
-        await pollOnce();
+          await pollOnce();
+
+          // The channel's own line is throttled like the timeline rows.
+          expect(
+            stderr.mock.calls
+              .map((call) => String(call[0]))
+              .filter((line) => line.includes('API error processing issue:42'))
+              .map((line) => line.match(/\((\d+)\/30\)|skipping/)?.[0]),
+          ).toEqual(['(1/30)', '(10/30)', '(20/30)', 'skipping']);
+        } finally {
+          stderr.mockRestore();
+        }
 
         expect(
           mockOctokit.rest.activity.markNotificationsAsRead,
@@ -2123,6 +2137,80 @@ describe('GithubChannel', () => {
             .filter((row) => row['number'] === 2)
             .map((row) => (row['detail'] as { heldPolls: number }).heldPolls),
         ).toEqual([1, 10, 20, 30, 40]);
+      });
+
+      it('spends no budget while nothing newer waits to be marked read', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              // Thread 1 stays unread at the cursor (its mark-as-read never
+              // applied) and nothing newer arrives until poll 31.
+              const stale = issueNotification(1, '2026-07-01T00:00:00.000Z');
+              return poll <= 30 ? [stale] : [stale, issueNotification(2)];
+            }
+            if (params.issue_number === 1 || poll === 31) throw transient();
+            const at = '2026-07-02T01:30:00.000Z';
+            return [makeComment({ id: 2001, created_at: at, updated_at: at })];
+          },
+        );
+
+        for (let i = 0; i < 32; i++) await pollOnce();
+
+        // Thread 2's first failure holds the new window; its comment is
+        // answered on the next poll.
+        expect(
+          journalRows()
+            .filter((row) => row['number'] === 2)
+            .map((row) => row['outcome']),
+        ).toEqual(['failed']);
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '2001',
+        ]);
+      });
+
+      it('reports a thread as retried while a failing task store holds the window', async () => {
+        await initFailing();
+        mockOctokit.paginate
+          .mockResolvedValueOnce([makeNotification()])
+          .mockResolvedValueOnce([makeComment()]);
+        const originalRename = nodeFs.renameSync;
+        const spy = vi.spyOn(nodeFs, 'renameSync').mockImplementation(((
+          from: string,
+          to: string,
+        ) => {
+          if (
+            typeof to === 'string' &&
+            to.endsWith('-github-inbound-tasks.json')
+          ) {
+            throw Object.assign(new Error('ENOSPC: no space left on device'), {
+              code: 'ENOSPC',
+            });
+          }
+          return (originalRename as (a: string, b: string) => void)(from, to);
+        }) as unknown as typeof nodeFs.renameSync);
+        try {
+          await pollOnce();
+        } finally {
+          spy.mockRestore();
+        }
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+        expect(journalRows()).toEqual([
+          expect.objectContaining({ outcome: 'failed', number: 42 }),
+        ]);
+
+        mockOctokit.paginate
+          .mockResolvedValueOnce([makeNotification()])
+          .mockResolvedValueOnce([makeComment()]);
+        await pollOnce();
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '1001',
+        ]);
       });
 
       it('bounds the once-per-window journal keys', async () => {

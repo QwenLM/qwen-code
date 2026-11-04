@@ -2310,6 +2310,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // the first and every tenth poll it stops, and a skip once.
         const heldPolls =
           failure === 'shared' ? this.sharedHoldPolls + 1 : transientPoll;
+        // A local error raised by a failing task store is not this thread's
+        // fault, and the store failure already holds the window: report it as
+        // retried, not skipped.
+        const storeHeld =
+          failure === 'permanent' &&
+          (this.inboundPersistenceBlocked || this.publicationAuditBlocked);
+        const held = retry || storeHeld;
         const milestone = (n: number) => n === 1 || n % 10 === 0;
         const report =
           failure === 'shared'
@@ -2327,7 +2334,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
               ? `[Channel:${this.name}] API error processing ${threadId} (rate limit or credentials), keeping notifications unread and stopping this poll: ${error}\n`
               : retry
                 ? `[Channel:${this.name}] API error processing ${threadId} (${heldPolls}/${MAX_TRANSIENT_FAILURE_POLLS}), keeping it unread for the next poll: ${error}\n`
-                : `[Channel:${this.name}] API error processing ${threadId}, skipping: ${error}\n`,
+                : storeHeld
+                  ? `[Channel:${this.name}] error processing ${threadId} while the task store is failing, keeping it unread for the next poll: ${error}\n`
+                  : `[Channel:${this.name}] API error processing ${threadId}, skipping: ${error}\n`,
           );
           let detail: Record<string, number> | undefined;
           if (failure === 'transient') {
@@ -2337,7 +2346,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           }
           this.recordChannelEvent({
             type: 'inbound',
-            outcome: retry ? 'failed' : 'skipped',
+            outcome: held ? 'failed' : 'skipped',
             reason: 'github_api_error',
             triggerKind: reason,
             repository: chatId,
@@ -2352,7 +2361,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         continue;
       }
     }
-    if (transientHeld) this.transientHoldPolls += 1;
+    // Only a window that can commit spends the budget: a thread left unread
+    // at the cursor with nothing newer to mark read holds nothing.
+    if (transientHeld && this.pendingCursorUpdatedAt) {
+      this.transientHoldPolls += 1;
+    }
     if (sharedHeld) this.sharedHoldPolls += 1;
     if (reasonFilterCollapsed > 0) {
       // One counted row instead of a row per notification: the threads differ,
