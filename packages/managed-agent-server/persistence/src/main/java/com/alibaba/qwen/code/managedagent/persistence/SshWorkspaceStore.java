@@ -392,27 +392,33 @@ public class SshWorkspaceStore
     }
 
     static String physicalKey(JdbcTemplate jdbc, String tenant, String storage) {
-        boolean lock = org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive();
+        String lock = org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive() ? " FOR UPDATE" : "";
         var rows = jdbc.queryForList("SELECT tenant_id, storage_id, storage_kind, registration_state, physical_key, fence_operation_id"
-                + " FROM ma_storage WHERE alias_key = ?" + (lock ? " FOR UPDATE" : ""),
+                + " FROM ma_storage WHERE alias_key = ?" + lock,
                 JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
         if (rows.isEmpty() || !KIND.equals(rows.getFirst().get("storage_kind"))) {
             return null;
         }
         var row = rows.getFirst();
+        requireOwner(jdbc, tenant, storage, row, lock);
+        return (String) row.get("physical_key");
+    }
+
+    static Map<String, Object> requireOwner(JdbcTemplate jdbc, String tenant, String storage,
+            Map<String, Object> row, String lock) {
         if (!tenant.equals(text(row.get("tenant_id"))) || !storage.equals(text(row.get("storage_id")))
                 || !"REGISTERED".equals(row.get("registration_state")) || row.get("fence_operation_id") != null
                 || !(row.get("physical_key") instanceof String key)) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
         var owners = jdbc.queryForList("SELECT mount_state, tenant_id, storage_id FROM ma_storage_owner WHERE storage_key = ?"
-                + " AND storage_kind = 'SSH_LOCAL'" + (lock ? " FOR UPDATE" : ""), key);
+                + " AND storage_kind = 'SSH_LOCAL'" + lock, key);
         if (owners.size() != 1 || !"READY".equals(owners.getFirst().get("mount_state"))
                 || !tenant.equals(text(owners.getFirst().get("tenant_id")))
                 || !storage.equals(text(owners.getFirst().get("storage_id")))) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
-        return key;
+        return owners.getFirst();
     }
 
     private static String text(Object value) {
