@@ -3700,29 +3700,41 @@ describe('GithubChannel', () => {
       channel.disconnect();
     });
 
-    it('keeps bare 429 publication failures single-shot', async () => {
-      await connectForPublication();
-      const error = Object.assign(new Error('secondary rate limit'), {
-        status: 429,
-      });
-      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
-      const publish = (
-        channel as unknown as {
-          publishFinalResponse: (
-            chatId: string,
-            threadId: string,
-            text: string,
-            sessionId: string,
-          ) => Promise<void>;
-        }
-      ).publishFinalResponse.bind(channel);
+    it.each([
+      ['without headers', undefined],
+      ['with only retry-after', { 'retry-after': '30' }],
+    ])(
+      'keeps bare 429 publication failures single-shot (%s)',
+      async (_label, headers) => {
+        await connectForPublication();
+        const error = Object.assign(new Error('secondary rate limit'), {
+          status: 429,
+          ...(headers ? { response: { headers } } : {}),
+        });
+        mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+        const publish = (
+          channel as unknown as {
+            publishFinalResponse: (
+              chatId: string,
+              threadId: string,
+              text: string,
+              sessionId: string,
+            ) => Promise<void>;
+          }
+        ).publishFinalResponse.bind(channel);
 
-      await expect(
-        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
-      ).rejects.toMatchObject({ cause: error });
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
-      expect(existsSync(pendingPath())).toBe(false);
-    });
+        await expect(
+          publish(
+            'owner/repo',
+            'issue:42',
+            'Final reply',
+            'session-publication',
+          ),
+        ).rejects.toMatchObject({ cause: error });
+        expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+        expect(existsSync(pendingPath())).toBe(false);
+      },
+    );
 
     it('audits an ambiguous publication failure as failed_ambiguous, keeping the key consumed (R6-A3)', async () => {
       await connectForPublication();
@@ -3790,6 +3802,13 @@ describe('GithubChannel', () => {
         [60_000, 60_000],
       ],
       ['a bare 403', 403, SECONDARY_LIMIT, {}, [60_000, 120_000]],
+      [
+        'a 403 with retry-after and other wording',
+        403,
+        'Forbidden',
+        { 'retry-after': '30' },
+        [30_000, 30_000],
+      ],
       ['a 429', 429, SECONDARY_LIMIT, {}, [60_000, 120_000]],
       [
         'the older abuse-detection wording',
@@ -3852,6 +3871,57 @@ describe('GithubChannel', () => {
         ]);
       },
     );
+
+    it('posts the final reply once when GitHub accepts the retry after a secondary limit', async () => {
+      await connectForPublication();
+      const sleep = vi.fn().mockResolvedValue(undefined);
+      (
+        channel as unknown as {
+          sleepForRetry: (ms: number) => Promise<void>;
+        }
+      ).sleepForRetry = sleep;
+      mockOctokit.rest.issues.createComment
+        .mockRejectedValueOnce(
+          Object.assign(
+            new Error(`${SECONDARY_LIMIT} - https://docs.github.com/rest`),
+            {
+              status: 403,
+              response: { headers: { 'x-ratelimit-remaining': '4999' } },
+            },
+          ),
+        )
+        .mockResolvedValueOnce({
+          data: {
+            id: 2010,
+            html_url:
+              'https://github.com/owner/repo/issues/42#issuecomment-2010',
+          },
+        });
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await publish(
+        'owner/repo',
+        'issue:42',
+        'Final reply',
+        'session-publication',
+      );
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
+      expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([60_000]);
+      const audit = readFileSync(auditPath(), 'utf-8');
+      expect(audit).toContain('"outcome":"posted"');
+      expect(audit).not.toContain('"outcome":"failed');
+      expect(existsSync(pendingPath())).toBe(false);
+    });
 
     it('keeps the final reply pending, without an immediate retry, when a stop ends the rate-limit wait', async () => {
       await connectForPublication();
@@ -6163,6 +6233,26 @@ describe('GithubChannel', () => {
         expect(sleep).toHaveBeenCalledWith(60_000);
       },
     );
+
+    it('waits the rate-limit minimum when retry-after is unusable and the wording differs', async () => {
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          Object.assign(new Error('Forbidden'), {
+            status: 403,
+            response: {
+              headers: {
+                'x-ratelimit-remaining': '4999',
+                'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT',
+              },
+            },
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(60_000);
+    });
 
     it('matches the secondary-limit wording in any letter case', async () => {
       const sleep = stubSleep();

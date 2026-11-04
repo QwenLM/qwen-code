@@ -995,12 +995,13 @@ const SECONDARY_RATE_LIMIT_MESSAGE = /secondary rate limit|abuse detection/i;
 
 /**
  * GitHub's rate limiter rejected the write before creating anything. The
- * `x-ratelimit-remaining` header shows a rate limiter answered rather than,
- * say, a bare 429 from a proxy; then either the budget is exhausted or the
- * message carries GitHub's secondary-limit wording, which GitHub sends with
- * quota left and not always with `retry-after`. Unlike the watch-pass
- * predicate, a `retry-after` header alone is not enough: a proxy can send one
- * too, and a wrongly retried comment is a duplicate public reply.
+ * `x-ratelimit-remaining` header shows GitHub's API answered rather than, say,
+ * a bare 429 from a proxy in front of it. Then any of GitHub's rate-limit
+ * signals marks the rejection: an exhausted budget, `retry-after`, or the
+ * secondary-limit wording. GitHub sends a secondary limit with quota left and
+ * not always with `retry-after`, and its wording has changed before, so no
+ * single signal is required. A component that copied GitHub's headers onto
+ * its own 403/429 could still be misread, by any of the three alike.
  */
 function isDefiniteNoWriteGithubError(err: unknown): boolean {
   const e = err as {
@@ -1008,12 +1009,14 @@ function isDefiniteNoWriteGithubError(err: unknown): boolean {
     message?: unknown;
     response?: { headers?: Record<string, string | number> };
   };
-  const remaining = e.response?.headers?.['x-ratelimit-remaining'];
+  const headers = e.response?.headers;
+  const remaining = headers?.['x-ratelimit-remaining'];
   if ((e.status !== 403 && e.status !== 429) || remaining === undefined) {
     return false;
   }
   return (
     Number(remaining) === 0 ||
+    headers?.['retry-after'] !== undefined ||
     SECONDARY_RATE_LIMIT_MESSAGE.test(String(e.message))
   );
 }
@@ -3897,10 +3900,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             ) + 1000;
         } else if (
           (e.status === 403 || e.status === 429) &&
-          SECONDARY_RATE_LIMIT_MESSAGE.test(String(e.message))
+          (headers['retry-after'] !== undefined ||
+            SECONDARY_RATE_LIMIT_MESSAGE.test(String(e.message)))
         ) {
-          // GitHub's guidance for a secondary limit without retry-after: wait
-          // at least a minute, longer on each repeat.
+          // GitHub's guidance for a secondary limit without a usable
+          // retry-after: wait at least a minute, longer on each repeat.
           cooldown = 60_000 * 2 ** (attempt - 1);
         } else {
           cooldown = 1000 * 2 ** (attempt - 1);
