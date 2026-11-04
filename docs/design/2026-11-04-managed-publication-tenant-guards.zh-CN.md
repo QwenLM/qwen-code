@@ -1,0 +1,89 @@
+# 去掉发布车道上的租户级 guard
+
+[English](2026-11-04-managed-publication-tenant-guards.md) | [简体中文](2026-11-04-managed-publication-tenant-guards.zh-CN.md)
+
+状态：待评审的设计，尚无代码改动。
+
+## 问题与现状
+
+工具输出发布（reserve、上传、校验、finish、准入、回执、续期、隔离）的每次调用仍会获取两个
+租户级的行：
+
+- **Placement**（`runtime_placement`），最先获取，经由 `lockPublicationPlacement` /
+  `lockStagedPlacement`、发布写入方（`lockPublicationWriter`）和 CSI continuation。
+- **Publication**（`output_publication`），随后获取，经由 `ToolPublicationStore`、
+  `ToolPublicationDataStore`、`ToolPublicationAdmissionStore` 和 `ManagedToolResultStore`
+  中的 `ToolPublicationRetentionStore.lockTenant`。
+
+因此一个租户内所有发布输出的 Session，其发布步骤只能逐个执行，还要排在 Runtime placement、
+存储工作、迁移、retention 和回收之后。journal commit、Turn 准入和 Session 命令都已不再获取
+这两个行。
+
+## 每个 guard 保护什么
+
+| guard       | 保护的内容                                                                                                                                                                             | 另一侧的持有者                                                                                                               |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Placement   | 发布的原始 Runtime binding 保持被引用：Runtime retention 清扫只有在 `executionReferenced` 和 `bindingReferenced` 找不到该 binding 的 `ma_output_capture` 或 execution 行之后才删除它。 | `JdbcRuntimeRetention.visit`（placement、slot、binding `FOR UPDATE`，在 READ COMMITTED 下读引用）。                          |
+| Publication | 1. 租户字节配额：`reserve` 先 fence 已过期的预留，汇总租户已占用字节，再插入预留。2. 发布车道与回收之间的锁顺序。                                                                      | 其他 Session 的 `reserve`；`SessionResourceCollectionCollector` 与发布回收器（租户、私有 head、publication、公共 Session）。 |
+
+只有 `reserve` 会增加租户总量。上传、校验、finish、准入和回执只在已有预留内移动字节
+（`*_used_bytes` 不会超过 `*_held_bytes`），回收只释放字节。
+
+车道先锁 publication 行（`lockOriginalSettledResult`），再锁 Session root 和 head
+（`lockPublicationWriter`）；回收先锁私有 head，再锁 publication 行。两者顺序相反，目前靠双方
+都先获取同一租户行才不会死锁。
+
+## 方案
+
+分三步，各自一个 PR，每步都附 MySQL 锁等待证据。
+
+### C1. 租户配额使用独立的行
+
+只为 `reserve` 保留租户级串行，改用 `ma_tenant_guard` 中独立的 `publication_quota` 域，由
+`reserve` 和回收中的配额释放获取。其他车道不再与预留争用。曾考虑用计数行加条件更新；它仍要
+持有排他行锁直到预留事务结束，还会在每条 capture 的已占用字节之外引入第二个数据来源，相比
+独立的 guard 没有收益。
+
+### C2. 发布车道按 Session 排序，而不是按租户
+
+不预留的车道去掉 `output_publication`，车道与回收统一按 Session 排序：Session root、私有
+head、publication 行、公共 Session。
+
+- 车道把 `lockPublicationWriter`（root、head）移到 publication 行锁之前。按照
+  [发布锁顺序设计](2026-10-11-publication-lock-order-split.zh-CN.md)的要求，加锁之后仍会
+  读取 publication 行并与存储的 binding 核对。
+- 回收保持原顺序但去掉租户行；只有配额释放会在 head 之前获取 `publication_quota`（C1）。
+- 沿用 journal commit 设计中的快照规则：每条车道的第一条语句是锁定读，之后的普通读能看到
+  另一侧已提交的内容。
+
+### C3. 用原始 Runtime binding 取代 placement
+
+在普通（非 CSI）发布车道中，用对原始 binding 行（`ma_runtime_binding`）的共享锁取代
+placement guard，获取位置与目前的 placement 相同。retention 清扫在检查引用之前以
+`FOR UPDATE` 锁定该行，因此要么车道等待清扫，随后发现 binding 已不存在而拒绝；要么清扫等待
+车道，随后看到它的引用。CSI 固定的 Session 保留 placement；CSI 退役与应用路径不在范围内。
+
+这正是[锁范围设计](2026-11-04-managed-lock-scope.zh-CN.md)为 hosted cleanup 引用留下的
+binding 握手；同一握手之后也可用于这些引用。
+
+## 待定问题
+
+1. C2 的锁顺序调整涉及所有发布车道。车道现有的 MySQL 测试
+   （`ToolPublicationLockOrderMySqlIT`、发布故障门禁）固定了目前的顺序，需要随之修改。
+2. C3 需要确定 binding 在全局顺序中的位置：清扫在 placement 下先锁 slot 再锁 binding；
+   车道会在 Session root 之后锁 binding。清扫锁定 binding 之后不再锁 Session 行，预计不会
+   形成环路，但审计必须覆盖车道和清扫对 `ma_tool_execution` 的加锁。
+3. `ManagedToolResultStore.claim` 和 `admitsLegacyProjection`（工具结果投影的 worker
+   车道）是按 C2 处理，还是保留 guard。
+
+## 风险
+
+- 去掉租户串行会暴露原本被掩盖的缺失键间隙锁、顺序环路和过期快照；每一步的测试都需要独立
+  的 MySQL 连接，不能只用 H2。
+- 配额按设计仍按租户串行；并发预留输出很多的租户仍会在 `publication_quota` 上排队。
+
+## 验证与验收
+
+每一步：在基线上复现目标等待，再证明移除的 guard 被持有时车道仍能完成；在 MySQL 上并发
+运行同一租户不同 Session 的发布，不出现死锁；在并发车道下运行回收、retention 清扫和配额
+耗尽；通过发布、retention、回收与锁契约测试，包括 CI 中的 MySQL profile。
