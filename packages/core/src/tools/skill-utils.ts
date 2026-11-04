@@ -327,7 +327,9 @@ ${escapeXml(entry.description)}
  * `<repo>/.qwen/skills/` regardless of folder trust because its body only
  * influences the model, but its side effects grant tool approvals or run
  * repo-supplied commands, so they need explicit folder trust. Disabling
- * folder trust does not authorize these side effects. User, extension
+ * folder trust does not authorize these side effects. Settings-file project
+ * hooks additionally need the user's approval (`Config.getProjectHooks()`);
+ * skill and subagent frontmatter hooks do not yet. User, extension
  * and bundled skills are not repo-controlled and are unaffected.
  */
 export function canApplySkillSideEffects(
