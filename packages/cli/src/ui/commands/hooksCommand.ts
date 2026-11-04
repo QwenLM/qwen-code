@@ -157,7 +157,33 @@ const listCommand: SlashCommand = {
       ? sessionHooksManager.getAllSessionHooks(sessionId)
       : [];
 
-    const totalHooks = configHooks.length + sessionHooks.length;
+    // The registry omits blocks the approval/trust gates withhold; the
+    // listing accessor still has them, so a non-interactive `/hooks` shows
+    // what is configured but not loaded instead of claiming none exist.
+    const withheldApproval = config.getWithheldProjectHooks?.();
+    const withheldTrust = config.getTrustWithheldProjectHooks?.();
+    const withheld = withheldApproval ?? withheldTrust;
+    const withheldReason = withheldApproval
+      ? config.isProjectHooksRejected?.()
+        ? 'rejected'
+        : 'not approved'
+      : 'folder not trusted';
+    const withheldCount = withheld
+      ? Object.values(withheld).reduce(
+          (count, defs) =>
+            count +
+            (Array.isArray(defs)
+              ? defs.reduce(
+                  (n, def) =>
+                    n + (Array.isArray(def?.hooks) ? def.hooks.length : 0),
+                  0,
+                )
+              : 0),
+          0,
+        )
+      : 0;
+
+    const totalHooks = configHooks.length + sessionHooks.length + withheldCount;
 
     if (totalHooks === 0) {
       return {
@@ -234,6 +260,28 @@ const listCommand: SlashCommand = {
         name: extractName(config),
         source: formatHookSource('session'),
       });
+    }
+
+    if (withheld) {
+      for (const [eventName, defs] of Object.entries(withheld)) {
+        if (!Array.isArray(defs)) continue;
+        for (const def of defs) {
+          if (!Array.isArray(def?.hooks)) continue;
+          for (const hookConfig of def.hooks) {
+            addHook(eventName, normalizeMatcher(def.matcher), {
+              name: extractName(
+                hookConfig as {
+                  type: string;
+                  command?: string;
+                  url?: string;
+                  name?: string;
+                },
+              ),
+              source: `${formatHookSource('project')}; disabled (${withheldReason})`,
+            });
+          }
+        }
+      }
     }
 
     let output = `**Configured Hooks (${totalHooks} total)**\n\n`;
