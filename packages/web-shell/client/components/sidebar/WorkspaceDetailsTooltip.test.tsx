@@ -184,9 +184,7 @@ describe('WorkspaceDetailsTooltip', () => {
       </WorkspaceDetailsTooltip>,
     );
 
-    expect(facetRow(details, 'hooks')?.textContent).toBe(
-      'Hooks2 (1 untrusted)',
-    );
+    expect(facetRow(details, 'hooks')?.textContent).toBe('Hooks2');
     expect(facetRow(details, 'hooks')?.getAttribute('title')).toContain(
       'not loaded (folder not trusted)',
     );

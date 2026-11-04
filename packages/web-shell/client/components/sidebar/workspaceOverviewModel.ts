@@ -358,9 +358,9 @@ export function formatOverviewValue(
     case 'context':
       return String(snapshot.context!.fileCount);
     case 'hooks':
-      return snapshot.hooks!.untrusted > 0
-        ? `${snapshot.hooks!.count} (${snapshot.hooks!.untrusted} untrusted)`
-        : String(snapshot.hooks!.count);
+      // The value stays language-neutral; the localized withheld count and
+      // remedy live in overviewDetail's tooltip.
+      return String(snapshot.hooks!.count);
     default:
       return undefined;
   }

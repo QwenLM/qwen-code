@@ -1493,7 +1493,34 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
-    it('still withholds project hooks in non-interactive safe and bare modes', () => {
+    it('exposes the withheld block to diagnostics only while trust withholds it', () => {
+      const withheld = makeConfig({ projectHooks });
+      expect(withheld.getProjectHooks()).toBeUndefined();
+      expect(withheld.getTrustWithheldProjectHooks()).toEqual(projectHooks);
+
+      const trusted = makeConfig({
+        folderTrust: true,
+        trustedFolder: true,
+        projectHooks,
+      });
+      expect(trusted.getProjectHooks()).toEqual(projectHooks);
+      expect(trusted.getTrustWithheldProjectHooks()).toBeUndefined();
+
+      expect(
+        makeConfig({
+          safeMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({
+          bareMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+    });
+
+    it('keeps safe and bare modes withholding in non-interactive sessions', () => {
       expect(
         makeConfig({ safeMode: true, projectHooks }).getProjectHooks(),
       ).toBeUndefined();

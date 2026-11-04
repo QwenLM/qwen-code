@@ -45,6 +45,7 @@ function makeConfig(options: {
   systemHooks?: Record<string, unknown>;
   userHooks?: Record<string, unknown>;
   projectHooks?: Record<string, unknown>;
+  trustWithheldProjectHooks?: { [K in HookEventName]?: HookDefinition[] };
   extensions?: Array<{ isActive: boolean; hooks?: Record<string, unknown> }>;
 }): HooksListingConfig {
   const session = options.session ?? new SessionHooksManager();
@@ -67,6 +68,9 @@ function makeConfig(options: {
     getSystemHooks: vi.fn().mockReturnValue(options.systemHooks),
     getUserHooks: vi.fn().mockReturnValue(options.userHooks),
     getProjectHooks: vi.fn().mockReturnValue(options.projectHooks),
+    getTrustWithheldProjectHooks: vi
+      .fn()
+      .mockReturnValue(options.trustWithheldProjectHooks),
     getExtensions: vi.fn().mockReturnValue(options.extensions ?? []),
   } as unknown as HooksListingConfig;
 }
@@ -324,6 +328,29 @@ describe('buildHooksListing', () => {
   });
 
   describe('enabled and disabledReason', () => {
+    it('lists trust-withheld project hooks as disabled (untrusted)', () => {
+      const list = rows({
+        trustWithheldProjectHooks: LINT_SETTINGS,
+      });
+
+      expect(list).toHaveLength(1);
+      expect(list[0]).toMatchObject({
+        source: HooksConfigSource.Project,
+        origin: 'registry',
+        enabled: false,
+        disabledReason: 'untrusted',
+      });
+    });
+
+    it('does not duplicate the withheld block when hooks are all disabled', () => {
+      const list = rows({
+        disableAll: true,
+        trustWithheldProjectHooks: LINT_SETTINGS,
+      });
+
+      expect(list).toHaveLength(0);
+    });
+
     it('reports registryDisabled for an entry switched off in the registry', async () => {
       const [row] = await lintRows({}, true);
 

@@ -1669,9 +1669,21 @@ export async function main() {
 
     // The TUI shows a startup warning when the trust gate withholds project
     // hooks; a headless run gets one stderr line so the failure is not silent.
+    // Mirror the TUI predicate: raw workspace hooks non-empty, trust absent,
+    // and no mode/switch that withholds hooks for a different reason. The
+    // Config accessor cannot see the feature-on case (the settings layer
+    // already dropped the workspace scope), so read the raw file like the
+    // TUI does.
+    const rawWorkspaceHooks = settings.workspace?.settings?.hooks;
     if (
       !nonInteractiveConfig.isInteractive?.() &&
-      nonInteractiveConfig.getTrustWithheldProjectHooks?.()
+      !nonInteractiveConfig.isExplicitlyTrustedFolder?.() &&
+      !nonInteractiveConfig.getBareMode?.() &&
+      !nonInteractiveConfig.isSafeMode?.() &&
+      !nonInteractiveConfig.getDisableAllHooks?.() &&
+      rawWorkspaceHooks &&
+      typeof rawWorkspaceHooks === 'object' &&
+      Object.keys(rawWorkspaceHooks).length > 0
     ) {
       writeStderrLine(
         'Project hooks in .qwen/settings.json were not loaded: the folder is not explicitly trusted. Enable security.folderTrust.enabled and trust the folder to run them.',

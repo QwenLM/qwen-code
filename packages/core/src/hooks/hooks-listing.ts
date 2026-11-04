@@ -110,6 +110,7 @@ export type HooksListingConfig = Pick<
   | 'getSystemHooks'
   | 'getUserHooks'
   | 'getProjectHooks'
+  | 'getTrustWithheldProjectHooks'
   | 'getExtensions'
 >;
 
@@ -422,6 +423,47 @@ export function buildHooksListing(config: HooksListingConfig): HooksListing {
           : gates,
       ),
     );
+  }
+
+  // The trust gate keeps the settings project block out of the registry
+  // entirely; list it from the diagnostics accessor so status surfaces can
+  // show what is configured but withheld, marked disabled (untrusted).
+  const trustWithheld = config.getTrustWithheldProjectHooks?.();
+  if (trustWithheld && !listing.allDisabled) {
+    const withheldGates: HooksListingGates = { ...gates, trustedFolder: false };
+    for (const [eventName, definitions] of Object.entries(trustWithheld)) {
+      if (!Array.isArray(definitions)) continue;
+      for (const definition of definitions) {
+        if (!definition || typeof definition !== 'object') continue;
+        const raw = definition as unknown as Record<string, unknown>;
+        if (!Array.isArray(raw['hooks'])) continue;
+        for (const hookRaw of raw['hooks']) {
+          const hookConfig = displayableSettingsHook(hookRaw);
+          if (!hookConfig) continue;
+          listing.rows.push(
+            toRow(
+              hookConfig,
+              {
+                eventName: eventName as HookEventName,
+                matcher:
+                  typeof raw['matcher'] === 'string'
+                    ? raw['matcher']
+                    : undefined,
+                sequential:
+                  typeof raw['sequential'] === 'boolean'
+                    ? raw['sequential']
+                    : undefined,
+                source: HooksConfigSource.Project,
+                origin: 'registry',
+                entryEnabled: true,
+                trustGated: true,
+              },
+              withheldGates,
+            ),
+          );
+        }
+      }
+    }
   }
 
   const sessionId = config.getSessionId();

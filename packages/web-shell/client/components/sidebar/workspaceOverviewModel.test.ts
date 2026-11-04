@@ -119,7 +119,7 @@ describe('summarizeHooks', () => {
     });
     expect(hooks.untrusted).toBe(1);
     const snapshot: WorkspaceOverviewSnapshot = { hooks, fetchedAt: 0 };
-    expect(formatOverviewValue(snapshot, 'hooks')).toBe('4 (1 untrusted)');
+    expect(formatOverviewValue(snapshot, 'hooks')).toBe('4');
     expect(overviewFacetHasIssue(snapshot, 'hooks')).toBe(true);
   });
 
