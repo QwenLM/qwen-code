@@ -4681,8 +4681,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * HEAD to have moved it *from* that SHA, which only this command's own
    * commit does. For an unborn repository the expected predecessor is
    * explicitly `null`, which lets the initial commit register without
-   * treating a failed probe as a valid empty history. Fail-closed both
-   * ways: a foreign commit never earns an exemption, and a multi-commit
+   * treating a failed probe as a valid empty history. That sentinel is not
+   * provenance: every root commit satisfies it, so a root commit somebody
+   * else lands during the promoted window is indistinguishable from this
+   * command's own and registers too (#12523). Fail-closed on a born HEAD
+   * both ways: a foreign commit never earns an exemption, and a multi-commit
    * promoted chain (`commit a && commit b`, whose newest entry descends
    * from `a`) loses one it had earned rather than guessing. The foreground
    * call site passes nothing and keeps the disclosed window unchanged.

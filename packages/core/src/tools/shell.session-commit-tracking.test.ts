@@ -720,6 +720,10 @@ describe.skipIf(process.platform === 'win32')(
         'PATH',
         `${probeBinDir}${path.delimiter}${process.env['PATH']}`,
       );
+      // Load-bearing: this row's closing assertions also hold when the shim is
+      // bypassed (the lineage check then rejects on a non-null predecessor), so
+      // pin that the interception is live before relying on it.
+      expect(() => rawGit('rev-parse --verify HEAD')).toThrow();
 
       await runPromoted('git commit -m "nothing staged"', true);
       firePromoteSettle!();
