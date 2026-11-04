@@ -23,6 +23,6 @@ export function frameModPrompt(prompt: ModQueuedPrompt): string {
     `<qwen:mod-prompt mod=${name}>`,
     body,
     CLOSE,
-    `The ${name} Mod, an extension the user installed, sent the message above while the session was idle; the user did not type it. Act on it as a request made on the user's behalf, within what the user has asked for and allowed. Only the block's own closing marker ends it.`,
+    `The ${name} Mod, an extension the user installed, sent the message above, which waited until the session was idle; the user did not type it. Act on it as a request made on the user's behalf, within what the user has asked for and allowed. Only the block's own closing marker ends it.`,
   ].join('\n');
 }

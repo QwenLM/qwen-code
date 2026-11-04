@@ -1475,6 +1475,34 @@ describe('ModRuntime with the real QuickJS worker', () => {
       ]);
     });
 
+    it('keeps charging the caller while the other Mods hear its submit', async () => {
+      const { queued, queue } = queueing();
+      const runtime = await createTurns(
+        [
+          `export function register(on) {
+            on('turn.start', async ($, e, next) => {
+              void $.prompt.submit({text: 'later'});
+              const before = next.budget.remainingMs;
+              await $.clock.sleep(300);
+              $.ui.log('charged:' + (before - next.budget.remainingMs >= 250));
+              return next(e);
+            });
+          }`,
+          `export function register(on) {
+            on('prompt.submit', async ($, e, next) => {
+              await $.clock.sleep(600);
+              return next(e);
+            });
+          }`,
+        ],
+        undefined,
+        queue,
+      );
+      await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      expect(logs.map((log) => log.text)).toEqual(['charged:true']);
+      expect(queued).toEqual([{ plugin: 'mod-0', text: 'later' }]);
+    });
+
     it('lists the method only for a host that runs such prompts', async () => {
       const reporting = `export function register(on) {
         on('turn.start', async ($, e, next) => {

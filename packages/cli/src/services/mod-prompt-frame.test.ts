@@ -17,6 +17,7 @@ describe('frameModPrompt', () => {
       expect.stringContaining('The "lint" Mod'),
     ]);
     expect(framed).toContain('the user did not type it');
+    expect(framed).toContain('waited until the session was idle');
   });
 
   it('keeps a closing marker in the text, in any spelling, from ending the block', () => {

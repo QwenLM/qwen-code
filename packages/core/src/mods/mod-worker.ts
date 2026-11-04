@@ -771,8 +771,10 @@ async function hostCall(
     return result['value'];
   };
   // Void log notifications do not suspend their caller's execution, and a
-  // sleep is the caller's own time; other calls lend the caller's budget.
-  return notice(method) || method === 'clock.sleep'
+  // sleep is the caller's own time; nor does a submit, whose hooks are the
+  // other Mods' time and may still run after the caller has moved on. Other
+  // calls lend the caller's budget.
+  return detached || method === 'clock.sleep'
     ? invoke()
     : call.budget.lend(invoke);
 }
