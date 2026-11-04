@@ -79,7 +79,7 @@ Record:
 | `channel`     | Channel instance name, kept in full (see limits below)                |
 | `type`        | `inbound` / `outbound` / `task` / `poll`                              |
 | `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `ok` / a task state    |
-| `reason`      | machine reason code for skips (`sender_denied`, `reason_filter`, ...) |
+| `reason`      | reason code of a skip or an inbound failure (`github_api_error`, ...) |
 | `triggerKind` | Channel-specific trigger (`mention`, `assign`, ...)                   |
 | `repository`  | conversation container (for GitHub, `owner/repo`)                     |
 | `thread`      | thread identity (`issue:12`, `pr:34`)                                 |
@@ -251,8 +251,9 @@ must not be the answer when the journal could not be read.
   the poll loop awaits `pollOnce`, so no poll runs while a turn is in progress;
   the reachable cases are a task that failed and is still retryable, a thread
   GitHub failed to read with a 5xx (held for at most 30 polls), and a rate
-  limit or credential failure. A held window is read again in full on every
-  poll. A real run with a 2 s poll and a turn that kept failing
+  limit or credential failure. A held window is read again from the start on
+  every poll; a rate limit or credential failure stops that poll at the first
+  thread GitHub refuses. A real run with a 2 s poll and a turn that kept failing
   re-journaled one batch of 300 filtered notifications until the journal
   rotated, pushing the accepted/posted rows out of the page's window. The
   adapter therefore journals at most 20 `reason_filter` rows per poll and
