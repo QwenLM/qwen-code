@@ -1268,6 +1268,15 @@ export interface BridgeSessionSummary {
    * session can produce several PRs (stacked or follow-up work).
    */
   prs?: SessionPrInfo[];
+  /**
+   * True when the session's PR sidecar EXISTS but could not be read (I/O
+   * error, invalid JSON, failed shape check): `prs` is then unknown, not
+   * empty. Absent sidecars (never bound / last binding removed) leave both
+   * fields unset — that is an authoritative "no bindings". Consumers that
+   * project bindings into authoritative snapshots must treat this flag as
+   * a degraded read, not an unbind.
+   */
+  prsReadFailed?: true;
 }
 
 /** Original event-bus cursor captured when a prompt id was first admitted. */
@@ -2154,10 +2163,16 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * session FIFO-serialize through a per-session queue.
    *
    * Admission contract: implementations must not be `async`. Admission
-   * failures such as `InvalidClientIdError`, `PromptQueueFullError`, and
-   * pre-aborted signals throw synchronously so HTTP routes can reject
-   * before returning 202. Deferred failures such as `SessionNotFoundError`
-   * may be returned as rejected promises.
+   * failures — `InvalidClientIdError`, `PromptQueueFullError`, pre-aborted
+   * signals, `SessionNotFoundError` (unknown or closing session), and the
+   * reserved standalone working-directory check — throw synchronously so
+   * HTTP routes can reject before returning 202. A rejected promise
+   * normally represents a turn that WAS admitted and then failed. The one
+   * pre-enqueue check that still rejects deferred (prompt-shape validation,
+   * which the HTTP routes pre-validate) is an admission failure too:
+   * `onPromptAdmitted` has not fired for it, and callers that dedupe retries
+   * must drop the idempotency key when a rejection arrives without the
+   * admission signal.
    *
    * Reserved contract (not yet implemented): promptId admission dedup — a
    * `PromptIdConflictError` admission failure class, and a rule that a

@@ -153,7 +153,7 @@ class WorkspaceCsiNativeActivationGateTest {
                 .startsWith("select latest_checkpoint_resource_id, harness_session_id from ma_session_head ");
         assertThat(replayHeads.get(2).sql()).contains("and harness_session_id = ? for update");
         assertThat(trace.successful("tenant", sessionId).stream().filter(event -> event.sql()
-                .startsWith("select tenant_id, session_id, csi_guard from ma_session "))).hasSize(1);
+                .startsWith("select tenant_id, session_id, is_csi_guard from ma_session "))).hasSize(1);
     }
 
     @Test
