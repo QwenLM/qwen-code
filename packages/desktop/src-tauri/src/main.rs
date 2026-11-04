@@ -2,6 +2,8 @@
 
 mod desktop_state;
 mod runtime;
+#[cfg(target_os = "linux")]
+mod runtime_recovery;
 
 use command_group::GroupChild;
 use desktop_state::{default_window_size, restore_window, zoom_after, SettingsStore, DEFAULT_ZOOM};
@@ -569,14 +571,14 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
         }) {
             Ok(runtime) => {
                 if state.start_generation.load(Ordering::SeqCst) != generation {
-                    runtime.stop();
+                    runtime.stop_owned();
                     clear_pending_runtime(&state, generation);
                     return;
                 }
                 let origin = match origin_of(runtime.base_url()) {
                     Ok(origin) => origin,
                     Err(error) => {
-                        runtime.stop();
+                        runtime.stop_owned();
                         clear_pending_runtime(&state, generation);
                         emit_runtime_failure(&app, generation, error);
                         return;
@@ -584,7 +586,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
                 };
                 *lock(&state.origin) = Some(origin);
                 let Some(window) = app.get_webview_window("main") else {
-                    runtime.stop();
+                    runtime.stop_owned();
                     clear_pending_runtime(&state, generation);
                     emit_runtime_failure(
                         &app,
@@ -594,7 +596,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
                     return;
                 };
                 if let Err(error) = window.navigate(runtime.authenticated_web_url()) {
-                    runtime.stop();
+                    runtime.stop_owned();
                     clear_pending_runtime(&state, generation);
                     emit_runtime_failure(
                         &app,
@@ -606,7 +608,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
                 let mut runtime_slot = lock(&state.runtime);
                 if state.start_generation.load(Ordering::SeqCst) != generation {
                     drop(runtime_slot);
-                    runtime.stop();
+                    runtime.stop_owned();
                     clear_pending_runtime(&state, generation);
                     return;
                 }
