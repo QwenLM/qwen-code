@@ -46,7 +46,7 @@ Workspace already runs this insert path without the guard.
 | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | First consistent read after a lock               | The first statement locks the selected `ma_workspace` row with the predicate `resolveForCreation` uses, so its later lock is the same row.                                                                                                                                                                             |
 | Same idempotency key from two requests           | Unchanged: the receipt's unique key decides, the creation-mode claim inserts first and re-reads with a lock, and the service answers a `DuplicateKeyException` with the recorded admission.                                                                                                                            |
-| Migration                                        | The storage fence rows are locked before any insert, and migration prepare checks idleness on committed data (#16223). Migration does not lock `ma_workspace`, so there is no reversed order.                                                                                                                          |
+| Migration                                        | The storage fence rows are locked before any insert. After locking the alias, migration checks committed work and the complete Session profile inventory on a fresh connection. Migration does not lock `ma_workspace`, so there is no reversed order.                                                                 |
 | Resident Workspace retirement, Workspace removal | They lock the same `ma_workspace` row, so creations in that Workspace queue behind them.                                                                                                                                                                                                                               |
 | Resident Workspace single-Session check          | `ResidentWorkspaces.requireCreation` range-locks the Workspace's open Sessions and its runtime sessions; two adjacent Workspaces' ranges share a gap that both creations insert into. Selections that may resolve to a configured Resident Workspace keep the guard first, decided from configuration before any read. |
 
@@ -71,6 +71,15 @@ For this change, an explicitly approved per-class ceiling adjustment from
 889 to 900 lines accommodates that necessary logic and explanation. This is
 a scoped exception to the ratchet-down convention; the global ceiling and
 the other per-class ceilings remain unchanged.
+
+Migration can establish a REPEATABLE READ snapshot before waiting for a
+creation's storage alias lock. Its existing fresh autocommit idle check must
+also validate the complete Session profile inventory, including Sessions
+committed during that wait. Otherwise it can miss an uninitialized or
+unsupported Session. Read the inventory, receipts, genesis and definition
+resources through that same fresh connection. The outer transaction holds the
+alias and publication authority locks; the fresh reader must not lock Session
+or head rows and reverse ordinary traffic's Session-before-alias order.
 
 ## Risks
 
@@ -97,5 +106,13 @@ the other per-class ceilings remain unchanged.
    separate storage registrations and with shared storage. Default selections
    must bind every Session to the default Workspace. The existing MySQL
    default-switch test must resolve the newly selected default without a deadlock.
-4. Existing queue, creation, Workspace, migration and lock contract suites
+4. `WorkspaceMigrationMySqlIT`: creation and legacy CWD settlement wait on an
+   uncommitted `ma_storage` fence, reject it after commit, preserve original
+   request replay and allow the unrelated tenant to progress. A Session
+   committed after migration's REPEATABLE READ snapshot must still be checked:
+   an uninitialized Session rejects migration without leaving an operation or
+   fence.
+5. Existing queue, creation, Workspace, migration and lock contract suites
    pass, including the MySQL profiles in CI.
+6. The source-size gate accepts the 900-line admission class at its exact
+   approved ceiling and preserves main's 4,253-line broker and global ceilings.
