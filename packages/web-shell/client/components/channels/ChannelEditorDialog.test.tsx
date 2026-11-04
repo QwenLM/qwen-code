@@ -888,6 +888,12 @@ describe('ChannelEditorDialog', () => {
       );
     expect(boxes().length).toBeGreaterThan(0);
     expect(boxes().every((box) => box.disabled)).toBe(true);
+    // The dimmed-row styling hook must track the gate, not just the input.
+    expect(
+      boxes().every(
+        (box) => box.closest('label')?.getAttribute('data-disabled') === 'true',
+      ),
+    ).toBe(true);
     expect(document.body.textContent).toContain(
       'Enable "Deliver To PR-Bound Sessions" above to select watch events.',
     );
@@ -1025,6 +1031,17 @@ describe('ChannelEditorDialog', () => {
     expect(boxes.filter((b) => b !== selected).every((b) => b.disabled)).toBe(
       true,
     );
+    // A clearable stored row keeps the selected styling, not the dimmed one.
+    expect(selected.closest('label')?.getAttribute('data-disabled')).toBe(
+      'false',
+    );
+    expect(
+      boxes
+        .filter((b) => b !== selected)
+        .every(
+          (b) => b.closest('label')?.getAttribute('data-disabled') === 'true',
+        ),
+    ).toBe(true);
 
     await act(async () => {
       selected.click();
@@ -1198,6 +1215,79 @@ describe('ChannelEditorDialog', () => {
     );
     expect(document.body.textContent).toContain(
       'to save the selected watch events.',
+    );
+  });
+
+  it('does not surface validation before the first submit', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        prWatchEvents: ['ci_failure', 'merge_conflict'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance });
+    expect(document.querySelectorAll('[role="alert"]').length).toBe(0);
+
+    // A legitimate gated edit must not reveal validation state the operator
+    // never submitted; submit stays the only population site.
+    const box = Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+      ),
+    ).find((b) => b.closest('label')?.textContent?.includes('merge_conflict'))!;
+    await act(async () => {
+      box.click();
+    });
+    expect(document.querySelectorAll('[role="alert"]').length).toBe(0);
+  });
+
+  it('keeps a shown invalid-option message when delivery is switched off', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        deliverToBoundSessions: true,
+        prWatchEvents: ['bogus_event'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance });
+    const clickSave = async () => {
+      await act(async () => {
+        (
+          Array.from(document.querySelectorAll('button')).find(
+            (button) => button.textContent?.trim() === 'Save',
+          ) as HTMLButtonElement
+        ).click();
+      });
+    };
+    const clickSwitch = async () => {
+      await act(async () => {
+        document
+          .querySelector<HTMLButtonElement>('button[role="switch"]')!
+          .click();
+      });
+    };
+
+    await clickSave();
+    expect(document.body.textContent).toContain(
+      "Remove values that aren't in the allowed list.",
+    );
+    // The mirror case: a shown instruction survives the switch moving off
+    // (re-derived, not silently dropped), in both directions.
+    await clickSwitch();
+    expect(document.body.textContent).toContain(
+      "Remove values that aren't in the allowed list.",
+    );
+    await clickSwitch();
+    expect(document.body.textContent).toContain(
+      "Remove values that aren't in the allowed list.",
     );
   });
 

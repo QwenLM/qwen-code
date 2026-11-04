@@ -503,30 +503,36 @@ export function ChannelEditorDialog({
     });
   };
 
-  // Retire or replace the watch-events error by re-deriving validity from the
-  // post-edit draft, so each remedy (switch on, untick) retires exactly the
-  // instruction it satisfies — including invalidOption, whose remedy is
-  // unticking the offending value rather than enabling delivery.
-  const refreshWatchError = (values: ChannelEditorDraft['values']) => {
-    const code = validateChannelEditorDraft(
-      descriptor,
-      { ...draft, values },
-      existingNames,
-      instance,
-    )['prWatchEvents'];
+  // Re-derive only the errors already on screen, so each remedy (switch in
+  // either direction, untick) retires exactly the instruction it satisfies —
+  // including invalidOption, whose remedy is unticking the offending value —
+  // without surfacing an error the operator never submitted. Submit stays the
+  // only population site; deriving through validateChannelEditorDraft keeps
+  // the daemon precedence that the parity table pins.
+  const refreshErrors = (values: ChannelEditorDraft['values']) =>
     setErrors((current) => {
+      const shown = Object.keys(current);
+      if (shown.length === 0) return current;
+      const validation = validateChannelEditorDraft(
+        descriptor,
+        { ...draft, values },
+        existingNames,
+        instance,
+      );
       const next = { ...current };
-      if (code) {
-        next['prWatchEvents'] = validationMessage(
-          descriptor.fields.find((field) => field.key === 'prWatchEvents'),
-          code,
-        );
-      } else {
-        delete next['prWatchEvents'];
+      for (const key of shown) {
+        const code = validation[key];
+        if (code) {
+          next[key] = validationMessage(
+            descriptor.fields.find((field) => field.key === key),
+            code,
+          );
+        } else {
+          delete next[key];
+        }
       }
       return next;
     });
-  };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -716,12 +722,12 @@ export function ChannelEditorDialog({
         field.key === 'useLocalGh' &&
         isRepositoryOnlyChannelType(descriptor.type);
       const updateSwitch = (checked: boolean) => {
-        if (field.key === 'deliverToBoundSessions' && checked) {
-          // The dependency error asked for this exact action; re-derive so a
-          // surviving invalidOption keeps its own instruction.
-          refreshWatchError({
+        if (field.key === 'deliverToBoundSessions') {
+          // Both directions re-derive shown errors: on retires the dependency
+          // instruction, off keeps a shown one instead of dropping it silently.
+          refreshErrors({
             ...draft.values,
-            deliverToBoundSessions: true,
+            deliverToBoundSessions: checked,
           });
         }
         if (!isLocalGhSwitch) {
@@ -842,7 +848,7 @@ export function ChannelEditorDialog({
         // Unticking is a remedy too: re-derive so a satisfied instruction
         // retires without waiting for a second Save.
         if (watchField) {
-          refreshWatchError({ ...draft.values, [field.key]: joined });
+          refreshErrors({ ...draft.values, [field.key]: joined });
         }
         update(joined);
       };

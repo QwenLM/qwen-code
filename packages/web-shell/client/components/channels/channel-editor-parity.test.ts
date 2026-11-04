@@ -20,11 +20,20 @@ import {
 // (dependency dropped, second precondition added, vocabulary moved) fails
 // this table instead of leaving both suites green. Test-only import: the
 // plugin is a devDependency and never reaches the web-shell bundle.
+// management is optional on ChannelPlugin by contract; narrow once so a
+// hypothetical missing descriptor fails with a clear message instead of a
+// module-load TypeError (and stays TS18048-clean if test files ever join the
+// package typecheck).
+const management = plugin.management;
+if (!management) {
+  throw new Error('@qwen-code/channel-github declares no management metadata.');
+}
+
 const descriptor: DaemonChannelTypeDescriptor = {
   type: 'github',
   displayName: 'GitHub',
   manageable: true,
-  fields: plugin.management.fields,
+  fields: management.fields,
 };
 
 const CASES = [
@@ -84,7 +93,7 @@ describe('bound-delivery rule parity (editor mirror vs daemon authority)', () =>
     )['prWatchEvents'];
     expect(clientCode).toBe(code);
 
-    const daemonMessage = plugin.management.validateConfig?.(config);
+    const daemonMessage = management.validateConfig?.(config);
     if (daemon) {
       expect(daemonMessage).toMatch(daemon);
     } else {
