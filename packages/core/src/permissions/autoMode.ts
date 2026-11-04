@@ -368,6 +368,10 @@ function hasRawProtectedRedirect(command: string, cwd: string): boolean {
 
     const target = expandGlobalDirEnvVar(stripRawRedirectTargetToken(token));
     if (!target || target.startsWith('&')) continue;
+    // Anything left to expand can name any path, including the usual spelling
+    // ${XDG_CONFIG_HOME:-$HOME/.config}/qwen/settings.json, so it gets reviewed.
+    // hasRawProtectedWriteCommand() treats its targets the same way.
+    if (/\$[{(A-Za-z_]|`/.test(target)) return true;
     const resolved = path.isAbsolute(target) ? target : path.join(cwd, target);
     if (isAutoModeProtectedWritePath(resolved)) return true;
   }

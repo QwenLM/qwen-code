@@ -677,6 +677,20 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     expect(forcesReview("echo '{}' > $'.qwen/settings.json'")).toBe(true);
   });
 
+  it('reviews a redirect target it cannot resolve', () => {
+    for (const command of [
+      'cat > ${XDG_CONFIG_HOME:-$HOME/.config}/qwen/settings.json',
+      'cat > "${XDG_CONFIG_HOME:-$HOME/.config}/qwen/hooks/x.json"',
+      'd=$HOME/.config/qwen; cat > $d/settings.json',
+      'cat > $(echo ~/.config/qwen)/settings.json',
+      'cat > `echo ~/.config/qwen`/settings.json',
+    ]) {
+      expect(forcesReview(command)).toBe(true);
+    }
+    expect(forcesReview('echo hi > /tmp/out.txt')).toBe(false);
+    expect(forcesReview('echo hi 2>&1')).toBe(false);
+  });
+
   it('expands the home variables in redirects to the XDG global dir', () => {
     const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
     restoringQwenHome(() =>
