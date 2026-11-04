@@ -119,7 +119,7 @@ public class ManagedToolResultProjector {
     private Projection resolve(Source source, ToolPublicationRetentionStore.ReadLease lease, Runnable guard) throws IOException {
         guard.run();
         store.verifySource(source);
-        var candidates = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns("p") + ", CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM ma_output_capture p WHERE scope_key = ? AND tenant_id = ?"
+        var candidates = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns("p") + ", CASE WHEN is_quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM ma_output_capture p WHERE scope_key = ? AND tenant_id = ?"
                         + " AND workspace_id = ? AND session_id = ? AND execution_key = ?",
                 (schemaRow, schemaIndex) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(schemaRow),
                 ToolPublicationDataStore.scope(source.sessionKey()),

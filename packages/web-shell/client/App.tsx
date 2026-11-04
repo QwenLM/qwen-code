@@ -29,6 +29,7 @@ import {
 } from './hooks/useMessageNavigation';
 import { ConversationSearch } from './components/ConversationSearch';
 import { useWebShellNavigation } from './navigation';
+import { isCoarsePointerDevice } from './hooks/useIsTouchComposer';
 import { isWebShellPage, type WebShellPage } from './utils/navigationUrl';
 import { getSourceEntries } from './components/sources/sourceEntries';
 import { openSourceEntry } from './components/panels/SourcesSection';
@@ -345,6 +346,7 @@ import { buildGoalControlRequest } from './utils/goalControlRequest';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
+import { ChannelEventsPage } from './components/channels/ChannelEventsPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
 import {
   McpAppHostContext,
@@ -699,6 +701,7 @@ function getArtifactPanelTabStops(
   );
 }
 const DEFAULT_COMPOSER_TOOLBAR_ACTIONS = [
+  'addMenu',
   'approvalMode',
   'workflowMode',
   'contextUsage',
@@ -8870,6 +8873,16 @@ export function App({
   const statusBarRef = useRef<StatusBarHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
   const editorRef = useRef<EditorHandle | null>(null);
+  const chatFocusBlockedRef = useRef(false);
+  const focusChatAfterNavigation = useCallback(() => {
+    if (chatFocusBlockedRef.current) return;
+    // Keep touch navigation accessible without opening the soft keyboard.
+    if (isCoarsePointerDevice()) {
+      chatPaneRef.current?.focus({ preventScroll: true });
+    } else {
+      editorRef.current?.focus();
+    }
+  }, []);
   const restoreConversationSearchFocus = useCallback(() => {
     editorRef.current?.focus();
   }, []);
@@ -10162,6 +10175,7 @@ export function App({
     | 'plugins'
     | 'agents'
     | 'channels'
+    | 'channel-events'
     | 'live'
     | 'workspaces'
     | null
@@ -10319,6 +10333,7 @@ export function App({
         | 'plugins'
         | 'agents'
         | 'channels'
+        | 'channel-events'
         | 'live'
         | 'workspaces',
     ) => {
@@ -10465,6 +10480,9 @@ export function App({
     sidebarRailEnabled &&
     sidebarOptions.showLive &&
     sidebarOptions.primaryNav?.items?.includes('live') !== false;
+  const channelNavigationEnabled =
+    projectFeaturesAvailable &&
+    (sidebarOptions.primaryNav?.items?.includes('channelEvents') ?? true);
   useEffect(() => {
     setSidebarSection((current) =>
       liveSidebarEnabled && connection.sessionContext?.kind === 'live'
@@ -10612,7 +10630,9 @@ export function App({
         ? 'scheduledTasks'
         : page === 'pr-watches'
           ? 'prWatches'
-          : page;
+          : page === 'channel-events'
+            ? 'channelEvents'
+            : page;
     const allowed =
       page === 'chat' ||
       (page === 'settings'
@@ -10622,6 +10642,7 @@ export function App({
         : projectFeaturesAvailable &&
           (page !== 'live' || liveSidebarEnabled) &&
           (page !== 'pr-watches' || prWatchesAvailable) &&
+          (page !== 'channel-events' || channelNavigationEnabled) &&
           (hostSidebar?.primaryNav?.items?.some(
             (item) => item === primaryItem,
           ) ??
@@ -10635,6 +10656,7 @@ export function App({
     setActivePanel(
       nextPage === 'plugins' ||
         nextPage === 'channels' ||
+        nextPage === 'channel-events' ||
         nextPage === 'live' ||
         nextPage === 'settings'
         ? nextPage
@@ -10659,6 +10681,7 @@ export function App({
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
     prWatchesAvailable,
+    channelNavigationEnabled,
     workspaceCapabilitiesReady,
   ]);
   useEffect(() => {
@@ -11228,17 +11251,17 @@ export function App({
     externalSplitControlled,
     sessionActions,
   ]);
-  // Land focus on the composer after a shrink-driven split close so keyboard
+  // Land focus in the chat after a shrink-driven split close so keyboard
   // users aren't dropped onto <body> — but not when the chat now shows an
   // approval overlay (it owns the keyboard) or a panel (it manages focus).
   useEffect(() => {
     if (mainView !== 'chat' || !focusComposerAfterSplitCloseRef.current) return;
     focusComposerAfterSplitCloseRef.current = false;
-    if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
-  }, [mainView, activePanel, approvalOverlayActive]);
+    if (!activePanel && !approvalOverlayActive) focusChatAfterNavigation();
+  }, [mainView, activePanel, approvalOverlayActive, focusChatAfterNavigation]);
   // The Settings / Daemon Status panel is a view, not a modal, so it lacks
   // DialogShell's focus trap/restore. Move focus into a panel when it opens (or
-  // when switching directly between panels) and back to the composer when it
+  // when switching directly between panels) and back to the chat when it
   // closes, so keyboard users aren't stranded on an element that is hidden.
   const panelBackRef = useRef<HTMLButtonElement | null>(null);
   const panelHeadingRef = useRef<HTMLHeadingElement | null>(null);
@@ -11272,23 +11295,23 @@ export function App({
       // than depending on that DOM coincidence.
       panelBackRef.current?.focus();
     } else if (prev) {
-      // Panel just closed. Return focus to the composer — unless an approval
+      // Panel just closed. Return focus to the chat — unless an approval
       // overlay is what forced it closed (see the effect below): that overlay
       // drives its own keyboard handling and ToolApproval ignores keys from
       // editable targets, so focusing the composer here would swallow its
       // shortcuts and leave the user unable to respond by keyboard.
       if (!approvalOverlayActive) {
-        editorRef.current?.focus();
+        focusChatAfterNavigation();
       }
     } else if (wasApprovalActive && !approvalOverlayActive) {
       // The panel was auto-closed for an approval (prev was consumed to null on
       // that render, editor focus skipped). Now the approval has resolved with
-      // no panel to return to, so restore the composer here. (useComposerCore's
+      // no panel to return to, so restore chat focus here. (useComposerCore's
       // dialogOpen effect also refocuses on this transition; this keeps the
       // panel focus effect self-contained instead of relying on that.)
-      editorRef.current?.focus();
+      focusChatAfterNavigation();
     }
-  }, [activePanel, approvalOverlayActive]);
+  }, [activePanel, approvalOverlayActive, focusChatAfterNavigation]);
   // A pending approval (a gated tool call or an AskUserQuestion) renders its
   // overlay in the chat footer, which is hidden (display:none) while a panel is
   // shown. Left alone, the turn would hang behind Settings/Status with no
@@ -12937,6 +12960,7 @@ export function App({
   // this daemon composer; its shortcuts must not reach the Local session.
   const interactionBlocked =
     managedMode || dialogOpen || mainView !== 'chat' || artifactPanelFullscreen;
+  chatFocusBlockedRef.current = interactionBlocked;
   const mainVoiceTarget = useMemo(
     () =>
       workspaceContextActive
@@ -15636,21 +15660,25 @@ export function App({
 
   const composerFocusRequestRef = useRef(0);
   const sessionOpenInvocationRef = useRef(0);
-  const scheduleComposerFocus = useCallback((sessionId?: string) => {
-    const request = ++composerFocusRequestRef.current;
-    window.setTimeout(() => {
-      if (
-        request !== composerFocusRequestRef.current ||
-        approvalOverlayActiveRef.current ||
-        (sessionId !== undefined &&
-          connectionRef.current.sessionId !== sessionId)
-      ) {
-        return;
-      }
-      editorRef.current?.focus();
-    }, 0);
-    return request;
-  }, []);
+  const scheduleChatFocus = useCallback(
+    (focus: () => void, sessionId?: string) => {
+      const request = ++composerFocusRequestRef.current;
+      window.setTimeout(() => {
+        if (
+          request !== composerFocusRequestRef.current ||
+          approvalOverlayActiveRef.current ||
+          chatFocusBlockedRef.current ||
+          (sessionId !== undefined &&
+            connectionRef.current.sessionId !== sessionId)
+        ) {
+          return;
+        }
+        focus();
+      }, 0);
+      return request;
+    },
+    [],
+  );
   const createNewSession = useCallback(
     async (
       intent: NewSessionIntent,
@@ -15827,7 +15855,7 @@ export function App({
         ).clearSession(
           dropSessionContextOnClear ? { dropSessionContext: true } : undefined,
         );
-        focusRequest = scheduleComposerFocus();
+        focusRequest = scheduleChatFocus(() => editorRef.current?.focus());
         await clearPromise;
         if (
           sessionOpenInvocationRef.current === invocation &&
@@ -15864,7 +15892,7 @@ export function App({
       reportError,
       refreshWorkspaceBrand,
       refreshWorkspaceCapabilities,
-      scheduleComposerFocus,
+      scheduleChatFocus,
       setPendingSessionContext,
       sessionActions,
       showChat,
@@ -17336,13 +17364,14 @@ export function App({
       !sessionWriteBlocked
     ) {
       setSidebarSwitchingSessionId(null);
-      scheduleComposerFocus(sidebarSwitchingSessionId);
+      scheduleChatFocus(focusChatAfterNavigation, sidebarSwitchingSessionId);
     }
   }, [
     connection.catchingUp,
     connection.loadingTranscript,
     connection.sessionId,
-    scheduleComposerFocus,
+    focusChatAfterNavigation,
+    scheduleChatFocus,
     sessionWriteBlocked,
     sidebarSwitchingSessionId,
   ]);
@@ -17627,8 +17656,8 @@ export function App({
       return;
     }
     focusComposerAfterCockpitCloseRef.current = false;
-    if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
-  }, [activePanel, approvalOverlayActive, mainView]);
+    if (!activePanel && !approvalOverlayActive) focusChatAfterNavigation();
+  }, [activePanel, approvalOverlayActive, mainView, focusChatAfterNavigation]);
   useEffect(() => {
     if (navigationRef.current && navigationRef.current.route.page !== 'chat')
       return;
@@ -22719,6 +22748,14 @@ export function App({
                       });
                     }
                   }}
+                  onOpenChannelEvents={
+                    channelNavigationEnabled
+                      ? () => {
+                          closeMobileDrawer();
+                          openPanel('channel-events');
+                        }
+                      : undefined
+                  }
                   onOpenManagedSessions={
                     managedAgentProvider
                       ? () => {
@@ -23183,6 +23220,7 @@ export function App({
             <div
               ref={chatPaneRef}
               data-testid="chat-pane-container"
+                tabIndex={-1}
               className={[
                 styles.chatPane,
                 mainView !== 'chat' ? styles.chatPaneShowingPage : undefined,
@@ -23534,6 +23572,15 @@ export function App({
                       <ChannelsManagerPage
                         onClose={
                           channelSidebarEnabled && navigationRailVisible
+                            ? undefined
+                            : returnToChat
+                        }
+                        initialFocusRef={panelHeadingRef}
+                      />
+                    ) : activePanel === 'channel-events' ? (
+                      <ChannelEventsPage
+                        onClose={
+                          channelNavigationEnabled && navigationRailVisible
                             ? undefined
                             : returnToChat
                         }

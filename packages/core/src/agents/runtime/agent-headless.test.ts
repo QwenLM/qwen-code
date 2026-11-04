@@ -62,6 +62,7 @@ import type {
   ToolConfig,
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
+import type { AgentCore } from './agent-core.js';
 import { beginRetryWait } from '../../utils/retry-wait.js';
 import { DEFAULT_STALL_MS, runStallResilient } from './workflow-stall.js';
 import {
@@ -72,7 +73,10 @@ import { WriteFileTool } from '../../tools/write-file.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { normalizeToolNameForProvider } from '../../utils/tool-name-utils.js';
 import { LoopDetectionService } from '../../services/loopDetectionService.js';
-import { logSubagentExecution } from '../../telemetry/loggers.js';
+import {
+  logLoopProtection,
+  logSubagentExecution,
+} from '../../telemetry/loggers.js';
 import type { SubagentExecutionEvent } from '../../telemetry/types.js';
 import {
   fnCall,
@@ -129,6 +133,7 @@ vi.mock('../../core/client.js');
 vi.mock('../../telemetry/loggers.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../telemetry/loggers.js')>()),
   logSubagentExecution: vi.fn(),
+  logLoopProtection: vi.fn(),
 }));
 
 vi.mock('../../skills/skill-manager.js', () => {
@@ -1708,6 +1713,199 @@ describe('subagent.ts', () => {
           sentParts(n).some((part) => part.text?.includes('in a row')),
         );
         expect(reminders).toEqual([3]);
+      });
+
+      it('does not credit a prepared reminder when the run ends at maxTurns', async () => {
+        // Negative control: the reminder is taken at the end of round 3
+        // (three identical tool results), and the run exits at the maxTurns
+        // check before a fourth request is attempted. No round then crosses
+        // a model-acceptance boundary, so `reminded` telemetry never credits
+        // a warning the model never saw — the earlier take-time commit is
+        // what this pins against.
+        const missingPath = '/workspace/project/missing-directory';
+        const { config, toolConfig } = await setupReadTool(
+          decl('list_directory', 'Lists a directory'),
+          invocation(
+            { path: missingPath },
+            'List directory',
+            toolResult('Error: ENOENT', 'Directory not found'),
+          ),
+          'List Directory',
+          'List directory contents',
+        );
+        vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+        respond(...rounds(3, 'list_directory', { path: missingPath }, 'call'));
+        const takeSpy = vi.spyOn(
+          LoopDetectionService.prototype,
+          'takeLoopReminder',
+        );
+        const scope = await runAgent(config, {
+          tools: toolConfig,
+          run: { max_time_minutes: 5, max_turns: 3 },
+        });
+
+        // Three tool rounds, no fourth model request.
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.MAX_TURNS);
+        // The reminder really was queued and taken at the end of round 3.
+        const taken = takeSpy.mock.results
+          .map((result) => result.value)
+          .filter(Boolean);
+        expect(taken).toHaveLength(1);
+        expect(String(taken[0])).toContain('in a row');
+        // Prepared, not committed: the delivery accounting never credits
+        // `reminded` for the warning that stayed unsent.
+        const decisions = vi
+          .mocked(logLoopProtection)
+          .mock.calls.map(([, event]) => event.decision);
+        expect(decisions).not.toContain('reminded');
+      });
+
+      it('commits the reminder once at the next round model acceptance (positive control)', async () => {
+        // With a genuine next round whose response streams model content,
+        // the reminder rides with that request and its delivery commits
+        // exactly once at the first chunk.
+        const missingPath = '/workspace/project/missing-directory';
+        const { config, toolConfig } = await setupReadTool(
+          decl('list_directory', 'Lists a directory'),
+          invocation(
+            { path: missingPath },
+            'List directory',
+            toolResult('Error: ENOENT', 'Directory not found'),
+          ),
+          'List Directory',
+          'List directory contents',
+        );
+        vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+        respond(
+          ...rounds(3, 'list_directory', { path: missingPath }, 'call'),
+          'stop',
+        );
+        const scope = await runAgent(config, { tools: toolConfig });
+
+        expect(scope.getTerminateMode()).not.toBe(
+          AgentTerminateMode.LOOP_DETECTED,
+        );
+        expect(
+          sentParts(3).some((part) => part.text?.includes('in a row')),
+        ).toBe(true);
+        const decisions = vi
+          .mocked(logLoopProtection)
+          .mock.calls.map(([, event]) => event.decision);
+        expect(decisions.filter((d) => d === 'reminded')).toHaveLength(1);
+      });
+
+      it('abandons the prepared reminder when the reminder-carrying send fails before acceptance', async () => {
+        // Pre-send error control: the request that carries the reminder
+        // rejects before any chunk proves model acceptance. The prepared
+        // delivery is abandoned in the round finally, so `reminded` stays
+        // un-credited even though the text rode in the draft request.
+        const missingPath = '/workspace/project/missing-directory';
+        const { config, toolConfig } = await setupReadTool(
+          decl('list_directory', 'Lists a directory'),
+          invocation(
+            { path: missingPath },
+            'List directory',
+            toolResult('Error: ENOENT', 'Directory not found'),
+          ),
+          'List Directory',
+          'List directory contents',
+        );
+        vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+        const callRounds = rounds(
+          3,
+          'list_directory',
+          { path: missingPath },
+          'call',
+        );
+        let sendIndex = 0;
+        mockSendMessageStream.mockImplementation(async () => {
+          sendIndex += 1;
+          if (sendIndex > callRounds.length) {
+            throw new Error('provider connection reset');
+          }
+          return streamOf(callsChunk(callRounds[sendIndex - 1]!));
+        });
+        const takeSpy = vi.spyOn(
+          LoopDetectionService.prototype,
+          'takeLoopReminder',
+        );
+        const scope = await createAgent(config, { tools: toolConfig });
+        await expect(scope.execute(new ContextState())).rejects.toThrow(
+          'provider connection reset',
+        );
+
+        // The fourth request carried the reminder text and failed pre-send.
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(4);
+        expect(
+          sentParts(3).some((part) => part.text?.includes('in a row')),
+        ).toBe(true);
+        const taken = takeSpy.mock.results
+          .map((result) => result.value)
+          .filter(Boolean);
+        expect(taken).toHaveLength(1);
+        const decisions = vi
+          .mocked(logLoopProtection)
+          .mock.calls.map(([, event]) => event.decision);
+        expect(decisions).not.toContain('reminded');
+      });
+
+      it('abandons the prepared reminder when prepareTools rejects before the send', async () => {
+        // prepareTools rejection control: the reminder is taken at the end
+        // of round 1 (three parallel identical calls), and round 2 fails in
+        // prepareTools() before sendMessageStream is ever reached.
+        const missingPath = '/workspace/project/missing-directory';
+        const { config, toolConfig } = await setupReadTool(
+          decl('list_directory', 'Lists a directory'),
+          invocation(
+            { path: missingPath },
+            'List directory',
+            toolResult('Error: ENOENT', 'Directory not found'),
+          ),
+          'List Directory',
+          'List directory contents',
+        );
+        vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+        vi.spyOn(config, 'getExecutionEnvironment').mockReturnValue(
+          {} as ExecutionEnvironment,
+        );
+        respond([
+          call('list_directory', { path: missingPath }, 'call_1'),
+          call('list_directory', { path: missingPath }, 'call_2'),
+          call('list_directory', { path: missingPath }, 'call_3'),
+        ]);
+        const takeSpy = vi.spyOn(
+          LoopDetectionService.prototype,
+          'takeLoopReminder',
+        );
+        const scope = await createAgent(config, { tools: toolConfig });
+        const core = (scope as unknown as { core: AgentCore }).core;
+        // The loop and the tool-call processor each call prepareTools per
+        // round: rounds one and two succeed (the setup warm-up plus round
+        // one), round two's second call — before the reminder-carrying
+        // send — rejects.
+        let prepareCalls = 0;
+        vi.spyOn(core, 'prepareTools').mockImplementation(async () => {
+          prepareCalls += 1;
+          if (prepareCalls >= 3) {
+            throw new Error('tool preparation failed');
+          }
+          return [decl('list_directory', 'Lists a directory')];
+        });
+
+        await expect(scope.execute(new ContextState())).rejects.toThrow(
+          'tool preparation failed',
+        );
+
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+        const taken = takeSpy.mock.results
+          .map((result) => result.value)
+          .filter(Boolean);
+        expect(taken).toHaveLength(1);
+        const decisions = vi
+          .mocked(logLoopProtection)
+          .mock.calls.map(([, event]) => event.decision);
+        expect(decisions).not.toContain('reminded');
       });
 
       it('keeps polling task_list while the task board changes (issue #9450)', async () => {

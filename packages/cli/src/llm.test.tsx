@@ -43,6 +43,7 @@ import {
   OutputFormat,
   Storage,
 } from '@qwen-code/qwen-code-core';
+import { MODEL_CATALOG_REFRESH_ENV } from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
 const mockPrepareFileWatchersForProcessExit = vi.hoisted(() => vi.fn());
@@ -1181,6 +1182,88 @@ describe('llm.tsx main function', () => {
       QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME: '1',
     });
   });
+
+  // The container mounts only the user settings dir and reads passthrough
+  // vars from `process.env`, so an operator opt-out that lives in a System
+  // settings file never reaches the sandboxed CLI through settings: the
+  // handoff itself has to carry it.
+  it.each([
+    ['model opt-out', { model: { catalogRefresh: false } }, 'off'],
+    [
+      'usage-statistics opt-out',
+      { privacy: { usageStatisticsEnabled: false } },
+      'off',
+    ],
+    ['no opt-out', {}, undefined],
+  ])(
+    'carries the operator catalog refresh opt-out into the sandbox handoff (%s)',
+    async (_label, extraSettings, expected) => {
+      const originalArgv = process.argv;
+      process.argv = ['node', 'script.js', '--acp'];
+      const processExitSpy = vi
+        .spyOn(process, 'exit')
+        .mockImplementation((code) => {
+          throw new MockProcessExitError(code);
+        });
+      const { loadCliConfig, parseArguments } = await import(
+        './config/config.js'
+      );
+      const { loadSettings } = await import('./config/settings.js');
+      const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+      const { start_sandbox } = await import('./serve/sandbox.js');
+      vi.mocked(start_sandbox).mockClear();
+      vi.mocked(parseArguments).mockResolvedValue({ acp: true } as CliArgs);
+      delete process.env[MODEL_CATALOG_REFRESH_ENV];
+
+      vi.mocked(loadSettings).mockReturnValue({
+        errors: [],
+        merged: {
+          advanced: {},
+          security: { auth: {} },
+          ui: {},
+          ...extraSettings,
+        },
+        setValue: vi.fn(),
+        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+        migrationWarnings: [],
+        getSystemHooks: () => undefined,
+        getUserHooks: () => undefined,
+        getProjectHooks: () => undefined,
+      } as never);
+      vi.mocked(loadSandboxConfig).mockResolvedValue({
+        command: 'docker',
+        image: 'ghcr.io/qwenlm/qwen-code:1.0.0',
+      });
+      vi.mocked(loadCliConfig).mockImplementation(
+        async () =>
+          ({
+            getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+            getSessionId: () => '123e4567-e89b-12d3-a456-426614174000',
+          }) as unknown as Config,
+      );
+
+      let refreshAtSpawn: string | undefined;
+      vi.mocked(start_sandbox).mockImplementation((async () => {
+        refreshAtSpawn = process.env[MODEL_CATALOG_REFRESH_ENV];
+        return 0;
+      }) as unknown as typeof start_sandbox);
+
+      try {
+        try {
+          await main();
+        } catch (e) {
+          if (!(e instanceof MockProcessExitError)) throw e;
+        }
+      } finally {
+        process.argv = originalArgv;
+        delete process.env[MODEL_CATALOG_REFRESH_ENV];
+        processExitSpy.mockRestore();
+      }
+
+      expect(start_sandbox).toHaveBeenCalledOnce();
+      expect(refreshAtSpawn).toBe(expected);
+    },
+  );
 
   it('follows its relaunch supervisor before reading any arguments', async () => {
     vi.clearAllMocks();
