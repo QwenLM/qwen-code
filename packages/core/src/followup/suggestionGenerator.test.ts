@@ -40,6 +40,7 @@ vi.mock('../agents/forkedAgent.js', async (importOriginal) => {
 });
 
 import {
+  _setWordSegmenterForTest,
   generatePromptSuggestion,
   getFilterReason,
   shouldFilterSuggestion,
@@ -219,6 +220,47 @@ describe('shouldFilterSuggestion', () => {
 
   it('allows slash commands as single word', () => {
     expect(shouldFilterSuggestion('/commit')).toBe(false);
+  });
+
+  it('uses character bounds for CJK suggestions', () => {
+    expect(shouldFilterSuggestion('运行测试')).toBe(false);
+    expect(shouldFilterSuggestion('テストを実行')).toBe(false);
+    expect(shouldFilterSuggestion('테스트실행')).toBe(false);
+    expect(getFilterReason('好')).toBe('too_few_words');
+    expect(getFilterReason('运'.repeat(31))).toBe('too_many_words');
+  });
+
+  it('counts words with a segmenter for Thai, Lao, Khmer and Myanmar suggestions', () => {
+    // These scripts are written without spaces between words, so a whole
+    // suggestion is one whitespace-delimited "word".
+    expect(getFilterReason('รันเทสต์อีกครั้ง')).toBeNull(); // Thai
+    expect(getFilterReason('แก้บั๊กนี้ให้หน่อย')).toBeNull(); // Thai
+    expect(getFilterReason('ແລ່ນການທົດສອບ')).toBeNull(); // Lao
+    expect(getFilterReason('ដំណើរការតេស្ត')).toBeNull(); // Khmer
+    expect(getFilterReason('စမ်းသပ်မှုလုပ်ပါ')).toBeNull(); // Myanmar
+    expect(getFilterReason('ใช่')).toBeNull(); // "yes"
+    // Long but within 12 words: the CJK 30-char cap would reject these.
+    expect(getFilterReason('ช่วยรันเทสต์ทั้งหมดอีกครั้งหนึ่ง')).toBeNull();
+    expect(
+      getFilterReason('ช่วยรันเทสต์ทั้งหมด แล้ว commit ให้หน่อย'),
+    ).toBeNull();
+    expect(getFilterReason('ก')).toBe('too_few_words');
+    expect(
+      getFilterReason(
+        'ช่วยรันเทสต์ทั้งหมดอีกครั้งแล้วแก้บั๊กที่เจอและอธิบายสาเหตุให้ละเอียด',
+      ),
+    ).toBe('too_many_words');
+  });
+
+  it('falls back to a character bound for these scripts without full ICU', () => {
+    _setWordSegmenterForTest(null);
+    try {
+      expect(getFilterReason('รันเทสต์อีกครั้ง')).toBeNull();
+      expect(getFilterReason('ก')).toBe('too_few_words');
+      expect(getFilterReason('ก'.repeat(61))).toBe('too_many_words');
+    } finally {
+      _setWordSegmenterForTest(undefined);
+    }
   });
 
   it('filters too many words', () => {

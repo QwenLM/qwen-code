@@ -297,6 +297,42 @@ function hasSentenceBoundary(suggestion: string): boolean {
   return false;
 }
 
+// Created on first use, and only on a Node build with full ICU: on a
+// small-icu build the first .segment() call can crash the process (#11747),
+// and this filter also runs on paths the CLI's ICU startup probe never covers.
+let wordSegmenter: Intl.Segmenter | null | undefined;
+
+function getWordSegmenter(): Intl.Segmenter | null {
+  if (wordSegmenter === undefined) {
+    const icuSmall = (
+      process.config?.variables as Record<string, unknown> | undefined
+    )?.['icu_small'];
+    wordSegmenter =
+      typeof Intl.Segmenter === 'function' &&
+      (icuSmall === false || icuSmall === 'false')
+        ? new Intl.Segmenter(undefined, { granularity: 'word' })
+        : null;
+  }
+  return wordSegmenter;
+}
+
+export function _setWordSegmenterForTest(
+  segmenter: Intl.Segmenter | null | undefined,
+): void {
+  wordSegmenter = segmenter;
+}
+
+/** Word count for scripts written without spaces, or null without full ICU. */
+function countSegmentedWords(text: string): number | null {
+  const segmenter = getWordSegmenter();
+  if (!segmenter) return null;
+  let count = 0;
+  for (const segment of segmenter.segment(text)) {
+    if (segment.isWordLike) count++;
+  }
+  return count;
+}
+
 /**
  * Returns the filter reason if the suggestion should be suppressed, or null if it passes.
  */
@@ -345,7 +381,22 @@ export function getFilterReason(suggestion: string): string | null {
   const hasCJK = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(
     suggestion,
   );
-  if (!hasCJK) {
+  // Thai, Lao, Khmer and Myanmar are also written without spaces between
+  // words, but their words are longer than CJK characters, so count words
+  // with a dictionary-based segmenter instead of using CJK character bounds.
+  const hasSpacelessScript =
+    /[\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u.test(
+      suggestion,
+    );
+  if (hasSpacelessScript && !hasCJK) {
+    if (suggestion.length < 2) return 'too_few_words';
+    const words = countSegmentedWords(suggestion);
+    // Without a segmenter, fall back to a character bound sized for these
+    // scripts' multi-character words.
+    if (words === null ? suggestion.length > 60 : words > 12) {
+      return 'too_many_words';
+    }
+  } else if (!hasCJK) {
     if (wordCount < 2) {
       if (suggestion.startsWith('/')) return null; // slash commands ok
       if (!ALLOWED_SINGLE_WORDS.has(lower)) return 'too_few_words';
