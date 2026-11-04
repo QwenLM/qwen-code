@@ -350,6 +350,11 @@ export function createBoundSessionsAccessor(
   promptAuthorization?: string,
 ): ChannelBoundSessions {
   const cwdBySession = new Map<string, string>();
+  // Consecutive answers the worker itself downgraded to partial (rows or PR
+  // entries that failed shape validation). Such an answer has no daemon
+  // I/O failure behind it, so without this line the cause would be logged
+  // nowhere; throttled because the route is polled every channel cycle.
+  let workerDowngradeStreak = 0;
   // requestRest's timer covers the connection through response headers
   // only; the signal also bounds body consumption so a half-open connection
   // cannot hang the poll loop indefinitely.
@@ -402,6 +407,7 @@ export function createBoundSessionsAccessor(
       partial?: unknown;
     };
     let partial = body.partial === true;
+    let dropped = 0;
     // A malformed 200 is not an authoritative empty snapshot: throwing
     // routes it into the adapter's fail-closed refresh handling (keep the
     // previous map, skip the watch pass) instead of wiping watch state.
@@ -417,6 +423,7 @@ export function createBoundSessionsAccessor(
         // A dropped session row is a degraded answer too: its bindings
         // are unknown, so the snapshot must not claim completeness.
         partial = true;
+        dropped += 1;
         continue;
       }
       const record = entry as Record<string, unknown>;
@@ -427,6 +434,7 @@ export function createBoundSessionsAccessor(
         !Array.isArray(prs)
       ) {
         partial = true;
+        dropped += 1;
         continue;
       }
       const entries: PrBindingSummary['prs'] = [];
@@ -454,6 +462,7 @@ export function createBoundSessionsAccessor(
         // projection must not masquerade as a complete one, or the adapter
         // would trust its absence semantics for the dropped PRs.
         partial = true;
+        dropped += prs.length - entries.length;
       }
       if (entries.length === 0 && prs.length > 0) {
         // A listed session whose PR entries ALL failed shape validation is
@@ -473,6 +482,16 @@ export function createBoundSessionsAccessor(
         ...(typeof updatedAt === 'string' ? { updatedAt } : {}),
         prs: entries,
       });
+    }
+    if (dropped > 0) {
+      workerDowngradeStreak += 1;
+      if (workerDowngradeStreak === 1 || workerDowngradeStreak % 60 === 0) {
+        process.stderr.write(
+          `[channel-worker] PR bindings answer downgraded to partial by the worker: ${dropped} binding row(s) or PR entries failed shape validation (${workerDowngradeStreak} consecutive answers); check that the worker and the daemon run the same version\n`,
+        );
+      }
+    } else {
+      workerDowngradeStreak = 0;
     }
     // Rebuild (not accumulate) on complete answers so sessions that left
     // the bindings drop out of the wake cache. On a partial answer keep
