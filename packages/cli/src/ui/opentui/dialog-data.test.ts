@@ -1205,7 +1205,7 @@ describe('permissions data and mutations', () => {
     const { settings, written } = createFakeSettings({
       user: {
         permissions: {
-          allow: ['  Bash(docker *  ', null as unknown as string],
+          allow: [null as unknown as string, '  Bash(docker *  '],
         },
       } as Settings,
     });
@@ -1219,6 +1219,20 @@ describe('permissions data and mutations', () => {
       key: 'permissions.allow',
       value: [],
     });
+  });
+
+  it('skips a non-array stored rule set without rewriting it', () => {
+    const { settings, written } = createFakeSettings({
+      user: {
+        permissions: { allow: 'Bash(docker *' },
+      } as unknown as Settings,
+    });
+
+    expect(() =>
+      deletePermissionRule(config, settings, 'Bash(docker *', 'allow'),
+    ).not.toThrow();
+    expect(removePersistentRule).toHaveBeenCalledWith('Bash(docker *', 'allow');
+    expect(written).toEqual([]);
   });
 });
 

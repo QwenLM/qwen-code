@@ -537,7 +537,8 @@ export function PermissionsDialog({
       ] as Record<string, string[]> | undefined;
       const scopeRules = perms?.[ruleType];
       if (
-        scopeRules?.some(
+        Array.isArray(scopeRules) &&
+        scopeRules.some(
           (r: string) =>
             typeof r === 'string' && r.trim() === deleteTarget.rule.raw,
         )
