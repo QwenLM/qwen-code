@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.*;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.BeforeEach;
@@ -82,6 +83,50 @@ class JournalLockContractTest {
         assertThat(heads()).isZero();
         assertThat(notifications).isEqualTo(1);
         assertThat(roots()).isEqualTo(1);
+    }
+
+    @Test
+    void newToolResultDoesNotLockAMissingResourceOrTenantGuard() {
+        proxy.publishToolResult(TENANT, SESSION, TOKEN, toolResult(new byte[] {1}));
+        var statements = trace.events().stream()
+                .filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
+                .map(StoreLockTrace.Event::sql).toList();
+        assertThat(statements).noneMatch(sql -> sql.contains("ma_tenant_guard"));
+        assertThat(statements).filteredOn(sql -> sql.startsWith("select ") && sql.contains(" from ma_resource "))
+                .singleElement().satisfies(sql -> assertThat(sql).doesNotContain("for update"));
+        trace.assertRootBeforeHead(TENANT, SESSION);
+        trace.assertOneTransaction(TENANT, SESSION);
+    }
+
+    @Test
+    void toolResultReplayRequiresTheSameContent() {
+        var request = toolResult(new byte[] {1});
+        var first = proxy.publishToolResult(TENANT, SESSION, TOKEN, request);
+        assertThat(proxy.publishToolResult(TENANT, SESSION, TOKEN, request)).isEqualTo(first);
+        assertThatThrownBy(() -> proxy.publishToolResult(TENANT, SESSION, TOKEN, toolResult(new byte[] {2})))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("managed_session_resource_conflict"));
+    }
+
+    @Test
+    void toolResultReplayDoesNotReviveACollectedResource() {
+        var request = toolResult(new byte[] {1});
+        proxy.publishToolResult(TENANT, SESSION, TOKEN, request);
+        var jdbc = new ManagedSchemaJdbcTemplate(trace);
+        jdbc.update("UPDATE ma_resource SET state = 'COLLECTED', inline_bytes = NULL"
+                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", TENANT, SESSION, request.resourceId());
+        assertThatThrownBy(() -> proxy.publishToolResult(TENANT, SESSION, TOKEN, request))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("managed_session_resource_corrupt"));
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ?"
+                + " AND resource_id = ?", String.class, TENANT, SESSION, request.resourceId())).isEqualTo("COLLECTED");
+        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ? AND session_id = ?"
+                + " AND resource_id = ?", byte[].class, TENANT, SESSION, request.resourceId())).isNull();
+    }
+
+    private static PublishToolResultRequest toolResult(byte[] bytes) {
+        return new PublishToolResultRequest("workspace", "writer", 1, "result", "managed-tool-result-content", 1,
+                bytes.length, DigestUtils.sha256Hex(bytes), Base64.getEncoder().encodeToString(bytes));
     }
 
     @Test
