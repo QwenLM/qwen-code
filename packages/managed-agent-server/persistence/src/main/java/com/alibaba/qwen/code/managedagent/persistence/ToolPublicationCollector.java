@@ -126,8 +126,8 @@ public final class ToolPublicationCollector {
                             + " c.session_id FROM ma_output_capture c WHERE c.retention_state ="
                             + " 'RETIRING' AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE"
                             + " s.tenant_id = c.tenant_id AND s.session_id = c.session_id AND"
-                            + " s.csi_guard = TRUE) AND NOT EXISTS (SELECT 1 FROM ma_operation o"
-                            + " USE INDEX (ix_ma_operation_publication) WHERE o.scope_key ="
+                            + " s.is_csi_guard = TRUE) AND NOT EXISTS (SELECT 1 FROM ma_operation o"
+                            + " USE INDEX (idx_ma_operation_publication) WHERE o.scope_key ="
                             + " c.scope_key AND o.publication_id = c.publication_id AND"
                             + " o.operation_kind = 'CAPTURE_GC' LIMIT 1) LIMIT 32",
                 (row, index) -> ManagedSchemaRows.read(row));
@@ -206,7 +206,7 @@ public final class ToolPublicationCollector {
         long time = ToolPublicationRetentionStore.now(jdbc);
         var candidates =
                 jdbc.query(
-                        "SELECT scope_key, publication_id, tenant_id, session_id FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_operation.tenant_id AND s.session_id = ma_operation.session_id AND s.csi_guard = TRUE) AND state <> 'SUCCEEDED' AND available_at >= 0 AND available_at <= ? AND (claim_owner = ? OR claim_until IS NULL OR claim_until <= ?) ORDER BY available_at, operation_key LIMIT 32",
+                        "SELECT scope_key, publication_id, tenant_id, session_id FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_operation.tenant_id AND s.session_id = ma_operation.session_id AND s.is_csi_guard = TRUE) AND state <> 'SUCCEEDED' AND available_at >= 0 AND available_at <= ? AND (claim_owner = ? OR claim_until IS NULL OR claim_until <= ?) ORDER BY available_at, operation_key LIMIT 32",
                         (row, index) -> ManagedSchemaRows.read(row),
                         time,
                         owner,
@@ -333,7 +333,7 @@ public final class ToolPublicationCollector {
 
     private boolean sessionCollectionPending(String tenant, String session) {
         return !Boolean.TRUE.equals(jdbc.queryForObject(
-                "SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id"
+                "SELECT is_resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id"
                         + " = ?", Boolean.class, tenant, session));
     }
 

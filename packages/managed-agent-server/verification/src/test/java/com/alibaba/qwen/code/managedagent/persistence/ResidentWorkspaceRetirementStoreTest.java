@@ -8,7 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesHttpRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.provisioning.kubernetes.KubernetesHttpRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;

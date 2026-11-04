@@ -1,11 +1,12 @@
 package com.alibaba.qwen.code.daemon;
 
+import org.junit.jupiter.api.Test;
+
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-
-import java.util.Map;
-import org.junit.jupiter.api.Test;
 
 class HostedAgentDefinitionRequestTest {
     private static final String SESSION = "22222222-2222-4222-8222-222222222222";

@@ -71,7 +71,7 @@ class ManagedSchemaPublicationLoadMySqlIT {
                         ManagedSchemaKeys.key(publication), operationId);
                 jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
                                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
-                                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, write_evidence, accepted_complete)"
+                                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete)"
                                 + " VALUES (?, ?, ?, 'workspace', ?, ?, ?, 'capture-id', '{}', ?, ?, 'FENCED',"
                                 + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE)",
                         scope, ManagedSchemaKeys.key(TENANT), TENANT, HEALTHY, publication,

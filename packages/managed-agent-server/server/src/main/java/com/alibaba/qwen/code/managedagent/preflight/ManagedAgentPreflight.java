@@ -1074,10 +1074,18 @@ public final class ManagedAgentPreflight {
         }
         if (ExternalRuntimeKinds.isFiles(broker.getProvisioner())) {
             try {
-                properties.validateExternalRuntime();
+                properties.validateRuntimeProvider();
                 return new Check("tool-path", Status.WARN, "External files protocol configured; Cloud mount and execution need live verification", null);
             } catch (IllegalStateException error) {
                 return new Check("tool-path", Status.FAIL, error.getMessage(), "check the external files Runtime configuration");
+            }
+        }
+        if ("ssh-process".equals(broker.getProvisioner())) {
+            try {
+                new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry().validateSelected(properties);
+                return new Check("tool-path", Status.PASS, "SSH Workspace files configuration accepted", null);
+            } catch (RuntimeException error) {
+                return new Check("tool-path", Status.FAIL, rootMessage(error), "correct the SSH Runtime configuration");
             }
         }
         if (!"local-process".equals(broker.getProvisioner())) {
@@ -1167,46 +1175,19 @@ public final class ManagedAgentPreflight {
                         "re-enter the recorded key"));
             }
         }
-        if (!ExternalRuntimeKinds.isExternal(broker.getProvisioner())) {
-            checks.add(directoryCheck("broker-state", broker.getStateDirectory()));
-        }
-        if ("local-process".equals(broker.getProvisioner())) {
-            checks.add(executableCheck("node", broker.getNodeExecutable()));
-            checks.add(readableCheck("worker-entry",
-                    broker.getWorkerEntry()));
-        } else if ("static".equals(broker.getProvisioner())) {
-            if (StringUtils.isBlank(broker.getStaticEndpoint())
-                    || StringUtils.isBlank(broker.getStaticToken())) {
-                checks.add(new Check("broker", Status.FAIL,
-                        "static provisioner needs endpoint and token",
-                        "set static-endpoint and static-token"));
-            }
-        } else if (ExternalRuntimeKinds.isExternal(broker.getProvisioner())) {
-            try {
-                properties.validateExternalRuntime();
-                checks.add(new Check("broker", Status.PASS,
-                        broker.getProvisioner() + " configuration accepted; provider reachability,"
-                                + " worker attestation and storage registration are checked on first use",
-                        null));
-                if (ExternalRuntimeKinds.isWorkspace(broker.getProvisioner()) && !ExternalRuntimeKinds.isFiles(broker.getProvisioner())) {
-                    // Configurable is not the same as usable: say so, so an
-                    // operator is never misled by the PASS above.
-                    checks.add(new Check("external-prerequisite", Status.WARN,
-                            "external-workspace can provision a storage-bound worker, but it"
-                                    + " cannot execute Hosted tools or close a Session yet;"
-                                    + " every placement fails closed",
-                            "keep this profile out of production until files execution and"
-                                    + " Session close are verified (step 3b/3c)"));
+        try {
+            var registry = new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry();
+            registry.validateSelected(properties);
+            for (String kind : com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection.from(properties)
+                    .kinds().stream().sorted().toList()) {
+                for (var check : registry.require(kind).preflight(properties)) {
+                    checks.add(new Check(check.name(), Status.valueOf(check.status().name()),
+                            check.detail(), check.remediation()));
                 }
-            } catch (RuntimeException error) {
-                checks.add(new Check("broker", Status.FAIL, rootMessage(error),
-                        "correct the external Runtime configuration"));
             }
-        } else {
-            checks.add(new Check("broker", Status.FAIL,
-                    "unknown provisioner " + broker.getProvisioner(),
-                    "use local-process, static or "
-                            + ExternalRuntimeKinds.supported()));
+        } catch (RuntimeException error) {
+            checks.add(new Check("broker", Status.FAIL, rootMessage(error),
+                    "install the configured Runtime provider JAR and correct its configuration"));
         }
         return checks;
     }
@@ -1381,9 +1362,18 @@ public final class ManagedAgentPreflight {
     }
 
     private static Check workspaceCheck(ManagedAgentProperties properties) {
-        if (ExternalRuntimeKinds.isExternal(properties.getRuntimeBroker().getProvisioner())) {
-            return new Check("workspace", Status.SKIP,
-                    "the external worker owns the mount root; no local directory required", null);
+        if (!properties.getRuntimeBroker().isEnabled()) {
+            return new Check("workspace", Status.SKIP, "Runtime Broker disabled", null);
+        }
+        String kind = properties.getRuntimeBroker().getProvisioner();
+        try {
+            if (!new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry()
+                    .require(kind).usesLocalWorkspace()) {
+                return new Check("workspace", Status.SKIP,
+                        "the remote worker owns the mount root; no local directory required", null);
+            }
+        } catch (RuntimeException error) {
+            return new Check("workspace", Status.SKIP, "Runtime provider unavailable; see broker check", null);
         }
         String cwd = properties.getRuntimeBroker().getWorkspaceCwd();
         if (StringUtils.isBlank(cwd)) {
@@ -1413,28 +1403,6 @@ public final class ManagedAgentPreflight {
                     "grant write access to the service account");
         }
         return new Check(name, Status.PASS, path, null);
-    }
-
-    private static Check executableCheck(String name, String path) {
-        if (StringUtils.isBlank(path)) {
-            return new Check(name, Status.FAIL, "not configured",
-                    "set the executable path");
-        }
-        return Files.isExecutable(Path.of(path))
-                ? new Check(name, Status.PASS, path, null)
-                : new Check(name, Status.FAIL, path + " is not executable",
-                        "install the executable or fix its path");
-    }
-
-    private static Check readableCheck(String name, String path) {
-        if (StringUtils.isBlank(path)) {
-            return new Check(name, Status.FAIL, "not configured",
-                    "set the worker entry path");
-        }
-        return Files.isReadable(Path.of(path))
-                ? new Check(name, Status.PASS, path, null)
-                : new Check(name, Status.FAIL, path + " is not readable",
-                        "install the Qwen Code CLI or fix its path");
     }
 
     static Check portCheck(String name, String address, int port) {

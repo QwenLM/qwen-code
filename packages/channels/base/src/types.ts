@@ -88,6 +88,7 @@ export interface ChannelConfig {
   /**
    * Who may operate a shared session (/approve, /cancel, /clear, /loop, ...).
    * Unset or empty grants no shared-session operator permissions.
+   * An attended request owner may still approve once or deny their own request.
    */
   operators?: string[];
   groupHistoryLimit?: number;
@@ -184,6 +185,73 @@ export interface SessionTarget {
   chatId: string;
   threadId?: string;
   isGroup?: boolean;
+}
+
+/** One PR binding mirrored from a daemon session's PR sidecar. */
+export interface PrBindingEntry {
+  number: number;
+  url: string;
+  state?: 'open' | 'merged' | 'closed';
+}
+
+/**
+ * A daemon session with PR bindings, as returned by the daemon's
+ * `GET /sessions/pr-bindings` reverse-lookup route.
+ */
+export interface PrBindingSummary {
+  sessionId: string;
+  workspaceCwd: string;
+  sourceType?: string;
+  updatedAt?: string;
+  prs: PrBindingEntry[];
+}
+
+/**
+ * Result of a PR-binding reverse lookup. `partial` means the daemon could
+ * not enumerate every binding (a workspace failed to list or is not active,
+ * a scan needed more than one page, or a scan cap was hit); consumers must
+ * not treat a missing entry as an authoritative absence — in particular they
+ * must not destroy state keyed by bindings.
+ */
+export interface PrBindingsSnapshot {
+  bindings: PrBindingSummary[];
+  partial: boolean;
+}
+
+/**
+ * Daemon-backed delivery into sessions the channel does not own. Provided by
+ * the daemon channel worker; absent in standalone ACP mode, where adapters
+ * must keep their normal channel-session behavior.
+ */
+export interface ChannelBoundSessions {
+  listPrBindings(): Promise<PrBindingsSnapshot>;
+  /**
+   * Inject a prompt into an existing session. Resolves once the daemon
+   * accepts the prompt into the session's queue; does not wait for the turn.
+   * Throws `BoundSessionGoneError` when the session no longer exists,
+   * `BoundSessionQueueFullError` when the session's prompt queue is full,
+   * and `BoundSessionUnavailableError` when the session or its workspace is
+   * temporarily unavailable (draining, session limit, restore in progress,
+   * rate limited). The latter two are backpressure: defer without consuming
+   * the failure budget.
+   *
+   * `idempotencyKey` identifies the delivery attempt's EVENT (the adapter
+   * derives it from the source chat and message id, so it survives task
+   * re-creation after a crash): the daemon deduplicates repeated admissions
+   * of the same key, and a retry after a lost acceptance mark or a lost
+   * response re-injects nothing within the daemon's lifetime. Dedupe is
+   * best-effort under two FIFO caps — 128 keys per session and 1024
+   * sessions — and a key can be evicted while its queue is still live (the
+   * per-session cap bites in a single long-lived session, the ordinary
+   * case), so a retry after such an eviction re-injects. The ring also dies
+   * with the in-memory queue: a daemon restart loses both, making
+   * re-injection the correct recovery there.
+   */
+  deliverPrompt(
+    sessionId: string,
+    prompt: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
 }
 
 export interface ObservedChannelIdentity {
@@ -495,6 +563,9 @@ export interface ChannelConfigNumberFieldDescriptor
   envResolvable?: never;
   multiline?: never;
   exclusiveMinimum?: number;
+  /** Inclusive upper bound. A poll interval above Node's 32-bit timer range is
+   * clamped to 1ms, so an unbounded interval field can persist a hot loop. */
+  maximum?: number;
   properties?: never;
 }
 

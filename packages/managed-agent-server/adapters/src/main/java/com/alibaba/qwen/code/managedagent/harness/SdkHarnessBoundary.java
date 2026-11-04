@@ -83,6 +83,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsModelConfiguration() {
+        return call(delegate::supportsModelConfiguration);
+    }
+
+    @Override
     public boolean supportsUserMessageQueue() {
         return call(delegate::supportsUserMessageQueue);
     }

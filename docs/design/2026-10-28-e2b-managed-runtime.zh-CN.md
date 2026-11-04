@@ -4,7 +4,7 @@
 
 ## 状态与目标
 
-基于 `main@6ef3eaa2` 的本地实现，正在验证。Managed Agent Server、Hosted Harness、模型调用、审批与日志仍放在中央服务，Qwen 执行 worker 放在 E2B Cloud，通过 Volumes 保存文件。本文不代表 Cloud 部署或生产验收完成。
+实现已整合 `main@9b1fcb8756`，正在验证。Managed Agent Server、Hosted Harness、模型调用、审批与日志仍放在中央服务，Qwen 执行 worker 放在 E2B Cloud，通过 Volumes 保存文件。本文不代表 Cloud 部署或生产验收完成。
 
 本实现面向具有现有持久 Volume 和显式登记 Workspace 的 E2B Cloud。其他 backend 兼容 Sandbox API，并不代表其存储、worker 或公共 Hosted 行为已经通过验收。
 
@@ -33,6 +33,8 @@
 | E2B adapter           | E2B 凭据、持久创建/退休日志、sandbox 创建、Volume 验证和受保护入口 |
 | Qwen worker           | Context/挂载检查、工具执行、文件历史、进程账本和持久排空证据       |
 | 中央 publication 服务 | Shell 片段、seal、manifest 和 sandbox 退休后仍保留的产物           |
+
+外部 provider 的 SPI factory 负责 profile 校验、preflight 和构造。Session Store facade 将外部 admission、策略与后续 Turn 校验委托给现有协作类。EXTERNAL 认领使用共享 owner 成员计数，并要求原计数为零，以保留独占执行且不恢复租户级锁。登记的外部挂载继续单独核对身份，本地挂载就绪不能证明远端存储权限。
 
 独立 adapter 位于 `integrations/e2b-runtime-provider/`，SDK 和 API key 不进入 Core 或 Harness。Broker 仍使用 Qwen worker 协议，不用 envd 命令代替。受保护的通配域名把每个 worker 已声明的接口转发至 43190/43191，并注入 E2B 流量凭据，保留 Broker 的 origin-only URL 契约。
 

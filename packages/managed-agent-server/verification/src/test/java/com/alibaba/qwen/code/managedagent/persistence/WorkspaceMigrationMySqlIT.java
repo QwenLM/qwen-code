@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
@@ -198,6 +199,9 @@ class WorkspaceMigrationMySqlIT {
                                 assertThat(refusal.isRetryable()).isFalse();
                             });
                 }
+            } catch (TimeoutException error) {
+                error.addSuppressed(new IllegalStateException(MySqlLockProbe.describeLockWaits(jdbc, schema)));
+                throw error;
             } finally {
                 migration.rollback();
             }
@@ -255,7 +259,7 @@ class WorkspaceMigrationMySqlIT {
         var manager = new DataSourceTransactionManager(data);
         var transaction = new TransactionTemplate(manager);
         transaction.setIsolationLevel(Connection.TRANSACTION_REPEATABLE_READ);
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "a".repeat(64);
         transaction.execute(status -> sessions.acquireWriter("tenant-b", "m-successor", token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 30000L)));

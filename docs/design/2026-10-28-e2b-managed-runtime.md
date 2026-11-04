@@ -4,7 +4,7 @@
 
 ## Status and goal
 
-Local implementation under verification, based on `main@6ef3eaa2`. Managed Agent Server, Hosted Harness, model access, approvals and journals stay in the central deployment. Qwen execution workers run in E2B Cloud and mount persistent Volumes. This is not a Cloud deployment or production acceptance report.
+Implementation integrated with `main@9b1fcb8756`, with verification in progress. Managed Agent Server, Hosted Harness, model access, approvals and journals stay in the central deployment. Qwen execution workers run in E2B Cloud and mount persistent Volumes. This is not a Cloud deployment or production acceptance report.
 
 The implementation targets E2B Cloud with existing persistent Volumes and an explicitly registered Workspace. Compatible Sandbox APIs on another backend do not by themselves qualify its storage, worker or public Hosted behavior.
 
@@ -33,6 +33,8 @@ The existing Hosted files profile actually dispatches raw Tool v2 and raw file-h
 | E2B adapter                 | E2B credentials, durable placement/retirement journal, sandbox creation, Volume verification and protected ingress |
 | Qwen worker                 | Context/mount checks, tool execution, file history, process ledger and durable drain evidence                      |
 | Central publication service | Shell segments, seals, manifests and artifacts that survive sandbox retirement                                     |
+
+The external provider SPI factory owns profile validation, preflight and construction. The Session Store facade delegates external admission, policy and subsequent Turn checks to its existing collaborators. EXTERNAL claims use the shared owner membership counter with a zero-member condition, preserving exclusive execution without restoring the tenant-wide lock. Registered external mounts retain their own identity checks; local mount readiness does not establish remote storage authority.
 
 The standalone adapter is under `integrations/e2b-runtime-provider/`. Its SDK and API key do not enter Core or the Harness. The Broker uses Qwen worker protocols, rather than replacing them with envd commands. A protected wildcard origin routes each worker's declared endpoints to ports 43190/43191 and injects E2B traffic authentication. The Broker's origin-only endpoint contract is preserved.
 

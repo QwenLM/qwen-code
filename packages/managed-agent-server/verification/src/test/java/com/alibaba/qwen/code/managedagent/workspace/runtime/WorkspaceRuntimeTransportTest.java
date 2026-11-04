@@ -361,7 +361,7 @@ class WorkspaceRuntimeTransportTest {
     }
 
     private static Fixture externalFilesFixture() throws Exception {
-        var fixture = acquisitionFixture(com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.FILES_KIND);
+        var fixture = acquisitionFixture(com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalWorkspaceProvisioner.FILES_KIND);
         var binding = fixture.resolver().savedBinding(fixture.session().getHarnessSessionId());
         when(fixture.resolver().externalStorage(binding)).thenReturn(new com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.RegisteredExternalStorage(
                 "provider", "volume", 1, binding.getWorkspaceId(), "/external/workspace", fixture.session().getScope().getCanonicalCwd()));

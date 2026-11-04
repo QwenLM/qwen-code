@@ -127,6 +127,7 @@ describe('NativeLspService disk document synchronization', () => {
       {
         getProjectRoot: () => directory,
         isTrustedFolder: () => true,
+        isExplicitlyTrustedFolder: () => true,
       } as unknown as Config,
       { getDirectories: () => [directory] } as unknown as WorkspaceContext,
       new EventEmitter(),

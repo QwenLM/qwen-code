@@ -301,7 +301,7 @@ public class ExternalStorageRegistrationTest {
     }
 
     @Test
-    void publishesAnExistingRegistrationWithAnOwnerGrantAndDurableReplay() throws Exception {
+    public void publishesAnExistingRegistrationWithAnOwnerGrantAndDurableReplay() throws Exception {
         store.registerExternalStorage("tenant", "register", registration("provider", "volume", "workspace", "/aliases/one"));
         String route = "/internal/managed-workspaces/v1/workspaces:publish-external";
         String input = json.writeValueAsString(new ExternalStorageRegistrationController.PublishRequest(
@@ -327,7 +327,7 @@ public class ExternalStorageRegistrationTest {
     }
 
     @Test
-    void filesExecutionRequiresTheExactRegisteredOwnerWithoutCreatingALocalOwner() {
+    public void filesExecutionRequiresTheExactRegisteredOwnerWithoutCreatingALocalOwner() {
         store.registerExternalStorage("tenant", "key", registration("provider", "volume", "workspace", "/aliases/one"));
         WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, "tenant", "workspace", true);
         jdbc.update("UPDATE ma_storage_owner SET tenant_id = 'foreign'");
@@ -340,7 +340,7 @@ public class ExternalStorageRegistrationTest {
     }
 
     @Test
-    void filesWorkspaceAdmitsAnOwnerSessionAndKeepsItsOriginalExecutionClaim() {
+    public void filesWorkspaceAdmitsAnOwnerSessionAndKeepsItsOriginalExecutionClaim() {
         store.registerExternalStorage("tenant", "register", registration("provider", "volume", "workspace", "/aliases/one"));
         store.publishWorkspace("tenant", "publish", "workspace", "provider", 1, "actor", "E2B Workspace");
         properties.getHarness().setWorkspaceFilesEnabled(true);
@@ -350,6 +350,9 @@ public class ExternalStorageRegistrationTest {
         var sessions = new ManagedAgentStore(jdbc, json, java.time.Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties,
                 new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var selection = new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection("workspace", ".");
+        assertThatThrownBy(() -> transactions.execute(ignored -> sessions.insertSessionCommand(
+                "tenant", "actor", "CREATE_SESSION", "unbound", "digest", "qwen-code", null, null, List.of(), "digest", null)))
+                .hasMessageContaining("registered Workspace selection");
         String id = transactions.execute(ignored -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId("tenant").actorId("actor").idempotencyKey("create")
                 .requestDigest("digest").agentId("qwen-code").selection(selection).build()).sessionId());
@@ -361,7 +364,39 @@ public class ExternalStorageRegistrationTest {
         var scope = new com.alibaba.qwen.code.runtimebroker.RuntimeScope("tenant", "workspace", "1", "/worker/workspace",
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
         var bindings = new JdbcRuntimeBindingRepository(jdbc.getDataSource(), new com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector("test", new byte[32]));
-        var request = new com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest(scope, id,
+        var record = readyExternalSession(bindings, scope, id);
+        String secondId = transactions.execute(ignored -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("tenant").actorId("actor").idempotencyKey("create-second")
+                .requestDigest("second").agentId("qwen-code").selection(selection).build()).sessionId());
+        var second = readyExternalSession(bindings, scope, secondId);
+        var authority = new WorkspaceExecutionStore(jdbc, manager, null, properties);
+        authority.claim(saved.workspace(), record);
+        authority.claim(saved.workspace(), record);
+        assertThat(authority.isHeld(saved.workspace(), record)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT member_count FROM ma_storage_owner", Integer.class)).isEqualTo(1);
+        assertThatThrownBy(() -> authority.claim(saved.workspace(), second))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_busy"));
+        assertThat(authority.isHeld(saved.workspace(), second)).isFalse();
+        assertThat(jdbc.queryForObject("SELECT member_count FROM ma_storage_owner", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE storage_kind = 'LOCAL'", Integer.class)).isZero();
+        jdbc.update("UPDATE ma_runtime_binding SET runtime_generation = runtime_generation + 1 WHERE binding_id = ?", record.getBindingId());
+        assertThatThrownBy(() -> authority.release(saved.workspace(), record)).isInstanceOf(RuntimeBrokerException.class);
+        assertThat(jdbc.queryForObject("SELECT execution_storage_key FROM ma_runtime_session WHERE runtime_session_id = ?", String.class, record.getRuntimeSessionId())).isNotNull();
+        assertThat(jdbc.queryForObject("SELECT member_count FROM ma_storage_owner", Integer.class)).isEqualTo(1);
+        jdbc.update("UPDATE ma_runtime_binding SET runtime_generation = runtime_generation - 1 WHERE binding_id = ?", record.getBindingId());
+        authority.release(saved.workspace(), record);
+        assertThat(authority.isHeld(saved.workspace(), record)).isFalse();
+        assertThat(jdbc.queryForObject("SELECT member_count FROM ma_storage_owner", Integer.class)).isZero();
+        authority.claim(saved.workspace(), second);
+        assertThat(authority.isHeld(saved.workspace(), second)).isTrue();
+        authority.release(saved.workspace(), second);
+        authority.release(saved.workspace(), second);
+        assertThat(jdbc.queryForObject("SELECT member_count FROM ma_storage_owner", Integer.class)).isZero();
+    }
+
+    private com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord readyExternalSession(
+            JdbcRuntimeBindingRepository bindings, com.alibaba.qwen.code.runtimebroker.RuntimeScope scope, String sessionId) {
+        var request = new com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest(scope, sessionId,
                 com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE_FILES, "workspace");
         var initial = bindings.findOrCreate(request);
         var claimed = bindings.claimOperation(initial.getBindingId(), "test", java.time.Duration.ofMinutes(5));
@@ -369,21 +404,11 @@ public class ExternalStorageRegistrationTest {
         var lease = new com.alibaba.qwen.code.runtimebroker.RuntimeLease(seed.getProvisionalRuntimeId(), java.net.URI.create("http://127.0.0.1:1"), seed.getToken(), seed.getLeaseId(), seed.getEpoch());
         var ready = bindings.compareAndSet(claimed, claimed.withAttestation(lease, new com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle(request.getProvisionerKind(), 1, java.util.Map.of("fixture", true)), java.time.Instant.now(), java.time.Instant.now()));
         var runtimeSessions = new com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository(jdbc.getDataSource());
-        var session = new com.alibaba.qwen.code.runtimebroker.RuntimeSession(id, UUID.randomUUID().toString(), "bootstrap", scope);
+        var session = new com.alibaba.qwen.code.runtimebroker.RuntimeSession(sessionId, UUID.randomUUID().toString(), "bootstrap", scope);
         var acquiring = runtimeSessions.findOrCreate(new com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord(session, ready.getBindingId(), ready.getGeneration(),
                 com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.State.ACQUIRING, 0, java.time.Instant.now()));
-        var record = runtimeSessions.compareAndSet(acquiring,
+        return runtimeSessions.compareAndSet(acquiring,
                 acquiring.withState(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.State.READY, java.time.Instant.now()));
-        var authority = new WorkspaceExecutionStore(jdbc, manager, null, properties);
-        authority.claim(saved.workspace(), record);
-        assertThat(authority.isHeld(saved.workspace(), record)).isTrue();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE storage_kind = 'LOCAL'", Integer.class)).isZero();
-        jdbc.update("UPDATE ma_runtime_binding SET runtime_generation = runtime_generation + 1 WHERE binding_id = ?", ready.getBindingId());
-        assertThatThrownBy(() -> authority.release(saved.workspace(), record)).isInstanceOf(RuntimeBrokerException.class);
-        assertThat(jdbc.queryForObject("SELECT execution_storage_key FROM ma_runtime_session WHERE runtime_session_id = ?", String.class, session.getRuntimeSessionId())).isNotNull();
-        jdbc.update("UPDATE ma_runtime_binding SET runtime_generation = runtime_generation - 1 WHERE binding_id = ?", ready.getBindingId());
-        authority.release(saved.workspace(), record);
-        assertThat(authority.isHeld(saved.workspace(), record)).isFalse();
     }
 
     private void assertReadPathMismatch() {
