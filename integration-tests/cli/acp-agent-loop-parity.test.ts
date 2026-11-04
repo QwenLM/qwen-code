@@ -281,6 +281,8 @@ const allowOnce = () => ({
       });
       const dir = rig.testDir!;
       scenario.prepare?.(rig);
+      // Snapshot the fixture's home writes before the child can touch it.
+      const homeBefore = readdirSync(join(dir, '.qwen-home')).sort();
       let streamingIndex = 0;
       server = await startFakeOpenAIServer(
         ({ body }) =>
@@ -514,13 +516,10 @@ const allowOnce = () => ({
         }
       }
       // The scratch runtime keeps the session runtime's `tmp/<hash>` and
-      // `usage/` out of the workspace; pin what TestRig wrote there instead
-      // of relying on the snapshot diff, which only trips on the losing side
-      // of a race.
-      expect(readdirSync(join(dir, '.qwen-home')).sort()).toEqual([
-        'settings.json',
-        'trustedFolders.json',
-      ]);
+      // `usage/` out of the workspace; pin the pre-run listing instead of
+      // relying on the snapshot diff, which only trips on the losing side of
+      // a race.
+      expect(readdirSync(join(dir, '.qwen-home')).sort()).toEqual(homeBefore);
       return {
         requests: modelRequests(server, dir),
         dateReminders: streamingMessages(server).filter((messages) =>
