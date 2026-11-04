@@ -856,10 +856,13 @@ public final class JdbcRuntimeBindingRepository
         requirePhysicalStorageAdmission(connection, request);
     }
 
+    // Harness admission, recovery, cleanup and Hook checks below are read-only: they write no
+    // row a concurrent lifecycle transition could observe, so they take no tenant placement
+    // guard. Authority checks hold the claim mirror through the transaction; ordinary
+    // checks order a transition committing after their snapshot after the check.
     @Override
     public void requireHarnessAdmission(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority);
             return null;
         });
@@ -873,7 +876,6 @@ public final class JdbcRuntimeBindingRepository
             return;
         }
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true));
             return null;
         });
@@ -895,7 +897,6 @@ public final class JdbcRuntimeBindingRepository
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
-                    lockPlacementDomain(connection, scope.getTenantId());
                     try (PreparedStatement fence =
                             connection.prepareStatement(
                                     "SELECT operation_id FROM ma_session_head"
@@ -944,7 +945,6 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public void requireHarnessCleanup(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(false, HarnessFence.CLEANUP));
             return null;
         });
@@ -958,7 +958,6 @@ public final class JdbcRuntimeBindingRepository
             return;
         }
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true, HarnessFence.CLEANUP));
             return null;
         });
@@ -967,7 +966,6 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public void requireHookAdmission(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(false, HarnessFence.LEGACY_HOOK));
             return null;
         });
@@ -981,7 +979,6 @@ public final class JdbcRuntimeBindingRepository
             return;
         }
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true, HarnessFence.LEGACY_HOOK));
             return null;
         });
@@ -1050,10 +1047,16 @@ public final class JdbcRuntimeBindingRepository
                 }
             }
         }
+        String claimLock = "";
+        if (authority != null) {
+            // Claim updates queue on the Session, independently of tenant placement.
+            claimLock = "H2".equals(connection.getMetaData().getDatabaseProductName())
+                    ? " FOR UPDATE" : " FOR SHARE";
+        }
         try (PreparedStatement statement = connection.prepareStatement(
                         "SELECT tenant_id, harness_session_id, phase, operation_id,"
                                 + " claim_generation, claim_lease_until FROM ma_session_head WHERE"
-                                + " tenant_key = ? AND harness_key = ?")) {
+                                + " tenant_key = ? AND harness_key = ?" + claimLock)) {
             statement.setString(1, harnessDrainKey(scope.getTenantId()));
             statement.setString(2, harnessDrainKey(harnessSessionId));
             try (ResultSet row = statement.executeQuery()) {
