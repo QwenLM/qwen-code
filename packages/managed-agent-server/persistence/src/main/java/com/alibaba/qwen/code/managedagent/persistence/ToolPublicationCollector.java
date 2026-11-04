@@ -47,7 +47,7 @@ public final class ToolPublicationCollector {
     }
 
     @Scheduled(fixedDelay = 1000, scheduler = "managedToolOutputScheduler")
-    public synchronized void tick() {
+    public void tick() {
         try {
             runOnce();
         } catch (RuntimeException error) {

@@ -37,6 +37,7 @@ import {
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
 import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
+import { approveProjectHooks } from '../project-hook-approval.js';
 
 // The agent trusts a client that presents the capability it was started with.
 const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
@@ -281,6 +282,8 @@ const allowOnce = () => ({
       });
       const dir = rig.testDir!;
       scenario.prepare?.(rig);
+      // Snapshot the fixture's home writes before the child can touch it.
+      const homeBefore = readdirSync(join(dir, '.qwen-home')).sort();
       let streamingIndex = 0;
       server = await startFakeOpenAIServer(
         ({ body }) =>
@@ -299,6 +302,7 @@ const allowOnce = () => ({
         ? CONTAINER_SANDBOX_NO_PROXY
         : '127.0.0.1,localhost';
       const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+      if (scenario.settings?.['hooks']) approveProjectHooks(qwenHome, dir);
       const env: NodeJS.ProcessEnv = {
         ...process.env,
         OPENAI_API_KEY: 'fake-key',
@@ -514,13 +518,10 @@ const allowOnce = () => ({
         }
       }
       // The scratch runtime keeps the session runtime's `tmp/<hash>` and
-      // `usage/` out of the workspace; pin what TestRig wrote there instead
-      // of relying on the snapshot diff, which only trips on the losing side
-      // of a race.
-      expect(readdirSync(join(dir, '.qwen-home')).sort()).toEqual([
-        'settings.json',
-        'trustedFolders.json',
-      ]);
+      // `usage/` out of the workspace. Comparing against the pre-run listing
+      // avoids copying TestRig's seeded names, and a leak fails here directly
+      // rather than only when the request equality loses a race.
+      expect(readdirSync(join(dir, '.qwen-home')).sort()).toEqual(homeBefore);
       return {
         requests: modelRequests(server, dir),
         dateReminders: streamingMessages(server).filter((messages) =>
