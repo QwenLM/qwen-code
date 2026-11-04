@@ -6979,6 +6979,17 @@ export function registerHostedHarnessSessionRoutes(
         !lifecycle &&
         !!session.extensions?.enabled &&
         pendingCommandApproval?.plan.commandStep !== undefined;
+      // A parked command-step round must never be answered by a cold load:
+      // answering writes a durable tool_result for the plan's own skill call,
+      // which permanently destroys the continuation. Both answer guards below
+      // key on this one predicate. pendingCommandApproval is computed
+      // unconditionally above; resumeApproval is only assigned inside the
+      // takeover arm, so on a bare load it is undefined and cannot be the key
+      // (R9-1).
+      let resumeApproval: RestoredHostedApprovalContinuation | undefined;
+      const commandStepPark =
+        pendingCommandApproval?.plan.commandStep !== undefined ||
+        resumeApproval?.plan.commandStep !== undefined;
       // A Hooks Session recovers only through this load (it never takes
       // over), and the file-history gate below needs every call of the
       // pending round answered. The team and agent calls the dead Harness
@@ -6990,7 +7001,7 @@ export function registerHostedHarnessSessionRoutes(
         session.hooks &&
         !lifecycle &&
         unsettled !== undefined &&
-        !pendingCommandApproval?.plan.commandStep
+        !commandStepPark
       ) {
         try {
           await answerResumedTurnCalls({
@@ -7205,7 +7216,6 @@ export function registerHostedHarnessSessionRoutes(
           resume = { promptId: unsettled, text, parts: [] };
         }
       }
-      let resumeApproval: RestoredHostedApprovalContinuation | undefined;
       // The extensions arm reuses extensionsCommandStepTakeover (computed with
       // the settle exemption above): an explicit, non-lifecycle takeover of an
       // extensions Session's parked command-step plan, even when a Hook catalog
@@ -7543,7 +7553,7 @@ export function registerHostedHarnessSessionRoutes(
         // before the Harness died — core's orphan repair would otherwise
         // have the model retry it — and as never run otherwise, so the
         // round the resume needs is whole.
-        if (promptId && !resumeApproval?.plan.commandStep)
+        if (promptId && !commandStepPark)
           await answerResumedTurnCalls({
             session: managed,
             sessionId,
