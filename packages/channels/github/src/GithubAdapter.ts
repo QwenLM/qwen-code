@@ -819,13 +819,13 @@ function isNoReplySentinel(text: string): boolean {
 const SECONDARY_RATE_LIMIT_MESSAGE = /secondary rate limit|abuse detection/i;
 
 /**
- * GitHub rejected the write before creating anything: its rate limiter
- * answered. The rate-limit headers prove the answer came from GitHub rather
- * than a proxy in front of it; then either the primary budget is exhausted or
- * the message names a secondary limit, which GitHub sends with quota left
- * and not always with `retry-after`. Unlike the watch-pass predicate, a
- * `retry-after` header alone is not enough: a proxy can send one too, and a
- * wrongly retried comment is a duplicate public reply.
+ * GitHub's rate limiter rejected the write before creating anything. The
+ * `x-ratelimit-remaining` header shows a rate limiter answered rather than,
+ * say, a bare 429 from a proxy; then either the budget is exhausted or the
+ * message carries GitHub's secondary-limit wording, which GitHub sends with
+ * quota left and not always with `retry-after`. Unlike the watch-pass
+ * predicate, a `retry-after` header alone is not enough: a proxy can send one
+ * too, and a wrongly retried comment is a duplicate public reply.
  */
 function isDefiniteNoWriteGithubError(err: unknown): boolean {
   const e = err as {
@@ -1510,9 +1510,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.removeReplyPendingInboundTask(record);
       } catch (err) {
         if (signal?.aborted) return;
-        if (isDefiniteNoWriteGithubError(err)) {
-          continue;
-        }
+        // A rate limit answers every remaining record the same way: keep
+        // them all for the next start instead of spending three more
+        // attempts per record against it.
+        if (isDefiniteNoWriteGithubError(err)) return;
         this.recordPublicationAudit({
           ...auditBase,
           at: new Date().toISOString(),

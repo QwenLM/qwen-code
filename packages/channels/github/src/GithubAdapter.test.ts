@@ -3384,6 +3384,35 @@ describe('GithubChannel', () => {
       ]);
     });
 
+    it('keeps every pending final and stops the pass on a secondary rate limit', async () => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({ id: 'second', sourceMessageId: '1002' }),
+      ]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(
+          new Error(
+            'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.',
+          ),
+          {
+            status: 403,
+            response: { headers: { 'x-ratelimit-remaining': '4999' } },
+          },
+        ),
+      );
+
+      await retryPendingForTest();
+
+      // One record's attempts only: the limit answers the rest the same way.
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(3);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['first', 'second']);
+      expect(existsSync(auditPath())).toBe(false);
+    });
+
     it('drops and audits an ambiguous pending final retry failure', async () => {
       writePending([
         pendingRecord({ triggerKind: 'mention', sourceMessageId: '1001' }),
@@ -3667,18 +3696,39 @@ describe('GithubChannel', () => {
       expect(existsSync(pendingPath())).toBe(true);
     });
 
+    const SECONDARY_LIMIT =
+      'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.';
     it.each([
-      ['a 403 with retry-after', 403, { 'retry-after': '60' }],
-      ['a bare 403', 403, {}],
-      ['a 429', 429, {}],
+      [
+        'a 403 with retry-after',
+        403,
+        SECONDARY_LIMIT,
+        { 'retry-after': '60' },
+        [60_000, 60_000],
+      ],
+      ['a bare 403', 403, SECONDARY_LIMIT, {}, [60_000, 120_000]],
+      ['a 429', 429, SECONDARY_LIMIT, {}, [60_000, 120_000]],
+      [
+        'the older abuse-detection wording',
+        403,
+        'You have triggered an abuse detection mechanism. Please wait a few minutes before you try again.',
+        {},
+        [60_000, 120_000],
+      ],
     ])(
-      'keeps the final reply as pending on a secondary rate limit sent as %s',
-      async (_label, status, extraHeaders) => {
+      'retries the final reply, then keeps it pending, on a secondary rate limit sent as %s',
+      async (_label, status, message, extraHeaders, waits) => {
         await connectForPublication();
+        // The retry cooldown alone: the poll loop's own interval sleep shares
+        // abortableSleep and would interleave with these values.
+        const sleep = vi.fn().mockResolvedValue(undefined);
+        (
+          channel as unknown as {
+            sleepForRetry: (ms: number) => Promise<void>;
+          }
+        ).sleepForRetry = sleep;
         const error = Object.assign(
-          new Error(
-            'You have exceeded a secondary rate limit. Please wait a few minutes before you try again. - https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits',
-          ),
+          new Error(`${message} - https://docs.github.com/rest`),
           {
             status,
             response: {
@@ -3706,6 +3756,8 @@ describe('GithubChannel', () => {
             'session-publication',
           ),
         ).rejects.toMatchObject({ cause: error });
+        expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(3);
+        expect(sleep.mock.calls.map(([ms]) => ms)).toEqual(waits);
         const audit = readFileSync(auditPath(), 'utf-8');
         expect(audit).toContain('"outcome":"failed"');
         expect(audit).not.toContain('"outcome":"failed_ambiguous"');
@@ -3718,76 +3770,49 @@ describe('GithubChannel', () => {
       },
     );
 
-    it('spaces secondary-limit retries of the final reply by GitHub minimum wait', async () => {
-      await connectForPublication();
-      // The retry cooldown alone: the poll loop's own interval sleep shares
-      // abortableSleep and would interleave with these values.
-      const sleep = vi.fn().mockResolvedValue(undefined);
-      (
-        channel as unknown as {
-          sleepForRetry: (ms: number) => Promise<void>;
-        }
-      ).sleepForRetry = sleep;
-      mockOctokit.rest.issues.createComment.mockRejectedValue(
-        Object.assign(
-          new Error(
-            'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.',
+    it.each([
+      [
+        'a permission 403',
+        403,
+        'Resource not accessible by personal access token',
+        '4999',
+      ],
+      ['a 502 carrying an exhausted budget header', 502, 'Server Error', '0'],
+    ])(
+      'keeps %s on the final reply single-shot',
+      async (_label, status, message, remaining) => {
+        await connectForPublication();
+        const error = Object.assign(new Error(message), {
+          status,
+          response: { headers: { 'x-ratelimit-remaining': remaining } },
+        });
+        mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+        const publish = (
+          channel as unknown as {
+            publishFinalResponse: (
+              chatId: string,
+              threadId: string,
+              text: string,
+              sessionId: string,
+            ) => Promise<void>;
+          }
+        ).publishFinalResponse.bind(channel);
+
+        await expect(
+          publish(
+            'owner/repo',
+            'issue:42',
+            'Final reply',
+            'session-publication',
           ),
-          {
-            status: 403,
-            response: { headers: { 'x-ratelimit-remaining': '4999' } },
-          },
-        ),
-      );
-      const publish = (
-        channel as unknown as {
-          publishFinalResponse: (
-            chatId: string,
-            threadId: string,
-            text: string,
-            sessionId: string,
-          ) => Promise<void>;
-        }
-      ).publishFinalResponse.bind(channel);
-
-      await expect(
-        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
-      ).rejects.toBeInstanceOf(Error);
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(3);
-      expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([60_000, 120_000]);
-      expect(existsSync(pendingPath())).toBe(true);
-    });
-
-    it('keeps a permission 403 on the final reply single-shot', async () => {
-      await connectForPublication();
-      const error = Object.assign(
-        new Error('Resource not accessible by personal access token'),
-        {
-          status: 403,
-          response: { headers: { 'x-ratelimit-remaining': '4999' } },
-        },
-      );
-      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
-      const publish = (
-        channel as unknown as {
-          publishFinalResponse: (
-            chatId: string,
-            threadId: string,
-            text: string,
-            sessionId: string,
-          ) => Promise<void>;
-        }
-      ).publishFinalResponse.bind(channel);
-
-      await expect(
-        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
-      ).rejects.toMatchObject({ cause: error });
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
-      expect(readFileSync(auditPath(), 'utf-8')).toContain(
-        '"outcome":"failed_ambiguous"',
-      );
-      expect(existsSync(pendingPath())).toBe(false);
-    });
+        ).rejects.toMatchObject({ cause: error });
+        expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+        expect(readFileSync(auditPath(), 'utf-8')).toContain(
+          '"outcome":"failed_ambiguous"',
+        );
+        expect(existsSync(pendingPath())).toBe(false);
+      },
+    );
 
     it('migrates legacy pending finals before retrying', async () => {
       const legacyPath = join(
