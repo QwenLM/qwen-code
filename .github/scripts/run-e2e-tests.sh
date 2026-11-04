@@ -59,14 +59,15 @@ if [ "$sandbox" = 'sandbox:docker' ]; then
 
   select_apt_mirror() {
     command -v curl > /dev/null 2>&1 || return 0
-    # Below this rate the two apt layers (~200 MB) would eat more than ~15 of
-    # this job's 60 minutes, so a faster mirror is worth the extra cache key.
-    # Above it the built-in source is healthy and is left untouched — which is
-    # what keeps a fixed mirror from slowing the Hong Kong hosts down.
-    local slow_default=250000
-    # A mirror also has to be fast in absolute terms, not merely faster than a
-    # broken default: without this floor, two slow endpoints would still
-    # "win" and move a host onto a mirror it never needed.
+    # Two gates, both on the mirror side. An absolute floor stops a "slow vs
+    # slower" override (two crawling endpoints must not move a host onto a
+    # mirror it never needed); the 4x factor keeps a genuinely fast default —
+    # the Hong Kong hosts — on the built-in source, since a mirror there is
+    # rarely 4x quicker. There is deliberately no "default looks healthy" gate:
+    # the mainland paths are bimodal, a 512 KiB probe can catch a fast burst
+    # (372 kB/s on hz4-2) while the sustained 200 MB transfer then throttles to
+    # 45 kB/s and times out (#16214 recurrence, run 41743539611). Trusting the
+    # mirror's own measured speed, not the default's, is what survives that.
     local fast_mirror=1000000
     local default_rate best_rate=0 best='' mirror rate
     default_rate="$(apt_mirror_probe_rate deb.debian.org)"
@@ -82,8 +83,7 @@ if [ "$sandbox" = 'sandbox:docker' ]; then
     # Print the measurements: the next person debugging a slow image build
     # should not have to re-run this probe by hand (#16214).
     echo "apt probe: deb.debian.org=${default_rate} B/s best=${best_rate} B/s (${best:-none})" >&2
-    if [ -n "${best}" ] && [ "${default_rate}" -lt "${slow_default}" ] &&
-      [ "${best_rate}" -gt "${fast_mirror}" ] &&
+    if [ -n "${best}" ] && [ "${best_rate}" -gt "${fast_mirror}" ] &&
       [ "${best_rate}" -gt $((default_rate * 4)) ]; then
       printf '%s' "${best}"
     fi
