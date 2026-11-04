@@ -107,27 +107,45 @@ jobs:
           set -euo pipefail
           superseded=false
           provisional=false
-          # A `cancelled` run is classified by positive annotation evidence, not
-          # by the absence of a timeout (#16272, review on #16280):
-          #   - a job execution-time timeout is a real breakage that concludes
-          #     `cancelled` rather than `failure` (#16214 hid this way) -> report,
-          #     even when a shutdown annotation coexists on the same job;
-          #   - a concurrency supersede carries the runner shutdown / higher-
-          #     priority / operation-canceled annotations and no timeout -> skip,
-          #     so a push chain does not file an issue per displaced run;
-          #   - neither (or the jobs/annotations cannot be read) -> report, fail
-          #     open like the rest of this step, so an unclassifiable cancellation
-          #     cannot re-create the hiding problem.
-          if [[ "${RUN_CONCLUSION}" == 'cancelled' ]]; then
-            timeout_found=false
-            concurrency_found=false
+          # Classify a cancelled run by positive annotation evidence (#16272,
+          # review on #16280). Echoes `timeout`, `concurrency`, or `unknown`:
+          #   timeout     - a job carries the execution-time annotation (a real
+          #                 breakage that concludes cancelled, #16214); wins even
+          #                 when a shutdown annotation coexists on the same job.
+          #   concurrency - shutdown / higher-priority / operation-canceled
+          #                 annotations and no timeout (a deliberate supersede).
+          #   unknown     - neither, or the jobs/annotations could not be read or
+          #                 certified complete; callers fail open on this so an
+          #                 unclassifiable cancellation cannot hide.
+          # Shared by the current-run gate and the successor-ownership check so
+          # the two cannot drift.
+          cancelled_class() {
+            local run_id="$1" attempt="$2" pages
+            pages="${RUNNER_TEMP}/cancel-jobs-${run_id}-${attempt}.json"
+            if ! gh api "repos/${REPO}/actions/runs/${run_id}/attempts/${attempt}/jobs?per_page=100" \
+              --paginate > "${pages}" 2>/dev/null; then
+              echo unknown
+              return 0
+            fi
+            # Certify the merged pages against the total_count receipt, like the
+            # download step: a partial list must read as unknown, not as a
+            # complete one that happens to lack the timed-out job.
+            if ! jq -e -s '([.[].total_count] | max) as $t | ([.[].jobs[]?] | length) as $n | $t != null and $n == $t' \
+              "${pages}" >/dev/null 2>&1; then
+              echo unknown
+              return 0
+            fi
+            local timeout_found=false concurrency_found=false annotations
             while IFS=$'\t' read -r job_id check_run_id; do
               [[ -n "${check_run_id}" ]] || continue
-              annotations="$(
+              if ! annotations="$(
                 gh api --paginate \
                   "repos/${REPO}/check-runs/${check_run_id}/annotations" \
-                  --jq '[.[].message] | join("\n")' 2>/dev/null || true
-              )"
+                  --jq '[.[].message] | join("\n")' 2>/dev/null
+              )"; then
+                echo unknown
+                return 0
+              fi
               if grep -qiE 'exceeded the maximum execution time' <<< "${annotations}"; then
                 timeout_found=true
               fi
@@ -135,23 +153,17 @@ jobs:
                 concurrency_found=true
               fi
             done < <(
-              gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
-                --paginate \
-                | jq -rs '[.[].jobs[]?] | .[] | select(.conclusion == "cancelled") | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv' \
-                  2>/dev/null
+              jq -r -s '[.[].jobs[]?] | .[] | select(.conclusion == "cancelled") | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv' \
+                "${pages}" 2>/dev/null
             )
-            if [[ "${timeout_found}" != 'true' && "${concurrency_found}" == 'true' ]]; then
-              echo "superseded=true" >> "${GITHUB_OUTPUT}"
-              echo "provisional=false" >> "${GITHUB_OUTPUT}"
-              echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled by a concurrency supersede (shutdown/higher-priority annotation, no timeout); not reporting."
-              exit 0
-            fi
             if [[ "${timeout_found}" == 'true' ]]; then
-              echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled by a job execution-time timeout; reporting it as a failure."
+              echo timeout
+            elif [[ "${concurrency_found}" == 'true' ]]; then
+              echo concurrency
             else
-              echo "::warning::Run ${WORKFLOW_RUN_ID} was cancelled with no readable timeout or concurrency annotation; failing open and reporting."
+              echo unknown
             fi
-          fi
+          }
           if live_attempt="$(
             gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}" \
               --jq '.run_attempt'
@@ -163,6 +175,38 @@ jobs:
             fi
           else
             echo "::warning::Could not read run ${WORKFLOW_RUN_ID}; assuming this attempt-${RUN_ATTEMPT} event is current and reporting."
+          fi
+          # Classify a cancelled run only after the stale-attempt check, so a
+          # stale event is attributed to staleness rather than to a cancellation
+          # cause it never established (review R1-6). Only trusted triggers run
+          # the classifier: on the pull_request / pull_request_review arms the
+          # annotation text is contributor-authored, so it must not decide
+          # whether the PAT-backed reporter files (review R1-4); PR-triggered
+          # cancellations stay on the supersede path.
+          if [[ "${superseded}" != 'true' && "${RUN_CONCLUSION}" == 'cancelled' ]]; then
+            if [[ "${EVENT_NAME}" == 'pull_request' || "${EVENT_NAME}" == 'pull_request_review' ]]; then
+              superseded=true
+              echo "::notice::Run ${WORKFLOW_RUN_ID} is a PR-triggered cancellation; not reporting (contributor-authored annotations are untrusted)."
+            else
+              cancel_class="$(cancelled_class "${WORKFLOW_RUN_ID}" "${RUN_ATTEMPT}")"
+              case "${cancel_class}" in
+                concurrency)
+                  superseded=true
+                  echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled by a concurrency supersede (shutdown/higher-priority annotation, no timeout); not reporting."
+                  ;;
+                timeout)
+                  echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled by a job execution-time timeout; reporting it as a failure."
+                  ;;
+                *)
+                  echo "::warning::Run ${WORKFLOW_RUN_ID} was cancelled but a job-timeout could not be ruled out (unreadable or unclassifiable annotations); failing open and reporting."
+                  ;;
+              esac
+            fi
+            if [[ "${superseded}" == 'true' ]]; then
+              echo "superseded=true" >> "${GITHUB_OUTPUT}"
+              echo "provisional=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
           fi
           # A post-merge push run reports the commit that was main when it
           # started. When main has since advanced, a newer run of the same
@@ -202,9 +246,9 @@ jobs:
               if [[ -n "${tip}" && "${tip}" != "${HEAD_SHA}" ]]; then
                 if successor="$(
                   gh api "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?event=push&branch=main&head_sha=${tip}&per_page=1" \
-                    --jq '.workflow_runs[0] // {} | if (.status // "") == "" then "none" else "\(.status) \(.conclusion // "")" end'
+                    --jq '.workflow_runs[0] // {} | if (.status // "") == "" then "none" else "\(.status) \(.conclusion // "") \(.id // "") \(.run_attempt // "")" end'
                 )"; then
-                  read -r successor_status successor_conclusion <<< "${successor}"
+                  read -r successor_status successor_conclusion successor_id successor_attempt <<< "${successor}"
                   successor_owns=false
                   # Complement, not an enumeration: only a settled successor
                   # owns the result, and not-yet-final statuses grow.
@@ -212,6 +256,17 @@ jobs:
                     completed)
                       case "${successor_conclusion}" in
                         success | failure) successor_owns=true ;;
+                        cancelled)
+                          # A timeout-backed cancelled successor reports itself,
+                          # so it owns this result and filing here would duplicate
+                          # it; a plain concurrency cancellation or an unreadable
+                          # one does not own (review R1-3). Same classifier as the
+                          # current-run gate so the two cannot drift.
+                          if [[ -n "${successor_id}" &&
+                            "$(cancelled_class "${successor_id}" "${successor_attempt:-1}")" == 'timeout' ]]; then
+                            successor_owns=true
+                          fi
+                          ;;
                       esac
                       ;;
                     none)
@@ -229,7 +284,7 @@ jobs:
                   elif [[ "${successor_status}" == 'none' ]]; then
                     echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA} and main is now ${tip}, but workflow ${WORKFLOW_ID} has no newer push run there; reporting this run."
                   else
-                    echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA} and main is now ${tip}, but its newer push run is ${successor_status}${successor_conclusion:+ ${successor_conclusion}}, which this workflow does not report; reporting this run."
+                    echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA} and main is now ${tip}, but its newer push run is ${successor_status}${successor_conclusion:+ ${successor_conclusion}}, which does not own this result; reporting this run."
                   fi
                 else
                   echo "::warning::Could not list the newer runs of workflow ${WORKFLOW_ID}; reporting this run as though it had no successor."

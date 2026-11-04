@@ -493,13 +493,29 @@ fi
     // evidence: a timeout reports (even with a coexisting shutdown annotation),
     // a concurrency supersede (shutdown / higher-priority / operation-canceled,
     // no timeout) is skipped, and neither / unreadable fails open to reporting.
-    const classifyCancel = (annotationBehavior) => {
+    // The stub resolves the requested check-run id (job id 91234 != check-run
+    // id 9001, so a URL built from the wrong variable 404s) and applies the
+    // caller's --jq with real jq, so both the id extraction and the message
+    // projection are exercised (review R1-7).
+    const classifyCancel = (messages, { unreadable = false } = {}) => {
+      const fixture = JSON.stringify(
+        (messages ?? []).map((m) => ({ message: m })),
+      );
       const ghScript = `#!/usr/bin/env bash
 if [[ "$*" == */check-runs/*/annotations* ]]; then
-  ${annotationBehavior}
+  ${unreadable ? 'exit 1' : ''}
+  id="$(printf '%s' "$*" | grep -oE 'check-runs/[0-9]+' | head -1 | cut -d/ -f2)"
+  [[ "$id" == 9001 ]] || exit 1
+  filter=''
+  args=("$@")
+  for ((i=0;i<\${#args[@]};i++)); do
+    if [[ "\${args[i]}" == --jq ]]; then filter="\${args[i+1]}"; fi
+  done
+  printf '%s' '${fixture}' | jq -r "$filter"
+  exit 0
 fi
 if [[ "$*" == */attempts/*/jobs* ]]; then
-  printf '%s\\n' '{"jobs":[{"id":9001,"conclusion":"cancelled","check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
   exit 0
 fi
 printf '%s\\n' '1'
@@ -507,56 +523,73 @@ printf '%s\\n' '1'
       return detect('1', { RUN_CONCLUSION: 'cancelled' }, { ghScript });
     };
 
-    it('reports a cancelled run backed by a job execution-time timeout', () => {
-      const resolved = classifyCancel(
-        "printf '%s\\n' 'The job has exceeded the maximum execution time of 1h0m0s'; exit 0",
+    it('pins the RUN_CONCLUSION env input of the live step', () => {
+      expect(live.env.RUN_CONCLUSION).toBe(
+        '${{ github.event.workflow_run.conclusion }}',
       );
+    });
+
+    it('reports a cancelled run backed by a job execution-time timeout', () => {
+      const resolved = classifyCancel([
+        'The job has exceeded the maximum execution time of 1h0m0s',
+      ]);
       expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('execution-time timeout');
     });
 
     it('reports a timeout even when a shutdown annotation coexists on the job', () => {
-      const resolved = classifyCancel(
-        "printf '%s\\n' 'The job has exceeded the maximum execution time of 1h0m0s' 'The runner has received a shutdown signal.'; exit 0",
-      );
+      const resolved = classifyCancel([
+        'The job has exceeded the maximum execution time of 1h0m0s',
+        'The runner has received a shutdown signal.',
+      ]);
       expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('execution-time timeout');
     });
 
     it('skips a concurrency cancellation carrying the operation-canceled annotation', () => {
-      const resolved = classifyCancel(
-        "printf '%s\\n' 'The operation was canceled.'; exit 0",
-      );
+      const resolved = classifyCancel(['The operation was canceled.']);
       expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
       expect(resolved.stdout).toContain('concurrency supersede');
     });
 
     it('skips a concurrency cancellation carrying the runner shutdown annotation', () => {
-      const resolved = classifyCancel(
-        "printf '%s\\n' 'The runner has received a shutdown signal.'; exit 0",
-      );
+      const resolved = classifyCancel([
+        'The runner has received a shutdown signal.',
+      ]);
       expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
       expect(resolved.stdout).toContain('concurrency supersede');
     });
 
     it('skips a concurrency cancellation carrying the higher-priority annotation', () => {
-      const resolved = classifyCancel(
-        "printf '%s\\n' 'Canceling since a higher priority waiting request is queued.'; exit 0",
-      );
+      const resolved = classifyCancel([
+        'Canceling since a higher priority waiting request is queued.',
+      ]);
       expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
       expect(resolved.stdout).toContain('concurrency supersede');
     });
 
+    it('skips a PR-triggered cancellation without trusting contributor annotations', () => {
+      const resolved = detect(
+        '1',
+        {
+          RUN_CONCLUSION: 'cancelled',
+          EVENT_NAME: 'pull_request',
+          HEAD_BRANCH: 'feature',
+        },
+        { ghScript: '#!/usr/bin/env bash\nexit 1' },
+      );
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('PR-triggered cancellation');
+    });
+
     it('fails open and reports when the annotations cannot be read', () => {
-      const resolved = classifyCancel('exit 1');
+      const resolved = classifyCancel([], { unreadable: true });
       expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('failing open');
     });
 
     it('fails open and reports an unclassifiable cancellation annotation', () => {
-      const resolved = classifyCancel(
-        "printf '%s\\n' 'Some unrelated annotation.'; exit 0",
-      );
+      const resolved = classifyCancel(['Some unrelated annotation.']);
       expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('failing open');
     });
@@ -687,8 +720,31 @@ printf '%s\\n' '1'
       );
       expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('completed cancelled');
-      expect(resolved.stdout).toContain('does not report');
+      expect(resolved.stdout).toContain('does not own this result');
       expect(resolved.summary).toBe('');
+    });
+
+    it('lets a timeout-backed cancelled successor own the result (no duplicate)', () => {
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == *commits/main* ]]; then printf '%s\\n' 'new-head'; exit 0; fi
+if [[ "$*" == *actions/workflows/*/runs* ]]; then printf '%s\\n' 'completed cancelled 555 1'; exit 0; fi
+if [[ "$*" == *actions/runs/555/attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  exit 0
+fi
+if [[ "$*" == */check-runs/9001/annotations* ]]; then
+  printf '%s\\n' 'The job has exceeded the maximum execution time of 1h0m0s'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { EVENT_NAME: 'push', HEAD_BRANCH: 'main', HEAD_SHA: 'old-head' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('the newer push run owns its result');
     });
     it('reports a push run whose successor has not settled, flagged provisional', () => {
       // A running successor proves nothing yet, and this job cannot wait for
@@ -2038,16 +2094,20 @@ fi
     expect(downloadStep.env.RUN_ATTEMPT).toBe(
       '${{ github.event.workflow_run.run_attempt }}',
     );
-    // Counted over the whole workflow: the download step's two projections
-    // share one fetch, and the live-step cancellation classifier adds a second
-    // fetch that only runs for a cancelled run (#16272). Two static callsites.
+    // The download step's two projections share this one fetch of the event's
+    // jobs. The cancellation classifier fetches jobs too, but through the shared
+    // cancelled_class helper with parameterized run/attempt (#16272), so it does
+    // not use this literal; pin that helper's fetch separately below.
     expect(
       (
         workflow.match(
           /actions\/runs\/\$\{WORKFLOW_RUN_ID\}\/attempts\/\$\{RUN_ATTEMPT\}\/jobs/g,
         ) ?? []
       ).length,
-    ).toBe(2);
+    ).toBe(1);
+    expect(workflow).toContain(
+      'actions/runs/${run_id}/attempts/${attempt}/jobs',
+    );
     // The ids projection is bound to the array the download loop iterates and to
     // the payload the fetch wrote. Swapping it with the TSV projection below
     // hands the reader whole TSV lines so every log download 404s. Renaming

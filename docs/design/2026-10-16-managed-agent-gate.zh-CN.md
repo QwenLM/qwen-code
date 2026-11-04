@@ -154,8 +154,9 @@ workflow 共用的汇总 issue 上追加评论，找到匹配的已关闭 issue 
 当合入后 push 失败的 head 已不再是 main 的 tip 时，如果新 tip 上存在同一 workflow
 的更新 push 运行、且它**已经定论**，这次失败只记录在 analyze 运行的步骤摘要里，不会
 记录到 workflow issue 上：`success` 表示该处代码是绿的，`failure` 会通过自己的完成
-事件上报。以 `cancelled`、`timed_out`、`skipped` 或 `startup_failure` 结束的后继永远
-不会被分析，因此此时仍然上报原始失败。
+事件上报。以 `timed_out`、`skipped`、`startup_failure` 结束的后继，以及普通并发取消的
+`cancelled` 后继，永远不会被分析，因此此时仍然上报原始失败；带超时的 `cancelled`
+后继会自我上报并拥有该结果（#16272）。
 
 尚未 `completed` 的后继什么都证明不了，而本 job 也等不起它——报告所在
 的 runner 池把它排了 20-100 分钟，准备好报告时 tip 上的运行通常刚开始不久。此时仍然
