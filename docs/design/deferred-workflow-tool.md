@@ -31,6 +31,12 @@ change the separate construction-time Skill reference decision.
   override a tool's native deferral, consistent with other deferred tools.
 - The existing schema-budget preload and incomplete-bridge fallback still
   apply. An explicit permission deferral remains distinct from native deferral.
+  A nonzero preload budget remains all-or-nothing: Workflow now contributes to
+  the candidate total and can push the entire deferred set over budget. The
+  default zero budget does not preload tools.
+  Normal LLM initialization runs `startChat` and resolves the incomplete-bridge
+  fallback before Config marks Workflow mode ready or applies its initial mode,
+  so mode activation does not wait for the first model request.
 - Old histories containing direct Workflow calls can reveal the tool during
   replay; `/clear` retains its existing reset behavior.
 - Named workflows, name-only sessions, host-owned runs and `/review` activation
