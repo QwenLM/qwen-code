@@ -308,6 +308,30 @@ it('gives the shared Linux test lane one ceiling on both pools', () => {
   expect(ci.jobs.test.strategy.matrix.shard).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
 });
 
+it('skips every build-consuming shard step when test_build failed', () => {
+  // `!cancelled()` is true when a needed job fails, so without this term a
+  // failed build still starts all eight shards: each pays a full install and
+  // then dies at the missing artifact, and every shard reports artifact
+  // plumbing as its failing step instead of the build that broke. The steps
+  // are gated, not the job or the matrix: `test_ubuntu` compares
+  // `needs.test.result` to `success`, so a shard must still conclude success
+  // when the build failed and let the aggregate report the failure.
+  const steps = new Map(
+    (ci.jobs.test.steps ?? []).map((step) => [step.name, step]),
+  );
+  for (const name of [
+    'Install dependencies',
+    'Download the built tree',
+    'Unpack the built tree',
+    'Run tests and generate reports',
+    'Package and scan Chrome extension artifacts',
+  ]) {
+    expect(String(steps.get(name)?.if ?? ''), name).toContain(
+      "needs.test_build.result == 'success'",
+    );
+  }
+});
+
 it('reports the required Linux check only when the build and every shard pass', () => {
   const gate = ci.jobs.test_ubuntu;
   expect(gate.name).toBe('Test (ubuntu-latest, Node 22.x)');
@@ -723,13 +747,16 @@ describe('post-merge push lane', () => {
         (ci.jobs[job].steps ?? []).map((s) => {
           const { name: _artifactName, ...restWith } = s.with ?? {};
           // Both install without the prepare build: lint needs none, and
-          // the test shards unpack the one test_build made.
+          // the test shards unpack the one test_build made. Their `if`s now
+          // differ on purpose — a shard's install must not run when the
+          // build failed, while lint has no such dependency — so it is
+          // stripped here and each side is pinned explicitly below.
           if (job !== 'test_build' && s.name === 'Install dependencies') {
             expect(s.env).toEqual({
               QWEN_SKIP_PREPARE: '1',
               QWEN_SKIP_NOTICE_GENERATION: '1',
             });
-            const { env: _installEnv, ...install } = s;
+            const { env: _installEnv, if: _installIf, ...install } = s;
             return [
               s.name,
               JSON.stringify(canon({ ...install, with: restWith })),
@@ -770,6 +797,17 @@ describe('post-merge push lane', () => {
         t.get(n),
       );
     }
+    // The exemption above is only for the field that must differ: the shard
+    // install carries the build guard, and the lint install must not.
+    const installIf = (job) =>
+      (ci.jobs[job].steps ?? []).find((s) => s.name === 'Install dependencies')
+        ?.if;
+    expect(String(installIf('test') ?? '')).toContain(
+      "needs.test_build.result == 'success'",
+    );
+    expect(String(installIf('lint_and_static') ?? '')).not.toContain(
+      'needs.test_build',
+    );
     // Name-keyed maps are order-blind, and order is load-bearing here: the
     // `steps` context only exposes steps that have already run, and a
     // nonexistent property reads as '' — so if `Use trusted CI profile`

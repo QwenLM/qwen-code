@@ -1755,11 +1755,18 @@ describe('package scripts', () => {
   it('bounds the CI unit step so a hang fails instead of stalling', () => {
     // #10490's run 3 was cancelled at ~60 minutes, leaving behind
     // orphaned test processes; a stall reads as a timeout, not a failure.
-    const step = getWorkflowStep(
-      getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
-      'Run tests and generate reports',
+    const job = getWorkflowJob(
+      readWorkflow('.github/workflows/ci.yml'),
+      'test',
     );
-    expect(step).toContain('timeout-minutes: 110');
+    const step = getWorkflowStep(job, 'Run tests and generate reports');
+    expect(step).toContain('timeout-minutes: 45');
+    // The step cap is the one that must fire: it fails the step and leaves
+    // the job alive for the diagnostic steps below it, while a job timeout
+    // cancels the job and skips them.
+    const stepCap = Number(step.match(/timeout-minutes: (\d+)/)?.[1]);
+    const jobCap = Number(job.match(/\n {4}timeout-minutes: (\d+)/)?.[1]);
+    expect(stepCap).toBeLessThan(jobCap);
   });
 
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {

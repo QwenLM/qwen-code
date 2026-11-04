@@ -7,14 +7,14 @@ on:
   # merged tree before it lands. No queue is enabled (none since 2026-07-02),
   # so nothing validated that tree on either side of a merge: `main` had no
   # gate before one and nothing faster than the ~40-minute E2E after one.
-  # `test`, `lint_and_static`, and the `classify_pr` they depend on accept
-  # it (see their `if`s); every other job excludes push, so a post-merge run
-  # is exactly those three. The no-AK integration gate is its own
-  # `integration_no_ak` job on pull_request / merge_group, so this lane is
-  # lint, static analysis and unit tests. Removing it once the queue is
-  # enabled means dropping the trigger AND the push arm from ALL THREE
-  # `if`s: a partial removal leaves every merge running the survivors alone,
-  # publishing outputs nothing consumes.
+  # `test_build`, `test`, `test_ubuntu`, `lint_and_static`, and the
+  # `classify_pr` they depend on accept it (see their `if`s); every other job
+  # excludes push, so a post-merge run is exactly those five. The no-AK
+  # integration gate is its own `integration_no_ak` job on pull_request /
+  # merge_group, so this lane is lint, static analysis and unit tests.
+  # Removing it once the queue is enabled means dropping the trigger AND the
+  # push arm from ALL FIVE `if`s: a partial removal leaves every merge
+  # running the survivors alone, publishing outputs nothing consumes.
   push:
     branches:
       - 'main'
@@ -744,7 +744,7 @@ jobs:
           path: '${{ runner.temp }}/unit-test-tree.tgz'
           compression-level: 0
           overwrite: true
-          retention-days: 1
+          retention-days: 7
 
   # The required `Test (ubuntu-latest, Node 22.x)` check is `test_ubuntu`,
   # which passes only when the build and every shard below pass.
@@ -1036,7 +1036,7 @@ jobs:
       # `test_build` already ran the `prepare` build; its archive below
       # brings the outputs this install skips.
       - name: 'Install dependencies'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         env:
           QWEN_SKIP_PREPARE: '1'
           QWEN_SKIP_NOTICE_GENERATION: '1'
@@ -1059,7 +1059,7 @@ jobs:
       # for over a quarter of an hour; bound it and try once more.
       - name: 'Download the built tree'
         id: 'download_tree'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         timeout-minutes: 5
         continue-on-error: true
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
@@ -1076,7 +1076,7 @@ jobs:
           path: '${{ runner.temp }}/unit-test-tree'
 
       - name: 'Unpack the built tree'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
           tar -xzf "${RUNNER_TEMP}/unit-test-tree/unit-test-tree.tgz"
           rm -rf "${RUNNER_TEMP}/unit-test-tree"
@@ -1174,18 +1174,18 @@ jobs:
 
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         # A hung suite used to burn the whole job budget: #10490's run 3 was
         # cancelled at ~60 minutes with the runner terminating orphaned test
         # processes, which reads as a timeout rather than a failure.
         #
-        # The cap has to clear the slowest honest run, not the healthy one.
-        # ~32 minutes was measured at six Vitest forks; the pool now runs
-        # three, which roughly doubles the test phase on an idle host, and a
-        # failing run adds its retries on top. 110 leaves room for that and
-        # still fits the job's 120-minute budget, which this step enters at
-        # around minute 18.
-        timeout-minutes: 110
+        # The cap has to clear the slowest honest shard, not the healthy one:
+        # the same 1/8 slice measures ~7 minutes on an idle host and ~36 on a
+        # contended one, and a failing run adds its retries on top. 45 leaves
+        # room for that while still firing before this job's 60-minute cap,
+        # which this step enters around minute 10 — a step timeout keeps the
+        # diagnostic steps below alive, a job timeout does not.
+        timeout-minutes: 45
         env:
           NO_COLOR: true
           # Every attempt of a contended shard is a fresh roll: the same
@@ -1305,7 +1305,7 @@ jobs:
       # `scan:artifacts` manual-only. Linux leg only — packaging shells out to
       # the POSIX `zip`; skip (not fail) where it is missing.
       - name: 'Package and scan Chrome extension artifacts'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && matrix.shard == 1 }}"
+        if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && matrix.shard == 1 }}"
         run: |-
           if ! command -v zip >/dev/null 2>&1; then
             echo "::warning::zip is not installed; skipping the Chrome extension artifact scan"
