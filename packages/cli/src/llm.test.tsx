@@ -174,7 +174,6 @@ vi.mock('./config/config.js', () => ({
     getSandbox: vi.fn(() => false),
     getQuestion: vi.fn(() => ''),
     isInteractive: () => false,
-    getTrustWithheldProjectHooks: () => undefined,
     isProjectHooksPendingApproval: () => false,
     isLspEnabled: () => false,
     getLspClient: () => undefined,
@@ -574,7 +573,6 @@ describe('llm.tsx main function', () => {
       callOrder.push('loadCliConfig');
       return {
         isInteractive: () => false,
-        getTrustWithheldProjectHooks: () => undefined,
         isProjectHooksPendingApproval: () => false,
         getQuestion: () => '',
         getSandbox: () => false,
@@ -688,7 +686,6 @@ describe('llm.tsx main function', () => {
       ).toBeUndefined();
       return {
         isInteractive: () => false,
-        getTrustWithheldProjectHooks: () => undefined,
         isProjectHooksPendingApproval: () => false,
         getQuestion: () => '',
         getSandbox: () => false,
@@ -781,7 +778,6 @@ describe('llm.tsx main function', () => {
       async () =>
         ({
           isInteractive: () => false,
-          getTrustWithheldProjectHooks: () => undefined,
           isProjectHooksPendingApproval: () => false,
           getQuestion: () => '',
           getSandbox: () => false,
@@ -900,7 +896,6 @@ describe('llm.tsx main function', () => {
       async () =>
         ({
           isInteractive: () => false,
-          getTrustWithheldProjectHooks: () => undefined,
           isProjectHooksPendingApproval: () => false,
           getQuestion: () => '',
           getSandbox: () => false,
@@ -1006,7 +1001,6 @@ describe('llm.tsx main function', () => {
       async () =>
         ({
           isInteractive: () => false,
-          getTrustWithheldProjectHooks: () => undefined,
           isProjectHooksPendingApproval: () => false,
           getQuestion: () => '',
           getSandbox: () => false,
@@ -1862,7 +1856,6 @@ describe('llm.tsx main function', () => {
     };
     const configStub = {
       isInteractive: () => false,
-      getTrustWithheldProjectHooks: () => undefined,
       isProjectHooksPendingApproval: () => false,
       getQuestion: () => 'bare prompt',
       getSandbox: () => false,
@@ -2163,7 +2156,6 @@ describe('llm.tsx main function', () => {
     let initialized = false;
     const configStub = {
       isInteractive: () => false,
-      getTrustWithheldProjectHooks: () => undefined,
       isProjectHooksPendingApproval: () => false,
       getQuestion: () => 'hello',
       getSandbox: () => false,
@@ -2549,7 +2541,6 @@ describe('llm.tsx main function', () => {
 
     const configStub = {
       isInteractive: () => false,
-      getTrustWithheldProjectHooks: () => undefined,
       isProjectHooksPendingApproval: () => false,
       getQuestion: () => 'hello',
       getSandbox: () => false,
@@ -2944,7 +2935,6 @@ describe('llm.tsx main function', () => {
 
     const configStub = {
       isInteractive: () => false,
-      getTrustWithheldProjectHooks: () => undefined,
       isProjectHooksPendingApproval: () => false,
       getQuestion: () => '  hello stream  ',
       getSandbox: () => false,
@@ -3298,7 +3288,6 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     vi.mocked(loadCliConfig).mockResolvedValue({
       ...sessionRegistryConfigStub,
       isInteractive: () => false,
-      getTrustWithheldProjectHooks: () => undefined,
       getQuestion: () => '',
       getSandbox: () => false,
       getDebugMode: () => false,

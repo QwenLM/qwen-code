@@ -1685,6 +1685,9 @@ export async function main() {
     const rawWorkspaceHooks = settings.workspace?.settings?.hooks;
     if (
       !nonInteractiveConfig.isInteractive?.() &&
+      // The approval-gate warning above already covers a pending/rejected
+      // block; this line is only for the trust-withheld case it cannot see.
+      !nonInteractiveConfig.isProjectHooksPendingApproval?.() &&
       !nonInteractiveConfig.isExplicitlyTrustedFolder?.() &&
       !nonInteractiveConfig.getBareMode?.() &&
       !nonInteractiveConfig.isSafeMode?.() &&

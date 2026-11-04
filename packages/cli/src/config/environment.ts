@@ -550,10 +550,16 @@ export interface EnvFileReadFailure {
 export function readProjectEnvFiles(
   settings: Settings,
   startDir: string,
+  workspaceTrusted?: boolean,
 ): Record<string, Record<string, string> | null> {
   const userLevelPaths = getUserLevelEnvPaths();
   const files: Record<string, Record<string, string> | null> = {};
-  for (const file of findEnvFiles(settings, startDir, userLevelPaths)) {
+  for (const file of findEnvFiles(
+    settings,
+    startDir,
+    userLevelPaths,
+    workspaceTrusted,
+  )) {
     if (userLevelPaths.has(path.normalize(file))) continue;
     try {
       files[file] = dotenv.parse(fs.readFileSync(file, 'utf-8'));

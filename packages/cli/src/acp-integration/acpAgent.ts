@@ -275,7 +275,6 @@ import {
   getProjectHooksForApprovalFromRawWorkspace,
   getProjectHooksApprovalState,
   getSeparatedHookSettings,
-  loadHookApprovals,
   summarizeProjectHooks,
 } from '../config/hook-approvals.js';
 import { assembleMcpServers } from '../config/mcpServers.js';
@@ -11008,17 +11007,10 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.projectHooksApprove: {
         // Dedicated approval route, NOT session/request_permission: permission
         // requests are auto-answered by automation clients, a trust decision
-        // must be an explicit user act. Records the same hash-bound approval
-        // the TUI dialog writes, then reloads the registry.
-        const approval =
-          getProjectHooksForApproval(this.settings) ??
-          getProjectHooksForApprovalFromRawWorkspace(this.settings);
-        if (!approval) {
-          throw RequestError.invalidParams(
-            undefined,
-            'No project hooks await approval in this workspace.',
-          );
-        }
+        // must be an explicit user act. The daemon already persisted the
+        // hash-bound decision for the exact block the user reviewed; this
+        // child only applies it. Re-deriving and re-writing the hash here
+        // could bind the decision to a block that changed since the review.
         const decision = params['decision'];
         if (decision !== 'approve' && decision !== 'reject') {
           throw RequestError.invalidParams(
@@ -11026,15 +11018,19 @@ class QwenAgent implements Agent {
             'decision must be approve or reject.',
           );
         }
-        await loadHookApprovals().setState(
-          approval,
-          decision === 'approve' ? 'approved' : 'rejected',
-        );
-        this.config.setProjectHooksPendingApproval(
-          decision !== 'approve',
-          decision === 'reject',
-        );
-        await this.config.getHookSystem()?.reload();
+        // Apply to every live config, not just the bootstrap one: each
+        // session holds its own Config and the registry reads its flags.
+        const configs = new Set([
+          this.config,
+          ...this.getActiveSessions().map((session) => session.getConfig()),
+        ]);
+        for (const config of configs) {
+          config.setProjectHooksPendingApproval(
+            decision !== 'approve',
+            decision === 'reject',
+          );
+          await config.getHookSystem()?.reload();
+        }
         return { decision, reloaded: true } as unknown as Record<
           string,
           unknown

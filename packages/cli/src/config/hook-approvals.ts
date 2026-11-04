@@ -129,7 +129,10 @@ export function getProjectHooksForApprovalFromRawWorkspace(settings: {
     hooks,
     resolved,
     env: {
-      files: readProjectEnvFiles(settings.merged, root),
+      // The review subject covers the project's env regardless of the
+      // folder's current trust state; otherwise a decision recorded while
+      // untrusted would hash differently once the folder is trusted.
+      files: readProjectEnvFiles(settings.merged, root, true),
       settings: settings.workspace.originalSettings.env ?? null,
     },
   };

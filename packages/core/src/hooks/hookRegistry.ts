@@ -52,9 +52,6 @@ export interface HookRegistryConfig {
   getSystemHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
   getUserHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
-  getTrustWithheldProjectHooks?():
-    | { [K in HookEventName]?: HookDefinition[] }
-    | undefined;
   getExtensions(): ExtensionWithHooks[];
 }
 
@@ -316,12 +313,6 @@ export class HookRegistry {
     const projectHooks = this.config.getProjectHooks();
     if (projectHooks) {
       this.processHooksConfiguration(projectHooks, HooksConfigSource.Project);
-    } else if (this.config.getTrustWithheldProjectHooks?.()) {
-      // The trust gate is why the scope is absent; leave a trace for the
-      // headless population that gets no TUI warning.
-      debugLogger.warn(
-        'Project hooks in .qwen/settings.json were not loaded: the folder is not explicitly trusted.',
-      );
     }
 
     // Extension hooks are always loaded

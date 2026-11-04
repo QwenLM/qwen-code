@@ -115,14 +115,7 @@ export type HooksListingConfig = Pick<
   | 'getTrustWithheldProjectHooks'
   | 'getExtensions'
 > &
-  Partial<
-    Pick<
-      Config,
-      | 'getWithheldProjectHooks'
-      | 'isProjectHooksRejected'
-      | 'getTrustWithheldProjectHooks'
-    >
-  >;
+  Partial<Pick<Config, 'getWithheldProjectHooks' | 'isProjectHooksRejected'>>;
 
 const PROMPT_DISPLAY_LIMIT = 50;
 
@@ -494,6 +487,7 @@ export function buildHooksListing(config: HooksListingConfig): HooksListing {
       );
     }
   }
+
   const sessionId = config.getSessionId();
   if (sessionId) {
     const sessionHooks = hookSystem
