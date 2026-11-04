@@ -1132,3 +1132,65 @@ it('preserves local command identity on read-only status results', () => {
   ).toBe(true);
   expect(new Set(state.blocks.map((block) => block.id)).size).toBe(2);
 });
+
+describe('tool name carried only by the lifecycle metadata', () => {
+  const lifecycleFrame = (toolName: string) => ({
+    v: 1,
+    id: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-1',
+        status: 'completed',
+        _meta: {
+          toolLifecycle: {
+            v: 1,
+            kind: 'tool',
+            sessionId: 'session',
+            executionId: 'exec-1',
+            callId: 'call-1',
+            toolName,
+            phase: 'ended',
+            executionStatus: 'success',
+            startedAt: 100,
+            endedAt: 120,
+            executionDurationMs: 20,
+            outcome: 'success',
+          },
+        },
+      },
+    },
+  });
+
+  it('names the tool block from _meta.toolLifecycle.toolName', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(lifecycleFrame('read_file')),
+      { now: 1 },
+    );
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'read_file',
+      title: 'read_file',
+    });
+  });
+
+  it('keeps an explicit title and _meta.toolName ahead of the lifecycle name', () => {
+    const frame = lifecycleFrame('read_file');
+    const update = frame.data.update;
+    update.title = 'Output retained';
+    update._meta = { ...update._meta, toolName: 'explicit_tool' };
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(frame),
+      { now: 1 },
+    );
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'explicit_tool',
+      title: 'Output retained',
+    });
+  });
+});
