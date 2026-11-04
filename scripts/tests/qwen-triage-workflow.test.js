@@ -104,10 +104,11 @@ function job(name) {
     : workflow.slice(start, start + 1 + nextJob);
 }
 
-// Executed-harness factory shared by the claim and finalize lifecycle tests:
-// a stubbed `gh` on PATH with failure-injection arms, the real step script
-// run under GitHub's exact shell flags, and capture of the body/call the
-// stub saw plus whatever the step appended to $GITHUB_OUTPUT. GitHub runs
+// Executed-harness factory shared by the claim and finalize lifecycle tests
+// and the verify job's review snapshot: a stubbed `gh` on PATH with
+// failure-injection arms, the real step script run under GitHub's exact
+// shell flags, and capture of the body/call the stub saw, every call's argv,
+// and whatever the step appended to $GITHUB_OUTPUT. GitHub runs
 // `shell: bash` as `bash --noprofile --norc -eo pipefail {0}`, and a step's
 // own `set -uo pipefail` does not turn `-e` back off — match that, or an
 // unguarded failing command kills the real step in production while the
@@ -115,19 +116,25 @@ function job(name) {
 // place: the two pasted copies already diverged once (only the finalize stub
 // had the failure arms), and a later fix made on only one copy would silently
 // degrade exactly one test. The failure arms stay inert unless a scenario
-// sets GH_STUB_FAIL_LIST / GH_STUB_FAIL_WRITE; a POST (any write that is not
-// a PATCH) answers with GH_STUB_POST_ID (default 7777) like the comments
-// API's created-id payload.
+// sets GH_STUB_FAIL_LIST / GH_STUB_FAIL_WRITE, or GH_STUB_EMPTY_LIST for a
+// paginated read that exits 0 with nothing on stdout; a paginated read
+// otherwise answers with `commentsFile`, and a POST (any write that is not a
+// PATCH) with GH_STUB_POST_ID (default 7777) like the comments API's
+// created-id payload. The temp `dir` is returned for steps that write under
+// $RUNNER_TEMP.
 function makeGhHarness(label) {
   const dir = mkdtempSync(join(tmpdir(), `triage-${label}-`));
   const commentsFile = join(dir, 'comments.json');
   const bodyOut = join(dir, 'body.md');
   const callOut = join(dir, 'call.txt');
   const outputFile = join(dir, 'github_output');
+  const argvFile = join(dir, 'argv');
   writeFileSync(
     join(dir, 'gh'),
     [
       '#!/usr/bin/env bash',
+      // One record per call, NUL between arguments: a body spans lines.
+      `printf '%s\\0' "$@" >> "$GH_STUB_ARGV"; printf '\\036' >> "$GH_STUB_ARGV"`,
       'body=""',
       'for a in "$@"; do case "$a" in body=*) body="${a#body=}";; esac; done',
       'if [ -n "$body" ]; then',
@@ -136,7 +143,10 @@ function makeGhHarness(label) {
       'fi',
       'case "$*" in',
       "  'api user --jq .login') echo qwen-code-ci-bot ;;",
-      '  *--paginate*) [ -n "${GH_STUB_FAIL_LIST:-}" ] && exit 1; cat "$GH_STUB_COMMENTS" ;;',
+      '  *--paginate*)',
+      '    [ -n "${GH_STUB_FAIL_LIST:-}" ] && exit 1',
+      '    [ -n "${GH_STUB_EMPTY_LIST:-}" ] && exit 0',
+      '    cat "$GH_STUB_COMMENTS" ;;',
       '  *PATCH*) [ -n "${GH_STUB_FAIL_WRITE:-}" ] && exit 1 ;;',
       '  *) [ -n "${GH_STUB_FAIL_WRITE:-}" ] && exit 1; echo "${GH_STUB_POST_ID:-7777}" ;;',
       'esac',
@@ -150,6 +160,7 @@ function makeGhHarness(label) {
     rmSync(bodyOut, { force: true });
     rmSync(callOut, { force: true });
     rmSync(outputFile, { force: true });
+    rmSync(argvFile, { force: true });
     const proc = spawnSync('bash', [...bashArgs, script], {
       env: {
         ...process.env,
@@ -162,6 +173,7 @@ function makeGhHarness(label) {
         GH_STUB_OUT: bodyOut,
         GH_STUB_CALL: callOut,
         GH_STUB_COMMENTS: commentsFile,
+        GH_STUB_ARGV: argvFile,
         ...env,
       },
       encoding: 'utf8',
@@ -172,10 +184,17 @@ function makeGhHarness(label) {
       call: existsSync(callOut) ? readFileSync(callOut, 'utf8') : null,
       out: `${proc.stdout}${proc.stderr}`,
       outputs: existsSync(outputFile) ? readFileSync(outputFile, 'utf8') : '',
+      calls: existsSync(argvFile)
+        ? readFileSync(argvFile, 'utf8')
+            .split('\x1e')
+            .slice(0, -1)
+            .map((call) => call.split('\0').slice(0, -1))
+        : [],
     };
   };
   return {
     commentsFile,
+    dir,
     run,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
     RUN_URL,
@@ -1721,53 +1740,25 @@ describe('qwen-triage verify workflow', () => {
       expect(at).toBeLessThan(
         resolveStep.lastIndexOf('echo "decision=run" >> "$GITHUB_OUTPUT"'),
       );
-      const dir = mkdtempSync(join(tmpdir(), 'verify-review-snapshot-'));
+      const { commentsFile, dir, ...harness } = makeGhHarness(
+        'verify-review-snapshot',
+      );
       try {
-        writeFileSync(
-          join(dir, 'gh'),
-          [
-            '#!/usr/bin/env bash',
-            'printf "%s\\n" "$@" > "$GH_ARGS"',
-            '[ -n "${GH_FAIL:-}" ] && exit 1',
-            '[ -n "${GH_EMPTY:-}" ] && exit 0',
-            'cat "$GH_PAGES"',
-          ].join('\n'),
-          { mode: 0o755 },
-        );
         const context = join(dir, 'verify-context');
         const file = join(context, 'review-threads.json');
         const run = (pages, env = {}) => {
           rmSync(context, { recursive: true, force: true });
           mkdirSync(context);
-          writeFileSync(join(dir, 'pages.json'), JSON.stringify(pages));
-          const proc = spawnSync(
-            'bash',
-            [
-              '--noprofile',
-              '--norc',
-              '-eo',
-              'pipefail',
-              '-c',
-              `set -euo pipefail\n${snippet}`,
-            ],
-            {
-              encoding: 'utf8',
-              env: {
-                ...process.env,
-                PATH: `${dir}:${process.env.PATH}`,
-                RUNNER_TEMP: dir,
-                GITHUB_REPOSITORY: 'QwenLM/qwen-code',
-                PR_NUMBER: '7999',
-                GH_ARGS: join(dir, 'args'),
-                GH_PAGES: join(dir, 'pages.json'),
-                ...env,
-              },
-            },
-          );
-          expect(proc.status, proc.stderr).toBe(0);
+          writeFileSync(commentsFile, JSON.stringify(pages));
+          const { out, calls } = harness.run(`set -euo pipefail\n${snippet}`, {
+            RUNNER_TEMP: dir,
+            PR_NUMBER: '7999',
+            ...env,
+          });
+          expect(calls).toHaveLength(1);
           return {
-            out: `${proc.stdout}${proc.stderr}`,
-            args: readFileSync(join(dir, 'args'), 'utf8').split('\n'),
+            out,
+            args: calls[0],
             state: existsSync(file)
               ? JSON.parse(readFileSync(file, 'utf8'))
               : null,
@@ -1947,9 +1938,9 @@ describe('qwen-triage verify workflow', () => {
         // file: the skill reads its absence as "unknown", and a partial file
         // would read as "nothing open".
         for (const [input, env] of [
-          [pages, { GH_FAIL: '1' }],
+          [pages, { GH_STUB_FAIL_LIST: '1' }],
           // gh exits 0 with nothing on stdout, and jq then exits 0 too.
-          [pages, { GH_EMPTY: '1' }],
+          [pages, { GH_STUB_EMPTY_LIST: '1' }],
           [[{ data: null }], {}],
           [[], {}],
         ]) {
@@ -1962,7 +1953,7 @@ describe('qwen-triage verify workflow', () => {
         expect(reviewState([{ data: null }])).toBeNull();
         expect(reviewState([])).toBeNull();
       } finally {
-        rmSync(dir, { recursive: true, force: true });
+        harness.cleanup();
       }
     },
   );
