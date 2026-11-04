@@ -217,7 +217,7 @@ public class WorkspaceFileStore {
                     throw unavailable();
                 }
                 worktreeRevision = worktree.revision();
-                var root = guard.fileRoot(binding);
+                var root = lock ? guard.fileRoot(binding) : guard.fileRootForRead(binding);
                 try {
                     var identity = java.nio.file.Files.readAttributes(java.nio.file.Path.of((String) root.get("root"))
                             .resolve(".qwen-managed-worktrees").resolve(worktree.worktreeId()), "unix:dev,ino", java.nio.file.LinkOption.NOFOLLOW_LINKS);

@@ -8,8 +8,10 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Function;
 
 /** The original Runtime remains referenced until its Hosted cleanup is confirmed. */
@@ -18,6 +20,18 @@ final class HostedCleanupReferences {
 
     static String bindingKey(String tenant, String workspace, String binding) {
         return ManagedSchemaKeys.key("hosted-cleanup-binding", tenant, workspace, binding);
+    }
+
+    /**
+     * True when the transaction carries a Hosted cleanup event. Retention takes
+     * placement before binding and Session locks, so cleanup admission must
+     * join that order before it can inspect the original binding.
+     */
+    static boolean containsCleanup(byte[] recordBytes) {
+        return Arrays.stream(new String(recordBytes, StandardCharsets.UTF_8).split("\n"))
+                .map(com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore::parse)
+                .filter(Objects::nonNull)
+                .anyMatch(record -> "hosted.cleanup".equals(record.path("managedSession").path("kind").asText()));
     }
 
     static void apply(JdbcTemplate jdbc, String tenant, String workspace, String session,

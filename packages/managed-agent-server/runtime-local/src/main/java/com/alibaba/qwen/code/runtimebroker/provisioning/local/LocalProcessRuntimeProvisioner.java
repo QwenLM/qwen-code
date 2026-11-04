@@ -43,10 +43,12 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 /**
@@ -59,6 +61,9 @@ public final class LocalProcessRuntimeProvisioner
     public static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration GRACE_BEFORE_FORCE = Duration.ofSeconds(5);
     private static final int READY_RECORD_LIMIT = 32 * 1024;
+    private static final int MAXIMUM_OPERATIONS = 16;
+    private static final int MAXIMUM_READERS = 64;
+    private static final int MAXIMUM_STOPS = 4;
     private static final Pattern CAPABILITY_DIGEST =
             Pattern.compile("sha256:[0-9a-f]{64}");
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -78,12 +83,9 @@ public final class LocalProcessRuntimeProvisioner
     private final boolean trustedRebootRecovery;
     private String managedExtensionCacheDirectory;
     private String managedExtensionCgroupRoot;
-    private final ExecutorService executor = Executors.newCachedThreadPool(
-            task -> {
-                Thread thread = new Thread(task, "runtime-provisioner");
-                thread.setDaemon(true);
-                return thread;
-            });
+    private final ExecutorService executor = pool("runtime-provisioner-", MAXIMUM_OPERATIONS);
+    private final ExecutorService readers = pool("runtime-ready-", MAXIMUM_READERS);
+    private final ExecutorService stops = pool("runtime-stop-", MAXIMUM_STOPS);
     private final ConcurrentMap<List<Object>, OwnedProcess> owned =
             new ConcurrentHashMap<>();
     // Tombstones need only equality: store the SHA-256 of the canonical
@@ -106,6 +108,21 @@ public final class LocalProcessRuntimeProvisioner
     private final Object lifecycle = new Object();
     private volatile boolean terminated;
     private final Thread exitHook;
+
+    private static ExecutorService pool(String name, int maximum) {
+        return new ThreadPoolExecutor(0, maximum, 60, TimeUnit.SECONDS,
+                new SynchronousQueue<>(), Thread.ofPlatform().daemon().name(name, 0).factory(),
+                new ThreadPoolExecutor.AbortPolicy());
+    }
+
+    private <T> CompletionStage<T> submit(Supplier<T> operation) {
+        try {
+            return CompletableFuture.supplyAsync(operation, executor);
+        } catch (RejectedExecutionException rejected) {
+            return CompletableFuture.failedFuture(capacity(
+                    "Managed Runtime provisioner is at capacity or closed.", rejected));
+        }
+    }
 
     public LocalProcessRuntimeProvisioner(List<String> command,
             Path workingDirectory, HttpRuntimeTransport transport) {
@@ -209,8 +226,7 @@ public final class LocalProcessRuntimeProvisioner
     @Override
     public CompletionStage<RuntimeLease> provision(
             RuntimeProvisionRequest request) {
-        return CompletableFuture.supplyAsync(() -> start(request, null),
-                executor);
+        return submit(() -> start(request, null));
     }
 
     @Override
@@ -219,8 +235,7 @@ public final class LocalProcessRuntimeProvisioner
         if (seed == null) {
             throw new IllegalArgumentException("seed is required");
         }
-        return CompletableFuture.supplyAsync(() -> start(request, seed),
-                executor);
+        return submit(() -> start(request, seed));
     }
 
     @Override
@@ -231,8 +246,8 @@ public final class LocalProcessRuntimeProvisioner
             return CompletableFuture.failedFuture(privateProfileRefusal());
         }
         if (store != null) {
-            return CompletableFuture.supplyAsync(() -> store.locked(request, seed, knownHandle, true,
-                    (resource, registration) -> registration.handle()), executor);
+            return submit(() -> store.locked(request, seed, knownHandle, true,
+                    (resource, registration) -> registration.handle()));
         }
         if (knownHandle != null) {
             if (!KIND.equals(knownHandle.getKind())
@@ -320,15 +335,16 @@ public final class LocalProcessRuntimeProvisioner
     public CompletionStage<RuntimeObservation> reconcile(
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle handle, RuntimeLease lastLease) {
-        return CompletableFuture.supplyAsync(
-                () -> observe(request, seed, handle, lastLease), executor);
+        return submit(() -> observe(request, seed, handle, lastLease));
     }
 
     @Override
     public CompletionStage<Void> confirm(RuntimeProvisionRequest request,
             RuntimeLease lease) {
-        return CompletableFuture.runAsync(() -> attestOwned(request, lease),
-                executor);
+        return submit(() -> {
+            attestOwned(request, lease);
+            return null;
+        });
     }
 
     @Override
@@ -365,7 +381,7 @@ public final class LocalProcessRuntimeProvisioner
         // The Broker commits the handle before launch; its drain claim fences late startup.
         boolean createIntent = binding.getResourceHandle() == null && binding.getLease() == null
                 && binding.getAttestationGeneration() == 0;
-        return CompletableFuture.supplyAsync(() -> store.locked(binding.getRequest(),
+        return submit(() -> store.locked(binding.getRequest(),
                 binding.getProvisionSeed(), binding.getResourceHandle(), createIntent, (resource, registration) -> {
                 boolean originalBootStopped = trustedRebootRecovery && store.rebooted(registration);
                 if (!originalBootStopped && (!store.sameBoot(registration)
@@ -413,7 +429,7 @@ public final class LocalProcessRuntimeProvisioner
                 }
                 return new RuntimeDrainReceipt(binding.getBindingId(), binding.getGeneration(),
                         binding.getProvisionSeed().getProvisionRequestId(), registration.handle(), Instant.now(), mode, proofScope);
-            }), executor);
+            }));
     }
 
     private static void waitForStop(LocalRuntimeStore.Registration registration, int seconds) {
@@ -457,14 +473,14 @@ public final class LocalProcessRuntimeProvisioner
             // That escalation runs on a daemon thread which dies with the
             // JVM, so the worker stays in `starting` until it finishes.
             try {
-                executor.execute(() -> {
+                stops.execute(() -> {
                     try {
                         forceAfterGrace(process.process);
                     } finally {
                         starting.remove(process);
                     }
                 });
-            } catch (RejectedExecutionException closing) {
+            } catch (RejectedExecutionException saturatedOrClosing) {
                 starting.remove(process);
                 process.process.destroyForcibly();
             }
@@ -520,8 +536,8 @@ public final class LocalProcessRuntimeProvisioner
         owned.clear();
         reaped.clear();
         executor.shutdownNow();
-        // A queued escalation does not run after that shutdown, and its
-        // finally block was the only thing removing the entry it tracked.
+        readers.shutdownNow();
+        stops.shutdownNow();
         starting.clear();
         if (exitHook != null) {
             try {
@@ -542,6 +558,14 @@ public final class LocalProcessRuntimeProvisioner
             }
             return startDurable(request, seed);
         }
+        CompletableFuture<Process> readerProcess = new CompletableFuture<>();
+        CompletableFuture<String> ready = new CompletableFuture<>();
+        try {
+            // Reserve the lifetime reader before spawn; readers must never queue behind live workers.
+            readers.execute(() -> readOutput(readerProcess, ready));
+        } catch (RejectedExecutionException rejected) {
+            throw capacity("Managed Runtime readers are at capacity or closed.", rejected);
+        }
         OwnedProcess ownedProcess = null;
         boolean adopted = false;
         RuntimeBrokerException closedRefusal = null;
@@ -561,9 +585,10 @@ public final class LocalProcessRuntimeProvisioner
                 ownedProcess = new OwnedProcess(process, null, seed);
                 starting.add(ownedProcess);
             }
+            readerProcess.complete(process);
             process.getOutputStream().write(encoded);
             process.getOutputStream().close();
-            String readyLine = readReadyLine(process);
+            String readyLine = readReadyLine(process, ready);
             RuntimeLease lease = readyLease(request, seed, document,
                     readyLine.getBytes(StandardCharsets.UTF_8));
             attest(request, ownedProcess.seed, lease);
@@ -600,6 +625,7 @@ public final class LocalProcessRuntimeProvisioner
             }
             throw failed("Managed Runtime worker failed to start.", exception);
         } finally {
+            readerProcess.cancel(false);
             if (!adopted && ownedProcess != null) {
                 starting.remove(ownedProcess);
                 ownedProcess.process.destroyForcibly();
@@ -994,34 +1020,30 @@ public final class LocalProcessRuntimeProvisioner
         }
     }
 
-    private static String readReadyLine(Process process) throws IOException {
-        CompletableFuture<String> line = new CompletableFuture<>();
-        Thread reader = new Thread(() -> {
-            BufferedReader input = new BufferedReader(new InputStreamReader(
-                    process.getInputStream(), StandardCharsets.UTF_8.newDecoder()));
-            try {
-                line.complete(readLine(input, true));
-            } catch (Throwable throwable) {
-                line.completeExceptionally(throwable);
-            }
+    private static void readOutput(CompletableFuture<Process> process, CompletableFuture<String> line) {
+        try (BufferedReader input = new BufferedReader(new InputStreamReader(
+                process.join().getInputStream(), StandardCharsets.UTF_8.newDecoder()))) {
+            line.complete(readLine(input, true));
             // The worker treats a closed stdout pipe as fatal, so keep the
             // pipe open and drained for the worker's lifetime.
-            try {
-                while (readLine(input, false) != null) {
-                    // Discard everything the worker prints after ready.
-                }
-            } catch (Throwable ignored) {
-                // The worker is gone; nothing left to drain.
+            while (readLine(input, false) != null) {
+                // Discard everything the worker prints after ready.
             }
-        }, "runtime-ready");
-        reader.setDaemon(true);
-        reader.start();
+        } catch (Throwable failure) {
+            line.completeExceptionally(failure);
+        }
+    }
+
+    private static String readReadyLine(Process process, CompletableFuture<String> line) {
         String ready;
         try {
             ready = line.get(READY_TIMEOUT.toMillis(),
                     TimeUnit.MILLISECONDS);
         } catch (Exception exception) {
             process.destroyForcibly();
+            if (exception instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
             if (exception instanceof ExecutionException
                     && exception
                             .getCause() instanceof RuntimeBrokerException failure) {
@@ -1063,6 +1085,10 @@ public final class LocalProcessRuntimeProvisioner
 
     private static RuntimeBrokerException failed(String message) {
         return failed(message, null);
+    }
+
+    private static RuntimeBrokerException capacity(String message, RejectedExecutionException cause) {
+        return new RuntimeBrokerException(503, "runtime_local_capacity", message, true, cause);
     }
 
     private static void requireLegacyProfile(RuntimeScope scope) {

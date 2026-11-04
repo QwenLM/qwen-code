@@ -25,7 +25,6 @@ import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -74,12 +73,7 @@ final class JournalCommit {
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
         JournalStoreRows.validateStableId(request.writerId(), "writerId");
         ValidatedCommit validated = validateCommit(request);
-        if (Arrays.stream(new String(validated.recordBytes(), StandardCharsets.UTF_8).split("\n"))
-                .map(com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore::parse)
-                .filter(Objects::nonNull)
-                .anyMatch(record -> "hosted.cleanup".equals(record.path("managedSession").path("kind").asText()))) {
-            // Retention takes placement before binding and Session locks. Cleanup
-            // admission must join that order before it can inspect the original binding.
+        if (HostedCleanupReferences.containsCleanup(validated.recordBytes())) {
             fencing.lockPlacementBounded(tenantId);
         }
         // Other ordinary commits queue on their Session before any consistent
