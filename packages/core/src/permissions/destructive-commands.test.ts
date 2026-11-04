@@ -311,6 +311,17 @@ describe('isDestructiveCommand — git commit --amend', () => {
     'echo "see pattern <(x) in the docs"',
     'bash <<< "echo hi"',
     'npm test || sh',
+    // Fail-closed arms narrowed to position and quote state (#16075 review,
+    // R3-1): `${IFS}` only matters in the program word, `xargs`/`find` pass
+    // data rather than a program, an unquoted `#` comment is not an argument,
+    // and a heredoc body belongs to the segment that owns the redirection.
+    "echo 'set $IFS'",
+    'git commit -m "docs: explain ${IFS} word splitting"',
+    "grep -rn '${IFS}' packages/core/src",
+    'find . -name bash',
+    'ls | xargs sh',
+    "git commit -m 'fix: tidy' # --amend is blocked in AUTO mode",
+    "bash --version; cat > notes.md <<'EOF'\ngit commit --amend --no-edit\nEOF",
   ])('allows inert text that mentions amend: %s', (command) => {
     expectAllowed([command], 'write a report');
   });

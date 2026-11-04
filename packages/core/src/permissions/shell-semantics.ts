@@ -2655,22 +2655,11 @@ function nestedAmendPayloads(tokens: string[]): {
       continue;
     }
 
-    // An executor that launches a shell runs a program this scan never sees.
-    // `sh -c '…'` is covered by the shell branch below; a bare shell is not.
-    if (program === 'xargs' || program === 'find') {
-      const launchesShell = tokens
-        .slice(index + 1)
-        .some((token) =>
-          AMEND_SHELL_PROGRAMS.has(amendExecutableBasename(token)),
-        );
-      if (
-        launchesShell &&
-        !tokens.some((token) => /^-[A-Za-z]*c/.test(token))
-      ) {
-        unclassifiable = true;
-      }
-      continue;
-    }
+    // `xargs`/`find` hand their operand a list of *data* (file names, lines),
+    // not a program, so a bare shell there cannot hide a command: `ls | xargs
+    // sh` and `find . -name bash` are inert. A `-c` operand is a program and is
+    // read by the shell branch below.
+    if (program === 'xargs' || program === 'find') continue;
 
     if (!AMEND_SHELL_PROGRAMS.has(program)) continue;
     const payload = shellDashCPayload(tokens, index);
@@ -2681,8 +2670,14 @@ function nestedAmendPayloads(tokens: string[]): {
     else payloads.push(payload);
   }
 
-  // `${IFS}` splits a word into argv entries the tokenizer keeps glued together.
-  if (tokens.some((token) => /\$\{?IFS\b/.test(token))) unclassifiable = true;
+  // `${IFS}` splits a word into argv entries the tokenizer keeps glued
+  // together, so `git${IFS}commit${IFS}--amend` only executes an amend when the
+  // expansion lands in the program word. Inside quoted arguments the same text
+  // is literal (`grep '${IFS}'`), so only the program position fails closed.
+  const [programWord] = skipAmendPrefixes(tokens);
+  if (programWord !== undefined && /\$\{?IFS\b/.test(programWord)) {
+    unclassifiable = true;
+  }
 
   return { payloads, unclassifiable };
 }
@@ -2697,11 +2692,46 @@ function decodeAnsiCWord(body: string): string {
   );
 }
 
+/**
+ * Drop an unquoted `#…`-to-EOL comment, keeping quoted `#` text.
+ *
+ * `git commit -m 'fix: tidy' # --amend is blocked` never runs the comment, but
+ * bash still ends the command there; tokenizing the words as arguments made the
+ * scan read a bare `--amend` inside the note.
+ */
+function stripUnquotedComments(segment: string): string {
+  let quote: '"' | "'" | null = null;
+  let out = '';
+  for (let index = 0; index < segment.length; index++) {
+    const char = segment[index]!;
+    if (char === '\\' && quote !== "'" && index + 1 < segment.length) {
+      out += char + segment[index + 1]!;
+      index++;
+      continue;
+    }
+    if (quote !== null) {
+      out += char;
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      out += char;
+      continue;
+    }
+    if (char === '#' && (index === 0 || /\s/.test(segment[index - 1]!))) break;
+    out += char;
+  }
+  return out;
+}
+
 function tokensContainGitAmend(segment: string, depth: number): boolean {
   if (depth >= AMEND_UNWRAP_DEPTH_LIMIT) {
     // Fail closed for pathological wrapper nesting in a permission guard.
     return true;
   }
+
+  segment = stripUnquotedComments(segment);
 
   const unwrapped = stripShellWrapper(segment);
   if (unwrapped !== segment) {
@@ -2914,17 +2944,28 @@ function extractShellFedHeredocBodies(command: string): string[] {
     const delimiters = getHeredocDelimiters(line);
     if (delimiters.length === 0) continue;
 
-    // Derived from the whole line, not its first word: `echo hi; bash <<'EOF'`
-    // hands the body to the shell that is not first.
-    const shellFed = splitCompoundCommandSegments(line).some(
-      ({ command: seg }) => {
-        const [program] = skipAmendPrefixes(tokenize(seg));
-        return (
-          program !== undefined &&
-          SHELLS_READING_STDIN.has(amendExecutableBasename(program))
-        );
-      },
+    // Attributed to the segment that owns the redirection, plus a pipe consumer
+    // after it — not to any shell anywhere on the line. `bash --version; cat >
+    // notes.md <<'EOF'` writes the body to a file, so the `bash` before the `;`
+    // must not turn it into a program.
+    const segments = splitCompoundCommandSegments(line);
+    const readsStdin = (seg: string): boolean => {
+      const [program] = skipAmendPrefixes(tokenize(seg));
+      return (
+        program !== undefined &&
+        SHELLS_READING_STDIN.has(amendExecutableBasename(program))
+      );
+    };
+    const ownerIndex = Math.max(
+      segments.findIndex(({ command: seg }) => /<<-?\s*['"]?/.test(seg)),
+      0,
     );
+    const owner = segments[ownerIndex]!;
+    const shellFed =
+      readsStdin(owner.command) ||
+      ((owner.terminator === '|' || owner.terminator === '|&') &&
+        segments[ownerIndex + 1] !== undefined &&
+        readsStdin(segments[ownerIndex + 1]!.command));
     active = {
       delimiter: delimiters[0]!,
       shellFed,
