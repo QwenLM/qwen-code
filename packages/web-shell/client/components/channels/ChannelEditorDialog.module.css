@@ -192,6 +192,21 @@
   background: color-mix(in srgb, var(--muted) 62%, transparent);
 }
 
+.optionRow[data-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* A checked-but-disabled row keeps the selected border; only unselected
+   disabled rows lose the hover emphasis. */
+.optionRow[data-disabled='true']:not([data-selected='true']):hover {
+  border-color: var(--border);
+}
+
+.optionCheckbox:disabled {
+  cursor: not-allowed;
+}
+
 .optionCheckbox {
   width: 14px;
   height: 14px;

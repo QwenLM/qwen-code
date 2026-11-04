@@ -209,8 +209,8 @@ so the session that follows the PR handles the event with its existing context.
 - **Two operator-visible states stop bound delivery from processing events.**
   (1) _Cold start_: with `deliverToBoundSessions` on, the comment lane waits
   for the first successful binding lookup. While the lookup has never
-  succeeded — or keeps answering an **empty partial** snapshot (a draining or
-  unreadable workspace) — `pollOnce` returns before fetching notifications, so
+  succeeded — or keeps answering an **empty partial** snapshot (a workspace whose
+  files the daemon cannot read) — `pollOnce` returns before fetching notifications, so
   no GitHub event is processed; a throttled stderr line names the
   state. The empty-partial deferral is bounded (30 consecutive polls): after
   that the lane opens, and events whose PR is still absent from the incomplete
@@ -218,14 +218,17 @@ so the session that follows the PR handles the event with its existing context.
   path — an incomplete scan never establishes that a PR is unbound. That
   per-event deferral is PR-scoped: bindings are PR-only, so once the lane is
   open an issue event is never deferred by it (its absence needs no snapshot)
-  and routes publicly even under a permanently partial scan. A permanently
-  partial snapshot has a steady-state cause besides a degraded workspace: the
-  binding scan reads at most 100 sessions per page and flags any multi-page
-  scan partial, so a workspace with more than 100 active sessions never
-  produces a complete snapshot. In that state a comment on a PR that no
-  session follows defers per-event until the dead-letter horizon (~4 hours at
-  the default poll) rather than falling back to the channel; issue events are
-  unaffected, since the per-event absence gate is PR-scoped. The lane-level
+  and routes publicly even under a permanently partial scan. A partial
+  snapshot only arises when part of the catalog could not be read (a chats
+  directory the daemon could not list, a PR sidecar, transcript or live
+  session list it could not read, or a workspace whose runtime is missing)
+  or when the channel worker had to drop a malformed binding row (check that
+  the worker and the daemon run the same version; the worker logs the
+  drop); the number of active sessions never makes it partial. While such a failure persists, a
+  comment on a PR that no session follows defers per-event until the
+  dead-letter horizon (~4 hours at the default poll) rather than falling back
+  to the channel; issue events are unaffected, since the per-event absence
+  gate is PR-scoped. The lane-level
   cold start above still holds every notification, issue events included,
   until the first successful binding lookup. Once a complete snapshot lands,
   deferred events are re-resolved: delivered privately to a follower, or
