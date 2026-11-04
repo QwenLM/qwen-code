@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   checkDaemonHealth: vi.fn(),
   isBackingOff: vi.fn(),
   recordFailure: vi.fn(),
+  // Regression sentinel for the removed ack-time reset.
   clearReconnectState: vi.fn(),
 }));
 
@@ -211,6 +212,20 @@ describe('service worker reconnect-backoff gates (#13966)', () => {
     expect(sockets[1]?.url).toBe(WS_URL);
   });
 
+  it('arms the live reconnect timer with the persisted delay', async () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    mocks.recordFailure.mockResolvedValue(16_000);
+    installChromeHarness();
+    await loadServiceWorker();
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+
+    dropSocket(sockets[0]);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 16_000);
+  });
+
   it('preserves the ladder when the daemon closes before the ACP init ack', async () => {
     installChromeHarness();
     await loadServiceWorker();
@@ -228,14 +243,38 @@ describe('service worker reconnect-backoff gates (#13966)', () => {
     expect(mocks.clearReconnectState).not.toHaveBeenCalled();
   });
 
-  it('clears the ladder only after a successful ACP init ack', async () => {
+  it('preserves the ladder when ACP initialization returns an error', async () => {
     installChromeHarness();
     await loadServiceWorker();
     await vi.waitFor(() => expect(sockets).toHaveLength(1));
     const ws = sockets[0];
     ws.readyState = MockWebSocket.OPEN;
     ws.onopen?.();
+
+    ws.onmessage?.({
+      data: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'browser-tools-acp-init',
+        error: { code: -32000, message: 'Too many connections' },
+      }),
+    });
+    expect(ws.close).toHaveBeenCalledTimes(1);
     expect(mocks.clearReconnectState).not.toHaveBeenCalled();
+
+    dropSocket(ws);
+    await vi.waitFor(() =>
+      expect(mocks.recordFailure).toHaveBeenCalledWith(BASE_URL),
+    );
+    expect(mocks.clearReconnectState).not.toHaveBeenCalled();
+  });
+
+  it('keeps the ladder when a successful ACP ack is followed by a close', async () => {
+    installChromeHarness();
+    await loadServiceWorker();
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    const ws = sockets[0];
+    ws.readyState = MockWebSocket.OPEN;
+    ws.onopen?.();
 
     ws.onmessage?.({
       data: JSON.stringify({
@@ -244,9 +283,12 @@ describe('service worker reconnect-backoff gates (#13966)', () => {
         result: {},
       }),
     });
+    expect(mocks.clearReconnectState).not.toHaveBeenCalled();
 
+    dropSocket(ws);
     await vi.waitFor(() =>
-      expect(mocks.clearReconnectState).toHaveBeenCalledTimes(1),
+      expect(mocks.recordFailure).toHaveBeenCalledWith(BASE_URL),
     );
+    expect(mocks.clearReconnectState).not.toHaveBeenCalled();
   });
 });

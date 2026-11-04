@@ -11,8 +11,9 @@
  * it, and the next keepalive alarm started a fresh worker that retried
  * immediately. Against a daemon that rejects the upgrade (e.g. origin not
  * allowlisted) that loop logged thousands of lines a day (#13966). The
- * persisted `nextRetryAt` is the single source of truth shared by the live
- * timer path, the keepalive alarm, and a cold `start()`.
+ * persisted `nextRetryAt` is shared by the live timer path, the keepalive
+ * alarm, and a cold `start()`, with a worker-local fallback when session
+ * storage cannot retain it.
  */
 
 /* global chrome, console */
@@ -26,13 +27,17 @@ export const RECONNECT_MIN_MS = 1_000;
 export const RECONNECT_MAX_MS = 300_000;
 
 export interface ReconnectState {
-  /** Consecutive connect attempts that never completed ACP initialization. */
+  /** Consecutive reconnect attempts in the current unstable episode. */
   failures: number;
   /** Epoch ms before which no new attempt should be made. */
   nextRetryAt: number;
   /** The daemon base URL these failures belong to. */
   baseUrl: string;
 }
+
+// Preserve the current worker's ladder when the base is unknown or a session
+// write fails. A later successful write replaces this fallback.
+let volatileState: ReconnectState | null = null;
 
 function storage(): typeof chrome.storage.session | undefined {
   return chrome?.storage?.session;
@@ -52,8 +57,13 @@ export function computeBackoffMs(failures: number): number {
 export async function readReconnectState(
   baseUrl: string,
 ): Promise<ReconnectState | null> {
+  const memory =
+    volatileState?.baseUrl === baseUrl &&
+    Date.now() - volatileState.nextRetryAt <= RECONNECT_MAX_MS
+      ? volatileState
+      : null;
   const store = storage();
-  if (!store) return null;
+  if (!store || !baseUrl) return memory;
   try {
     const raw = await store.get(STORAGE_KEY);
     const state = raw?.[STORAGE_KEY] as Partial<ReconnectState> | undefined;
@@ -61,14 +71,18 @@ export async function readReconnectState(
       !state ||
       typeof state.failures !== 'number' ||
       typeof state.nextRetryAt !== 'number' ||
-      state.baseUrl !== baseUrl
+      state.baseUrl !== baseUrl ||
+      Date.now() - state.nextRetryAt > RECONNECT_MAX_MS
     ) {
-      return null;
+      return memory;
     }
-    return state as ReconnectState;
+    // A rejected write can leave session storage older than this worker.
+    return memory && memory.nextRetryAt > state.nextRetryAt
+      ? memory
+      : (state as ReconnectState);
   } catch (error) {
     console.warn('[reconnect-backoff] read failed:', error);
-    return null;
+    return memory;
   }
 }
 
@@ -77,42 +91,27 @@ export async function readReconnectState(
  * the next attempt may run.
  */
 export async function recordFailure(baseUrl: string): Promise<number> {
-  // A failure with no known daemon base (e.g. the config read itself failed
-  // before a base URL was known) must not rewrite the single-slot state: it
-  // would land under an empty key and evict the real daemon's ladder. Report
-  // the floor delay without persisting (#14022).
-  if (!baseUrl) {
-    return RECONNECT_MIN_MS;
-  }
   const prev = await readReconnectState(baseUrl);
   const failures = (prev?.failures ?? 0) + 1;
   const delay = computeBackoffMs(failures - 1);
+  const state = {
+    failures,
+    nextRetryAt: Date.now() + delay,
+    baseUrl,
+  } satisfies ReconnectState;
+  volatileState = state;
   const store = storage();
-  if (store) {
+  // An unknown base has a worker-local ladder only; never evict the real
+  // daemon's persisted state with an empty key.
+  if (baseUrl && store) {
     try {
-      await store.set({
-        [STORAGE_KEY]: {
-          failures,
-          nextRetryAt: Date.now() + delay,
-          baseUrl,
-        } satisfies ReconnectState,
-      });
+      await store.set({ [STORAGE_KEY]: state });
+      if (volatileState === state) volatileState = null;
     } catch (error) {
       console.warn('[reconnect-backoff] persist failed:', error);
     }
   }
   return delay;
-}
-
-/** Clear the ladder after successful ACP initialization. */
-export async function clearReconnectState(): Promise<void> {
-  const store = storage();
-  if (!store) return;
-  try {
-    await store.remove(STORAGE_KEY);
-  } catch (error) {
-    console.warn('[reconnect-backoff] clear failed:', error);
-  }
 }
 
 /** True when no new attempt should be made yet for `baseUrl`. */

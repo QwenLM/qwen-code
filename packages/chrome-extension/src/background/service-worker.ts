@@ -21,11 +21,7 @@ import {
 } from './cdp-bridge';
 import { getDaemonConfig } from '../daemon/config.js';
 import { checkDaemonHealth } from '../daemon/discovery.js';
-import {
-  clearReconnectState,
-  isBackingOff,
-  recordFailure,
-} from '../daemon/reconnect-backoff.js';
+import { isBackingOff, recordFailure } from '../daemon/reconnect-backoff.js';
 import './browser-use-bridge.js';
 
 /* global WebSocket, console, setTimeout, chrome, TextEncoder, btoa */
@@ -119,7 +115,8 @@ function onWsMessage(ws: WebSocket, data: unknown): void {
       );
       ws.close();
     } else {
-      void clearReconnectState();
+      // An ack alone does not prove a stable tunnel. Keep the ladder so an
+      // immediate close still escalates; old episodes expire in the read path.
       console.log(LOG_PREFIX, 'ACP initialized; CDP tunnel ready');
     }
     return;

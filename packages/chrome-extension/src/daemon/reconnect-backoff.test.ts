@@ -6,7 +6,6 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  clearReconnectState,
   computeBackoffMs,
   isBackingOff,
   readReconnectState,
@@ -41,8 +40,8 @@ describe('computeBackoffMs', () => {
     expect(computeBackoffMs(0)).toBe(RECONNECT_MIN_MS);
     expect(computeBackoffMs(1)).toBe(2_000);
     expect(computeBackoffMs(2)).toBe(4_000);
-    expect(computeBackoffMs(20)).toBe(RECONNECT_MAX_MS);
-    expect(computeBackoffMs(100)).toBe(RECONNECT_MAX_MS);
+    expect(computeBackoffMs(20)).toBe(300_000);
+    expect(computeBackoffMs(100)).toBe(300_000);
   });
 });
 
@@ -68,14 +67,53 @@ describe('recordFailure', () => {
     expect(await recordFailure('http://127.0.0.1:5000')).toBe(RECONNECT_MIN_MS);
   });
 
+  it('starts a new episode after the old retry expires beyond the decay window', async () => {
+    sessionData['qwen.cdpReconnect'] = {
+      failures: 8,
+      nextRetryAt: Date.now() - RECONNECT_MAX_MS - 1,
+      baseUrl: BASE,
+    };
+
+    expect(await recordFailure(BASE)).toBe(RECONNECT_MIN_MS);
+    expect((await readReconnectState(BASE))?.failures).toBe(1);
+  });
+
+  it('continues a recent episode after its retry becomes due', async () => {
+    sessionData['qwen.cdpReconnect'] = {
+      failures: 8,
+      nextRetryAt: Date.now() - 1,
+      baseUrl: BASE,
+    };
+
+    expect(await recordFailure(BASE)).toBe(256_000);
+  });
+
   it('does not evict the ladder when a failure has no known base', async () => {
     await recordFailure(BASE);
     await recordFailure(BASE);
     // A config-read failure arrives with an empty base URL. Recording it must
     // not rewrite the single-slot state and evict the real daemon's ladder.
     expect(await recordFailure('')).toBe(RECONNECT_MIN_MS);
+    expect(await recordFailure('')).toBe(2_000);
+    expect(await recordFailure('')).toBe(4_000);
     const state = await readReconnectState(BASE);
     expect(state?.failures).toBe(2);
+  });
+
+  it('keeps escalating in memory when session persistence fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.mocked(chrome.storage.session.set).mockRejectedValue(
+      new Error('session storage denied'),
+    );
+    vi.resetModules();
+    const fresh = await import('./reconnect-backoff.js');
+
+    expect(await fresh.recordFailure(BASE)).toBe(RECONNECT_MIN_MS);
+    expect(await fresh.recordFailure(BASE)).toBe(2_000);
+    expect(await fresh.recordFailure(BASE)).toBe(4_000);
+    expect((await fresh.readReconnectState(BASE))?.failures).toBe(3);
+    expect(warn).toHaveBeenCalledTimes(3);
+    warn.mockRestore();
   });
 });
 
@@ -91,15 +129,6 @@ describe('isBackingOff', () => {
       nextRetryAt: Date.now() - 1,
       baseUrl: BASE,
     };
-    expect(await isBackingOff(BASE)).toBe(false);
-  });
-});
-
-describe('clearReconnectState', () => {
-  it('wipes the ladder after successful ACP initialization', async () => {
-    await recordFailure(BASE);
-    await clearReconnectState();
-    expect(await readReconnectState(BASE)).toBeNull();
     expect(await isBackingOff(BASE)).toBe(false);
   });
 });
