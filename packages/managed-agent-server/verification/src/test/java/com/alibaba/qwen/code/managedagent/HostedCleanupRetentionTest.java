@@ -399,7 +399,7 @@ class HostedCleanupRetentionTest {
         });
     }
 
-    private Map<String, Object> journalState() {
+    protected Map<String, Object> journalState() {
         var state = new LinkedHashMap<String, Object>();
         state.put("head", jdbc.queryForMap("SELECT journal_revision, committed_sequence, cleanup_head_revision"
                 + " FROM ma_session_head WHERE session_id = ?", "harness"));
@@ -415,7 +415,7 @@ class HostedCleanupRetentionTest {
         journal.committed(request);
     }
 
-    private CommitTransactionRequest cleanupRequest(String id, String prompt, String state) {
+    protected CommitTransactionRequest cleanupRequest(String id, String prompt, String state) {
         return cleanupRequest(id, prompt, state, original.getGeneration());
     }
 
@@ -451,7 +451,7 @@ class HostedCleanupRetentionTest {
                 template.recordCount(), template.recordBytesBase64(), template.recordDigest(), resources);
     }
 
-    private void assertCollected() {
+    protected void assertCollected() {
         var result = sweep();
         assertThat(result.bindingsDeleted()).as("%s heads=%s refs=%s bindings=%s sessions=%s", result,
                 jdbc.queryForList("SELECT journal_revision, cleanup_head_revision FROM ma_session_head"),
