@@ -302,6 +302,11 @@ const allowOnce = () => ({
         NO_PROXY: noProxy,
         no_proxy: noProxy,
         QWEN_HOME: qwenHome,
+        // TestRig keeps QWEN_RUNTIME_DIR inside the workspace; leaving it
+        // there makes the session runtime write `tmp/<hash>` into the test
+        // directory, which then differs between the two surfaces' request
+        // snapshots. Give both surfaces the same scratch runtime.
+        QWEN_RUNTIME_DIR: qwenHome,
       };
       delete env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'];
       if (shared) env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = '1';
@@ -496,8 +501,16 @@ const allowOnce = () => ({
           if (agent.exitCode !== null || agent.signalCode) resolve(undefined);
           else agent.once('exit', resolve);
         });
-        await removeScratchDir(qwenHome);
+        // Keep the runtime state for post-mortem whenever TestRig.cleanup()
+        // keeps the test directory, which it decides by truthiness.
+        if (!process.env['KEEP_OUTPUT']) {
+          await removeScratchDir(qwenHome);
+        }
       }
+      // The scratch runtime is what keeps the session runtime's `tmp/<hash>`
+      // out of the workspace, so pin its absence rather than relying on the
+      // snapshot diff, which only trips on the losing side of a race.
+      expect(existsSync(join(dir, '.qwen-home', 'tmp'))).toBe(false);
       return {
         requests: modelRequests(server, dir),
         dateReminders: streamingMessages(server).filter((messages) =>
