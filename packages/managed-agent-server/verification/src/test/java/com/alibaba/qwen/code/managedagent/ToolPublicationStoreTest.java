@@ -116,13 +116,26 @@ class ToolPublicationStoreTest {
     }
 
     private void initialize(javax.sql.DataSource source, boolean csiWorkspace) {
+        initialize(source, csiWorkspace, null);
+    }
+
+    private void initialize(javax.sql.DataSource source, boolean csiWorkspace,
+            ToolPublicationObjectStore objects) {
         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         csiRegistration = csiWorkspace
                 ? new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
                         "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
                         "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1)
                 : null;
-        journal = PublicationJournalFixture.create(source, csiRegistration);
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
+        manager = new DataSourceTransactionManager(source);
+        projectionProperties = new ManagedAgentProperties();
+        projectionProperties.getArtifacts().setEnabled(true);
+        publicWorkspaces = org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class);
+        publicSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, java.time.Clock.systemUTC(), events -> {},
+                publicWorkspaces, projectionProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        publicResults = new ManagedToolResultStore(jdbc, manager, publicSessions);
+        journal = PublicationJournalFixture.create(source, csiRegistration, objects, publicResults);
         jdbc = journal.jdbc;
         manager = journal.manager;
         sessions = journal.sessions;
@@ -133,13 +146,6 @@ class ToolPublicationStoreTest {
         checkpoint = journal.checkpoint;
         csiStore = csiWorkspace ? new WorkspaceCsiReservationStore(jdbc, manager, JSON) : null;
         csiReservation = journal.csiReservation;
-        projectionProperties = new ManagedAgentProperties();
-        projectionProperties.getArtifacts().setEnabled(true);
-        publicWorkspaces = org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class);
-        publicSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, java.time.Clock.systemUTC(), events -> {},
-                publicWorkspaces, projectionProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        publicResults = new ManagedToolResultStore(jdbc, manager, publicSessions);
-        sessions.setToolResults(publicResults);
     }
 
     javax.sql.DataSource publicationDataSource() {
@@ -887,6 +893,22 @@ class ToolPublicationStoreTest {
     @ValueSource(booleans = {false, true})
     void commitsLargeBlockedOutcomeThroughVerifiedCatalogObject(boolean ambient) {
         List<String> lockOrder = new java.util.ArrayList<>();
+        Map<String, byte[]> objects = new java.util.HashMap<>();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) {
+                objects.putIfAbsent(key, bytes.clone());
+            }
+
+            @Override
+            public InputStream open(String key) {
+                return new ByteArrayInputStream(objects.get(key));
+            }
+
+            @Override
+            public void validateConfiguration() {
+            }
+        };
         initialize(new DelegatingDataSource(publicationDataSource()) {
             @Override
             public Connection getConnection() throws SQLException {
@@ -924,25 +946,8 @@ class ToolPublicationStoreTest {
                             }
                         });
             }
-        });
+        }, false, bucket);
         reserve();
-        Map<String, byte[]> objects = new java.util.HashMap<>();
-        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
-            @Override
-            public void putIfAbsent(String key, byte[] bytes) {
-                objects.putIfAbsent(key, bytes.clone());
-            }
-
-            @Override
-            public InputStream open(String key) {
-                return new ByteArrayInputStream(objects.get(key));
-            }
-
-            @Override
-            public void validateConfiguration() {
-            }
-        };
-        sessions.setPublicationObjects(bucket);
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
         JsonNode key = binding.get("sessionKey");
@@ -1014,7 +1019,7 @@ class ToolPublicationStoreTest {
         objects.get(objectKey)[0] = 'z';
         assertThatThrownBy(() -> sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
-        assertThat(jdbc.queryForObject("SELECT quarantined FROM ma_output_capture"
+        assertThat(jdbc.queryForObject("SELECT is_quarantined FROM ma_output_capture"
                 + " WHERE publication_id = X'7075622d31'", Boolean.class)).isTrue();
         assertThatThrownBy(() -> sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
@@ -1267,7 +1272,7 @@ class ToolPublicationStoreTest {
         if (!large) {
             if (quarantineBeforeProjection) {
                 jdbc.update(
-                        "UPDATE ma_output_capture SET quarantined = TRUE WHERE publication_id ="
+                        "UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id ="
                                 + " X'7075622d31'");
             }
             JsonNode projected = projectPublicReceipt(data);
@@ -1349,7 +1354,7 @@ class ToolPublicationStoreTest {
         try (var stream = apiReader.open(artifact)) {
             assertThat(stream.readNBytes(2)).isEqualTo("ab".getBytes(StandardCharsets.UTF_8));
             jdbc.update(
-                    "UPDATE ma_output_capture SET quarantined = TRUE WHERE publication_id ="
+                    "UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id ="
                             + " X'7075622d31'");
             byte[] target = new byte[] {'?'};
             assertThatThrownBy(() -> stream.read(target)).hasMessageContaining("receipt is unavailable");
@@ -1435,7 +1440,7 @@ class ToolPublicationStoreTest {
                 .hasMessageContaining("digest changed");
         assertThat(jdbc.queryForObject("SELECT capture_state FROM ma_resource"
                 + " WHERE slot_key = X'7365676d656e743a7374646f75743a31'", String.class)).isEqualTo("QUARANTINED");
-        assertThat(jdbc.queryForObject("SELECT quarantined FROM ma_output_capture"
+        assertThat(jdbc.queryForObject("SELECT is_quarantined FROM ma_output_capture"
                 + " WHERE publication_id = X'7075622d31'", Boolean.class)).isFalse();
         assertThat(data.prefix(key, "pub-1", PUBLICATION_TOKEN, "good-prefix", "stdout")
                 .path("byteLength").asLong()).isEqualTo(3);
@@ -2530,10 +2535,10 @@ class ToolPublicationStoreTest {
         jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
                 + " expires_at, capture_bytes, producer_bytes, admission_bytes, capture_held_bytes,"
-                + " producer_held_bytes, admission_held_bytes, write_evidence) SELECT scope_key, tenant_key,"
+                + " producer_held_bytes, admission_held_bytes, is_write_evidence) SELECT scope_key, tenant_key,"
                 + " tenant_id, workspace_id, session_id, ?, ?, ?, binding_json, binding_digest, token_hash, state,"
                 + " expires_at, capture_bytes, producer_bytes, admission_bytes, capture_held_bytes,"
-                + " producer_held_bytes, admission_held_bytes, write_evidence FROM ma_output_capture"
+                + " producer_held_bytes, admission_held_bytes, is_write_evidence FROM ma_output_capture"
                 + " WHERE publication_id = ?", to.getBytes(StandardCharsets.UTF_8), digest(to),
                 to.getBytes(StandardCharsets.UTF_8), from.getBytes(StandardCharsets.UTF_8));
     }
@@ -3076,12 +3081,12 @@ class ToolPublicationStoreTest {
     void acceptedProducerEvidenceFeedsRetirementEligibility() {
         var fixture = apiFixture();
         assertThat(fixture.jdbc().queryForObject(
-                                        "SELECT write_evidence AND accepted_complete FROM"
+                                        "SELECT is_write_evidence AND is_accepted_complete FROM"
                                                 + " ma_output_capture",
                 Boolean.class)).isTrue();
         fixture.jdbc().update(
                         "UPDATE ma_session SET retirement_operation_id = X'64656c6574652d31',"
-                                + " retirement_generation = 1, retired_at = 1, recovery_protected ="
+                                + " retirement_generation = 1, retired_at = 1, is_recovery_protected ="
                                 + " FALSE WHERE tenant_id = X'74656e616e742d31' AND session_id ="
                                 + " X'73657373696f6e2d31'");
         fixture.jdbc().update("UPDATE ma_output_capture SET retention_state = 'RETIRING'");
@@ -3242,7 +3247,7 @@ class ToolPublicationStoreTest {
         var claim = fixture.results().claim().orElseThrow();
         fixture.jdbc().update(
                         "UPDATE ma_session SET retirement_operation_id = X'64656c6574652d31',"
-                                + " retirement_generation = 1, retired_at = 1, recovery_protected ="
+                                + " retirement_generation = 1, retired_at = 1, is_recovery_protected ="
                                 + " FALSE WHERE tenant_id = X'74656e616e742d31' AND session_id ="
                                 + " X'73657373696f6e2d31'");
         var projection = new ManagedToolResultStore.Projection(JSON.createObjectNode(), "pub-1",
@@ -3341,7 +3346,7 @@ class ToolPublicationStoreTest {
         var calls = new java.util.concurrent.atomic.AtomicInteger();
         org.mockito.Mockito.doAnswer(call -> {
             if (calls.incrementAndGet() == 2) {
-                fixture.jdbc().update("UPDATE ma_output_capture SET quarantined=TRUE");
+                fixture.jdbc().update("UPDATE ma_output_capture SET is_quarantined=TRUE");
             }
             return fixture.policy().version();
         }).when(policy).version();

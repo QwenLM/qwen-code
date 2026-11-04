@@ -236,6 +236,34 @@ class ResidentWorkspacesTest {
     }
 
     @Test
+    void residentClaimAndReleaseDoNotWaitForTheTenantPlacementGuard() throws Exception {
+        var session = create("guarded").sessionId();
+        var original = ready(residents.request(context));
+        var record = active(original, session);
+        withTenantGuard(() -> authority.claim(context, record));
+        withTenantGuard(() -> authority.assertHeld(context, record));
+        var second = active(original, session);
+        withTenantGuard(() -> assertThatThrownBy(() -> authority.claim(context, second)).isInstanceOf(RuntimeBrokerException.class));
+        runtimeSessions.compareAndSet(second, second.withState(RuntimeSessionRecord.State.RELEASED, Instant.now()));
+        var releasing = bindings.beginSessionRelease(runtimeSessions, executions, record);
+        withTenantGuard(() -> authority.release(context, releasing));
+        bindings.completeSessionRelease(runtimeSessions, releasing);
+        assertThatThrownBy(() -> authority.assertHeld(context, record)).isInstanceOf(RuntimeBrokerException.class);
+    }
+
+    private void withTenantGuard(Runnable action) throws Exception {
+        try (var holder = jdbc.getDataSource().getConnection()) {
+            holder.setAutoCommit(false);
+            JdbcRuntimeBindingRepository.lockPlacementDomain(holder, "tenant");
+            try {
+                action.run();
+            } finally {
+                holder.rollback();
+            }
+        }
+    }
+
+    @Test
     void aClearedOriginalSlotNeverCreatesAReplacementGeneration() {
         var request = residents.request(context);
         ready(request);
