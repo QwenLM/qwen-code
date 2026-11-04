@@ -681,7 +681,18 @@ describe('livePromptEvents', () => {
           ],
           expect.any(AbortSignal),
           expect.any(String),
-          { type: SendMessageType.ToolResult },
+          {
+            type: SendMessageType.ToolResult,
+            toolResultParts: [
+              {
+                functionResponse: {
+                  name: freshRequest.name,
+                  id: freshRequest.callId,
+                  response: { ok: true },
+                },
+              },
+            ],
+          },
         ]);
       } finally {
         schedule.mockRestore();
@@ -1749,7 +1760,18 @@ describe('livePromptEvents', () => {
       type: SendMessageType.UserQuery,
       submittedPrompt: '@file.txt raw composer text',
     });
-    expect(secondOptions).toEqual({ type: SendMessageType.ToolResult });
+    expect(secondOptions).toEqual({
+      type: SendMessageType.ToolResult,
+      toolResultParts: [
+        {
+          functionResponse: {
+            name: 'test_tool',
+            id: 't1',
+            response: { ok: true },
+          },
+        },
+      ],
+    });
   });
 
   it('forwards a human declaration only on the initial send, independently from submittedPrompt', async () => {

@@ -22990,13 +22990,28 @@ describe('Session', () => {
         undefined,
         { promptId: 'test-session-id########1' },
       );
+      const toolResultParts = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[1]?.[4]?.toolResultParts;
+      expect(toolResultParts?.map((part) => part.functionResponse)).toEqual([
+        {
+          id: 'call-1',
+          name: 'read_file',
+          response: { output: 'file contents' },
+        },
+      ]);
+      expect(toolResultParts?.[0]).toBe(
+        (
+          vi.mocked(mockChat.sendMessageStream).mock.calls[1]?.[1]
+            .message as Part[]
+        )[0],
+      );
       expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
         2,
         'vision-agent\0https://vision.example.com/v1\0',
         expect.any(Object),
         expect.any(String),
         undefined,
-        undefined,
+        { toolResultParts },
       );
       expect(resolveForModel).toHaveBeenCalledWith(
         'vision-agent\0https://vision.example.com/v1',

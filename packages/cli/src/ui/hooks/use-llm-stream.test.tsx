@@ -4713,7 +4713,10 @@ describe('useLlmStream', () => {
       expectedMergedResponse,
       expect.any(AbortSignal),
       'prompt-id-2',
-      { type: SendMessageType.ToolResult },
+      {
+        type: SendMessageType.ToolResult,
+        toolResultParts: expectedMergedResponse,
+      },
     );
   });
 
@@ -12143,7 +12146,10 @@ describe('useLlmStream', () => {
         toolCallResponseParts,
         expect.any(AbortSignal),
         'prompt-id-4',
-        { type: SendMessageType.ToolResult },
+        {
+          type: SendMessageType.ToolResult,
+          toolResultParts: toolCallResponseParts,
+        },
       );
     });
 

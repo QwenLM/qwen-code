@@ -3961,7 +3961,11 @@ describe('runNonInteractive', () => {
         [{ text: 'Tool response' }],
         expect.any(AbortSignal),
         'prompt-id-2',
-        { type: SendMessageType.ToolResult, workflowModeEligible: false },
+        {
+          type: SendMessageType.ToolResult,
+          toolResultParts: toolResponse,
+          workflowModeEligible: false,
+        },
       );
       expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
       // Verify recordCompletedToolCall is called with the tool name and args.
@@ -4047,6 +4051,10 @@ describe('runNonInteractive', () => {
         'prompt-tool-image',
         {
           type: SendMessageType.ToolResult,
+          toolResultParts: [
+            { text: 'Tool response with image' },
+            { text: 'Skill response' },
+          ],
           workflowModeEligible: false,
           modelOverride: model,
         },
@@ -4139,6 +4147,7 @@ describe('runNonInteractive', () => {
         'prompt-tool-image',
         {
           type: SendMessageType.ToolResult,
+          toolResultParts: [{ text: 'first image' }, { text: 'second image' }],
           workflowModeEligible: false,
           modelOverride: first,
         },
@@ -5772,7 +5781,18 @@ describe('runNonInteractive', () => {
       ],
       expect.any(AbortSignal),
       'prompt-id-3',
-      { type: SendMessageType.ToolResult, workflowModeEligible: false },
+      {
+        type: SendMessageType.ToolResult,
+        toolResultParts: [
+          {
+            functionResponse: {
+              name: 'errorTool',
+              response: { output: 'Error: Execution failed' },
+            },
+          },
+        ],
+        workflowModeEligible: false,
+      },
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Sorry, let me try again.\n');
   });
@@ -6066,6 +6086,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-route',
       {
         type: SendMessageType.ToolResult,
+        toolResultParts: [{ text: 'tool response' }],
         workflowModeEligible: false,
         modelOverride: selector,
       },
