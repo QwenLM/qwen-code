@@ -134,6 +134,37 @@ describe('interactive Mod owner', () => {
     expect(getInteractiveModSession(config)).toBe(owner);
   });
 
+  it('reports startup until the Mods load, fail or close, and a failed load', async () => {
+    const loaded = setup();
+    expect(loaded.owner.starting).toBe(true);
+    await loaded.owner.initialize();
+    expect(loaded.owner.starting).toBe(false);
+    expect(loaded.owner.failed).toBe(false);
+
+    const failed = setup();
+    failed.runtime.initialize.mockRejectedValue(new Error('Bad Mod'));
+    expect(failed.owner.failed).toBe(false);
+    const initialization = failed.owner.initialize();
+    await expect(initialization).rejects.toThrow('Bad Mod');
+    // Set as the load settles, not a tick later.
+    expect(failed.owner.starting).toBe(false);
+    expect(failed.owner.failed).toBe(true);
+    void failed.owner.close();
+    expect(failed.owner.failed).toBe(false);
+
+    // A session that failed to start before loading the Mods is not a failed
+    // Mod load, so its own error is the one reported.
+    const session = setup();
+    session.owner.failStartup(new Error('Config failed'));
+    expect(session.owner.starting).toBe(false);
+    expect(session.owner.failed).toBe(false);
+    await expect(session.owner.ready).rejects.toThrow('Config failed');
+
+    const closed = setup();
+    void closed.owner.close();
+    expect(closed.owner.starting).toBe(false);
+  });
+
   it('leaves Mod readiness intact when later host recovery fails', async () => {
     const { owner, runtime } = setup();
     let release!: () => void;

@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.charset.StandardCharsets;
@@ -69,11 +70,12 @@ final class AgentSessionCommands {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest,
             String actorId) {
-        // A per-turn admission: a long holder of the tenant's placement row
-        // answers tenant_guard_contended within the hot-path bound instead
-        // of parking the submit past the caller's budget (#13800).
-        ManagedSessionStore.lockBounded(() -> WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId,
-                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        // A per-turn admission takes no tenant guard. The Session row orders it
+        // against lifecycle begin, requireOpen's locking reads of this storage's
+        // alias (fence) and directory rows order it against migration fence
+        // installation and physical fencing, and nothing later in this
+        // transaction takes the guard. The Session lock comes first, so this
+        // transaction's snapshot is taken after it.
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         sessionPolicies.requirePublicChildImmutable(session);
         // A bound Session's later Turn needs the same deployment opt-in as
@@ -105,7 +107,7 @@ final class AgentSessionCommands {
                     throw AgentSessionPolicies.workspaceExecutionUnavailable();
                 }
             }
-            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+            WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         }
         if (!"ACTIVE".equals(session.status())) {
             throw new ManagedAgentException(409, "session_not_active",
@@ -216,9 +218,12 @@ final class AgentSessionCommands {
 
     SessionMutationCommand beginSessionRename(String tenantId, String key,
             String digest, String sessionId, String title, String actorId) {
+        // Empty operation ranges can share an InnoDB gap even across Session scopes.
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
-        // Tenant and Session locks serialize admission without gap-locking missing index entries.
+        // The Session lock serializes this Session's admissions without gap-locking missing index
+        // entries. A different Session reusing the tenant-scoped key loses on the receipt's unique
+        // key in beginSessionMutation and answers idempotency_conflict.
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
         if (previous.isPresent()
                 && sessionId.equals(previous.get().sessionId())) {
@@ -364,7 +369,6 @@ final class AgentSessionCommands {
     SessionRecord settleRename(RenameDelivery delivery, String owner, String bootId) {
         String tenantId = delivery.tenantId();
         String sessionId = delivery.sessionId();
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         var rows =
                 jdbc.queryForList(
@@ -434,7 +438,6 @@ final class AgentSessionCommands {
     }
 
     void abandonSessionRename(String tenantId, String key, String sessionId, long revision, String owner) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_operation WHERE operation_key = ? AND operation_kind = 'RENAME' AND state = 'RUNNING' AND claim_owner = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
@@ -465,7 +468,6 @@ final class AgentSessionCommands {
     }
 
     Optional<RenameDelivery> claimRename(RenameDelivery delivery, String owner, Duration lease) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, delivery.tenantId());
         storeRows.requireLegacySessionForUpdate(delivery.tenantId(), delivery.sessionId());
         long now = clock.millis();
         int claimed =
@@ -506,7 +508,6 @@ final class AgentSessionCommands {
     }
 
     void retryRename(RenameDelivery delivery, String owner, long availableAt) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, delivery.tenantId());
         storeRows.requireLegacyMutation(delivery.tenantId(), delivery.sessionId());
         String key = renameKey(delivery.tenantId(), delivery.sessionId(), delivery.revision());
         parkRename(Map.of("operation_key", key, "tenant_id", delivery.tenantId(),
@@ -573,24 +574,23 @@ final class AgentSessionCommands {
     SessionMutationCommand beginSessionMutation(String tenantId,
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind, String actorId) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        // No tenant guard. The Session lock comes first, so this transaction's snapshot follows
+        // it and serializes this Session's commands. The replay probe does not lock: a locking
+        // read that misses gap-locks the tenant-shared receipt index, and concurrent admissions
+        // of different keys would deadlock inserting into that gap. A racing Session reusing the
+        // tenant-scoped key loses on the receipt's unique key instead (see insertCommand below).
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         Optional<CommandRecord> existing = findCommand(tenantId, operation,
-                idempotencyKey, kind != SessionMutationKind.RENAME);
+                idempotencyKey, false);
         if (existing.isPresent()) {
             CommandRecord command = existing.get();
-            if (!command.requestDigest().equals(requestDigest)
-                    || !command.sessionId().equals(sessionId)) {
-                throw new ManagedAgentException(409,
-                        "idempotency_conflict",
-                        "The idempotency key was reused with different content.");
-            }
+            requireSameMutation(command, requestDigest, sessionId);
             if ("FAILED".equals(command.status())) {
                 if (session.workspace() != null) {
-                    WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+                    WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
                 }
                 sessionPolicies.requireNoOpenOperation(tenantId, sessionId);
                 validateMutationStatus(session, kind);
@@ -607,14 +607,28 @@ final class AgentSessionCommands {
                     true);
         }
         if (session.workspace() != null) {
-            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+            WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         }
         sessionPolicies.requireNoOpenOperation(tenantId, sessionId);
         validateMutationStatus(session, kind);
         long now = clock.millis();
-        insertCommand(tenantId, operation, idempotencyKey, requestDigest,
-                sessionId, null, "PENDING", session.status(),
-                commandActorKey(tenantId, actorId), now);
+        try {
+            insertCommand(tenantId, operation, idempotencyKey, requestDigest,
+                    sessionId, null, "PENDING", session.status(),
+                    commandActorKey(tenantId, actorId), now);
+        } catch (DuplicateKeyException race) {
+            // Every receipt unique key derives from this command key, so another request
+            // committed it first. A locking read normally sees it past this transaction's
+            // snapshot; if an engine still hides it, the key is taken all the same. Nothing has
+            // been written here yet.
+            CommandRecord winner = findCommand(tenantId, operation, idempotencyKey, true).orElse(null);
+            if (winner == null) {
+                throw new ManagedAgentException(409, "idempotency_conflict",
+                        "The idempotency key was reused with different content.");
+            }
+            requireSameMutation(winner, requestDigest, sessionId);
+            return new SessionMutationCommand(sessionId, winner.status(), true);
+        }
         jdbc.update("UPDATE ma_request_receipt SET gmt_modified = " + ManagedSchemaTime.SQL_NOW
                         + ", mutation_attempt_sequence"
                         + " = ? WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND'",
@@ -631,10 +645,18 @@ final class AgentSessionCommands {
         return new SessionMutationCommand(sessionId, "PENDING", false);
     }
 
+    private static void requireSameMutation(CommandRecord command, String requestDigest, String sessionId) {
+        if (!command.requestDigest().equals(requestDigest)
+                || !command.sessionId().equals(sessionId)) {
+            throw new ManagedAgentException(409,
+                    "idempotency_conflict",
+                    "The idempotency key was reused with different content.");
+        }
+    }
+
     SessionRecord completeSessionMutation(String tenantId,
             String operation, String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
@@ -668,7 +690,7 @@ final class AgentSessionCommands {
                             + " request was retired.");
         }
         if (session.workspace() != null) {
-            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+            WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         }
         validateMutationStatus(session, kind);
         long now = clock.millis();
