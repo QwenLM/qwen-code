@@ -12806,7 +12806,10 @@ export function registerHostedHarnessSessionRoutes(
         }
       }
       if (session.lifecycleProtocolVersion !== 2) {
-        await session.hooks?.close();
+        // A DELETE is terminal; a detach keeps the Session reloadable, so the
+        // deterministic config-scoped Hook owner must stay re-acquirable
+        // (R13-1) instead of being tombstoned under the id a reload recomputes.
+        await session.hooks?.close({ terminal: req.method === 'DELETE' });
         // Deferred until the close is known terminal: a Hook fence refusal
         // above keeps the Session attached and retryable, and its wake pump
         // with it. wakeBusy() holds mcpClosing for the whole drain, so no

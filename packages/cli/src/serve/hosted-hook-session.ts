@@ -639,6 +639,17 @@ export class HostedHookSession {
     return this.acquired || this.broker.acquired;
   }
 
+  /**
+   * The config-scoped owner an active extension bundle names at construction
+   * (`extensions-components-<hash(sessionKey, configRevision)>`). Unlike a
+   * per-load `hooks-activation-*` owner, the same id is recomputed on every
+   * load of the same configRevision, so a terminal release would tombstone
+   * the id a later load must re-acquire (R13-1).
+   */
+  private get deterministicOwner(): boolean {
+    return this.broker.runtimeSessionId.startsWith('extensions-components-');
+  }
+
   delegateBrokerToMcp(): void {
     if (this.mountWorkUnproven()) throw new HostedHookRecoveryRequiredError();
     this.ownsBroker = false;
@@ -1982,7 +1993,12 @@ export class HostedHookSession {
     }
   }
 
-  async close(): Promise<void> {
+  async close(opts: { terminal?: boolean } = {}): Promise<void> {
+    // A detach keeps the Session reloadable; only a delete is terminal. The
+    // deterministic config-scoped owner must survive a detach re-acquirable
+    // (R13-1): a terminal release would persist a RELEASED tombstone under the
+    // very id the next load recomputes, wedging every later acquire.
+    const terminal = opts.terminal ?? true;
     await this.drain();
     // The close is the drain arm. A Hook-configured Shell turn shares this
     // broker and its `finish()` skips the release, so a background run that
@@ -2012,6 +2028,19 @@ export class HostedHookSession {
     // with it, so a later turn can still run and retry the fenced release.
     if (this.fencedOwners.size > 0) throw new HostedHookRecoveryRequiredError();
     if (this.ownsBroker && this.mountHeld) {
+      if (!terminal && this.deterministicOwner) {
+        // R13-1: a detach hands the mount back but keeps the deterministic
+        // config-scoped owner re-acquirable. A terminal release here would
+        // persist a RELEASED tombstone under the id the next load recomputes
+        // from (sessionKey, configRevision), and acquireNewSession refuses any
+        // non-ACQUIRING row, so every Hook after the reload would fail. The
+        // mount is the scarce shared resource; releasing it lets other
+        // Sessions acquire while this owner's row stays re-acquirable.
+        const claim = this.broker.mountClaim();
+        if (claim !== undefined) await this.broker.releaseMount(claim);
+        this.acquired = false;
+        return;
+      }
       try {
         await this.broker.release({ drain: true });
       } catch (cause) {

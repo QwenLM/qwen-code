@@ -24121,6 +24121,187 @@ describe('Hosted Harness tool approvals', () => {
     ).expect(204);
   });
 
+  it('keeps the deterministic Hook owner re-acquirable across a detach and same-revision reload (R13-1)', async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'capabilityDigest',
+      'get',
+    ).mockReturnValue(MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST);
+    // A Broker that refuses to re-acquire a terminally released owner, exactly
+    // as acquireNewSession refuses any non-ACQUIRING row. The released set is
+    // the durable RELEASED tombstone: it survives the reload.
+    const releasedOwners = new Set<string>();
+    const runtime = {
+      bindingId: 'binding',
+      generation: '1',
+      workspaceGeneration: '1',
+    };
+    vi.mocked(HostedWorkspaceBroker.prototype.warm).mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = runtime;
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        if (releasedOwners.has(this.runtimeSessionId))
+          throw new HostedWorkspaceBrokerRejection(
+            409,
+            'runtime_session_not_acquirable',
+          );
+        this.runtime = runtime;
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        releasedOwners.add(this.runtimeSessionId);
+      },
+    );
+    // A mount handback frees the mount without tombstoning the owner.
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'releaseMount',
+    ).mockResolvedValue();
+    const catalog: ManagedHookCatalog = {
+      ...hookPin,
+      hooks: [
+        {
+          hookId: 'Notification',
+          eventName: HookEventName.Notification,
+          sequential: false,
+          async: false,
+          failClosed: true,
+          onceKey: null,
+          config: { type: 'command' },
+        },
+      ],
+    };
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
+      async (operation) => {
+        if (operation.kind === 'hook-catalog')
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            catalog,
+          };
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          result: {
+            success: true,
+            outcome: 'success',
+            duration: 0,
+            output: { hookSpecificOutput: { additionalContext: 'checked' } },
+          },
+        };
+      },
+    );
+    const runtimeStates = new Map<string, string>();
+    let currentRevision = 0;
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'extensionControl',
+    ).mockImplementation(async (operation) => {
+      const common = {
+        operationId: operation.operationId,
+        executionMode: 'developer-process-group',
+      };
+      if (operation.kind === 'extension-prepare') {
+        runtimeStates.set(operation.operationId, 'prepared');
+        currentRevision = operation.expectedRevision + 1;
+        return {
+          ...common,
+          state: 'prepared',
+          expectedRevision: operation.expectedRevision,
+          revision: currentRevision,
+          packages: operation.extensions.map((pin) => ({
+            pin,
+            assetRoot: `extension://${pin.extensionId}/`,
+            contributions: {
+              skills: [],
+              commands: [],
+              agents: [],
+              context: [],
+              mcpServers: {},
+              hooks: {},
+              settings: [],
+            },
+          })),
+          mcpServers: [],
+          hookCatalog: hookPin,
+        };
+      }
+      if (operation.kind === 'extension-activate')
+        runtimeStates.set(operation.operationId, 'active');
+      return {
+        ...common,
+        state: runtimeStates.get(operation.operationId),
+        revision: currentRevision,
+      };
+    });
+    const selection = (expectedRevision: number) => ({
+      operationId: randomUUID(),
+      actorKey: 'a'.repeat(64),
+      expectedRevision,
+      extensions: [
+        {
+          extensionId: 'sample',
+          packageRevision: 1,
+          packageDigest: 'b'.repeat(64),
+        },
+      ],
+    });
+    const definition = {
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      publicChildAgentsVersion: 1,
+      agentDefinition: {
+        agentId: `agent_${'c'.repeat(32)}`,
+        revision: '1',
+        digest: 'd'.repeat(64),
+      },
+      initialSelection: selection(0),
+    };
+    const sessionKey = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const ownerFor = (revision: number) =>
+      `extensions-components-${createHash('sha256')
+        .update(JSON.stringify([sessionKey, revision]))
+        .digest('hex')}`;
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({ ...definition, sessionId: SESSION_ID, sessionScope: 'thread' })
+      .expect(200);
+    const clientId = created.body.clientId as string;
+    const fireHook = (message: string) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/hooks/operations`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          operationId: randomUUID(),
+          event: 'Notification',
+          input: { message, notification_type: 'test' },
+        });
+    // Fire a Hook so the deterministic owner acquires and holds the mount.
+    await fireHook('ready').expect(200);
+    expect(releasedOwners.has(ownerFor(1))).toBe(false);
+    // Detach, then reload the SAME Session at the SAME configRevision in a
+    // fresh harness process. The load recomputes the identical deterministic
+    // owner id; a terminal release on detach would have tombstoned it and the
+    // next Hook's acquire would be refused.
+    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .set('X-Qwen-Client-Id', clientId)
+      .expect(204);
+    // The detach must not terminally release the deterministic owner: the next
+    // load recomputes the identical id from (sessionKey, configRevision) and
+    // must re-acquire it. A terminal release here persists a RELEASED tombstone
+    // that acquireNewSession refuses, killing every Hook after the reload. The
+    // acquire mock above refuses any re-acquire of a released id, so this is
+    // exactly the condition that would wedge the reload.
+    expect(releasedOwners.has(ownerFor(1))).toBe(false);
+  });
+
   it('refuses the tool_stage recovery domain when extensions are disabled', async () => {
     const key = {
       tenantId: 'tenant',
