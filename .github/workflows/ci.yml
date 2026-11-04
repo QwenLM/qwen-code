@@ -659,6 +659,11 @@ jobs:
       # scripts/ci-build-cache.mjs runs the build after the install.
       - name: 'Install dependencies'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        # Every cap below stays under the job's 45 so a stalled host fails the
+        # step and leaves the failure-gated collectors at the end reachable. A
+        # job timeout cancels the run and skips them, which is the case those
+        # collectors exist for.
+        timeout-minutes: 30
         env:
           QWEN_SKIP_PREPARE: '1'
         run: |-
@@ -707,11 +712,13 @@ jobs:
 
       - name: 'Build'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        timeout-minutes: 25
         run: 'node scripts/ci-build-cache.mjs build .qwen-build-cache'
 
       - name: 'Pack the build cache'
         id: 'pack_build_cache'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'push' || steps.build_cache.outputs.cache-matched-key == '') }}"
+        timeout-minutes: 8
         run: |-
           rm -rf .qwen-build-cache
           node scripts/ci-build-cache.mjs pack .qwen-build-cache
@@ -732,6 +739,7 @@ jobs:
       # cannot disagree about what the build produces.
       - name: 'Archive the built tree'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        timeout-minutes: 8
         run: |-
           node scripts/ci-build-cache.mjs paths |
             tar --null -T - -czf "${RUNNER_TEMP}/unit-test-tree.tgz"
@@ -1066,6 +1074,7 @@ jobs:
       # brings the outputs this install skips.
       - name: 'Install dependencies'
         if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        timeout-minutes: 30
         env:
           QWEN_SKIP_PREPARE: '1'
           QWEN_SKIP_NOTICE_GENERATION: '1'
@@ -1828,6 +1837,7 @@ jobs:
 
       - name: 'Install dependencies'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        timeout-minutes: 30
         env:
           QWEN_SKIP_PREPARE: '1'
           QWEN_SKIP_NOTICE_GENERATION: '1'

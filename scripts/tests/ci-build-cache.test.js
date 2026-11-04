@@ -7,6 +7,7 @@
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -106,27 +107,39 @@ const scriptPath = join(import.meta.dirname, '..', 'ci-build-cache.mjs');
 
 function makeFixture() {
   const repo = mkdtempSync(join(tmpdir(), 'ci-build-cache-fixture-'));
-  const workspace = join(repo, 'packages/a');
   const shims = join(repo, '.shims');
   const calls = join(repo, '.calls');
   const workspacesJson = join(repo, '.workspaces.json');
 
-  mkdirSync(join(workspace, 'src'), { recursive: true });
-  mkdirSync(join(workspace, 'dist'), { recursive: true });
+  for (const name of ['a', 'b']) {
+    const workspace = join(repo, 'packages', name);
+    mkdirSync(join(workspace, 'src'), { recursive: true });
+    mkdirSync(join(workspace, 'dist'), { recursive: true });
+    writeFileSync(
+      join(workspace, 'package.json'),
+      `{"name":"${name}","version":"1.0.0"}\n`,
+    );
+    writeFileSync(join(workspace, 'src/index.ts'), 'export {};\n');
+    writeFileSync(join(workspace, 'dist/out.js'), `${name} built\n`);
+  }
   mkdirSync(join(repo, 'node_modules/x'), { recursive: true });
   mkdirSync(shims, { recursive: true });
-  writeFileSync(join(repo, '.gitignore'), 'dist/\nnode_modules/\n');
+  // `.calls` is ignored because the restage step in the changed-workspace
+  // case would otherwise stage it: a root-level file, it edits the global
+  // hash and makes every workspace look changed. `.cache/` is deliberately
+  // not ignored — CI's cache directory is not ignored either, and an ignored
+  // one lands in `builtPaths()` and gets tarred into itself.
+  writeFileSync(join(repo, '.gitignore'), 'dist/\nnode_modules/\n.calls\n');
   writeFileSync(join(repo, 'package.json'), '{"name":"root","private":true}\n');
-  writeFileSync(
-    join(workspace, 'package.json'),
-    '{"name":"a","version":"1.0.0"}\n',
-  );
-  writeFileSync(join(workspace, 'src/index.ts'), 'export {};\n');
-  writeFileSync(join(workspace, 'dist/out.js'), 'built\n');
   writeFileSync(join(repo, 'node_modules/x/index.js'), 'dep\n');
   writeFileSync(
     workspacesJson,
-    JSON.stringify([{ name: 'a', path: workspace }]),
+    JSON.stringify(
+      ['a', 'b'].map((name) => ({
+        name,
+        path: join(repo, 'packages', name),
+      })),
+    ),
   );
 
   const shim = (name, body) => {
@@ -163,6 +176,8 @@ function makeFixture() {
   };
   return {
     repo,
+    env,
+    calls,
     run,
     cleanup: () => rmSync(repo, { recursive: true, force: true }),
   };
@@ -229,6 +244,70 @@ describe('ci-build-cache CLI', () => {
       const { calls } = fixture.run('build', join(fixture.repo, '.missing'));
       expect(calls).toContain('npm run build');
       expect(calls).toContain('npm run bundle');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it('rebuilds and purges only the changed workspace on a cache hit', () => {
+    const fixture = makeFixture();
+    try {
+      const cache = join(fixture.repo, '.cache');
+      fixture.run('pack', cache);
+      writeFileSync(
+        join(fixture.repo, 'packages/a/src/index.ts'),
+        'export {}; // changed\n',
+      );
+      // The hash reads the index, so the edit counts only once staged.
+      execFileSync('git', ['add', '-A'], { cwd: fixture.repo });
+
+      const { calls } = fixture.run('build', cache);
+      expect(calls).toMatch(
+        /corepack pnpm -r --filter \{\.\/packages\/a\} run build/,
+      );
+      expect(calls).not.toContain('npm run build');
+      // `stale` purges the changed workspace before rebuilding it and leaves
+      // the untouched one alone. Widening builtPaths(dirs) to builtPaths()
+      // deletes every restored workspace's dist, and eight shards then run
+      // against a tree missing the outputs the cache restored.
+      expect(existsSync(join(fixture.repo, 'packages/a/dist/out.js'))).toBe(
+        false,
+      );
+      expect(existsSync(join(fixture.repo, 'packages/b/dist/out.js'))).toBe(
+        true,
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it('runs the build preflight on demand and nothing else', () => {
+    const fixture = makeFixture();
+    try {
+      mkdirSync(join(fixture.repo, 'scripts'), { recursive: true });
+      copyFileSync(
+        join(import.meta.dirname, '..', 'build.js'),
+        join(fixture.repo, 'scripts', 'build.js'),
+      );
+      mkdirSync(join(fixture.repo, 'node_modules/ink/build'), {
+        recursive: true,
+      });
+      writeFileSync(
+        join(fixture.repo, 'node_modules/ink/build/frame-controller.d.ts'),
+        'export {};\n',
+      );
+      writeFileSync(fixture.calls, '');
+
+      // The cached branch of ci-build-cache.mjs depends on this exact
+      // contract: exit 0 with no generate, workspace build or schema step.
+      // Renaming the flag or dropping its early exit falls through to the
+      // full build, which records those calls here.
+      execFileSync(
+        process.execPath,
+        [join(fixture.repo, 'scripts', 'build.js'), '--preflight'],
+        { cwd: fixture.repo, env: fixture.env, encoding: 'utf8' },
+      );
+      expect(readFileSync(fixture.calls, 'utf8')).toBe('');
     } finally {
       fixture.cleanup();
     }

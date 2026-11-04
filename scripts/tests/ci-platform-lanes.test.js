@@ -332,6 +332,27 @@ it('skips every build-consuming shard step when test_build failed', () => {
   }
 });
 
+it('keeps every blocking test_build step under the job ceiling', () => {
+  // The job cap cancels the job, and a cancelled job skips the failure-gated
+  // collectors at the end — the file they upload is the reason this job has
+  // them. A step cap fails only that step, so the collectors still run. Each
+  // cap therefore has to fire before the job's.
+  const jobCap = Number(ci.jobs.test_build['timeout-minutes']);
+  const steps = new Map(
+    (ci.jobs.test_build.steps ?? []).map((step) => [step.name, step]),
+  );
+  for (const name of [
+    'Install dependencies',
+    'Build',
+    'Pack the build cache',
+    'Archive the built tree',
+  ]) {
+    const minutes = steps.get(name)?.['timeout-minutes'];
+    expect(typeof minutes, `${name} has no step timeout`).toBe('number');
+    expect(minutes, `${name} cannot outlast the job`).toBeLessThan(jobCap);
+  }
+});
+
 it('reports the required Linux check only when the build and every shard pass', () => {
   const gate = ci.jobs.test_ubuntu;
   expect(gate.name).toBe('Test (ubuntu-latest, Node 22.x)');
@@ -797,7 +818,11 @@ describe('post-merge push lane', () => {
     // test_build carries the test shards' whole prelude, up to the install.
     const b = byName('test_build');
     const buildShared = [...b.keys()].filter((n) => t.has(n));
-    expect(buildShared.length).toBeGreaterThanOrEqual(15);
+    // The number is the real intersection, not a floor to drift above: with
+    // 15 written here while the intersection is 16, renaming one shared step
+    // in `test` alone drops it back to 15, the loop stops comparing it, and
+    // `test_build`'s copy can change freely. Raise it with the membership.
+    expect(buildShared.length).toBeGreaterThanOrEqual(16);
     for (const n of buildShared) {
       if (n === 'Install dependencies') continue;
       expect(b.get(n), `step "${n}" drifted between test_build and test`).toBe(
