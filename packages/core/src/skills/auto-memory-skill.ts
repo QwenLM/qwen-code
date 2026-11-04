@@ -43,9 +43,9 @@ import {
   toolSearchBridgeSentence,
   type BundledReferenceRoute,
 } from './bundled-reference.js';
+import { AUTO_MEMORY_SKILL_NAME } from './types.js';
 
-/** Name of the bundled reference, as the model would invoke it. */
-export const AUTO_MEMORY_SKILL_NAME = 'auto-memory';
+export { AUTO_MEMORY_SKILL_NAME };
 
 const POINTER = `Once you decide to save or reorganize a memory, load the \`${AUTO_MEMORY_SKILL_NAME}\` skill for the full guidance on each memory type with examples, the keyword and usage-scenario rules, team memory, and when a plan or tasks fit better than memory.`;
 

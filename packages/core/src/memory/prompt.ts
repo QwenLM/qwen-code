@@ -19,6 +19,33 @@ import {
 
 const DIR_EXISTS_GUIDANCE =
   'This directory already exists — write to it directly with the write_file tool (do not run mkdir or check for its existence).';
+/** {@link DIR_EXISTS_GUIDANCE} for the resident policy, which names every directory. */
+const DIRS_EXIST_GUIDANCE =
+  'They already exist — write to them directly with the write_file tool (do not run mkdir or check for their existence).';
+
+/**
+ * The memory directories, one line each, as both the full and the resident
+ * main-session policy list them.
+ */
+function buildAutoMemoryTierLines(
+  memoryDir: string,
+  userSection: UserAutoMemorySection | undefined,
+  teamSection: TeamAutoMemorySection | undefined,
+): string[] {
+  return [
+    ...(userSection !== undefined
+      ? [
+          `- USER memory (cross-project, durable knowledge about who the user is): \`${userSection.memoryDir}\``,
+        ]
+      : []),
+    `- PROJECT memory (this project only, private to you): \`${memoryDir}\``,
+    ...(teamSection !== undefined
+      ? [
+          `- TEAM memory (this project, shared with every collaborator through the repository — just save the file; the repo's normal git workflow carries it to teammates, so don't run git yourself): \`${teamSection.memoryDir}\``,
+        ]
+      : []),
+  ];
+}
 
 // Spell out the tier count so a future 4th tier never silently reads "two".
 const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four'] as const;
@@ -361,20 +388,11 @@ export function buildManagedAutoMemoryPrompt(
   teamSection?: TeamAutoMemorySection,
   options?: BuildMemoryPromptOptions,
 ): string {
-  const tierLines: string[] = [];
-  if (userSection !== undefined) {
-    tierLines.push(
-      `- USER memory (cross-project, durable knowledge about who the user is): \`${userSection.memoryDir}\``,
-    );
-  }
-  tierLines.push(
-    `- PROJECT memory (this project only, private to you): \`${memoryDir}\``,
+  const tierLines = buildAutoMemoryTierLines(
+    memoryDir,
+    userSection,
+    teamSection,
   );
-  if (teamSection !== undefined) {
-    tierLines.push(
-      `- TEAM memory (this project, shared with every collaborator through the repository — just save the file; the repo's normal git workflow carries it to teammates, so don't run git yourself): \`${teamSection.memoryDir}\``,
-    );
-  }
   const multiTier = tierLines.length > 1;
   const keywordVocabularySnapshot = options?.keywordVocabularySnapshot?.trim();
   const keywordVocabularySection = keywordVocabularySnapshot
@@ -484,15 +502,11 @@ export function buildResidentAutoMemoryPrompt(
   teamSection: TeamAutoMemorySection | undefined,
   referenceSection: string,
 ): string {
-  const tierLines = [
-    `- USER memory (cross-project, durable knowledge about who the user is): \`${userSection.memoryDir}\``,
-    `- PROJECT memory (this project only, private to you): \`${memoryDir}\``,
-    ...(teamSection !== undefined
-      ? [
-          `- TEAM memory (this project, shared with every collaborator through the repository — just save the file; the repo's normal git workflow carries it to teammates, so don't run git yourself): \`${teamSection.memoryDir}\``,
-        ]
-      : []),
-  ];
+  const tierLines = buildAutoMemoryTierLines(
+    memoryDir,
+    userSection,
+    teamSection,
+  );
   const teamLines =
     teamSection !== undefined
       ? [
@@ -505,7 +519,7 @@ export function buildResidentAutoMemoryPrompt(
     '',
     CATALOG_DATA_NOTE,
     '',
-    `You have ${NUMBER_WORDS[tierLines.length] ?? String(tierLines.length)} persistent, file-based memory directories. They already exist — write to them directly with the write_file tool (do not run mkdir or check for their existence).`,
+    `You have ${NUMBER_WORDS[tierLines.length] ?? String(tierLines.length)} persistent, file-based memory directories. ${DIRS_EXIST_GUIDANCE}`,
     '',
     ...tierLines,
     '',

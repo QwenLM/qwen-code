@@ -42,6 +42,7 @@ import { isSafeModeEnv } from '@qwen-code/qwen-code-core/utils/safe-mode.js';
 import { closeFileWatcher } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { getExtensionDisplayName } from '@qwen-code/qwen-code-core/extension/i18n.js';
 import {
+  AUTO_MEMORY_SKILL_NAME,
   authoredSkillName,
   qualifySkillName,
 } from '@qwen-code/qwen-code-core/skills/types.js';
@@ -541,7 +542,7 @@ async function buildWorkspaceSkillsStatus(
         isSkillEnabled: (skill) =>
           !(
             skill.level === 'bundled' &&
-            skill.name === 'auto-memory' &&
+            skill.name === AUTO_MEMORY_SKILL_NAME &&
             !managedAutoMemoryEnabled
           ),
       };

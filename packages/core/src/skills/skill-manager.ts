@@ -28,6 +28,7 @@ import {
   parseUserInvocableField,
   qualifySkillName,
   validateSkillName,
+  AUTO_MEMORY_SKILL_NAME,
 } from './types.js';
 import type { Config } from '../config/config.js';
 import { parsePriorityField, validateConfig } from './skill-load.js';
@@ -59,14 +60,14 @@ const SKILLS_CONFIG_DIR = 'skills';
  * Bundled skills that `Config.isSkillEnabled` hides when the feature they
  * serve is off: `generated-ui` without the generated-UI runtime, and
  * `auto-memory` without legacy managed auto-memory. Both the listing and a
- * by-name load consult it, so the two cannot disagree. Spelled out rather than
- * imported from their modules, which sit above this one in the import graph.
+ * by-name load consult it, so the two cannot disagree. `generated-ui` is
+ * spelled out because its module sits above this one in the import graph.
  * A Config stand-in that builds a SkillManager must answer `isSkillEnabled`
  * for these (see the daemon's skills catalog).
  */
 const CONDITIONAL_BUNDLED_SKILLS: ReadonlySet<string> = new Set([
   'generated-ui',
-  'auto-memory',
+  AUTO_MEMORY_SKILL_NAME,
 ]);
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 

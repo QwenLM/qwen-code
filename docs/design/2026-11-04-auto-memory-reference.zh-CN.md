@@ -59,6 +59,8 @@
 
 **列表。** 只有开启 managed auto-memory 且召回处于 legacy 模式时才列出这个 skill。否则 `Config.isSkillEnabled` 会把它隐藏；`SkillManager` 在列表和按名加载时都使用这个开关，与 `generated-ui` 的处理方式一样。daemon 的 skills 目录根据工作区设置回答同一个问题。
 
+**审批。** 写入私有 memory 目录不需要审批，所以加载这个参考也不能需要，否则每次保存都会先弹一次确认。Skill 工具默认会询问；当名字解析到 bundled 的 `auto-memory` 时直接放行，它是只读文本，没有 `allowedTools`，也没有 hooks。同名的项目、用户或扩展 skill 优先级更高，加载它们仍会询问；权限规则照常在此之上生效。
+
 ## 4. 实测效果
 
 长度单位为字符，使用常见路径（`/home/alice/.qwen/memories` 与 `/home/alice/.qwen/projects/-home-alice-work-app/memory`）：
@@ -94,6 +96,7 @@
   - `skills/bundled/auto-memory/SKILL.test.ts`：skill 包含每个常量的每一行，以及双向锚点；
   - `skills/auto-memory-skill.test.ts`：四种路由、读取方 Config 的路由，以及体积预算；
   - `config/config.test.ts`：各路由下的策略、没有 Skill 工具的注册表、没有 skill manager 的派生 Config，以及列表开关；
+  - `tools/skill.test.ts`：加载 bundled 参考无需询问，被同名 skill 覆盖时仍会询问；
   - `memory/prompt.test.ts` 与 `skills/bundled-skills.integration.test.ts`。
 - **逐字节一致：** `buildManagedAutoMemoryPrompt` 的输出在五种参数组合下与 merge base 对比，全部一致。
 - **行为：** 用真实模型在九个场景下做改动前后对比。场景覆盖：保存到正确的层级且元数据合法、绝对日期、reference、拒绝保存可推导的内容、更新而非重复、忘掉、对照代码核实过时的 memory、遵守“不要用 memory”，以及一个既不应加载 skill、也不应写 memory 的无关任务。结果写在 PR 中。

@@ -59,6 +59,8 @@ It decides on the route rather than on the surface the tool descriptions use. Th
 
 **Listing.** The skill is listed only when managed auto-memory is on and recall is in legacy mode. `Config.isSkillEnabled` hides it otherwise, and `SkillManager` applies that gate both to the listing and to loading it by name, the way it does for `generated-ui`. The daemon's skills catalog answers the same question from the workspace settings.
 
+**Approval.** Writes to the private memory directories need no approval, so loading the reference must not need one either, or every save would start with a confirmation. The Skill tool asks by default. It allows the call when the name resolves to the bundled `auto-memory`, which is read-only text with no `allowedTools` and no hooks. A same-named project, user or extension skill takes precedence over it and still asks, and permission rules apply on top as usual.
+
 ## 4. Measured effect
 
 Lengths in characters, with typical paths (`/home/alice/.qwen/memories` and `/home/alice/.qwen/projects/-home-alice-work-app/memory`):
@@ -94,6 +96,7 @@ A session that loads the skill carries its body, about 14.6k characters, in hist
   - `skills/bundled/auto-memory/SKILL.test.ts`: every constant line in the skill, plus both-way anchors;
   - `skills/auto-memory-skill.test.ts`: the four routes, the route of the reading Config, and the size budget;
   - `config/config.test.ts`: the policy per route, a registry without the Skill tool, a derived Config without a skill manager, and the listing gate;
+  - `tools/skill.test.ts`: loading the bundled reference is allowed without asking, and a shadowing skill still asks;
   - `memory/prompt.test.ts` and `skills/bundled-skills.integration.test.ts`.
 - **Byte identity:** the output of `buildManagedAutoMemoryPrompt` was compared with the merge base for five argument shapes and matched.
 - **Behavior:** a before/after run with real models over nine scenarios. The scenarios cover saving to the right tier with valid metadata, absolute dates, references, refusing to store derivable facts, updating instead of duplicating, forgetting, verifying a stale memory against the code, honoring "don't use memory", and an unrelated task that must neither load the skill nor write memory. The results are in the PR.
