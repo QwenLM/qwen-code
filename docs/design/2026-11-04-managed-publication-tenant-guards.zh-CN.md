@@ -50,6 +50,9 @@ head（`lockPublicationWriter`），然后锁 publication 行：guard 之下的�
   空间释放前都会被拒绝，因此不会累积。
 - Session 字节上限仍然精确：同一 Session 的预留在其 root 上串行，发布写入方在汇总之前锁定
   该 root。
+- 汇总前仍会在整个租户内 fence 已过期的预留。该更新使用热路径的语句超时与
+  `tenant_guard_contended` 命名失败映射，因此回收器持有的过期行不会让 placement 持有者
+  一直等到数据库默认锁超时。
 - 该车道先锁 Session root 和 head，再锁 publication 行，与回收的顺序一致；锁 root 之后不再
   获取 publication guard，因此不会与 retention（publication guard、root、head）形成环路。
 - CSI 发布保留该 guard，这是其退役与 continuation 路径的预期。
@@ -70,10 +73,21 @@ root 和 head 下获取的租约本身就能与它们互斥。租约续期也跳
 世代与过期时间，再延长租约。这同时去掉了车道在 root 之后读取证据时的 guard（C1 发现的环路），
 以及 Artifact 与 journal 资源读取中的 guard。
 
+隔离损坏的发布对象同样只锁该 Session 的 root、head 与 publication 行。隔离不会改变租户级
+容量，并保留 retained-publication 状态检查，因此无论独立执行，还是加入已经持有 root 的
+读取事务，都能采用同一顺序。其他 retained-publication 变更仍保留 guard 优先的入口。
+
 审计以测试形式完成：另一连接持有 guard 时，reserve、派发、finish、准入和回执都必须能完成
 （`ManagedSessionGuardConvoyIT`）；任何在 root 之后获取 guard 的车道都会在这里卡住。另一个
 观测用例在 guard 被持有时，把尚未过期的读租约回拨到续期窗口，要求它在持有 root 的事务中
 成功延长过期时间。
+隔离观测用例要求在同样持有 guard 的情况下，完成该 Session 内的状态变更。过期预留观测用例
+持有另一个 Session 的过期 capture 行，检查有界的命名失败，再释放该行并检查新预留能成功
+将其 fence。
+
+容量核算放在独立的持久化辅助类中，准入入口加锁归入 grant store，使两个现有发布 store
+都低于各自的类大小棘轮；抽取后同步降低上限。门面清单登记了有意新增的 guard 选择 writer
+重载，事务属性保持不变。
 
 未覆盖：native journal 快照写入方，其 build 事务在锁 Session 之前先锁资源行，顺序需要单独分析。
 

@@ -416,11 +416,14 @@ class ManagedSessionGuardConvoyIT {
             // quota overshoot, so a held guard neither parks nor names it.
             // It runs on a fresh thread so it cannot join the held transaction.
             long reserveBefore = System.nanoTime();
-            try (var reservePool = Executors.newSingleThreadExecutor()) {
+            var reservePool = Executors.newSingleThreadExecutor();
+            try {
                 reservePool.submit(() -> {
                     journal.reserve();
                     return null;
                 }).get(30, TimeUnit.SECONDS);
+            } finally {
+                reservePool.shutdownNow();
             }
             assertThat((System.nanoTime() - reserveBefore) / 1_000_000).isLessThan(BOUNDED_FAILURE_CEILING_MS);
         } finally {
@@ -620,6 +623,70 @@ class ManagedSessionGuardConvoyIT {
             journal.manager.rollback(hold);
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_read_lease", Integer.class)).isZero();
+    }
+
+    @Test
+    void expiredReservationFenceHasABoundedNamedWait() throws Exception {
+        var journal = PublicationJournalFixture.create(source);
+        var jdbc = journal.jdbc;
+        String scope = ToolPublicationRetentionStore.hash("expired-session");
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+                + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
+                + " expires_at, capture_bytes, producer_bytes, admission_bytes)"
+                + " VALUES (?, ?, 'tenant-1', 'workspace-1', 'expired-session', 'expired', ?, 'expired', '{}', ?, ?,"
+                + " 'OPEN', 0, 1, 1, 1)", scope, ToolPublicationRetentionStore.hash("tenant-1"), scope, scope, scope);
+        var transactions = new TransactionTemplate(journal.manager);
+        var hold = journal.manager.getTransaction(new DefaultTransactionDefinition());
+        try {
+            ToolPublicationRetentionStore.lockTenant(jdbc, "tenant-1");
+            jdbc.queryForList("SELECT publication_id FROM ma_output_capture WHERE scope_key = ? FOR UPDATE", scope);
+            assertFastGuardFailure(() -> transactions.execute(ignored -> {
+                jdbc.execute("SET SESSION innodb_lock_wait_timeout = 20");
+                return journal.reserve();
+            }));
+        } finally {
+            journal.manager.rollback(hold);
+        }
+        journal.reserve();
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_output_capture WHERE scope_key = ?", String.class, scope))
+                .isEqualTo("FENCED");
+    }
+
+    @Test
+    void quarantineUnderASessionRootCompletesWhileTenantGuardIsHeld() throws Exception {
+        var journal = PublicationJournalFixture.create(source);
+        journal.reserve();
+        var jdbc = journal.jdbc;
+        String scope = ToolPublicationDataStore.scope("tenant-1", "workspace-1", "session-1");
+        String resourceScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore
+                .sessionScopeKey("tenant-1", "session-1");
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
+                + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, scope_key,"
+                + " publication_id, slot_key, capture_state, capture_object_key, object_key, operation_id, gmt_create)"
+                + " VALUES (?, ?, 'tenant-1', 'workspace-1', 'session-1', 'corrupt-resource',"
+                + " 'managed-tool-result-content', 1, 1, ?, 'TOOL_PUBLICATION', 'PUBLISHED', ?, 'pub-1',"
+                + " 'segment:stdout:0', 'VERIFIED', 'corrupt-object', 'corrupt-object', 'op', "
+                + ManagedSchemaTime.SQL_NOW + ")", com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
+                        .key(resourceScope, "corrupt-resource"), resourceScope, scope, scope);
+        var retention = new ToolPublicationRetentionStore(jdbc, journal.manager);
+        var transactions = new TransactionTemplate(journal.manager);
+        var hold = journal.manager.getTransaction(new DefaultTransactionDefinition());
+        try {
+            ToolPublicationRetentionStore.lockTenant(jdbc, "tenant-1");
+            completesWhileHeld(() -> transactions.execute(ignored -> {
+                try (var lease = retention.read("tenant-1", "session-1")) {
+                    lease.check();
+                    retention.quarantineResource(scope, "corrupt-resource", "corrupt-object");
+                }
+                return null;
+            }));
+        } finally {
+            journal.manager.rollback(hold);
+        }
+        assertThat(jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE resource_id = 'corrupt-resource'",
+                String.class)).isEqualTo("QUARANTINED");
+        assertThat(jdbc.queryForObject("SELECT CASE WHEN is_quarantined THEN 1 ELSE 0 END FROM ma_output_capture",
+                Integer.class)).isEqualTo(1);
     }
 
     @Test

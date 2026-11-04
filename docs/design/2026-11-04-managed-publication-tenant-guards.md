@@ -61,6 +61,10 @@ no-start release) and its publication writer no longer take
   so it does not accumulate.
 - The Session byte limit stays exact: reservations of one Session serialize
   on its root, which the publication writer locks before the sums.
+- Expired reservations are still fenced across the tenant before the sums.
+  This update uses the hot-path statement timeout and named
+  `tenant_guard_contended` mapping, so an expired row held by a collector
+  cannot park the placement owner until the database's default lock timeout.
 - The lane takes Session root and head before the publication row, the order
   collection uses, and never takes the publication guard after the root, so
   it closes no cycle with retention (publication guard, root, head).
@@ -90,12 +94,28 @@ it locks the root and rechecks retirement generation and expiry before
 extending the lease. This also removes the guard from evidence reads after a
 lane's root (the cycle C1 found) and from Artifact and journal resource reads.
 
+Quarantining a corrupt publication object also locks only that Session's
+root, head and publication row. Quarantine changes no tenant-wide capacity
+and keeps the retained-publication state check, so the same ordering works
+both independently and inside a read transaction that already holds the
+root. Other retained-publication mutations keep their guard-first entry.
+
 The audit is a test: with the guard held on another connection, reserve,
 dispatch, finish, admission and receipt must all complete
 (`ManagedSessionGuardConvoyIT`); a lane that took the guard after its root
 would stall there. A separate witness backdates an unexpired read lease into
 the renewal window while the guard is held and requires the lease's expiry
 to advance inside the transaction that holds its root.
+A quarantine witness requires its Session-local state changes to complete
+under the same held guard. An expired-reservation witness holds a different
+Session's expired capture row, checks the bounded named failure, then releases
+the row and checks that a fresh reservation fences it successfully.
+
+Capacity accounting lives in a separate persistence helper, and admission
+entry locking lives with the grant store. This keeps both existing publication
+stores below their class-size ratchets; the ceilings are lowered after the
+extraction. The facade inventory includes the intentional guard-selecting
+writer overload without changing its transaction attributes.
 
 Not covered: the native journal snapshot writer, whose build transaction
 locks resource rows before the Session; its order needs its own analysis.

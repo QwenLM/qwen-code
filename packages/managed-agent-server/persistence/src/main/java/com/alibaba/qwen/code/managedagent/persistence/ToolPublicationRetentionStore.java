@@ -128,7 +128,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         });
     }
 
-    private static PreparedStatementSetter boundedParameters(
+    static PreparedStatementSetter boundedParameters(
             JdbcTemplate jdbc, int timeoutSeconds, Object... parameters) {
         PreparedStatementSetter arguments = jdbc instanceof ManagedSchemaJdbcTemplate managed
                 ? managed.newArgPreparedStatementSetter(parameters)
@@ -271,6 +271,10 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     }
 
     void lockRetainedPublication(String scope, String publication) {
+        lockRetainedPublication(scope, publication, true);
+    }
+
+    private void lockRetainedPublication(String scope, String publication, boolean tenantGuard) {
         var row =
                 jdbc.query(
                                 "SELECT tenant_id, session_id FROM ma_output_capture"
@@ -279,7 +283,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                                 scope,
                                 publication)
                         .getFirst();
-        lockGenericSession(jdbc, (String) row.get("tenant_id"), (String) row.get("session_id"));
+        lockSessionHead(jdbc, (String) row.get("tenant_id"), (String) row.get("session_id"), true, tenantGuard);
         String state =
                 jdbc.queryForObject(
                         "SELECT retention_state FROM ma_output_capture"
@@ -306,7 +310,9 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                                             objectKey)
                                     .getFirst();
                     String publication = (String) row.get("publication_id");
-                    lockRetainedPublication(scope, publication);
+                    // Quarantine is Session-local: root, head and publication suffice,
+                    // including when a reader already holds the root in this transaction.
+                    lockRetainedPublication(scope, publication, false);
                     jdbc.update(
                             "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", is_quarantined = TRUE WHERE scope_key = ?"
                                     + " AND publication_id = ?",
