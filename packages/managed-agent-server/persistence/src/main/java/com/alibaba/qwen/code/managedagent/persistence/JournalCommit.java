@@ -25,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -71,15 +72,22 @@ final class JournalCommit {
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        // Ordinary record commits still hold the placement guard while they
-        // fly: a begin/lifecycle admission serializes with only that row, so
-        // without it an admission sails through mid-commit. The acquisition
-        // stays bounded — a held row degrades to a named failure within the
-        // hot-path budget rather than waiting out the caller (#13800).
-        JournalFencing.lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
-                JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         JournalStoreRows.validateStableId(request.writerId(), "writerId");
         ValidatedCommit validated = validateCommit(request);
+        if (Arrays.stream(new String(validated.recordBytes(), StandardCharsets.UTF_8).split("\n"))
+                .map(com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore::parse)
+                .filter(Objects::nonNull)
+                .anyMatch(record -> "hosted.cleanup".equals(record.path("managedSession").path("kind").asText()))) {
+            // Retention takes placement before binding and Session locks. Cleanup
+            // admission must join that order before it can inspect the original binding.
+            fencing.lockPlacementBounded(tenantId);
+        }
+        // Other ordinary commits queue on their Session before any consistent
+        // read, so lifecycle and placement cannot change it mid-commit. Cleanup
+        // commits already hold placement; lifecycle authority holds both guards.
+        // CSI-pinned Sessions take them behind this root in
+        // lockCsiContinuation (design 2026-11-03-managed-journal-commit-tenant-guard).
+        Boolean rootPin = fencing.lockSessionFirst(tenantId, sessionId);
         HarnessPlacementStore.Placement placement = fencing.requirePlacement(tenantId, request.workspaceId(),
                 sessionId, writerToken, request.writerId(), false);
         boolean promotes = ManagedHostedRecoveryRecords.requiresVersionTwo(validated.recordBytes(), request.resources())
@@ -93,7 +101,7 @@ final class JournalCommit {
         if (promotes) {
             readerVersion.requireReadable(2);
         }
-        var continuation = fencing.lockCsiContinuation(tenantId, sessionId);
+        var continuation = fencing.lockCsiContinuation(tenantId, sessionId, rootPin);
         var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
@@ -148,7 +156,14 @@ final class JournalCommit {
             return replay(existing, request, validated.recordDigest(),
                     writerToken);
         }
-        fencing.requirePhysicalSessionOpen(tenantId, request.workspaceId(), sessionId);
+        // The storage's alias and directory rows order this commit against
+        // migration and physical fences; migration prepare checks idleness on
+        // committed data after locking them, so the guard adds nothing here.
+        if (authority == null && csiOriginal == null) {
+            fencing.requireSessionStorageOpenForAdmission(tenantId, request.workspaceId(), sessionId);
+        } else {
+            fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
+        }
         JournalStoreRows.HeadRow head = csiHead == null
                 ? fencing.requireHeadAfterCsiCheck(tenantId, sessionId) : csiHead;
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);

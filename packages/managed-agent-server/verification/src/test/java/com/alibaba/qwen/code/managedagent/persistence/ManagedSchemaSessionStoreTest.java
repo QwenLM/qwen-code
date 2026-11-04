@@ -317,6 +317,77 @@ public class ManagedSchemaSessionStoreTest {
         jdbc.update("UPDATE ma_resource SET retention_until = 946684800000 WHERE tenant_id = ? AND retention_until IS NOT NULL", tenant);
     }
 
+    // A snapshot can predate the rename that won the tenant-scoped receipt key.
+    @Test
+    void aRacingSessionReusingARenameKeyAnswersConflictFromTheReceiptKey() {
+        String other =
+                tx.execute(
+                                status ->
+                                        store.insertSessionCommand(
+                                                tenant,
+                                                "actor",
+                                                "CREATE_SESSION",
+                                                "create-other",
+                                                "create-other-digest",
+                                                "qwen-code",
+                                                null,
+                                                "title",
+                                                List.of(),
+                                                null))
+                        .sessionId();
+        var winner = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
+        winner.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        assertThatThrownBy(
+                        () ->
+                                tx.executeWithoutResult(
+                                        status -> {
+                                            // Pin this transaction's snapshot before the winner commits.
+                                            jdbc.queryForObject(
+                                                            "SELECT COUNT(*) FROM ma_request_receipt"
+                                                                    + " WHERE namespace = 'SESSION_COMMAND'",
+                                                            Long.class);
+                                            winner.execute(ignored -> store.beginSessionRename(
+                                                    tenant, "shared", "digest", other, "theirs"));
+                                            store.beginSessionRename(tenant, "shared", "digest", session, "mine");
+                                        }))
+                .isInstanceOfSatisfying(
+                        com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
+        assertThat(store.requireSession(tenant, session).title()).isEqualTo("title");
+        assertThat(jdbc.queryForObject(
+                        "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ?",
+                        Long.class,
+                        tenant))
+                .isEqualTo(1);
+    }
+
+    @Test
+    void concurrentRenamesOfDifferentSessionsDoNotDeadlock() throws Exception {
+        String other = tx.execute(status -> store.insertSessionCommand(
+                tenant, "actor", "CREATE_SESSION", "create-other", "other-digest",
+                "qwen-code", null, "other", List.of(), null)).sessionId();
+        try (var threads = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var start = new java.util.concurrent.CyclicBarrier(2);
+            var first = threads.submit(() -> {
+                start.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                return tx.execute(status -> store.beginSessionRename(
+                        tenant, "first", "first-digest", session, "first"));
+            });
+            var second = threads.submit(() -> {
+                start.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                return tx.execute(status -> store.beginSessionRename(
+                        tenant, "second", "second-digest", other, "second"));
+            });
+            assertThat(first.get(15, java.util.concurrent.TimeUnit.SECONDS).renameRevision())
+                    .isEqualTo(1);
+            assertThat(second.get(15, java.util.concurrent.TimeUnit.SECONDS).renameRevision())
+                    .isEqualTo(1);
+        }
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND state = 'PENDING' AND tenant_id = ?",
+                Long.class, tenant)).isEqualTo(2);
+    }
+
     @Test
     void renameRevisionAndClaimGenerationFenceStaleWorkers() {
         var command =
