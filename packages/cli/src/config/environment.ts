@@ -22,6 +22,7 @@ import {
   resetLoaderKeyRejectionReportingForTesting,
 } from './shared-env-keys.js';
 import { VERIFY_PR_COORDINATE_ENV } from './verify-pr-coordinates.js';
+import { isWithinRoot } from './path-comparison.js';
 import { publishPendingCompileCache } from './compile-cache.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
@@ -564,8 +565,16 @@ export function readProjectEnvFiles(
     // Match findEnvFiles(): use the resolved path when realpath is unavailable.
   }
   const isInsideWorkspace = (filePath: string): boolean => {
-    const relative = path.relative(workspaceRoot, path.resolve(filePath));
-    return !relative.startsWith('..') && !path.isAbsolute(relative);
+    let resolved: string;
+    try {
+      // Resolve the candidate's link target too: a workspace `.env` symlinked
+      // outside the workspace is hashed on the host and dangles in the sandbox,
+      // which is the same host/container divergence this filter removes.
+      resolved = fs.realpathSync(filePath);
+    } catch {
+      return false;
+    }
+    return isWithinRoot(resolved, workspaceRoot);
   };
   const files: Record<string, Record<string, string> | null> = {};
   for (const file of findEnvFiles(settings, startDir, userLevelPaths)) {

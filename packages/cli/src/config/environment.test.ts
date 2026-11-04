@@ -2286,4 +2286,43 @@ describe('project hook approval env files stay inside the workspace', () => {
       resetTrustedFoldersForTesting();
     }
   });
+
+  it('does not hash a .env symlinked outside the workspace', () => {
+    const parent = makeWorkspace();
+    const root = path.join(parent, 'workspace');
+    fs.mkdirSync(root);
+    const outsideEnv = path.join(parent, 'secrets.env');
+    fs.writeFileSync(outsideEnv, 'OUTSIDE_SECRET=1\n');
+    const workspaceEnv = path.join(root, '.env');
+    fs.symlinkSync(outsideEnv, workspaceEnv);
+    const previousTrustedFoldersPath =
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    trustFolder(parent, root);
+
+    try {
+      const settings = testSettings({
+        security: { folderTrust: { enabled: true } },
+      });
+      // Discovery follows the link, so the runtime env still sees the file.
+      expect(findEnvFiles(settings, root)).toContain(workspaceEnv);
+
+      // The approval hash input must not: the link target is outside the
+      // workspace, so the container mount cannot supply it.
+      const hostFiles = readProjectEnvFiles(settings, root);
+      expect(hostFiles).not.toHaveProperty(workspaceEnv);
+
+      // Container view: the target is gone and the link dangles; the hash
+      // input has to stay identical to what the host recorded.
+      fs.rmSync(outsideEnv);
+      expect(readProjectEnvFiles(settings, root)).toEqual(hostFiles);
+    } finally {
+      if (previousTrustedFoldersPath === undefined) {
+        delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+      } else {
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
+          previousTrustedFoldersPath;
+      }
+      resetTrustedFoldersForTesting();
+    }
+  });
 });
