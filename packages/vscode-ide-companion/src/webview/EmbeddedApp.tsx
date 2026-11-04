@@ -84,6 +84,7 @@ function waitForRewindApplied(
 }
 
 const COMPOSER_TOOLBAR_ACTIONS = [
+  'addMenu',
   'approvalMode',
   'workflowMode',
   'contextUsage',

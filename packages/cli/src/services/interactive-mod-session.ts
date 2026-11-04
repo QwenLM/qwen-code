@@ -21,6 +21,10 @@ import type { ICommandLoader } from './types.js';
 
 const sessions = new WeakMap<Config, InteractiveModSession>();
 
+/** The line a prompt sent to Mods that failed to load is refused with. */
+export const MODS_FAILED_TO_INITIALIZE =
+  'Mods failed to initialize. Fix the Mod configuration and restart. /help and /quit remain available.';
+
 export function isModRecoveryCommand(
   command: SlashCommand | undefined,
 ): boolean {
@@ -67,6 +71,8 @@ export class InteractiveModSession implements ICommandLoader {
     this.rejectStartup = reject;
   });
   private initialization?: Promise<void>;
+  private started = false;
+  private startupFailed = false;
   private closing?: Promise<void>;
   private listener?: (text: string) => void;
   private readonly logs: Array<{ text: string; sessionId: string }> = [];
@@ -75,6 +81,7 @@ export class InteractiveModSession implements ICommandLoader {
     columns: 80,
   };
   private sites: readonly ModRenderSite[] = [];
+  private prompts = false;
   // The band's last tree, kept until a new answer lands; none draws nothing.
   private band?: ModBand;
   private revision = 0;
@@ -90,6 +97,7 @@ export class InteractiveModSession implements ICommandLoader {
       surface: 'terminal',
       presentation: () => this.presentation,
       sites: () => this.sites,
+      prompts: () => this.prompts,
       draw: (tree, owner) => {
         const band =
           tree.type === 'engine'
@@ -111,15 +119,27 @@ export class InteractiveModSession implements ICommandLoader {
     });
   }
 
-  /** Loads the Mods once; `sites` names the render sites the host draws. */
-  initialize(sites: readonly ModRenderSite[] = []): Promise<void> {
-    if (!this.initialization) this.sites = sites;
+  /**
+   * Loads the Mods once; `sites` names the render sites the host draws, and
+   * `prompts` says whether it raises `prompt.submit`.
+   */
+  initialize(
+    sites: readonly ModRenderSite[] = [],
+    { prompts = false }: { prompts?: boolean } = {},
+  ): Promise<void> {
+    if (!this.initialization) {
+      this.sites = sites;
+      this.prompts = prompts;
+    }
     this.initialization ??= this.session.initialize(this.lifetime.signal).then(
       () => {
         this.session.flushLogs();
+        this.started = true;
         this.resolveStartup();
       },
       (error: unknown) => {
+        this.started = true;
+        this.startupFailed = true;
         this.emit(
           `Mods failed to initialize: ${sanitizeTerminalLine(String(error)).slice(0, 2000)}`,
           this.config.getSessionId(),
@@ -135,9 +155,27 @@ export class InteractiveModSession implements ICommandLoader {
     return this.startup;
   }
 
+  /**
+   * Whether startup is still under way, so which hooks the Mods bring is
+   * unknown. False once the Mods load or fail, or the session fails to start.
+   */
+  get starting(): boolean {
+    return !this.closing && !this.started;
+  }
+
+  /**
+   * Whether the Mods themselves failed to load, so every prompt is refused.
+   * A session that failed to start before loading them reports its own error
+   * instead.
+   */
+  get failed(): boolean {
+    return !this.closing && this.startupFailed;
+  }
+
   failStartup(error: unknown): void {
     if (this.initialization) return;
     this.initialization = this.startup;
+    this.started = true;
     this.rejectStartup(error);
   }
 
@@ -201,6 +239,20 @@ export class InteractiveModSession implements ICommandLoader {
 
   syncSession(reason: 'clear' | 'resume'): Promise<void> {
     return this.session.syncSession(reason);
+  }
+
+  /** Whether a loaded Mod hooks `prompt.submit`. */
+  get hearsPrompts(): boolean {
+    return !this.closing && this.session.hearsPrompts;
+  }
+
+  submitPrompt(
+    text: string,
+    signal: AbortSignal,
+  ): Promise<{ text: string; context?: string[] } | { drop: string }> {
+    return this.closing
+      ? Promise.resolve({ text })
+      : this.session.submitPrompt(text, signal);
   }
 
   startTurn(

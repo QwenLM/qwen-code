@@ -183,7 +183,10 @@ export class HookSystem {
         ?.hookConfigs.length ||
         this.sessionHooksManager
           .getMatchingHooks(owner.sessionId, event, toolName)
-          .some((entry) => !entry.trustGated || this.config.isTrustedFolder()),
+          .some(
+            (entry) =>
+              !entry.trustGated || this.config.isExplicitlyTrustedFolder(),
+          ),
     );
   }
 

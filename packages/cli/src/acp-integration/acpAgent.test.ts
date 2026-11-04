@@ -296,6 +296,7 @@ vi.mock('./btw-generation.js', async (importOriginal) => ({
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  QWEN_DIR: '.qwen',
   BTW_MAX_INPUT_LENGTH: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).BTW_MAX_INPUT_LENGTH,
@@ -16023,6 +16024,91 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('exposes per-model timing samples and failures in session stats', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const api = { totalRequests: 3, totalErrors: 1, totalLatencyMs: 900 };
+    const tokens = {
+      prompt: 10,
+      candidates: 40,
+      total: 50,
+      cached: 0,
+      thoughts: 0,
+    };
+    const byKind = Object.assign(
+      Object.create(null) as Record<string, number>,
+      {
+        '429': 1,
+      },
+    );
+    vi.mocked(uiTelemetryService.getMetricsForSession).mockReturnValue({
+      models: {
+        'model-a': { api, tokens, bySource: {} },
+        'model-b': { api, tokens, bySource: {} },
+      },
+      statsModels: {
+        'model-a': {
+          api,
+          tokens,
+          timingSamples: [
+            { at: 1_000, ttftMs: 200, generationMs: 400, outputTokens: 40 },
+            {
+              at: 2_000,
+              ttftMs: 300,
+              generationMs: 0,
+              outputTokens: 5,
+              source: 'explorer',
+            },
+          ],
+          failures: {
+            byKind,
+            recent: [{ at: 1_500, kind: '429', source: 'explorer' }],
+          },
+        },
+        'model-b': { api, tokens, timingSamples: [] },
+      },
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        byName: {},
+      },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+    } as never);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    try {
+      const stats = (await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.sessionStats,
+        { sessionId },
+      )) as { models: Record<string, Record<string, unknown>> };
+      expect(JSON.parse(JSON.stringify(stats.models['model-a']))).toMatchObject(
+        {
+          timingSamples: [
+            { at: 1_000, ttftMs: 200, generationMs: 400, outputTokens: 40 },
+            {
+              at: 2_000,
+              ttftMs: 300,
+              generationMs: 0,
+              outputTokens: 5,
+              source: 'explorer',
+            },
+          ],
+          failures: {
+            byKind: { '429': 1 },
+            recent: [{ at: 1_500, kind: '429', source: 'explorer' }],
+          },
+        },
+      );
+      expect(stats.models['model-b']).not.toHaveProperty('timingSamples');
+      expect(stats.models['model-b']).not.toHaveProperty('failures');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('status ext method returns disabled LSP status', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -17975,6 +18061,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({
         toolInvocationGuard: expect.any(Function),
       }),
+      expect.any(Function),
+      // projectHooksApprovalProvider: live settings for the YOLO-exit re-gate
       expect.any(Function),
     );
 
