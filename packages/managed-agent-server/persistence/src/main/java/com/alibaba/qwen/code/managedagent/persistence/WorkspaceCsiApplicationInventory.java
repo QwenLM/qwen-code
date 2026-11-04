@@ -281,7 +281,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "mount_registration_id:CHAR,storage_kind:VARCHAR,csi_phase:VARCHAR,csi_revision:BIGINT,"
                     + "csi_reservation_id:CHAR,csi_registration_key:CHAR,csi_registration_revision:BIGINT,"
                     + "csi_provision_request_id:VARBINARY,maintenance_id:CHAR,maintenance_generation:BIGINT,"
-                    + "physical_key:CHAR"),
+                    + "physical_key:CHAR,member_count:BIGINT,exclusive_member_key:CHAR"),
             declaration("ma_tenant_guard", "tenant_key,guard_domain",
                     "tenant_key:CHAR,tenant_id:VARBINARY,guard_domain:VARCHAR"),
             declaration("ma_tool_execution", "execution_call_id_hash",
@@ -2949,7 +2949,9 @@ final class WorkspaceCsiApplicationInventory {
                         && CsiOwnershipRevision.reserved(intent.reservation().revision())
                         && Objects.equals(row.number("csi_revision"),
                                 CsiOwnershipRevision.next(intent.reservation().revision()))
-                        && row.cell("maintenance_id").isNull());
+                        && row.cell("maintenance_id").isNull()
+                        && Objects.equals(0L, row.number("member_count"))
+                        && row.cell("exclusive_member_key").isNull());
                 case "ma_runtime_slot" -> expect(table, row, request(row)
                         && original.bindingId().equals(row.text("active_binding_id"))
                         && Objects.equals(original.generation(), row.number("last_generation")));

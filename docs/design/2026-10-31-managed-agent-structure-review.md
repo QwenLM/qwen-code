@@ -6,7 +6,9 @@
 - Date: 2026-10-31
 - Scope: `packages/managed-agent-server`
 - Analyzed revision: `9ebd2de171`; figures rechecked against `origin/main`
-  `e7fe14ee83` where the two differ. Line counts are a snapshot and will drift.
+  `e7fe14ee83` where the two differ, and the god-class table and store-split
+  status rechecked again at `8d8217aeee` after the store decomposition
+  (#16090, #16142) landed. Line counts are a snapshot and will drift.
 
 ## Problem statement
 
@@ -71,20 +73,29 @@ exclusion; zero `TODO`/`FIXME` markers in production code.
 
 | Class                              | Module         | Lines | Notes                                                                                                                                                |
 | ---------------------------------- | -------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ManagedAgentStore`                | persistence    | 7,657 | 300+ methods; dependencies constructor-injected and final (#16061)                                                                                   |
 | `RuntimeBrokerService`             | runtime-broker | 4,270 | ~150 methods; binding registry, execution reconciler/recovery/cancellation/dispatcher, support/state, cooldown and hold inventory extracted (see P1) |
-| `ManagedSessionStore`              | persistence    | 3,931 |                                                                                                                                                      |
-| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                                                                                                                      |
+| `WorkspaceCsiApplicationInventory` | persistence    | 3,329 |                                                                                                                                                      |
 | `ToolPublicationDataStore`         | persistence    | 2,709 |                                                                                                                                                      |
-| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                                                                                                                      |
-| `ManagedAgentService`              | control-plane  | 2,120 |                                                                                                                                                      |
+| `QwenHostedHarnessConnector`       | adapters       | 2,349 |                                                                                                                                                      |
+| `ManagedAgentService`              | control-plane  | 2,169 |                                                                                                                                                      |
 | `HarnessCoordinator`               | control-plane  | 1,770 |                                                                                                                                                      |
+| `ManagedAgentStore`                | persistence    | 1,170 | was 7,657; decomposed into immutable aggregate collaborators, now a transaction facade (#16090, #16142); constructor-injected final deps (#16061)    |
+| `ManagedSessionStore`              | persistence    | 357   | was 3,931; decomposed into a transaction facade in the same slice (#16090)                                                                           |
 
-`ManagedAgentStore` mixes session admission, turns, events, item/message
-projection, worktrees, MCP management, definition pins, skills, and extension
-projection. Its dependencies are now constructor-injected into `final` fields
-(#16061), with `@Nullable` optional collaborators and a `@Lazy` record-store
-cycle, so the bean can no longer be observed half-assembled.
+`ManagedAgentStore` originally mixed session admission, turns, events,
+item/message projection, worktrees, MCP management, definition pins, skills,
+and extension projection. Its dependencies were constructor-injected into
+`final` fields (#16061), with `@Nullable` optional collaborators and a `@Lazy`
+record-store cycle, so the bean can no longer be observed half-assembled. The
+physical aggregate split has since landed (#16090, #16142): Agent and Journal
+responsibilities moved into immutable internal collaborators — admission,
+commands, lifecycle, execution, message projection, queries, policies and turn
+execution on the Agent side, and the commit/fencing/writer-lifecycle family on
+the Journal side — leaving `ManagedAgentStore` a 1,170-line transaction facade
+and `ManagedSessionStore` a 357-line facade. The bilingual
+[store decomposition design](2026-11-02-managed-store-decomposition.md) records
+the entry ownership, transaction, lock-order and caller inventories, pinned by
+`ManagedStoreDecompositionTest` and `SessionRowLockOrderTest`.
 `RuntimeBrokerService` originally mixed provisioning, binding CAS, leases,
 cancellation, recovery scans, and extension commands in a single class; the
 P1 extraction slices have since delegated the binding registry, execution
@@ -194,7 +205,7 @@ cross-cutting "how the system works today" tour.
    nested records/constants resolve through inheritance (imports of nested
    types must name the owning role). A role-composition pin keeps the
    composite empty and owns no surface of its own. Consumer audit
-   (call-level, corrected after review): 22 single-role consumers inject
+   (call-level, corrected after review): 23 single-role consumers inject
    their role directly — lifecycle (`RenameEvidence`, `TurnInputEvidence`,
    `ChildLifecycleAdmissions`, `ActionResponseCoordinator`,
    `ContextCompressionCoordinator`, `ContextCompressionService`,
@@ -202,7 +213,7 @@ cross-cutting "how the system works today" tour.
    query (`ManagedRuntimeCoordinator`,
    `SessionRecoveryService`, `ManagedExtensionCommandVerifier`,
    `ManagedSessionStore`, `ChildWorkspaceService`, `WorkspaceRuntimeResolver`,
-   `ManagedAutomationService`), policy (`ManagedMcpManagementService`,
+   `ManagedAutomationService`, `EmbeddedRuntimeBroker`), policy (`ManagedMcpManagementService`,
    `ManagedExtensionManagementService`), event projection
    (`MessageMaterializer`, `ReplayFloorAdvancer`, `ManagedToolResultStore`),
    and turn execution (`SessionWorktreeService`). Most of the remaining
@@ -210,8 +221,8 @@ cross-cutting "how the system works today" tour.
    and keep the composite. The broker wiring is no longer one of them:
    `EmbeddedRuntimeBroker` forwards the store only into
    `WorkspaceRuntimeResolver` and `ManagedRuntimeCoordinator`, which both
-   take `SessionQueryStore`, so it is itself a candidate for the same
-   narrowing. Four of these — `ChildWorkspaceService`,
+   take `SessionQueryStore`, and it now injects `SessionQueryStore` itself.
+   Four of these — `ChildWorkspaceService`,
    `WorkspaceRuntimeResolver`, `ManagedAutomationService` and
    `TaskCancelCoordinator` — were initially deferred because their
    `this(...)` calls are constructor delegation within the same class rather
@@ -246,10 +257,16 @@ cross-cutting "how the system works today" tour.
   wiring). The dedicated [constructor-wiring design](2026-11-01-managed-agent-store-wiring.md)
   covers the required/optional dependencies, the additional lazy record-store
   field and its Session-store cycle, final references, direct-fixture migration
-  and real Spring context verification. It is implemented locally with focused
-  verification passed and full CI qualification pending; the conversion touched
-  this central 7,657-line class and ~30 test wiring sites. The remaining work is
-  the physical aggregate split itself, each aggregate its own slice.
+  and real Spring context verification. The conversion touched this central
+  class (then 7,657 lines) and ~30 test wiring sites. **The physical aggregate
+  split has since landed**: #16090 split the Agent and Session stores into
+  immutable internal collaborators while retaining transaction facades and
+  compatibility bridges, and #16142 trimmed the delegation boilerplate.
+  `ManagedAgentStore` is now a 1,170-line facade and `ManagedSessionStore` a
+  357-line facade; the entry ownership, transaction, lock-order and caller
+  inventories are recorded in the bilingual
+  [store decomposition design](2026-11-02-managed-store-decomposition.md) and
+  pinned by `ManagedStoreDecompositionTest` and `SessionRowLockOrderTest`.
 - `RuntimeBrokerService`: extract module-internal collaborators for recovery
   scanning, cancellation, tool holds, and observation cooldown; the service
   becomes a facade. The module already exists, so no cross-module contract
@@ -293,8 +310,9 @@ cross-cutting "how the system works today" tour.
   the Registry. The Registry slice itself does not claim that coverage.
   See the linked bilingual designs for concurrency, cleanup and acceptance
   requirements; local and CI qualification are recorded separately.
-- Apply the same treatment to `ManagedSessionStore` and
-  `QwenHostedHarnessConnector` afterwards, each as its own slice.
+- `ManagedSessionStore` was decomposed in the same #16090 slice (now a 357-line
+  facade). Apply the same treatment to `QwenHostedHarnessConnector` (2,349
+  lines) afterwards, as its own slice.
 
 ### P2 — Hygiene (opportunistic)
 
@@ -386,7 +404,8 @@ cross-cutting "how the system works today" tour.
   `SessionCreationCommand`; the pin test is green and ratchets.
 - `ManagedAgentStore` has no public setter/configure wiring; the two target
   god classes are decomposed (P1 complete when no class in `persistence` or
-  `runtime-broker` exceeds the agreed size ratchet).
+  `runtime-broker` exceeds the agreed size ratchet, enforced by
+  `ClassSizeRatchetTest`).
 - Zero OpenAPI diff, zero schema diff, all ArchUnit/Checkstyle/SpotBugs gates
   green, CI full profiles green on the accepted revision.
 - README and the architecture tour exist in both languages with reciprocal
@@ -400,6 +419,9 @@ cross-cutting "how the system works today" tour.
   migrated call site uses it; the overload convergence and the builder landed
   in the same change. Role-interface segregation (P0 step 3) follows as a
   separate slice.
-- Whether to introduce the class-size ratchet gate before P1 (to stop
-  regrowth) or only after the splits land.
+- Resolved (2026-11-04): the class-size ratchet gate is introduced after the
+  splits land. `ClassSizeRatchetTest` pins the current large classes in
+  `persistence`/`runtime-broker` ratchet-down-only, with a global ceiling that
+  lowers as the remaining large classes are decomposed; see the
+  [class-size ratchet design](2026-11-04-managed-agent-class-size-ratchet.md).
 - Sequencing of P1 slices against in-flight feature work on the same classes.
