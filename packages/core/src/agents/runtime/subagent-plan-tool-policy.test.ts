@@ -372,6 +372,34 @@ describe('subagent plan tool policy', () => {
     ).toBe(false);
   });
 
+  it('vetoes an eager-hidden Skill whose declared bridge is blocklisted', () => {
+    // prepareTools() drops whichever bridge half the blocklist names, so the
+    // wildcard's inherited bridge no longer reaches the withheld schema.
+    for (const blocked of [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL]) {
+      expect(
+        toolConfigAllowsSkill(
+          { tools: ['*'], disallowedTools: [blocked] },
+          false,
+          true,
+          false,
+          true,
+          true,
+        ),
+      ).toBe(false);
+    }
+    // An unrelated blocklist entry leaves the bridge intact.
+    expect(
+      toolConfigAllowsSkill(
+        { tools: ['*'], disallowedTools: [ToolNames.SHELL] },
+        false,
+        true,
+        false,
+        true,
+        true,
+      ),
+    ).toBe(true);
+  });
+
   describe('hasAgentSkillExecBinding', () => {
     const contextWith = (
       mode: ToolMode,

@@ -77,6 +77,23 @@ describe('legacy tool mode settings', () => {
     );
   });
 
+  it('honours an explicit higher-precedence legacy direct pin', () => {
+    const loaded = new LoadedSettings(
+      file({ tools: { codeModeOnly: false } } as unknown as Settings),
+      file({}),
+      file({ tools: { mode: 'code_mode_only' } }),
+      file({}),
+      true,
+      new Set(),
+    );
+
+    expect(
+      (loaded.merged.tools as { codeModeOnly?: unknown })?.codeModeOnly,
+    ).toBe(false);
+    expect(loaded.merged.tools?.mode).toBeUndefined();
+    expect(getEffectiveValue('tools.mode', {}, loaded.merged)).toBe('direct');
+  });
+
   it('keeps an explicit mode over the legacy key in the same scope', () => {
     const loaded = new LoadedSettings(
       file({}),

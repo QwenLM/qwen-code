@@ -758,21 +758,24 @@ function mergeSettings(
   // otherwise sit beside a lower-scope `mode` that every key-first reader
   // prefers. Keep the highest-precedence scope's choice.
   const toolModeChoice = [systemDefaults, user, safeWorkspace, system].reduce<
-    'mode' | 'legacy' | undefined
+    'mode' | 'legacy-true' | 'legacy-false' | undefined
   >((choice, scope) => {
     const tools = scope.tools as
       | { mode?: unknown; codeModeOnly?: unknown }
       | undefined;
     if (tools?.mode !== undefined) return 'mode';
-    if (tools?.codeModeOnly === true) return 'legacy';
+    if (tools?.codeModeOnly === true) return 'legacy-true';
+    if (tools?.codeModeOnly === false) return 'legacy-false';
     return choice;
   }, undefined);
   if (
-    toolModeChoice === 'legacy' &&
+    (toolModeChoice === 'legacy-true' || toolModeChoice === 'legacy-false') &&
     merged.tools &&
     typeof merged.tools === 'object'
   ) {
-    delete merged.tools.mode;
+    const tools = merged.tools as { mode?: unknown; codeModeOnly?: unknown };
+    delete tools.mode;
+    tools.codeModeOnly = toolModeChoice === 'legacy-true';
   }
   const operatorCatalogRefresh = selectOperatorCatalogRefresh(
     systemDefaults,

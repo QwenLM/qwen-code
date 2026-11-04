@@ -227,8 +227,15 @@ export function toolConfigAllowsSkill(
   // list holding only inline declarations inherits: both take the explicit
   // branch there, which declares no registry tool.
   const inheritsRegistry = !toolConfig || names.includes('*');
+  const bridgeBlocked =
+    matchesAgentToolBlocklist(
+      toolConfig?.disallowedTools,
+      ToolNames.TOOL_SEARCH,
+    ) ||
+    matchesAgentToolBlocklist(toolConfig?.disallowedTools, ToolNames.TOOL_CALL);
   const bridgeReachesSkill =
     deferredBridgeAvailable &&
+    !bridgeBlocked &&
     (inheritsRegistry ||
       (names.includes(ToolNames.TOOL_SEARCH) &&
         names.includes(ToolNames.TOOL_CALL)));
