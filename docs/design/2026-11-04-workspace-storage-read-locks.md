@@ -23,7 +23,15 @@ logical fence, alias, physical owner and registration queries use ordinary
 SELECTs in the caller's fresh REPEATABLE READ snapshot. Reuse the existing
 physical identity, canonical directory, storage marker and migration-history
 checks. Existing validation entry points retain their locking behavior for
-admission and recovery.
+admission and recovery. The shared validation now reads the registration row
+before filesystem identity, instead of after it; its locks and refusal checks
+are unchanged.
+
+Marker reading, probe error mapping and initial publication live in a small
+package-local collaborator so the storage guard stays within its existing
+class-size ceiling. It reuses the guard's mapper and preserves the marker
+format, no-follow reads, size bound, hard-link publication and fsync behavior.
+Migration authorization and replacement remain in the guard.
 
 File scope chooses snapshot validation for reads and existing validation for
 durable admission. The existing file exchange checks authorization and scope
@@ -37,13 +45,19 @@ and validates the source again in a second fresh snapshot before returning,
 comparing the complete resolved binding, root and storage identity. Revoked
 access or a new fence refuses the result; a changed binding or registration
 invalidates it. This also checks for changes during filesystem validation.
+For example, replacing the root directory after the first validation can leave
+the SQL identity and path unchanged while removing the marker. A SQL-only
+second check would miss that case; the source regression replaces the directory
+without changing SQL and expects the second full validation to refuse it.
 Final worktree admission continues to compare the plan against current locked
 storage identity before persisting the operation.
 
-Snapshot entry points reject an ambient transaction, as in the previous
-increment. Internal snapshot helpers inherit only the short transaction opened
-by those entry points. Templates remain writable because an invalid worktree
-may persist its existing BLOCKED diagnostic transition.
+Public snapshot entry points reject an ambient transaction, as in the previous
+increment. Internal helpers, including `verifiedRootForRead`, run inside the
+short transaction opened by those entry points; rejecting all active
+transactions in a helper would also reject its intended callers. Templates
+remain writable because an invalid worktree may persist its existing BLOCKED
+diagnostic transition.
 
 ## Consistency and limits
 
@@ -53,6 +67,14 @@ in a fresh snapshot; filesystem identity checks still reject a replaced or
 unsafe directory. These checks do not reserve permission or storage for a
 future operation. Worktree Git options/preflight remain advisory after source
 resolution, and final creation independently validates the plan.
+
+Two complete source validations add filesystem work; their uncontended latency
+cost has not been measured. A committed binding or storage revision change
+between snapshots can return `worktree_source_changed`, even if a subsequent
+request succeeds. Source options expose the refusal as an unsupported result
+with its reason, and creation propagates the existing 409 before admission.
+The service does not retry automatically; the Web Shell options UI offers a
+retry. Final admission already uses the same error for an invalidated plan.
 
 Healthy reads should take no storage row locks. The existing BLOCKED diagnostic
 update can still write its worktree row on an invalid-filesystem path. No
