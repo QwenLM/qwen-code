@@ -1116,10 +1116,7 @@ public final class ToolPublicationDataStore {
         String digest = ToolPublicationContract.sha256(bytes);
         String scope = scope(key);
         AdmissionCandidate candidate = transactions.execute(status -> {
-            lockOriginalSettledResult(key, publicationId, original);
-            lockTenant(key);
-            sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
-                    text(key, "sessionId"), writerId, writerGeneration, writerToken);
+            lockAdmissionLane(key, publicationId, original, writerId, writerGeneration, writerToken);
             var publication = jdbc.query("SELECT producer_phase, binding_json, binding_digest,"
                     + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined,"
                     + " admission_bytes, admission_used_bytes,"
@@ -1176,10 +1173,7 @@ public final class ToolPublicationDataStore {
         }
         if (!candidate.verified()) {
             transactions.executeWithoutResult(status -> {
-                lockOriginalSettledResult(key, publicationId, original);
-                lockTenant(key);
-                sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
-                        text(key, "sessionId"), writerId, writerGeneration, writerToken);
+                lockAdmissionLane(key, publicationId, original, writerId, writerGeneration, writerToken);
                 var publication = jdbc.query("SELECT producer_phase, terminal_resource_id, binding_json, binding_digest,"
                         + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                         + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ? AND tenant_id = ?"
@@ -1947,8 +1941,23 @@ public final class ToolPublicationDataStore {
         grants.lockPublicationPlacement(key, publicationId);
     }
 
-    void lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {
-        grants.lockOriginalSettledResult(key, publicationId, finished);
+    boolean lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {
+        return grants.lockOriginalSettledResult(key, publicationId, finished);
+    }
+
+    // The admission lanes' entry: placement and, for a CSI original, its
+    // settled result and the tenant publication guard; then the Session root
+    // and head. An ordinary publication skips the guard: below it, the lane
+    // and collection share the order root, head, publication row (design
+    // 2026-11-04-managed-publication-tenant-guards, C2).
+    private void lockAdmissionLane(JsonNode key, String publicationId, JsonNode original,
+            String writerId, long writerGeneration, String writerToken) {
+        boolean csi = lockOriginalSettledResult(key, publicationId, original);
+        if (csi) {
+            lockTenant(key);
+        }
+        sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
+                text(key, "sessionId"), writerId, writerGeneration, writerToken, csi);
     }
 
     private JsonNode exactSucceededReplay(String scope, String publicationId, String operationId,

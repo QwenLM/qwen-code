@@ -989,7 +989,9 @@ class ToolPublicationStoreTest {
                 : admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit);
         assertThat(receipt.path("decision").asText()).isEqualTo("blocked");
         if (ambient) {
-            assertThat(lockOrder).contains("retention");
+            // An ordinary receipt takes placement first and no tenant
+            // publication guard (design 2026-11-04-managed-publication-tenant-guards).
+            assertThat(lockOrder).doesNotContain("retention");
             assertThat(lockOrder.getFirst()).isEqualTo("placement");
         }
         var changedReplay = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,

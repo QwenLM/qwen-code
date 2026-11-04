@@ -256,6 +256,15 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 session);
     }
 
+    /**
+     * The Session's root and head without the tenant publication guard, for a
+     * lane that never takes the guard after them: root, head, then its own
+     * rows is the order collection takes below the guard.
+     */
+    static Map<String, Object> lockSessionHeadWithoutGuard(JdbcTemplate jdbc, String tenant, String session) {
+        return lockSessionHead(jdbc, tenant, session, false, false);
+    }
+
     static Map<String, Object> lockGenericSession(
             JdbcTemplate jdbc, String tenant, String session) {
         return lockSessionHead(jdbc, tenant, session, true);
@@ -383,25 +392,18 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         return read(key.path("tenantId").asText(), key.path("sessionId").asText());
     }
 
-    public ReadLease read(String tenant, String session) {
-        return read(tenant, session, false);
-    }
-
     /**
-     * {@code sessionLocked}: the caller's transaction already holds this
-     * Session's root and head, so retirement and collection, which need them
-     * too, cannot change it meanwhile. The tenant publication guard is then
-     * skipped: taking it after the root would invert retention's order
-     * (guard, root, head). The root and head are relocked re-entrantly.
+     * Takes a read lease under the Session's root and head only. Retirement
+     * and collection check leases while holding that root and head, so they
+     * and a new lease exclude each other without the tenant publication
+     * guard; a caller that already holds the root and head (a publication
+     * writer) relocks them re-entrantly, and never takes the guard after its
+     * root (design 2026-11-04-managed-publication-tenant-guards).
      */
-    public ReadLease read(String tenant, String session, boolean sessionLocked) {
+    public ReadLease read(String tenant, String session) {
         return transactions.execute(
                 status -> {
-                    if (sessionLocked) {
-                        lockSessionHead(jdbc, tenant, session, true, false);
-                    } else {
-                        lockGenericSession(jdbc, tenant, session);
-                    }
+                    lockSessionHead(jdbc, tenant, session, true, false);
                     requireLive(jdbc, tenant, session);
                     long generation =
                             jdbc.queryForObject(

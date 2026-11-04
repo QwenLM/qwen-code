@@ -2,7 +2,7 @@
 
 [English](2026-11-04-managed-publication-tenant-guards.md) | [简体中文](2026-11-04-managed-publication-tenant-guards.zh-CN.md)
 
-Status: C1 implemented; C2 and C3 are proposals.
+Status: C1 and C2 implemented; C3 is a proposal.
 
 ## Problem and current state
 
@@ -72,15 +72,30 @@ row with a conditional update. Either keeps tenant-wide serialization of every
 reservation for an exact cap that a protective limit does not need; the
 counter row would also need updates at every held-byte shrink.
 
-### C2. Other ordinary publication lanes
+### C2. Other ordinary publication lanes and read leases
 
-Apply C1 to the ordinary upload, verify, finish, admission and receipt lanes,
-the tool-result projection worker and the snapshot writer: skip the
-publication guard and keep root, head, publication rows. No lane changes its
-order. The work is the audit C1 needed: after the root, nothing in the lane
-may take the publication guard again (C1's evidence read lease did, through
-`ToolPublicationRetentionStore.read`). Such a call either takes the
-Session-locked variant or the lane keeps the guard. CSI lanes keep it.
+Apply C1 to the ordinary producer (dispatch, upload, verify, finish),
+admission and receipt lanes and to the tool-result projection worker: skip
+the publication guard and keep root, head, publication rows. No lane changes
+its order. CSI originals keep the guard, and so does a receipt whose journal
+commit carries lifecycle authority, because that commit takes the guard
+itself.
+
+Read leases (`ToolPublicationRetentionStore.read`) no longer take the guard
+either. Every check that can delete what a lease protects (the publication,
+Session resource and projection collectors) holds the Session's root and
+head, and retirement updates the root; a lease taken under that root and
+head therefore excludes them on its own. This also removes the guard from
+evidence reads after a lane's root (the cycle C1 found) and from Artifact and
+journal resource reads.
+
+The audit is a test: with the guard held on another connection, reserve,
+dispatch, finish, admission and receipt must all complete
+(`ManagedSessionGuardConvoyIT`); a lane that took the guard after its root
+would stall there.
+
+Not covered: the native journal snapshot writer, whose build transaction
+locks resource rows before the Session; its order needs its own analysis.
 
 ### C3. Original Runtime binding instead of placement
 
@@ -98,9 +113,7 @@ cleanup references; the same handshake can then serve those references.
 
 ## Open questions
 
-1. C2's post-root audit covers the receipt lane's journal commit and resource
-   installation in the same transaction; `ToolPublicationLockOrderMySqlIT`
-   is the check that found C1's case.
+1. The native journal snapshot writer still takes the guard (see C2).
 2. C3 needs the binding's position in the global order: the sweep takes slot
    then binding under placement; lanes would take binding after the Session
    root. The sweep never locks Session rows after the binding, so no cycle is

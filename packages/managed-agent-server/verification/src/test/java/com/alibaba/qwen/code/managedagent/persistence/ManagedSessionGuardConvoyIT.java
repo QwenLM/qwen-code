@@ -22,6 +22,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.AfterEach;
@@ -391,12 +392,13 @@ class ManagedSessionGuardConvoyIT {
     }
 
     /**
-     * Publication lanes take their first tenant-wide acquisition with the
-     * hot-path bound: reserve (apply lane), prepareAdmission (admission
-     * lane), producer/dispatch, commitReceipt (receipt lane's placement-first
-     * entry) all answer tenant_guard_contended
-     * within the bound while a guard row is externally held, and complete
-     * after the hold lifts (#13800 R1).
+     * Ordinary publication lanes take placement first, with the hot-path
+     * bound: producer/dispatch, finish and commitReceipt answer
+     * tenant_guard_contended within the bound while placement is externally
+     * held (#13800 R1). None of them takes the tenant publication guard any
+     * more: reserve, producer/dispatch, finish, prepareAdmission and
+     * commitReceipt all complete while that guard is externally held, which
+     * also shows that none takes it after its Session root.
      */
     @Test
     void heldTenantGuardsBoundPublicationLaneEntries() throws Exception {
@@ -462,11 +464,17 @@ class ManagedSessionGuardConvoyIT {
         } finally {
             manager.rollback(hold);
         }
-        assertThat(journal.store.verifyDispatch(execution, "pub-1",
-                PublicationJournalFixture.PUBLICATION_TOKEN).path("publicationId").asText())
-                .isEqualTo("pub-1");
-        data.finish(key, "pub-1", PublicationJournalFixture.PUBLICATION_TOKEN, "finish",
-                envelope.toString().getBytes(StandardCharsets.UTF_8));
+        hold = manager.getTransaction(new DefaultTransactionDefinition());
+        try {
+            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
+            assertThat(completesWhileHeld(() -> journal.store.verifyDispatch(execution, "pub-1",
+                    PublicationJournalFixture.PUBLICATION_TOKEN)).path("publicationId").asText())
+                    .isEqualTo("pub-1");
+            completesWhileHeld(() -> data.finish(key, "pub-1", PublicationJournalFixture.PUBLICATION_TOKEN,
+                    "finish", envelope.toString().getBytes(StandardCharsets.UTF_8)));
+        } finally {
+            manager.rollback(hold);
+        }
         var outcome = JSON.createObjectNode().put("schemaVersion", 1).put("decision", "blocked")
                 .putNull("manifestRef");
         outcome.set("envelope", envelope);
@@ -477,16 +485,14 @@ class ManagedSessionGuardConvoyIT {
         outcome.set("history", history);
 
         hold = manager.getTransaction(new DefaultTransactionDefinition());
+        JsonNode root;
         try {
             ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
-            assertFastGuardFailure(() ->
-                    data.prepareAdmission(key, "pub-1", "writer-1", 1,
-                            PublicationJournalFixture.WRITER_TOKEN, outcome));
+            root = completesWhileHeld(() -> data.prepareAdmission(key, "pub-1", "writer-1", 1,
+                    PublicationJournalFixture.WRITER_TOKEN, outcome));
         } finally {
             manager.rollback(hold);
         }
-        var root = data.prepareAdmission(key, "pub-1", "writer-1", 1,
-                PublicationJournalFixture.WRITER_TOKEN, outcome);
 
         long sequence = journal.sequence + 1;
         var payload = JSON.createObjectNode().put("executionCallId", "execution-1")
@@ -517,8 +523,15 @@ class ManagedSessionGuardConvoyIT {
         } finally {
             manager.rollback(hold);
         }
-        assertThat(admission.commitReceipt(key, "pub-1", PublicationJournalFixture.WRITER_TOKEN,
-                request).path("historyRevision").asLong()).isEqualTo(sequence);
+        hold = manager.getTransaction(new DefaultTransactionDefinition());
+        try {
+            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
+            assertThat(completesWhileHeld(() -> admission.commitReceipt(key, "pub-1",
+                    PublicationJournalFixture.WRITER_TOKEN, request)).path("historyRevision").asLong())
+                    .isEqualTo(sequence);
+        } finally {
+            manager.rollback(hold);
+        }
     }
 
     @Test
@@ -860,6 +873,17 @@ class ManagedSessionGuardConvoyIT {
             Thread.sleep(100);
         }
         throw new AssertionError("Timed out waiting for a lock wait on " + table);
+    }
+
+    // Runs the action on a fresh thread, so it cannot join the holder's
+    // transaction, and requires it to finish within the hot-path bound.
+    private static <T> T completesWhileHeld(Callable<T> action) throws Exception {
+        long before = System.nanoTime();
+        try (var pool = Executors.newSingleThreadExecutor()) {
+            T result = pool.submit(action).get(30, TimeUnit.SECONDS);
+            assertThat((System.nanoTime() - before) / 1_000_000).isLessThan(BOUNDED_FAILURE_CEILING_MS);
+            return result;
+        }
     }
 
     private static void assertFastGuardFailure(Callable<Object> action) throws Exception {

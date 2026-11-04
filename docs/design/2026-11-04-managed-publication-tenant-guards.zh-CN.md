@@ -2,7 +2,7 @@
 
 [English](2026-11-04-managed-publication-tenant-guards.md) | [简体中文](2026-11-04-managed-publication-tenant-guards.zh-CN.md)
 
-状态：C1 已实现；C2、C3 为方案。
+状态：C1、C2 已实现；C3 为方案。
 
 ## 问题与现状
 
@@ -57,13 +57,22 @@ head（`lockPublicationWriter`），然后锁 publication 行：guard 之下的�
 考虑过但未采用：独立的 `publication_quota` guard，或计数行加条件更新。两者都会为了精确上限
 继续按租户串行每一次预留，而保护性上限并不需要；计数行还需要在每次 held 字节缩小时更新。
 
-### C2. 其他普通发布车道
+### C2. 其他普通发布车道与读租约
 
-把 C1 的做法用到普通的上传、校验、finish、准入和回执车道，以及工具结果投影 worker 和快照
-写入方：跳过 publication guard，保持 root、head、publication 行的顺序，不调整任何车道的顺序。
-工作量在于 C1 也需要的审计：锁 root 之后，车道中不能再获取 publication guard（C1 的证据读租约
-就经由 `ToolPublicationRetentionStore.read` 获取过）。这类调用要么改用 Session 已锁定的变体，
-要么该车道保留 guard。CSI 车道保留。
+把 C1 的做法用到普通的生产端（派发、上传、校验、finish）、准入和回执车道，以及工具结果投影
+worker：跳过 publication guard，保持 root、head、publication 行的顺序，不调整任何车道的顺序。
+CSI original 保留 guard；journal commit 带生命周期授权的回执也保留，因为那个 commit 自己会
+获取 guard。
+
+读租约（`ToolPublicationRetentionStore.read`）也不再获取 guard。所有可能删除租约所保护内容的
+检查（发布、Session 资源与投影回收器）都持有该 Session 的 root 和 head，退役会更新 root；在同一
+root 和 head 下获取的租约本身就能与它们互斥。这同时去掉了车道在 root 之后读取证据时的 guard
+（C1 发现的环路），以及 Artifact 与 journal 资源读取中的 guard。
+
+审计以测试形式完成：另一连接持有 guard 时，reserve、派发、finish、准入和回执都必须能完成
+（`ManagedSessionGuardConvoyIT`）；任何在 root 之后获取 guard 的车道都会在这里卡住。
+
+未覆盖：native journal 快照写入方，其 build 事务在锁 Session 之前先锁资源行，顺序需要单独分析。
 
 ### C3. 用原始 Runtime binding 取代 placement
 
@@ -77,8 +86,7 @@ binding 握手；同一握手之后也可用于这些引用。
 
 ## 待定问题
 
-1. C2 锁 root 之后的审计要覆盖回执车道在同一事务中的 journal commit 与资源安装；
-   `ToolPublicationLockOrderMySqlIT` 就是发现 C1 那处问题的检查。
+1. native journal 快照写入方仍获取 guard（见 C2）。
 2. C3 需要确定 binding 在全局顺序中的位置：清扫在 placement 下先锁 slot 再锁 binding；
    车道会在 Session root 之后锁 binding。清扫锁定 binding 之后不再锁 Session 行，预计不会
    形成环路，但审计必须覆盖车道和清扫对 `ma_tool_execution` 的加锁。

@@ -266,12 +266,6 @@ public class ManagedSessionStore
         return resourceReads.readResource(tenantId, workspaceId, sessionId, resourceId, writerToken);
     }
 
-    /** As readResource, for a publication writer that already holds the Session's root and head. */
-    StoredResource readResourceUnderPublicationWriter(String tenantId, String workspaceId,
-            String sessionId, String resourceId, String writerToken) {
-        return resourceReads.readResource(tenantId, workspaceId, sessionId, resourceId, writerToken, true, true);
-    }
-
     StoredResource readSnapshotResource(String tenantId, String workspaceId, String sessionId,
             String resourceId, String writerToken) {
         return resourceReads.readSnapshotResource(tenantId, workspaceId, sessionId, resourceId, writerToken);

@@ -213,7 +213,13 @@ public final class ToolPublicationStore {
             }
             throw error;
         }
-        lockTenant(row.tenant());
+        // An ordinary producer takes no tenant publication guard: it locks the
+        // head before the publication row, as collection does, and nothing
+        // after the head takes the guard. A CSI original keeps it (design
+        // 2026-11-04-managed-publication-tenant-guards, C2).
+        if (original.csi()) {
+            lockTenant(row.tenant());
+        }
         return producerBindingAfterParentLocked(scope, publicationId, suppliedHash, row,
                 binding, original, access, deferActivationLapse);
     }
@@ -502,7 +508,7 @@ public final class ToolPublicationStore {
                 "Original intent conflicts");
         requireCheckpoint(b, readResource(b, b.get("checkpointRef"), writerToken), writer);
         if (!writer.checkpointId().equals(text(b.get("checkpointRef"), "resourceId"))) {
-            var current = sessions.readResourceUnderPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
+            var current = sessions.readResource(text(key, "tenantId"), text(key, "workspaceId"),
                     text(key, "sessionId"), writer.checkpointId(), writerToken);
             require("managed-checkpoint".equals(current.kind()) && current.schemaVersion() == 1
                     && current.byteLength() <= ManagedSessionStoreModels.MAX_EVENT_BYTES, "Current checkpoint is invalid");
@@ -637,11 +643,9 @@ public final class ToolPublicationStore {
                 "Checkpoint execution identity conflicts");
     }
 
-    // Called only by requireEvidence, after lockPublicationWriter holds the
-    // Session's root and head.
     private JsonNode readResource(JsonNode b, JsonNode ref, String writerToken) {
         JsonNode key = b.get("sessionKey");
-        var resource = sessions.readResourceUnderPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
+        var resource = sessions.readResource(text(key, "tenantId"), text(key, "workspaceId"),
                 text(key, "sessionId"), text(ref, "resourceId"), writerToken);
         require(resource.kind().equals(text(ref, "kind")) && resource.schemaVersion() == ref.get("schemaVersion").intValue()
                 && resource.byteLength() == ref.get("byteLength").longValue()
@@ -853,8 +857,9 @@ public final class ToolPublicationStore {
         return storedBinding(row.binding(), row.digest(), "Stored binding is corrupt");
     }
 
-    void lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {
-        lockOriginalSettledResult(key, publicationId, finished, false);
+    /** Locks placement and, for a CSI original, its settled result; answers whether it was CSI. */
+    boolean lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {
+        return lockOriginalSettledResult(key, publicationId, finished, false) != null;
     }
 
     ToolExecutionRecord lockOriginalAcknowledgementResult(JsonNode key, String publicationId, JsonNode finished) {
