@@ -1025,6 +1025,82 @@ describe('ChannelEditorDialog', () => {
     expect(request.config['deliverToBoundSessions']).toBe(false);
   });
 
+  it('keeps the invalid-option message when delivery is switched on', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        prWatchEvents: ['bogus_event'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+    expect(document.body.textContent).toContain(
+      "Remove values that aren't in the allowed list.",
+    );
+
+    // Switching delivery on remedies the dependency, not the unknown value:
+    // the higher-precedence invalidOption message must survive.
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+    expect(document.body.textContent).toContain(
+      "Remove values that aren't in the allowed list.",
+    );
+    expect(document.body.textContent).not.toContain(
+      'to save the selected watch events.',
+    );
+  });
+
+  it('clears the dependency message when the last event is unticked', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        prWatchEvents: ['ci_failure'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+    expect(document.body.textContent).toContain(
+      'to save the selected watch events.',
+    );
+
+    // Unticking the last event is the other remedy; the alert must retire
+    // without another Save.
+    const box = Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+      ),
+    ).find((b) => b.closest('label')?.textContent?.includes('ci_failure'))!;
+    await act(async () => {
+      box.click();
+    });
+    expect(document.body.textContent).not.toContain(
+      'to save the selected watch events.',
+    );
+  });
+
   it('associates the disabled hint with the checkbox group', async () => {
     await renderDialog({ descriptor: GITHUB_BOUND });
 
@@ -1074,6 +1150,22 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).not.toContain(
       'above to select watch events.',
     );
+
+    // The live region must exist (empty) before the hint appears, and the
+    // same node must survive the transition — a region mounted together
+    // with its text is exactly what aria-live cannot announce.
+    const region = Array.from(
+      document.querySelectorAll<HTMLElement>('span[aria-live="polite"]'),
+    ).find((node) => node.id.endsWith('-prWatchEvents-disabled-hint'));
+    expect(region).toBeDefined();
+    expect(region!.textContent).toBe('');
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+    expect(region!.isConnected).toBe(true);
+    expect(region!.textContent).toContain('above to select watch events');
   });
 
   it('localizes the instructions copy for zh-CN operators', async () => {
@@ -1480,6 +1572,11 @@ describe('ChannelEditorDialog', () => {
       setInputValue(name!, 'github-bot');
       toggle!.click();
     });
+
+    // The pre-existing hint call sites pass no hintId: the local-gh hint
+    // must keep rendering without an id or a live region.
+    expect(document.querySelectorAll('span[aria-live]').length).toBe(0);
+    expect(document.querySelectorAll('span[id]').length).toBe(0);
 
     const save = Array.from(document.querySelectorAll('button')).find(
       (button) => button.textContent?.trim() === 'Save',

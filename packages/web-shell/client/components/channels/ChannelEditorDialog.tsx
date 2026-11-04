@@ -426,6 +426,21 @@ export function ChannelEditorDialog({
     });
   };
 
+  // Retire only the dependency message: the same slot also holds the
+  // higher-precedence invalidOption, which must survive its own remedy.
+  const clearDependencyError = (key: string) => {
+    const dependencyMessage = validationMessage(
+      undefined,
+      'requiresBoundDelivery',
+    );
+    setErrors((current) => {
+      if (current[key] !== dependencyMessage) return current;
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  };
+
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const validation = validateChannelEditorDraft(
@@ -609,11 +624,7 @@ export function ChannelEditorDialog({
         if (field.key === 'deliverToBoundSessions' && checked) {
           // The dependency error asked for this exact action; leaving it
           // under the now-on switch would keep instructing a done deal.
-          setErrors((current) => {
-            const next = { ...current };
-            delete next['prWatchEvents'];
-            return next;
-          });
+          clearDependencyError('prWatchEvents');
         }
         if (!isLocalGhSwitch) {
           update(checked);
@@ -724,14 +735,16 @@ export function ChannelEditorDialog({
         const next = new Set(selectedKeys);
         if (checked) next.add(target.toLowerCase());
         else next.delete(target.toLowerCase());
-        update(
-          [
-            ...options
-              .map((option) => option.value)
-              .filter((entry) => next.has(entry.toLowerCase())),
-            ...stored.filter((entry) => next.has(entry.toLowerCase())),
-          ].join(', '),
-        );
+        const joined = [
+          ...options
+            .map((option) => option.value)
+            .filter((entry) => next.has(entry.toLowerCase())),
+          ...stored.filter((entry) => next.has(entry.toLowerCase())),
+        ].join(', ');
+        // Clearing the last event is the other remedy for the dependency
+        // error; an empty valid selection must not keep demanding the switch.
+        if (watchField && !joined) clearDependencyError(field.key);
+        update(joined);
       };
       return (
         <FieldShell
