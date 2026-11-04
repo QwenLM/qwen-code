@@ -71,13 +71,15 @@ final class JournalCommit {
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        // Ordinary record commits still hold the placement guard while they
-        // fly: a begin/lifecycle admission serializes with only that row, so
-        // without it an admission sails through mid-commit. The acquisition
-        // stays bounded — a held row degrades to a named failure within the
-        // hot-path budget rather than waiting out the caller (#13800).
-        JournalFencing.lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
-                JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        // An ordinary commit queues on its own Session row, not the tenant
+        // placement guard: lifecycle begin, settle and Harness placement all
+        // lock this row before they write, so none of them can land
+        // mid-commit, and commits of other Sessions no longer wait here. It
+        // is the first statement, so every later plain read sees what those
+        // writers committed before it. Lifecycle-authority commits took both
+        // guards above; CSI-pinned Sessions take them behind this root in
+        // lockCsiContinuation (design 2026-11-03-managed-journal-commit-tenant-guard).
+        Boolean rootPin = fencing.lockSessionFirst(tenantId, sessionId);
         JournalStoreRows.validateStableId(request.writerId(), "writerId");
         ValidatedCommit validated = validateCommit(request);
         HarnessPlacementStore.Placement placement = fencing.requirePlacement(tenantId, request.workspaceId(),
@@ -93,7 +95,7 @@ final class JournalCommit {
         if (promotes) {
             readerVersion.requireReadable(2);
         }
-        var continuation = fencing.lockCsiContinuation(tenantId, sessionId);
+        var continuation = fencing.lockCsiContinuation(tenantId, sessionId, rootPin);
         var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
@@ -148,7 +150,14 @@ final class JournalCommit {
             return replay(existing, request, validated.recordDigest(),
                     writerToken);
         }
-        fencing.requirePhysicalSessionOpen(tenantId, request.workspaceId(), sessionId);
+        // The storage's alias and directory rows order this commit against
+        // migration and physical fences; migration prepare checks idleness on
+        // committed data after locking them, so the guard adds nothing here.
+        if (authority == null && csiOriginal == null) {
+            fencing.requireSessionStorageOpenForAdmission(tenantId, request.workspaceId(), sessionId);
+        } else {
+            fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
+        }
         JournalStoreRows.HeadRow head = csiHead == null
                 ? fencing.requireHeadAfterCsiCheck(tenantId, sessionId) : csiHead;
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
