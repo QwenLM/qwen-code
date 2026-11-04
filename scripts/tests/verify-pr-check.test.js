@@ -45,6 +45,9 @@ function makeArtifactDir(files, evidence = []) {
   writeFileSync(join(dir, 'report.md'), files.report);
   writeFileSync(join(dir, 'verdict.txt'), files.verdict);
   writeFileSync(join(dir, 'assertions.json'), files.assertions);
+  if (files.comment !== undefined) {
+    writeFileSync(join(dir, 'comment.md'), files.comment);
+  }
   if (evidence.length > 0) {
     mkdirSync(join(dir, 'evidence'));
     for (const name of evidence) {
@@ -291,6 +294,108 @@ describe('failures ledger', () => {
   });
 });
 
+// Rounds folded whole workspace suites into their own counts: "7737 scripted
+// assertions" held a few dozen checks the round wrote. Suite results have a
+// field of their own, and the triple counts what the round wrote.
+describe('gates', () => {
+  const GATES_ERROR = /gates must be an array of \{ suite, pass, fail \}/;
+  const withGates = (gates, counts = { pass: 4, fail: 0, total: 4 }) =>
+    check({ assertions: JSON.stringify({ ...counts, gates }) });
+
+  it("accepts suite counts beside the round's own", () => {
+    const result = withGates([
+      { suite: 'cli acp-session', pass: 1290, fail: 2, skipped: 1 },
+      { suite: 'core client', pass: 535, fail: 0 },
+    ]);
+    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
+    expect(result.counts).toEqual({ pass: 4, fail: 0, total: 4 });
+    // An empty list is a round that ran no suites: valid, and below the
+    // size threshold it has nothing to warn about.
+    const empty = withGates([]);
+    expect(empty.errors).toEqual([]);
+    expect(empty.warnings).toEqual([]);
+  });
+
+  it('refuses a malformed list without echoing the suite name', () => {
+    for (const gates of [
+      { cli: { pass: 1, fail: 0 } },
+      [null],
+      [{ pass: 1, fail: 0 }],
+      [{ suite: '  ', pass: 1, fail: 0 }],
+      [{ suite: 'x', pass: -1, fail: 0 }],
+      [{ suite: 'x', pass: 1, fail: 0.5 }],
+      [{ suite: 'x', pass: 1, fail: 0, skipped: '2' }],
+      [{ suite: 'x', pass: 1, fail: 0, skipped: false }],
+      [{ suite: 'x', pass: 1, fail: 0, skipped: null }],
+      [{ suite: 'x', pass: '1', fail: 0 }],
+    ]) {
+      const result = withGates(gates);
+      expect(result.errors.join('\n')).toMatch(GATES_ERROR);
+    }
+    // The publisher forwards error lines to its log; a suite name is
+    // agent-chosen text.
+    const named = withGates([
+      { suite: '@everyone <!-- x -->', pass: -1, fail: 0 },
+    ]);
+    expect(named.errors.join('\n')).not.toContain('@everyone');
+  });
+
+  it('refuses counts beyond the safe integer range', () => {
+    // Raw literals: JSON.stringify would turn 1e309 into null and hide the
+    // overflow that the publisher's jq clamps to a finite double.
+    const raw = (pass) =>
+      check({
+        assertions: `{"pass":4,"fail":0,"total":4,"gates":[{"suite":"x","pass":${pass},"fail":0}]}`,
+      });
+    for (const pass of ['1e309', '1e308', '9007199254740992']) {
+      expect(raw(pass).errors.join('\n')).toMatch(GATES_ERROR);
+    }
+    expect(raw('9007199254740991').errors).toEqual([]);
+  });
+
+  it('warns when a suite-sized total comes with no gate results', () => {
+    const big = check({
+      assertions: JSON.stringify({ pass: 1001, fail: 0, total: 1001 }),
+    });
+    expect(big.errors).toEqual([]);
+    expect(big.warnings.join('\n')).toMatch(
+      /counts 1001 assertions and records no gate results/,
+    );
+    const edge = check({
+      assertions: JSON.stringify({ pass: 1000, fail: 0, total: 1000 }),
+    });
+    expect(edge.warnings.join('\n')).not.toMatch(/records no gate results/);
+    const split = withGates([{ suite: 'cli', pass: 1292, fail: 0 }], {
+      pass: 1001,
+      fail: 0,
+      total: 1001,
+    });
+    expect(split.warnings.join('\n')).not.toMatch(/records no gate results/);
+    // An empty list records no suites, so it must not silence the warning
+    // either: folding suites in and writing [] is the same smell.
+    const empty = withGates([], { pass: 1001, fail: 0, total: 1001 });
+    expect(empty.errors).toEqual([]);
+    expect(empty.warnings.join('\n')).toMatch(/records no gate results/);
+    // Nor do entries that count nothing: a placeholder suite moved no test
+    // out of the counts. Skipped tests are not results either.
+    for (const gate of [
+      { suite: 'placeholder', pass: 0, fail: 0 },
+      { suite: 'cli', pass: 0, fail: 0, skipped: 12 },
+    ]) {
+      const hollow = withGates([gate], { pass: 1001, fail: 0, total: 1001 });
+      expect(hollow.errors).toEqual([]);
+      expect(hollow.warnings.join('\n')).toMatch(/records no gate results/);
+    }
+    const allRed = withGates([{ suite: 'cli', pass: 0, fail: 3 }], {
+      pass: 1001,
+      fail: 0,
+      total: 1001,
+    });
+    expect(allRed.warnings.join('\n')).not.toMatch(/records no gate results/);
+  });
+});
+
 // "Every production commit since the previous round was mutated on its own"
 // shipped while two commits had no row. A coverage claim is universally
 // quantified over an enumerable set, so it is checked against that set.
@@ -413,6 +518,139 @@ describe('checkMutationCoverage', () => {
   });
 });
 
+// Three rounds of PR #15984 opened with the title and the whole verdict
+// paragraph merged into one `#` line. The Markdown is structurally valid;
+// GitHub renders it as a single giant H1, a wall of bold text. The shape is
+// a warning, not an error: a cosmetic defect must not make the CI publisher
+// refuse an otherwise consistent verdict.
+describe('verdict line shape', () => {
+  const shippedLead = `# PR 15984 round 3 verification — **Verdict: merge-ready** — 63/63 scripted assertions passed, 0 failed. Verified head: \`${HEAD}\`.`;
+
+  it('warns when the verdict paragraph is a heading, without failing the round', () => {
+    const result = check({ report: `${shippedLead}\n` });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join('\n')).toMatch(
+      /report\.md opens with a heading carrying the verdict/,
+    );
+  });
+
+  it('accepts the same line as a plain paragraph', () => {
+    const result = check({ report: `${shippedLead.slice(2)}\n` });
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('accepts a short title heading that carries no verdict', () => {
+    const result = check({ report: `# Report\n\nmerge-ready · ${HEAD}\n` });
+    expect(result.warnings.join('\n')).not.toMatch(/opens with a heading/);
+  });
+
+  it('warns on an over-long heading even without the verdict word', () => {
+    const result = check({
+      report: `# ${'t'.repeat(130)}\n\nmerge-ready · ${HEAD}\n`,
+    });
+    expect(result.warnings.join('\n')).toMatch(
+      /opens with a heading of 132 characters/,
+    );
+  });
+
+  it('keeps the shape verdicts under CRLF line endings', () => {
+    const heading = check({ report: `${shippedLead}\r\n` });
+    expect(heading.warnings.join('\n')).toMatch(
+      /report\.md opens with a heading carrying the verdict/,
+    );
+    const plain = check({ report: `${shippedLead.slice(2)}\r\n` });
+    expect(plain.warnings).toEqual([]);
+  });
+
+  // GFM renders an ATX heading indented up to three spaces as a heading
+  // (verified against the GitHub markdown API); four spaces are a code
+  // block. The indent must not be a way around the shape check.
+  it('warns on a verdict heading indented up to three spaces', () => {
+    for (const indent of [' ', '  ', '   ']) {
+      const result = check({ report: `${indent}${shippedLead}\n` });
+      expect(result.warnings.join('\n')).toMatch(
+        /report\.md opens with a heading carrying the verdict/,
+      );
+    }
+    const codeBlock = check({ report: `    ${shippedLead}\n` });
+    expect(codeBlock.warnings.join('\n')).not.toMatch(/opens with a heading/);
+  });
+});
+
+// report.md deliberately carries no footer — both publish paths append it at
+// comment time — so the footer is checkable only on comment.md, the exact
+// body a local round posts. All three PR #15984 rounds shipped without it.
+describe('comment.md footer', () => {
+  const footer =
+    '_— test-model via Qwen Code /verify-pr (v0.1.2; skill 0123456789ab)_';
+  const body = `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n`;
+
+  it('accepts a body ending in the resolved footer', () => {
+    const result = check({ comment: `${body}\n${footer}\n` });
+    expect(result.warnings).toEqual([]);
+  });
+
+  // PR #16002 review: a Windows-authored comment.md with CRLF line endings
+  // failed the anchored footer regex on the stray \r, and the local publish
+  // gate sent a valid artifact back for unnecessary repair. GitHub renders
+  // CRLF and LF identically; the checker has to agree.
+  it('accepts the same footer with CRLF line endings (LF/CRLF parity)', () => {
+    const lf = check({ comment: `${body}\n${footer}\n` });
+    const crlf = check({
+      comment: `${body}\n${footer}\n`.replace(/\n/g, '\r\n'),
+    });
+    expect(lf.warnings).toEqual([]);
+    expect(crlf.warnings).toEqual([]);
+  });
+
+  it('still flags a missing footer and a heading lead under CRLF', () => {
+    const missing = check({ comment: body.replace(/\n/g, '\r\n') });
+    expect(missing.warnings.join('\n')).toMatch(
+      /does not end with the attribution footer/,
+    );
+    const heading = check({
+      comment: `# PR 15984 round 3 verification — **Verdict: merge-ready** — ${HEAD}\r\n\r\n${footer}\r\n`,
+    });
+    expect(heading.warnings.join('\n')).toMatch(
+      /comment\.md opens with a heading carrying the verdict/,
+    );
+  });
+
+  it('warns when the footer is missing', () => {
+    const result = check({ comment: body });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join('\n')).toMatch(
+      /comment\.md does not end with the attribution footer/,
+    );
+  });
+
+  it('warns on a malformed footer', () => {
+    for (const bad of [
+      '_— test-model via Qwen Code /verify-pr (v0.1.2; skill xyz)_',
+      '_— test-model via Qwen Code /verify-pr (0.1.2; skill 0123456789ab)_',
+      '— test-model via Qwen Code /verify-pr (v0.1.2; skill 0123456789ab)',
+    ]) {
+      const result = check({ comment: `${body}\n${bad}\n` });
+      expect(result.warnings.join('\n')).toMatch(
+        /does not end with the attribution footer/,
+      );
+    }
+  });
+
+  it('checks the lead shape on the posted body too', () => {
+    const result = check({
+      comment: `# PR 15984 round 3 verification — **Verdict: merge-ready** — ${HEAD}\n\n${footer}\n`,
+    });
+    expect(result.warnings.join('\n')).toMatch(
+      /comment\.md opens with a heading carrying the verdict/,
+    );
+  });
+
+  it('stays silent when the round has no comment.md, which the workflow never writes', () => {
+    expect(check({}).warnings).toEqual([]);
+  });
+});
+
 // The CLI is the path a maintainer runs, so the exit codes are the contract.
 describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
   const run = (dir) =>
@@ -437,7 +675,43 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     expect(bad.stdout).toContain('failed: verdict=merge-ready');
   });
 
-  it('reads the verified head from the round snapshot', () => {
+  // The CI publisher parses the last stdout line; shape and footer warnings
+  // must stay above it and keep the exit code at 0.
+  it('warns without failing when comment.md lacks the footer', () => {
+    const dir = makeArtifactDir(
+      validFiles({ comment: `merge-ready · ${HEAD}\n` }),
+      ['01-ab-cells.png'],
+    );
+    const result = run(dir);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      'warn  comment.md does not end with the attribution footer',
+    );
+    expect(result.stdout).toContain(
+      'ok: verdict=merge-ready (4 passed · 0 failed · 4 total)',
+    );
+  });
+
+  // The reviewer's CLI probe: the same valid footer, only the line endings
+  // changed to CRLF, must not produce the footer warning.
+  it('accepts a CRLF comment.md with a valid footer end to end', () => {
+    const dir = makeArtifactDir(
+      validFiles({
+        comment: `merge-ready · ${HEAD}\r\n\r\n_— test-model via Qwen Code /verify-pr (v0.26.4; skill 0123456789ab)_\r\n`,
+      }),
+      ['01-ab-cells.png'],
+    );
+    const result = run(dir);
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain(
+      'does not end with the attribution footer',
+    );
+    expect(result.stdout).toContain(
+      'ok: verdict=merge-ready (4 passed · 0 failed · 4 total)',
+    );
+  });
+
+  it('names the legacy snapshot when the round has none', () => {
     const root = mkdtempSync(join(tmpdir(), 'verify-pr-check-snapshot-'));
     tmpDirs.push(root);
     const artifacts = join(root, 'tmp', 'pr7-verify-20261026-120000');
@@ -464,6 +738,20 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(`does not name the verified head ${head}`);
+    expect(result.stdout).toContain(
+      join(root, 'tmp', 'verify-context', 'pr7.json'),
+    );
+
+    for (const snapshot of ['{', '{}']) {
+      writeFileSync(join(artifacts, 'context.json'), snapshot);
+      const unreadable = run(artifacts);
+      expect(unreadable.status).toBe(0);
+      expect(unreadable.stdout).toContain(join(artifacts, 'context.json'));
+      expect(unreadable.stdout).toContain('fell back to presence-only');
+      expect(unreadable.stdout).not.toContain(
+        `does not name the verified head ${head}`,
+      );
+    }
   });
 
   it('exits 2 without a directory and 1 on a missing one', () => {
@@ -473,5 +761,79 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     expect(run(join(tmpdir(), 'verify-pr-check-does-not-exist')).status).toBe(
       1,
     );
+  });
+
+  // The artifact directory is writable by the PR code the round just ran, so
+  // its own context.json cannot pin the head. --context reads a copy the round
+  // never saw and must not fall back to the writable one.
+  it('pins the head from a host-held snapshot over the artifact copy', () => {
+    const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
+    writeFileSync(
+      join(dir, 'context.json'),
+      JSON.stringify({ headRefOid: 'e'.repeat(40) }),
+    );
+    const hostSnapshot = join(tmpdir(), `verify-pr-host-${Date.now()}.json`);
+    tmpDirs.push(hostSnapshot);
+    writeFileSync(hostSnapshot, JSON.stringify({ headRefOid: HEAD }));
+
+    const pinned = spawnSync(
+      process.execPath,
+      [SCRIPT, '--context', hostSnapshot, dir],
+      { encoding: 'utf8' },
+    );
+    expect(pinned.status).toBe(0);
+    expect(pinned.stdout).toContain(`head source: ${hostSnapshot}`);
+    expect(pinned.stdout).not.toContain('does not name the verified head');
+
+    const artifactOnly = run(dir);
+    expect(artifactOnly.status).toBe(0);
+    expect(artifactOnly.stdout).toContain('does not name the verified head');
+  });
+
+  it('refuses an unusable --context instead of falling back', () => {
+    const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
+    // Seed a usable writable copy: a fallback regression would exit 0 here
+    // and print its head source, so the exit-1 assertion pins the property.
+    writeFileSync(
+      join(dir, 'context.json'),
+      JSON.stringify({ headRefOid: HEAD }),
+    );
+    const empty = join(tmpdir(), `verify-pr-host-empty-${Date.now()}.json`);
+    tmpDirs.push(empty);
+    writeFileSync(empty, '{}');
+    for (const snapshot of [join(tmpdir(), 'verify-pr-no-such.json'), empty]) {
+      const result = spawnSync(
+        process.execPath,
+        [SCRIPT, '--context', snapshot, dir],
+        { encoding: 'utf8' },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('--context');
+      expect(result.stdout).not.toContain('head source:');
+    }
+  });
+
+  it('exits 2 for an unknown option or a missing --context value', () => {
+    const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
+    expect(
+      spawnSync(process.execPath, [SCRIPT, '--bogus', dir], {
+        encoding: 'utf8',
+      }).status,
+    ).toBe(2);
+    expect(
+      spawnSync(process.execPath, [SCRIPT, '--context'], {
+        encoding: 'utf8',
+      }).status,
+    ).toBe(2);
+    // A forgotten --context turns the snapshot into a second positional:
+    // refuse instead of silently using the artifact's writable copy.
+    const hostSnapshot = join(tmpdir(), `verify-pr-host-${Date.now()}.json`);
+    tmpDirs.push(hostSnapshot);
+    writeFileSync(hostSnapshot, JSON.stringify({ headRefOid: HEAD }));
+    expect(
+      spawnSync(process.execPath, [SCRIPT, dir, hostSnapshot], {
+        encoding: 'utf8',
+      }).status,
+    ).toBe(2);
   });
 });

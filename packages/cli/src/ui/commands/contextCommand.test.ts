@@ -20,6 +20,7 @@ import {
   resolveInteractionMode,
   ToolNames,
   resolveSlimmingConfig,
+  Storage,
   wrapSystemReminder,
 } from '@qwen-code/qwen-code-core';
 import { AUTO_MEMORY_SNAPSHOT_METADATA } from '@qwen-code/qwen-code-core/memory/request-context.js';
@@ -83,6 +84,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
     isInteractive: vi.fn().mockReturnValue(true),
     getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+    storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
   } as unknown as Config;
 }
 
@@ -123,7 +125,115 @@ describe('collectContextData (contextCommand)', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
     } as unknown as Config;
+  });
+
+  it('exposes the absolute path of real memory files but not synthetic aggregates', async () => {
+    const config = {
+      ...makeMockConfig(200_000),
+      getWorkingDir: vi.fn().mockReturnValue('/workspace'),
+      storage: { getProjectRoot: vi.fn().mockReturnValue('/workspace') },
+      getUserMemory: vi
+        .fn()
+        .mockReturnValue(
+          '--- Context from: AGENTS.md ---\nproject rules\n--- End of Context from: AGENTS.md ---',
+        ),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue('auto memory catalog'),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    // Real instruction files carry an absolute path; the auto-memory
+    // aggregate is synthetic and must not.
+    const agents = data.instructionFiles?.find(
+      (file) => file.path === 'AGENTS.md',
+    );
+    expect(agents?.absolutePath).toBe(path.resolve('/workspace', 'AGENTS.md'));
+    const autoMemory = data.memoryFiles.find(
+      (file) => file.path === t('auto memory'),
+    );
+    expect(autoMemory).toBeDefined();
+    expect(autoMemory?.absolutePath).toBeUndefined();
+  });
+
+  it('gates openable paths on the admission root, not the live working dir', async () => {
+    // A session that cd'd into a subdirectory keeps its admission root. The
+    // gate must key on that root (the same one the client resolves the owner
+    // from), so the root's own AGENTS.md stays openable even though it is
+    // above the live cwd, while files outside the admission root (an
+    // unrelated directory, an installed extension) stay non-interactive.
+    const admissionRoot = '/workspace/repo';
+    const workingDir = '/workspace/repo/sub';
+    const globalMemory = path.join(Storage.getGlobalQwenDir(), 'QWEN.md');
+    const rootFile = path.join(admissionRoot, 'AGENTS.md');
+    const subdirFile = path.join(workingDir, 'AGENTS.md');
+    const outsideFile = '/tmp/outside/AGENTS.md';
+    const extensionFile = '/opt/extensions/foo/AGENTS.md';
+    const marker = (absolute: string) => {
+      const relative = path.relative(workingDir, absolute);
+      return `--- Context from: ${relative} ---\nbody\n--- End of Context from: ${relative} ---`;
+    };
+    const config = {
+      ...makeMockConfig(200_000),
+      getWorkingDir: vi.fn().mockReturnValue(workingDir),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(admissionRoot) },
+      getUserMemory: vi
+        .fn()
+        .mockReturnValue(
+          [globalMemory, rootFile, subdirFile, outsideFile, extensionFile]
+            .map(marker)
+            .join('\n\n'),
+        ),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+    const rows = data.instructionFiles ?? [];
+    expect(rows).toHaveLength(5);
+    const openPaths = rows
+      .map((file) => file.absolutePath)
+      .filter((value): value is string => value !== undefined);
+    expect(new Set(openPaths)).toEqual(
+      new Set([globalMemory, rootFile, subdirFile]),
+    );
+    // The admission root's own file is openable after cd into a subdirectory.
+    expect(
+      rows.find((file) => file.absolutePath === rootFile)?.absolutePath,
+    ).toBe(rootFile);
+    expect(rows.filter((file) => file.absolutePath === undefined)).toHaveLength(
+      2,
+    );
+  });
+
+  it('keeps the global memory row openable when QWEN_HOME has a trailing separator', async () => {
+    // getGlobalQwenDir() returns an absolute QWEN_HOME verbatim, so a trailing
+    // separator must not defeat the exact-directory match against dirname().
+    const previousHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = '/srv/qwen/';
+    try {
+      const workingDir = '/workspace';
+      const globalMemory = path.join('/srv/qwen/', 'QWEN.md');
+      const relative = path.relative(workingDir, globalMemory);
+      const config = {
+        ...makeMockConfig(200_000),
+        getWorkingDir: vi.fn().mockReturnValue(workingDir),
+        storage: { getProjectRoot: vi.fn().mockReturnValue(workingDir) },
+        getUserMemory: vi
+          .fn()
+          .mockReturnValue(
+            `--- Context from: ${relative} ---\nbody\n--- End of Context from: ${relative} ---`,
+          ),
+      } as unknown as Config;
+
+      const data = await collectContextData(config, true);
+      const globalRow = (data.instructionFiles ?? []).find(
+        (file) => file.absolutePath === globalMemory,
+      );
+      expect(globalRow?.absolutePath).toBe(globalMemory);
+    } finally {
+      if (previousHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousHome;
+    }
   });
 
   it('queries getFunctionDeclarations with no args, matching the actual API request', async () => {
@@ -190,6 +300,18 @@ describe('collectContextData (contextCommand)', () => {
     expect(getLastCachedContentTokenCount).toHaveBeenCalled();
     expect(data.totalTokens).toBe(65_267);
     expect(data.breakdown.cachedTokens).toBe(1_000);
+  });
+
+  it('shows a million-token context window in millions', async () => {
+    const text = async (window: number) =>
+      formatContextUsageText(
+        await collectContextData(makeMockConfig(window), false),
+      );
+
+    expect(await text(2_000_000)).toContain('Context window: 2.0m tokens');
+    expect(await text(1_000_000)).toContain('Context window: 1.0m tokens');
+    expect(await text(999_950)).toContain('Context window: 1.0m tokens');
+    expect(await text(999_949)).toContain('Context window: 999.9k tokens');
   });
 
   it('keeps a zero per-session cached count instead of the foreign global (#12047)', async () => {
@@ -373,11 +495,102 @@ describe('collectContextData (contextCommand)', () => {
       } as unknown as Config;
     }
 
+    it.each([0, 1, 100_000])(
+      'separates instruction and auto-memory accounting at total %s',
+      async (total) => {
+        const config = makeChatConfig({ total, history: [] });
+        const instructions = 'Project instructions. '.repeat(100);
+        const policy = 'Automatic memory policy. '.repeat(50);
+        Object.assign(config, {
+          getUserMemory: () =>
+            '--- Context from: QWEN.md ---\n' +
+            instructions +
+            '\n--- End of Context from: QWEN.md ---',
+          getAutoMemoryPrompt: () => policy,
+          getAutoMemoryContext: () => '',
+        });
+        const data = await collectContextData(config, true);
+        expect(data.instructionFiles?.map((file) => file.path)).toEqual([
+          'QWEN.md',
+        ]);
+        expect(data.memoryFiles.map((file) => file.path)).toEqual([
+          t('auto memory'),
+        ]);
+        if (total !== 1) {
+          expect(data.breakdown.instructionFiles).toBe(
+            estimateContextTextTokens(instructions + '\n'),
+          );
+          expect(data.breakdown.memoryFiles).toBe(
+            estimateContextTextTokens(policy),
+          );
+        }
+        if (total) {
+          expect(sumRows(data.breakdown)).toBe(total);
+        } else {
+          expect(data.breakdown.freeSpace).toBe(
+            data.contextWindowSize -
+              sumRows(data.breakdown) -
+              data.breakdown.autocompactBuffer,
+          );
+        }
+        const summary = await collectContextData(config, false);
+        expect(summary.breakdown).toEqual(data.breakdown);
+        expect(summary.instructionFiles).toEqual([]);
+        expect(summary.memoryFiles).toEqual([]);
+        const text = formatContextUsageText(data);
+        expect(text).toContain('**Instruction files**');
+        expect(text).toContain('**Auto memory**');
+        expect(formatContextUsageText(summary)).toMatch(
+          /Instruction files\s+\S+ tokens/,
+        );
+        expect(formatContextUsageText(summary)).toMatch(
+          /Auto memory\s+\S+ tokens/,
+        );
+        expect(text).not.toContain('Memory files');
+      },
+    );
+
+    it('scales nonzero instruction and auto-memory rows and their details together', async () => {
+      const sources = {
+        getUserMemory: () =>
+          '--- Context from: QWEN.md ---\n' +
+          'Project instructions. '.repeat(100) +
+          '\n--- End of Context from: QWEN.md ---',
+        getAutoMemoryPrompt: () => 'Automatic memory policy. '.repeat(50),
+        getAutoMemoryContext: () => '',
+      };
+      const collect = (total: number) =>
+        collectContextData(
+          Object.assign(makeChatConfig({ total, history: [] }), sources),
+          true,
+        );
+      const raw = await collect(0);
+      const total = 1000;
+      const scale = total / sumRows(raw.breakdown);
+      expect(scale).toBeLessThan(1);
+      const scaled = await collect(total);
+
+      for (const category of ['instructionFiles', 'memoryFiles'] as const) {
+        const expected = Math.floor(raw.breakdown[category]! * scale);
+        expect(expected).toBeGreaterThan(0);
+        expect(scaled.breakdown[category]).toBe(expected);
+        expect(scaled[category]).toEqual(
+          raw[category]!.map((entry) => ({
+            ...entry,
+            tokens: Math.round(entry.tokens * scale),
+          })),
+        );
+      }
+      expect(scaled.breakdown.unattributed).toBe(0);
+      expect(sumRows(scaled.breakdown)).toBe(total);
+    });
+
     function sumRows(breakdown: ContextCategoryBreakdown): number {
       return (
         breakdown.systemPrompt +
         breakdown.builtinTools +
         breakdown.mcpTools +
+        (breakdown.instructionFiles ?? 0) +
         breakdown.memoryFiles +
         breakdown.skills +
         (breakdown.startupContext ?? 0) +
@@ -1664,6 +1877,7 @@ describe('collectContextData (contextCommand)', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
@@ -1715,6 +1929,7 @@ describe('collectContextData (contextCommand)', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
@@ -1837,8 +2052,10 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(1);
-    expect(data.memoryFiles[0].path).toBe(path.join('~', '.qwen', 'QWEN.md'));
+    expect(data.instructionFiles!).toHaveLength(1);
+    expect(data.instructionFiles![0].path).toBe(
+      path.join('~', '.qwen', 'QWEN.md'),
+    );
   });
 
   it('renders project-local markers as relative paths when workingDir != cwd', async () => {
@@ -1863,9 +2080,9 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(2);
-    expect(data.memoryFiles[0].path).toBe('QWEN.md');
-    expect(data.memoryFiles[1].path).toBe(path.join('docs', 'QWEN.md'));
+    expect(data.instructionFiles!).toHaveLength(2);
+    expect(data.instructionFiles![0].path).toBe('QWEN.md');
+    expect(data.instructionFiles![1].path).toBe(path.join('docs', 'QWEN.md'));
   });
 
   it('attributes all injected skill bodies after refresh, removal and disable', async () => {
@@ -2001,10 +2218,10 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(2);
+    expect(data.instructionFiles!).toHaveLength(2);
     // The project file keeps its path; only the extension's file is renamed.
-    expect(data.memoryFiles[0].path).toBe('QWEN.md');
-    expect(data.memoryFiles[1].path).toBe(
+    expect(data.instructionFiles![0].path).toBe('QWEN.md');
+    expect(data.instructionFiles![1].path).toBe(
       `${t('Extension')}: Report Tools · QWEN.md`,
     );
   });
@@ -2040,14 +2257,14 @@ describe('collectContextData (contextCommand)', () => {
 
     const after = await collectContextData(config, true);
 
-    expect(after.memoryFiles.map((file) => file.path)).toEqual(
+    expect(after.instructionFiles!.map((file) => file.path)).toEqual(
       ['docs', 'prompts'].map(
         (dir) =>
           `${t('Extension')}: Report Tools · ${path.join(dir, 'QWEN.md')}`,
       ),
     );
-    expect(after.memoryFiles.map((file) => file.tokens)).toEqual(
-      before.memoryFiles.map((file) => file.tokens),
+    expect(after.instructionFiles!.map((file) => file.tokens)).toEqual(
+      before.instructionFiles!.map((file) => file.tokens),
     );
   });
 
@@ -2068,8 +2285,8 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(1);
-    expect(data.memoryFiles[0].path).toBe('QWEN.md');
+    expect(data.instructionFiles!).toHaveLength(1);
+    expect(data.instructionFiles![0].path).toBe('QWEN.md');
   });
 
   it('measures the listing a session would send before a chat exists (#12235)', async () => {
@@ -2151,6 +2368,40 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.skills.map((skill) => skill.name)).toEqual(['enabled-skill']);
   });
 });
+
+it.each([false, true])(
+  'preserves the combined memory category in legacy text snapshots (details: %s)',
+  (showDetails) => {
+    const text = formatContextUsageText({
+      type: 'context_usage',
+      modelName: 'legacy-model',
+      totalTokens: 200,
+      contextWindowSize: 1000,
+      breakdown: {
+        systemPrompt: 0,
+        builtinTools: 0,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        messages: 0,
+        freeSpace: 600,
+        autocompactBuffer: 200,
+        thresholds: { effectiveWindow: 1000, warn: 700, auto: 800, hard: 900 },
+        currentTier: 'safe',
+      },
+      builtinTools: [],
+      mcpTools: [],
+      skills: [],
+      memoryFiles: [{ path: 'QWEN.md', tokens: 200 }],
+      showDetails,
+    });
+    expect(text).toMatch(/Memory files\s+200 tokens/);
+    expect(text).not.toContain('Instruction files');
+    expect(text).not.toContain('Auto memory');
+    expect(text.includes('QWEN.md')).toBe(showDetails);
+    expect(text.includes('**Memory files**')).toBe(showDetails);
+  },
+);
 
 describe('/context shows three-tier thresholds', () => {
   beforeEach(() => {

@@ -15,6 +15,11 @@ import {
   HostedCompressionRefusal,
 } from './hosted-context-compression.js';
 import { extensionInstructionText } from './hosted-extension-tool-context.js';
+import {
+  parseHostedModelConfig,
+  parseHostedModelConfigDigest,
+  type HostedModelConfigReader,
+} from './hosted-model-config.js';
 
 import {
   parseHostedApprovalSelection,
@@ -326,6 +331,7 @@ import {
   answerResumedTurnCalls,
   fillParkedRoundAgentGaps,
   fillParkedRoundCommandGaps,
+  HostedChildLedgerRecoveryRequiredError,
   HostedRecoveryQuiescingError,
   isDurableBlockedVerdict,
   originalRuntimeBroker,
@@ -613,6 +619,7 @@ async function extensionBootstrapIncomplete(
 function liftRecoveryBlock(session: HostedSession): void {
   session.blocked = false;
   session.recoveryReason = undefined;
+  session.recoveryCancelPromptId = undefined;
   session.cleanupBlocked = false;
 }
 
@@ -651,6 +658,8 @@ interface HostedSession {
   storeBaseUrl: string;
   definition: Record<string, unknown> | null;
   agentDefinition?: HostedAgentDefinition;
+  modelConfigDigest?: string;
+  modelConfig?: HostedModelConfigReader;
   sessionSkillsRef?: ManagedSessionDurableRef;
   skills?: HostedSkillCatalog;
   baseSkills?: HostedSkillCatalog;
@@ -675,6 +684,8 @@ interface HostedSession {
    * until the block clears. Only `managed_session_store_unavailable` goes
    * here; other recovery blocks keep naming themselves at the caller. */
   recoveryReason?: string;
+  /** The one A6 block whose pre-aborted managed cancel can still settle. */
+  recoveryCancelPromptId?: string;
   toolProfile?: HostedWorkspaceToolProfile | typeof HOSTED_MCP_PROFILE;
   foregroundOnly?: boolean;
   publicChildAgentsVersion?: 1;
@@ -882,6 +893,7 @@ function compressionFor(session: HostedSession): HostedContextCompression {
     session: session.managed,
     cwd: session.cwd,
     agentDefinition: session.agentDefinition,
+    modelConfig: session.modelConfig,
     instructions: async () =>
       [
         await readHostedAgentInstructions(
@@ -940,6 +952,7 @@ async function runHostedLifecycleHook(
   event: HookEventName,
   operationId: string,
   fields: Record<string, unknown>,
+  kind?: 'legacy-close',
 ): Promise<unknown> {
   if (!session.hooks) return undefined;
   await session.hooks.ensureReady();
@@ -964,6 +977,9 @@ async function runHostedLifecycleHook(
           cwd: session.cwd,
           signal,
           scope,
+          modelConfig: session.modelConfig
+            ? () => session.modelConfig!(kind)
+            : undefined,
         },
         run,
       );
@@ -2691,6 +2707,7 @@ async function verifyWorkspaceRestore(
     }
     if (ref.kind === 'managed-definition') {
       const definition = object(JSON.parse(bytes.toString('utf8')));
+      parseHostedModelConfigDigest(definition?.['modelConfigDigest']);
       const sessionSkills = parseSessionSkillsRef(
         definition?.['sessionSkillsRef'],
       );
@@ -3496,6 +3513,16 @@ async function startHostedRecoveredTurn(
   liftRecoveryBlock(session);
 }
 
+// E2E fault injection only (QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT=<sessionId>, set
+// by the packaged finished-before-commit arm on the generation that must crash):
+// once the main model stream's Finished marker is durable but before the assistant
+// output commits, hold the turn so the runner can SIGKILL this generation inside
+// that window. The next generation must reissue the saved request rather than
+// compensate an already-committed terminal. The flag is never set in production.
+const crashBeforeCommitSession =
+  process.env['QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT'];
+let crashBeforeCommitFired = false;
+
 async function executeHostedTurn(
   session: HostedSession,
   sessionId: string,
@@ -3895,6 +3922,7 @@ async function executeHostedTurn(
                   launch: workflowLaunch,
                   signal: abort.signal,
                   agentDefinition: session.agentDefinition,
+                  modelConfig: session.modelConfig,
                 })
               : await runHostedHarnessTextTurn({
                   sessionId,
@@ -3953,6 +3981,7 @@ async function executeHostedTurn(
                   modelScope,
                   workspaceContext,
                   agentDefinition: session.agentDefinition,
+                  modelConfig: session.modelConfig,
                   publicChildModelRoute: session.publicChildModelRoute,
                   modelSelection: await readHostedTurnModelSelection(
                     session.managed,
@@ -4001,6 +4030,29 @@ async function executeHostedTurn(
                     : {}),
                   ...(deltas ? { textDeltas: deltas } : {}),
                 });
+          if (
+            crashBeforeCommitSession === sessionId &&
+            !crashBeforeCommitFired
+          ) {
+            // The stream's Finished marker is already durable (the model layer's
+            // finally committed a usage-only output_committed); the assistant
+            // message.committed below is not. Hold here so the runner crashes this
+            // generation inside the B3a window and the next one must reissue. The
+            // hold still observes the Turn's abort signal: a leaked flag must not
+            // park a real Session uncancellably, so a cancel/deadline/daemon abort
+            // rejects into the enclosing catch and settles the Turn instead.
+            crashBeforeCommitFired = true;
+            writeStderrLineSafe(
+              `qwen serve: E2E holding finished turn before assistant commit for Session ${sessionId} prompt ${promptId}`,
+            );
+            await new Promise<never>((_resolve, reject) => {
+              const release = (): void =>
+                reject(abort.signal.reason ?? new Error('aborted'));
+              if (abort.signal.aborted) release();
+              else
+                abort.signal.addEventListener('abort', release, { once: true });
+            });
+          }
           await commit(
             'assistant',
             result.parts ?? [{ text: result.text }],
@@ -4173,6 +4225,13 @@ export function registerHostedHarnessSessionRoutes(
   const unresolvedOpenings = new Set<string>();
   let initialReconciliations = 0;
   const epoch = contract.bootId.replaceAll('-', '_');
+  // E2E fault injection only (QWEN_E2E_DROP_LOAD_REPLY=<sessionId>, set by the
+  // packaged load-reply-lost arm on the replacement Harness): lose exactly the
+  // first load attach reply for that Session, after its driver has started, so
+  // the control plane must redrive the same load into the now-active driver.
+  // The flag is never set in production.
+  const dropLoadReplySession = process.env['QWEN_E2E_DROP_LOAD_REPLY'];
+  let loadReplyDropped = false;
   const released = new Map<
     string,
     { clientId: string; receipt: HostedHarnessReleaseReceipt }
@@ -4397,6 +4456,14 @@ export function registerHostedHarnessSessionRoutes(
     session: HostedSession,
     recovery?: HostedRuntimeRecoveryReport,
   ): void => {
+    if (dropLoadReplySession === sessionId && !loadReplyDropped) {
+      loadReplyDropped = true;
+      writeStderrLineSafe(
+        `qwen serve: E2E dropping first load reply for Session ${sessionId}`,
+      );
+      res.destroy();
+      return;
+    }
     res.status(200).json({
       sessionId,
       clientId: session.clientId,
@@ -4580,8 +4647,12 @@ export function registerHostedHarnessSessionRoutes(
     }
     const sessionId = create ? body?.['sessionId'] : req.params['id'];
     let agentDefinition: HostedAgentDefinition | undefined;
+    let modelConfigDigest: string | undefined;
     let sessionSkillsRef: ManagedSessionDurableRef | undefined;
     try {
+      modelConfigDigest = parseHostedModelConfigDigest(
+        body?.['modelConfigDigest'],
+      );
       sessionSkillsRef = parseSessionSkillsRef(body?.['sessionSkillsRef']);
       agentDefinition = parseHostedAgentDefinition(
         body?.['agentDefinition'],
@@ -4849,8 +4920,12 @@ export function registerHostedHarnessSessionRoutes(
     }
     if (
       resident &&
-      !create &&
-      !sameHostedAgentDefinition(resident.agentDefinition, agentDefinition)
+      ((!create &&
+        !sameHostedAgentDefinition(
+          resident.agentDefinition,
+          agentDefinition,
+        )) ||
+        resident.modelConfigDigest !== modelConfigDigest)
     ) {
       error(res, 409, 'hosted_agent_definition_conflict');
       return;
@@ -5742,6 +5817,7 @@ export function registerHostedHarnessSessionRoutes(
                   engine: 'managed',
                   sessionId,
                   ...(agentDefinition ? { agentDefinition } : {}),
+                  ...(modelConfigDigest ? { modelConfigDigest } : {}),
                   ...(publicChildAgentsVersion === 1
                     ? { publicChildAgentsVersion }
                     : {}),
@@ -5826,6 +5902,12 @@ export function registerHostedHarnessSessionRoutes(
       let savedSessionSkillsRef: ManagedSessionDurableRef | undefined;
       let skills: HostedSkillCatalog | undefined;
       try {
+        if (
+          parseHostedModelConfigDigest(definition?.['modelConfigDigest']) !==
+          modelConfigDigest
+        ) {
+          throw new Error('Session model configuration binding changed.');
+        }
         savedAgentDefinition = parseHostedAgentDefinition(
           definition?.['agentDefinition'],
         );
@@ -5968,6 +6050,22 @@ export function registerHostedHarnessSessionRoutes(
         storeBaseUrl: store.baseUrl,
         definition,
         agentDefinition: savedAgentDefinition,
+        ...(modelConfigDigest
+          ? {
+              modelConfigDigest,
+              modelConfig: async (kind) => {
+                try {
+                  return parseHostedModelConfig(
+                    await stores.modelConfig(modelConfigDigest, kind),
+                    modelConfigDigest,
+                  );
+                } catch (cause) {
+                  if (namedStoreFailure(cause)) throw cause;
+                  throw new HostedModelUnavailableError();
+                }
+              },
+            }
+          : {}),
         ...(publicChildAgentsVersion === 1
           ? { publicChildAgentsVersion: 1 as const }
           : {}),
@@ -11022,6 +11120,7 @@ export function registerHostedHarnessSessionRoutes(
               commands: session.commands,
               children: session.childAgents,
               messages: session.messages,
+              signal: abort.signal,
             });
             if (outstanding.length > 0 || filled > 0) {
               projected = await session.managed.sink.project();
@@ -11161,6 +11260,7 @@ export function registerHostedHarnessSessionRoutes(
             signal: abort.signal,
             workspaceContext,
             agentDefinition: session.agentDefinition,
+            modelConfig: session.modelConfig,
             publicChildModelRoute: session.publicChildModelRoute,
             modelSelection: await readHostedTurnModelSelection(
               session.managed,
@@ -11281,6 +11381,13 @@ export function registerHostedHarnessSessionRoutes(
         }
       } catch (cause) {
         if (cause instanceof HostedToolRecoveryRequiredError) {
+          session.recoveryCancelPromptId =
+            cause instanceof HostedChildLedgerRecoveryRequiredError
+              ? promptId
+              : undefined;
+          if (cause instanceof HostedChildLedgerRecoveryRequiredError)
+            // A blocked continue's admission must not replay as a cancel.
+            session.admissions.delete(promptId);
           session.blocked = true;
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} is recovery blocked: ${String(cause.cause)}`,
@@ -11373,7 +11480,7 @@ export function registerHostedHarnessSessionRoutes(
     const request = recoveryRequest(req);
     if (!request) return error(res, 400, 'invalid_managed_runtime_recovery');
     const { promptId, checkpointId, activationId } = request;
-    if (session.blocked) {
+    if (session.blocked && session.recoveryCancelPromptId !== promptId) {
       // A retry-inviting refusal: keep an adopted lease owed with the
       // still-READY identity — the next takeover re-acquires it
       // idempotently, while a release would persist RELEASED and wedge
@@ -11490,7 +11597,7 @@ export function registerHostedHarnessSessionRoutes(
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     if (session.mcpBusy || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
-    if (session.blocked)
+    if (session.blocked && session.recoveryCancelPromptId !== promptId)
       return error(
         res,
         409,
@@ -11573,6 +11680,8 @@ export function registerHostedHarnessSessionRoutes(
                 commands: session.commands,
               });
             }
+            const cancelCommandFillAbort = new AbortController();
+            cancelCommandFillAbort.abort();
             await fillParkedRoundCommandGaps({
               managed: session.managed,
               sessionId,
@@ -11582,6 +11691,7 @@ export function registerHostedHarnessSessionRoutes(
               commands: session.commands,
               children: session.childAgents,
               messages: session.messages,
+              signal: cancelCommandFillAbort.signal,
             });
           }
         } else if (agentWait !== null) {
@@ -11913,6 +12023,11 @@ export function registerHostedHarnessSessionRoutes(
         // No handback here: the coordinator retries a failed cancel, and a
         // release would wedge that retry; the success path above already
         // released and discharged the flag itself.
+        if (
+          session.recoveryCancelPromptId === promptId &&
+          !unsettledInputs(session).has(promptId)
+        )
+          liftRecoveryBlock(session);
         session.active = undefined;
       }
     })();
@@ -12606,12 +12721,14 @@ export function registerHostedHarnessSessionRoutes(
             HookEventName.SessionEnd,
             `session-end:${req.params['id']}`,
             { reason: 'other' },
+            'legacy-close',
           );
           await runHostedLifecycleHook(
             session,
             HookEventName.SessionDelete,
             `session-delete:${req.params['id']}`,
             { deleted_session_id: req.params['id'] },
+            'legacy-close',
           );
         } finally {
           session.hooksBusy = false;

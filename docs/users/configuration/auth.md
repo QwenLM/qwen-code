@@ -31,6 +31,8 @@ The official platform entry. Choose it when your API key comes from 千问AI平�
 
 Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **QwenCloud**, and choose **Token Plan** or **Standard API Key** from the sub-menu. Choose the platform (**China — 千问AI平台** or **International — QwenCloud**), then enter your API key.
 
+Qwen Code checks the endpoint's model list at startup with your stored key; see [Built-in provider updates](#built-in-provider-updates).
+
 ### Headless or scripted setup
 
 For CI, containers, or scripts, configure the platform with environment variables instead of the interactive `/auth` flow.
@@ -134,6 +136,8 @@ Alibaba Cloud Coding Plan is available in two regions:
 
 Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **Alibaba ModelStudio**, and choose **Coding Plan** from the sub-menu. Choose your region, then enter your `sk-sp-xxxxxxxxx` key.
 
+Qwen Code checks the endpoint's model list at startup with your stored key; see [Built-in provider updates](#built-in-provider-updates).
+
 After authentication, use the `/model` command to switch between all Alibaba Cloud Coding Plan supported models (including qwen3.5-plus, qwen3.6-plus, qwen3.7-plus, qwen3-coder-plus, qwen3-coder-next, qwen3-max-2026-01-23, glm-5, glm-4.7, kimi-k2.5, and MiniMax-M2.5).
 
 ### Headless or scripted setup
@@ -204,6 +208,8 @@ Token Plan is available in two regions, each with its own dedicated endpoint:
 Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **Alibaba ModelStudio**, and choose **Token Plan** from the sub-menu. Choose your region (**China (Beijing)** or **Singapore (International)**), then enter your API key. The wizard then shows its final step (Step 3/3 · Model IDs), where you pick the model IDs to configure: the models served by your endpoint are offered there and are applied only when you explicitly select them. ModelStudio Token Plan API keys have no prefix requirement, unlike Coding Plan keys, which start with `sk-sp-`, and unlike the separate QwenCloud Token Plan keys in Option 1, which also start with `sk-sp-`.
 
 After authentication, use the `/model` command to browse and switch between the models configured for your Token Plan. The model lineup evolves over time, so it is intentionally not listed here; model discovery from the endpoint happens during the `/auth` setup step above (the endpoint's own list is offered there and must be selected explicitly), and `/model` then shows the models configured for your plan.
+
+Qwen Code also checks the endpoint's model list at startup with your stored API key, as described in [Built-in provider updates](#built-in-provider-updates).
 
 ### Headless or scripted setup
 
@@ -462,6 +468,18 @@ qwen --model "qwen3-coder-plus"
 
 qwen --model "qwen3.5-plus"
 ```
+
+## Built-in provider updates
+
+Installed providers with a built-in model list can offer a **Built-in Provider Update** when a newer preset ships.
+
+QwenCloud (Token Plan and Standard API Key) and Alibaba ModelStudio (Coding Plan, Token Plan and Standard API Key) also check `/models` at startup. This check uses the provider-specific API-key variable saved by `/auth` (for example, `BAILIAN_TOKEN_PLAN_API_KEY`), including values from `settings.env`. A key supplied only through a CLI flag, `OPENAI_API_KEY`, or generic authentication settings does not enable this check; generic keys are not forwarded to other providers' endpoints.
+
+Successful discovery limits the update to built-in models your key is served, while preserving user-added models. It can also offer an update when the served set changes without a preset release, such as after switching plans. Discovery alone keeps the selected model; once you switch away, a later startup check can offer its removal. If filtering leaves no built-in model to install, the existing provider configuration is kept without prompting. When only the served set changes, the update adds just newly served models, so a model you left out during `/auth` is not added back. If nothing would change, the check is recorded without a prompt.
+
+If discovery is unavailable, fails, or matches no built-in model, a preset update uses the full built-in list; an already-current install is left unchanged. Providers without discovery continue to use the built-in list.
+
+**Later** waits 24 hours before asking again about the same version or served set; a different change can still prompt. Updating, skipping, or silently recording a newer decision clears the earlier postponement. **Skip** keeps your configuration, including retained models: a skipped preset version is not offered again until a newer one ships, and a skipped served set is not offered again until it changes.
 
 ## Removed `qwen auth` CLI command
 
