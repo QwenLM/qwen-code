@@ -326,15 +326,15 @@ ${escapeXml(entry.description)}
  * frontmatter hooks — may be applied. A project skill is discovered from
  * `<repo>/.qwen/skills/` regardless of folder trust because its body only
  * influences the model, but its side effects grant tool approvals or run
- * repo-supplied commands, so they need a trusted folder: the same gate
- * `Config.getProjectHooks()` applies to settings-file hooks. User, extension
+ * repo-supplied commands, so they need explicit folder trust. Disabling
+ * folder trust does not authorize these side effects. User, extension
  * and bundled skills are not repo-controlled and are unaffected.
  */
 export function canApplySkillSideEffects(
   skill: Pick<SkillConfig, 'level'>,
-  config: Pick<Config, 'isTrustedFolder'>,
+  config: Pick<Config, 'isExplicitlyTrustedFolder'>,
 ): boolean {
-  return skill.level !== 'project' || config.isTrustedFolder();
+  return skill.level !== 'project' || config.isExplicitlyTrustedFolder();
 }
 
 /**
@@ -387,7 +387,7 @@ export function applySkillAllowedTools(
  * added, so re-invoking a skill never stacks duplicate hooks.
  *
  * A project skill's hooks are marked trust-gated by `registerSkillHooks`, so
- * the event handler re-reads folder trust at fire time. `isTrustedFolder()`
+ * the event handler re-reads folder trust at fire time. `isExplicitlyTrustedFolder()`
  * reads the IDE context store first and only falls back to the `Config`'s
  * own readonly field, so with an IDE companion connected that value is live
  * and revoking trust silences an already-registered gate at the next event,
@@ -470,7 +470,9 @@ export async function applySkillSideEffects(
     | (Pick<Config, 'getHookSystem' | 'getSessionId' | 'getPermissionManager'> &
         Pick<
           Config,
-          'isTrustedFolder' | 'enableReviewWorkflow' | 'isWorkspaceAgentSession'
+          | 'isExplicitlyTrustedFolder'
+          | 'enableReviewWorkflow'
+          | 'isWorkspaceAgentSession'
         >)
     | null
     | undefined,
@@ -494,7 +496,7 @@ export async function applySkillSideEffects(
   if (!canApplySkillSideEffects(skill, config)) {
     if (skill.allowedTools?.length || skill.hooks) {
       debugLogger.warn(
-        `Skill "${skill.name}" is a project skill in an untrusted folder; ignoring its allowedTools and hooks.`,
+        `Skill "${skill.name}" requires explicit folder trust; ignoring its allowedTools and hooks. Enable security.folderTrust.enabled in user settings and trust this folder, or grant IDE workspace trust.`,
       );
     }
     return;

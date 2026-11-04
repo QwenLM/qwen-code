@@ -11776,15 +11776,21 @@ export class Config {
 
   /**
    * Get project-level hooks configuration.
-   * Returns hooks from workspace settings, only in trusted folders.
+   * Returns hooks from workspace settings, only in explicitly trusted folders.
    * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
     if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
-    // Only return project hooks if workspace is trusted
-    if (!this.isTrustedFolder()) {
+    // Interactive sessions need explicit trust for repo-supplied hooks: a
+    // disabled folder-trust feature must not silently authorize them.
+    // Non-interactive invocations (`-p`, piped stdin, ACP/SDK embeddings)
+    // treat trust as implicit — the caller chose the directory and there is
+    // no prompt surface; only run them in directories you trust. An explicit
+    // refusal is already enforced upstream: an untrusted workspace
+    // contributes no settings, so it supplies no project hooks.
+    if (this.isInteractive() && !this.isExplicitlyTrustedFolder()) {
       return undefined;
     }
     // The legacy merged `hooks` stands in only when no scope was supplied.
@@ -11958,6 +11964,13 @@ export class Config {
     }
 
     return this.trustedFolder ?? !this.folderTrust;
+  }
+
+  isExplicitlyTrustedFolder(): boolean {
+    const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+    return (
+      (this.folderTrust || ideTrust !== undefined) && this.isTrustedFolder()
+    );
   }
 
   setIdeMode(value: boolean): void {

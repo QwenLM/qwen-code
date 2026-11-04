@@ -29,7 +29,6 @@ import {
   isSkillListingReminder,
   computeThresholds,
   getStartupContextLength,
-  isMediaPolicyToolHiddenFromModel,
   estimateContextTextTokens,
   resolveSlimmingConfig,
   formatContextFileDisplayPath,
@@ -448,38 +447,18 @@ export async function collectContextData(
 
   const toolRegistry = config.getToolRegistry();
   const allTools = toolRegistry ? toolRegistry.getAllTools() : [];
-  // Match what's actually sent to the model: deferred tools — MCP tools and
-  // low-frequency built-ins like web_fetch / monitor / cron_* — are absent
-  // from the prompt unless session setup has revealed them. See
-  // client.ts which calls getFunctionDeclarations() with no args. The
-  // per-tool loop below applies the same filter so allToolsTokens stays
-  // aligned with the breakdown sum.
+  // Match client.ts's declaration source: registered tools can be hidden, and
+  // code mode can generate schemas that differ from the registered originals.
   const toolDeclarations = toolRegistry
     ? toolRegistry.getFunctionDeclarations()
     : [];
-  const toolDeclarationsByName = new Map(
-    toolDeclarations
-      .filter((declaration) => declaration.name)
-      .map((declaration) => [declaration.name!, declaration] as const),
-  );
   const toolsJsonStr = JSON.stringify(toolDeclarations);
   const allToolsTokens = estimateContextTextTokens(toolsJsonStr);
 
   const builtinTools: ContextToolDetail[] = [];
   const mcpTools: ContextToolDetail[] = [];
-  for (const tool of allTools) {
-    if (toolRegistry?.isDeferredAndHidden(tool.name)) {
-      continue;
-    }
-    // Same alignment rule for omni media-policy tools: fixed-only tools
-    // (declared descriptor, modelAccess not enabled) are stripped from
-    // getFunctionDeclarations() and cost the model zero prompt tokens, so
-    // listing them here would make the breakdown sum exceed allToolsTokens.
-    if (isMediaPolicyToolHiddenFromModel(config, tool)) {
-      continue;
-    }
-    const declaration = toolDeclarationsByName.get(tool.name);
-    if (!declaration) continue;
+  for (const declaration of toolDeclarations) {
+    const tool = allTools.find((tool) => tool.name === declaration.name);
     const toolJsonStr = JSON.stringify(declaration);
     const tokens = estimateContextTextTokens(toolJsonStr);
     if (tool instanceof DiscoveredMCPTool) {
@@ -487,9 +466,9 @@ export async function collectContextData(
         name: `${tool.serverName}__${tool.serverToolName || tool.name}`,
         tokens,
       });
-    } else if (tool.name !== ToolNames.SKILL) {
+    } else if (declaration.name !== ToolNames.SKILL) {
       builtinTools.push({
-        name: tool.name,
+        name: declaration.name!,
         tokens,
       });
     }
@@ -533,7 +512,9 @@ export async function collectContextData(
   const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);
 
   const skillTool = allTools.find((tool) => tool.name === ToolNames.SKILL);
-  const skillDeclaration = toolDeclarationsByName.get(ToolNames.SKILL);
+  const skillDeclaration = toolDeclarations.find(
+    (declaration) => declaration.name === ToolNames.SKILL,
+  );
   const skillToolDefinitionTokens = skillDeclaration
     ? estimateContextTextTokens(JSON.stringify(skillDeclaration))
     : 0;

@@ -194,7 +194,7 @@ class WorkspaceSessionRetentionMySqlIT {
         var claimed = deleteClaim(store, tenant, session);
         jdbc.update("DELETE FROM ma_workspace_access");
         assertThat(transaction(() -> store.completeOperation(tenant, session, claimed.operationId(), "delete-worker", claimed.claimGeneration(), false))).isTrue();
-        assertThat(jdbc.queryForObject("SELECT recovery_protected FROM ma_session WHERE retirement_generation > 0", Boolean.class)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT is_recovery_protected FROM ma_session WHERE retirement_generation > 0", Boolean.class)).isTrue();
         var retention = new ToolPublicationRetentionStore(jdbc, new DataSourceTransactionManager(source));
         assertThat(retention.observe(Duration.ZERO)).singleElement().extracting(ToolPublicationRetentionStore.Candidate::blocker).isEqualTo("recovery_protected");
         assertThatThrownBy(() -> transaction(() -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).acquireWriter(tenant, session, TOKEN,
@@ -495,7 +495,7 @@ class WorkspaceSessionRetentionMySqlIT {
         String key = "b".repeat(64);
         jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
-                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, write_evidence, accepted_complete,"
+                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete,"
                 + " capture_held_bytes, producer_held_bytes, admission_held_bytes, capture_used_bytes)"
                 + " VALUES (?, ?, ?, 'workspace', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?, 'FENCED',"
                 + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE, 1000, 1000, 1000, 123)",

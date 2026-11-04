@@ -78,7 +78,7 @@ final class WorkspaceCsiApplicationImage {
                 put(headDelta, "wake_head_revision", revision);
                 wakeRevision = revision;
             }
-            put(headDelta, "wake_scan_pending", Boolean.TRUE.equals(head.bool("wake_pending"))
+            put(headDelta, "is_wake_scan_pending", Boolean.TRUE.equals(head.bool("is_wake_pending"))
                     || wakeRevision == null || wakeRevision != revision);
             put(headDelta, "committed_sequence", request.path("lastSequence").longValue());
             put(headDelta, "last_commit_digest", text(request, "commitDigest"));

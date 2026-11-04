@@ -875,6 +875,7 @@ Always follow these standards:
 
 - **Tool Restrictions**: Use `tools` to limit which tools a subagent can access, or `disallowedTools` to block specific tools while inheriting everything else
 - **Permission Mode**: Subagents inherit their parent's permission mode by default. Plan-mode sessions cannot escalate to auto-edit through delegated agents. Privileged modes (auto-edit, yolo) are blocked in untrusted folders.
+- **Project Hooks**: Project subagent frontmatter hooks require explicit folder trust: enable `security.folderTrust.enabled` in user settings and trust the directory, or grant IDE workspace trust. Disabling folder trust does not authorize these hooks, even in YOLO mode. Subagent instructions remain available; user-level hooks keep their existing behavior.
 - **Provider Selection**: A subagent with `model: authType:modelId`, or
   `model: fast` where `fastModel` resolves to another auth type, sends that
   subagent's model requests to the selected provider. Make sure that provider is

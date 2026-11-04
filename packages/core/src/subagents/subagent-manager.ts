@@ -1255,11 +1255,11 @@ export class SubagentManager {
         if (config.hooks && Object.keys(config.hooks).length > 0) {
           const isSourceTrusted =
             config.level === 'project'
-              ? () => this.config.isTrustedFolder()
+              ? () => this.config.isExplicitlyTrustedFolder()
               : undefined;
           if (isSourceTrusted && !isSourceTrusted()) {
             debugLogger.warn(
-              `Subagent "${config.name}" is a project agent in an untrusted folder; ignoring its hooks.`,
+              `Subagent "${config.name}" requires explicit folder trust; ignoring its hooks. Enable security.folderTrust.enabled in user settings and trust this folder, or grant IDE workspace trust.`,
             );
           } else if (hookRegistry) {
             unregisterAgentHooks = hookRegistry.addAgentHooks(

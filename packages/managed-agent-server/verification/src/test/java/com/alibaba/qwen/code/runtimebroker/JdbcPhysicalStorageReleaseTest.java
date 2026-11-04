@@ -60,6 +60,7 @@ public class JdbcPhysicalStorageReleaseTest {
                     RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
             shared.execute("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE binding_id = ?", shared.physical,
                     shared.binding.getBindingId().getBytes(StandardCharsets.UTF_8));
+            shared.execute("UPDATE ma_storage_owner SET member_count = 2 WHERE storage_key = ?", shared.physical);
             assertEquals(RuntimeSessionRecord.State.RELEASED, shared.release().getState());
             assertNull(shared.text("SELECT execution_storage_key FROM ma_runtime_session WHERE binding_id = ? AND runtime_session_id = X'6f726967696e616c'",
                     shared.binding.getBindingId().getBytes(StandardCharsets.UTF_8)));
@@ -334,6 +335,7 @@ public class JdbcPhysicalStorageReleaseTest {
                                             Instant.now())));
             execute("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE binding_id = ?",
                     physical, binding.getBindingId().getBytes(StandardCharsets.UTF_8));
+            execute("UPDATE ma_storage_owner SET member_count = 1 WHERE storage_key = ?", physical);
         }
 
         private String text(String sql, Object parameter) throws Exception {

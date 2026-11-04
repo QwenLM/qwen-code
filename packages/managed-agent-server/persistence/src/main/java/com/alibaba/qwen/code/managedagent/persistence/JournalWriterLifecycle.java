@@ -94,7 +94,7 @@ final class JournalWriterLifecycle {
         JournalStoreRows.validateScope(tenant, workspace, session);
         fencing.requireCredential(tenant, workspace, session, token);
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenant, session);
-        fencing.requirePhysicalSessionOpen(tenant, workspace, session);
+        fencing.lockPlacementBounded(tenant);
         // Publication-lane writer: keeps the tenant CAS row before the
         // Session root the CSI check locks and before the head row, the
         // order retention reads take (CAS row, root, head) and the same as
@@ -107,6 +107,7 @@ final class JournalWriterLifecycle {
         if (csiOriginal != null) {
             csiOriginal.requireAdmission();
         }
+        fencing.requireSessionStorageOpen(tenant, workspace, session);
         JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenant, session);
         storeRows.requireHeadScope(head, tenant, workspace, session);
         Timestamp now = storeRows.databaseNow();
