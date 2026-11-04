@@ -87,12 +87,18 @@ import {
   expandCollapsedHistory,
 } from '../utils/resumeHistoryUtils.js';
 import { projectHistoryToStreamEvents } from './item-projection.js';
+import type { OpenTuiComposerSlot } from './input-submission.js';
+import {
+  CLIPBOARD_PASTE_FRAMING,
+  framePasteExpansion,
+} from '../utils/paste-placeholders.js';
 
 const mocks = vi.hoisted(() => {
   const state = {
     handleResult: undefined as unknown,
     modBand: undefined as unknown,
     handleResults: [] as unknown[],
+    handledTyped: [] as unknown[],
     loadCommandsOverride: null as null | (() => Promise<readonly unknown[]>),
     loadRejects: false,
     useRealDispatcher: false,
@@ -245,7 +251,7 @@ vi.mock('./commands-dispatch.js', async (importOriginal) => {
       mocks.state.releaseHandle?.();
     }
     dispose() {}
-    async handle(text: string) {
+    async handle(text: string, typed?: unknown) {
       if (
         mocks.state.holdHandleOn === text &&
         mocks.state.releaseHandle === null
@@ -255,6 +261,7 @@ vi.mock('./commands-dispatch.js', async (importOriginal) => {
         });
       }
       mocks.state.handledTexts.push(text);
+      mocks.state.handledTyped.push(typed);
       mocks.state.onHandle?.(text);
       const queued = mocks.state.handleResults;
       return queued.length > 0 ? queued.shift() : mocks.state.handleResult;
@@ -461,6 +468,7 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.deferDuringStreaming = false;
     mocks.state.deferGate = null;
     mocks.state.handledTexts.length = 0;
+    mocks.state.handledTyped.length = 0;
     mocks.state.host = null;
     mocks.state.hosts.length = 0;
     mocks.state.dispatcherConstructions = 0;
@@ -2085,6 +2093,7 @@ describe('OpenTuiApp shell wiring', () => {
       modelOverride: 'qwen3-max',
       refreshContextFilesOnWrite: true,
       onComplete,
+      promptContext: ['Use the runbook'],
     } satisfies OpenTuiDispatchOutcome;
 
     await submit('/model summarize');
@@ -2092,6 +2101,7 @@ describe('OpenTuiApp shell wiring', () => {
       modelOverride: 'qwen3-max',
       refreshContextFilesOnWrite: true,
       onComplete,
+      promptContext: ['Use the runbook'],
       invocationEchoed: true,
     });
   });
@@ -3055,6 +3065,157 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.handledTexts).toEqual(['/compress']);
   });
 
+  it('hands a queued ?-form command the Mods refused back to the composer', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.handleResults.push({ kind: 'refused' });
+    const restoreSubmission = vi.fn();
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      composerHandle: {
+        current: { getText: () => '', setText: vi.fn(), restoreSubmission },
+      },
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('?compress now');
+    expect(screen.getByText(/Queued \?compress now/)).toBeTruthy();
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(restoreSubmission).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ text: '?compress now' }),
+      ),
+    );
+    expect(mocks.state.handledTexts).toEqual(['?compress now']);
+  });
+
+  it('hands refused queued ?-form inputs back once, in the order sent, with their pastes', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.handleResults.push({ kind: 'refused' }, { kind: 'refused' });
+    const restoreSubmission = vi.fn();
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      composerHandle: {
+        current: { getText: () => '', setText: vi.fn(), restoreSubmission },
+      },
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    const entry = (name: string) => {
+      const placeholder = `[Pasted Content ${name}]`;
+      const pastes = new Map([[placeholder, `${name} `.repeat(300)]]);
+      const displayText = `?compress ${placeholder}`;
+      return {
+        framed: framePasteExpansion(displayText, pastes),
+        displayText,
+        pastes,
+      };
+    };
+    const alpha = entry('alpha');
+    const beta = entry('beta');
+    for (const { framed, displayText, pastes } of [alpha, beta]) {
+      await submit(framed, undefined, {
+        displayText,
+        pasteExpansions: pastes,
+      });
+    }
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(restoreSubmission).toHaveBeenCalled());
+    expect(restoreSubmission).toHaveBeenCalledOnce();
+    // The hooks were offered what the composer showed.
+    expect(mocks.state.handledTyped).toEqual([
+      { displayText: alpha.displayText, pasteExpansions: alpha.pastes },
+      { displayText: beta.displayText, pasteExpansions: beta.pastes },
+    ]);
+    const restored = restoreSubmission.mock.calls[0][0];
+    expect(restored.text).toBe(`${alpha.displayText}\n\n${beta.displayText}`);
+    expect(restored.restoredDraft.pasteExpansions).toEqual(
+      new Map([...alpha.pastes, ...beta.pastes]),
+    );
+    // What the resubmit sends carries both pastes, framed once.
+    const modelText: string = restored.restoredDraft.modelText;
+    for (const { pastes } of [alpha, beta])
+      expect(modelText).toContain([...pastes.values()][0]);
+    expect(modelText.endsWith(CLIPBOARD_PASTE_FRAMING)).toBe(true);
+    expect(modelText.split(CLIPBOARD_PASTE_FRAMING)).toHaveLength(2);
+  });
+
+  it('keeps refused queued input for the composer a dialog opened behind it unmounts', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.handleResults.push(
+      { kind: 'refused' },
+      { kind: 'open_dialog', request: { dialog: 'help' } },
+    );
+    const restoreSubmission = vi.fn();
+    const composerHandle: OpenTuiComposerSlot = {
+      current: { getText: () => '', setText: vi.fn(), restoreSubmission },
+    };
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      composerHandle,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('?compress now');
+    await submit('/help');
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(screen.getByText('dialog:help')).toBeTruthy(),
+    );
+    expect(mocks.state.handledTexts).toEqual(['?compress now', '/help']);
+    // The composer is about to unmount, so the text waits for its next mount.
+    expect(restoreSubmission).not.toHaveBeenCalled();
+    expect(composerHandle.returned).toEqual(
+      expect.objectContaining({ text: '?compress now' }),
+    );
+  });
+
+  it('keeps ?-form input the Mods refused at once in the composer', async () => {
+    mocks.state.handleResults.push({ kind: 'refused' });
+    renderApp({ streaming: false });
+    await settle();
+    const onSubmit = mocks.state.inputProps?.['onSubmit'] as (
+      t: string,
+      i?: string[],
+      metadata?: OpenTuiSubmitOptions,
+    ) => Promise<boolean>;
+    let accepted: boolean | undefined;
+    await act(async () => {
+      accepted = await onSubmit('?btw key AKIA1', undefined, {
+        displayText: '?btw key AKIA1',
+      });
+    });
+    expect(mocks.state.handledTexts).toEqual(['?btw key AKIA1']);
+    // Not accepted, so the composer keeps the draft to edit.
+    expect(accepted).toBe(false);
+  });
+
   it('runs a mid-turn slash command that opted into streaming at once', async () => {
     renderApp({ streaming: true });
     await settle();
@@ -3826,6 +3987,7 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     mocks.state.handleResult = { kind: 'handled' };
     mocks.state.handleResults.length = 0;
     mocks.state.handledTexts.length = 0;
+    mocks.state.handledTyped.length = 0;
     mocks.state.host = null;
     mocks.state.hosts.length = 0;
     mocks.state.dispatcherConstructions = 0;
@@ -4087,6 +4249,7 @@ describe('OpenTuiApp transcript scroll region', () => {
     mocks.state.handleResult = { kind: 'handled' };
     mocks.state.handleResults.length = 0;
     mocks.state.handledTexts.length = 0;
+    mocks.state.handledTyped.length = 0;
     mocks.state.host = null;
     mocks.state.hosts.length = 0;
     mocks.state.dispatcherConstructions = 0;

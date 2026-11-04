@@ -14,7 +14,7 @@
 
 ESLint、Prettier 和 YAML 检查选择变更的完整文件。Prettier 从最近的、带有 Prettier 配置或忽略文件的祖先目录运行，因此没有嵌套配置的 diff 只需一次进程启动，而不是每个目录一次（启动开销有限但真实：实测每次冷启动约 0.24 秒，相对 37 秒的全仓运行，约 154 个变更目录才打平；近期 diff 远低于这个量级——#15524 统计中位数 3、最大 39——所以常见收益约半秒，而宽范围扫动不再按目录逐个付启动开销）。Shell 相关变更调用现有全量 ShellCheck，以保留被 source 脚本的覆盖；无关变更跳过。旧输出管道会吞掉检查器失败状态，因此严格执行 ShellCheck 失败需单独清理历史基线。workflow/action 变更保留全量 actionlint，因为可复用工作流存在跨文件契约。lint 规则、配置、忽略文件、依赖或 lint 实现变化时恢复全量检查。非 PR 事件继续全量。没有相关变更文件时明确记录跳过；diff 失败绝不能当作空列表成功通过。
 
-lint 安装步骤单独设置 `QWEN_SKIP_PREPARE=1` 和 `QWEN_SKIP_NOTICE_GENERATION=1`。保留依赖生命周期脚本与 patch-package。已有的干净 CLI 构建及 bundle 闭包检查移到文件 lint 之后、i18n、schema 和 notice 检查之前，产物供后续检查使用。测试任务保留正常 prepare。两个主要 hosted 任务复用已有 pnpm store 缓存 action；self-hosted store 继续使用现有路径。
+lint 安装步骤单独设置 `QWEN_SKIP_PREPARE=1` 和 `QWEN_SKIP_NOTICE_GENERATION=1`。保留依赖生命周期脚本与 patch-package。已有的干净 CLI 构建及 bundle 闭包检查移到文件 lint 之后、i18n、schema 和 notice 检查之前，产物供后续检查使用。测试任务现在同样以 `QWEN_SKIP_PREPARE=1` 安装，prepare 构建不再每个 shard 各跑一次：由 `test_build` 通过 `scripts/ci-build-cache.mjs` 构建一次，各 shard 解包它归档的产物；push 到 `main` 时仍然从零构建。两个主要 hosted 任务复用已有 pnpm store 缓存 action；self-hosted store 继续使用现有路径。
 
 ## 验证与验收
 
