@@ -2,7 +2,7 @@
 
 [English](2026-11-04-managed-publication-tenant-guards.md) | [简体中文](2026-11-04-managed-publication-tenant-guards.zh-CN.md)
 
-Status: design for review. No code changes yet.
+Status: C1 implemented; C2 and C3 are proposals.
 
 ## Problem and current state
 
@@ -42,15 +42,33 @@ shared tenant row taken first by both keeps them from deadlocking.
 
 Three increments, each its own PR, each with MySQL lock-wait evidence.
 
-### C1. Tenant quota on its own row
+### C1. Tenant quota without a lock
 
-Keep tenant-wide serialization for `reserve` only, on a dedicated
-`publication_quota` guard domain in `ma_tenant_guard`, taken by `reserve` and
-by quota release in collection. Other lanes stop contending with reservations.
-A counter row with a conditional update was considered; it still holds an
-exclusive row lock to the end of the reservation transaction, and adds a
-second source of truth beside the per-capture held bytes, so it buys nothing
-over a dedicated guard.
+The tenant byte limit (`tool-publication.tenant-bytes`) and the active-capture
+limit are protective caps, so a bounded overshoot is accepted. The ordinary
+apply lane (`ToolPublicationStore.applyLocked`: reserve, renew, fence,
+no-start release) and its publication writer no longer take
+`output_publication`.
+
+- The lane runs at READ COMMITTED, so each sum sees every reservation
+  committed before it. Two reservations of different Sessions can overlap
+  between their sums and commits and pass the tenant limits together. The
+  overshoot is at most the overlapping reservations times one allocation each
+  (capture size plus 4,784,128 bytes); it is held bytes, which shrink to used
+  bytes at finish, and later reservations are refused until bytes are freed,
+  so it does not accumulate.
+- The Session byte limit stays exact: reservations of one Session serialize
+  on its root, which the publication writer locks before the sums.
+- The lane takes Session root and head before the publication row, the order
+  collection uses, and never takes the publication guard after the root, so
+  it closes no cycle with retention (publication guard, root, head).
+- CSI publications keep the guard, as their retirement and continuation paths
+  expect.
+
+Considered and rejected: a dedicated `publication_quota` guard, or a counter
+row with a conditional update. Either keeps tenant-wide serialization of every
+reservation for an exact cap that a protective limit does not need; the
+counter row would also need updates at every held-byte shrink.
 
 ### C2. Publication lanes order on the Session, not the tenant
 
@@ -63,8 +81,7 @@ row, public Session.
   binding after the lock, as the
   [publication lock order design](2026-10-11-publication-lock-order-split.md)
   requires.
-- Collection keeps its order without the tenant row, except quota release,
-  which takes `publication_quota` before the head (C1).
+- Collection keeps its order without the tenant row.
 - The snapshot rule from the journal commit design applies: the first
   statement of each lane is a locking read, so later plain reads see what the
   other side committed.
@@ -101,8 +118,8 @@ cleanup references; the same handshake can then serve those references.
 - Removing tenant serialization exposes missing-key gap locks, order cycles
   and stale snapshots it hid; each increment needs independent MySQL
   connections in its tests, not H2 alone.
-- Quota stays tenant-serialized by design; tenants with heavy concurrent
-  output reservation still queue on `publication_quota`.
+- Tenant byte and active-capture limits can be exceeded briefly by
+  concurrent reservations of different Sessions (C1).
 
 ## Verification and acceptance
 

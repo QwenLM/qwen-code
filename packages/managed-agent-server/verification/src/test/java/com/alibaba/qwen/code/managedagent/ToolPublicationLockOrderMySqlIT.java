@@ -354,12 +354,14 @@ class ToolPublicationLockOrderMySqlIT {
 
     /**
      * On an ordinary Session every lane that holds the tenant CAS row
-     * reaches the Session root only after it: a publication renew takes
-     * placement → CAS → root, and the retention lane takes CAS → root.
-     * Taking the root first on the retention side (an earlier answer to
-     * #13800 R1-1) closes a cycle with every such lane on every Session,
-     * not only on pinned ones: the paused retention owner would hold the
-     * root while the renew holds CAS. Here both complete with no deadlock.
+     * reaches the Session root only after it, and the ordinary apply lane
+     * (reserve, renew) no longer takes the CAS row at all: a renew takes
+     * placement → root → head, including the read lease it takes for its
+     * evidence, and the retention lane takes CAS → root. Taking the CAS row
+     * after the root on either side (an earlier answer to #13800 R1-1, or a
+     * read lease that relocks the CAS row) closes a cycle. Here the renew
+     * completes while the retention owner holds the CAS row, and neither
+     * side deadlocks.
      */
     @Test
     void ordinaryPublicationBesideARetentionOwnerDoesNotDeadlock() throws Exception {
@@ -391,13 +393,13 @@ class ToolPublicationLockOrderMySqlIT {
                         .as("Retention owner holds its first row").isTrue();
                 var subject = subjects.submit(() -> journal.store.apply(journal.request("renew"),
                         WRITER_TOKEN, PUBLICATION_TOKEN));
-                MySqlLockProbe.awaitLockWaits(admin, schema, 1, "the publication renew");
-                source.releaseOwner.countDown();
-                owner.get(30, TimeUnit.SECONDS);
                 JsonNode renewed = subject.get(30, TimeUnit.SECONDS);
                 assertThat(renewed.path("state").asText()).isEqualTo(reserved.path("state").asText());
+                assertThat(owner.isDone()).as("The retention owner still holds the CAS row").isFalse();
+                source.releaseOwner.countDown();
+                owner.get(30, TimeUnit.SECONDS);
                 assertThat(MySqlLockProbe.innodbDeadlocks(admin) - deadlocksBefore)
-                        .as("Retention and publication agree on CAS before root").isZero();
+                        .as("The renew never takes the CAS row after the root").isZero();
             } finally {
                 source.releaseOwner.countDown();
                 source.enabled = false;

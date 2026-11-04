@@ -157,6 +157,13 @@ public class ManagedSessionStore
         return writerLifecycle.lockPublicationWriter(tenant, workspace, session, writer, generation, token);
     }
 
+    /** As above; {@code publicationGuard} false skips the tenant publication guard (ordinary apply lane). */
+    PublicationWriter lockPublicationWriter(String tenant, String workspace,
+            String session, String writer, long generation, String token, boolean publicationGuard) {
+        return writerLifecycle.lockPublicationWriter(tenant, workspace, session, writer, generation, token,
+                publicationGuard);
+    }
+
     @Transactional
     public WriterGrant acquireWriter(String tenantId, String sessionId,
             String writerToken, AcquireWriterRequest request) {
@@ -257,6 +264,12 @@ public class ManagedSessionStore
     public StoredResource readResource(String tenantId, String workspaceId,
             String sessionId, String resourceId, String writerToken) {
         return resourceReads.readResource(tenantId, workspaceId, sessionId, resourceId, writerToken);
+    }
+
+    /** As readResource, for a publication writer that already holds the Session's root and head. */
+    StoredResource readResourceUnderPublicationWriter(String tenantId, String workspaceId,
+            String sessionId, String resourceId, String writerToken) {
+        return resourceReads.readResource(tenantId, workspaceId, sessionId, resourceId, writerToken, true, true);
     }
 
     StoredResource readSnapshotResource(String tenantId, String workspaceId, String sessionId,

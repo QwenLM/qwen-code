@@ -409,10 +409,18 @@ class ManagedSessionGuardConvoyIT {
         var hold = manager.getTransaction(new DefaultTransactionDefinition());
         try {
             ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
-            assertFastGuardFailure(() -> {
-                journal.reserve();
-                return null;
-            });
+            // The apply lane no longer takes the publication guard: a
+            // reservation orders on its Session and accepts a bounded tenant
+            // quota overshoot, so a held guard neither parks nor names it.
+            // It runs on a fresh thread so it cannot join the held transaction.
+            long reserveBefore = System.nanoTime();
+            try (var reservePool = Executors.newSingleThreadExecutor()) {
+                reservePool.submit(() -> {
+                    journal.reserve();
+                    return null;
+                }).get(30, TimeUnit.SECONDS);
+            }
+            assertThat((System.nanoTime() - reserveBefore) / 1_000_000).isLessThan(BOUNDED_FAILURE_CEILING_MS);
         } finally {
             manager.rollback(hold);
         }

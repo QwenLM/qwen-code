@@ -49,6 +49,13 @@ final class JournalResourceReads {
 
     StoredResource readResource(String tenantId, String workspaceId,
             String sessionId, String resourceId, String writerToken, boolean updateVerification) {
+        return readResource(tenantId, workspaceId, sessionId, resourceId, writerToken, updateVerification, false);
+    }
+
+    // sessionLocked: the caller already holds the Session's root and head
+    // (a publication writer); see ToolPublicationRetentionStore.read.
+    StoredResource readResource(String tenantId, String workspaceId, String sessionId, String resourceId,
+            String writerToken, boolean updateVerification, boolean sessionLocked) {
         JournalStoreRows.validateScope(tenantId, workspaceId, sessionId);
         fencing.requireCredential(tenantId, workspaceId, sessionId, writerToken);
         if (updateVerification && ManagedNativeJournalSnapshots.isSnapshotId(resourceId)) {
@@ -58,7 +65,7 @@ final class JournalResourceReads {
         JournalStoreRows.HeadRow head = storeRows.requireHead(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, workspaceId, sessionId);
         fencing.requireReadGrant(head, writerToken);
-        try (var lease = outputRetention.read(tenantId, sessionId)) {
+        try (var lease = outputRetention.read(tenantId, sessionId, sessionLocked)) {
             String scopeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
             JournalStoreRows.ResourceRow resource = storeRows.findResource(scopeKey, resourceId, updateVerification);
             if (resource == null) {

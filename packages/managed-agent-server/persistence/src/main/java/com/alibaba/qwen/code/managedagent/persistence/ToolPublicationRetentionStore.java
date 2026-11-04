@@ -150,12 +150,19 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
 
     private static Map<String, Object> lockSessionHead(
             JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation) {
+        return lockSessionHead(jdbc, tenant, session, legacyMutation, true);
+    }
+
+    private static Map<String, Object> lockSessionHead(
+            JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation, boolean tenantGuard) {
         // Bound the root and head waits as well: holding the tenant guard
         // behind one Session's writer must not convoy unrelated Sessions
         // until the database's default lock timeout (#14393 A.2).
         return ManagedSessionStore.lockBoundedResult(() -> {
             int timeoutSeconds = ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS;
-            lockTenant(jdbc, tenant, timeoutSeconds);
+            if (tenantGuard) {
+                lockTenant(jdbc, tenant, timeoutSeconds);
+            }
             lockSessionRoot(jdbc, tenant, session, legacyMutation, timeoutSeconds);
             var heads = jdbc.query(
                     "SELECT state FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND"
@@ -377,9 +384,24 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     }
 
     public ReadLease read(String tenant, String session) {
+        return read(tenant, session, false);
+    }
+
+    /**
+     * {@code sessionLocked}: the caller's transaction already holds this
+     * Session's root and head, so retirement and collection, which need them
+     * too, cannot change it meanwhile. The tenant publication guard is then
+     * skipped: taking it after the root would invert retention's order
+     * (guard, root, head). The root and head are relocked re-entrantly.
+     */
+    public ReadLease read(String tenant, String session, boolean sessionLocked) {
         return transactions.execute(
                 status -> {
-                    lockGenericSession(jdbc, tenant, session);
+                    if (sessionLocked) {
+                        lockSessionHead(jdbc, tenant, session, true, false);
+                    } else {
+                        lockGenericSession(jdbc, tenant, session);
+                    }
                     requireLive(jdbc, tenant, session);
                     long generation =
                             jdbc.queryForObject(

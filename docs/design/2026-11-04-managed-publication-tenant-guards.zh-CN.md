@@ -2,7 +2,7 @@
 
 [English](2026-11-04-managed-publication-tenant-guards.md) | [简体中文](2026-11-04-managed-publication-tenant-guards.zh-CN.md)
 
-状态：待评审的设计，尚无代码改动。
+状态：C1 已实现；C2、C3 为方案。
 
 ## 问题与现状
 
@@ -37,12 +37,24 @@
 
 分三步，各自一个 PR，每步都附 MySQL 锁等待证据。
 
-### C1. 租户配额使用独立的行
+### C1. 租户配额不加锁
 
-只为 `reserve` 保留租户级串行，改用 `ma_tenant_guard` 中独立的 `publication_quota` 域，由
-`reserve` 和回收中的配额释放获取。其他车道不再与预留争用。曾考虑用计数行加条件更新；它仍要
-持有排他行锁直到预留事务结束，还会在每条 capture 的已占用字节之外引入第二个数据来源，相比
-独立的 guard 没有收益。
+租户字节上限（`tool-publication.tenant-bytes`）和活跃捕获数上限是保护性上限，接受有界的
+超额。普通 apply 车道（`ToolPublicationStore.applyLocked`：reserve、renew、fence、未开始
+释放）及其发布写入方不再获取 `output_publication`。
+
+- 该车道运行在 READ COMMITTED 下，每次汇总都能看到之前已提交的所有预留。不同 Session 的两次
+  预留可能在各自汇总与提交之间重叠，一起越过租户上限。超额最多为重叠的预留数乘以每次分配
+  （捕获大小加 4,784,128 字节）；超出的是 held 字节，finish 后会缩回 used，之后的预留在
+  空间释放前都会被拒绝，因此不会累积。
+- Session 字节上限仍然精确：同一 Session 的预留在其 root 上串行，发布写入方在汇总之前锁定
+  该 root。
+- 该车道先锁 Session root 和 head，再锁 publication 行，与回收的顺序一致；锁 root 之后不再
+  获取 publication guard，因此不会与 retention（publication guard、root、head）形成环路。
+- CSI 发布保留该 guard，这是其退役与 continuation 路径的预期。
+
+考虑过但未采用：独立的 `publication_quota` guard，或计数行加条件更新。两者都会为了精确上限
+继续按租户串行每一次预留，而保护性上限并不需要；计数行还需要在每次 held 字节缩小时更新。
 
 ### C2. 发布车道按 Session 排序，而不是按租户
 
@@ -52,7 +64,7 @@ head、publication 行、公共 Session。
 - 车道把 `lockPublicationWriter`（root、head）移到 publication 行锁之前。按照
   [发布锁顺序设计](2026-10-11-publication-lock-order-split.zh-CN.md)的要求，加锁之后仍会
   读取 publication 行并与存储的 binding 核对。
-- 回收保持原顺序但去掉租户行；只有配额释放会在 head 之前获取 `publication_quota`（C1）。
+- 回收保持原顺序但去掉租户行。
 - 沿用 journal commit 设计中的快照规则：每条车道的第一条语句是锁定读，之后的普通读能看到
   另一侧已提交的内容。
 
@@ -80,7 +92,7 @@ binding 握手；同一握手之后也可用于这些引用。
 
 - 去掉租户串行会暴露原本被掩盖的缺失键间隙锁、顺序环路和过期快照；每一步的测试都需要独立
   的 MySQL 连接，不能只用 H2。
-- 配额按设计仍按租户串行；并发预留输出很多的租户仍会在 `publication_quota` 上排队。
+- 不同 Session 的并发预留可能让租户字节上限和活跃捕获数上限短暂被超出（C1）。
 
 ## 验证与验收
 

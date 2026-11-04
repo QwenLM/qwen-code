@@ -317,15 +317,27 @@ public final class ToolPublicationStore {
         String id = candidate == null ? text(request, "publicationId") : text(candidate, "publicationId");
         PublicationTarget target = lockPublicationPlacement(key, id, candidate);
         lockOriginal(target.binding(), false, target.runtime());
-        // Every mutation uses this order, including no-start capacity release.
-        // The tenant guard is this entry's first acquisition, so it runs
-        // bounded with the shared named-failure mapping: a held row answers
-        // tenant_guard_contended instead of out-waiting the caller (#13800).
-        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
-                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        // Every mutation uses this order, including no-start capacity release:
+        // Session root and head, then the publication row, as collection does.
+        // An ordinary publication takes no tenant publication guard:
+        // reservations of one Session serialize on its root, so the Session
+        // byte limit stays exact, and this lane reads committed data, so a
+        // reservation sees every one committed before its sums. Reservations
+        // of different Sessions may overlap between their sums and commits and
+        // briefly pass the tenant byte and active-capture limits together;
+        // that bounded, self-correcting overshoot is accepted (design
+        // 2026-11-04-managed-publication-tenant-guards). A CSI publication
+        // keeps the guard first, bounded with the shared named-failure
+        // mapping, as its retirement and continuation paths expect (#13800).
+        boolean csi = WorkspaceCsiReservationStore.PROVISIONER_KIND
+                .equals(target.runtime().getRequest().getProvisionerKind());
+        if (csi) {
+            ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
+                    ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        }
         JsonNode owner = request.get("owner");
         var writer = sessions.lockPublicationWriter(tenant, workspace, session,
-                text(owner, "writerId"), owner.get("writerGeneration").longValue(), writerToken);
+                text(owner, "writerId"), owner.get("writerGeneration").longValue(), writerToken, csi);
         String operation = text(request, "operation");
         List<Row> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture"
                         + " WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
@@ -490,7 +502,7 @@ public final class ToolPublicationStore {
                 "Original intent conflicts");
         requireCheckpoint(b, readResource(b, b.get("checkpointRef"), writerToken), writer);
         if (!writer.checkpointId().equals(text(b.get("checkpointRef"), "resourceId"))) {
-            var current = sessions.readResource(text(key, "tenantId"), text(key, "workspaceId"),
+            var current = sessions.readResourceUnderPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
                     text(key, "sessionId"), writer.checkpointId(), writerToken);
             require("managed-checkpoint".equals(current.kind()) && current.schemaVersion() == 1
                     && current.byteLength() <= ManagedSessionStoreModels.MAX_EVENT_BYTES, "Current checkpoint is invalid");
@@ -625,9 +637,11 @@ public final class ToolPublicationStore {
                 "Checkpoint execution identity conflicts");
     }
 
+    // Called only by requireEvidence, after lockPublicationWriter holds the
+    // Session's root and head.
     private JsonNode readResource(JsonNode b, JsonNode ref, String writerToken) {
         JsonNode key = b.get("sessionKey");
-        var resource = sessions.readResource(text(key, "tenantId"), text(key, "workspaceId"),
+        var resource = sessions.readResourceUnderPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
                 text(key, "sessionId"), text(ref, "resourceId"), writerToken);
         require(resource.kind().equals(text(ref, "kind")) && resource.schemaVersion() == ref.get("schemaVersion").intValue()
                 && resource.byteLength() == ref.get("byteLength").longValue()
