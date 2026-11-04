@@ -7,8 +7,10 @@
 #                 that concludes cancelled, #16214); wins even when a shutdown
 #                 annotation coexists on the same job.
 #   concurrency - shutdown / higher-priority / operation-canceled annotations
-#                 and no timeout (a deliberate supersede).
-#   unknown     - neither, or the jobs/annotations could not be read or
+#                 and no timeout (a deliberate supersede), OR a cancelled run
+#                 with no cancelled job at all (it ran nothing; #16280 R1-2).
+#   unknown     - cancelled jobs exist but their annotations could not be read
+#                 or matched neither pattern, or the jobs pages could not be
 #                 certified complete; callers fail open on this so an
 #                 unclassifiable cancellation cannot hide.
 set -uo pipefail
@@ -35,8 +37,10 @@ fi
 
 timeout_found=false
 concurrency_found=false
+cancelled_seen=false
 while IFS=$'\t' read -r _ check_run_id; do
   [[ -n "${check_run_id}" ]] || continue
+  cancelled_seen=true
   if ! annotations="$(
     gh api --paginate \
       "repos/${REPO}/check-runs/${check_run_id}/annotations" \
@@ -59,6 +63,11 @@ done < <(
 if [[ "${timeout_found}" == 'true' ]]; then
   echo timeout
 elif [[ "${concurrency_found}" == 'true' ]]; then
+  echo concurrency
+elif [[ "${cancelled_seen}" != 'true' ]]; then
+  # A cancelled run with no cancelled job ran nothing (displaced while queued,
+  # or cancelled after only success/skipped jobs): there is no breakage to
+  # report, so treat it as a supersede rather than failing open (#16280 R1-2).
   echo concurrency
 else
   echo unknown

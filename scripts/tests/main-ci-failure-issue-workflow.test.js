@@ -603,6 +603,44 @@ printf '%s\\n' '1'
       expect(resolved.stdout).toContain('failing open');
     });
 
+    it('skips a cancelled run that ran no job (displaced while queued)', () => {
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == */attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[],"total_count":0}'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { RUN_CONCLUSION: 'cancelled' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('concurrency supersede');
+    });
+
+    it('fails open when the jobs pages cannot be certified complete', () => {
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == */check-runs/*/annotations* ]]; then
+  printf '%s\\n' 'The operation was canceled.'
+  exit 0
+fi
+if [[ "$*" == */attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":2}'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { RUN_CONCLUSION: 'cancelled' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('failing open');
+    });
+
     it('skips reporting when the run has moved on to a later attempt', () => {
       // Measured on run 39237270547: attempt 1 failed on the host lock,
       // attempt 2 went green, and this job started hours later, read the green
@@ -754,6 +792,31 @@ printf '%s\\n' '1'
       );
       expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
       expect(resolved.stdout).toContain('the newer push run owns its result');
+    });
+    it('does not let a concurrency-cancelled successor swallow the report', () => {
+      // Same shape as the timeout case but the successor's cancelled job carries
+      // a supersede annotation, so the classifier says concurrency and the
+      // == 'timeout' comparison must be false: the older run still reports.
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == *commits/main* ]]; then printf '%s\\n' 'new-head'; exit 0; fi
+if [[ "$*" == *actions/workflows/*/runs* ]]; then printf '%s\\n' 'completed cancelled 555 1'; exit 0; fi
+if [[ "$*" == *actions/runs/555/attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  exit 0
+fi
+if [[ "$*" == */check-runs/9001/annotations* ]]; then
+  printf '%s\\n' 'The operation was canceled.'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { EVENT_NAME: 'push', HEAD_BRANCH: 'main', HEAD_SHA: 'old-head' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('does not own this result');
     });
     it('reports a push run whose successor has not settled, flagged provisional', () => {
       // A running successor proves nothing yet, and this job cannot wait for
