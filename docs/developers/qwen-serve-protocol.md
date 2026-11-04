@@ -4029,11 +4029,26 @@ Request:
 { "modelId": "qwen-staging" }
 ```
 
+With capability `session_set_model_transient`, callers may add the boolean
+`persistDefault: false` to keep user/workspace model and auth defaults unchanged.
+The selection still belongs to the session and remains eligible for cold
+restoration. Omission or `true` retains default-persisting behavior, subject to
+existing standalone-session rules. The SDK preflights the new capability only
+for `false`; it never falls back to a default-persisting switch on older daemons.
+Both ACP model setters accept the same field. Valid legacy
+`_meta["qwen.session.modelPersistDefault"]` remains supported; conflicting public
+and legacy values or invalid types are rejected before mutation.
+
+SDK callers can use
+`client.setSessionModel(id, model, { clientId, persistDefault: false })` or
+`session.setModel(model, { persistDefault: false })`. Existing positional
+`clientId` calls remain supported.
+
 Response: the ACP agent's model-switch result, forwarded verbatim — the
 daemon does not reshape it, so the top level carries no `modelId`. Read the
 switch details from `_meta.qwenModelSwitch`.
 
-On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler. A successful switch also records the session model in the session JSONL on a best-effort basis; when the record is written, daemon load/resume attempts to restore this session's model before authentication. If the recorded model can no longer be applied (model removed, credentials unavailable), restore uses a same-id registry route when one exists — for a runtime-snapshot record that can be a different endpoint than the recorded binding — and continues on the `settings.model.name` default only when no route resolves. `settings.model.name` is still updated as the default for **new** sessions.
+On success, publishes `model_switched` to the SSE stream. Session-only switches do not broadcast a workspace `settings_changed` event. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler. A successful switch also records the session model in the session JSONL on a best-effort basis; when the record is written, daemon load/resume attempts to restore this session's model before authentication. If the recorded model can no longer be applied (model removed, credentials unavailable), restore uses a same-id registry route when one exists — for a runtime-snapshot record that can be a different endpoint than the recorded binding — and continues on the `settings.model.name` default only when no route resolves. Default-persisting switches update `settings.model.name` as the default for **new** sessions.
 
 ### `GET /session/:id/message-groups`
 

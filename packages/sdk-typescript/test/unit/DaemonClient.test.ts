@@ -7066,6 +7066,55 @@ describe('DaemonClient', () => {
   });
 
   describe('setSessionModel', () => {
+    it('checks transient support before sending the option and client identity', async () => {
+      const { fetch, calls } = recordingFetch(({ url }) =>
+        jsonResponse(
+          200,
+          url.endsWith('/capabilities')
+            ? { v: 1, features: ['session_set_model_transient'] }
+            : {},
+        ),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.setSessionModel('s-1', 'qwen3-coder', {
+        clientId: 'client-1',
+        persistDefault: false,
+      });
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/capabilities',
+        'http://daemon/session/s-1/model',
+      ]);
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        modelId: 'qwen3-coder',
+        persistDefault: false,
+      });
+      expect(calls[1]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('rejects unsupported transient switches without a mutation', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { v: 1, features: ['session_set_model'] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.setSessionModel('s-1', 'qwen3-coder', {
+          persistDefault: false,
+        }),
+      ).rejects.toMatchObject({ capability: 'session_set_model_transient' });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toBe('http://daemon/capabilities');
+    });
+
+    it('does not preflight an explicit default-persisting switch', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.setSessionModel('s-1', 'qwen3-coder', {
+        persistDefault: true,
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/model');
+    });
+
     it('POSTs the modelId in the body and returns the agent response', async () => {
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });

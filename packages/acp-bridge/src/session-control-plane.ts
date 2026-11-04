@@ -14720,7 +14720,10 @@ export function createSessionControlPlane(
           // drift is corrected by `reconcileAfterRoundtrip`, which reads the
           // agent's authoritative selector and re-publishes if it differs.
           publishModelSwitched(entry, req.modelId, originatorClientId);
-          if (!isReservedStandaloneSessionSourceType(entry.sourceType)) {
+          if (
+            req._meta?.[SESSION_MODEL_PERSIST_DEFAULT_META_KEY] !== false &&
+            !isReservedStandaloneSessionSourceType(entry.sourceType)
+          ) {
             broadcastWorkspaceEvent({
               type: 'settings_changed',
               data: {

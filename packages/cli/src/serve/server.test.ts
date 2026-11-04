@@ -661,6 +661,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'slow_client_warning',
   'typed_event_schema',
   'session_set_model',
+  'session_set_model_transient',
   'client_identity',
   'client_heartbeat',
   'session_permission_vote',
@@ -27726,6 +27727,57 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/model', () => {
+    it.each([false, true])(
+      'maps persistDefault %s before the model mutation',
+      async (persistDefault) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post('/session/session-A/model')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            modelId: 'qwen3-coder',
+            sessionId: 'forged-session',
+            persistDefault,
+            _meta: { unrelated: 'retained' },
+          });
+        expect(res.status).toBe(200);
+        expect(bridge.setModelCalls[0]?.req).toMatchObject({
+          sessionId: 'session-A',
+          modelId: 'qwen3-coder',
+          _meta: {
+            unrelated: 'retained',
+            'qwen.session.modelPersistDefault': persistDefault,
+          },
+        });
+        expect(bridge.setModelCalls[0]?.req).not.toHaveProperty(
+          'persistDefault',
+        );
+      },
+    );
+
+    it.each([
+      { persistDefault: null },
+      { persistDefault: 'false' },
+      { persistDefault: 0 },
+      {
+        persistDefault: false,
+        _meta: { 'qwen.session.modelPersistDefault': true },
+      },
+    ])(
+      'rejects invalid or conflicting persistence before mutation: %j',
+      async (options) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post('/session/session-A/model')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ modelId: 'qwen3-coder', ...options });
+        expect(res.status).toBe(400);
+        expect(bridge.setModelCalls).toHaveLength(0);
+      },
+    );
+
     it('200 with the agent response on success', async () => {
       const bridge = fakeBridge({
         setModelImpl: async () => ({ _meta: { applied: true } }),

@@ -1008,8 +1008,17 @@ export class DaemonSessionClient {
     );
   }
 
-  setModel(modelId: string): Promise<SetModelResult> {
-    return this.client.setSessionModel(this.sessionId, modelId, this.clientId);
+  setModel(
+    modelId: string,
+    options?: { persistDefault?: boolean },
+  ): Promise<SetModelResult> {
+    return this.client.setSessionModel(
+      this.sessionId,
+      modelId,
+      options === undefined
+        ? this.clientId
+        : { clientId: this.clientId, persistDefault: options.persistDefault },
+    );
   }
 
   setConfigOption(

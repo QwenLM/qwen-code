@@ -51,6 +51,7 @@ import type {
 } from '../acp-session-bridge.js';
 import { FsError } from '../fs/errors.js';
 import { workflowRequestErrorStatus } from '../workflow-errors.js';
+import { parseSessionModelMetadata } from '../session-model-options.js';
 import { WorkspaceRuntimeInitializationError } from '../workspace-runtime-coordinator.js';
 import {
   TooManyActiveDeviceFlowsError,
@@ -3238,11 +3239,27 @@ export class AcpDispatcher {
               return;
             }
             if (configId === 'model') {
+              const modelOptions = parseSessionModelMetadata(params);
+              if (modelOptions.error) {
+                if (id !== undefined) {
+                  this.replySession(
+                    conn,
+                    sessionId,
+                    id,
+                    undefined,
+                    error(id, RPC.INVALID_PARAMS, modelOptions.error),
+                  );
+                }
+                return;
+              }
               await this.bridge.setSessionModel(
                 sessionId,
-                { modelId: rawValue } as unknown as Parameters<
-                  HttpAcpBridge['setSessionModel']
-                >[1],
+                {
+                  modelId: rawValue,
+                  ...(modelOptions.metadata
+                    ? { _meta: modelOptions.metadata }
+                    : {}),
+                } as unknown as Parameters<HttpAcpBridge['setSessionModel']>[1],
                 ctx,
               );
             } else if (configId === 'mode') {
@@ -3403,10 +3420,29 @@ export class AcpDispatcher {
               }
               return;
             }
+            const modelOptions = parseSessionModelMetadata(params);
+            if (modelOptions.error) {
+              if (id !== undefined) {
+                this.replySession(
+                  conn,
+                  sessionId,
+                  id,
+                  undefined,
+                  error(id, RPC.INVALID_PARAMS, modelOptions.error),
+                );
+              }
+              return;
+            }
             const ctx = this.sessionCtx(conn, sessionId, loopback);
             await this.bridge.setSessionModel(
               sessionId,
-              { modelId, sessionId },
+              {
+                modelId,
+                sessionId,
+                ...(modelOptions.metadata
+                  ? { _meta: modelOptions.metadata }
+                  : {}),
+              },
               ctx,
             );
             this.replySession(conn, sessionId, id, {});
