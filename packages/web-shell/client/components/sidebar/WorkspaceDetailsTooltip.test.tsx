@@ -169,6 +169,32 @@ describe('WorkspaceDetailsTooltip', () => {
     expect(facetRow(details, 'context')?.textContent).toBe('Context0');
   });
 
+  it('names trust-withheld hooks and the remedy in the hooks facet', async () => {
+    const details = await openDetails(
+      <WorkspaceDetailsTooltip
+        label="qwen-code"
+        cwd="/work/qwen-code"
+        overview={{
+          ...snapshot,
+          hooks: { initialized: true, count: 2, disabled: false, untrusted: 1 },
+        }}
+        items={['hooks']}
+      >
+        <button type="button">qwen-code</button>
+      </WorkspaceDetailsTooltip>,
+    );
+
+    expect(facetRow(details, 'hooks')?.textContent).toBe(
+      'Hooks2 (1 untrusted)',
+    );
+    expect(facetRow(details, 'hooks')?.getAttribute('title')).toContain(
+      'not loaded (folder not trusted)',
+    );
+    expect(facetRow(details, 'hooks')?.getAttribute('title')).toContain(
+      'security.folderTrust.enabled',
+    );
+  });
+
   it('marks a facet with an issue in the warning tone', async () => {
     const details = await openDetails(
       <WorkspaceDetailsTooltip
