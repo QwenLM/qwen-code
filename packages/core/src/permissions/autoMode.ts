@@ -18,6 +18,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { Content } from '@google/genai';
 import type { TrustedUserAnswerSnapshot } from './trusted-user-answers.js';
@@ -206,10 +207,14 @@ function getNormalizedQwenHomePrefixes(): string[] {
   // The global dir can sit outside a `.qwen` directory (QWEN_HOME, or the XDG
   // config directory on Linux), which the patterns above miss. The XDG dir is
   // covered even while ~/.qwen wins, since a write there can make it win.
-  const qwenHomes = [Storage.getGlobalQwenDir()];
-  const xdgDir = Storage.getXdgGlobalQwenDir();
-  if (xdgDir) qwenHomes.push(xdgDir);
-  const cacheKey = qwenHomes.join('\n');
+  // This runs for every path in a command, and resolving the default stats the
+  // filesystem, so the key is what the dirs derive from. A later ~/.qwen only
+  // swaps the XDG dir for one the patterns above already cover.
+  const cacheKey = [
+    process.env['QWEN_HOME'] && Storage.getGlobalQwenDir(),
+    process.env['XDG_CONFIG_HOME'],
+    os.homedir(),
+  ].join('\n');
   if (
     qwenHomePrefixesCacheKey === cacheKey &&
     qwenHomePrefixesCache !== undefined
@@ -217,6 +222,9 @@ function getNormalizedQwenHomePrefixes(): string[] {
     return qwenHomePrefixesCache;
   }
 
+  const qwenHomes = [Storage.getGlobalQwenDir()];
+  const xdgDir = Storage.getXdgGlobalQwenDir();
+  if (xdgDir) qwenHomes.push(xdgDir);
   const candidates = new Set<string>();
   for (const qwenHome of qwenHomes) {
     candidates.add(path.resolve(qwenHome));
