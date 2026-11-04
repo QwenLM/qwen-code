@@ -204,13 +204,21 @@ describe('build-and-publish-image workflow', () => {
     // so a hardcoded 127.0.0.1:7890 in the YAML would aim their buildkitd
     // at a dead port and break the paths that work today.
     expect(proxyDetectStep).toContain("id: 'buildkit_proxy'");
+    // One ordered pin instead of four independent substrings: hoisting the
+    // probe call out of the `{ ... } >> "$GITHUB_OUTPUT"` group leaves
+    // driver_opts empty while each substring pin stays green. The script's
+    // stdout must stay inside the group; its probe log goes to stderr and
+    // stays in the step log.
     expect(proxyDetectStep).toContain(
-      'bash .github/scripts/buildkitd-proxy-opts.sh',
+      [
+        'run: |',
+        '          {',
+        "            echo 'driver_opts<<EOF'",
+        '            bash .github/scripts/buildkitd-proxy-opts.sh',
+        "            echo 'EOF'",
+        '          } >> "$GITHUB_OUTPUT"',
+      ].join('\n'),
     );
-    // The script's stdout becomes the multiline output; its probe log goes
-    // to stderr and stays in the step log.
-    expect(proxyDetectStep).toContain("echo 'driver_opts<<EOF'");
-    expect(proxyDetectStep).toContain('>> "$GITHUB_OUTPUT"');
     expect(buildxStep).toContain(
       "driver-opts: '${{ steps.buildkit_proxy.outputs.driver_opts }}'",
     );
@@ -778,7 +786,10 @@ describe.skipIf(process.platform === 'win32')(
           join(dir, 'curl'),
           [
             '#!/bin/bash',
-            'echo "curl $*" >> "' + callsLog + '"',
+            // One token per NUL: `$*` joins argv with single spaces, which
+            // hides a deleted empty argument (`--noproxy ''`) from every
+            // assertion written against the joined line.
+            'printf "%s\\0" "$@" >> "' + callsLog + '"',
             `printf '%s' '${curlCode}'`,
             `exit ${curlExit}`,
             '',
@@ -808,11 +819,17 @@ describe.skipIf(process.platform === 'win32')(
           },
         },
       );
+      const calls = existsSync(callsLog) ? readFileSync(callsLog, 'utf8') : '';
       return {
         status: result.status,
         out: result.stdout,
         err: result.stderr,
-        calls: existsSync(callsLog) ? readFileSync(callsLog, 'utf8') : '',
+        // Raw NUL-separated log, kept as a string so the "no probe ran"
+        // cases can still assert ''.
+        calls,
+        // One token per entry: an empty argument survives the round trip, so
+        // deleting the `''` value of `--noproxy` cannot pass unnoticed.
+        argv: calls === '' ? [] : calls.split('\0').slice(0, -1),
       };
     };
 
@@ -839,21 +856,49 @@ describe.skipIf(process.platform === 'win32')(
           '',
         ].join('\n'),
       );
-      // The probe must aim at the exact endpoint whose poisoned resolution
-      // caused the incident, through the exact proxy it will inject.
-      expect(result.calls).toContain('-x http://127.0.0.1:7890');
-      expect(result.calls).toContain('https://registry-1.docker.io/v2/');
-      // Route pin, not text pin: an inherited NO_PROXY/no_proxy matching the
-      // registry would make curl dial direct while still printing 401, so a
-      // dead proxy would pass. The exclusion list must be cleared explicitly.
-      expect(result.calls).toMatch(/--noproxy\s+-x http:\/\/127\.0\.0\.1:7890/);
-      // Without the timeout a proxy that accepts and never answers hangs the
-      // detect step, which carries no timeout-minutes of its own.
-      expect(result.calls).toContain('--max-time 5');
+      // Exact argv, token by token. The probe must aim at the exact endpoint
+      // whose poisoned resolution caused the incident, through the exact
+      // proxy it will inject, and `--noproxy ''` must stay adjacent to `-x`:
+      // an inherited NO_PROXY/no_proxy matching the registry would make curl
+      // dial direct while still printing 401, so a dead proxy would pass.
+      // `-o /dev/null` and `--max-time 5` are held here for the same reason:
+      // deleting either lets a chatty or hung probe report a healthy code.
+      // The empty string also proves the log kept argv shape instead of
+      // `$*`-joining that value away.
+      expect(result.argv).toEqual([
+        '-s',
+        '-o',
+        '/dev/null',
+        '--max-time',
+        '5',
+        '--noproxy',
+        '',
+        '-x',
+        'http://127.0.0.1:7890',
+        '-w',
+        '%{http_code}',
+        'https://registry-1.docker.io/v2/',
+      ]);
       // The measurement reaches the step log, or the next broken build is
       // another manual SSH investigation (#16218 precedent).
       expect(result.err).toContain('buildkitd proxy:');
       expect(result.err).toContain('401');
+    });
+
+    it('keeps the fleet path as the default when the override is absent', () => {
+      // Every replay above injects QWEN_PROXY_ENV_FILE, so nothing read the
+      // production default. It cannot be replayed: the fleet manages that
+      // absolute path and a self-hosted host may legitimately have it, so a
+      // replay asserting "missing" would misread such a host as a defect.
+      // The literal is therefore the deterministic half — the override stays
+      // optional and points at the fleet file when unset.
+      const source = readFileSync(
+        '.github/scripts/buildkitd-proxy-opts.sh',
+        'utf8',
+      );
+      expect(source).toContain(
+        'PROXY_ENV_FILE="${QWEN_PROXY_ENV_FILE:-/etc/qwen-proxy-client/proxy.env}"',
+      );
     });
 
     it('accepts a 200 probe answer as well', () => {
