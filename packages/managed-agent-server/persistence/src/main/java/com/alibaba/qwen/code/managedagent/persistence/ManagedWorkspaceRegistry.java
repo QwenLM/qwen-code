@@ -281,6 +281,17 @@ public class ManagedWorkspaceRegistry
         return resolve(tenantId, actorId, selection, false, false);
     }
 
+    // The default Workspace is found through its generated unique key, so a
+    // locking resolution takes that one row rather than every Workspace row
+    // of the tenant, which a tenant_id range scan would lock.
+    static String selectionPredicate(WorkspaceSelection selection) {
+        return selection == null ? "default_tenant = ?" : "tenant_id = ? AND workspace_id = ?";
+    }
+
+    static Object[] selectionArguments(String tenantId, WorkspaceSelection selection) {
+        return selection == null ? new Object[] {tenantId} : new Object[] {tenantId, selection.workspaceId()};
+    }
+
     private ResolvedBinding resolve(String tenantId, String actorId, WorkspaceSelection selection,
             boolean lock, boolean requireOwner) {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
@@ -302,11 +313,11 @@ public class ManagedWorkspaceRegistry
                 "SELECT workspace_id, workspace_generation, storage_id, display_name,"
                         + " config_ref, policy_ref, state, workspace_kind FROM"
                         + " ma_workspace WHERE "
-                        + (selection == null ? "tenant_id = ? AND is_default = TRUE" : "tenant_id = ? AND workspace_id = ?")
+                        + selectionPredicate(selection)
                         + (lock ? " FOR UPDATE" : ""),
                 (result, row) -> new RegistryRow(workspaceRow(tenantId, result.getString("workspace_id"), result),
                         result.getString("workspace_kind")),
-                selection == null ? new Object[] {tenantId} : new Object[] {tenantId, selection.workspaceId()});
+                selectionArguments(tenantId, selection));
         if (records.isEmpty()) {
             if (selection == null) {
                 throw workspaceRequired();
