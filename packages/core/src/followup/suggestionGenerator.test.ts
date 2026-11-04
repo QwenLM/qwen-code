@@ -250,6 +250,18 @@ describe('shouldFilterSuggestion', () => {
         'ช่วยรันเทสต์ทั้งหมดอีกครั้งแล้วแก้บั๊กที่เจอและอธิบายสาเหตุให้ละเอียด',
       ),
     ).toBe('too_many_words');
+    // Cases where the word count and the 60-character fallback disagree, so
+    // they fail if the segmenter is silently disabled.
+    // 37 characters, 13 words: over the 12-word window.
+    expect(getFilterReason('กดปุ่มนี้แล้วรอสักครู่นะครับผมจะไปเอง')).toBe(
+      'too_many_words',
+    );
+    // 76 characters, 11 words: over the fallback cap, within the window.
+    expect(
+      getFilterReason(
+        'ปรับปรุงประสิทธิภาพการประมวลผลฐานข้อมูลอิเล็กทรอนิกส์ของมหาวิทยาลัยเทคโนโลยี',
+      ),
+    ).toBeNull();
   });
 
   it('falls back to a character bound for these scripts without full ICU', () => {
