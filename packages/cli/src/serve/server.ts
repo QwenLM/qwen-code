@@ -1103,12 +1103,18 @@ export function createServeApp(
   const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
   const trustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
     workspaceTrusted: true,
+    autoDiscover: true,
   });
   const untrustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
     workspaceTrusted: false,
     includeUntrustedSkills: true,
+    autoDiscover: true,
   });
   const getSkillsConfigStatus = (workspaceCwd: string, trusted: boolean) => {
+    const obsolete = trusted
+      ? untrustedSkillsConfigStatus
+      : trustedSkillsConfigStatus;
+    obsolete.invalidate?.(workspaceCwd);
     const provider = trusted
       ? trustedSkillsConfigStatus
       : untrustedSkillsConfigStatus;
@@ -1118,6 +1124,7 @@ export function createServeApp(
     trustedSkillsConfigStatus.invalidate?.(workspaceCwd);
     untrustedSkillsConfigStatus.invalidate?.(workspaceCwd);
   };
+  app.locals['invalidateSkillsConfigStatus'] = invalidateSkillsConfigStatus;
   const webTerminalRegistry = new WebTerminalRegistry();
   const webTerminalLocals = app.locals as {
     stopWebTerminalRegistry?: () => void;
@@ -4373,6 +4380,13 @@ export function createServeApp(
   }
 
   let appDrainComplete = false;
+  const disposeSkillsConfigStatus = async () => {
+    await Promise.all([
+      trustedSkillsConfigStatus.dispose?.(),
+      untrustedSkillsConfigStatus.dispose?.(),
+    ]);
+  };
+  serveAppLifecycle.addAppDrain(disposeSkillsConfigStatus);
   if (!deps.serveAppLifecycle)
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
