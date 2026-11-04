@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { normalizeDaemonEvent } from '../src/daemon/ui/normalizer.js';
+import {
+  createDaemonTranscriptState,
+  reduceDaemonTranscriptEvents,
+} from '../src/daemon/ui/transcript.js';
 import { describe, expect, it } from 'vitest';
 import {
   createToolLifecycleState,
@@ -37,15 +41,42 @@ const frame = (event: unknown) => ({
 describe('tool lifecycle', () => {
   it('does not create or overwrite Chat cards for metadata-only updates, including unknown versions', () => {
     for (const payload of [started, { ...started, v: 2 }]) {
+      const events = normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: { update: frame(payload) },
+      });
+      // A recognised lifecycle frame carries the late name for an existing
+      // block; neither case may create a card.
       expect(
-        normalizeDaemonEvent({
-          id: 1,
-          v: 1,
-          type: 'session_update',
-          data: { update: frame(payload) },
-        }),
-      ).toEqual([]);
+        reduceDaemonTranscriptEvents(createDaemonTranscriptState(), events)
+          .blocks,
+      ).toHaveLength(0);
     }
+    expect(
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: { update: frame({ ...started, v: 2 }) },
+      }),
+    ).toEqual([]);
+    expect(
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: { update: frame(started) },
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'tool.update',
+        toolCallId: 'c',
+        toolName: 'shell',
+        nameOnly: true,
+      }),
+    ]);
     expect(
       normalizeDaemonEvent({
         id: 1,

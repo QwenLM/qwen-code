@@ -306,6 +306,12 @@ export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
   title?: string;
   status?: string;
   toolName?: string;
+  /**
+   * Set when the event only carries a late-arriving tool name (a metadata
+   * lifecycle frame). Reducers may name an existing block by `toolCallId`
+   * but must not create a block from it.
+   */
+  nameOnly?: boolean;
   /** Server-measured call timing; absent in older recordings. */
   startedAt?: number;
   durationMs?: number;

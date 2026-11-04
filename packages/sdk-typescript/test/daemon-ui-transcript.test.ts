@@ -1134,15 +1134,14 @@ it('preserves local command identity on read-only status results', () => {
 });
 
 describe('tool name carried only by the lifecycle metadata', () => {
-  const lifecycleFrame = (toolName: string) => ({
-    v: 1,
+  const producerFrame = (patch: Record<string, unknown> = {}) => ({
+    v: 1 as const,
     id: 1,
-    type: 'session_update',
+    type: 'session_update' as const,
     data: {
       update: {
-        sessionUpdate: 'tool_call_update',
+        sessionUpdate: 'tool_call_update' as const,
         toolCallId: 'call-1',
-        status: 'completed',
         _meta: {
           toolLifecycle: {
             v: 1,
@@ -1150,7 +1149,7 @@ describe('tool name carried only by the lifecycle metadata', () => {
             sessionId: 'session',
             executionId: 'exec-1',
             callId: 'call-1',
-            toolName,
+            toolName: 'read_file',
             phase: 'ended',
             executionStatus: 'success',
             startedAt: 100,
@@ -1159,32 +1158,59 @@ describe('tool name carried only by the lifecycle metadata', () => {
             outcome: 'success',
           },
         },
+        ...patch,
       },
     },
   });
+  const createdFrame = {
+    v: 1 as const,
+    id: 0,
+    type: 'session_update' as const,
+    data: {
+      update: {
+        sessionUpdate: 'tool_call' as const,
+        toolCallId: 'call-1',
+        status: 'in_progress',
+      },
+    },
+  };
 
-  it('names the tool block from _meta.toolLifecycle.toolName', () => {
-    const state = reduceDaemonTranscriptEvents(
+  it('names an existing block from the producer lifecycle frame', () => {
+    const created = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
-      normalizeDaemonEvent(lifecycleFrame('read_file')),
+      normalizeDaemonEvent(createdFrame),
       { now: 1 },
     );
-    expect(state.blocks).toHaveLength(1);
-    expect(state.blocks[0]).toMatchObject({
+    expect(created.blocks).toHaveLength(1);
+    expect(created.blocks[0]).toMatchObject({ kind: 'tool', title: 'Tool' });
+
+    const named = reduceDaemonTranscriptEvents(
+      created,
+      normalizeDaemonEvent(producerFrame()),
+      { now: 2 },
+    );
+    expect(named.blocks).toHaveLength(1);
+    expect(named.blocks[0]).toMatchObject({
       kind: 'tool',
       toolName: 'read_file',
-      title: 'read_file',
+      // The human-readable title is never replaced by the bare tool name.
+      title: 'Tool',
     });
   });
 
   it('keeps an explicit title and _meta.toolName ahead of the lifecycle name', () => {
-    const frame = lifecycleFrame('read_file');
-    const update = frame.data.update;
-    update.title = 'Output retained';
-    update._meta = { ...update._meta, toolName: 'explicit_tool' };
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
-      normalizeDaemonEvent(frame),
+      normalizeDaemonEvent(
+        producerFrame({
+          status: 'completed',
+          title: 'Output retained',
+          _meta: {
+            toolLifecycle: producerFrame().data.update._meta.toolLifecycle,
+            toolName: 'explicit_tool',
+          },
+        }),
+      ),
       { now: 1 },
     );
     expect(state.blocks[0]).toMatchObject({

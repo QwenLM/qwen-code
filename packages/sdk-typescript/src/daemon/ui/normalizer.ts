@@ -38,6 +38,7 @@ import {
   stringifyJson,
   stringifyRedactedJson,
 } from './utils.js';
+import { extractToolLifecycle } from './tool-lifecycle.js';
 
 /**
  * Common base fields stamped on every normalized UI event. Centralized as a
@@ -1091,8 +1092,24 @@ function normalizeSessionUpdate(
         update['content'] === undefined &&
         update['title'] === undefined &&
         update['kind'] === undefined
-      )
-        return [];
+      ) {
+        // Lifecycle frames are the only name carrier for a subagent's tool
+        // call, so forward the name alone: the reducer names an existing
+        // block by `toolCallId` and never creates a card from it.
+        const lifecycle = extractToolLifecycle(update);
+        const lifecycleCallId =
+          getString(update, 'toolCallId') ?? lifecycle?.callId;
+        if (!lifecycle?.toolName || !lifecycleCallId) return [];
+        return [
+          {
+            ...base,
+            type: 'tool.update' as const,
+            toolCallId: lifecycleCallId,
+            toolName: lifecycle.toolName,
+            nameOnly: true,
+          },
+        ];
+      }
       if (
         getString(update, 'status') === 'in_progress' &&
         getString(update, 'kind') === undefined &&

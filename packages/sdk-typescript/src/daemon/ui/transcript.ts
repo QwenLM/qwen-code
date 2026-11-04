@@ -1046,6 +1046,19 @@ function upsertToolBlock(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'tool.update' }>,
 ): void {
+  if (event.nameOnly) {
+    const namedId = state.toolBlockByCallId[event.toolCallId];
+    const named = getWritableBlockById(state, namedId);
+    if (
+      named?.kind === 'tool' &&
+      named.toolName === undefined &&
+      event.toolName
+    ) {
+      named.toolName = event.toolName;
+      named.updatedAt = state.now;
+    }
+    return;
+  }
   const compactTaskOutput =
     !state.retainSubagentBlocks &&
     isRecord(event.rawOutput) &&
