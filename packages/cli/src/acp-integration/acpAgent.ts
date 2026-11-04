@@ -270,6 +270,7 @@ import {
   parseCallerSuppliedSessionId,
 } from '../config/session-id.js';
 import { loadMcpApprovals } from '../config/mcpApprovals.js';
+import { normalizeProjectRoot } from '../config/approval-project-root.js';
 import {
   getProjectHooksForApproval,
   getProjectHooksForApprovalFromRawWorkspace,
@@ -11020,10 +11021,21 @@ class QwenAgent implements Agent {
         }
         // Apply to every live config, not just the bootstrap one: each
         // session holds its own Config and the registry reads its flags.
-        const configs = new Set([
-          this.config,
-          ...this.getActiveSessions().map((session) => session.getConfig()),
-        ]);
+        // Scope by the admission-bound workspace root, not the live cwd:
+        // session/cd moves getTargetDir() into subdirectories (or out of
+        // the workspace), and the decision belongs to the workspace the
+        // daemon recorded it for.
+        const decisionRoot = normalizeProjectRoot(cwd);
+        const configs = new Set(
+          [
+            this.config,
+            ...this.getActiveSessions().map((session) => session.getConfig()),
+          ].filter(
+            (config) =>
+              normalizeProjectRoot(this.sessionWorkspaceRoot(config)) ===
+              decisionRoot,
+          ),
+        );
         for (const config of configs) {
           config.setProjectHooksPendingApproval(
             decision !== 'approve',

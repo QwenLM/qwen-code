@@ -35287,6 +35287,128 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
   });
 });
 
+describe('QwenAgent projectHooksApprove control', () => {
+  let capturedAgentFactory:
+    | ((conn: { closed: Promise<void> }) => {
+        extMethod: (
+          method: string,
+          args: Record<string, unknown>,
+        ) => Promise<Record<string, unknown>>;
+      })
+    | undefined;
+  const mockArgv = {} as CliArgs;
+  const mockSettings = {
+    merged: {},
+  } as unknown as LoadedSettings;
+
+  const makeConfig = (workspaceRoot: string) =>
+    ({
+      initialize: vi.fn().mockResolvedValue(undefined),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      closeSessionWriter: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getModel: vi.fn().mockReturnValue('test-model'),
+      getModelsConfig: vi.fn().mockReturnValue({
+        getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
+      }),
+      refreshAuth: vi.fn().mockResolvedValue(undefined),
+      getMcpServers: vi.fn().mockReturnValue({}),
+      getTopTierMcpServers: vi.fn().mockReturnValue(undefined),
+      getRuntimeMcpServers: vi.fn().mockReturnValue({}),
+      getCliAllowedMcpServerNames: vi.fn().mockReturnValue(undefined),
+      getApprovalMode: vi.fn().mockReturnValue('default'),
+      getBareMode: vi.fn().mockReturnValue(false),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getWorkspaceContext: vi.fn().mockReturnValue({}),
+      getDebugMode: vi.fn().mockReturnValue(false),
+      storage: { getProjectRoot: () => workspaceRoot },
+      getTargetDir: () => workspaceRoot,
+      setProjectHooksPendingApproval: vi.fn(),
+      getHookSystem: () => ({ reload: vi.fn().mockResolvedValue(undefined) }),
+      getExecutionEnvironment: () => undefined,
+      getToolRegistry: () => ({
+        getMcpClientManager: () => undefined,
+      }),
+    }) as unknown as Config;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConnectionState.reset();
+    capturedAgentFactory = undefined;
+    vi.mocked(resolveOutputLanguageOrPreserveAuto).mockImplementation(
+      (v: string | null | undefined) => v ?? 'auto',
+    );
+    vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
+      capturedAgentFactory = factory as typeof capturedAgentFactory;
+      return {
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      } as unknown as AgentSideConnection;
+    });
+  });
+
+  it('applies the decision only to configs bound to the requested workspace', async () => {
+    const bootstrap = makeConfig('/work/repo');
+    const agentPromise = runAcpAgent(bootstrap, mockSettings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      closed: mockConnectionState.promise,
+    });
+    const internals = agent as unknown as {
+      sessions: Map<string, { getConfig: () => Config }>;
+    };
+    const sameWorkspace = makeConfig('/work/repo');
+    // session/cd moved this one into a subdirectory of the same workspace.
+    const movedWithin = makeConfig('/work/repo');
+    (movedWithin.getTargetDir as () => string) = () => '/work/repo/sub';
+    const otherWorkspace = makeConfig('/work/elsewhere');
+    internals.sessions.set('same', { getConfig: () => sameWorkspace });
+    internals.sessions.set('moved', { getConfig: () => movedWithin });
+    internals.sessions.set('other', { getConfig: () => otherWorkspace });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.projectHooksApprove, {
+        cwd: '/work/repo',
+        decision: 'approve',
+      }),
+    ).resolves.toEqual({ decision: 'approve', reloaded: true });
+
+    for (const config of [bootstrap, sameWorkspace, movedWithin]) {
+      expect(config.setProjectHooksPendingApproval).toHaveBeenCalledWith(
+        false,
+        false,
+      );
+    }
+    expect(
+      otherWorkspace.setProjectHooksPendingApproval,
+    ).not.toHaveBeenCalled();
+
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.projectHooksApprove, {
+      cwd: '/work/repo',
+      decision: 'reject',
+    });
+    expect(
+      sameWorkspace.setProjectHooksPendingApproval,
+    ).toHaveBeenLastCalledWith(true, true);
+    expect(
+      otherWorkspace.setProjectHooksPendingApproval,
+    ).not.toHaveBeenCalled();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.projectHooksApprove, {
+        cwd: '/work/repo',
+        decision: 'maybe',
+      }),
+    ).rejects.toThrow('decision must be approve or reject');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+});
+
 describe('normalizeCoreSettingValue', () => {
   it('accepts a valid boolean and rejects a non-boolean', () => {
     expect(normalizeCoreSettingValue('general.vimMode', true)).toBe(true);
