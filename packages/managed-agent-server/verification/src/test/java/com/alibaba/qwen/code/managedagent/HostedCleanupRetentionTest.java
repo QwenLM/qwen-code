@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedRuntimeRetentionGuard;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.persistence.StoreLockTrace;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -50,6 +51,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.UnaryOperator;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -59,6 +61,7 @@ import static org.mockito.Mockito.mock;
 
 class HostedCleanupRetentionTest {
     private final ObjectMapper json = new ObjectMapper();
+    private StoreLockTrace trace;
     private DataSource source;
     private JdbcTemplate jdbc;
     private TransactionTemplate transactions;
@@ -77,7 +80,8 @@ class HostedCleanupRetentionTest {
 
     @BeforeEach
     void setup() {
-        source = dataSource();
+        trace = new StoreLockTrace(dataSource());
+        source = trace;
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
@@ -228,6 +232,40 @@ class HostedCleanupRetentionTest {
         assertThat(transactions.execute(status -> journal.commit(owed)).replayed()).isTrue();
         assertThat(transactions.execute(status -> journal.commit(confirmed)).replayed()).isTrue();
         assertThat(journalState()).isEqualTo(before);
+    }
+
+    @Test
+    void cleanupAcquiresPlacementBeforeItsSessionRoot() {
+        assertCleanupPlacement(records -> records, 0);
+    }
+
+    @Test
+    void cleanupWithCarriageReturnAcquiresPlacementBeforeItsSessionRoot() {
+        assertCleanupPlacement(records -> records.replace("\"managedSession\":", "\r\"managedSession\":"), 0);
+    }
+
+    @Test
+    void cleanupAfterAnotherEventAcquiresPlacementBeforeItsSessionRoot() {
+        assertCleanupPlacement(records -> {
+            String[] lines = records.split("\n");
+            var cleanup = (ObjectNode) com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(lines[0]);
+            var preceding = cleanup.deepCopy();
+            var event = (ObjectNode) preceding.path("managedSession");
+            event.put("kind", "operation.replayed").put("eventId", "preceding-event");
+            event.set("payload", json.createObjectNode());
+            var cleanupEvent = (ObjectNode) cleanup.path("managedSession");
+            cleanupEvent.put("sequence", cleanupEvent.path("sequence").longValue() + 1);
+            return preceding + "\n" + cleanup + "\n" + lines[1] + "\n";
+        }, 1);
+    }
+
+    private void assertCleanupPlacement(UnaryOperator<String> editRecords, int extraEvents) {
+        var request = cleanupRequest("placement", "prompt", "owed", original.getGeneration(), editRecords, extraEvents);
+        trace.clear();
+        transactions.executeWithoutResult(status -> journal.commit(request));
+        trace.assertPlacementBeforeSession("tenant", "harness");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind = 'HOSTED_CLEANUP'", Long.class))
+                .isEqualTo(1);
     }
 
     void committedCleanupProtectsBindingFromSweepWaitingForPlacement() throws Exception {
@@ -382,6 +420,11 @@ class HostedCleanupRetentionTest {
     }
 
     private CommitTransactionRequest cleanupRequest(String id, String prompt, String state, long generation) {
+        return cleanupRequest(id, prompt, state, generation, records -> records, 0);
+    }
+
+    private CommitTransactionRequest cleanupRequest(String id, String prompt, String state, long generation,
+            UnaryOperator<String> editRecords, int extraEvents) {
         ObjectNode body = json.createObjectNode().put("v", 1).put("promptId", prompt)
                 .put("runtimeSessionId", prompt).put("bindingId", original.getBindingId())
                 .put("generation", Long.toString(generation)).put("workspaceGeneration", "1")
@@ -397,7 +440,7 @@ class HostedCleanupRetentionTest {
                     ObjectNode payload = event.putObject("payload").put("cleanupId", id).put("state", state);
                     payload.putObject("descriptorRef").put("resourceId", resource).put("kind", "hosted-turn-cleanup")
                             .put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", descriptor.digest());
-                }, records -> records);
+                }, editRecords, extraEvents);
         var resources = new java.util.ArrayList<>(template.resources());
         resources.add(descriptor);
         return new CommitTransactionRequest(template.workspaceId(), template.writerId(), template.writerGeneration(),

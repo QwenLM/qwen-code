@@ -16,8 +16,9 @@ writer 与 sweep 竞争时在 sweep 获胜后提交悬空引用。这些是正�
 ## 决策与锁顺序
 
 只有包含 `hosted.cleanup` 事件的 journal 事务才在 Session/root 锁之前取得已有
-的有界租户 placement guard。从已校验的 record bytes 识别事件，覆盖混合事务与
-JSON 转义；不依赖调用者填写的 operation 名称或 resource 列表。不含该事件的普通
+的有界租户 placement guard。从已校验的 record bytes 按仅 LF 分隔的 JSONL 边界
+识别事件，覆盖混合事务、JSON 内的原始 CR 空白与 JSON 转义；不依赖调用者填写的
+operation 名称或 resource 列表。不含该事件的普通
 事务保留 Session-first 路径。
 
 | 路径                 | 相关锁顺序                                        |
@@ -41,14 +42,15 @@ retention 看到债务并保留原 Runtime。
 
 ## 兼容性与范围
 
-- Confirmation 在原 Runtime 已回收后仍可删除引用；它不新增债务，不要求 binding
-  仍然存在。
+- Journal confirmation 不新增债务，也不要求 binding 仍然存在。当前 Harness 会先
+  通过 Broker 释放原 binding；该生产路径仍会拒绝已回收的 binding。通过该路径
+  修复此前已存在的悬空债务，不在本次准入修改范围内。
 - 已提交命令重放原 receipt，不重新执行新债务准入；确认并回收后也保持该语义。
 - 既有 descriptor/重放身份检查保持不变。本次增加持久化 binding 的作用域与
   generation 校验，不重新设计 Runtime Session 所有权或 release 授权。
-- 不涉及 schema、公开 API 结构、配额、Workspace 创建或 provider 变更。Cleanup
-  事务现在可能等待租户 placement，并使用已有的有界可重试拒绝；其他 journal
-  流量仍保持独立。
+- 不涉及 schema、公开 API 结构、配额、Workspace 创建或 provider 变更。所有
+  cleanup 事务（包括 confirmation 与命令重放）现在都可能等待租户 placement，
+  并使用已有的有界可重试拒绝；不含 cleanup 事件的 journal 流量仍保持独立。
 
 ## 验证与验收
 
@@ -56,7 +58,9 @@ retention 看到债务并保留原 Runtime。
 cleanup-first 两种顺序。覆盖缺失 binding、作用域/generation 不匹配、resource/
 reference/journal 状态回滚、回收后的 confirmation 与命令重放、shared binding，
 以及无关 placement 被持有时普通 journal commit 仍能前进。复用已有 H2/MySQL
-cleanup、journal 锁契约和锁序测试，并运行 Checkstyle。
+cleanup、journal 锁契约和锁序测试，并运行 Checkstyle。对普通 cleanup 记录、
+JSON 内的原始 CR 空白，以及混合批次中位于其他事件之后的 cleanup，跟踪并断言
+同一事务内先取得 placement，再取得 Session root。
 
 遵循 Managed Agent 模块的共享本地验证预算。完整 Java、MySQL 和相关 Hosted/fault
 验收仍由 CI 完成；本地定向通过不等于完整验收。

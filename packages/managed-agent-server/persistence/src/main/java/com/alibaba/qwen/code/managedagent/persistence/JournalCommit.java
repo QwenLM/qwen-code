@@ -25,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -73,7 +74,7 @@ final class JournalCommit {
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
         JournalStoreRows.validateStableId(request.writerId(), "writerId");
         ValidatedCommit validated = validateCommit(request);
-        if (new String(validated.recordBytes(), StandardCharsets.UTF_8).lines()
+        if (Arrays.stream(new String(validated.recordBytes(), StandardCharsets.UTF_8).split("\n"))
                 .map(com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore::parse)
                 .filter(Objects::nonNull)
                 .anyMatch(record -> "hosted.cleanup".equals(record.path("managedSession").path("kind").asText()))) {
