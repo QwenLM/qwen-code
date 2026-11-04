@@ -3813,6 +3813,16 @@ fills a per-run WORKDIR with API dumps that no VM teardown
 removes on the pool, so it gets a fixed autofix* per-run path
 (the age sweep can reclaim it after a hard kill), an EXIT
 trap, and an always() cleanup step mirroring issue-autofix.
+That cleanup must be the LAST step, after every reader including
+the artifact upload: nothing else removes the per-run WORKDIR, so
+on the persistent pool every run would otherwise leave its
+transcripts and decision files behind forever, and moving the
+`rm -rf "${WORKDIR}"` ahead of the upload deletes the transcript
+before its last reader — the upload's `if-no-files-found: ignore`
+then turns that into a silent no-op artifact. always() covers
+cancellation too; only a hard runner kill abandons the dir, and
+run_id never repeats, so the age sweep in Reset autofix workspace
+reclaims it.
 ```
 
 <a id="af-149"></a>
@@ -4646,6 +4656,14 @@ counted in eval markers rather than in ROUND:
   run still charges once. A run that is cancelled or dies in setup is
   NOT free: the report step runs on always() and writes its marker with
   a sentinel timestamp, so the census charges it.
+- The eval marker's fields are POSITIONAL in the scan regex
+  (`.[0]=ts .[2]=round .[3]=win .[4]=run`), so every write site must emit
+  `ts= acted= round= win= run=` in that order verbatim. Adding a field or
+  reordering them still produces a well-formed marker while the regex
+  binds the wrong captures, and the window watermark, round accounting
+  and budget census then count wrong numbers — which the consecutive and
+  cumulative caps gate on. Only the bot's own comments are trusted, so a
+  spoofed marker is ignored.
 - A breaker stop is NOT a spent budget. Three shapes reach the cap gate
   with the budget spent anyway: the consecutive-failure breaker jumps
   the round to MAX_ROUNDS with a real timestamp (no trailing sentinel),

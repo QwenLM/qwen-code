@@ -3740,7 +3740,7 @@ jobs:
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
           # A missing trusted-base heartbeat copy must leave no plantable staged file.
-          # Full rationale → qwen-autofix.md#af-149
+          # Full rationale → qwen-autofix.md#af-158
           rm -rf "${RUNNER_TEMP}/autofix-status-heartbeat.sh"
           cp .github/scripts/autofix-status-heartbeat.sh "${RUNNER_TEMP}/autofix-status-heartbeat.sh" 2> /dev/null || true
           # Verify staged script digests before execution.
@@ -4978,7 +4978,7 @@ jobs:
           # re-pins from the same capture). Full rationale → qwen-autofix.md#af-149
           export PATH="${TRUSTED_PATH}"
           # Mint a fresh gh config per call so a planted socket cannot capture the PAT.
-          # Full rationale → qwen-autofix.md#af-112
+          # Full rationale → qwen-autofix.md#af-149
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
           # The config dir is minted PER CALL (the R11-1 shape): every gh
