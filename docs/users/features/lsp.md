@@ -310,18 +310,18 @@ Code action kinds:
 
 ## Security
 
-LSP servers are only started in trusted workspaces by default. This is because language servers run with your user permissions and can execute code.
+Language servers run with your user permissions and can execute code. Servers configured by a workspace's `.lsp.json` require **explicit folder trust**, including their executable availability probes and hot reloads. Enable `security.folderTrust.enabled` in user settings and trust the directory, or grant workspace trust through your IDE. Disabling folder trust does not authorize workspace LSP configurations, including in YOLO mode.
 
 ### Trust Controls
 
-- **Trusted Workspace**: LSP servers start if configured
-- **Untrusted Workspace**: LSP servers won't start unless `trustRequired: false` is set in the server configuration
+- **Explicitly Trusted Workspace**: Workspace LSP servers start if configured.
+- **No Explicit Trust**: Workspace `.lsp.json` servers are skipped. The repository cannot override this by setting `trustRequired: false` or declaring an extension source.
 
-To mark a workspace as trusted, use the `/trust` command.
+After enabling folder trust in user settings, use the startup trust dialog or `/trust` to trust the directory. Restart after changing the CLI's trust decision.
 
 ### Per-Server Trust Override
 
-You can override trust requirements for specific servers in their configuration:
+Installed extensions retain their existing trust policy. An extension can declare `trustRequired: false` when the host permits LSP discovery in untrusted workspaces. This override is ignored in workspace `.lsp.json`:
 
 ```json
 {

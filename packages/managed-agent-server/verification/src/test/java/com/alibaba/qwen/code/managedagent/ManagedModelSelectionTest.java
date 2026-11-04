@@ -12,7 +12,6 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelSelection
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
@@ -265,7 +264,7 @@ class ManagedModelSelectionTest {
                     "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         }
         if (shape.equals("recovery")) {
-            transaction().execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).acquireWriter(tenant, session,
+            transaction().execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).acquireWriter(tenant, session,
                     "model-selection-writer-token-0123456789", new AcquireWriterRequest("ws", "writer", 60_000L)));
             jdbc.update("UPDATE ma_session_head SET recovery_status='BLOCKED' WHERE tenant_id=?", tenant);
         }
@@ -385,6 +384,20 @@ class ManagedModelSelectionTest {
 
     private ManagedAgentService service(ManagedAgentStore source) {
         return new ManagedAgentService(source, new RequestDigests(), mock(HarnessCoordinator.class), harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+    }
+
+    @Test
+    void modelChangeDoesNotWaitForTheTenantPlacementGuard() throws Exception {
+        try (var holder = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
+            holder.setAutoCommit(false);
+            com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.lockPlacementDomain(holder, tenant);
+            try {
+                assertThat(change("actor", "guarded", "model-a", 0).modelSelection())
+                        .isEqualTo(new WebShellModelSelection("model-a", 1));
+            } finally {
+                holder.rollback();
+            }
+        }
     }
 
     private WebShellModelChangeResult change(String actor, String key, String model, long revision) {

@@ -5,6 +5,7 @@
  */
 
 import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
+import type { ContentGeneratorConfig } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { isInteractiveInvocation } from '../utils/interactive-mode.js';
 import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
 import {
@@ -1763,6 +1764,7 @@ export async function loadCliConfig(
    * construction may install the executor-boundary callback.
    */
   hostPolicy?: {
+    modelConfiguration?: ContentGeneratorConfig & { authType: AuthType };
     toolInvocationGuard?: ToolInvocationGuard;
     workflowAncestorTrustProvider?: ConfigParameters['workflowAncestorTrustProvider'];
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
@@ -1784,6 +1786,20 @@ export async function loadCliConfig(
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
+  const modelConfiguration = hostPolicy?.modelConfiguration;
+  if (modelConfiguration) {
+    settings = {
+      ...settings,
+      modelProviders: {},
+      providerProtocol: {},
+      fastModel: undefined,
+      compactionModel: undefined,
+      advisorModel: undefined,
+      visionModel: undefined,
+      imageModel: undefined,
+      modelFallbacks: undefined,
+    };
+  }
   assertKnownOmniSettingKeys(settings);
   const agentHostReadOnly = hostPolicy?.agentHostReadOnly === true;
   const sshWorkspace = agentHostReadOnly ? undefined : readSshWorkspace(cwd);
@@ -2275,18 +2291,49 @@ export async function loadCliConfig(
   // up-front provider validation above is what classifies invalid configuration;
   // this call's own settings reads must not re-wrap a resolver
   // defect as a user config error, so it stays unwrapped.
-  const resolvedCliConfig = resolveCliGenerationConfig({
-    argv: {
-      model: argv.model,
-      openaiApiKey: argv.openaiApiKey,
-      openaiBaseUrl: argv.openaiBaseUrl,
-      openaiLogging: argv.openaiLogging,
-      openaiLoggingDir: argv.openaiLoggingDir,
-    },
-    settings,
-    selectedAuthType,
-    env: process.env as Record<string, string | undefined>,
-  });
+  const resolvedCliConfig: ReturnType<typeof resolveCliGenerationConfig> =
+    modelConfiguration
+      ? {
+          authType: modelConfiguration.authType,
+          model: modelConfiguration.model,
+          apiKey: modelConfiguration.apiKey ?? '',
+          baseUrl: modelConfiguration.baseUrl ?? '',
+          generationConfig: {
+            ...resolveCliGenerationConfig({
+              argv: {
+                model: modelConfiguration.model,
+                openaiApiKey: modelConfiguration.apiKey ?? '',
+                openaiBaseUrl: modelConfiguration.baseUrl ?? '',
+                openaiLogging: argv.openaiLogging,
+                openaiLoggingDir: argv.openaiLoggingDir,
+              },
+              settings: {
+                model: {
+                  enableOpenAILogging: settings.model?.enableOpenAILogging,
+                  openAILoggingDir: settings.model?.openAILoggingDir,
+                  reasoningEffort: settings.model?.reasoningEffort,
+                },
+              },
+              selectedAuthType: modelConfiguration.authType,
+              env: {},
+            }).generationConfig,
+            ...modelConfiguration,
+          },
+          sources: {},
+          warnings: [],
+        }
+      : resolveCliGenerationConfig({
+          argv: {
+            model: argv.model,
+            openaiApiKey: argv.openaiApiKey,
+            openaiBaseUrl: argv.openaiBaseUrl,
+            openaiLogging: argv.openaiLogging,
+            openaiLoggingDir: argv.openaiLoggingDir,
+          },
+          settings,
+          selectedAuthType,
+          env: process.env as Record<string, string | undefined>,
+        });
 
   const { model: resolvedModel } = resolvedCliConfig;
 
@@ -2711,6 +2758,10 @@ export async function loadCliConfig(
     usageStatisticsEnabled: resolveUsageStatisticsEnabled(
       settings.privacy?.usageStatisticsEnabled,
     ),
+    modelCatalogRefreshEnabled:
+      typeof settings.model?.catalogRefresh === 'boolean'
+        ? settings.model.catalogRefresh
+        : undefined,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
     plansDirectory: settings.plansDirectory,
@@ -2911,10 +2962,9 @@ export async function loadCliConfig(
     compactionModel: settings.compactionModel || undefined,
     imageModel: settings.imageModel || undefined,
     visionBridgeTimeoutMs: settings.visionBridgeTimeoutMs,
-    modelFallbacks: resolveModelFallbacks(
-      argv.fallbackModel,
-      settings.modelFallbacks,
-    ),
+    modelFallbacks: modelConfiguration
+      ? []
+      : resolveModelFallbacks(argv.fallbackModel, settings.modelFallbacks),
     // Use separated hooks if provided, otherwise fall back to merged hooks
     ...resolveHookSettingsForConfig(
       settings.hooks,
