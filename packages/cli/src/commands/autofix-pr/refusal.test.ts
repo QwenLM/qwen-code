@@ -64,22 +64,57 @@ const COMMANDS = [
 ];
 
 describe('nextStep', () => {
-  it('gives every code a step for every helper', () => {
-    const steps = new Set<RefusalNext>([
-      'retry',
-      'stop',
-      'end_task',
-      'take_over',
-      'discard',
-      'foreground',
-      'rerun',
-      'needs_human',
-      'fix_plan',
+  // Every code of every helper: its step, then the helpers that differ.
+  const ROUND = ['snapshot', 'ci-log', 'push', 'sync', 'reply', 'rerun'];
+  const SPEC: Record<
+    RefusalCode,
+    [RefusalNext, Array<[string[], RefusalNext]>]
+  > = {
+    busy: ['retry', []],
+    partial: ['retry', []],
+    pr_closed: ['stop', [[['prepare'], 'report']]],
+    not_prepared: ['report', [[ROUND, 'end_task']]],
+    watch_stopped: ['report', [[ROUND, 'end_task']]],
+    task_replaced: ['report', [[ROUND, 'end_task']]],
+    watched_elsewhere: [
       'report',
-    ]);
-    for (const command of COMMANDS) {
-      for (const code of REFUSAL_CODES) {
-        expect(steps.has(nextStep(command, code))).toBe(true);
+      [
+        [ROUND, 'end_task'],
+        [['prepare'], 'take_over'],
+      ],
+    ],
+    fix_in_flight: ['report', []],
+    worktree_dirty: [
+      'report',
+      [
+        [['sync'], 'discard'],
+        [['push'], 'needs_human'],
+      ],
+    ],
+    no_failed_job: ['rerun', []],
+    no_background_fix: ['foreground', []],
+    rerun_failed: ['needs_human', []],
+    push_failed: ['needs_human', []],
+    plan_invalid: ['fix_plan', []],
+    failed: [
+      'report',
+      [
+        [['push', 'rerun'], 'needs_human'],
+        [['reply'], 'retry'],
+      ],
+    ],
+  };
+
+  it('gives every code of every helper the step the skill takes', () => {
+    expect(Object.keys(SPEC).sort()).toEqual([...REFUSAL_CODES].sort());
+    for (const code of REFUSAL_CODES) {
+      const [step, except] = SPEC[code];
+      for (const command of COMMANDS) {
+        const want =
+          except.find(([commands]) => commands.includes(command))?.[1] ?? step;
+        expect(`${command} ${code} → ${nextStep(command, code)}`).toBe(
+          `${command} ${code} → ${want}`,
+        );
       }
     }
   });
@@ -133,12 +168,35 @@ describe('nextStep', () => {
 });
 
 describe('refusalOf', () => {
+  it('keeps the longest line well inside the 16 KiB of stderr the tool keeps', () => {
+    // packages/core/src/tools/autofix-pr.ts: STDERR_CAP_CHARS = 16 * 1024,
+    // the tail of a helper's stderr the tool reads the coded line from.
+    const STDERR_CAP_CHARS = 16 * 1024;
+    for (const worst of ['"', '\\', 'x', '\n', '\u2603']) {
+      const line = JSON.stringify(
+        refusalOf('rerun_failed', new Error(worst.repeat(100_000))),
+      );
+      expect(line.length).toBeLessThanOrEqual(MAX_REFUSAL_MESSAGE + 100);
+    }
+    expect(MAX_REFUSAL_MESSAGE + 100).toBeLessThan(STDERR_CAP_CHARS / 2);
+  });
+
   it('keeps the head and the tail of a message too long for one line', () => {
     const long = `push failed:${'x'.repeat(20_000)}remote: denied`;
     const { message } = refusalOf('push', new Error(long));
     expect(message.length).toBeLessThanOrEqual(MAX_REFUSAL_MESSAGE + 3);
     expect(message.startsWith('push failed:')).toBe(true);
     expect(message.endsWith('remote: denied')).toBe(true);
+  });
+
+  it('drops escape sequences whole, C1 controls and bidi overrides, and keeps tabs and newlines', () => {
+    const { message } = refusalOf(
+      'push',
+      new Error(
+        'hook:\n\t\u001b[31mfatal\u001b[0m \u009b31mred \u202eevil\u202c \u200bzero\r\n',
+      ),
+    );
+    expect(message).toBe('hook:\n\tfatal red evil zero\n');
   });
 
   it('drops terminal controls, and fits the message as JSON, not as text', () => {
@@ -214,9 +272,30 @@ describe('withRefusals', () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it('prints the frames of a defect before its line, and none for a refusal', async () => {
+    await run(
+      command(() => {
+        throw new TypeError(
+          "Cannot read properties of undefined (reading 'x')",
+        );
+      }),
+    );
+    const lines = mocks.stderr.mock.calls.map(([line]) => line);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^\s+at /);
+    expect(JSON.parse(lines[1])).toMatchObject({ refused: 'failed' });
+    mocks.stderr.mockClear();
+    await run(
+      command(() => {
+        throw new AutofixPrRefusal('busy', 'another helper');
+      }),
+    );
+    expect(mocks.stderr).toHaveBeenCalledOnce();
+  });
+
   it('answers a rejected promise the same way', async () => {
     await run(command(() => Promise.reject(new Error('gh: HTTP 502'))));
-    expect(JSON.parse(mocks.stderr.mock.calls[0][0])).toEqual({
+    expect(JSON.parse(String(mocks.stderr.mock.calls.at(-1)?.[0]))).toEqual({
       refused: 'failed',
       next: 'needs_human',
       message: 'gh: HTTP 502',
@@ -241,11 +320,14 @@ describe('the refusals of the watch checks', () => {
       watch: { every: 2, reply: true, instructions: '', task: 'aaaaaaaaaaaa' },
       ...patch,
     }) as AutofixPrState;
+  /** The code `fn` refused with: anything else it throws is the test's
+   * failure, not a refusal. */
   const codeOf = (fn: () => unknown) => {
     try {
       fn();
     } catch (err) {
-      return (err as AutofixPrRefusal).code;
+      if (err instanceof AutofixPrRefusal) return err.code;
+      throw err;
     }
     return undefined;
   };
@@ -275,8 +357,27 @@ describe('the refusals of the watch checks', () => {
     expect(
       codeOf(() => assertOwnedBySession(state({ sessionId: 'session-b' }))),
     ).toBe('watched_elsewhere');
+    expect(() => assertWatching(state(), 'aaaaaaaaaaaa')).not.toThrow();
+  });
+
+  it('checks a stopped watch first, then its session, then the task', () => {
+    vi.stubEnv('QWEN_CODE_SESSION_ID', 'session-b');
+    // Stopped by session A, asked about by B: stopped, not someone else's
+    // to take over.
+    expect(
+      codeOf(() =>
+        assertWatching(
+          state({ ended: { at: 'now', reason: 'kept' } }),
+          'bbbbbbbbbbbb',
+        ),
+      ),
+    ).toBe('watch_stopped');
+    // Another session's watch, with its very task: still that session's.
     expect(codeOf(() => assertWatching(state(), 'aaaaaaaaaaaa'))).toBe(
-      undefined,
+      'watched_elsewhere',
+    );
+    expect(codeOf(() => assertWatching(state(), 'bbbbbbbbbbbb'))).toBe(
+      'watched_elsewhere',
     );
   });
 
@@ -322,8 +423,31 @@ describe('the autofix-pr command', () => {
 
   // Every helper run through the command, in a clone with no watch and a
   // `gh` that fails: each refuses with its coded line.
-  it.each<[string[], RefusalCode, RefusalNext]>([
+  // The two that refuse nothing in an empty clone get what makes them.
+  const fixInFlight = (root: string) => {
+    const paths = autofixPrPaths(root, 7);
+    mkdirSync(dirname(paths.fixPath), { recursive: true });
+    writeFileSync(
+      paths.fixPath,
+      JSON.stringify({
+        version: 1,
+        attempt: '0123456789ab',
+        task: 'aaaaaaaaaaaa',
+        head: 'a'.repeat(40),
+        startedAt: new Date().toISOString(),
+      }),
+    );
+  };
+  // The clone's own `.qwen/tmp` a file: nothing there can be listed.
+  const unreadableState = (root: string) => {
+    mkdirSync(join(root, '.qwen'), { recursive: true });
+    writeFileSync(join(root, '.qwen', 'tmp'), '');
+  };
+
+  it.each<[string[], RefusalCode, RefusalNext, ((root: string) => void)?]>([
     [['prepare', '7', '--repo', 'o/r'], 'failed', 'report'],
+    [['cleanup', '7'], 'fix_in_flight', 'report', fixInFlight],
+    [['status', '7'], 'failed', 'report', unreadableState],
     [['snapshot', '7'], 'not_prepared', 'end_task'],
     [['ci-log', '7', '1'], 'not_prepared', 'end_task'],
     [['push', '7'], 'not_prepared', 'end_task'],
@@ -333,19 +457,23 @@ describe('the autofix-pr command', () => {
     [['schedule', '7'], 'not_prepared', 'report'],
     [['fix-start', '7', '--attempt', '0123456789ab'], 'not_prepared', 'report'],
     [['fix-end', '7', '--attempt', '0123456789ab'], 'not_prepared', 'report'],
-  ])('prints the refusal of %j as its coded line', async (argv, code, next) => {
-    execFileSync('git', ['init', '-q'], { cwd: dir });
-    writeFileSync(join(dir, 'plan.json'), '{}');
-    await yargs()
-      .command(autofixPrCommand)
-      .strict()
-      .exitProcess(false)
-      .parseAsync(['autofix-pr', ...argv]);
-    expect(process.exitCode).toBe(1);
-    expect(JSON.parse(String(mocks.stderr.mock.calls.at(-1)?.[0]))).toEqual({
-      refused: code,
-      next,
-      message: expect.any(String),
-    });
-  });
+  ])(
+    'prints the refusal of %j as its coded line',
+    async (argv, code, next, make) => {
+      execFileSync('git', ['init', '-q'], { cwd: dir });
+      make?.(dir);
+      writeFileSync(join(dir, 'plan.json'), '{}');
+      await yargs()
+        .command(autofixPrCommand)
+        .strict()
+        .exitProcess(false)
+        .parseAsync(['autofix-pr', ...argv]);
+      expect(process.exitCode).toBe(1);
+      expect(JSON.parse(String(mocks.stderr.mock.calls.at(-1)?.[0]))).toEqual({
+        refused: code,
+        next,
+        message: expect.any(String),
+      });
+    },
+  );
 });

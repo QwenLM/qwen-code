@@ -273,13 +273,8 @@ export function runFixStart(args: FixStartArgs): AutofixPrFixAttempt & {
         `PR #${args.pr} has no scheduled task: a fix runs in the background only in a watch.`,
       );
     }
-    const running = fixInFlight(paths);
-    if (running) {
-      throw new AutofixPrRefusal(
-        'fix_in_flight',
-        `attempt ${running.attempt} of PR #${args.pr}'s fix is still in flight (started ${running.startedAt}).`,
-      );
-    }
+    // With what the skill reports: how that fix ends.
+    assertNoFixInFlight(paths, args.pr);
     // Only a round's sync (or a take-over, or cleanup) removes one its
     // session left behind, and the round then discards what it made.
     if (readFixMarker(paths)) {

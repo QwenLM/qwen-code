@@ -1031,8 +1031,13 @@ describe('runSync (real git, bare remote)', () => {
       synced: false,
       headSha: featSha,
       moved: false,
-      reason: expect.stringMatching(/could not switch it back/),
+      reason: expect.stringMatching(
+        /could not switch it back: qwen-autofix\/pr-7 is checked out in .*other-wt\. .*git worktree remove .*other-wt/,
+      ),
     });
+    // The cleanup it names last could not delete the branch either: the
+    // reason does not send the user there first.
+    expect(runSync(7, true).reason).not.toMatch(/cleanup 7 --force/);
   });
 
   it('with --discard takes the worktree back to the watch branch from one a fix switched to', () => {

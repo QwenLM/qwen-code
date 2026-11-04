@@ -195,7 +195,8 @@ describe('fix-start and fix-end', () => {
     expect(() => runFixStart({ pr: 7, attempt: 'ba9876543210' })).toThrow(
       refused(
         'fix_in_flight',
-        /attempt 0123456789ab of PR #7's fix is still in flight/,
+        // How that fix ends, as every refusal with this code says.
+        /a fix agent is working in PR #7's worktree \(attempt 0123456789ab.*\/autofix-pr stop 7.*within 45 minutes/,
       ),
     );
     age(FIX_FRESH_MS + 1000);

@@ -14,14 +14,15 @@
 // and exits 1. Any other failure (git or gh failing, a file that cannot be
 // read) is a refusal too, with the code `failed`.
 
+import { stripVTControlCharacters } from 'node:util';
 import type { ArgumentsCamelCase, CommandModule } from 'yargs';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 export const REFUSAL_CODES = [
   /** Another helper of the PR holds the lock: this one did nothing. */
   'busy',
-  /** `snapshot` asked GitHub about more bot threads than one call reads,
-   * and kept the answers. */
+  /** `snapshot` spent a round's eight minutes asking GitHub about bot
+   * threads it did not know yet, and kept the answers. */
   'partial',
   /** The PR was merged or closed. */
   'pr_closed',
@@ -152,16 +153,20 @@ export interface RefusalLine {
  * last 16 KiB of a helper's stderr, and the line must fit whole. */
 export const MAX_REFUSAL_MESSAGE = 8000;
 
-// Terminal controls a hook's output carries (colours, `\r` progress), each
-// six characters in JSON: nothing a reader of the message needs.
-// eslint-disable-next-line no-control-regex
-const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
+// What a message drops of the text it quotes — a pre-push hook's output is
+// the PR's: after escape sequences, whole, the class of the daemon's
+// `LOG_LINE_UNSAFE_RE` (C0 and C1 controls, `\r`, bidi overrides,
+// invisible formatters) but the tab and the newline, which a message keeps.
+/* eslint-disable no-control-regex */
+const UNSAFE =
+  /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g;
+/* eslint-enable no-control-regex */
 
 export function refusalOf(command: string, error: unknown): RefusalLine {
   const code = error instanceof AutofixPrRefusal ? error.code : 'failed';
-  const whole = (
-    error instanceof Error ? error.message : String(error ?? 'unknown error')
-  ).replace(CONTROL, '');
+  const whole = stripVTControlCharacters(
+    error instanceof Error ? error.message : String(error ?? 'unknown error'),
+  ).replace(UNSAFE, '');
   // What failed comes first, and what git or gh said last: both are kept.
   let message = whole;
   for (
@@ -187,6 +192,14 @@ export function withRefusals(command: CommandModule): CommandModule {
       try {
         await command.handler(argv);
       } catch (error) {
+        // A defect rather than a refusal keeps where it happened: its
+        // frames go first, so the coded line stays the last.
+        if (!(error instanceof AutofixPrRefusal) && error instanceof Error) {
+          const frames = (error.stack ?? '')
+            .split('\n')
+            .filter((line) => /^\s+at /.test(line));
+          if (frames.length > 0) writeStderrLine(frames.join('\n'));
+        }
         writeStderrLine(JSON.stringify(refusalOf(name, error)));
         process.exitCode = 1;
       }

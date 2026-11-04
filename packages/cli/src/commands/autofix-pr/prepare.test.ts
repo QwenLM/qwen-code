@@ -107,7 +107,7 @@ import {
   writeState,
 } from './state.js';
 import { requireWorktree } from './worktree.js';
-import type { RefusalCode } from './refusal.js';
+import { refusalOf, type RefusalCode } from './refusal.js';
 
 /** A refusal with its code: what the skill acts on. */
 const refused = (code: RefusalCode, message: RegExp) =>
@@ -1081,9 +1081,18 @@ describe('runPrepare (real git)', () => {
           )
         : answer(...args),
     );
-    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
-      /head repository no longer exists/,
-    );
+    // An open PR: `failed`, never the `pr_closed` a resume stops a watch
+    // on.
+    let thrown: unknown;
+    try {
+      runPrepare({ pr: 7, repo: 'o/r' });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(refusalOf('prepare', thrown)).toMatchObject({
+      refused: 'failed',
+      message: expect.stringMatching(/head repository no longer exists/),
+    });
   });
 
   it("derives a resumed watch's remotes from the clone, not from its state file", () => {
@@ -1679,6 +1688,17 @@ describe('runPrepare (real git)', () => {
     mocks.matched.mockImplementation(() => []);
     expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
       /no single git remote/,
+    );
+    expect(existsSync(autofixPrPaths(clone, 7).statePath)).toBe(false);
+  });
+
+  it('refuses an open PR it may not push to as failed, not pr_closed', () => {
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') return JSON.stringify(prView());
+      return JSON.stringify({ ...writable, viewerPermission: 'READ' });
+    });
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+      refused('failed', /cannot push to this repository \(permission: READ\)/),
     );
     expect(existsSync(autofixPrPaths(clone, 7).statePath)).toBe(false);
   });

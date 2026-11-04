@@ -1601,7 +1601,7 @@ says why, for the report.
 | Code                                             | Raised by                                                                                                                                                                                                                                | `next`                                                                                                                                                                   |
 | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `busy`                                           | every helper that takes the watch's lock, when another holds it                                                                                                                                                                          | `retry`                                                                                                                                                                  |
-| `partial`                                        | `snapshot`: more bot threads to ask about than one call asks, the answers kept                                                                                                                                                           | `retry`                                                                                                                                                                  |
+| `partial`                                        | `snapshot`: a round's eight minutes spent asking GitHub about bot threads it did not know yet, the answers kept                                                                                                                          | `retry`                                                                                                                                                                  |
 | `pr_closed`                                      | `prepare`, `sync`, `reply`, `rerun`: the PR was merged or closed                                                                                                                                                                         | `stop`; `report` from `prepare`                                                                                                                                          |
 | `not_prepared`, `watch_stopped`, `task_replaced` | the watch checks every helper runs                                                                                                                                                                                                       | `end_task` from a round's helper (`sync`, `snapshot`, `ci-log`, `push`, `reply`, `rerun`), `report` from the others                                                      |
 | `watched_elsewhere`                              | the same                                                                                                                                                                                                                                 | as above, but `take_over` from `prepare`                                                                                                                                 |
@@ -1633,8 +1633,15 @@ its refusal. A message carries at most 8,000 characters as JSON, its head
 and its tail, with terminal controls dropped, so the line fits the 16 KiB
 of stderr the tool keeps. A refusal without the line — one of the tool's own, which
 says why in words, arguments yargs refused, or a CLI older than the codes
-— keeps the old form; the skill handles it as the calling step says, and
-otherwise reports it.
+— keeps the form the tool gave every refusal before the codes: the result
+starts `autofix-pr <command> refused (exit <n>).`, followed by the whole of
+the helper's stderr and what it printed on stdout, and a background fix's
+launch reads it as the last stderr line that names an error (`Error: …`,
+prefix stripped), or the last line. The skill handles it as the calling
+step says, and otherwise reports it. A defect in a helper rather than a
+refusal (an error that is no `AutofixPrRefusal`) prints its stack frames
+before the coded line, so where it happened is kept and the line stays
+last.
 
 ## 7. One check (`tick`)
 

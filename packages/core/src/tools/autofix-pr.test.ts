@@ -19,6 +19,7 @@ import {
   autofixPrArgs,
   resetAutofixPrLaunchForTests,
   codedRefusal,
+  STDERR_CAP_CHARS,
   resolveAutofixPrLaunch,
   runAutofixPrHelper,
   validateAutofixPrParams,
@@ -862,6 +863,12 @@ describe('running a helper', () => {
       before:
         'git said this\n(node:1) Warning: late\n(Use `node --trace-warnings ...` to show where the warning was created)',
     });
+    // `--trace-warnings` (a user's NODE_OPTIONS) adds the warning's frames.
+    expect(
+      codedRefusal(
+        `${line}\n(node:1) Warning: late\n    at emitWarning (node:internal/process/warning:1:1)\n    at process.<anonymous> (x.js:2:2)\n`,
+      )?.line,
+    ).toBe(line);
     // A line a hook printed before the helper crashed is not its refusal.
     expect(
       codedRefusal(
@@ -881,6 +888,21 @@ describe('running a helper', () => {
     ]) {
       expect(codedRefusal(stderr)).toBeNull();
     }
+  });
+
+  it('reads the longest coded line a helper prints from the stderr tail it keeps', () => {
+    // packages/cli/src/commands/autofix-pr/refusal.ts keeps a message to
+    // 8,000 characters as JSON (MAX_REFUSAL_MESSAGE): its line, with the keys.
+    const line = JSON.stringify({
+      refused: 'push_failed',
+      next: 'needs_human',
+      message: 'x'.repeat(8000 - 2),
+    });
+    const stderr = `${'remote: progress\n'.repeat(4000)}${line}\n`;
+    expect(stderr.length).toBeGreaterThan(STDERR_CAP_CHARS);
+    // What the runner keeps of it.
+    expect(codedRefusal(stderr.slice(-STDERR_CAP_CHARS))?.line).toBe(line);
+    expect(line.length).toBeLessThan(STDERR_CAP_CHARS / 2);
   });
 
   it('reads no coded line from a helper that did not exit 1', async () => {

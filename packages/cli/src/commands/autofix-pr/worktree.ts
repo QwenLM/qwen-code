@@ -337,8 +337,14 @@ export function requireWorktree(
     // checked out elsewhere, or a lock or a missing branch stops it.
     // Discarding again would only ask the same.
     if (switchBack && !inPlace) {
+      // The branch checked out in another worktree is the one cause no
+      // command of the watch can clear: `cleanup` cannot delete the branch
+      // either while that checkout holds it.
+      const holder = worktreeHolding(worktreePath, paths.branch);
       throw new SwitchBackRefused(
-        `${checkedOut}, and git could not switch it back; remove the watch with \`qwen autofix-pr cleanup ${prNumber} --force\` and prepare it again.`,
+        holder
+          ? `${checkedOut}, and git could not switch it back: ${paths.branch} is checked out in ${holder}. Switch that checkout to another branch or remove it (\`git worktree remove ${holder}\`); until then neither a round nor \`qwen autofix-pr cleanup ${prNumber}\` can use or remove the branch.`
+          : `${checkedOut}, and git could not switch it back; remove the watch with \`qwen autofix-pr cleanup ${prNumber} --force\` and prepare it again.`,
       );
     }
     throw new AutofixPrRefusal(
@@ -346,6 +352,26 @@ export function requireWorktree(
       `${checkedOut}; switch it back before pushing or syncing.`,
     );
   }
+}
+
+/** Another worktree of the clone with `branch` checked out, or null. */
+function worktreeHolding(worktreePath: string, branch: string): string | null {
+  const list = gitOpt('-C', worktreePath, 'worktree', 'list', '--porcelain');
+  if (list === null) return null;
+  const self = realpathSync(worktreePath);
+  for (const entry of list.split('\n\n')) {
+    const path = /^worktree (.+)$/m.exec(entry)?.[1];
+    if (!path || /^branch (.+)$/m.exec(entry)?.[1] !== `refs/heads/${branch}`) {
+      continue;
+    }
+    try {
+      if (realpathSync(path) === self) continue;
+    } catch {
+      // Gone since git listed it: still what holds the branch for git.
+    }
+    return path;
+  }
+  return null;
 }
 
 /** `sync --discard` asked to switch the worktree back to the watch's

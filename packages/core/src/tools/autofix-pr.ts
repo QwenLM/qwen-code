@@ -153,7 +153,7 @@ const STRING_SHAPES: Readonly<Partial<Record<OptionName, RegExp>>> = {
 export const AUTOFIX_PR_TIMEOUT_MS = 600_000;
 
 const OUTPUT_CAP_BYTES = 8 * 1024 * 1024;
-const STDERR_CAP_CHARS = 16 * 1024;
+export const STDERR_CAP_CHARS = 16 * 1024;
 
 /**
  * The reply plan the skill writes beside the PR's worktree, and nothing in
@@ -766,8 +766,9 @@ interface PreparedLike {
 /** How long `cleanup` waits for a stopped fix agent to end. */
 const FIX_STOP_WAIT_MS = 15_000;
 
-/** A warning Node prints on stderr, and the hint it adds. */
-const NODE_WARNING = /^\(node:\d+\) |^\(Use `node --trace-/;
+/** A warning Node prints on stderr: its line, the hint it adds, and the
+ * frames `--trace-warnings` adds. */
+const NODE_WARNING = /^\(node:\d+\) |^\(Use `node --trace-|^at /;
 
 /**
  * A helper's coded refusal: the JSON line it prints last on stderr —
@@ -1478,7 +1479,7 @@ export class AutofixPrTool extends BaseDeclarativeTool<
       ToolDisplayNames.AUTOFIX_PR,
       [
         'Runs one `qwen autofix-pr` helper of the /autofix-pr skill and returns the JSON line it prints. Use it only as that skill says; outside it, never.',
-        'A failed call is the helper refusing: its result starts with the coded line {"refused","next","message"}; act on its `next` as the skill says, never work around it. Run calls one at a time.',
+        'A failed call is the helper refusing. Its result starts with `autofix-pr <command> refused: ` and then the helper\'s coded line {"refused","next","message"}: act on its `next` as the skill says, never work around it. A refusal without that line is a refusal still: handle it as the skill says. Run calls one at a time.',
         '`command: "unattended"` asks the user whether the fix agent of a watch this session runs may run its commands without asking; `command: "attended"` takes that back, asking nothing.',
       ].join(' '),
       Kind.Execute,

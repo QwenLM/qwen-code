@@ -42,7 +42,7 @@ The watch gets the PR ready to merge and keeps it there: failed checks, merge co
 
 A helper that refuses prints, as its last line on stderr, `{"refused": "<code>", "next": "<step>", "message": "…"}`; through the `autofix_pr` tool, the result starts with `autofix-pr <command> refused: ` and that line. Its `message` says why, and `next` what to do:
 
-- `retry` → run the same call again: for `busy` (another helper holds the lock, and this one did nothing) once the other has finished; for `partial` (`snapshot` asked GitHub about more bot threads than one call reads, and kept the answers) right away, up to three times in a round; for anything else once. Refused again the same way → `report`.
+- `retry` → run the same call again: for `busy` (another helper holds the lock, and this one did nothing) once the other has finished; for `partial` (`snapshot` spent its eight minutes asking GitHub about bot threads it did not know yet, and kept the answers) right away, up to three times in a round; for anything else once. Refused again the same way → `report`.
 - `stop` → the PR was merged or closed: Section "Stop".
 - `end_task` → a round's helper found that this task drives no watch here: delete (`cron_delete`) this task — with `--once` or `--in-place` there is none — and end the round with the one line its code gives:
   - `not_prepared` → the watch was cleaned up: no line.
@@ -106,7 +106,7 @@ When this session has the `autofix_pr` tool, run `"${QWEN_CODE_CLI:-qwen}" autof
    - an answer of `action: "merge"`, `synced: false` or `unpushed` commits → an earlier round left work behind that nothing answered: run `sync <n> --discard` instead (it also takes the worktree back to the watch's branch). If that answers `synced: false`, the worktree cannot be cleaned: Section "Stop" with its `reason`.
    - `abandonedFix` in its answer → a background fix of an earlier round never went on (its session ended, or its notification came too late): what it left is discarded as above, its items come back in this round's snapshot, and this round's fix runs in the foreground (step 5). Say so in the report.
 
-   Then run `"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot <n>`. If it refuses with `partial` (a PR with many bot threads it has not asked GitHub about yet), run it again — up to three times in a round.
+   Then run `"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot <n>`. If it refuses with `partial` (a PR with bot threads it has not asked GitHub about yet, and GitHub slow to answer), run it again — up to three times in a round.
 
 2. Act on `action`:
    - **`stop`** (merged or closed) → Section "Stop", then one line: the outcome and the pushes made.

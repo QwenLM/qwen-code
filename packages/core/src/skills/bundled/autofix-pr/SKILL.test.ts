@@ -313,26 +313,58 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain("whose gate names the watch's session");
   });
 
-  it('answers every step a refusal can name, and every code a step reads apart', () => {
+  it('answers every step the helpers can name, each with what that step does', () => {
     const { body } = loadSkill();
     const section = body.slice(
       body.indexOf('## Refusals'),
       body.indexOf('## Arguments'),
     );
-    for (const next of [
-      'retry',
-      'stop',
-      'end_task',
-      'take_over',
-      'discard',
-      'foreground',
-      'rerun',
-      'needs_human',
-      'fix_plan',
-      'report',
-    ]) {
-      expect(section).toContain(`- \`${next}\` → `);
+    // The steps and codes as the helpers define them: read from their source,
+    // as core does not import the CLI.
+    const source = fs.readFileSync(
+      path.join(
+        path.dirname(fileURLToPath(import.meta.url)),
+        '../../../../../cli/src/commands/autofix-pr/refusal.ts',
+      ),
+      'utf8',
+    );
+    const steps = [
+      ...(/export type RefusalNext =([^;]+);/.exec(source)?.[1] ?? '').matchAll(
+        /'([a-z_]+)'/g,
+      ),
+    ].map(([, step]) => step);
+    const codes = [
+      ...(
+        /export const REFUSAL_CODES = \[([\s\S]*?)\] as const/.exec(
+          source,
+        )?.[1] ?? ''
+      ).matchAll(/^\s*'([a-z_]+)',/gm),
+    ].map(([, code]) => code);
+    expect(steps).toContain('retry');
+    expect(codes).toContain('busy');
+    const bullet = (step: string) =>
+      section.split('\n').find((line) => line.startsWith(`- \`${step}\` → `));
+    for (const step of steps) {
+      expect(bullet(step), `no bullet for ${step}`).toBeDefined();
     }
+    // What each step does, so two bodies cannot trade places unnoticed.
+    const does: Record<string, string> = {
+      retry: 'run the same call again',
+      stop: 'Section "Stop"',
+      end_task: 'delete (`cron_delete`) this task',
+      take_over: 'Start step 3',
+      discard: 'run `sync <n> --discard` in its place',
+      foreground: 'call in the foreground',
+      rerun: 'Round step 3',
+      needs_human: 'are `needs_human`',
+      fix_plan: 'run `reply` again',
+      report: 'report the message',
+    };
+    expect(Object.keys(does).sort()).toEqual([...steps].sort());
+    for (const [step, phrase] of Object.entries(does)) {
+      expect(bullet(step)).toContain(phrase);
+    }
+    // The codes whose line the section gives apart.
     for (const code of [
       'busy',
       'partial',
@@ -342,6 +374,7 @@ describe('bundled autofix-pr skill', () => {
       'watched_elsewhere',
       'fix_in_flight',
     ]) {
+      expect(codes).toContain(code);
       expect(section).toContain(`\`${code}\``);
     }
     // `prepare` gives `pr_closed` the step `report` (a start has no watch to
