@@ -9765,6 +9765,9 @@ class QwenAgent implements Agent {
               ? { sequential: row.sequential }
               : {}),
             enabled: row.enabled,
+            ...(row.disabledReason
+              ? { disabledReason: row.disabledReason }
+              : {}),
           }),
         );
       return {

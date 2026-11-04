@@ -193,6 +193,8 @@ export interface WorkspaceHooksSummary {
   initialized: boolean;
   count: number;
   disabled: boolean;
+  /** Hooks the trust gate withholds (reason 'untrusted'); older daemons omit the reason. */
+  untrusted: number;
 }
 
 export function summarizeHooks(
@@ -202,6 +204,9 @@ export function summarizeHooks(
     initialized: status.initialized,
     count: status.hooks.length,
     disabled: status.disabled,
+    untrusted: status.hooks.filter(
+      (hook) => !hook.enabled && hook.disabledReason === 'untrusted',
+    ).length,
   };
 }
 
@@ -277,6 +282,8 @@ export function overviewFacetHasIssue(
     }
     case 'channels':
       return (snapshot?.channels?.failed ?? 0) > 0;
+    case 'hooks':
+      return (snapshot?.hooks?.untrusted ?? 0) > 0;
     default:
       return false;
   }
@@ -351,7 +358,9 @@ export function formatOverviewValue(
     case 'context':
       return String(snapshot.context!.fileCount);
     case 'hooks':
-      return String(snapshot.hooks!.count);
+      return snapshot.hooks!.untrusted > 0
+        ? `${snapshot.hooks!.count} (${snapshot.hooks!.untrusted} untrusted)`
+        : String(snapshot.hooks!.count);
     default:
       return undefined;
   }
@@ -404,8 +413,14 @@ export function overviewDetail(
     }
     case 'hooks': {
       const hooks = snapshot.hooks!;
-      return hooks.disabled
-        ? t('sidebar.overview.hooksDisabled', { count: hooks.count })
+      if (hooks.disabled) {
+        return t('sidebar.overview.hooksDisabled', { count: hooks.count });
+      }
+      return hooks.untrusted > 0
+        ? t('sidebar.overview.hooksUntrusted', {
+            count: hooks.count,
+            untrusted: hooks.untrusted,
+          })
         : t('sidebar.overview.hooksDetail', { count: hooks.count });
     }
     default:
