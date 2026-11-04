@@ -1093,12 +1093,16 @@ jobs:
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
-      # A pool host's download usually takes under a minute but has stalled
-      # for over a quarter of an hour; bound it and try once more.
+      # Eight shards pull this same artifact at once, so the cap has to cover
+      # the blob's tail latency rather than the median: main measured 4m52s on
+      # the slow host class and expired twice at five minutes, which skipped
+      # the unpack and failed the required check. Fifteen minutes plus one
+      # retry absorbs that tail without letting a hung transfer reach the job
+      # cap.
       - name: 'Download the built tree'
         id: 'download_tree'
         if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        timeout-minutes: 5
+        timeout-minutes: 15
         continue-on-error: true
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
@@ -1107,7 +1111,7 @@ jobs:
 
       - name: 'Retry downloading the built tree'
         if: "${{ steps.download_tree.outcome == 'failure' }}"
-        timeout-minutes: 5
+        timeout-minutes: 15
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
           name: 'unit-test-tree'

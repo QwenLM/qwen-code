@@ -394,6 +394,16 @@ it('pins the build-to-shard artifact handoff on both ends', () => {
   expect(name).toBeTruthy();
   expect(shard.get('Download the built tree').with.name).toBe(name);
   expect(shard.get('Retry downloading the built tree').with.name).toBe(name);
+  // Both attempts have to outlast the blob tail, not the median: eight shards
+  // fetch this same artifact at once, and on main the slow host class spent
+  // 4m52s before five-minute caps expired on two runs in a row, skipping the
+  // unpack entirely.
+  for (const step of [
+    'Download the built tree',
+    'Retry downloading the built tree',
+  ]) {
+    expect(shard.get(step)?.['timeout-minutes'], step).toBe(15);
+  }
   expect(shard.get('Unpack the built tree').run).toContain(
     `\${RUNNER_TEMP}/${name}/${name}.tgz`,
   );
