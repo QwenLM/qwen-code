@@ -137,7 +137,7 @@ this recovery exception.
 | API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
 | Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
 | Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits, described in [Turn events](#turn-events)                                                             |
-| Prompts    | `prompt.submit` in headless runs, described in [Submitted prompts](#submitted-prompts)                                                                                                  |
+| Prompts    | `prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                                                |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
 | Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, described in [The band above the prompt](#the-band-above-the-prompt)                                        |
@@ -158,20 +158,21 @@ command names are matched against the resulting name.
 ## Middleware and recovery
 
 Patterns select among the engine events `session.start`, `session.end`,
-`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete`, in headless runs `prompt.submit`, in the Ink and OpenTUI terminals `ui.render`, and the API event of each supported
+`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete`, `prompt.submit`, in the Ink and OpenTUI terminals `ui.render`, and the API event of each supported
 `$` method, which `$.session.version()` lists. Use an exact name, a prefix such as `command.*`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
 
 Claude Code 2.1.316 also defines events that Qwen Code does not run yet, such as
-`prompt.fill` or `classic.Stop`. `prompt.submit` runs only in headless runs, and
-`ui.render` only where a host draws it. A registration for one of them,
-or for a prefix such as `prompt.*` that matches none of the events above, loads
+`prompt.fill` or `classic.Stop`. `ui.render` runs only where a host draws it. A registration for one of them,
+or for a prefix such as `classic.*` that matches none of the events above, loads
 but never runs, so the rest of the Mod keeps working. At startup each plugin
 reports its skipped patterns once, where transcript logs appear:
 `Hooks for unsupported events will not run: prompt.fill, ui.render`. A skipped
 hook never runs, including a guard and its `.catch`. Names that Claude Code does
-not define, such as `tool.calls`, still reject initialization.
+not define, such as `tool.calls`, still reject initialization. A prefix that
+covers a supported event, such as `prompt.*` or `*`, is not skipped: it hears
+that event.
 
 To refuse such a plugin instead, set its `unsupportedEvents` to `"reject"` in user
 or system settings. Initialization then fails if the plugin registers any skipped
@@ -629,8 +630,8 @@ prompt after it ends a turn.
 
 ## Submitted prompts
 
-In headless runs, `prompt.submit` fires for each prompt a person submits, before
-UserPromptSubmit hooks and before `@` references are read. A hook can rewrite the
+In headless runs and in the Ink and OpenTUI terminals, `prompt.submit` fires for
+each prompt a person submits, before UserPromptSubmit hooks and before `@` references are read. A hook can rewrite the
 prompt, attach context the model reads beside it, or drop it:
 
 ```javascript
@@ -649,12 +650,12 @@ export function register(on) {
 
 The hook receives:
 
-| Field     | Value                                                                                 |
-| --------- | ------------------------------------------------------------------------------------- |
-| `text`    | the prompt as submitted; for a stream-json message, its text blocks                   |
-| `context` | absent; each hook that attaches context passes the list on with its own entries added |
-| `wait`    | `false`                                                                               |
-| `origin`  | `{kind: 'sdk'}`                                                                       |
+| Field     | Value                                                                                          |
+| --------- | ---------------------------------------------------------------------------------------------- |
+| `text`    | the prompt as submitted, with pasted text expanded; for a stream-json message, its text blocks |
+| `context` | absent; each hook that attaches context passes the list on with its own entries added          |
+| `wait`    | `false`                                                                                        |
+| `origin`  | `{kind: 'sdk'}` in headless runs, `{kind: 'composer'}` in the terminals                        |
 
 `origin`, `wait` and `turnId` are pinned. The prompt that enters is the one that
 arrives beneath the hooks: `next(e)` resolves to `{text, context?, origin}`, and
@@ -683,17 +684,50 @@ on('prompt.submit', guard).catch(($, e, next) =>
 );
 ```
 
+In the Ink and OpenTUI terminals:
+
+- The hooks hear what the person typed, with pasted text expanded. A paste the
+  rewrite gives back whole stays collapsed, and the model is still told it was
+  pasted. A rewrite that edits inside a paste, removes it or repeats it is
+  refused with an error line, and the prompt comes back to the input box; a
+  hook keeps a paste out by dropping the prompt.
+- Images attached in OpenTUI stay attached to a rewritten prompt. In Ink,
+  attachment references and the notices Qwen Code adds to a prompt for the
+  model alone, such as a resumed worktree, stay ahead of it.
+- In OpenTUI, the prompt's row appears once the hooks let it through.
+- A prompt sent while the Mods are still loading waits for them, so their
+  hooks hear it too.
+- A rewrite also stands in the prompt's row and in the input history that the
+  Up key recalls.
+- A dropped prompt shows the reason as an error line. It is neither shown nor
+  kept in the input history, since it may hold what the hook kept out. It comes
+  back to the input box, ahead of anything typed since, to be edited and sent
+  again.
+- Esc while the hooks run cancels the prompt and hands it back the same way.
+- Slash commands, shell-mode commands, `/btw` questions and scheduled prompts
+  raise no `prompt.submit`. In OpenTUI, slash-form text sent with an attached
+  image goes to the model as a prompt, so the hooks hear it like any prompt.
+- A `?`-form command, such as a `?btw` question, is typed text, so the hooks
+  hear it. In OpenTUI a rewrite must keep the same command: one that leaves
+  `?`-form or names another command is refused with an error line. Context
+  they attach goes with the turn the command starts; a `?btw` question starts
+  none, so its context is not used.
+- In OpenTUI, a prompt typed during a turn shows in the queued-messages strip
+  until it is sent; the hooks hear it then.
+- While a Mod hooks `prompt.submit`, a prompt typed during a turn is not sent
+  into that turn when a tool finishes. It waits for the turn to end, and the
+  hooks hear it when it is sent.
+
 A prompt longer than 128 KiB as JSON reaches no hook, and the line
 `prompt.submit hook skipped: the prompt is too long for a Mod payload` appears
 where transcript logs do.
 
 These differ from Claude Code:
 
-- `prompt.submit` runs only in headless runs; the Ink and OpenTUI terminals skip
-  its hooks at startup.
 - Slash commands, background notifications and the continuation of an
   interrupted turn raise no `prompt.submit`, so `command` and `isMeta` never
-  appear.
+  appear. Slash-form text that OpenTUI sends as a prompt, as above, is heard
+  as a prompt.
 - `attachments` never appears, and `$.prompt.media` does not exist.
 - A UserPromptSubmit hook that blocks the prompt beneath does not turn `next(e)`
   into `{drop}`: the Mod hooks have settled by the time it runs.

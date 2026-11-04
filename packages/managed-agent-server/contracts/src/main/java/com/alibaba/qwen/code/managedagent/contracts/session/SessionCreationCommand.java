@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.contracts.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 
 import java.util.List;
@@ -31,7 +32,7 @@ public record SessionCreationCommand(
         boolean publicChildrenSupported, String modelId,
         List<ManagedExtensionPackages.Pin> extensionPins,
         Set<String> extensionLifecycleProfiles,
-        SessionWorktreeStore.Plan worktree) {
+        SessionWorktreeStore.Plan worktree, SessionModelConfig modelConfig) {
     public static Builder builder() {
         return new Builder();
     }
@@ -58,6 +59,7 @@ public record SessionCreationCommand(
         private List<ManagedExtensionPackages.Pin> extensionPins;
         private Set<String> extensionLifecycleProfiles = Set.of();
         private SessionWorktreeStore.Plan worktree;
+        private SessionModelConfig modelConfig;
 
         public Builder tenantId(String value) {
             this.tenantId = value;
@@ -159,13 +161,18 @@ public record SessionCreationCommand(
             return this;
         }
 
+        public Builder modelConfig(SessionModelConfig value) {
+            this.modelConfig = value;
+            return this;
+        }
+
         public SessionCreationCommand build() {
             return new SessionCreationCommand(tenantId, actorId, idempotencyKey,
                     requestDigest, agentId, requestedRevision, title, input,
                     payloadDigest, selection, requestedApprovalMode,
                     approvalSelectionSupported, requestedPlanMode, planModeSupported,
                     skills, publicChildrenSupported, modelId, extensionPins,
-                    extensionLifecycleProfiles, worktree);
+                    extensionLifecycleProfiles, worktree, modelConfig);
         }
     }
 }
