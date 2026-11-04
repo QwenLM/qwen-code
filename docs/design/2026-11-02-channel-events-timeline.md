@@ -439,14 +439,19 @@ classes, the daemon route, the SDK types and the wire shape are unchanged.
   failure path; a retire is not claimed when the removal or the save throws;
   and the watch guard's clearing edge is journalled, because a `poll` / `ok`
   row is written throughout the outage and cannot mark its end. Every one of
-  these guards was
-  mutation-verified: 22 mutations, 22 killed. Two of them exist only to prove
-  the privacy assertion is load-bearing — one smuggles the body into another
-  field of a retire row, the other appends it after the write error so the
-  error assertion still passes.
+  these guards was mutation-verified: 37 mutations, 37 killed. Two of them
+  exist only to prove the privacy assertion is load-bearing — one smuggles the
+  body into another field of a retire row, the other appends it after the write
+  error so the error assertion still passes. Two more initially survived and
+  were investigated rather than accepted: a loose `sessionId` count that three
+  correctly attributed rows still satisfied with the clearing row unattributed,
+  and a mutation filter that matched no test after a rename. A sweep that
+  cannot tell "no test ran" from "the guard held" is not evidence, so the
+  harness now reports that case explicitly.
 - §5 Web Shell: `failed_ambiguous` renders its label in English and Chinese
   rather than the raw token, the session chip truncates with the full id in
-  `title`, the degraded counters render, and both catalogs cover every entry of
+  `title`, the degraded counters render and are asserted **absent** on a row
+  that carries no counter, and both catalogs cover every entry of
   `KNOWN_OUTCOMES`.
 
 ## Acceptance criteria
