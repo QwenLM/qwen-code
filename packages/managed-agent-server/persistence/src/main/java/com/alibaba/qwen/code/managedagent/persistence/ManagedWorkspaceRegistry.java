@@ -281,14 +281,20 @@ public class ManagedWorkspaceRegistry
         return resolve(tenantId, actorId, selection, false, false);
     }
 
-    // The default Workspace is found through its generated unique key, so a
-    // locking resolution takes that one row rather than every Workspace row
-    // of the tenant, which a tenant_id range scan would lock.
-    static String selectionPredicate(WorkspaceSelection selection) {
-        return selection == null ? "default_tenant = ?" : "tenant_id = ? AND workspace_id = ?";
+    void lockSelectionForCreation(String tenantId, WorkspaceSelection selection) {
+        jdbc.queryForList("SELECT workspace_id FROM ma_workspace WHERE "
+                + selectionPredicate(selection) + " FOR UPDATE",
+                selectionArguments(tenantId, selection));
     }
 
-    static Object[] selectionArguments(String tenantId, WorkspaceSelection selection) {
+    // Default switches lock the tenant/workspace key before the row. Keep the
+    // same lookup order: default_tenant would lock its secondary index first
+    // and deadlock with a switch that already holds the row.
+    private static String selectionPredicate(WorkspaceSelection selection) {
+        return selection == null ? "tenant_id = ? AND is_default = TRUE" : "tenant_id = ? AND workspace_id = ?";
+    }
+
+    private static Object[] selectionArguments(String tenantId, WorkspaceSelection selection) {
         return selection == null ? new Object[] {tenantId} : new Object[] {tenantId, selection.workspaceId()};
     }
 

@@ -28,6 +28,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -353,8 +355,10 @@ class ManagedSessionGuardConvoyIT {
      * locking probe of a missing key there would deadlock two of them
      * (InnoDB 1213). H2 takes no gap locks, so only MySQL shows it.
      */
-    @Test
-    void concurrentWorkspaceSessionCreationsOfOneTenantDoNotDeadlock() throws Exception {
+    @ParameterizedTest
+    @CsvSource({"false, false", "false, true", "true, false", "true, true"})
+    void concurrentWorkspaceSessionCreationsOfOneTenantDoNotDeadlock(
+            boolean defaultSelection, boolean sharedStorage) throws Exception {
         var jdbc = new ManagedSchemaJdbcTemplate(source);
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
         String tenant = "tenant-create";
@@ -363,14 +367,18 @@ class ManagedSessionGuardConvoyIT {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         var mounts = new ArrayList<ManagedAgentProperties.RuntimeBroker.WorkspaceMount>();
         for (int index = 0; index < writers; index++) {
+            String storage = sharedStorage ? "storage" : "storage-" + index;
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
-                    + " display_name, config_ref, policy_ref, state) VALUES (?, ?, 1, ?, 'Workspace', ?, ?, 'ACTIVE')",
-                    tenant, "ws-" + index, "storage-" + index,
+                    + " display_name, config_ref, policy_ref, state, is_default)"
+                    + " VALUES (?, ?, 1, ?, 'Workspace', ?, ?, 'ACTIVE', ?)",
+                    tenant, "ws-" + index, storage,
                     com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONFIG_REF,
-                    com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF);
+                    com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF, index == 0);
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OWNER')",
                     tenant, "ws-" + index, "actor".getBytes(StandardCharsets.UTF_8));
-            mounts.add(new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, "storage-" + index, "/tmp/create-" + index));
+            if (!sharedStorage || index == 0) {
+                mounts.add(new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, storage, "/tmp/create-" + storage));
+            }
         }
         properties.getRuntimeBroker().setWorkspaceMounts(mounts);
         var registry = new ManagedWorkspaceRegistry(jdbc);
@@ -387,13 +395,14 @@ class ManagedSessionGuardConvoyIT {
             List<Future<Integer>> runs = new ArrayList<>();
             for (int writer = 0; writer < writers; writer++) {
                 String workspace = "ws-" + writer;
+                var selection = defaultSelection ? null
+                        : new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection(workspace, ".");
                 runs.add(pool.submit(() -> {
                     start.await();
                     for (int index = 0; index < perWriter; index++) {
                         String key = workspace + "-create-" + index;
                         transactions.execute(ignored -> service.createWorkspaceSession(tenant, "actor", key,
-                                "qwen-code", null, null, null, List.of(),
-                                new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection(workspace, ".")));
+                                "qwen-code", null, null, null, List.of(), selection));
                     }
                     return perWriter;
                 }));
@@ -405,6 +414,11 @@ class ManagedSessionGuardConvoyIT {
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_kind = 'PUBLIC'",
                 Integer.class, tenant)).isEqualTo(writers * perWriter);
+        if (defaultSelection) {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?"
+                            + " AND session_kind = 'PUBLIC' AND workspace_id = 'ws-0'",
+                    Integer.class, tenant)).isEqualTo(writers * perWriter);
+        }
     }
 
     /**

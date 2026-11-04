@@ -50,21 +50,34 @@ Workspace already runs this insert path without the guard.
 | Resident Workspace retirement, Workspace removal | They lock the same `ma_workspace` row, so creations in that Workspace queue behind them.                                                                                                                                                                                                                               |
 | Resident Workspace single-Session check          | `ResidentWorkspaces.requireCreation` range-locks the Workspace's open Sessions and its runtime sessions; two adjacent Workspaces' ranges share a gap that both creations insert into. Selections that may resolve to a configured Resident Workspace keep the guard first, decided from configuration before any read. |
 
-The default Workspace was resolved with `tenant_id = ? AND is_default = TRUE`
+Default Workspace resolution retains `tenant_id = ? AND is_default = TRUE`
 under `FOR UPDATE`, a scan of the tenant prefix of the
-`(tenant_id, workspace_id)` key that locks every Workspace row of the tenant.
-Resolution now uses the generated unique column `default_tenant = ?`, which
-locks one row.
+`(tenant_id, workspace_id)` key that can lock other Workspace rows of the
+tenant. The proposed `default_tenant = ?` lookup deadlocks on MySQL 8.4 when
+an administrator first updates Workspace metadata and then switches the
+default: the reader holds the generated unique index and waits for the row,
+while the administrator holds the row and waits for that index. Keep the
+existing lookup order; narrowing default-selection locks needs a separate
+design that preserves concurrent default-switch behavior.
 
 Team lead creation and child Session creation keep the guard. Child creation
 takes it again in `ChildWorkspaceStore.admit` and serializes with the parent's
 child run record; both are low frequency.
 
+The first Workspace locking read is owned by `ManagedWorkspaceRegistry`,
+which keeps its selection predicate and arguments private. Session admission
+retains the Resident Workspace guard decision and its lock-order explanation.
+For this change, an explicitly approved per-class ceiling adjustment from
+889 to 900 lines accommodates that necessary logic and explanation. This is
+a scoped exception to the ratchet-down convention; the global ceiling and
+the other per-class ceilings remain unchanged.
+
 ## Risks
 
 - Creations in one Workspace still queue on its row, and every creation still
   locks the storage's alias row exclusively, so creations sharing one storage
-  queue there.
+  queue there. Default selection retains the tenant-prefix scan and can also
+  delay creations in other Workspaces of the tenant.
 - A missing-key locking read in the creation path that the audit missed would
   show up as an InnoDB deadlock between two creations of one tenant. The MySQL
   test below targets it.
@@ -79,6 +92,10 @@ child run record; both are low frequency.
 2. `ManagedModelSelectionTest`: with the guard held, a Workspace Session
    creation completes.
 3. `ManagedSessionGuardConvoyIT` (MySQL): four writers create ten Sessions
-   each in four Workspaces of one tenant at once, with no deadlock.
+   each in one tenant at once, with no deadlock. Cover explicit selections
+   across four Workspaces and selection of the default Workspace, each with
+   separate storage registrations and with shared storage. Default selections
+   must bind every Session to the default Workspace. The existing MySQL
+   default-switch test must resolve the newly selected default without a deadlock.
 4. Existing queue, creation, Workspace, migration and lock contract suites
    pass, including the MySQL profiles in CI.
