@@ -111,6 +111,7 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     deliverToBoundSessions:
       'channels.editor.field.github.deliverToBoundSessions',
     prWatchEvents: 'channels.editor.field.github.prWatchEvents',
+    boundSessionActions: 'channels.editor.field.github.boundSessionActions',
   },
   gitlab: {
     token: 'channels.editor.field.gitlab.token',
@@ -925,7 +926,17 @@ export function ChannelEditorDialog({
         }
       }
       const updateRecord = (key: string, val: string) => {
-        const next = { ...record, [key]: val };
+        // Clearing a row DELETES the key: the channel validators reject
+        // empty template values, and this renderer offers no other delete
+        // affordance, so a touched-then-cleared row would otherwise strand
+        // an unsavable "" entry (GitHub boundSessionActions, GitLab
+        // action_prompt_template).
+        const next = { ...record };
+        if (val.trim() === '') {
+          delete next[key];
+        } else {
+          next[key] = val;
+        }
         update(JSON.stringify(next));
       };
       return (
