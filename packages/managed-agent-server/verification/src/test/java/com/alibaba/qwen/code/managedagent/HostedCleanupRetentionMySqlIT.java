@@ -13,6 +13,13 @@ class HostedCleanupRetentionMySqlIT extends HostedCleanupRetentionTest {
     @Override
     @Test
     @Timeout(60)
+    void committedCleanupProtectsBindingFromSweepWaitingForPlacement() throws Exception {
+        super.committedCleanupProtectsBindingFromSweepWaitingForPlacement();
+    }
+
+    @Override
+    @Test
+    @Timeout(60)
     void owedCleanupPreservesExactReleasedOwnerAcrossSweepAndReopen() {
         super.owedCleanupPreservesExactReleasedOwnerAcrossSweepAndReopen();
     }
