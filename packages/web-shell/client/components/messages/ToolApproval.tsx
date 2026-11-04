@@ -267,6 +267,7 @@ export function ToolApproval({
   const { t } = useI18n();
   const isAgent = isAgentTool(request.toolName);
   const isGoal = request.toolName === 'propose_goal';
+  const isProjectHooks = request.toolName === 'project_hooks';
   const isExitPlanApproval = isExitPlanApprovalRequest(request);
   const hasPlanExecutionMode =
     isExitPlanApproval && planExecutionMode !== undefined;
@@ -388,9 +389,11 @@ export function ToolApproval({
     request.toolName || parsedTitle.toolName || request.kind || 'Tool';
   const toolName = isGoal
     ? t('approval.goal.title')
-    : showsPlanWorkflow
-      ? t('workflow.planReview.title')
-      : localizeToolDisplayName(rawToolName, t);
+    : isProjectHooks
+      ? t('hooksApproval.title')
+      : showsPlanWorkflow
+        ? t('workflow.planReview.title')
+        : localizeToolDisplayName(rawToolName, t);
   const descriptionText =
     showsPlanWorkflow || isGoal ? undefined : getDescriptionText(request);
   const contentText = extractContentText(request);
@@ -620,13 +623,15 @@ export function ToolApproval({
   const contentDisplay = sanitizeControlChars(contentText);
   const questionText = isGoal
     ? t('approval.goal.hint')
-    : showsPlanWorkflow
-      ? t('workflow.planReview.question')
-      : isAgent
-        ? t('approval.launchAgentQuestion')
-        : isExec
-          ? t('approval.execQuestion', { tool: toolName })
-          : t('approval.changeQuestion');
+    : isProjectHooks
+      ? t('hooksApproval.description')
+      : showsPlanWorkflow
+        ? t('workflow.planReview.question')
+        : isAgent
+          ? t('approval.launchAgentQuestion')
+          : isExec
+            ? t('approval.execQuestion', { tool: toolName })
+            : t('approval.changeQuestion');
 
   return (
     <div

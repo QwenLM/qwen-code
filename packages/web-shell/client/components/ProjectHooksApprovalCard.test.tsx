@@ -4,7 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
-import { ProjectHooksApprovalBanner } from './ProjectHooksApprovalBanner';
+import { ProjectHooksApprovalCard } from './ProjectHooksApprovalCard';
 
 const workspaceHooks = vi.fn();
 const approveWorkspaceHooks = vi.fn();
@@ -38,18 +38,18 @@ async function mount(): Promise<HTMLDivElement> {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  // Plain render + macrotask flush: act() never drains while the banner's
+  // Plain render + macrotask flush: act() never drains while the card's
   // poll interval keeps scheduling work in this environment.
   root!.render(
     <I18nProvider language="en">
-      <ProjectHooksApprovalBanner />
+      <ProjectHooksApprovalCard />
     </I18nProvider>,
   );
   await new Promise((resolve) => setTimeout(resolve, 50));
   return container;
 }
 
-describe('ProjectHooksApprovalBanner', () => {
+describe('ProjectHooksApprovalCard', () => {
   it('asks for an explicit decision when project hooks are pending', async () => {
     workspaceHooks.mockResolvedValue({
       pendingApproval: true,
@@ -61,18 +61,13 @@ describe('ProjectHooksApprovalBanner', () => {
       reloaded: true,
     });
     const element = await mount();
-    const banner = element.querySelector(
-      '[data-testid="project-hooks-approval-banner"]',
+    const card = element.querySelector(
+      '[data-testid="project-hooks-approval-card"] [data-web-shell-permission-panel]',
     );
-    expect(banner).not.toBeNull();
-    expect(
-      element.querySelector('[data-testid="project-hooks-approval-lines"]')
-        ?.textContent,
-    ).toContain('node hook-marker.mjs');
+    expect(card).not.toBeNull();
+    expect(card?.textContent).toContain('node hook-marker.mjs');
     element
-      .querySelector<HTMLButtonElement>(
-        '[data-testid="project-hooks-approve"]',
-      )!
+      .querySelector<HTMLButtonElement>('[data-option-id="hooks_approve"]')!
       .click();
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(approveWorkspaceHooks).toHaveBeenCalledWith('approve');
@@ -86,7 +81,7 @@ describe('ProjectHooksApprovalBanner', () => {
     });
     const element = await mount();
     element
-      .querySelector<HTMLButtonElement>('[data-testid="project-hooks-reject"]')!
+      .querySelector<HTMLButtonElement>('[data-option-id="hooks_reject"]')!
       .click();
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(approveWorkspaceHooks).toHaveBeenCalledWith('reject');
@@ -96,7 +91,7 @@ describe('ProjectHooksApprovalBanner', () => {
     workspaceHooks.mockResolvedValue({ hooks: [] });
     const element = await mount();
     expect(
-      element.querySelector('[data-testid="project-hooks-approval-banner"]'),
+      element.querySelector('[data-testid="project-hooks-approval-card"]'),
     ).toBeNull();
   });
 
@@ -104,7 +99,7 @@ describe('ProjectHooksApprovalBanner', () => {
     workspaceHooks.mockRejectedValue(new Error('404'));
     const element = await mount();
     expect(
-      element.querySelector('[data-testid="project-hooks-approval-banner"]'),
+      element.querySelector('[data-testid="project-hooks-approval-card"]'),
     ).toBeNull();
   });
 });

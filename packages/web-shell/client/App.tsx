@@ -1,5 +1,5 @@
 import { DaemonConnectionBanner } from './components/DaemonConnectionBanner.js';
-import { ProjectHooksApprovalBanner } from './components/ProjectHooksApprovalBanner.js';
+import { ProjectHooksApprovalCard } from './components/ProjectHooksApprovalCard.js';
 import { useDaemonAvailability } from './daemon/availability-context.js';
 import { isDaemonUnavailableError } from './daemon/availability.js';
 import {
@@ -23204,10 +23204,7 @@ export function App({
               {!artifactPanelFullscreen &&
                 (managedMode ||
                   !(artifactPanelOpen && useFloatingArtifactPanel)) && (
-                  <>
-                    <DaemonConnectionBanner />
-                    {!managedMode && <ProjectHooksApprovalBanner />}
-                  </>
+                  <DaemonConnectionBanner />
                 )}
               <div
                 ref={contextBodyRef}
@@ -24566,6 +24563,16 @@ export function App({
                           />
                         </div>
                       )}
+                      {/* Workspace-level hooks trust decision uses the same
+                          approval slot and card as tool approvals; it is not
+                          a session permission request. */}
+                      {!managedMode &&
+                        !pendingToolApproval &&
+                        mainView === 'chat' && (
+                          <div className={styles.approvalOverlay}>
+                            <ProjectHooksApprovalCard />
+                          </div>
+                        )}
                       {pendingAskUserApproval && mainView === 'chat' && (
                         <div
                           data-testid="approval-overlay"
