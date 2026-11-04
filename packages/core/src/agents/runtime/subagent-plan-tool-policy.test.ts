@@ -400,6 +400,41 @@ describe('subagent plan tool policy', () => {
     ).toBe(true);
   });
 
+  it('vetoes an eager-hidden Skill an execution allowlist hides the bridge from', () => {
+    // Hybrid declarations are narrowed by the execution allowlist, so a
+    // wildcard alone does not keep a bridge half the allowlist excludes.
+    for (const allowed of [
+      [ToolNames.READ_FILE],
+      [ToolNames.TOOL_SEARCH],
+      [ToolNames.TOOL_CALL],
+    ]) {
+      expect(
+        toolConfigAllowsSkill(
+          { tools: ['*'], executionAllowedTools: allowed },
+          false,
+          true,
+          false,
+          true,
+          true,
+        ),
+      ).toBe(false);
+    }
+    // Both halves declared keep the route open.
+    expect(
+      toolConfigAllowsSkill(
+        {
+          tools: ['*'],
+          executionAllowedTools: [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+        },
+        false,
+        true,
+        false,
+        true,
+        true,
+      ),
+    ).toBe(true);
+  });
+
   describe('hasAgentSkillExecBinding', () => {
     const contextWith = (
       mode: ToolMode,
