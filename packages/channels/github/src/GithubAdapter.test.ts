@@ -5862,6 +5862,19 @@ describe('GithubChannel', () => {
         ),
       ).resolves.toBe('https://github.example.com');
     });
+
+    it('strips a bare trailing slash from the baseUrl', async () => {
+      await expect(
+        connectAndReadWebOrigin(
+          makeConfig({ baseUrl: 'https://github.example.com/' }),
+        ),
+      ).resolves.toBe('https://github.example.com');
+      await expect(
+        connectAndReadWebOrigin(
+          makeConfig({ baseUrl: 'https://api.github.com/' }),
+        ),
+      ).resolves.toBe('https://github.com');
+    });
   });
 
   describe('event journal', () => {
@@ -6830,6 +6843,237 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(mockOctokit.paginate).toHaveBeenCalled();
     });
 
+    it('names the binding lookup, not workspace storage, when failing refreshes reach the cold-empty cap (R1-8)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockRejectedValue(new Error('daemon cold'));
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        for (let i = 0; i < 30; i++) {
+          await pollOnce();
+        }
+        const capLine = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been an empty partial for 30'));
+        expect(capLine).toBeDefined();
+        expect(capLine).toContain('binding lookup itself has been failing');
+        expect(capLine).not.toContain('chats directory');
+        // No snapshot has ever succeeded, so the gate keeps the lane closed:
+        // the cap line must not claim it opened.
+        expect(capLine).not.toContain('opening the comment lane');
+        expect(capLine).toContain('remains stalled');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('hints at unreadable storage after ten partial snapshots and counts the listed rows (R1-8)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // One tombstone row: no routable binding, but a listed session.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [{ sessionId: 'tomb', workspaceCwd: '/ws', prs: [] }],
+        partial: true,
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        for (let i = 0; i < 10; i++) {
+          await pollOnce();
+        }
+        const hint = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been partial for 10'));
+        expect(hint).toBeDefined();
+        expect(hint).toContain('(1 sessions listed)');
+        expect(hint).toContain('PR bindings scan');
+        expect(hint).toContain('no runtime');
+        // The lane is still deferred on the tenth cold poll: no claim that
+        // issue events flow.
+        expect(hint).toContain('PR and issue events are both stalled');
+        expect(hint).not.toContain('issue events are unaffected');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('keeps hinting while retention holds bindings the partial answers no longer list (R1-8)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValue([]);
+      // One complete snapshot lands a binding; then the chats dir becomes
+      // unlistable and every poll answers an empty partial. Retention keeps
+      // the binding in the map, so the hint must still fire.
+      boundSessions.listPrBindings.mockResolvedValueOnce({
+        bindings: [makeBinding()],
+        partial: false,
+      });
+      await pollOnce();
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        for (let i = 0; i < 10; i++) {
+          await pollOnce();
+        }
+        const hint = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been partial for 10'));
+        expect(hint).toBeDefined();
+        expect(hint).toContain('(0 sessions listed)');
+        // The lane opened on the complete snapshot: issue events do flow.
+        expect(hint).toContain('issue events are unaffected');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('does not blame the binding lookup when the cold-empty cap was reached by successful empty partials (R3-2)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValue([]);
+      // 29 successful empty partials, then one transient failure lands the
+      // cap on the failure path; the wording must name the storage causes.
+      for (let i = 0; i < 29; i++) {
+        boundSessions.listPrBindings.mockResolvedValueOnce({
+          bindings: [],
+          partial: true,
+        });
+        await pollOnce();
+      }
+      boundSessions.listPrBindings.mockRejectedValue(new Error('502'));
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await pollOnce();
+        const capLine = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been an empty partial for 30'));
+        expect(capLine).toBeDefined();
+        expect(capLine).not.toContain('binding lookup itself has been failing');
+        expect(capLine).toContain("'PR bindings scan' line");
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('names the binding lookup when failed lookups seeded the cold-empty cap and one empty partial lands it (R4-5)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValue([]);
+      boundSessions.listPrBindings.mockRejectedValue(new Error('daemon cold'));
+      for (let i = 0; i < 29; i++) {
+        await pollOnce();
+      }
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await pollOnce();
+        const capLine = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been an empty partial for 30'));
+        expect(capLine).toBeDefined();
+        expect(capLine).toContain('binding lookup itself has been failing');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('attributes the cold-empty cap to the failed lookups when one empty partial interrupted them (R6)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValue([]);
+      boundSessions.listPrBindings.mockRejectedValue(new Error('daemon cold'));
+      for (let i = 0; i < 15; i++) {
+        await pollOnce();
+      }
+      // One empty partial resets boundSnapshotFailureStreak; the streak that
+      // reaches the cap is still 29 failed lookups out of 30 polls.
+      boundSessions.listPrBindings.mockResolvedValueOnce({
+        bindings: [],
+        partial: true,
+      });
+      await pollOnce();
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        for (let i = 0; i < 14; i++) {
+          await pollOnce();
+        }
+        const capLine = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been an empty partial for 30'));
+        expect(capLine).toBeDefined();
+        expect(capLine).toContain(
+          'binding lookup itself has been failing for 29 of those polls',
+        );
+        expect(capLine).toContain("'PR bindings scan' line");
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('keeps the storage cause in front when only a few polls of the cold-empty streak failed the lookup (R6)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValue([]);
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      for (let i = 0; i < 28; i++) {
+        await pollOnce();
+      }
+      boundSessions.listPrBindings.mockRejectedValue(new Error('502'));
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await pollOnce();
+        await pollOnce();
+        const capLine = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been an empty partial for 30'));
+        expect(capLine).toBeDefined();
+        expect(capLine).not.toContain('binding lookup itself has been failing');
+        expect(capLine).toContain("'PR bindings scan' line");
+        expect(capLine).toContain('2 of those polls also failed the lookup');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('resets the failed-lookup count together with the cold-empty streak (R6)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValue([]);
+      boundSessions.listPrBindings.mockRejectedValue(new Error('daemon cold'));
+      for (let i = 0; i < 5; i++) {
+        await pollOnce();
+      }
+      // A non-empty partial ends the cold-empty streak; the five failures
+      // before it must not be charged to the next streak, which starts when
+      // that session's tombstone empties the map again.
+      boundSessions.listPrBindings.mockResolvedValueOnce({
+        bindings: [makeBinding()],
+        partial: true,
+      });
+      await pollOnce();
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [{ ...makeBinding(), prs: [] }],
+        partial: true,
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        for (let i = 0; i < 30; i++) {
+          await pollOnce();
+        }
+        const capLine = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been an empty partial for 30'));
+        expect(capLine).toBeDefined();
+        expect(capLine).toContain("'PR bindings scan' line");
+        expect(capLine).not.toContain('failed the lookup');
+        expect(capLine).not.toContain('binding lookup itself has been failing');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
     it('opens the lane on a non-empty partial snapshot and delivers known targets (R1-7)', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
       // A partial answer that LISTS the binding is enough for the known
@@ -6891,8 +7135,8 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
     it('routes an issue event publicly under a permanent partial snapshot (R14-B1)', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
-      // A PERMANENT partial (a multi-page scan or a long-lived non-active
-      // workspace) never lands a complete snapshot, so boundSnapshotTrusted
+      // A PERMANENT partial (a sidecar the daemon persistently cannot read)
+      // never lands a complete snapshot, so boundSnapshotTrusted
       // stays false forever. Bindings are PR-only and GitHub's issue/PR
       // number space is exclusive, so an issue event can never have a bound
       // target: its absence is provable without any snapshot and it must
