@@ -4600,7 +4600,19 @@ const EN: Messages = {
     'state_change — the PR is merged or closed',
   'channels.editor.field.github.boundSessionActions': 'Bound Session Actions',
   'channels.editor.field.github.boundSessionActions.description':
-    'Optional. Operator instruction templates delivered to PR-bound sessions, keyed by event class (watch:<type> or a notification reason), optionally role-qualified (review:, verify:, fix:). Requires Deliver To PR-Bound Sessions. With templates configured, each role gets its own delivery (one winner per role); a role with no matching key skips the event. Template variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%. Use %% for a literal %. Leave empty for the default generic prompt.',
+    'Optional. Instruction templates delivered to PR-bound sessions. Pick an event key below; a role prefix (review:, verify:, fix:) targets that binding role only. Requires Deliver To PR-Bound Sessions. Each role with a matching key gets its own delivery; roles without one skip the event. Variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%; %% for a literal %. Leave empty for the default generic prompt.',
+  'channels.editor.field.github.boundSessionActions.disabledHint':
+    'Enable "Deliver To PR-Bound Sessions" above to add templates.',
+  'channels.editor.field.github.boundSessionActions.group.any': 'Any role',
+  'channels.editor.field.github.boundSessionActions.group.review':
+    'review — code review sessions',
+  'channels.editor.field.github.boundSessionActions.group.verify':
+    'verify — verification sessions',
+  'channels.editor.field.github.boundSessionActions.group.fix':
+    'fix — fix sessions',
+  'channels.editor.record.addPlaceholder': 'Add template…',
+  'channels.editor.record.empty': 'No templates configured yet.',
+  'channels.editor.record.remove': (v) => `Remove ${v?.key ?? ''}`,
   'channels.editor.field.gitlab.token': 'Personal Access Token',
   'channels.editor.field.gitlab.token.description':
     'PAT with "read_api" + "api" scopes',
@@ -4874,6 +4886,48 @@ const EN: Messages = {
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
 };
+
+/**
+ * zh-CN descriptions for the GitHub boundSessionActions keys. The 20 base
+ * event descriptions are written once; the 60 role-qualified spellings
+ * reuse them (the picker group header names the role). English needs no
+ * entries here: the renderer falls back to the descriptor's own option
+ * descriptions. The role list mirrors PR_BINDING_ROLES in
+ * @qwen-code/channel-base, which the client cannot import.
+ */
+function githubBoundActionOptionDescriptionsZh(): Record<string, string> {
+  const base: Record<string, string> = {
+    default: '没有更具体键的事件使用的回退模板',
+    'watch:ci_failure': 'head 提交上的 CI 检查变红',
+    'watch:merge_conflict': 'PR 出现合并冲突',
+    'watch:head_change': 'PR 的 head 提交变更',
+    'watch:state_change': 'PR 被合并或关闭',
+    mention: '你在评论中被 @提及',
+    review_requested: '有人请求你评审',
+    assign: '你被指派到该 PR',
+    author: '你创建的 PR 有新动态',
+    comment: '已订阅 PR 的新评论',
+    ci_activity: '已订阅 PR 的 CI 动态',
+    manual: '你手动订阅了该 PR',
+    state_change: 'PR 被关闭或合并',
+    subscribed: '你订阅的 PR 有新动态',
+    team_mention: '你所在的团队被 @提及',
+    security_alert: '仓库的安全告警',
+    approval_requested: '有人请求你批准',
+    invitation: '你收到协作邀请',
+    member_feature_requested: '成员功能请求通知',
+    security_advisory_credit: '你在安全公告中被署名致谢',
+  };
+  const prefix = 'channels.editor.field.github.boundSessionActions';
+  const entries: Record<string, string> = {};
+  for (const [key, description] of Object.entries(base)) {
+    entries[`${prefix}.optionDescription.${key}`] = description;
+    for (const role of ['review', 'verify', 'fix']) {
+      entries[`${prefix}.optionDescription.${role}:${key}`] = description;
+    }
+  }
+  return entries;
+}
 
 const ZH: Messages = {
   ...EN,
@@ -9096,7 +9150,20 @@ const ZH: Messages = {
     'state_change — PR 被合并或关闭',
   'channels.editor.field.github.boundSessionActions': '绑定会话动作模板',
   'channels.editor.field.github.boundSessionActions.description':
-    '可选。投递给 PR 绑定会话的 operator 指令模板，键为事件类别（watch:<type> 或通知 reason），可加角色前缀（review:、verify:、fix:）。需开启"投递到 PR 绑定会话"。配置模板后每个角色各自投递（每角色一个 winner）；没有匹配键的角色跳过该事件。模板变量：%repo%、%pr%、%url%、%title%、%event%、%sender%、%role%。%% 表示字面 %。留空则使用默认通用 prompt。',
+    '可选。投递给 PR 绑定会话的 operator 指令模板。在下方选择事件键；加角色前缀（review:、verify:、fix:）可只定向该绑定角色。需开启"投递到 PR 绑定会话"。有匹配键的角色各自投递，没有匹配键的角色跳过该事件。变量：%repo%、%pr%、%url%、%title%、%event%、%sender%、%role%；%% 表示字面 %。留空则使用默认通用 prompt。',
+  'channels.editor.field.github.boundSessionActions.disabledHint':
+    '开启上方「投递到 PR 绑定会话」后即可添加模板。',
+  'channels.editor.field.github.boundSessionActions.group.any': '任意角色',
+  'channels.editor.field.github.boundSessionActions.group.review':
+    'review — 代码评审会话',
+  'channels.editor.field.github.boundSessionActions.group.verify':
+    'verify — 验证会话',
+  'channels.editor.field.github.boundSessionActions.group.fix':
+    'fix — 修复会话',
+  'channels.editor.record.addPlaceholder': '添加模板…',
+  'channels.editor.record.empty': '尚未配置模板。',
+  'channels.editor.record.remove': (v) => `删除 ${v?.key ?? ''}`,
+  ...githubBoundActionOptionDescriptionsZh(),
   'channels.editor.field.gitlab.token': '个人访问令牌',
   'channels.editor.field.gitlab.token.description':
     '需要 "read_api" + "api" 权限的 PAT',
