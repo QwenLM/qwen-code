@@ -46,18 +46,36 @@ import type {
  */
 export const MANAGED_MESSAGE_BODY_CACHE_BYTES = 64 * 1024 * 1024;
 
+/** The cached bodies of one resource store, least recently read first. */
+interface StoreBodies {
+  readonly entries: Map<string, Buffer>;
+  bytes: number;
+}
+
 /**
- * Message bodies already read through a projection, least recently read first.
- * A body is immutable and its ref names its kind, length and digest, so an
- * entry is exactly what the store returned for that ref. Entries are keyed by
- * the resource store they were read from, so Sessions never share them. Only
- * reads fill the cache: a body a projection has never read is still read from
- * the store, and fails the projection if the store no longer has it.
+ * Message bodies already read through a projection. A body is immutable and
+ * its ref names its kind, length and digest, so an entry is exactly what the
+ * store returned for that ref. Entries are kept per resource store, so
+ * Sessions never share them. Only reads fill the cache: a body a projection
+ * has never read is still read from the store, and fails the projection if the
+ * store no longer has it.
+ *
+ * A projection reads every body of its Session in commit order, so plain LRU
+ * would let a Session whose bodies exceed the bound evict each body just
+ * before its next projection reached it, and never hit. Instead a store never
+ * evicts its own bodies to keep a new one: such a Session keeps the bodies it
+ * kept first and reads the rest from the store. Room for a new body comes from
+ * the other stores, least recently read store first and, within it, its
+ * least recently read bodies first, so Sessions that contend for the bound
+ * re-read only the bodies the others displaced.
  */
 export class ManagedMessageBodyCache {
-  private readonly entries = new Map<string, Buffer>();
-  private readonly stores = new WeakMap<ManagedSessionResourceStore, number>();
-  private nextStore = 1;
+  private readonly stores = new WeakMap<
+    ManagedSessionResourceStore,
+    StoreBodies
+  >();
+  /** Stores holding bodies, least recently read first. */
+  private readonly order = new Set<StoreBodies>();
   private size = 0;
 
   constructor(private readonly limitBytes: number) {}
@@ -70,39 +88,63 @@ export class ManagedMessageBodyCache {
     resources: ManagedSessionResourceStore,
     ref: ManagedSessionDurableRef,
   ): Promise<Buffer> {
-    let store = this.stores.get(resources);
-    if (store === undefined) {
-      store = this.nextStore++;
-      this.stores.set(resources, store);
+    let bodies = this.stores.get(resources);
+    if (bodies === undefined) {
+      bodies = { entries: new Map(), bytes: 0 };
+      this.stores.set(resources, bodies);
     }
     const key = [
-      store,
       ref.resourceId,
       ref.kind,
       ref.schemaVersion,
       ref.byteLength,
       ref.digest,
     ].join('\u0000');
-    const cached = this.entries.get(key);
+    const cached = bodies.entries.get(key);
     if (cached !== undefined) {
-      this.entries.delete(key);
-      this.entries.set(key, cached);
+      bodies.entries.delete(key);
+      bodies.entries.set(key, cached);
+      this.touch(bodies);
       return cached;
     }
     const body = await readManagedMessageBody(
       (bodyRef) => resources.read(bodyRef),
       ref,
     );
-    if (body.byteLength <= this.limitBytes && !this.entries.has(key)) {
-      this.entries.set(key, body);
+    // A concurrent read of the same ref may have kept it while this one waited.
+    if (
+      !bodies.entries.has(key) &&
+      bodies.bytes + body.byteLength <= this.limitBytes
+    ) {
+      bodies.entries.set(key, body);
+      bodies.bytes += body.byteLength;
       this.size += body.byteLength;
-      for (const [oldest, value] of this.entries) {
-        if (this.size <= this.limitBytes) break;
-        this.entries.delete(oldest);
-        this.size -= value.byteLength;
-      }
+      this.touch(bodies);
+      this.evict();
     }
     return body;
+  }
+
+  private touch(bodies: StoreBodies): void {
+    this.order.delete(bodies);
+    this.order.add(bodies);
+  }
+
+  /**
+   * The store that just kept a body is the most recently read and holds at
+   * most the bound, so the other stores make room before the loop reaches it.
+   */
+  private evict(): void {
+    for (const bodies of this.order) {
+      if (this.size <= this.limitBytes) return;
+      for (const [key, body] of bodies.entries) {
+        if (this.size <= this.limitBytes) break;
+        bodies.entries.delete(key);
+        bodies.bytes -= body.byteLength;
+        this.size -= body.byteLength;
+      }
+      if (bodies.entries.size === 0) this.order.delete(bodies);
+    }
   }
 }
 
