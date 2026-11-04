@@ -2424,13 +2424,31 @@ test('start and verify use server.env when the configuration does not resolve', 
     'PASS http://127.0.0.1:18081/actuator/health is UP',
   );
 
-  // Without the resolver's verdict, the preflight judges the Harness URL
-  // once the Harness listens, as it does without the upgrade command.
+  // Without the resolver's verdict, start still refuses what the server
+  // refuses wherever it reads the value, since a pool would drop every
+  // member over it, and leaves the rest to the preflight.
   await host.stop();
+  const env = path.join(host.etc, 'server.env');
+  const base = await readFile(env, 'utf8');
+  for (const harnessUrl of [
+    'http://127.0.0.1:4172/?tenant=acme',
+    'http://svc:s3cret@127.0.0.1:4172',
+  ]) {
+    await writeFile(
+      env,
+      `${base}QWEN_MANAGED_AGENT_HARNESS_BASE_URL=${harnessUrl}\n`,
+    );
+    assert.equal(await host.upgrade('start'), 1, harnessUrl);
+    assert.match(
+      host.output.at(-1),
+      /^start refused: The control plane reaches qwen-hosted-harness at .*, which carries (a query or a fragment|a user name or password); correct/,
+    );
+    assert.ok(!host.output.join('\n').includes('s3cret'), harnessUrl);
+    assert.ok(!host.output.includes(`Starting ${HARNESS}`), harnessUrl);
+  }
   await writeFile(
-    path.join(host.etc, 'server.env'),
-    'QWEN_MANAGED_AGENT_HARNESS_BASE_URL=http://127.0.0.1:4172/?tenant=acme\n',
-    { flag: 'a' },
+    env,
+    `${base}QWEN_MANAGED_AGENT_HARNESS_BASE_URL=http://qwen_harness:4172\n`,
   );
   host.preflightStatus = 1;
   assert.equal(await host.upgrade('start'), 1);
@@ -2440,6 +2458,7 @@ test('start and verify use server.env when the configuration does not resolve', 
     `start refused: The preflight failed, so ${SERVER} stays stopped; fix its FAIL rows and run start again.`,
   );
   host.preflightStatus = 0;
+  await writeFile(env, base);
 
   // An address from server.env that no URL can carry is refused as well.
   await host.stop();
@@ -2550,7 +2569,7 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     assert.equal(await host.upgrade('start'), 1, harnessBaseUrl);
     assert.equal(
       host.output.at(-1),
-      `start refused: The control plane reaches qwen-hosted-harness at ${JSON.stringify(harnessBaseUrl)}, which the server does not take as an http or https origin, reading it untrimmed as java.net.URI does; correct qwen.managed-agent.harness.base-url.`,
+      `start refused: The control plane reaches qwen-hosted-harness at ${JSON.stringify(harnessBaseUrl)}, which the server does not take as an http or https base URL, reading it untrimmed as java.net.URI does; correct qwen.managed-agent.harness.base-url.`,
     );
     assert.ok(!host.output.some((line) => line.startsWith('Restarting')));
   }
@@ -3068,14 +3087,60 @@ test('verify says why an API read failed, in text the endpoint cannot steer', as
     const listless = rowsOf(host.output);
     assert.equal(
       listless.session,
-      `FAIL GET /v1/agents/sessions/s1/items?limit=20 answered data that is no list (${shown})`,
+      `FAIL GET /v1/agents/sessions/s1/items?limit=20 answered no data list (${shown})`,
     );
     assert.equal(
       listless.turn,
-      `FAIL Session s1: GET /v1/agents/sessions/s1/events answered data that is no list (${shown})`,
+      `FAIL Session s1: GET /v1/agents/sessions/s1/events answered no data list (${shown})`,
     );
     assert.ok(!control.test(listless.session), JSON.stringify(listless));
   }
+  // A page without a data list is not an empty one.
+  host.responses['GET /v1/agents/sessions/s1/items'] = { data: [] };
+  for (const [page, shown] of [
+    [[{ id: 's1' }], '[{"id":"s1"}]'],
+    [{ data: null }, 'null'],
+    ['oops', 'oops'],
+    [{}, '{}'],
+  ]) {
+    host.responses['GET /v1/agents/sessions'] = page;
+    assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
+    assert.equal(
+      rowsOf(host.output).session,
+      `FAIL GET /v1/agents/sessions?limit=1 answered no data list (${shown})`,
+    );
+  }
+  // An id a route cannot carry as one segment: fetch resolves the dots, and
+  // an empty one would read the list.
+  for (const id of ['', '.', '..']) {
+    host.responses['GET /v1/agents/sessions'] = { data: [{ id }] };
+    assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
+    assert.equal(
+      rowsOf(host.output).session,
+      `FAIL the API answered a Session whose id ${JSON.stringify(id)} names no route`,
+    );
+  }
+  // An event ends the turn only when the API marks it terminal.
+  host.responses['GET /v1/agents/sessions'] = { data: [{ id: 's1' }] };
+  host.responses['POST /v1/agents/sessions'] = { id: 's1' };
+  host.responses['GET /v1/agents/sessions/s1/events'] = {
+    data: [{ sequence: 1, type: 'turn.completed', terminal: 'false' }],
+  };
+  assert.equal(
+    await host.upgrade(
+      'verify',
+      '--tenant',
+      'acme',
+      '--turn',
+      '--timeout',
+      '3',
+    ),
+    1,
+  );
+  assert.equal(
+    rowsOf(host.output).turn,
+    'FAIL Session s1: no terminal event within 3s',
+  );
 });
 
 test('verify refuses a URL fetch refuses before it probes', async (t) => {

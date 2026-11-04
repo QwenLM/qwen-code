@@ -289,37 +289,33 @@ class ResolvedConfigurationTest {
 
     @Test
     void judgesTheHarnessUrlAsTheConnectorThatDialsItDoes() {
-        // The single Harness's connector and each pool member's are built
-        // from the one base-url, and refuse it by the preflight's rule: the
-        // pool's refresh drops a member whose connector refuses it.
-        for (boolean pooled : new boolean[] {false, true}) {
-            for (String url : new String[] {"http://127.0.0.1:4170",
-                    "https://harness.internal:4170/base", "http://[::1]:4170",
-                    "http://qwen_harness:4170", "http://@127.0.0.1:4170",
-                    "http://svc:s3cret@127.0.0.1:4170",
-                    "http://127.0.0.1:4170/?", "http://127.0.0.1:4170#x",
-                    "http://127.0.0.1:4170/a b", "ftp://127.0.0.1:4170",
-                    "proxy.test:4170", "", " http://127.0.0.1:4170 "}) {
-                ManagedAgentProperties properties = new ManagedAgentProperties();
-                ManagedAgentProperties.Harness harness = properties.getHarness();
-                harness.setEnabled(true);
-                harness.getPool().setEnabled(pooled);
-                harness.setBaseUrl(url);
-                harness.setToken("token");
-                harness.setCapabilityDigest("sha256:" + "a".repeat(64));
-                boolean built;
-                try {
-                    new QwenHostedHarnessConnector(properties,
-                            mock(AgentStateStore.class),
-                            mock(WorkspaceExecutionStore.class)).close();
-                    built = true;
-                } catch (IllegalArgumentException | IllegalStateException refused) {
-                    built = false;
-                }
-                assertEquals(String.valueOf(built),
-                        ManagedAgentPreflight.harnessUrlVerdict(harness),
-                        pooled + " " + url);
+        // The connector is built from the one base-url and refuses it by the
+        // preflight's rule; a pool builds each member's connector from the
+        // same value, as HarnessConfigurationTest pins.
+        for (String url : new String[] {"http://127.0.0.1:4170",
+                "https://harness.internal:4170/base", "http://[::1]:4170",
+                "http://qwen_harness:4170", "http://@127.0.0.1:4170",
+                "http://svc:s3cret@127.0.0.1:4170",
+                "http://127.0.0.1:4170/?", "http://127.0.0.1:4170#x",
+                "http://127.0.0.1:4170/a b", "ftp://127.0.0.1:4170",
+                "proxy.test:4170", "", " http://127.0.0.1:4170 "}) {
+            ManagedAgentProperties properties = new ManagedAgentProperties();
+            ManagedAgentProperties.Harness harness = properties.getHarness();
+            harness.setEnabled(true);
+            harness.setBaseUrl(url);
+            harness.setToken("token");
+            harness.setCapabilityDigest("sha256:" + "a".repeat(64));
+            boolean built;
+            try {
+                new QwenHostedHarnessConnector(properties,
+                        mock(AgentStateStore.class),
+                        mock(WorkspaceExecutionStore.class)).close();
+                built = true;
+            } catch (IllegalArgumentException | IllegalStateException refused) {
+                built = false;
             }
+            assertEquals(String.valueOf(built),
+                    ManagedAgentPreflight.harnessUrlVerdict(harness), url);
         }
     }
 

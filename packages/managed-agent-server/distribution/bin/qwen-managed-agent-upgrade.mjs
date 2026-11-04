@@ -2744,25 +2744,31 @@ async function phaseStart(system, deployment, options) {
   // which has a host: an opaque value such as proxy.test:8443 names none to
   // wait on. A value that does not parse gets fetchRefusal's reason, which
   // names an IPv6 zone as --server-url's refusal does.
-  // Past those, the server's verdict, which the resolver passes on: it takes
-  // only an http(s) origin, without user information, a query or a fragment,
-  // read untrimmed as java.net.URI reads it. The preflight fails any other
-  // after the Harness restarts, and a pool's members, whose row the
-  // preflight skips, would each refuse it. The reasons below only word a
-  // 'false' verdict. With the Harness disabled the verdict is 'skip', since
-  // nothing reads the value; without one, as when the configuration did not
-  // resolve, the preflight judges it once the Harness is up.
+  // Past those, the server's verdict, which the resolver passes on: its
+  // Harness connector takes only an http(s) URL with a host and without user
+  // information, a query or a fragment, read untrimmed as java.net.URI reads
+  // it. The preflight fails any other after the Harness restarts, and a
+  // pool, whose row the preflight skips, drops each member over it. 'true'
+  // and 'skip', for a disabled Harness that nothing reads, ask nothing more.
+  // Without a verdict, as when the configuration did not resolve, start
+  // still refuses user information, a query or a fragment, which the server
+  // refuses wherever it reads the value: a disabled Harness's value may then
+  // be refused for nothing, which costs an edit, where letting it through
+  // could start a pool that accepts no Session. The preflight judges the
+  // rest.
   const unusable = !harnessUrl
     ? fetchRefusal(urls.harness)
     : !['http:', 'https:'].includes(harnessUrl.protocol)
       ? 'is not an http or https URL'
-      : urls.harnessOrigin !== 'false'
+      : ['true', 'skip'].includes(urls.harnessOrigin)
         ? undefined
         : harnessUrl.username || harnessUrl.password
           ? 'carries a user name or password'
           : urls.harness.includes('?') || urls.harness.includes('#')
             ? 'carries a query or a fragment'
-            : 'the server does not take as an http or https origin, reading it untrimmed as java.net.URI does';
+            : urls.harnessOrigin === 'false'
+              ? 'the server does not take as an http or https base URL, reading it untrimmed as java.net.URI does'
+              : undefined;
   if (unusable) {
     throw new Refusal(
       `The control plane reaches ${harness.name} at ${JSON.stringify(withoutCredentials(urls.harness))}, which ${unusable}; correct qwen.managed-agent.harness.base-url.`,
@@ -2929,20 +2935,31 @@ function sessionRoute(session) {
       `the API answered a Session without a string id (${printable(shown)})`,
     );
   }
+  // fetch resolves a dot segment, so "." or ".." would read another route,
+  // and an empty id would read the list.
+  if (['', '.', '..'].includes(session.id)) {
+    throw new Error(
+      `the API answered a Session whose id ${JSON.stringify(session.id)} names no route`,
+    );
+  }
   return `/v1/agents/sessions/${encodeURIComponent(session.id)}`;
 }
 
-// The list a page of the API answered, or none when it holds no data. Any
-// other value is no list to read: iterating it would throw, or walk a
-// string's characters, and its length would be any value it chose.
+// The list a page of the API answered, which every page carries in its data.
+// Any other value is no list to read: iterating it would throw, or walk a
+// string's characters, its length would be any value it chose, and a page
+// without one would read as an empty list.
 function listed(page, route) {
-  const data = page?.data ?? [];
-  if (!Array.isArray(data)) {
-    throw new Error(
-      `GET ${printable(route)} answered data that is no list (${printable(data)})`,
-    );
+  if (Array.isArray(page?.data)) {
+    return page.data;
   }
-  return data;
+  const shown =
+    page !== null && typeof page === 'object' && 'data' in page
+      ? page.data
+      : page;
+  throw new Error(
+    `GET ${printable(route)} answered no data list (${printable(shown)})`,
+  );
 }
 
 async function sessionRow(system, client) {
@@ -3026,7 +3043,8 @@ async function turnRow(system, client, timeout) {
         if (Number.isSafeInteger(sequence) && sequence > after) {
           after = sequence;
         }
-        if (event?.terminal) {
+        // As the API sends it: a "false" is no end.
+        if (event?.terminal === true) {
           return event;
         }
       }
