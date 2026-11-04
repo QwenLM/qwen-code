@@ -1147,6 +1147,10 @@ describe('managed session record sink', () => {
     ['at_command', { path: 'README.md' }],
     ['ui_telemetry', { uiEvent: { event: 'turn_complete' } }],
     ['attribution_snapshot', { snapshot: { human: 1, assistant: 2 } }],
+    [
+      'tool_result_admission',
+      { recordUuids: ['result'], decision: 'admitted' },
+    ],
   ] as const)(
     'round-trips a carried %s record through the message channel',
     async (subtype, systemPayload) => {

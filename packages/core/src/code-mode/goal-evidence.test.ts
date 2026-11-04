@@ -192,7 +192,7 @@ describe('Code Mode Goal evidence', () => {
           .filter((part) => part.functionResponse)
           .map((part) => part.functionResponse?.id);
       expect(modelResultIds(records)).toEqual([]);
-      recorder.recordToolResultAdmission(response.responseParts);
+      await recorder.recordToolResultAdmission(response.responseParts);
       expect(
         modelResultIds(await recorder.readActiveTranscriptChain()),
       ).toEqual([request.callId]);

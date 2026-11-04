@@ -79,6 +79,7 @@ import {
 } from '../utils/api-history-metadata.js';
 import { getStartupContextLength } from '../core/environmentContext.js';
 import { getRecordRewindId } from './session-api-history.js';
+import { matchToolResultParts } from './tool-result-history.js';
 import { computeInitialTurnFromHistory } from './session-turn-state.js';
 import {
   deleteTranscriptMessageGroups,
@@ -309,6 +310,7 @@ export interface ToolResultAdmissionPayload {
 }
 
 export interface RecordedToolResultAdmission {
+  /** The complete packet's actual submitted parts, in their submitted order. */
   parts: readonly Part[];
   decision: ToolResultAdmissionPayload['decision'];
 }
@@ -3185,11 +3187,18 @@ export class ChatRecordingService {
     }
   }
 
-  recordToolResultAdmission(
+  async recordToolResultAdmission(
     parts: readonly Part[],
     withheldReason?: string,
-  ): RecordedToolResultAdmission[] {
+  ): Promise<RecordedToolResultAdmission[]> {
     if (!parts.some((part) => part.functionResponse)) return [];
+    if (this.writeFailure) throw this.writeFailure;
+    if (this.topologyFence) throw new SessionTranscriptChangedError();
+    if (
+      this.state !== 'inactive' &&
+      (!this.acceptingWrites || this.state !== 'active')
+    )
+      throw new SessionWriterUnavailableError();
     const roundStart = this.activeBranchRecords.findLastIndex(
       (record) =>
         record.type === 'assistant' ||
@@ -3198,6 +3207,7 @@ export class ChatRecordingService {
     const pending = new Set<string>();
     const decisions = new Map<string, ToolResultAdmissionPayload['decision']>();
     const results: ChatRecord[] = [];
+    let incompleteResult = false;
     for (const record of this.activeBranchRecords.slice(roundStart + 1)) {
       const result = record.message?.parts;
       if (
@@ -3210,8 +3220,17 @@ export class ChatRecordingService {
           result.every((part) =>
             parts.some((sent) => isDeepStrictEqual(part, sent)),
           )
-        )
+        ) {
           results.push(record);
+        } else if (
+          result.some(
+            (part) =>
+              part.functionResponse &&
+              parts.some((sent) => isDeepStrictEqual(part, sent)),
+          )
+        ) {
+          incompleteResult = true;
+        }
       }
       if (
         record.type !== 'system' ||
@@ -3236,22 +3255,33 @@ export class ChatRecordingService {
         pending.delete(id);
       }
     }
+    if (incompleteResult) throw new SessionTranscriptChangedError();
+    if (!results.length) return [];
+    if (!this.acceptingWrites || this.state !== 'active')
+      throw new SessionWriterUnavailableError();
+    const matchedParts = matchToolResultParts(
+      results.map((record) => record.message!.parts!),
+      parts,
+    );
     const decision: ToolResultAdmissionPayload['decision'] =
       withheldReason === undefined ? 'admitted' : { withheld: withheldReason };
     const recordUuids = results
       .filter((record) => pending.has(record.uuid))
       .map((record) => record.uuid);
     if (recordUuids.length) {
-      this.appendRecord({
+      await this.appendRecordStrict({
         ...this.createBaseRecord('system'),
         subtype: 'tool_result_admission',
         systemPayload: { recordUuids, decision },
       });
+    } else {
+      // An earlier decision may still be queued even though it is in memory.
+      await this.flush();
     }
     // A later setup failure cannot reverse a decision already used by recovery
     // or a compression checkpoint that includes the admitted pending input.
-    return results.map((record) => ({
-      parts: record.message!.parts!,
+    return results.map((record, index) => ({
+      parts: matchedParts[index],
       decision: decisions.get(record.uuid) ?? decision,
     }));
   }

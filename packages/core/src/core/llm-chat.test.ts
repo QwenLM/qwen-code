@@ -730,6 +730,138 @@ describe('LlmChat', async () => {
     });
   });
 
+  it('does not expose tool output when durable admission fails', async () => {
+    const failure = new Error('admission write failed');
+    const target = newChat({
+      recorder: {
+        recordToolResultAdmission: vi.fn().mockRejectedValue(failure),
+        recordAssistantTurn: vi.fn(),
+      },
+    });
+    const parts: Part[] = [
+      {
+        functionResponse: {
+          id: 'read',
+          name: 'read_file',
+          response: { output: 'secret' },
+        },
+      },
+    ];
+    await expect(
+      target.sendMessageStream(
+        'test-model',
+        { message: parts },
+        'failed-admission',
+        undefined,
+        { toolResultParts: parts },
+      ),
+    ).rejects.toBe(failure);
+    expect(target.getHistory()).toEqual([]);
+    expect(streamMock()).not.toHaveBeenCalled();
+  });
+
+  it('keeps an earlier withholding decision in a later model send', async () => {
+    const parts: Part[] = [
+      {
+        functionResponse: {
+          id: 'read',
+          name: 'read_file',
+          response: { output: 'secret' },
+        },
+      },
+      { text: 'secret companion' },
+    ];
+    const target = newChat({
+      recorder: {
+        recordToolResultAdmission: vi
+          .fn()
+          .mockResolvedValue([
+            { parts, decision: { withheld: 'original block' } },
+          ]),
+        recordAssistantTurn: vi.fn(),
+      },
+    });
+    target.addHistory({
+      role: 'model',
+      parts: [{ functionCall: { id: 'read', name: 'read_file', args: {} } }],
+    });
+    mockStream(streamOf(stopResponse([{ text: 'done' }])));
+    await drain(
+      await target.sendMessageStream(
+        'test-model',
+        { message: [...parts, { text: 'independent input' }] },
+        'earlier-withholding',
+        undefined,
+        { toolResultParts: parts },
+      ),
+    );
+    const request = JSON.stringify(requestAt(0).contents);
+    expect(request).not.toContain('secret');
+    expect(request).toContain('original block');
+    expect(request).toContain('independent input');
+  });
+
+  it.each(['compression', 'history setup'])(
+    'keeps confirmed tool admission when %s fails',
+    async (stage) => {
+      const parts: Part[] = [
+        {
+          functionResponse: {
+            id: 'read',
+            name: 'read_file',
+            response: { output: 'confirmed result' },
+          },
+        },
+      ];
+      const target = newChat({
+        recorder: {
+          recordToolResultAdmission: vi
+            .fn()
+            .mockResolvedValueOnce([{ parts, decision: 'admitted' }])
+            .mockResolvedValue([]),
+          recordAssistantTurn: vi.fn(),
+        },
+      });
+      target.addHistory({
+        role: 'model',
+        parts: [{ functionCall: { id: 'read', name: 'read_file', args: {} } }],
+      });
+      const failure = new Error('setup failed after admission');
+      if (stage === 'compression') {
+        vi.spyOn(
+          ChatCompressionService.prototype,
+          'compress',
+        ).mockRejectedValueOnce(failure);
+      } else {
+        vi.spyOn(
+          target as unknown as { getRequestHistory: () => Content[] },
+          'getRequestHistory',
+        ).mockImplementationOnce(() => {
+          throw failure;
+        });
+      }
+      const message = [...parts, { text: 'independent input' }];
+      await expect(
+        target.sendMessageStream(
+          'test-model',
+          { message },
+          'confirmed-admission',
+          undefined,
+          { toolResultParts: parts },
+        ),
+      ).rejects.toBe(failure);
+      expect(target.getHistory().at(-1)?.parts).toEqual([...message]);
+      expect(target.getUserContentPushCount()).toBe(1);
+      expect(streamMock()).not.toHaveBeenCalled();
+      mockStream(textStream('next response'));
+      await sendDrain('Next.', 'next-after-setup-error', target);
+      const responses = (requestAt(0).contents as Content[])
+        .flatMap((content) => content.parts ?? [])
+        .filter((part) => part.functionResponse?.id === 'read');
+      expect(responses).toHaveLength(1);
+    },
+  );
+
   it('preserves an ordinary prompt cancelled before send for interrupted-turn recovery', async () => {
     const reason = new Error('user cancelled');
     const stream = await chat.sendMessageStream(
@@ -12702,6 +12834,233 @@ describe('LlmChat', async () => {
   });
 
   describe('replaceSynthesizedToolResponse / getSynthesizedRepairCallIds', () => {
+    const repairHistory = () => [
+      content('model', fnCall('read_file', {}, 'call-1')),
+      content(
+        'user',
+        fnResponse(
+          'read_file',
+          { error: ORPHAN_TOOL_USE_REPAIR_REASON },
+          'call-1',
+        ),
+      ),
+    ];
+    it('refuses an async replacement before preparing when the first answer is genuine', async () => {
+      chat.setHistory([
+        content(
+          'user',
+          fnResponse('read_file', { output: 'genuine' }, 'call-1'),
+        ),
+        ...repairHistory(),
+      ]);
+      const prepare = vi.fn(async () => [
+        fnResponse('read_file', { output: 'late' }, 'call-1'),
+      ]);
+      expect(chat.getSynthesizedRepairCallIds()).toContain('call-1');
+      expect(
+        await chat.replaceSynthesizedToolResponseAsync('call-1', prepare),
+      ).toBe(false);
+      expect(prepare).not.toHaveBeenCalled();
+    });
+    it('protects a reserved placeholder and queues concurrent sends', async () => {
+      chat.setHistory(repairHistory());
+      const before = chat.getHistory();
+      let confirm!: (parts: Part[]) => void;
+      const prepare = vi.fn(
+        () =>
+          new Promise<Part[]>((resolve) => {
+            confirm = resolve;
+          }),
+      );
+      const replacing = chat.replaceSynthesizedToolResponseAsync(
+        'call-1',
+        prepare,
+      );
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
+      const mutators = [
+        () => chat.clearHistory(),
+        () => chat.addHistory(userText('new input')),
+        () => chat.setHistory([]),
+        () => chat.truncateHistory(0),
+        () => chat.stripThoughtsFromHistory(),
+        () => chat.stripOrphanedUserEntriesFromHistory(),
+        () => chat.repairOrphanedToolUseTurns(),
+        () => chat.redactApprovedPlanFromHistory('call-1', 'redacted'),
+        () => chat.compressFast(),
+        () => chat.replaceSynthesizedToolResponse('call-1', []),
+      ];
+      for (const mutate of mutators)
+        expect(mutate).toThrow('replacement is pending');
+      await expect(chat.tryCompress('reserved')).rejects.toThrow(
+        'replacement is pending',
+      );
+      expect(chat.getHistory()).toEqual(before);
+      streamMock().mockImplementation(async () => textStream('done'));
+      const first = sendDrain('next one', 'queued-1');
+      const second = sendDrain('next two', 'queued-2');
+      await Promise.resolve();
+      expect(streamMock()).not.toHaveBeenCalled();
+      confirm([fnResponse('read_file', { output: 'confirmed' }, 'call-1')]);
+      expect(await replacing).toBe(true);
+      await Promise.all([first, second]);
+      expect(streamMock()).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify(requestAt(0).contents)).toContain('confirmed');
+      expect(JSON.stringify(requestAt(0).contents)).not.toContain('next two');
+      expect(JSON.stringify(requestAt(1).contents)).toContain('next two');
+    });
+    it('releases a failed reservation without exposing output', async () => {
+      chat.setHistory(repairHistory());
+      const before = chat.getHistory();
+      const failure = new Error('write failed');
+      await expect(
+        chat.replaceSynthesizedToolResponseAsync('call-1', async () => {
+          throw failure;
+        }),
+      ).rejects.toBe(failure);
+      expect(chat.getHistory()).toEqual(before);
+      expect(
+        await chat.replaceSynthesizedToolResponseAsync('call-1', async () => [
+          fnResponse('read_file', { output: 'confirmed' }, 'call-1'),
+        ]),
+      ).toBe(true);
+    });
+    it('waits for an in-flight compression checkpoint before reserving', async () => {
+      chat.setHistory(repairHistory());
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
+        newHistory: repairHistory(),
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 50,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      let finish!: () => void;
+      const checkpoint = vi
+        .spyOn(
+          chat as unknown as { recordCompression: () => Promise<void> },
+          'recordCompression',
+        )
+        .mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        );
+      const compression = chat.tryCompress('checkpoint');
+      await vi.waitFor(() => expect(checkpoint).toHaveBeenCalledOnce());
+      const prepare = vi.fn(async () => [
+        fnResponse('read_file', { output: 'confirmed' }, 'call-1'),
+      ]);
+      const replacing = chat.replaceSynthesizedToolResponseAsync(
+        'call-1',
+        prepare,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(prepare).not.toHaveBeenCalled();
+      finish();
+      await compression;
+      expect(await replacing).toBe(true);
+    });
+
+    it('serializes competing replacements and resumes sending after a rejected preparation', async () => {
+      chat.setHistory(repairHistory());
+      let reject!: (error: Error) => void;
+      const firstPrepare = vi.fn(
+        () =>
+          new Promise<Part[]>((_resolve, fail) => {
+            reject = fail;
+          }),
+      );
+      const first = chat.replaceSynthesizedToolResponseAsync(
+        'call-1',
+        firstPrepare,
+      );
+      await vi.waitFor(() => expect(firstPrepare).toHaveBeenCalledOnce());
+      const settled = [
+        fnResponse('read_file', { output: 'confirmed' }, 'call-1'),
+      ];
+      const secondPrepare = vi.fn(async () => settled);
+      const second = chat.replaceSynthesizedToolResponseAsync(
+        'call-1',
+        secondPrepare,
+      );
+      const refusedPrepare = vi.fn(async () => settled);
+      const third = chat.replaceSynthesizedToolResponseAsync(
+        'call-1',
+        refusedPrepare,
+      );
+      streamMock().mockImplementation(async () => textStream('done'));
+      const sending = sendDrain('after failure', 'after-reject');
+      const failure = new Error('receipt failed');
+      const failed = first.then(
+        () => {
+          throw new Error('Expected rejected preparation');
+        },
+        (error: unknown) => {
+          expect(error).toBe(failure);
+        },
+      );
+      reject(failure);
+      await failed;
+      expect(await second).toBe(true);
+      expect(await third).toBe(false);
+      expect(refusedPrepare).not.toHaveBeenCalled();
+      await sending;
+      expect(JSON.stringify(requestAt(0).contents)).toContain('confirmed');
+    });
+
+    it('waits for an active stream and refuses a slot its model response overtook', async () => {
+      chat.setHistory(repairHistory());
+      let finish!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      mockStream(
+        (async function* () {
+          await blocked;
+          yield textChunk('done', 'STOP');
+        })(),
+      );
+      const sending = sendDrain('in flight', 'active-send');
+      await vi.waitFor(() => expect(streamMock()).toHaveBeenCalledOnce());
+      const prepare = vi.fn(async () => [
+        fnResponse('read_file', { output: 'confirmed' }, 'call-1'),
+      ]);
+      const replacing = chat.replaceSynthesizedToolResponseAsync(
+        'call-1',
+        prepare,
+      );
+      await Promise.resolve();
+      expect(prepare).not.toHaveBeenCalled();
+      finish();
+      await sending;
+      expect(await replacing).toBe(false);
+      expect(prepare).not.toHaveBeenCalled();
+    });
+
+    it.each(['before-user', 'after-user'] as const)(
+      'matches the recovery boundary for a degraded model %s',
+      async (position) => {
+        const history = repairHistory();
+        history.splice(
+          position === 'before-user' ? 1 : 2,
+          0,
+          modelText('(request timeout)'),
+        );
+        chat.setHistory(history);
+        const prepare = vi.fn(async () => [
+          fnResponse('read_file', { output: 'confirmed' }, 'call-1'),
+        ]);
+        expect(
+          await chat.replaceSynthesizedToolResponseAsync('call-1', prepare),
+        ).toBe(position === 'before-user');
+        expect(prepare).toHaveBeenCalledTimes(
+          position === 'before-user' ? 1 : 0,
+        );
+      },
+    );
+
     it('replaces the placeholder in place, preserving its slot and neighbours', () => {
       const realParts: Part[] = [
         fnResponse('read_file', { output: 'real contents' }, 'call-1'),

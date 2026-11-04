@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { projectToolResultHistory } from '../services/tool-result-history.js';
+
 import {
   attachToolOutputProvenance,
   getToolOutputProvenance,
@@ -2397,6 +2399,30 @@ export class LlmChat {
   // A promise to represent the current state of the message being sent to the
   // model.
   private sendPromise: Promise<void> = Promise.resolve();
+  private toolResponseReplacementPending = false;
+  private readonly pendingHistoryCompressions = new Set<
+    Promise<ChatCompressionInfo>
+  >();
+
+  private reserveHistoryOperation(): {
+    ready: Promise<void>;
+    release: () => void;
+  } {
+    const ready = this.sendPromise;
+    let release!: () => void;
+    this.sendPromise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { ready, release };
+  }
+
+  private assertHistoryMutationAllowed(): void {
+    if (this.toolResponseReplacementPending) {
+      throw new Error(
+        'Cannot modify history while a tool response replacement is pending.',
+      );
+    }
+  }
 
   /**
    * Per-chat last-prompt-token-count, populated from `usageMetadata` on each
@@ -3034,6 +3060,22 @@ export class LlmChat {
     signal?: AbortSignal,
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
+    this.assertHistoryMutationAllowed();
+    const pending = this.performCompression(promptId, force, signal, options);
+    this.pendingHistoryCompressions.add(pending);
+    try {
+      return await pending;
+    } finally {
+      this.pendingHistoryCompressions.delete(pending);
+    }
+  }
+
+  private async performCompression(
+    promptId: string,
+    force: boolean,
+    signal: AbortSignal | undefined,
+    options: TryCompressOptions | undefined,
+  ): Promise<ChatCompressionInfo> {
     // Counts from a pre-switch route must not anchor compression admission
     // or sizing for this route (#9454). In-send callers pass the request
     // route so the adoption never re-adopts the active route's retained
@@ -3109,6 +3151,7 @@ export class LlmChat {
     this.adoptTokenCountsForRoute(options?.requestRouteKey);
 
     if (info.compressionStatus === CompressionStatus.COMPRESSED && newHistory) {
+      this.assertHistoryMutationAllowed();
       // ChatCompressionService owns provenance. Keep a conservative fallback
       // for older/custom implementations that omit the field, but preserve an
       // explicit authoritative `false`.
@@ -3200,6 +3243,7 @@ export class LlmChat {
     info: ChatCompressionInfo;
     microcompactMeta?: MicrocompactMeta;
   } {
+    this.assertHistoryMutationAllowed();
     // A pre-switch route's count must not anchor fast-compression sizing
     // for the active route (#9454).
     this.adoptTokenCountsForRoute();
@@ -3419,7 +3463,9 @@ export class LlmChat {
       exactRoute?.contentGeneratorConfig.modalities ??
       this.config.getEffectiveInputModalities();
 
-    await this.sendPromise;
+    const { ready, release: streamDoneResolver } =
+      this.reserveHistoryOperation();
+    await ready;
     const signal = params.config?.abortSignal;
     let cancelledContent: Content | undefined;
     if (
@@ -3435,17 +3481,12 @@ export class LlmChat {
       );
       if (!cancelledContent.parts?.length) {
         const reason = signal.reason;
+        streamDoneResolver();
         return (async function* cancelledSend() {
           yield Promise.reject<never>(reason);
         })();
       }
     }
-
-    let streamDoneResolver: () => void;
-    const streamDonePromise = new Promise<void>((resolve) => {
-      streamDoneResolver = resolve;
-    });
-    this.sendPromise = streamDonePromise;
 
     // Clear any partial-push marker left over from a prior unretryable
     // break path — the marker is per-send; carrying it across sends
@@ -3498,6 +3539,7 @@ export class LlmChat {
       ? this.generationConfig
       : undefined;
     let currentUserContent: Content | undefined;
+    let retainedToolContent: Content | undefined;
     try {
       if (options?.preparedRequest) {
         const saved = options.preparedRequest;
@@ -3533,9 +3575,18 @@ export class LlmChat {
         // see only the stale prior-turn count (0).
         let userContent = cancelledContent ?? createUserContent(params.message);
         if (!signal?.aborted) {
-          this.chatRecordingService?.recordToolResultAdmission?.(
-            userContent.parts ?? [],
+          const toolOutput =
+            options?.toolResultParts ?? userContent.parts ?? [];
+          const admissions =
+            (await this.chatRecordingService?.recordToolResultAdmission?.(
+              toolOutput,
+            )) ?? [];
+          userContent = projectToolResultHistory(
+            userContent,
+            toolOutput,
+            admissions,
           );
+          if (admissions.length > 0) retainedToolContent = userContent;
         }
         // Restored responses have no original-size provenance. Never infer it from a preview.
         userContent = {
@@ -4175,7 +4226,19 @@ export class LlmChat {
         );
       }
     } catch (error) {
-      if (userContentAdded) {
+      // A confirmed tool decision survives setup errors in the transcript.
+      // Keep the same input live rather than undoing that admission.
+      if (retainedToolContent && !userContentAdded) {
+        markApiHistoryPrompt(retainedToolContent, options?.promptId);
+        if (Array.isArray(params.message)) {
+          (params.message as unknown as Record<PropertyKey, unknown>)[
+            userContentPushSnapshotKey
+          ] = this.userContentPushCount;
+        }
+        this.history.push(retainedToolContent);
+        this.syncReviewedSchemasForContent(retainedToolContent);
+        this.userContentPushCount++;
+      } else if (userContentAdded && !retainedToolContent) {
         this.history.pop();
         if (currentUserContent) {
           this.syncReviewedSchemasForContent(currentUserContent);
@@ -4183,7 +4246,10 @@ export class LlmChat {
         // The push above was rolled back, so undo its count too.
         this.userContentPushCount--;
       }
-      if (manualPlanExitNoticeVersion !== undefined) {
+      if (
+        manualPlanExitNoticeVersion !== undefined &&
+        (!retainedToolContent || !userContentAdded)
+      ) {
         this.config.restorePendingManualPlanExitNotice(
           manualPlanExitNoticeVersion,
         );
@@ -6448,8 +6514,54 @@ export class LlmChat {
    * Returns false — leaving history untouched — when `callId` is not
    * answered by a placeholder (either unanswered, or already answered by
    * a genuine response the caller must keep treating as a duplicate).
+   * The callback confirms persistence while the slot is reserved. It must not
+   * send on this chat or mutate its history; sends queue and mutations reject.
    */
+  async replaceSynthesizedToolResponseAsync(
+    callId: string,
+    prepare: () => Promise<Part[]>,
+  ): Promise<boolean> {
+    const { ready, release } = this.reserveHistoryOperation();
+    await ready;
+    try {
+      while (this.pendingHistoryCompressions.size) {
+        await Promise.allSettled(this.pendingHistoryCompressions);
+      }
+      for (const [entryIndex, entry] of this.history.entries()) {
+        if (entry.role !== 'user' || !entry.parts) continue;
+        const index = entry.parts.findIndex(
+          (part) => part.functionResponse?.id === callId,
+        );
+        if (index < 0) continue;
+        if (!isSynthesizedRepairPart(entry.parts[index])) return false;
+        const modelIndex = this.history.findLastIndex(
+          (candidate, candidateIndex) =>
+            candidateIndex < entryIndex &&
+            candidate.role === 'model' &&
+            candidate.parts?.some((part) => part.functionCall?.id === callId),
+        );
+        if (modelIndex < 0) return false;
+        const scan = scanModelTurn(this.history, modelIndex);
+        // Recovery cannot relocate a late result across the next model turn.
+        if (
+          entryIndex < scan.adjacentIdx ||
+          scan.scanEnd !== this.history.length
+        )
+          return false;
+        this.toolResponseReplacementPending = true;
+        const settledParts = await prepare();
+        entry.parts.splice(index, 1, ...settledParts);
+        return true;
+      }
+      return false;
+    } finally {
+      this.toolResponseReplacementPending = false;
+      release();
+    }
+  }
+
   replaceSynthesizedToolResponse(callId: string, realParts: Part[]): boolean {
+    this.assertHistoryMutationAllowed();
     for (const entry of this.history) {
       if (entry.role !== 'user') continue;
       const parts = entry.parts;
@@ -6573,6 +6685,7 @@ export class LlmChat {
    * Clears the chat history.
    */
   clearHistory(): void {
+    this.assertHistoryMutationAllowed();
     this.toolBudgetUsageAnchor = undefined;
     this.toolBudgetFixedInputVersion++;
     this.historyReplacementRevision++;
@@ -6596,6 +6709,7 @@ export class LlmChat {
    * Adds a new entry to the chat history.
    */
   addHistory(content: Content): void {
+    this.assertHistoryMutationAllowed();
     this.history.push(content);
     this.syncReviewedSchemasForContent(content);
     // addHistory only runs between sends, so the partial-push marker
@@ -6657,6 +6771,7 @@ export class LlmChat {
     replacement: string,
     expectedPlan?: string,
   ): boolean {
+    this.assertHistoryMutationAllowed();
     for (let i = this.history.length - 1; i >= 0; i--) {
       const entry = this.history[i];
       if (entry?.role !== 'model' || !entry.parts) continue;
@@ -6750,6 +6865,7 @@ export class LlmChat {
     history: Content[],
     completedToolCallIds?: readonly string[],
   ): void {
+    this.assertHistoryMutationAllowed();
     this.toolBudgetUsageAnchor = undefined;
     this.toolBudgetFixedInputVersion++;
     this.historyReplacementRevision++;
@@ -6780,6 +6896,7 @@ export class LlmChat {
   }
 
   truncateHistory(keepCount: number): void {
+    this.assertHistoryMutationAllowed();
     this.historyReplacementRevision++;
     const prevLen = this.history.length;
     this.history = this.history.slice(0, keepCount);
@@ -6806,6 +6923,7 @@ export class LlmChat {
   }
 
   stripThoughtsFromHistory(): void {
+    this.assertHistoryMutationAllowed();
     this.historyReplacementRevision++;
     this.history = this.history
       .map(stripThoughtPartsFromContent)
@@ -6825,6 +6943,7 @@ export class LlmChat {
    * any trailing user entries are leftovers from a request that failed.
    */
   stripOrphanedUserEntriesFromHistory(): Content[] {
+    this.assertHistoryMutationAllowed();
     const strippedEntries: Content[] = [];
     const boundary = recoveryHistoryBoundary(
       this.history,
@@ -6904,6 +7023,7 @@ export class LlmChat {
     injected: Array<{ callId: string; name: string }>;
     droppedDuplicates: Array<{ callId: string; name: string }>;
   } {
+    this.assertHistoryMutationAllowed();
     return repairOrphanedToolUseTurns(this.history, reason, options);
   }
 

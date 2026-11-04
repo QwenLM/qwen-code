@@ -5,6 +5,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { settleToolResultHistory } from '@qwen-code/qwen-code-core/services/tool-result-history.js';
+import {
+  hasToolResultPromptHook,
+  UNSENT_TOOL_RESULT,
+} from '../../services/tool-result-history.js';
+
 /**
  * Live-client wiring (P1d): builds a real agent-loop event source from a
  * qwen-code `Config` and maps it onto the neutral `StreamEvent` so the OpenTUI
@@ -1429,7 +1435,14 @@ export async function* livePromptEvents(
     // request that will never be sent.
     if (completed.every((call) => call.status === 'cancelled')) {
       if (responseParts.length > 0) {
-        await client.addHistory({ role: 'user', parts: responseParts });
+        await client.addHistory(
+          await settleToolResultHistory(
+            config.getChatRecordingService(),
+            { role: 'user', parts: responseParts },
+            responseParts,
+            hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
+          ),
+        );
       }
       options?.onToolsCancelled?.();
       return;
@@ -1474,7 +1487,16 @@ export async function* livePromptEvents(
             steered.restore.length > 0 ? steered.restore : texts,
           );
           if (responseParts.length > 0) {
-            await client.addHistory({ role: 'user', parts: responseParts });
+            await client.addHistory(
+              await settleToolResultHistory(
+                config.getChatRecordingService(),
+                { role: 'user', parts: responseParts },
+                responseParts,
+                hasToolResultPromptHook(config)
+                  ? UNSENT_TOOL_RESULT
+                  : undefined,
+              ),
+            );
           }
           return;
         }

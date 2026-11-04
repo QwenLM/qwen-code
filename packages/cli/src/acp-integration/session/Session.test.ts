@@ -5637,6 +5637,356 @@ describe('Session', () => {
       );
     });
 
+    describe('terminal tool-result admission', () => {
+      it.each([
+        'no-hook',
+        'pending-hook',
+        'prior-allow',
+        'prior-withheld',
+        'write-reject',
+      ] as const)(
+        'settles a stopped tool batch with independent input: %s',
+        async (decision) => {
+          const hooked =
+            decision === 'pending-hook' || decision === 'prior-allow';
+          mockConfig.getDisableAllHooks = vi.fn(() => !hooked);
+          mockConfig.getMessageBus = vi.fn().mockReturnValue({
+            request: vi.fn().mockResolvedValue({ success: true, output: {} }),
+          });
+          mockConfig.hasHooksForEvent = vi.fn(
+            (event: string) => hooked && event === 'UserPromptSubmit',
+          );
+          let entered!: () => void;
+          const toolStarted = new Promise<void>((resolve) => {
+            entered = resolve;
+          });
+          let finish!: () => void;
+          const toolGate = new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+          useTool(core.Kind.Read, 'read_file').mockImplementation(async () => {
+            entered();
+            await toolGate;
+            return {
+              llmContent: 'PRIVATE_TERMINAL_RESULT',
+              returnDisplay: 'done',
+            };
+          });
+          runAcpToolBatchSpy.mockImplementation(async (host, batch) => {
+            const result = await runEachTool(host, batch);
+            const companions: Part[] = [
+              { text: 'PRIVATE_TERMINAL_COMPANION' },
+              {
+                inlineData: {
+                  mimeType: 'image/png',
+                  data: 'PRIVATE_TERMINAL_IMAGE',
+                },
+              },
+            ];
+            const recordedParts: Part[] =
+              result.results[0].response.responseParts;
+            recordedParts.push(...companions);
+            return { ...result, parts: [...result.parts, ...companions] };
+          });
+          const send = useSharedRounds([
+            toolCall({ id: 'terminal-call', name: 'read_file', args: {} }),
+            finished(),
+          ]);
+          let release!: () => void;
+          const barrier = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          const recordAdmission = vi.fn(async (parts: readonly Part[]) => {
+            if (decision === 'write-reject')
+              throw new Error('terminal receipt write failed');
+            await barrier;
+            return [
+              {
+                parts,
+                decision:
+                  decision === 'prior-withheld'
+                    ? { withheld: 'previous policy refusal' }
+                    : decision === 'pending-hook'
+                      ? {
+                          withheld:
+                            'The tool had already completed; its output was discarded.',
+                        }
+                      : ('admitted' as const),
+              },
+            ];
+          });
+          Object.assign(mockChatRecordingService, {
+            recordToolResultAdmission: recordAdmission,
+          });
+          let failure: unknown;
+          const pending = prompt().catch((error: unknown) => {
+            failure = error;
+            return undefined;
+          });
+          await toolStarted;
+          (
+            session as unknown as {
+              midTurnRecoveredMessages: Array<{
+                kind: 'text';
+                message: string;
+              }>;
+            }
+          ).midTurnRecoveredMessages.push({
+            kind: 'text',
+            message: 'INDEPENDENT_TERMINAL_INPUT',
+          });
+          vi.mocked(mockChat.addHistory).mockClear();
+          await session.cancelPendingPrompt();
+          finish();
+          let result: Awaited<typeof pending>;
+          try {
+            await vi.waitFor(() =>
+              expect(recordAdmission).toHaveBeenCalledOnce(),
+            );
+            expect(
+              JSON.stringify(vi.mocked(mockChat.addHistory).mock.calls),
+            ).not.toContain('PRIVATE_TERMINAL');
+          } finally {
+            release();
+            result = await pending;
+          }
+          expect(recordAdmission).toHaveBeenCalledWith(
+            expect.any(Array),
+            hooked
+              ? 'The tool had already completed; its output was discarded.'
+              : undefined,
+          );
+          const recordedOwnership = recordAdmission.mock.calls[0][0];
+          expect(JSON.stringify(recordedOwnership)).toContain(
+            'PRIVATE_TERMINAL_RESULT',
+          );
+          expect(JSON.stringify(recordedOwnership)).toContain(
+            'PRIVATE_TERMINAL_COMPANION',
+          );
+          expect(JSON.stringify(recordedOwnership)).toContain(
+            'PRIVATE_TERMINAL_IMAGE',
+          );
+          expect(JSON.stringify(recordedOwnership)).not.toContain(
+            'INDEPENDENT_TERMINAL_INPUT',
+          );
+          expect(send).toHaveBeenCalledOnce();
+          const history = JSON.stringify(
+            vi.mocked(mockChat.addHistory).mock.calls,
+          );
+          if (decision === 'write-reject') {
+            expect(failure).toBeDefined();
+            expect(history).not.toContain('PRIVATE_TERMINAL');
+          } else {
+            expect(result).toMatchObject({ stopReason: 'cancelled' });
+            expect(history).toContain('INDEPENDENT_TERMINAL_INPUT');
+            if (decision === 'pending-hook' || decision === 'prior-withheld') {
+              expect(history).not.toContain('PRIVATE_TERMINAL');
+              expect(history).toContain(
+                decision === 'prior-withheld'
+                  ? 'previous policy refusal'
+                  : 'The tool had already completed; its output was discarded.',
+              );
+            } else expect(history).toContain('PRIVATE_TERMINAL_RESULT');
+          }
+        },
+      );
+    });
+
+    it.each([false, true])(
+      'keeps full tool ownership but filters host input on a partial terminal preserve: hook=%s',
+      async (hooked) => {
+        mockConfig.getDisableAllHooks = vi.fn(() => !hooked);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({
+          request: vi.fn().mockResolvedValue({ success: true, output: {} }),
+        });
+        mockConfig.hasHooksForEvent = vi.fn(
+          (event: string) => hooked && event === 'UserPromptSubmit',
+        );
+        useTool(core.Kind.Read, 'read_file').mockResolvedValue({
+          llmContent: 'PRIVATE_PARTIAL_RESULT',
+          returnDisplay: 'done',
+        });
+        let batchFinished = false;
+        const companions: Part[] = [
+          { text: 'PRIVATE_PARTIAL_COMPANION' },
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'PRIVATE_PARTIAL_IMAGE',
+            },
+          },
+        ];
+        runAcpToolBatchSpy.mockImplementation(async (host, batch) => {
+          const result = await runEachTool(host, batch);
+          const owned: Part[] = result.results[0].response.responseParts;
+          owned.push(...companions);
+          batchFinished = true;
+          return { ...result, parts: [...result.parts, ...companions] };
+        });
+        let drained = false;
+        vi.mocked(mockClient.extMethod).mockImplementation(async (method) => {
+          if (
+            method === 'craft/drainMidTurnQueue' &&
+            batchFinished &&
+            !drained
+          ) {
+            drained = true;
+            return {
+              messages: ['INDEPENDENT_PARTIAL_INPUT'],
+              hasQueuedPrompt: false,
+            };
+          }
+          return { messages: [] };
+        });
+        const send = useSharedRounds(
+          [
+            toolCall({ id: 'partial-call', name: 'read_file', args: {} }),
+            finished(),
+          ],
+          [
+            {
+              type: core.LlmEventType.SessionTokenLimitExceeded,
+              value: { currentTokens: 120, limit: 100, message: 'over' },
+            },
+          ],
+        );
+        const recordAdmission = vi.fn((parts: readonly Part[]) => [
+          {
+            parts,
+            decision: hooked
+              ? {
+                  withheld:
+                    'The tool had already completed; its output was discarded.',
+                }
+              : ('admitted' as const),
+          },
+        ]);
+        Object.assign(mockChatRecordingService, {
+          recordToolResultAdmission: recordAdmission,
+        });
+        const result = await prompt();
+        expect(result.stopReason).toBe('max_tokens');
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(JSON.stringify(send.mock.calls[1][0])).toContain(
+          'INDEPENDENT_PARTIAL_INPUT',
+        );
+        expect(recordAdmission).toHaveBeenCalledWith(
+          expect.arrayContaining(companions),
+          hooked
+            ? 'The tool had already completed; its output was discarded.'
+            : undefined,
+        );
+        const history = JSON.stringify(
+          vi.mocked(mockChat.addHistory).mock.calls,
+        );
+        expect(history).not.toContain('INDEPENDENT_PARTIAL_INPUT');
+        if (hooked) {
+          expect(history).not.toContain('PRIVATE_PARTIAL');
+          expect(history).toContain(
+            'The tool had already completed; its output was discarded.',
+          );
+        } else {
+          for (const marker of [
+            'PRIVATE_PARTIAL_RESULT',
+            'PRIVATE_PARTIAL_COMPANION',
+            'PRIVATE_PARTIAL_IMAGE',
+          ])
+            expect(history).toContain(marker);
+        }
+      },
+    );
+
+    it('settles an early skipped legacy tool send without treating configured prompt hooks as a result gate', async () => {
+      mockConfig.isUnifiedAgentLoopEnabled = vi.fn(() => false);
+      mockConfig.getDisableAllHooks = vi.fn(() => false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({
+        request: vi.fn().mockResolvedValue({ success: true, output: {} }),
+      });
+      mockConfig.hasHooksForEvent = vi.fn(
+        (event: string) => event === 'UserPromptSubmit',
+      );
+      mockConfig.getSessionTokenLimit = vi.fn(() => 100);
+      mockConfig.getApprovalMode = vi.fn(() => ApprovalMode.YOLO);
+      mockLlmClient.tryCompressChat.mockImplementation(async () => ({
+        originalTokenCount: vi.mocked(mockChat.sendMessageStream).mock.calls
+          .length
+          ? 999
+          : 10,
+        newTokenCount: vi.mocked(mockChat.sendMessageStream).mock.calls.length
+          ? 999
+          : 10,
+        compressionStatus: core.CompressionStatus.NOOP,
+      }));
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: {},
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: () => 'read_file',
+          toolLocations: () => [],
+          execute: vi.fn(async () => {
+            (
+              session as unknown as {
+                midTurnRecoveredMessages: Array<{
+                  kind: 'text';
+                  message: string;
+                }>;
+              }
+            ).midTurnRecoveredMessages.push({
+              kind: 'text',
+              message: 'INDEPENDENT_LEGACY_INPUT',
+            });
+            return {
+              llmContent: [
+                { text: 'PRIVATE_LEGACY_RESULT' },
+                {
+                  inlineData: {
+                    mimeType: 'image/png',
+                    data: 'PRIVATE_LEGACY_IMAGE',
+                  },
+                },
+              ],
+              returnDisplay: 'done',
+            };
+          }),
+        }),
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                { id: 'legacy-skipped', name: 'read_file', args: {} },
+              ],
+            },
+          },
+        ]),
+      );
+      const recordAdmission = vi.fn(async (parts: readonly Part[]) => [
+        { parts, decision: 'admitted' as const },
+      ]);
+      Object.assign(mockChatRecordingService, {
+        recordToolResultAdmission: recordAdmission,
+      });
+      const result = await prompt();
+      expect(result.stopReason).toBe('max_tokens');
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      expect(recordAdmission).toHaveBeenCalledWith(
+        expect.any(Array),
+        undefined,
+      );
+      const ownership = JSON.stringify(recordAdmission.mock.calls[0][0]);
+      expect(ownership).toContain('PRIVATE_LEGACY_RESULT');
+      expect(ownership).toContain('PRIVATE_LEGACY_IMAGE');
+      expect(ownership).not.toContain('INDEPENDENT_LEGACY_INPUT');
+      const history = JSON.stringify(vi.mocked(mockChat.addHistory).mock.calls);
+      expect(history).toContain('PRIVATE_LEGACY_RESULT');
+      expect(history).toContain('PRIVATE_LEGACY_IMAGE');
+      expect(history).not.toContain('INDEPENDENT_LEGACY_INPUT');
+    });
+
     const readCall = (id: string) =>
       toolCall({ id, name: 'read_file', args: { file_path: '/tmp/a.txt' } });
 
@@ -6265,6 +6615,10 @@ describe('Session', () => {
           });
           Object.assign(mockChatRecordingService, {
             recordToolResultAdmission: recordAdmission,
+          });
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getMessageBus = vi.fn().mockReturnValue({
+            request: vi.fn().mockResolvedValue({ success: true, output: {} }),
           });
           mockConfig.hasHooksForEvent = vi
             .fn()
@@ -39310,11 +39664,38 @@ describe('Session', () => {
               )
               .mockResolvedValue(createEmptyStream());
 
+            let release!: () => void;
+            const barrier = new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            const recordToolResultAdmission = vi.fn(
+              async (parts: readonly Part[]) => {
+                await barrier;
+                return [{ parts, decision: 'admitted' as const }];
+              },
+            );
+            Object.assign(mockChatRecordingService, {
+              recordToolResultAdmission,
+            });
             expect(boundGoalHost).toBeDefined();
-            await boundGoalHost!.startGoalTurn({
+            const pending = boundGoalHost!.startGoalTurn({
               permit,
               continuationContext: 'write a poem',
             });
+
+            await vi.waitFor(() =>
+              expect(recordToolResultAdmission).toHaveBeenCalledOnce(),
+            );
+            try {
+              expect(mockChat.addHistory).not.toHaveBeenCalled();
+              expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+              expect(
+                mockChatRecordingService.recordGoalTurnEnd,
+              ).not.toHaveBeenCalled();
+            } finally {
+              release();
+              await pending;
+            }
 
             await vi.waitFor(() => {
               expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
@@ -62801,113 +63182,229 @@ describe('Session', () => {
       );
     });
 
-    it('preserves an external Stop hook tool result when a nested Guard claim is unavailable', async () => {
-      rebuildSessionWithGuard();
-      installPendingTodoTool();
-      const todoTool = mockToolRegistry.getTool(core.ToolNames.TODO_WRITE);
-      const readExecute = vi.fn().mockResolvedValue({
-        llmContent: 'file contents',
-        returnDisplay: 'file contents',
-      });
-      const readTool = {
-        name: 'read_file',
-        kind: core.Kind.Read,
-        build: vi.fn().mockReturnValue({
-          params: { path: '/tmp/test.txt' },
-          execute: readExecute,
-          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
-          getDescription: vi.fn().mockReturnValue('Read file'),
-          toolLocations: vi.fn().mockReturnValue([]),
-        }),
-      };
-      mockToolRegistry.getTool.mockImplementation((name: string) =>
-        name === core.ToolNames.TODO_WRITE ? todoTool : readTool,
-      );
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValueOnce(
-          createStreamWithChunks([
-            {
-              type: core.StreamEventType.CHUNK,
-              value: {
-                functionCalls: [
-                  {
-                    id: 'todo-before-unavailable-nested-claim',
-                    name: core.ToolNames.TODO_WRITE,
-                    args: { todos: pendingTodos },
-                  },
-                ],
-              },
-            },
-          ]),
-        )
-        .mockResolvedValueOnce(createEmptyStream())
-        .mockResolvedValueOnce(
-          createStreamWithChunks([
-            {
-              type: core.StreamEventType.CHUNK,
-              value: {
-                functionCalls: [
-                  {
-                    id: 'coalesced-read-before-unavailable-nested-claim',
-                    name: 'read_file',
-                    args: { path: '/tmp/test.txt' },
-                  },
-                ],
-              },
-            },
-          ]),
-        )
-        .mockResolvedValue(createEmptyStream());
-      let stopCalls = 0;
-      const messageBus = {
-        request: vi.fn().mockImplementation(async (request) => {
-          if (request.eventName !== 'Stop') {
-            return { success: true, output: {} };
-          }
-          stopCalls++;
-          return stopCalls === 1
-            ? {
-                success: true,
-                output: {
-                  decision: 'block',
-                  reason: 'external hook owns nested tool result',
+    it.each(['unavailable', 'queued'] as const)(
+      'preserves an external Stop hook tool result when a nested Guard claim is %s',
+      async (claimOutcome) => {
+        rebuildSessionWithGuard();
+        installPendingTodoTool();
+        const todoTool = mockToolRegistry.getTool(core.ToolNames.TODO_WRITE);
+        let readFinished = false;
+        const readExecute = vi.fn().mockImplementation(async () => {
+          readFinished = true;
+          return {
+            llmContent: 'STOP_PACKET_RESULT',
+            returnDisplay: 'file contents',
+          };
+        });
+        const companion = {
+          text: '[Todo Stop Guard] 1 todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.',
+        };
+        const image: Part = {
+          inlineData: { mimeType: 'image/png', data: 'STOP_PACKET_IMAGE' },
+        };
+        const originalFinalize = core.finalizeToolResponses;
+        const finalize = vi
+          .spyOn(core, 'finalizeToolResponses')
+          .mockImplementation(async (...args) => {
+            const entries = await originalFinalize(...args);
+            return entries.map((entry) =>
+              entry.callId ===
+                'coalesced-read-before-unavailable-nested-claim' &&
+              !entry.responseParts.includes(companion)
+                ? {
+                    ...entry,
+                    responseParts: [...entry.responseParts, companion, image],
+                  }
+                : entry,
+            );
+          });
+        const recordAdmission = vi.fn((parts: readonly Part[]) => [
+          { parts, decision: 'admitted' as const },
+        ]);
+        Object.assign(mockChatRecordingService, {
+          recordToolResultAdmission: recordAdmission,
+        });
+        const readTool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            execute: readExecute,
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+          }),
+        };
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === core.ToolNames.TODO_WRITE ? todoTool : readTool,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'todo-before-unavailable-nested-claim',
+                      name: core.ToolNames.TODO_WRITE,
+                      args: { todos: pendingTodos },
+                    },
+                  ],
                 },
-              }
-            : { success: true, output: {} };
-        }),
-      };
-      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
-      mockConfig.hasHooksForEvent = vi
-        .fn()
-        .mockImplementation((name: string) => name === 'Stop');
-      let claimCalls = 0;
-      mockGuardBridge(
-        async () => ({ messages: [], hasQueuedPrompt: false }),
-        async () =>
-          ++claimCalls === 1
-            ? { claimed: true, hasQueuedPrompt: false }
-            : { claimed: false, hasQueuedPrompt: false },
-      );
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'coalesced-read-before-unavailable-nested-claim',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValue(createEmptyStream());
+        let stopCalls = 0;
+        const messageBus = {
+          request: vi.fn().mockImplementation(async (request) => {
+            if (request.eventName !== 'Stop') {
+              return { success: true, output: {} };
+            }
+            stopCalls++;
+            return stopCalls === 1
+              ? {
+                  success: true,
+                  output: {
+                    decision: 'block',
+                    reason: 'external hook owns nested tool result',
+                  },
+                }
+              : { success: true, output: {} };
+          }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((name: string) => name === 'Stop');
+        let claimCalls = 0;
+        mockGuardBridge(
+          async () => ({ messages: [], hasQueuedPrompt: false }),
+          async () =>
+            ++claimCalls === 1
+              ? { claimed: true, hasQueuedPrompt: false }
+              : { claimed: false, hasQueuedPrompt: claimOutcome === 'queued' },
+        );
 
-      await runGuardPrompt();
+        let watchedQueuedDrain = false;
+        const bridge = vi.mocked(mockClient.extMethod).getMockImplementation()!;
+        vi.mocked(mockClient.extMethod).mockImplementation(
+          async (method, params) => {
+            if (
+              claimOutcome === 'queued' &&
+              readFinished &&
+              method === 'craft/drainMidTurnQueue' &&
+              typeof params === 'object' &&
+              params !== null &&
+              'todoStopGuardWatchQueuedPrompt' in params &&
+              params['todoStopGuardWatchQueuedPrompt'] === true
+            ) {
+              watchedQueuedDrain = true;
+              return {
+                messages: ['QUEUED_STOP_HOST_INPUT'],
+                hasQueuedPrompt: true,
+              };
+            }
+            return bridge(method, params);
+          },
+        );
+        try {
+          await runGuardPrompt();
+        } finally {
+          finalize.mockRestore();
+        }
 
-      expect(claimCalls).toBe(2);
-      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
-      const externalToolResult = vi.mocked(mockChat.sendMessageStream).mock
-        .calls[3]?.[1] as { message: Part[] };
-      expect(
-        externalToolResult.message.some(
-          (part) =>
-            'functionResponse' in part &&
-            part.functionResponse?.id ===
+        expect(claimCalls).toBe(2);
+        expect(watchedQueuedDrain).toBe(claimOutcome === 'queued');
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(
+          claimOutcome === 'queued' ? 3 : 4,
+        );
+        const sent = vi
+          .mocked(mockChat.sendMessageStream)
+          .mock.calls.map(([, params]) => params.message as Part[]);
+        expect(
+          textParts(sent[2]).some((text) =>
+            text.startsWith('[Todo Stop Guard]'),
+          ),
+        ).toBe(true);
+        expect(
+          sent
+            .flatMap(textParts)
+            .filter((text) =>
+              text.includes('external hook owns nested tool result'),
+            ),
+        ).toHaveLength(1);
+        const retained =
+          claimOutcome === 'queued'
+            ? vi
+                .mocked(mockChat.addHistory)
+                .mock.calls.map(([message]) => message.parts ?? [])
+                .find((parts) =>
+                  parts.some(
+                    (part) =>
+                      part.functionResponse?.id ===
+                      'coalesced-read-before-unavailable-nested-claim',
+                  ),
+                )
+            : sent[3];
+        expect(retained).toBeDefined();
+        expect(
+          retained!.filter(
+            (part) =>
+              part.functionResponse?.id ===
               'coalesced-read-before-unavailable-nested-claim',
-        ),
-      ).toBe(true);
-      expect(textParts(externalToolResult.message).join('\n')).not.toContain(
-        '[Todo Stop Guard]',
-      );
-    });
+          ),
+        ).toHaveLength(1);
+        expect(JSON.stringify(retained)).toContain('STOP_PACKET_RESULT');
+        expect(retained).toContainEqual(image);
+        expect(
+          textParts(retained!).filter((text) =>
+            text.startsWith('[Todo Stop Guard]'),
+          ),
+        ).toEqual([companion.text]);
+        expect(
+          textParts(retained!).filter((text) =>
+            text.includes('external hook owns nested tool result'),
+          ),
+        ).toHaveLength(0);
+        if (claimOutcome === 'queued') {
+          expect(
+            JSON.stringify(retained).match(/QUEUED_STOP_HOST_INPUT/g),
+          ).toHaveLength(1);
+          expect(
+            recordAdmission.mock.calls.some(
+              ([parts]) =>
+                parts.some(
+                  (part) =>
+                    part.functionResponse?.id ===
+                    'coalesced-read-before-unavailable-nested-claim',
+                ) &&
+                parts.includes(companion) &&
+                parts.includes(image),
+            ),
+          ).toBe(true);
+        }
+      },
+    );
 
     it('reports Guard exhaustion before a coalesced external Stop hook reaches its cap', async () => {
       rebuildSessionWithGuard();

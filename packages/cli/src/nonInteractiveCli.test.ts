@@ -1821,7 +1821,15 @@ describe('runNonInteractive', () => {
       .mockResolvedValue(undefined);
     mockCoreExecuteToolCall.mockResolvedValue({
       callId: 'update-goal-terminal',
-      responseParts: [{ text: 'proposal recorded' }],
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'update-goal-terminal',
+            name: 'update_goal',
+            response: { output: 'proposal recorded' },
+          },
+        },
+      ],
       resultDisplay: 'proposal recorded',
       error: undefined,
       errorType: undefined,
@@ -1849,18 +1857,50 @@ describe('runNonInteractive', () => {
         ]),
     );
 
-    const exitCode = await runNonInteractive(
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const recordToolResultAdmission = vi.fn(async (parts: readonly Part[]) => {
+      await barrier;
+      return [{ parts, decision: 'admitted' as const }];
+    });
+    mockConfig.getChatRecordingService.mockReturnValue({
+      ...mockConfig.getChatRecordingService(),
+      recordToolResultAdmission,
+      flush: vi.fn().mockResolvedValue(undefined),
+    });
+    const pending = runNonInteractive(
       mockConfig,
       mockSettings,
       '/goal resume',
       'goal-terminal-tool-result',
     );
 
+    await vi.waitFor(() =>
+      expect(recordToolResultAdmission).toHaveBeenCalledOnce(),
+    );
+    try {
+      expect(mockLlmClient.addHistory).not.toHaveBeenCalled();
+      expect(finishTurn).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await pending;
+    }
+    const exitCode = await pending;
     expect(exitCode).toBe(0);
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
     expect(mockLlmClient.addHistory).toHaveBeenCalledWith({
       role: 'user',
-      parts: [{ text: 'proposal recorded' }],
+      parts: [
+        {
+          functionResponse: {
+            id: 'update-goal-terminal',
+            name: 'update_goal',
+            response: { output: 'proposal recorded' },
+          },
+        },
+      ],
     });
     expect(finishTurn).toHaveBeenCalledOnce();
     expect(endInteractionSpanSpy).toHaveBeenCalledWith('ok', {

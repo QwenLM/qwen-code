@@ -122,6 +122,7 @@ const MockedLlmClientClass = vi.hoisted(() =>
       .fn()
       .mockReturnValue(new Set<string>());
     this.replaceSynthesizedToolResponse = vi.fn().mockReturnValue(false);
+    this.replaceSynthesizedToolResponseAsync = vi.fn().mockResolvedValue(false);
     // Stream-side duplicate provider-id replay detection consults the
     // fingerprint map; default to empty (no handled calls in history).
     this.getHistoryToolCallFingerprints = vi
@@ -422,6 +423,7 @@ describe('useLlmStream', () => {
       getProjectRoot: vi.fn(() => '/test/dir'),
       getFileCheckpointingEnabled: vi.fn(() => false),
       getLlmClient: mockGetLlmClient,
+      getChatRecordingService: vi.fn(() => undefined),
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getTeamManager: vi.fn(() => null),
       onTeamManagerChange: vi.fn(),
@@ -6775,7 +6777,15 @@ describe('useLlmStream', () => {
         responseSubmittedToLlm: false,
         response: {
           callId,
-          responseParts: [{ text: `${callId} response` }],
+          responseParts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'testTool',
+                response: { output: `${callId} response` },
+              },
+            },
+          ],
           errorType: undefined,
         },
         tool: { displayName: 'MockTool' },
@@ -6887,6 +6897,17 @@ describe('useLlmStream', () => {
     );
     rerender();
     client.addHistory.mockClear();
+    let releaseReceipt!: () => void;
+    const receiptBarrier = new Promise<void>((resolve) => {
+      releaseReceipt = resolve;
+    });
+    const recordToolResultAdmission = vi.fn(async (parts: readonly Part[]) => {
+      await receiptBarrier;
+      return [{ parts, decision: 'admitted' as const }];
+    });
+    mockConfig.getChatRecordingService = vi
+      .fn()
+      .mockReturnValue({ flush, recordToolResultAdmission });
     queuedSteerMessages = ['steer it this way', '/goal pause'];
     const batch = act(async () => {
       await capturedOnComplete?.([
@@ -6904,7 +6925,15 @@ describe('useLlmStream', () => {
       await result.current.submitQuery('keep going', SendMessageType.Steer);
     });
     releaseSlashCommand?.();
-    await batch;
+    try {
+      await waitFor(() =>
+        expect(recordToolResultAdmission).toHaveBeenCalledOnce(),
+      );
+      expect(client.addHistory).not.toHaveBeenCalled();
+    } finally {
+      releaseReceipt();
+      await batch;
+    }
 
     await waitFor(() => {
       expect(dispatch).toHaveBeenCalledWith({
@@ -6917,7 +6946,13 @@ describe('useLlmStream', () => {
 
     expect(client.addHistory).toHaveBeenCalledWith({
       role: 'user',
-      parts: [{ text: 'done-tool response' }, { text: 'cont-tool response' }],
+      parts: ['done-tool', 'cont-tool'].map((callId) => ({
+        functionResponse: {
+          id: callId,
+          name: 'testTool',
+          response: { output: `${callId} response` },
+        },
+      })),
     });
     expect(client.addHistory).not.toHaveBeenCalledWith(
       expect.objectContaining({
@@ -6965,7 +7000,19 @@ describe('useLlmStream', () => {
       } as unknown as ReturnType<Config['getGoalRuntime']>;
       mockConfig.getGoalRuntime = vi.fn(() => runtime);
       mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
-      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({ flush });
+      let release!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const recordToolResultAdmission = vi.fn(
+        async (parts: readonly Part[]) => {
+          await barrier;
+          return [{ parts, decision: 'admitted' as const }];
+        },
+      );
+      mockConfig.getChatRecordingService = vi
+        .fn()
+        .mockReturnValue({ flush, recordToolResultAdmission });
       let capturedOnComplete:
         | ((completedTools: TrackedToolCall[]) => Promise<void>)
         | null = null;
@@ -7030,7 +7077,7 @@ describe('useLlmStream', () => {
         },
       ];
 
-      await act(async () => {
+      const completing = act(async () => {
         await capturedOnComplete?.([
           {
             request: {
@@ -7057,6 +7104,16 @@ describe('useLlmStream', () => {
         ]);
       });
 
+      await waitFor(() =>
+        expect(recordToolResultAdmission).toHaveBeenCalledOnce(),
+      );
+      try {
+        expect(client.addHistory).not.toHaveBeenCalled();
+        expect(finishTurn).not.toHaveBeenCalled();
+      } finally {
+        release();
+        await completing;
+      }
       expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['update-goal-1']);
       expect(client.addHistory).toHaveBeenCalledWith({
         role: 'user',
@@ -9826,6 +9883,182 @@ describe('useLlmStream', () => {
     },
   );
 
+  describe('terminal tool-result admission', () => {
+    const paths = ['cancelled', 'quota', 'capacity'] as const;
+    const decisions = [
+      'no-hook',
+      'pending-hook',
+      'prior-allow',
+      'prior-withheld',
+      'write-reject',
+    ] as const;
+
+    it.each(
+      paths.flatMap((path) =>
+        decisions.map((decision) => ({ path, decision })),
+      ),
+    )(
+      'settles $path results durably before retaining history: $decision',
+      async ({ path, decision }) => {
+        const hooked =
+          decision === 'pending-hook' || decision === 'prior-allow';
+        mockConfig.getDisableAllHooks = vi.fn(() => !hooked);
+        mockConfig.getMessageBus = vi.fn(() => ({
+          request: vi.fn(),
+        })) as Config['getMessageBus'];
+        mockConfig.hasHooksForEvent = vi.fn(
+          (event) => hooked && event === 'UserPromptSubmit',
+        );
+        const permit: GoalTurnPermit = {
+          goalId: 'terminal-goal',
+          revision: 1,
+          turnId: 'terminal-turn',
+        };
+        const runtime = {
+          permitForTurn: vi.fn(() => permit),
+          dispatch: vi.fn().mockResolvedValue(undefined),
+          finishTurn: vi.fn().mockResolvedValue(undefined),
+          getSnapshot: vi.fn(() => ({ goal: { ...permit, status: 'active' } })),
+        } as unknown as ReturnType<Config['getGoalRuntime']>;
+        mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+        if (path === 'capacity') {
+          mockConfig.getBackgroundTaskRegistry = vi.fn(() => ({
+            canStartBackgroundAgent: () => false,
+            getMaxConcurrentBackgroundAgents: () => 1,
+            setNotificationCallback: vi.fn(),
+          })) as Config['getBackgroundTaskRegistry'];
+        }
+        const parts: Part[] = [
+          {
+            functionResponse: {
+              id: 'terminal-call',
+              name: 'agent',
+              response: { output: 'PRIVATE_TERMINAL_RESULT' },
+            },
+          },
+          { text: 'PRIVATE_TERMINAL_COMPANION' },
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'PRIVATE_TERMINAL_IMAGE',
+            },
+          },
+        ];
+        let release!: () => void;
+        const barrier = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const recordToolResultAdmission = vi.fn(
+          async (owned: readonly Part[]) => {
+            if (decision === 'write-reject')
+              throw new Error('terminal receipt write failed');
+            await barrier;
+            return [
+              {
+                parts: owned,
+                decision:
+                  decision === 'prior-withheld'
+                    ? { withheld: 'previous policy refusal' }
+                    : decision === 'pending-hook'
+                      ? {
+                          withheld:
+                            'The tool had already completed; its output was discarded.',
+                        }
+                      : ('admitted' as const),
+              },
+            ];
+          },
+        );
+        mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+          recordToolResult: vi.fn(),
+          recordToolResultAdmission,
+          flush: vi.fn().mockResolvedValue(undefined),
+        });
+        const tool = {
+          request: {
+            callId: 'terminal-call',
+            name: 'agent',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'terminal-prompt',
+            ...(path === 'quota' ? { goalContext: permit } : {}),
+          },
+          status: path === 'cancelled' ? 'cancelled' : 'success',
+          responseSubmittedToLlm: false,
+          response: {
+            callId: 'terminal-call',
+            responseParts: parts,
+            errorType: undefined,
+            resultDisplay: { type: 'task_execution', status: 'background' },
+          },
+          tool: { displayName: 'Agent' },
+          invocation: { getDescription: () => 'terminal result' },
+        } as unknown as TrackedCompletedToolCall;
+        const client = new MockedLlmClientClass(mockConfig);
+        const { completeToolRound } = renderTestHook(
+          [],
+          client,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          path === 'quota',
+        );
+        let failure: unknown;
+        const pending = completeToolRound([tool]).catch((error: unknown) => {
+          failure = error;
+        });
+        try {
+          await waitFor(() =>
+            expect(recordToolResultAdmission).toHaveBeenCalledOnce(),
+          );
+          expect(client.addHistory).not.toHaveBeenCalled();
+        } finally {
+          release();
+          await pending;
+        }
+        expect(recordToolResultAdmission).toHaveBeenCalledWith(
+          parts,
+          hooked
+            ? 'The tool had already completed; its output was discarded.'
+            : undefined,
+        );
+        expect(mockSendMessageStream).not.toHaveBeenCalled();
+        if (decision === 'write-reject') {
+          expect(failure).toBeDefined();
+          expect(client.addHistory).not.toHaveBeenCalled();
+        } else if (
+          decision === 'pending-hook' ||
+          decision === 'prior-withheld'
+        ) {
+          const kept = vi.mocked(client.addHistory).mock.calls[0]?.[0];
+          expect(JSON.stringify(kept)).not.toContain('PRIVATE_TERMINAL');
+          expect(kept).toMatchObject({
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'terminal-call',
+                  response: {
+                    error:
+                      decision === 'prior-withheld'
+                        ? 'previous policy refusal'
+                        : 'The tool had already completed; its output was discarded.',
+                  },
+                },
+              },
+            ],
+          });
+        } else {
+          expect(client.addHistory).toHaveBeenCalledWith({
+            role: 'user',
+            parts,
+          });
+        }
+      },
+    );
+  });
+
   it('should handle all tool calls being cancelled', async () => {
     const cancelledToolCalls: TrackedToolCall[] = [
       {
@@ -10945,12 +11178,34 @@ describe('useLlmStream', () => {
     // Widening `replaceableTools` to every deduped tool -- i.e. dropping
     // the `synthesizedRepairCallIds.has(...)` filter -- turns this red:
     // a genuine duplicate would then be offered to the replace path.
-    expect(client.replaceSynthesizedToolResponse).not.toHaveBeenCalled();
+    expect(client.replaceSynthesizedToolResponseAsync).not.toHaveBeenCalled();
 
     // No follow-up submission: the response already in history closes
     // the tool_use ↔ tool_result pair.
     expect(mockSendMessageStream).not.toHaveBeenCalled();
   });
+
+  const installLateRepairMock = (
+    client: {
+      replaceSynthesizedToolResponseAsync: (
+        callId: string,
+        prepare: () => Promise<Part[]>,
+      ) => Promise<boolean>;
+    },
+    canReplace: (callId: string) => boolean = () => true,
+  ) => {
+    const eligible = vi.fn(canReplace);
+    const apply = vi.fn<(callId: string, parts: Part[]) => void>();
+    client.replaceSynthesizedToolResponseAsync = vi.fn(
+      async (callId: string, prepare: () => Promise<Part[]>) => {
+        if (!eligible(callId)) return false;
+        const settled = await prepare();
+        apply(callId, settled);
+        return true;
+      },
+    );
+    return { eligible, apply };
+  };
 
   it('replaces a synthesized orphan-repair placeholder with the late real tool result (issue #15297)', async () => {
     // Race C + interleaved send: the stream died after the functionCall
@@ -11006,7 +11261,7 @@ describe('useLlmStream', () => {
     client.getSynthesizedRepairCallIds = vi
       .fn()
       .mockReturnValue(new Set(['call_15297']));
-    client.replaceSynthesizedToolResponse = vi.fn().mockReturnValue(true);
+    const { apply } = installLateRepairMock(client);
     const recordToolResult = vi.fn();
     mockConfig.getChatRecordingService = vi
       .fn()
@@ -11079,10 +11334,11 @@ describe('useLlmStream', () => {
     });
 
     // The placeholder is swapped for the finalized real parts in place…
-    expect(client.replaceSynthesizedToolResponse).toHaveBeenCalledWith(
+    expect(client.replaceSynthesizedToolResponseAsync).toHaveBeenCalledWith(
       'call_15297',
-      finalizedParts,
+      expect.any(Function),
     );
+    expect(apply).toHaveBeenCalledWith('call_15297', finalizedParts);
     // …the real result reaches the transcript (the drop path never
     // records, which is what produced phantom unanswered calls)…
     expect(recordToolResult).toHaveBeenCalledWith(
@@ -11145,6 +11401,129 @@ describe('useLlmStream', () => {
       invocation: { getDescription: () => `${name} ${callId}` },
     }) as unknown as TrackedCompletedToolCall;
 
+  it.each([
+    'admitted',
+    'pending-hook',
+    'write-reject',
+    'session-swap',
+  ] as const)(
+    'settles a late repair result before replacing its placeholder: %s',
+    async (outcome) => {
+      const late = lateCompletedTool(
+        'late-admission',
+        'edit',
+        {},
+        'PRIVATE_LATE_RESULT',
+      );
+      late.response.responseParts.push({ text: 'PRIVATE_LATE_COMPANION' });
+      const client = new MockedLlmClientClass(mockConfig);
+      client.getHistoryFunctionResponseIds = vi.fn(
+        () => new Set(['late-admission']),
+      );
+      client.getSynthesizedRepairCallIds = vi.fn(
+        () => new Set(['late-admission']),
+      );
+      const { apply } = installLateRepairMock(client);
+      const hooked = outcome === 'pending-hook';
+      mockConfig.getDisableAllHooks = vi.fn(() => !hooked);
+      mockConfig.getMessageBus = vi.fn(() => ({
+        request: vi.fn(),
+      })) as Config['getMessageBus'];
+      mockConfig.hasHooksForEvent = vi.fn(
+        (event) => hooked && event === 'UserPromptSubmit',
+      );
+      const recordToolResult = vi.fn();
+      let release!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const recordToolResultAdmission = vi.fn(
+        async (parts: readonly Part[]) => {
+          if (outcome === 'write-reject')
+            throw new Error('late receipt write failed');
+          await barrier;
+          return [
+            {
+              parts,
+              decision: hooked
+                ? {
+                    withheld:
+                      'The tool had already completed; its output was discarded.',
+                  }
+                : ('admitted' as const),
+            },
+          ];
+        },
+      );
+      mockConfig.getChatRecordingService = vi
+        .fn()
+        .mockReturnValue({ recordToolResult, recordToolResultAdmission });
+      mockUseDualOutput.mockReturnValue(mockDualOutput);
+      mockDualOutput.emitToolResult.mockClear();
+      const { completeToolRound } = renderTestHook([], client);
+      let failure: unknown;
+      const pending = completeToolRound([late]).catch((error: unknown) => {
+        failure = error;
+      });
+      try {
+        await waitFor(() =>
+          expect(recordToolResultAdmission).toHaveBeenCalledOnce(),
+        );
+        expect(recordToolResult).toHaveBeenCalledOnce();
+        expect(recordToolResult.mock.invocationCallOrder[0]).toBeLessThan(
+          recordToolResultAdmission.mock.invocationCallOrder[0],
+        );
+        expect(
+          client.replaceSynthesizedToolResponseAsync,
+        ).toHaveBeenCalledOnce();
+        expect(apply).not.toHaveBeenCalled();
+        expect(mockDualOutput.emitToolResult).not.toHaveBeenCalled();
+        if (outcome === 'session-swap')
+          mockConfig.getSessionId = () => 'replacement-session';
+      } finally {
+        release();
+        await pending;
+      }
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+      if (outcome === 'write-reject') {
+        expect(apply).not.toHaveBeenCalled();
+        expect(mockDualOutput.emitToolResult).not.toHaveBeenCalled();
+        expect(failure).toBeDefined();
+      } else if (hooked) {
+        expect(JSON.stringify(apply.mock.calls)).not.toContain('PRIVATE_LATE');
+        expect(apply).toHaveBeenCalledWith('late-admission', [
+          {
+            functionResponse: {
+              id: 'late-admission',
+              name: 'edit',
+              response: {
+                error:
+                  'The tool had already completed; its output was discarded.',
+              },
+            },
+          },
+        ]);
+      } else {
+        expect(apply).toHaveBeenCalledWith(
+          'late-admission',
+          late.response.responseParts,
+        );
+        if (outcome === 'session-swap') {
+          // A committed receipt belongs to the protected old chat slot even
+          // after the visible session changes; only the new-session emit stops.
+          expect(failure).toBeUndefined();
+          expect(mockDualOutput.emitToolResult).not.toHaveBeenCalled();
+        }
+      }
+      expect(
+        JSON.stringify(recordToolResultAdmission.mock.calls[0][0]),
+      ).toContain('PRIVATE_LATE_RESULT');
+      expect(
+        JSON.stringify(recordToolResultAdmission.mock.calls[0][0]),
+      ).toContain('PRIVATE_LATE_COMPANION');
+    },
+  );
+
   it('skips the placeholder replacement when the session swaps during finalize', async () => {
     // `finalizeToolResponses` is awaited between reading the synthesized
     // set and splicing history (it can persist overflow output to disk),
@@ -11166,7 +11545,7 @@ describe('useLlmStream', () => {
     client.getSynthesizedRepairCallIds = vi
       .fn()
       .mockReturnValue(new Set(['call_15297']));
-    client.replaceSynthesizedToolResponse = vi.fn().mockReturnValue(true);
+    const { apply } = installLateRepairMock(client);
     const recordToolResult = vi.fn();
     mockConfig.getChatRecordingService = vi
       .fn()
@@ -11187,7 +11566,8 @@ describe('useLlmStream', () => {
     const { completeToolRound } = renderTestHook([], client);
     await completeToolRound([late]);
 
-    expect(client.replaceSynthesizedToolResponse).not.toHaveBeenCalled();
+    expect(client.replaceSynthesizedToolResponseAsync).not.toHaveBeenCalled();
+    expect(apply).not.toHaveBeenCalled();
     expect(recordToolResult).not.toHaveBeenCalled();
     // The dedup bookkeeping still runs, so the scheduler unblocks and the
     // locally executed tool is still counted.
@@ -11203,8 +11583,8 @@ describe('useLlmStream', () => {
     // - `call_replaced`: synthesized placeholder, chat accepts the swap ->
     //   splice + transcript record + sidecar emit.
     // - `call_refused`: the synthesized set names it, but the chat's
-    //   splice-time re-check refuses (history was rewritten during the
-    //   await). Without the early return it would gain a second durable
+    //   eligibility re-check refuses before prepare. Without that gate it
+    //   would gain a second durable
     //   tool result for one call and vanish from the `[REPAIR] Dropping`
     //   breadcrumb.
     // - `call_genuine`: only in `getHistoryFunctionResponseIds`, so the
@@ -11237,8 +11617,9 @@ describe('useLlmStream', () => {
     client.getSynthesizedRepairCallIds = vi
       .fn()
       .mockReturnValue(new Set(['call_replaced', 'call_refused']));
-    client.replaceSynthesizedToolResponse = vi.fn(
-      (callId: string) => callId === 'call_replaced',
+    const { eligible, apply } = installLateRepairMock(
+      client,
+      (callId) => callId === 'call_replaced',
     );
     const recordToolResult = vi.fn();
     mockConfig.getChatRecordingService = vi
@@ -11252,13 +11633,20 @@ describe('useLlmStream', () => {
 
     // Only the ids the synthesized set named are offered to the chat;
     // dropping the filter turns the second assertion red.
-    expect(client.replaceSynthesizedToolResponse).toHaveBeenCalledTimes(2);
-    expect(client.replaceSynthesizedToolResponse).not.toHaveBeenCalledWith(
+    expect(client.replaceSynthesizedToolResponseAsync).toHaveBeenCalledTimes(2);
+    expect(client.replaceSynthesizedToolResponseAsync).not.toHaveBeenCalledWith(
       'call_genuine',
       expect.anything(),
     );
-    // The refused id is neither recorded nor emitted: deleting the
-    // replacement-refused early return turns both counts red.
+    expect(eligible).toHaveBeenCalledTimes(2);
+    expect(eligible).toHaveBeenCalledWith('call_refused');
+    expect(apply).toHaveBeenCalledOnce();
+    expect(apply).toHaveBeenCalledWith(
+      'call_replaced',
+      replaced.response.responseParts,
+    );
+    // Refusal precedes prepare, so neither a journal record nor a raw
+    // temporary splice exists for the refused result.
     expect(recordToolResult).toHaveBeenCalledTimes(1);
     expect(recordToolResult).toHaveBeenCalledWith(
       replaced.response.responseParts,

@@ -1266,6 +1266,13 @@ export class LlmClient {
     return this.getChat().replaceSynthesizedToolResponse(callId, realParts);
   }
 
+  replaceSynthesizedToolResponseAsync(
+    callId: string,
+    prepare: () => Promise<Part[]>,
+  ): Promise<boolean> {
+    return this.getChat().replaceSynthesizedToolResponseAsync(callId, prepare);
+  }
+
   /**
    * Walk-only accessor for the handled tool-call id → (name, args)
    * fingerprint map used by duplicate provider-id replay detection. Same

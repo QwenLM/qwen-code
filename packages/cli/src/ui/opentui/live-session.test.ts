@@ -465,6 +465,10 @@ function createFakeConfig(
   recorder?: {
     recordMidTurnUserMessage: (...args: unknown[]) => void;
     recordToolResult?: ChatRecordingService['recordToolResult'];
+    recordToolResultAdmission?: (
+      parts: readonly Part[],
+      reason?: string,
+    ) => unknown;
   },
 ) {
   const chatRecorder = recorder
@@ -2502,6 +2506,148 @@ describe('livePromptEvents', () => {
       { text: 'second' },
     ]);
     expect(atMocks.calls).toEqual([]);
+  });
+
+  describe('terminal tool-result admission', () => {
+    const paths = ['all-cancelled', 'steering-abort'] as const;
+    const decisions = [
+      'no-hook',
+      'pending-hook',
+      'prior-allow',
+      'prior-withheld',
+      'write-reject',
+    ] as const;
+    it.each(
+      paths.flatMap((path) =>
+        decisions.map((decision) => ({ path, decision })),
+      ),
+    )(
+      'settles $path results before history retention: $decision',
+      async ({ path, decision }) => {
+        const hooked =
+          decision === 'pending-hook' || decision === 'prior-allow';
+        const controller = new AbortController();
+        const stream = oneToolBatchStream({
+          callId: 'terminal-call',
+          name: 'test_tool',
+          args: {
+            __cancelled: path === 'all-cancelled',
+            __restoreResult: { output: 'PRIVATE_TERMINAL_RESULT' },
+          },
+        });
+        let release!: () => void;
+        const barrier = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const recordToolResultAdmission = vi.fn(
+          async (parts: readonly Part[]) => {
+            if (decision === 'write-reject')
+              throw new Error('terminal receipt write failed');
+            await barrier;
+            return [
+              {
+                parts,
+                decision:
+                  decision === 'prior-withheld'
+                    ? { withheld: 'previous policy refusal' }
+                    : decision === 'pending-hook'
+                      ? {
+                          withheld:
+                            'The tool had already completed; its output was discarded.',
+                        }
+                      : ('admitted' as const),
+              },
+            ];
+          },
+        );
+        const config = createFakeConfig(stream, undefined, () => true, {
+          recordMidTurnUserMessage: vi.fn(),
+          recordToolResultAdmission,
+        });
+        Object.assign(config, {
+          getDisableAllHooks: () => !hooked,
+          getMessageBus: () => ({ request: vi.fn() }),
+          hasHooksForEvent: (event: string) =>
+            hooked && event === 'UserPromptSubmit',
+        });
+        const restoreSteering = vi.fn();
+        if (path === 'steering-abort') atMocks.hang = () => controller.abort();
+        let failure: unknown;
+        const pending = drain(
+          livePromptEvents(
+            config,
+            'start',
+            controller.signal,
+            path === 'steering-abort'
+              ? { drainSteering: () => steering('read @a.ts'), restoreSteering }
+              : undefined,
+          ),
+        ).catch((error: unknown) => {
+          failure = error;
+          return [];
+        });
+        try {
+          await vi.waitFor(() =>
+            expect(recordToolResultAdmission).toHaveBeenCalledOnce(),
+          );
+          expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
+        } finally {
+          release();
+          await pending;
+        }
+        expect(recordToolResultAdmission).toHaveBeenCalledWith(
+          expect.any(Array),
+          hooked
+            ? 'The tool had already completed; its output was discarded.'
+            : undefined,
+        );
+        const recordedOwnership = recordToolResultAdmission.mock.calls[0][0];
+        expect(recordedOwnership).toHaveLength(1);
+        expect(recordedOwnership[0]).toMatchObject({
+          functionResponse: {
+            id: 'terminal-call',
+            name: 'test_tool',
+            response: { output: 'PRIVATE_TERMINAL_RESULT' },
+          },
+        });
+        expect(stream).toHaveBeenCalledOnce();
+        if (path === 'steering-abort')
+          expect(restoreSteering).toHaveBeenCalledWith(steering('read @a.ts'));
+        const addHistory = vi.mocked(config.getGeminiClient().addHistory);
+        if (decision === 'write-reject') {
+          expect(failure).toBeDefined();
+          expect(addHistory).not.toHaveBeenCalled();
+        } else if (
+          decision === 'pending-hook' ||
+          decision === 'prior-withheld'
+        ) {
+          expect(JSON.stringify(addHistory.mock.calls)).not.toContain(
+            'PRIVATE_TERMINAL',
+          );
+          expect(addHistory).toHaveBeenCalledWith({
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'terminal-call',
+                  name: 'test_tool',
+                  response: {
+                    error:
+                      decision === 'prior-withheld'
+                        ? 'previous policy refusal'
+                        : 'The tool had already completed; its output was discarded.',
+                  },
+                },
+              },
+            ],
+          });
+        } else {
+          expect(JSON.stringify(addHistory.mock.calls)).toContain(
+            'PRIVATE_TERMINAL_RESULT',
+          );
+        }
+      },
+    );
   });
 
   it('restores the whole drained batch when the turn dies inside a steering read', async () => {

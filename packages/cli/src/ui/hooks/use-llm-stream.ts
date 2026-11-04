@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { settleToolResultHistory } from '@qwen-code/qwen-code-core/services/tool-result-history.js';
+import {
+  hasToolResultPromptHook,
+  UNSENT_TOOL_RESULT,
+} from '../../services/tool-result-history.js';
+
 import {
   completeRestoreToolResponse,
   type RestoreToolResponseBinding,
@@ -5522,45 +5528,55 @@ export const useLlmStream = (
           // NEW session's transcript. Skip both; the ids fall through to
           // the drop bookkeeping below.
           if (isCurrentSession()) {
-            finalizedReplaceable.forEach((entry, index) => {
+            for (const [index, entry] of finalizedReplaceable.entries()) {
               const { request, response, status } = replaceableTools[index]!;
-              if (
-                !llmClient.replaceSynthesizedToolResponse?.(
-                  entry.callId,
-                  entry.responseParts,
-                )
-              ) {
-                return;
+              if (!isCurrentSession()) {
+                abandonedSessionId = sessionId;
+                break;
               }
+              const recorder = config.getChatRecordingService?.();
+              const replaced =
+                await llmClient.replaceSynthesizedToolResponseAsync(
+                  entry.callId,
+                  async () => {
+                    if (!isCurrentSession()) {
+                      throw new Error(
+                        'Session changed before late tool result admission.',
+                      );
+                    }
+                    recorder?.recordToolResult?.(
+                      entry.responseParts,
+                      {
+                        callId: entry.callId,
+                        status,
+                        resultDisplay: response.resultDisplay,
+                        persistedOutputFiles: entry.persistedOutputFiles,
+                        artifacts: entry.artifacts,
+                        error: response.error,
+                        errorType: response.errorType,
+                        executionStatus: response.executionStatus,
+                      },
+                      goalToolResultProvenance(request, entry.responseParts),
+                    );
+                    const settled = await settleToolResultHistory(
+                      recorder,
+                      { role: 'user', parts: entry.responseParts },
+                      entry.responseParts,
+                      hasToolResultPromptHook(config)
+                        ? UNSENT_TOOL_RESULT
+                        : undefined,
+                    );
+                    return settled.parts ?? [];
+                  },
+                );
+              if (!isCurrentSession()) {
+                abandonedSessionId = sessionId;
+                break;
+              }
+              if (!replaced) continue;
               replacedCallIds.push(entry.callId);
-              // Every other completion path emits to the sidecar; without
-              // this a stream-json consumer never sees the late real result.
               dualOutput?.emitToolResult(request, response);
-              // The drop path never reaches `recordToolResult`, so without
-              // this the transcript keeps a `model[functionCall]` whose
-              // response exists nowhere on disk — the exact phantom shape
-              // reported in issue #15297. The placeholder was itself
-              // in-memory only, so the real result is the first durable
-              // answer for this callId. On `--resume` the repair pass hoists
-              // it back only while it still sits in the user run right after
-              // the call; once a model turn intervenes the scan stops there
-              // and synthesizes a fresh placeholder instead, leaving the
-              // recorded result durable but unreferenced.
-              config.getChatRecordingService?.()?.recordToolResult?.(
-                entry.responseParts,
-                {
-                  callId: entry.callId,
-                  status,
-                  resultDisplay: response.resultDisplay,
-                  persistedOutputFiles: entry.persistedOutputFiles,
-                  artifacts: entry.artifacts,
-                  error: response.error,
-                  errorType: response.errorType,
-                  executionStatus: response.executionStatus,
-                },
-                goalToolResultProvenance(request, entry.responseParts),
-              );
-            });
+            }
             if (replacedCallIds.length > 0) {
               debugLogger.warn(
                 `[REPAIR] Replaced synthesized placeholder(s) with late ` +
@@ -5873,10 +5889,17 @@ export const useLlmStream = (
             ),
           ),
         );
-        llmClient.addHistory({
-          role: 'user',
-          parts: responses.flatMap((entry) => entry.responseParts),
-        });
+        const toolOutputParts = responses.flatMap(
+          (entry) => entry.responseParts,
+        );
+        llmClient.addHistory(
+          await settleToolResultHistory(
+            config.getChatRecordingService(),
+            { role: 'user', parts: toolOutputParts },
+            toolOutputParts,
+            hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
+          ),
+        );
       };
       const endToolInteraction = (
         status: 'ok' | 'error' | 'cancelled',
@@ -6267,7 +6290,16 @@ export const useLlmStream = (
             .filter((entry) => !pairedCallIds.has(entry.callId))
             .flatMap((entry) => entry.responseParts);
           if (unpairedParts.length > 0)
-            llmClient.addHistory({ role: 'user', parts: unpairedParts });
+            llmClient.addHistory(
+              await settleToolResultHistory(
+                config.getChatRecordingService(),
+                { role: 'user', parts: unpairedParts },
+                unpairedParts,
+                hasToolResultPromptHook(config)
+                  ? UNSENT_TOOL_RESULT
+                  : undefined,
+              ),
+            );
         }
         markToolsAsSubmitted(
           llmTools.map((toolCall) => toolCall.request.callId),
@@ -6292,10 +6324,14 @@ export const useLlmStream = (
         if (llmClient) {
           // We need to manually add the function responses to the history
           // so the model knows the tools were cancelled.
-          llmClient.addHistory({
-            role: 'user',
-            parts: responsesToSend,
-          });
+          llmClient.addHistory(
+            await settleToolResultHistory(
+              config.getChatRecordingService(),
+              { role: 'user', parts: responsesToSend },
+              responsesToSend,
+              hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
+            ),
+          );
 
           // Report cancellation to arena (safety net — cancelOngoingRequest
           config.getArenaAgentClient()?.reportCancelled();
@@ -6371,10 +6407,13 @@ export const useLlmStream = (
         (toolCall) => toolCall.response.terminateTurn === true,
       );
       if (terminatesGoalTurn && toolGoalBinding) {
-        config
-          .getChatRecordingService()
-          ?.recordToolResultAdmission?.(responsesToSend);
-        llmClient.addHistory({ role: 'user', parts: responsesToSend });
+        llmClient.addHistory(
+          await settleToolResultHistory(
+            config.getChatRecordingService(),
+            { role: 'user', parts: responsesToSend },
+            responsesToSend,
+          ),
+        );
         let goalFinishFailed = false;
         try {
           await config.getChatRecordingService()?.flush();
@@ -6525,7 +6564,14 @@ export const useLlmStream = (
       // Don't continue if model was switched due to quota error
       if (modelSwitchedFromQuotaError) {
         if (toolGoalBinding) {
-          llmClient?.addHistory({ role: 'user', parts: responsesToSend });
+          llmClient?.addHistory(
+            await settleToolResultHistory(
+              config.getChatRecordingService(),
+              { role: 'user', parts: responsesToSend },
+              responsesToSend,
+              hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
+            ),
+          );
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation stopped after a model switch',
@@ -6553,7 +6599,14 @@ export const useLlmStream = (
           );
         });
       if (backgroundLaunchExhaustedCapacity) {
-        llmClient?.addHistory({ role: 'user', parts: responsesToSend });
+        llmClient?.addHistory(
+          await settleToolResultHistory(
+            config.getChatRecordingService(),
+            { role: 'user', parts: responsesToSend },
+            responsesToSend,
+            hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
+          ),
+        );
         if (toolGoalBinding) {
           await failClosedGoalTurn(
             toolGoalBinding,
@@ -6749,10 +6802,16 @@ export const useLlmStream = (
         settleDrainedTeammates(false);
         if (toolGoalBinding) {
           if (llmClient) {
-            llmClient.addHistory({
-              role: 'user',
-              parts: toolResultPartsForPause,
-            });
+            llmClient.addHistory(
+              await settleToolResultHistory(
+                config.getChatRecordingService(),
+                { role: 'user', parts: toolResultPartsForPause },
+                toolResultPartsForPause,
+                hasToolResultPromptHook(config)
+                  ? UNSENT_TOOL_RESULT
+                  : undefined,
+              ),
+            );
           }
           await failClosedGoalTurn(
             toolGoalBinding,
@@ -6767,10 +6826,14 @@ export const useLlmStream = (
         drainedSteer?.restore();
         settleDrainedTeammates(false);
         if (llmClient) {
-          llmClient.addHistory({
-            role: 'user',
-            parts: toolResultPartsForPause,
-          });
+          llmClient.addHistory(
+            await settleToolResultHistory(
+              config.getChatRecordingService(),
+              { role: 'user', parts: toolResultPartsForPause },
+              toolResultPartsForPause,
+              hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
+            ),
+          );
         }
         await failClosedGoalTurn(
           toolGoalBinding,

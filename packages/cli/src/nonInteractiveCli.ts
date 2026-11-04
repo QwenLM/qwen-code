@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { settleToolResultHistory } from '@qwen-code/qwen-code-core/services/tool-result-history.js';
+
 import { isWrappedSystemReminderPart } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -3093,10 +3095,13 @@ export async function runNonInteractive(
               shouldFinalizeTurn = true;
               if (!activeGoalTurn) break;
               await modTurn?.complete();
-              config
-                .getChatRecordingService?.()
-                ?.recordToolResultAdmission?.(result.parts ?? []);
-              llmClient.addHistory({ role: 'user', parts: result.parts ?? [] });
+              llmClient.addHistory(
+                await settleToolResultHistory(
+                  config.getChatRecordingService?.(),
+                  { role: 'user', parts: result.parts ?? [] },
+                  result.parts ?? [],
+                ),
+              );
               await config.getChatRecordingService?.()?.flush();
               await finishGoalTurn(activeGoalTurn);
               activeGoalTurn = undefined;
@@ -3267,13 +3272,13 @@ export async function runNonInteractive(
             }
             if (terminateTurn && activeGoalTurn) {
               await modTurn?.complete();
-              config
-                .getChatRecordingService?.()
-                ?.recordToolResultAdmission?.(toolResponseParts);
-              llmClient.addHistory({
-                role: 'user',
-                parts: toolResponseParts,
-              });
+              llmClient.addHistory(
+                await settleToolResultHistory(
+                  config.getChatRecordingService?.(),
+                  { role: 'user', parts: toolResponseParts },
+                  toolResponseParts,
+                ),
+              );
               await config.getChatRecordingService?.()?.flush();
               await finishGoalTurn(activeGoalTurn);
               activeGoalTurn = undefined;
