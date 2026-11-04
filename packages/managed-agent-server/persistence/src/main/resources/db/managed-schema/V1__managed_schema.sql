@@ -920,6 +920,7 @@ CREATE TABLE ma_runtime_slot (
     storage_id VARBINARY(1024) COMMENT 'Logical storage identity.',
     last_generation BIGINT UNSIGNED NOT NULL COMMENT 'Last allocated Runtime generation, retained after binding collection.',
     active_binding_id VARBINARY(2048) COMMENT 'Current binding identity, if the slot has an active binding.',
+    INDEX idx_ma_runtime_slot_isolation (isolation_key),
     CONSTRAINT uk_ma_runtime_slot_business_key UNIQUE (request_key),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_runtime_slot_id PRIMARY KEY (id)
@@ -1080,7 +1081,11 @@ CREATE TABLE ma_storage_owner (
     maintenance_generation BIGINT UNSIGNED COMMENT 'Maintenance generation fencing stale maintenance owners.',
     INDEX idx_execution_lease_maintenance (maintenance_id),
     physical_key CHAR(64) COMMENT 'Canonical physical storage identity shared by logical aliases.',
+    member_count BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Number of Runtime Session memberships and running uploads on this storage.',
+    exclusive_member_key CHAR(64) COMMENT 'Identity of the execution member holding exclusive rewind access.',
     CONSTRAINT uk_ma_storage_owner_physical UNIQUE (physical_key),
+    CONSTRAINT ck_ma_storage_owner_members CHECK (member_count >= 0),
+    CONSTRAINT ck_ma_storage_owner_exclusive CHECK (exclusive_member_key IS NULL OR member_count >= 1),
     CONSTRAINT uk_ma_storage_owner_business_key UNIQUE (storage_key),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_storage_owner_id PRIMARY KEY (id)

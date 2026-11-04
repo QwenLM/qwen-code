@@ -95,12 +95,11 @@ class HostedMySqlIsolationExtensionTest {
         when(connection.getMetaData()).thenReturn(metadata);
         when(metadata.getDatabaseProductName()).thenReturn("MySQL");
         when(connection.getCatalog()).thenReturn("hosted_isolation_test");
-        when(connection.prepareStatement("SELECT @@GLOBAL.sql_mode, @@SESSION.sql_mode"))
+        when(connection.prepareStatement("SELECT @@SESSION.sql_mode"))
                 .thenReturn(modeQuery);
         when(modeQuery.executeQuery()).thenReturn(modes);
         when(modes.next()).thenReturn(true, false);
         when(modes.getString(1)).thenReturn("STRICT_TRANS_TABLES");
-        when(modes.getString(2)).thenReturn("STRICT_TRANS_TABLES");
         when(connection.createStatement()).thenReturn(tables, cleanup);
         when(tables.executeQuery(anyString())).thenReturn(rows);
         when(rows.next()).thenReturn(true, true, false);

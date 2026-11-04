@@ -465,7 +465,6 @@ public class ManagedActionStore
             String actionId,
             JsonNode body,
             long now) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         // Serialize admission with journal projection and other Session commands.
         jdbc.queryForObject(
@@ -656,7 +655,7 @@ public class ManagedActionStore
             throw new ManagedAgentException(409, "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }
-        WorkspaceMigrationAdmission.requireSessionOpen(jdbc, tenantId, sessionId);
+        WorkspaceMigrationAdmission.requireSessionOpenForAdmission(jdbc, tenantId, sessionId);
         String sessionStatus = jdbc.queryForObject("SELECT status FROM ma_session"
                 + " WHERE tenant_id = ? AND session_id = ?", String.class, tenantId, sessionId);
         if (!"ACTIVE".equals(sessionStatus)) {
