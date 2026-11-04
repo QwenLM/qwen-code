@@ -57,7 +57,7 @@
 | `thread`      | 线程标识（`issue:12`、`pr:34`）                                         |
 | `number`      | issue 或 PR 编号                                                        |
 | `actor`       | 发送方登录名                                                            |
-| `sessionId`   | 处理该消息的会话                                                        |
+| `sessionId`   | 事件被路由到的会话；在 `retired` / `skipped` 行上是它失去的那个（§5）   |
 | `messageId`   | 来源消息标识                                                            |
 | `durationMs`  | 轮询耗时                                                                |
 | `error`       | 单行化错误信息，上限 200 字符                                           |
@@ -84,6 +84,7 @@
 | `GithubAdapter.runInboundTask`（私投递判定）                   | `task` / `delivered`，或 `task` / `retired` 带原因（§5）                                                     |
 | `GithubAdapter.retireBoundTask`                                | `task` / `retired`，原因 `dead_letter`；`task` / `failed`，原因 `dead_letter_write_failed`（§5）             |
 | `GithubAdapter.drainPendingWatch`（claim 前退休）              | `inbound` / `skipped`，原因 `watch_no_candidate`（§5）                                                       |
+| `GithubAdapter.watchOnePr`（待办队列溢出）                     | `inbound` / `skipped`，原因 `watch_pending_overflow`（§5）                                                   |
 | `GithubAdapter` 绑定扫描与 watch 守卫                          | `poll` / `degraded`，带原因，只打在既有限流点或状态边沿上；绑定扫描行另带 `detail.streak`（§5）              |
 
 `PollingChannelBase` 增加 `setPollEventDetail` 挂点，适配器可以挂自己的计数（GitHub 报告本次轮询取到多少条通知），基类不需要知道这些字段。基类在轮询开始前清空该字段，并在本次轮询结束后才消费它，因此事件绝不会把上一次轮询的计数记到本次的时间戳上。
@@ -110,7 +111,7 @@ GET /workspaces/:workspace/channels/events
 ### 4. Web Shell
 
 - `useChannelEvents` 在页面挂载且可见期间轮询该路由（5 秒），标签页隐藏时暂停、重新可见时刷新；页面另提供手动刷新。**同一时刻只允许一个轮询周期在途**：请求未完成时恢复可见绝不能再启动一个，否则两者结束时都会 schedule，而只保留最后一个定时器句柄，另一个成为永远轮询的孤儿——慢响应下的普通标签页切换会永久倍增日志读取。因此请求在途时恢复可见，是让该请求结束后再重新排程。两条读取路径都有时间上界（SDK 默认 30 秒 fetch 超时与 action 超时），所以该守卫不会让循环停摆。每份快照都带上产生它的查询（工作区、渠道、类型、limit），不匹配的数据会被遮蔽，做法与 `useDaemonChannels` 一致：底层 resource 在请求进行中或失败后仍保留旧数据，没有这个标记的话，上一个工作区的行——以及过滤选项里它的渠道名——就会显示在新选中的工作区下。
-- `ChannelEventsPage` 渲染按时间倒序的时间线，带工作区选择器、渠道过滤、类型过滤，每行显示：时间、渠道、类型、结果、目标（`owner/repo#12`）、操作者、原因或触发类型、耗时、错误。私投递还会显示它到达的会话：一个截断到 8 个字符的标记，完整标识放在 `title` 里——否则一个 UUID 会把原因和计数挤出该列。绑定扫描的 `degraded` 行显示 `detail.streak`（扫描次数，不是轮询次数），扫描不完整时还显示 `detail.sessions`；watch 守卫行只显示原因。工作区选择器与管理页一样列出已注册的非 live 工作区，因为 provider 的 cwd 是 daemon 全局的主工作区，否则在次工作区启动的渠道将无法查看。切换工作区会重置渠道过滤。
+- `ChannelEventsPage` 渲染按时间倒序的时间线，带工作区选择器、渠道过滤、类型过滤，每行显示：时间、渠道、类型、结果、目标（`owner/repo#12`）、操作者、原因或触发类型、耗时、错误。私投递还会显示它到达的会话：一个截断到 8 个字符的标记，完整标识放在 `title` 里——否则一个 UUID 会把原因和计数挤出该列。绑定扫描的 `degraded` 行显示 `detail.streak`（扫描次数，不是轮询次数），且**只有 `bindings_partial` 行**带 `detail.sessions`；`bindings_cold_empty` 与 `bindings_unreachable` 只带 `streak`，因此「是否存在 sessions」不能当作「这次扫描是部分结果」的判据。watch 守卫行只显示原因。工作区选择器与管理页一样列出已注册的非 live 工作区，因为 provider 的 cwd 是 daemon 全局的主工作区，否则在次工作区启动的渠道将无法查看。切换工作区会重置渠道过滤。
 - 适配器能写出的每个结果都有中英文标签。`KNOWN_OUTCOMES` 被导出，以便测试断言两份目录都覆盖它：翻译器会先回退到英文、再回退到原始键，所以缺一个中文标签只会静默显示英文。页面不认识的结果仍按原始 token 渲染——不好读，但安全。
 - 它是独立页面：`activePanel` 取值 `channel-events`，URL 为 `/channel-events`，侧边栏主导航项为 `channelEvents`。
 - 由 `channel_management` 能力位与受信任工作区门禁，与管理页一致。
@@ -134,6 +135,10 @@ PR #16117 增加了第二条投递通道：开启 `deliverToBoundSessions` 后�
 
 `transitionInboundTask` 增加一个可选的日志覆盖参数，使私投递的接受标记仍能按 `running` 持久化（不存在 `delivered` 这个任务状态——记录紧接着就被删除），而日志的最后一个词是终态。没有这个覆盖，被 preflight 拒绝的事件仍会以 `running` 收尾——和「还在投递中」无法区分——因为那个出口在 delivery 仍然挂着的情况下就消费掉了任务。同一个方法还会记住任务进来时持有的目标，因此清除 delivery 时写的那些行仍带着 `sessionId`，不会丢掉它们所指的那个会话。
 
+这份记忆是**持久化**的（任务记录上的 `lostSessionId`），而不只够一行用。gone 会话回退会清掉 delivery，之后每一轮都重新进入缺失门禁、最终进入死信，届时已无 delivery 可读；只记一次转换会让这些行全部无名——包括终态行，而那正是运维用来判断「是哪个会话弄丢了事件」的那一行。该字段只用于归因：**刻意不恢复 delivery**，否则会重新进入私投递并改变路由。它只在显式清除时写入，因此只是省略该键的转换不会扰动它，并像记录的其他字段一样按可选字符串校验。
+
+同一条规则也覆盖两处发生在任何任务被 claim 之前的退休：它们的 `inbound` / `skipped` 行带上待办条目里冻结的目标，而该目标本来就已写进同一事件的死信记录。没有它，时间线与死信就会对同一次被监视的状态变化给出不一致的归属。
+
 **新增结果词。** `task` / `delivered` 与 `task` / `retired` 只是日志用的终态词，不是持久化的任务状态。`retired` 带原因：`preflight_rejected`、`watch_no_target`、`watch_no_candidate`、`watch_session_gone`、`dead_letter`。死信追加失败记 `task` / `failed`，原因 `dead_letter_write_failed`，因为任务被保留、仍可恢复——那不是退休。每一条终态行都写在它所描述的持久化步骤**之后**，因此删除或保存抛错时，不会为一个下一轮还会重跑的事件留下退休声明。
 
 有两处 watch 退休发生在任何任务被 claim 之前，因此没有 task 行可收尾，改记 `inbound` / `skipped`：完整快照下已无候选时记 `watch_no_candidate`；按 PR 的待办队列超过上限、最老的事件被未投递退休时记 `watch_pending_overflow`。claim 前退休在 watch 状态保存抛错时会回滚它的 slice：slice 在保存之前就改了已加载的内存态，而保存失败不会清除已加载标志，因此不回滚的话下一轮会跳过该条目、随后一次保存又把截断后的状态写回磁盘——事件就此丢失且不留任何痕迹。
@@ -146,13 +151,17 @@ PR #16117 增加了第二条投递通道：开启 `deliverToBoundSessions` 后�
 
 `detail.streak` 统计的是**绑定扫描次数，不是轮询次数**：`refreshBoundSessions` 在每次 gone 会话重试时也会跑，所以一次轮询可能让它加不止一次。标签与 stderr 措辞因此都说「扫描」。同理 `detail.sessions` 用的是本次扫描自己的行数，而不是路由映射的大小——映射按 PR 建键，一个会话关注两个 PR 就会被报成两个会话，把运维支使去查一个根本没发生的漏读。
 
-**恢复记在清零边沿上**，即 `watch_reconcile_recovered`。`poll` / `ok` 行不能充当这个信号：基类在每次不抛错的轮询后都会写一条，包括持续故障期间的每一次，所以它在整个降级窗口都存在、结束时也没有变化。只有 watch 守卫这几个原因有恢复行；绑定扫描那几个原因是隐含恢复的——扫描一旦成功就不再产生降级行，下一次 `bindings_*` 的 streak 从头开始。
+**恢复记在清零边沿上**，即 `watch_reconcile_recovered`。`poll` / `ok` 行不能充当这个信号：基类在每次不抛错的轮询后都会写一条，包括持续故障期间的每一次，所以它在整个降级窗口都存在、结束时也没有变化。只有 watch 守卫这几个原因有恢复行。`bindings_unreachable` 与 `bindings_cold_empty` 是隐含恢复的——扫描一旦成功就不再产生它们，下一次 streak 从头开始。**`bindings_partial` 不是带恢复边沿的降级**：成功的多页扫描恰恰是它的*生产者*，而 `partialSnapshotStreak` 只在完整快照时清零，永远多页的守护进程永远不会返回完整快照。它是一条常驻健康提示，因此运维不能把「它安静下来」当作恢复的证据。
 
 watch 守卫行还会区分成因。`hasUnreconciledWatchPending()` 在读取错误时 fail-closed，所以不可读的 sidecar 同样会阻塞恢复——但把它报成待办积压，给出的补救（重新开启订阅）根本解决不了。订阅关闭时先加载状态：读取失败记 `watch_reconcile_blocked` 并带上错误，`watch_pending_unreconciled` 只留给确实持有待办事件的状态。门本身不变，仍然 fail-closed。
 
 曾考虑把绑定扫描的健康信息挂到现有轮询 detail 上，被否掉了：`setPollEventDetail` 由评论通道调用，而两个冷启动门都在它**之前**就 return——恰恰在它最该报告的那种情况下，detail 永远设不上。
 
-有两处 stderr 是刻意不记的：watch pass 失败，以及「保留旧映射」的刷新失败。两者每轮都打、没有限流，也没有现成标志可做边沿触发，覆盖它们就得为诊断新增适配器状态。
+绑定扫描与 watch 这条通道里有五处反复出现的 stderr 是刻意不记的：watch pass 失败、「保留旧映射」的刷新失败、部分快照超过 `MAX_PARTIAL_RETAINED` 时丢弃最旧未列出会话的保留上限裁剪、空闲 watch 条目的条目上限驱逐，以及让最旧的绑定 PR 超出 `MAX_WATCHED_PRS` 而不被监视的 watch 上限。五者在条件成立期间每轮都打、没有限流，也没有现成标志可做边沿触发，覆盖它们就得为诊断新增适配器状态。
+
+它们的后果并不一样重。watch 上限最重：被排除的 PR 根本不会被监视，它的状态变化一行都不产生，运维读到的是沉默而不是迟到的答案。保留上限裁剪次之——被丢弃会话的事件会被延迟、到点进入死信，运维几小时后看到终态行却没有任何一行说明会话被裁剪过。条目上限驱逐按构造是最轻的：它只驱逐没有待办事件、没有存活绑定认领、也没有在飞 watch 任务的空闲条目，因此不会丢掉任何可投递的事件。若将来要加这类状态，这两个容量站点是第一批候选。
+
+这是对这条通道里反复出现的健康与容量站点的清点，不是对适配器里每一行 stderr 的清点。另有两类同样只写 stderr，在此点名以免有人再去找：一次性加载诊断（watch 状态损坏、条目畸形或容器不可用、旧状态迁移），它们每次加载只打一次而不是每轮打；以及按 PR 的请求失败（例如一次 CI 拉取），它只让一个 PR 在一轮里少掉检测。入站任务读取失败不属于这两类——它会向上抛出，成为一条 `poll` / `failed` 行。
 
 一条量级说明：死信追加持续失败时任务保持可恢复，因此重试——以及它的 `dead_letter_write_failed` 行——每轮都会重复。这与既有的背压/失败转换对卡住的任务本来就每轮写一行是一致的，并由轮转封顶。给它加限流就得为「磁盘满」这种紧急状态新增按任务的状态，而这种状态的要害恰恰是事件已经没有任何持久化落点了。
 

@@ -1258,7 +1258,9 @@ that session's `sessionId`, including the rows written while the delivery is
 cleared and the retire that follows, which name the session the event lost.
 `detail` is optional on every event: a binding-scan `degraded` row carries
 `detail.streak` (a count of binding scans, which a gone-session retry can
-advance more than once per poll) and `detail.sessions` when the scan is partial,
+advance more than once per poll) and, on the `bindings_partial` rows only,
+`detail.sessions` (the sessions the map still routes to: the ones this scan
+listed plus the ones retention keeps),
 while the watch-guard rows (`watch_reconcile_blocked`,
 `watch_pending_unreconciled`, `watch_reconcile_recovered`) carry only `reason`
 and, for a read failure, `error`. A GitHub poll that filters more than 20 notifications journals

@@ -74,23 +74,23 @@ state files, so a Channel name cannot escape the directory.
 
 Record:
 
-| Field         | Meaning                                                                 |
-| ------------- | ----------------------------------------------------------------------- |
-| `at`          | ISO timestamp                                                           |
-| `channel`     | Channel instance name, kept in full (see limits below)                  |
-| `type`        | `inbound` / `outbound` / `task` / `poll`                                |
-| `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `ok` / a task state (§5) |
-| `reason`      | machine reason code for skips (`sender_denied`, `reason_filter`, ...)   |
-| `triggerKind` | Channel-specific trigger (`mention`, `assign`, ...)                     |
-| `repository`  | conversation container (for GitHub, `owner/repo`)                       |
-| `thread`      | thread identity (`issue:12`, `pr:34`)                                   |
-| `number`      | issue or PR number                                                      |
-| `actor`       | sender login                                                            |
-| `sessionId`   | session that handled the message                                        |
-| `messageId`   | source message identity                                                 |
-| `durationMs`  | poll duration                                                           |
-| `error`       | sanitized single-line error, capped at 200 characters                   |
-| `detail`      | flat primitive map, at most 12 keys                                     |
+| Field         | Meaning                                                                               |
+| ------------- | ------------------------------------------------------------------------------------- |
+| `at`          | ISO timestamp                                                                         |
+| `channel`     | Channel instance name, kept in full (see limits below)                                |
+| `type`        | `inbound` / `outbound` / `task` / `poll`                                              |
+| `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `ok` / a task state (§5)               |
+| `reason`      | machine reason code for skips (`sender_denied`, `reason_filter`, ...)                 |
+| `triggerKind` | Channel-specific trigger (`mention`, `assign`, ...)                                   |
+| `repository`  | conversation container (for GitHub, `owner/repo`)                                     |
+| `thread`      | thread identity (`issue:12`, `pr:34`)                                                 |
+| `number`      | issue or PR number                                                                    |
+| `actor`       | sender login                                                                          |
+| `sessionId`   | session the event was routed to; on a `retired` / `skipped` row, the one it lost (§5) |
+| `messageId`   | source message identity                                                               |
+| `durationMs`  | poll duration                                                                         |
+| `error`       | sanitized single-line error, capped at 200 characters                                 |
+| `detail`      | flat primitive map, at most 12 keys                                                   |
 
 Limits: free-text fields and `detail` values are capped at 200 characters. The
 Channel identity is the exception: the management API accepts names up to 255
@@ -120,6 +120,7 @@ handling.
 | `GithubAdapter.runInboundTask` (bound verdict)                     | `task` / `delivered`, or `task` / `retired` with a reason (§5)                                                                     |
 | `GithubAdapter.retireBoundTask`                                    | `task` / `retired`, reason `dead_letter`; `task` / `failed`, reason `dead_letter_write_failed` (§5)                                |
 | `GithubAdapter.drainPendingWatch` (retire before claim)            | `inbound` / `skipped`, reason `watch_no_candidate` (§5)                                                                            |
+| `GithubAdapter.watchOnePr` (pending-queue overflow)                | `inbound` / `skipped`, reason `watch_pending_overflow` (§5)                                                                        |
 | `GithubAdapter` binding scan and watch guard                       | `poll` / `degraded` with a reason, at the existing throttles or on a state edge; binding-scan rows also carry `detail.streak` (§5) |
 
 `PollingChannelBase` gains a `setPollEventDetail` seam so an adapter can attach
@@ -203,8 +204,10 @@ must not be the answer when the journal could not be read.
   chip truncated to 8 characters, with the full identity in `title` — a UUID
   would otherwise push the reason and the counters out of the column. A
   binding-scan `degraded` row shows `detail.streak` (a count of scans, not
-  polls) and, when the scan is partial, `detail.sessions`; the watch-guard
-  rows carry only their reason. The workspace selector lists the registered, non-live
+  polls) and, on the `bindings_partial` rows only, `detail.sessions`; the
+  `bindings_cold_empty` and `bindings_unreachable` rows carry `streak` alone, so
+  the presence of `sessions` is not a "this scan was partial" predicate. The
+  watch-guard rows carry only their reason. The workspace selector lists the registered, non-live
   workspaces exactly as the management page does, because the provider's cwd is
   the daemon-wide primary workspace and a Channel started in a secondary
   workspace would otherwise be unreachable. Changing the workspace resets the
@@ -258,6 +261,23 @@ is terminal. Without the override a preflight-rejected event would still end on
 consumes the task with its delivery still set. The same method remembers the
 target a task held going in, so the rows written while a delivery is cleared
 keep their `sessionId` instead of losing the session they are about.
+
+That memory is **persisted**, as `lostSessionId` on the task record, not just
+held for one row. The gone-session fallback clears the delivery, and every later
+poll re-enters the absence gate and finally the dead-letter with no delivery left
+to read; a one-transition memory would leave all of those rows unnamed —
+including the terminal one, which is the row an operator reads to learn which
+session lost the event. The field is attribution only: the delivery is
+deliberately not restored, since that would re-enter bound delivery and change
+routing. It is written only on an explicit clear, so a transition that merely
+omits the key cannot disturb it, and it is validated as an optional string like
+the record's other fields.
+
+The same rule reaches the two retires that happen before any task is claimed:
+their `inbound` / `skipped` rows carry the frozen target from the pending entry,
+which is already written into the dead-letter record for that same event. Without
+it the timeline and the dead-letter would disagree about attribution for one
+watched transition.
 
 **New outcomes.** `task` / `delivered` and `task` / `retired` are journal-only
 terminal words, not persisted task states. `retired` carries a reason:
@@ -316,9 +336,13 @@ happened.
 A `poll` / `ok` row cannot serve as that signal: the base writes one after every
 poll that does not throw, including every poll of a sustained outage, so it is
 present throughout the degraded window and unchanged at its end. Only the
-watch-guard reasons have a recovery row; the binding-scan reasons recover
-implicitly, because a successful scan simply stops producing degraded rows and
-the next `bindings_*` streak starts over.
+watch-guard reasons have a recovery row. `bindings_unreachable` and
+`bindings_cold_empty` recover implicitly, because a successful scan stops
+producing them and the next streak starts over. **`bindings_partial` is not a
+degradation with a recovery edge**: a successful multi-page scan is its
+_producer_, and `partialSnapshotStreak` resets only on a complete snapshot, which
+a permanently multi-page daemon never returns. It is a standing health hint, so
+an operator must not wait for it to go quiet as evidence of recovery.
 
 The watch-guard row also classifies its cause. `hasUnreconciledWatchPending()`
 is fail-closed on a read error, so an unreadable sidecar blocks recovery too —
@@ -333,10 +357,32 @@ considered and rejected: `setPollEventDetail` is called by the comment lane, and
 both cold-start gates return _before_ it — the detail would be missing in
 exactly the case it exists to report.
 
-Two stderr sites are deliberately not journaled: the watch pass failure and the
-"keeping previous map" refresh failure. Both run on every poll with no throttle
-and no existing flag to edge-trigger on, so covering them would mean new
-adapter state for diagnostics alone.
+Five recurring stderr sites in the binding-scan and watch lane are deliberately
+not journaled: the watch pass failure, the "keeping previous map" refresh
+failure, the retention-cap drop that discards the oldest unlisted sessions when
+a partial snapshot exceeds `MAX_PARTIAL_RETAINED`, the watch entry-cap eviction
+of idle entries, and the watch cap that leaves the oldest bound PRs beyond
+`MAX_WATCHED_PRS` unwatched. All five run on every poll while their condition
+holds, with no throttle and no existing flag to edge-trigger on, so covering
+them would mean new adapter state for diagnostics alone.
+
+They are not equally heavy. The watch cap is the worst: an excluded PR is never
+watched, so its transitions produce no rows at all and the operator reads
+silence rather than a late answer. The retention-cap drop is next — the dropped
+sessions' events defer and dead-letter at the horizon, so terminal rows appear
+hours later with no row saying sessions were pruned. The entry-cap eviction is
+the lightest by construction: it evicts only idle entries that have no pending
+event, no surviving binding claim and no in-flight watch task, so no deliverable
+event is lost. The two capacity sites are the first candidates if that state is
+ever added.
+
+This is a census of the lane's recurring health and capacity sites, not of every
+stderr line in the adapter. Two further classes stay on stderr as well and are
+named here so nobody has to go looking: one-shot load diagnostics (corrupt,
+malformed or unusable watch state, legacy state migration), which fire once per
+load rather than per poll; and per-PR request failures such as a CI fetch, which
+degrade one PR's detection for one poll. An inbound-task read failure is in
+neither class — it propagates and becomes a `poll` / `failed` row.
 
 One volume note: a dead-letter append that keeps failing leaves the task
 recoverable, so the retry — and its `dead_letter_write_failed` row — repeats

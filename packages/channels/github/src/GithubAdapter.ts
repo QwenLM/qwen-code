@@ -704,6 +704,14 @@ interface InboundTaskRecord {
    * bound session must not freeze mark-as-read for the whole channel.
    */
   backpressure?: boolean;
+  /**
+   * The bound session this event was routed to and lost, kept after the
+   * delivery is cleared so every later row — the re-entered deferrals and the
+   * dead-letter at the horizon — can still name it. Attribution only: the
+   * delivery is deliberately NOT restored, since that would re-enter bound
+   * delivery and change routing.
+   */
+  lostSessionId?: string;
 }
 
 /**
@@ -805,7 +813,9 @@ function isInboundTaskRecord(value: unknown): value is InboundTaskRecord {
     (record.deferCount === undefined ||
       (Number.isSafeInteger(record.deferCount) && record.deferCount >= 0)) &&
     (record.backpressure === undefined ||
-      typeof record.backpressure === 'boolean')
+      typeof record.backpressure === 'boolean') &&
+    (record.lostSessionId === undefined ||
+      typeof record.lostSessionId === 'string')
   );
 }
 
@@ -3313,6 +3323,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         return {
           ...record,
           ...updates,
+          // Persist the lost target, not just this row's attribution: the
+          // gone-session fallback clears the delivery, and every later poll
+          // re-enters the absence gate and finally the dead-letter with no
+          // delivery left to read. Remembering it for one transition would
+          // leave all of those rows — including the terminal one — unnamed.
+          // Only an EXPLICIT clear counts; an update that merely omits the
+          // key must not touch it.
+          ...('delivery' in updates &&
+          updates.delivery === undefined &&
+          previousSessionId !== undefined
+            ? { lostSessionId: previousSessionId }
+            : {}),
           state,
           updatedAt: new Date().toISOString(),
         };
@@ -3324,7 +3346,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const sessionId =
       task.delivery?.kind === 'bound-session'
         ? task.delivery.sessionId
-        : previousSessionId;
+        : (previousSessionId ?? task.lostSessionId);
     this.recordChannelEvent({
       type: 'task',
       outcome: journal?.outcome ?? state,
@@ -3366,7 +3388,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       sessionId ??
       (task.delivery?.kind === 'bound-session'
         ? task.delivery.sessionId
-        : undefined);
+        : task.lostSessionId);
     this.recordChannelEvent({
       type: 'task',
       outcome,
@@ -3736,6 +3758,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           }
         }
       }
+      // Sessions the routing map still routes to besides the ones this scan
+      // listed. Under a partial answer retention keeps unlisted sessions, so
+      // the scan's own row count alone can be 0 while the map is not.
+      let retainedSessionCount = 0;
       if (snapshot.partial) {
         // An incomplete enumeration is not an absence: keep every known
         // binding the partial answer failed to list, so private delivery
@@ -3763,6 +3789,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
                 )
                 .slice(0, MAX_PARTIAL_RETAINED)
             : retained;
+        retainedSessionCount = retainedCapped.length;
         if (retainedCapped.length < retained.length) {
           process.stderr.write(
             `[Channel:${this.name}] binding retention cap exceeded under a partial snapshot: dropped ${retained.length - retainedCapped.length} oldest unlisted sessions (keeping ${MAX_PARTIAL_RETAINED}); their unmatched events defer until a complete snapshot establishes absence\n`,
@@ -3817,8 +3844,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ) {
           // The routing map is keyed per PR, so its size counts bound PRs,
           // not sessions: one session following two PRs would be reported as
-          // two. The scan's own row count is the session count.
-          const listedSessions = snapshot.bindings.length;
+          // two. Count session rows instead — the ones this scan listed plus
+          // the ones retention keeps routing to. Reporting only the listed
+          // rows would say "0 sessions listed" for a draining workspace whose
+          // retained sessions are still receiving deliveries, and hand the
+          // operator a page-cap diagnosis for a state that is not a page cap.
+          const listedSessions =
+            snapshot.bindings.length + retainedSessionCount;
           process.stderr.write(
             `[Channel:${this.name}] binding snapshot has been partial for ${this.partialSnapshotStreak} consecutive binding scans (${listedSessions} sessions listed): a multi-page scan — more active sessions than one page — is always partial, so unmatched PR events defer to the dead-letter horizon instead of the channel (issue events are unaffected). Verify the daemon's per-workspace session counts.\n`,
           );
@@ -4124,12 +4156,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // loop by the finite follower count even if a stale snapshot keeps
       // re-listing dead sessions.
       const goneSessions = new Set<string>([delivery.sessionId]);
+      // The local `delivery` is the FIRST follower; the loop walks past it.
+      // The terminal row must name the last one tried, or the operator opens
+      // the workspace of a session evicted a step earlier.
+      let lastTarget = delivery;
       let next = this.resolveBoundDeliveryExcluding(
         envelope.chatId,
         task.issueNumber,
         goneSessions,
       );
       while (next) {
+        lastTarget = next;
         this.transitionInboundTask(task.id, 'running', { delivery: next });
         task.delivery = next;
         try {
@@ -4167,7 +4204,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         return {
           kind: 'retired',
           reason: 'watch_session_gone',
-          sessionId: delivery.sessionId,
+          sessionId: lastTarget.sessionId,
         };
       }
       // Comment events keep today's contract: fall back to the normal
@@ -4787,6 +4824,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           reason: `watch pending queue overflow (cap ${MAX_PENDING_WATCH_PER_ENTRY}); oldest event retired undelivered`,
           text: oldest.envelope.text,
         };
+        // `slice`, not `shift`: the rollback below restores this reference, so
+        // the queued array must not be mutated in place before the save lands.
+        const pendingBefore = next.pending;
         try {
           const path = this.channelFilePath('github-bound-deadletter.jsonl');
           mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -4794,7 +4834,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             encoding: 'utf-8',
             mode: 0o600,
           });
-          next.pending.shift();
+          next.pending = next.pending.slice(1);
+          this.prWatchState.entries[key] = next;
+          // The shift is only durable once the sidecar is saved, and the
+          // end-of-pass save below can still throw. Persist it here, before
+          // the journal claims the retire: otherwise a failed save leaves the
+          // event queued while the timeline says it was skipped, and a restart
+          // drains it — a skip row for a transition that is delivered later.
+          this.savePrWatchState();
           process.stderr.write(
             `[Channel:${this.name}] watch pending overflow for ${key}: retired ${oldest.key} to dead-letter (cap ${MAX_PENDING_WATCH_PER_ENTRY})\n`,
           );
@@ -4802,8 +4849,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           // was never claimed, so there is no task row to close, and the
           // dead-letter file plus stderr are its only trace. Identifiers only
           // — `record.text` above carries the body and must not be copied.
-          // After the durable shift, so a failed append leaves no retire
-          // claim for an event that is still queued.
           this.recordChannelEvent({
             type: 'inbound',
             outcome: 'skipped',
@@ -4812,11 +4857,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             thread: `pr:${number}`,
             number,
             messageId: oldest.key,
+            ...(oldest.delivery?.kind === 'bound-session'
+              ? { sessionId: oldest.delivery.sessionId }
+              : {}),
           });
         } catch (err) {
           // Same fail-safe as retireBoundTask: if the exhaustion surface
           // cannot be written, keep the event queued (over cap) and retry
-          // the overflow on the next detection instead of dropping it.
+          // the overflow on the next detection instead of dropping it. The
+          // rollback also covers a failed sidecar save, so memory and disk
+          // agree about what is still queued.
+          next.pending = pendingBefore;
+          this.prWatchState.entries[key] = next;
           // Sanitized without truncation, like the retireBoundTask dump.
           const payload = JSON.stringify(record);
           process.stderr.write(
@@ -4919,6 +4971,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             thread: pending.envelope.threadId,
             number: pending.issueNumber,
             messageId: pending.key,
+            // The frozen target is in hand and already goes into the
+            // dead-letter record for this same event; without it the timeline
+            // and the dead-letter disagree about attribution, and the row
+            // cannot say whether the retired event ever belonged to a session.
+            ...(pending.delivery?.kind === 'bound-session'
+              ? { sessionId: pending.delivery.sessionId }
+              : {}),
           });
           continue;
         }

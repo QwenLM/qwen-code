@@ -9109,6 +9109,90 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(rows[0]).toMatchObject({ detail: { streak: 10, sessions: 1 } });
     });
 
+    it('counts retained sessions the scan no longer lists', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // A complete snapshot lists three sessions; the workspace then goes
+      // draining/unreadable, whose documented answer is an EMPTY partial.
+      // Retention keeps routing to all three, so the map is non-empty while
+      // the scan lists nothing. Reporting only the listed rows would say
+      // "0 sessions listed" and hand the operator a page-cap diagnosis for a
+      // state that is not a page cap.
+      const three = ['s1', 's2', 's3'].map((sessionId, i) =>
+        makeBinding({
+          sessionId,
+          updatedAt: `2026-07-0${i + 1}T00:00:00.000Z`,
+          prs: [
+            {
+              number: 42 + i,
+              url: `https://github.com/owner/repo/pull/${42 + i}`,
+            },
+          ],
+        }),
+      );
+      boundSessions.listPrBindings.mockResolvedValueOnce({
+        bindings: three,
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+      await pollOnce();
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      for (let i = 0; i < 10; i++) await pollOnce();
+
+      const rows = degradedRows('bindings_partial');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ detail: { streak: 10, sessions: 3 } });
+    });
+
+    it('keeps the lost session on every row through the deferrals to the dead-letter', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.deliverPrompt.mockRejectedValue(
+        new BoundSessionGoneError('bound-session'),
+      );
+      // Poll 1 lists the binding; after the Gone the scan degrades to an empty
+      // partial, so the fallback defers instead of going public, and every
+      // later poll re-enters the absence gate with no delivery left to read.
+      boundSessions.listPrBindings
+        .mockResolvedValueOnce({ bindings: [makeBinding()], partial: false })
+        .mockResolvedValue({ bindings: [], partial: true });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()])
+        .mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await pollOnce();
+        // Jump the deferral counter to the horizon instead of polling 240
+        // times; the persisted record is the adapter's own state.
+        const tasks = readInboundTasks() as Array<Record<string, unknown>>;
+        expect(tasks).toHaveLength(1);
+        tasks[0]!['deferCount'] = 239;
+        writeInboundTasks(tasks);
+        await pollOnce();
+      } finally {
+        stderr.mockRestore();
+      }
+
+      const rows = taskRows();
+      expect(rows.at(-1)).toMatchObject({
+        outcome: 'retired',
+        reason: 'dead_letter',
+        sessionId: 'bound-session',
+      });
+      // Not just the terminal row: the re-entered deferral rows are written
+      // from a record whose delivery was cleared a poll earlier, so a
+      // one-transition memory would leave every one of them unnamed.
+      expect(rows.length).toBeGreaterThanOrEqual(4);
+      expect(rows.every((row) => row['sessionId'] === 'bound-session')).toBe(
+        true,
+      );
+      // Attribution only — the delivery must NOT be restored, or the event
+      // would re-enter bound delivery and change routing.
+      expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
     it('journals a stalled cold start the poll detail cannot reach', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
       boundSessions.listPrBindings.mockResolvedValue({
@@ -9125,6 +9209,11 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       // case: no notification fetch happened at all, yet the degraded row
       // is written.
       expect(mockOctokit.paginate).not.toHaveBeenCalled();
+      // An empty partial must not also produce a `bindings_partial` row: that
+      // row's diagnosis is a multi-page scan, which cannot cause a cold-start
+      // stall. `partialSnapshotStreak` advances for empty partials too, so the
+      // `map.size > 0` guard is the only thing keeping the two apart.
+      expect(degradedRows('bindings_partial')).toHaveLength(0);
     });
 
     it('journals the bounded cold-empty escape when the lane opens', async () => {
@@ -9150,6 +9239,11 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         ),
       ).toEqual([1, 10, 20, 30]);
       expect(mockOctokit.paginate).toHaveBeenCalledTimes(1);
+      // Thirty empty partials cross the `bindings_partial` throttle windows
+      // (10, 20) as well. Without the `map.size > 0` guard this stall would
+      // emit two contradictory health rows per window — a multi-page-scan
+      // diagnosis for a stall a page cap cannot cause.
+      expect(degradedRows('bindings_partial')).toHaveLength(0);
     });
   });
 
@@ -13137,7 +13231,14 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(rows.at(-1)).toMatchObject({
           outcome: 'retired',
           reason: 'watch_no_candidate',
+          // The retire verdict's sessionId is the only carrier left for this
+          // row: the delivery was cleared before the return, so dropping that
+          // field would file the event under the Channel with no victim.
+          sessionId: 'bound-session',
         });
+        expect(rows.every((row) => row['sessionId'] === 'bound-session')).toBe(
+          true,
+        );
         expect(rows.some((row) => row['outcome'] === 'delivered')).toBe(false);
       });
 
@@ -13232,6 +13333,61 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(rows.some((row) => row['outcome'] === 'delivered')).toBe(false);
       });
 
+      it('names the LAST follower tried when every bound follower is gone', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        // Two followers, A newer than B, so A is tried first. Both are Gone.
+        // The retry loop walks past the local `delivery`, so a terminal row
+        // built from it would name A — a session evicted a step earlier —
+        // while the row immediately before it names B.
+        const a = makeBinding({
+          sessionId: 'session-a',
+          updatedAt: '2026-07-03T00:00:00.000Z',
+        });
+        const b = makeBinding({
+          sessionId: 'session-b',
+          updatedAt: '2026-07-02T00:00:00.000Z',
+        });
+        boundSessions.deliverPrompt.mockRejectedValue(
+          new BoundSessionGoneError('gone'),
+        );
+        boundSessions.listPrBindings
+          .mockResolvedValueOnce({ bindings: [a, b], partial: false })
+          .mockResolvedValueOnce({ bindings: [a, b], partial: false })
+          .mockResolvedValueOnce({ bindings: [b], partial: false })
+          .mockResolvedValue({ bindings: [], partial: false });
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          mockPull({});
+          mockNotificationsOnce([]);
+          mockChecks([{ status: 'completed', conclusion: 'success' }]);
+          await pollOnce();
+
+          mockPull({ mergeable: false, mergeable_state: 'dirty' });
+          mockNotificationsOnce([]);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        // Both followers really were tried, in order.
+        expect(boundSessions.deliverPrompt.mock.calls.map((c) => c[0])).toEqual(
+          ['session-a', 'session-b'],
+        );
+        const rows = readChannelEvents().filter(
+          (event) =>
+            event['type'] === 'task' &&
+            String(event['messageId']).startsWith('watch:merge_conflict'),
+        );
+        expect(rows.at(-1)).toMatchObject({
+          outcome: 'retired',
+          reason: 'watch_session_gone',
+          sessionId: 'session-b',
+        });
+        // The clearing transition and the terminal row agree on the victim.
+        expect(rows.at(-2)).toMatchObject({ sessionId: 'session-b' });
+        expect(rows.some((row) => row['outcome'] === 'delivered')).toBe(false);
+      });
+
       it('journals a pre-claim watch retire as an inbound skip', async () => {
         const key = 'watch:ci_failure:sha-1';
         seedWatchState({
@@ -13268,6 +13424,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
               repository: 'owner/repo',
               number: 42,
               messageId: key,
+              // Same attribution the sibling task retires carry: the frozen
+              // target is in hand here, so the row can say which session the
+              // retired event belonged to.
+              sessionId: 'bound-session',
             }),
           ]),
         );
@@ -13418,6 +13578,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           thread: 'pr:42',
           number: 42,
           messageId: 'watch:merge_conflict:42:seed-0:1751446800000',
+          // The frozen target is in hand and already goes into the dead-letter
+          // record for this same event; without it the two surfaces disagree
+          // about attribution for one watched transition.
+          sessionId: 'bound-session',
         });
         // The dead-letter record carries the body; the journal must not.
         expect(readFileSync(boundDeadLetterPath(), 'utf-8')).toContain(
@@ -13426,6 +13590,79 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(JSON.stringify(readChannelEvents())).not.toContain(
           'seed event 0',
         );
+      });
+
+      it('does not claim an overflow retire when the watch-state save throws', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const pending = Array.from({ length: 64 }, (_, i) =>
+          makePendingWatch({
+            key: `watch:merge_conflict:42:seed-${i}:1751446800000`,
+            text: `seed event ${i}`,
+          }),
+        );
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            mergeableState: 'clean',
+            prState: 'open',
+            fired: [],
+            pending,
+          },
+        });
+        writeFileSync(inboundTaskPath(), '{corrupt', 'utf-8');
+        const watch = channel as unknown as {
+          runPrStateWatch: () => Promise<void>;
+          refreshBoundSessions: () => Promise<void>;
+        };
+        await watch.refreshBoundSessions();
+        mockPull({ mergeable: false, mergeable_state: 'dirty' });
+        // The dead-letter append succeeds but the sidecar save fails. The
+        // shift is only durable once that save lands, so the journal must not
+        // claim the retire: a restart would load the event as still pending
+        // and deliver it, leaving a skip row for a delivered transition.
+        const originalRename = nodeFs.renameSync;
+        const spy = vi.spyOn(nodeFs, 'renameSync').mockImplementation(((
+          from: unknown,
+          to: unknown,
+        ) => {
+          if (String(to) === watchStatePath()) {
+            throw Object.assign(new Error('ENOSPC: no space left'), {
+              code: 'ENOSPC',
+            });
+          }
+          return (originalRename as (a: unknown, b: unknown) => void)(from, to);
+        }) as unknown as typeof nodeFs.renameSync);
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          // The end-of-pass save hits the same failure and propagates, which
+          // is the existing contract for an unwritable watch state. What must
+          // NOT survive it is a journal claim for an event still on disk.
+          await expect(watch.runPrStateWatch()).rejects.toThrow('ENOSPC');
+        } finally {
+          spy.mockRestore();
+          stderr.mockRestore();
+        }
+
+        expect(
+          readChannelEvents().filter(
+            (event) => event['reason'] === 'watch_pending_overflow',
+          ),
+        ).toHaveLength(0);
+        // Rolled back in memory as well, so the next detection retries the
+        // overflow instead of agreeing with a disk that still holds the event.
+        const state = channel as unknown as {
+          prWatchState: {
+            entries: Record<string, { pending?: unknown[] }>;
+          };
+        };
+        expect(
+          state.prWatchState.entries['owner/repo#42']!['pending'],
+        ).toHaveLength(65);
+        expect(
+          readWatchState().entries['owner/repo#42']!['pending'],
+        ).toHaveLength(64);
       });
 
       it('keeps the event queued when the pre-claim retire save throws', async () => {
@@ -13563,6 +13800,18 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         const stderr = vi
           .spyOn(process.stderr, 'write')
           .mockImplementation(() => true);
+        const reconcileReasons = () =>
+          readChannelEvents()
+            .filter(
+              (event) =>
+                event['type'] === 'poll' &&
+                event['outcome'] === 'degraded' &&
+                String(event['reason']).startsWith('watch_reconcile'),
+            )
+            .map((event) => event['reason']);
+        const state = channel as unknown as {
+          prWatchState: { entries: Record<string, { pending?: unknown[] }> };
+        };
         try {
           mockPull({});
           mockNotificationsOnce([]);
@@ -13570,15 +13819,23 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           claimFails = false;
           mockPull({});
           mockNotificationsOnce([]);
-          await pollOnce(); // recovered
-          // The successful drain consumed the pending event, so a third poll
-          // would have nothing to claim and could not block again. Queue a
-          // fresh transition the way a new detection would.
-          const state = channel as unknown as {
-            prWatchState: {
-              entries: Record<string, { pending?: unknown[] }>;
-            };
-          };
+          await pollOnce(); // recovered — the clearing edge
+          // A SECOND healthy poll. This is the leg that separates an
+          // edge-triggered row from one written after every successful
+          // reconcile: the queue is empty, the reconcile succeeds, and
+          // nothing was blocked, so no row may be appended. Without it an
+          // unconditional write prints the same reasons and the test passes
+          // while production rotates the journal on every healthy poll.
+          mockPull({});
+          mockNotificationsOnce([]);
+          await pollOnce();
+          expect(reconcileReasons()).toEqual([
+            'watch_reconcile_blocked',
+            'watch_reconcile_recovered',
+          ]);
+
+          // Reopen: the successful drain consumed the pending event, so queue
+          // a fresh transition the way a new detection would.
           state.prWatchState.entries['owner/repo#42'] = {
             pending: [
               makePendingWatch({
@@ -13596,18 +13853,9 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         }
 
         // The base writes poll/ok after EVERY poll that does not throw,
-        // including all three of these, so ok rows cannot mark the end of the
+        // including all four of these, so ok rows cannot mark the end of the
         // degraded window. Only the clearing edge can.
-        expect(
-          readChannelEvents()
-            .filter(
-              (event) =>
-                event['type'] === 'poll' &&
-                event['outcome'] === 'degraded' &&
-                String(event['reason']).startsWith('watch_reconcile'),
-            )
-            .map((event) => event['reason']),
-        ).toEqual([
+        expect(reconcileReasons()).toEqual([
           'watch_reconcile_blocked',
           'watch_reconcile_recovered',
           'watch_reconcile_blocked',

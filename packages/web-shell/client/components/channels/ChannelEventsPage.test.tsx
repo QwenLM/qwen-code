@@ -422,4 +422,66 @@ describe('ChannelEventsPage', () => {
     }
     expect(enKeys.sort()).toEqual(zhKeys.sort());
   });
+
+  it('keeps the interpolating labels as functions in both catalogs', async () => {
+    // The translator ignores vars for a plain string, so turning one of these
+    // into a string — or keeping the arrow but dropping the interpolation —
+    // renders a bare "列出" / "连续 次绑定扫描" / "会话 " on every row. A key
+    // comparison cannot see that; the shape can.
+    const interpolating = [
+      'channelEvents.session',
+      'channelEvents.streak',
+      'channelEvents.sessions',
+      'channelEvents.notifications',
+      'channelEvents.moreFiltered',
+      'channelEvents.duration',
+    ];
+    // Collected rather than asserted per key so the failure names the offenders.
+    const notFunctions = interpolating.filter(
+      (key) =>
+        typeof CHANNEL_EVENTS_MESSAGES_EN[key] !== 'function' ||
+        typeof CHANNEL_EVENTS_MESSAGES_ZH[key] !== 'function',
+    );
+    expect(notFunctions).toEqual([]);
+  });
+
+  it('renders the Chinese counters and session chip with their values', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'task',
+          outcome: 'delivered',
+          repository: 'owner/repo',
+          number: 42,
+          sessionId: '3f2b8c1e-9d4a-4b7e-8c1f-2a5d9e0b7c31',
+        },
+        {
+          at: '2026-11-02T02:01:00.000Z',
+          channel: 'bot',
+          type: 'poll',
+          outcome: 'degraded',
+          reason: 'bindings_partial',
+          detail: { streak: 10, sessions: 1 },
+        },
+      ],
+    };
+
+    await renderPage('zh-CN');
+
+    const rows = container.querySelectorAll('li');
+    expect(rows).toHaveLength(2);
+    // Newest first: the degraded poll, then the delivery.
+    expect(rows[0]?.textContent).toContain('连续 10 次绑定扫描');
+    expect(rows[0]?.textContent).toContain('列出 1 个会话');
+    expect(rows[1]?.textContent).toContain('已投递');
+    expect(rows[1]?.textContent).toContain('会话 3f2b8c1e');
+    // A dropped interpolation leaves the counter's frame with a hole in it.
+    // The shape test alone would not catch that, and the render alone would
+    // not catch a plain-string label until a row happens to carry the var.
+    expect(rows[0]?.textContent).not.toContain('连续  次');
+    expect(rows[0]?.textContent).not.toContain('列出  个');
+  });
 });
