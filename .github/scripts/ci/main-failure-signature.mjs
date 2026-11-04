@@ -411,7 +411,7 @@ export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
     `[Run ${occurrence.runId}](${occurrence.runUrl}) · commit ${code(occurrence.sha.slice(0, 12))}`,
     '',
     ...jobs
-      .filter((job) => job.conclusion === 'failure')
+      .filter((job) => ['failure', 'cancelled'].includes(job.conclusion))
       .map((job) => {
         const steps = (job.steps ?? [])
           .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))

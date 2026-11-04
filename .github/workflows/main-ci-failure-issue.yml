@@ -44,7 +44,8 @@ jobs:
     name: 'Identify the failing tests'
     if: >-
       ${{ github.repository == 'QwenLM/qwen-code' &&
-      github.event.workflow_run.conclusion == 'failure' &&
+      (github.event.workflow_run.conclusion == 'failure' ||
+      github.event.workflow_run.conclusion == 'cancelled') &&
       ((github.event.workflow_run.head_branch == 'main' &&
       (github.event.workflow_run.event == 'push' ||
       (github.event.workflow_run.event == 'schedule' &&
@@ -74,6 +75,10 @@ jobs:
       # The newer run at main's tip had not settled when this report was
       # prepared. The issue is still filed, with a note saying so.
       provisional: '${{ steps.live.outputs.provisional }}'
+      # 'timeout' when the trigger ended cancelled because a job hit its
+      # `timeout-minutes` cap, 'none' otherwise. A timed-out run has no
+      # failed job to analyze, so the writer reruns it instead of filing.
+      cancellation_kind: '${{ steps.live.outputs.cancellation_kind }}'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -97,10 +102,49 @@ jobs:
           EVENT_NAME: '${{ github.event.workflow_run.event }}'
           HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+          CONCLUSION: '${{ github.event.workflow_run.conclusion }}'
         run: |-
           set -euo pipefail
           superseded=false
           provisional=false
+          cancellation_kind='none'
+          if [[ "${CONCLUSION:-}" == 'cancelled' ]]; then
+            # GitHub reports a job that hits its `timeout-minutes` cap as a
+            # cancelled run, indistinguishable at the run level from a
+            # deliberate concurrency supersede. The two need opposite
+            # treatment: a superseded run is replaced by the run that
+            # cancelled it and owns nothing, while a timed-out one is a real
+            # breakage whose only trace is this event. That is how #16214 sat
+            # unreported for weeks. The job annotations say which: only a
+            # timeout carries "The job has exceeded the maximum execution
+            # time". Reads fail open like every other one here — an
+            # unreadable annotation list is reported, and the repeating
+            # dedupe marker keeps a misclassified supersede to one comment.
+            annotations=''
+            if jobs_json="$(
+              gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT:-1}/jobs?per_page=100" \
+                --paginate 2>/dev/null | jq -s '{jobs: [.[].jobs[]?]}'
+            )" && [[ -n "${jobs_json}" ]]; then
+              annotations="$(
+                while IFS= read -r job_url; do
+                  [[ -n "${job_url}" ]] || continue
+                  gh api --paginate \
+                    "repos/${REPO}/check-runs/${job_url##*/}/annotations" \
+                    --jq '[.[].message] | join("\n")' 2>/dev/null || true
+                done < <(jq -r '.jobs[] | select(.conclusion == "cancelled") | .check_run_url // ""' <<< "${jobs_json}")
+              )"
+            fi
+            if grep -qiE 'exceeded the maximum execution time' <<< "${annotations}"; then
+              cancellation_kind='timeout'
+              echo "Run ${WORKFLOW_RUN_ID} was cancelled by a job timeout, not a supersede; reporting it."
+            elif [[ -z "${annotations}" ]]; then
+              echo "::warning::Could not read the cancelled jobs of run ${WORKFLOW_RUN_ID}; reporting it."
+              cancellation_kind='timeout'
+            else
+              superseded=true
+              echo "Run ${WORKFLOW_RUN_ID} was cancelled without a job timeout; a concurrent run superseded it and owns the result."
+            fi
+          fi
           if live_attempt="$(
             gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}" \
               --jq '.run_attempt'
@@ -190,6 +234,7 @@ jobs:
           fi
           echo "superseded=${superseded}" >> "${GITHUB_OUTPUT}"
           echo "provisional=${provisional}" >> "${GITHUB_OUTPUT}"
+          echo "cancellation_kind=${cancellation_kind}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Select the failure destination'
         id: 'destination'
@@ -298,18 +343,22 @@ jobs:
           # Both bodies read this list; the flag lets them say when it is short.
           echo "jobs_complete=${jobs_complete}" >> "${GITHUB_OUTPUT}"
 
+          # A cancelled job is in the list because a job timeout cancels the
+          # run; the others are cancelled with it and carry nothing. Without
+          # it a timed-out run names no job at all, which is what makes the
+          # timeout itself hard to see in the report.
           job_ids=()
           while IFS= read -r job_id; do
             job_ids+=("${job_id}")
           done < <(
-            jq -r '.jobs[] | select(.conclusion == "failure") | .id' \
+            jq -r '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .id' \
               "${jobs_json}" 2>/dev/null
           )
           echo "Failed jobs: ${#job_ids[@]}"
 
           # Even without test results, the jobs payload names the failed job
           # and step. A missing listing costs detail, never the failure report.
-          jq -r '.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure") | .name] | @tsv' \
+          jq -r '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.name] + [.steps[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .name] | @tsv' \
             "${jobs_json}" 2>/dev/null \
             > "${RUNNER_TEMP}/failed-jobs.tsv" || true
 
@@ -398,6 +447,7 @@ jobs:
           WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
           INFRA_ONLY: '${{ steps.infra.outputs.infra_only }}'
+          CANCELLATION_KIND: '${{ steps.live.outputs.cancellation_kind }}'
           JOBS_COMPLETE: '${{ steps.download.outputs.jobs_complete }}'
         run: |-
           helper='.github/scripts/ci/main-failure-signature.mjs'
@@ -414,6 +464,9 @@ jobs:
             cat "${RUNNER_TEMP}/pr-comment.md"
             if [[ "${INFRA_ONLY}" == 'true' ]]; then
               echo 'GitHub runner infrastructure failed; this result does not identify a Java test regression.'
+            fi
+            if [[ "${CANCELLATION_KIND}" == 'timeout' ]]; then
+              echo 'This run was cancelled because a job exceeded its `timeout-minutes` cap. That is a real breakage — usually a lane that no longer finishes in its budget — not a concurrency supersede.'
             fi
             if [[ "${JOBS_COMPLETE}" != 'true' ]]; then
               echo 'The job list could not be read in full, so this report may name fewer failing jobs than the run had.'
@@ -450,7 +503,7 @@ jobs:
   rerun_infra:
     name: 'Rerun infrastructure-only failures'
     needs: 'analyze'
-    if: "${{ needs.analyze.outputs.infra_only == 'true' && needs.analyze.outputs.file_issue == 'true' && needs.analyze.outputs.provisional != 'true' }}"
+    if: "${{ (needs.analyze.outputs.infra_only == 'true' || needs.analyze.outputs.cancellation_kind == 'timeout') && needs.analyze.outputs.file_issue == 'true' && needs.analyze.outputs.provisional != 'true' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
@@ -461,7 +514,16 @@ jobs:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           REPO: '${{ github.repository }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+          CANCELLATION_KIND: '${{ needs.analyze.outputs.cancellation_kind }}'
         run: |-
+          if [[ "${CANCELLATION_KIND}" == 'timeout' ]]; then
+            # A timed-out run has no failed job for `rerun-failed-jobs` to
+            # select, so rerun the whole run. Its own completion re-enters
+            # this workflow and the break is filed then.
+            gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun"
+            echo "Run ${WORKFLOW_RUN_ID} was cancelled by a job timeout; reran it and filed no issue yet."
+            exit 0
+          fi
           gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs"
           echo "Every failed job of run ${WORKFLOW_RUN_ID} died on infrastructure; reran them and filed no issue."
 

@@ -1456,3 +1456,30 @@ test('runCli plan renders the named job into the filed body', () => {
     `${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha}`,
   ]);
 });
+
+test('names the cancelled job of a run a job timeout ended', () => {
+  // A timeout cancels the run, so no job in it concludes `failure` — the
+  // comment has to name the cancelled job or it names nothing at all.
+  const comment = renderFailureComment({
+    analysis: { workflow: 'E2E Tests', tests: [] },
+    occurrence: {
+      sha: 'abc123456789',
+      runId: '41743539611',
+      runUrl: 'https://example.com/run',
+    },
+    jobs: [
+      {
+        name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',
+        conclusion: 'cancelled',
+        html_url: 'https://example.com/job',
+        steps: [
+          { name: 'Run E2E tests', conclusion: 'cancelled' },
+          { name: 'Set up Docker', conclusion: 'skipped' },
+        ],
+      },
+    ],
+  });
+  assert.match(comment, /sandbox:docker - shard 1\/1/);
+  assert.match(comment, /Run E2E tests/);
+  assert.doesNotMatch(comment, /Set up Docker/);
+});
