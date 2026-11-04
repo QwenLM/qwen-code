@@ -396,10 +396,11 @@ export function ChannelEditorDialog({
   }, [workspaceCwd]);
 
   useEffect(() => {
-    if (!advancedOpen || !scrollToErrorKey) return;
-    // Runs after the forced-open panel content mounts; the id is the same one
-    // FieldShell renders, so the scroll lands on the erroring control. The
-    // optional call keeps jsdom (no scrollIntoView) from throwing.
+    if (!scrollToErrorKey) return;
+    // Runs after the forced-open panel content mounts (submit sets both in
+    // one batch); the id is the same one FieldShell renders, so the scroll
+    // lands on the erroring control. The optional call keeps jsdom (no
+    // scrollIntoView) from throwing.
     document
       .getElementById(`${formId}-${scrollToErrorKey}`)
       ?.scrollIntoView?.({ block: 'center' });
@@ -502,17 +503,27 @@ export function ChannelEditorDialog({
     });
   };
 
-  // Retire only the dependency message: the same slot also holds the
-  // higher-precedence invalidOption, which must survive its own remedy.
-  const clearDependencyError = (key: string) => {
-    const dependencyMessage = validationMessage(
-      undefined,
-      'requiresBoundDelivery',
-    );
+  // Retire or replace the watch-events error by re-deriving validity from the
+  // post-edit draft, so each remedy (switch on, untick) retires exactly the
+  // instruction it satisfies — including invalidOption, whose remedy is
+  // unticking the offending value rather than enabling delivery.
+  const refreshWatchError = (values: ChannelEditorDraft['values']) => {
+    const code = validateChannelEditorDraft(
+      descriptor,
+      { ...draft, values },
+      existingNames,
+      instance,
+    )['prWatchEvents'];
     setErrors((current) => {
-      if (current[key] !== dependencyMessage) return current;
       const next = { ...current };
-      delete next[key];
+      if (code) {
+        next['prWatchEvents'] = validationMessage(
+          descriptor.fields.find((field) => field.key === 'prWatchEvents'),
+          code,
+        );
+      } else {
+        delete next['prWatchEvents'];
+      }
       return next;
     });
   };
@@ -526,15 +537,14 @@ export function ChannelEditorDialog({
       instance,
     );
     if (Object.keys(validation).length > 0) {
-      // An error on a collapsed field would otherwise be invisible: open the
-      // panel and bring the first erroring advanced field into view.
+      // An error below the fold or on a collapsed field would otherwise be
+      // invisible: open the advanced panel when needed and bring the first
+      // erroring field — advanced or not — into view.
       const advancedErrorKey = Object.keys(validation).find((key) =>
         ADVANCED_FIELD_KEYS.has(key),
       );
-      if (advancedErrorKey) {
-        setAdvancedOpen(true);
-        setScrollToErrorKey(advancedErrorKey);
-      }
+      if (advancedErrorKey) setAdvancedOpen(true);
+      setScrollToErrorKey(advancedErrorKey ?? Object.keys(validation)[0]);
       setErrors(
         Object.fromEntries(
           Object.entries(validation).map(([key, code]) => [
@@ -707,9 +717,12 @@ export function ChannelEditorDialog({
         isRepositoryOnlyChannelType(descriptor.type);
       const updateSwitch = (checked: boolean) => {
         if (field.key === 'deliverToBoundSessions' && checked) {
-          // The dependency error asked for this exact action; leaving it
-          // under the now-on switch would keep instructing a done deal.
-          clearDependencyError('prWatchEvents');
+          // The dependency error asked for this exact action; re-derive so a
+          // surviving invalidOption keeps its own instruction.
+          refreshWatchError({
+            ...draft.values,
+            deliverToBoundSessions: true,
+          });
         }
         if (!isLocalGhSwitch) {
           update(checked);
@@ -826,9 +839,11 @@ export function ChannelEditorDialog({
             .filter((entry) => next.has(entry.toLowerCase())),
           ...stored.filter((entry) => next.has(entry.toLowerCase())),
         ].join(', ');
-        // Clearing the last event is the other remedy for the dependency
-        // error; an empty valid selection must not keep demanding the switch.
-        if (watchField && !joined) clearDependencyError(field.key);
+        // Unticking is a remedy too: re-derive so a satisfied instruction
+        // retires without waiting for a second Save.
+        if (watchField) {
+          refreshWatchError({ ...draft.values, [field.key]: joined });
+        }
         update(joined);
       };
       return (
