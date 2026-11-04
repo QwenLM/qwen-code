@@ -106,10 +106,12 @@ are buried in noise.
 
 - Add `packages/web-shell/client/components/ui/collapsible.tsx` in the house
   style (shadcn structure, `import { Collapsible as CollapsiblePrimitive }
-from 'radix-ui'`, `data-slot` attributes). The current shadcn registry
-  emits the same unified-package import; if the registry is unreachable the
-  file is authored to that exact shape. No new dependency, no portal, so no
-  portal-root integration is needed.
+from 'radix-ui'`, `data-slot` attributes, `React.forwardRef` on all three
+  wrappers for the repository's React 18/19 ref contract, pinned by
+  `react18-ref-compat.test.tsx`). The current shadcn registry emits the same
+  unified-package import; if the registry is unreachable the file is authored
+  to that exact shape. No new dependency, no portal, so no portal-root
+  integration is needed.
 - New i18n keys in both locale maps:
   - `channels.editor.section.advanced` — "Advanced settings" / "高级设置"
   - `channels.editor.section.advanced.description` — one line explaining the

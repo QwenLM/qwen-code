@@ -53,7 +53,7 @@ Web Shell 渠道编辑器（`ChannelEditorDialog.tsx`，七个平台共用）把
 
 ### 3. 原语与文案
 
-- 按仓库风格新增 `packages/web-shell/client/components/ui/collapsible.tsx`（shadcn 结构，`import { Collapsible as CollapsiblePrimitive } from 'radix-ui'`，`data-slot` 属性）。当前 shadcn registry 生成的正是同样的统一包导入；若 registry 不可达，则按该形状手写。无新依赖、无 portal，因此不需要 portal-root 集成。
+- 按仓库风格新增 `packages/web-shell/client/components/ui/collapsible.tsx`（shadcn 结构，`import { Collapsible as CollapsiblePrimitive } from 'radix-ui'`，`data-slot` 属性；三个包装均用 `React.forwardRef`，满足仓库 React 18/19 ref 契约，由 `react18-ref-compat.test.tsx` 钉住）。当前 shadcn registry 生成的正是同样的统一包导入；若 registry 不可达，则按该形状手写。无新依赖、无 portal，因此不需要 portal-root 集成。
 - 两个 locale map 各新增 i18n key：
   - `channels.editor.section.advanced` — "Advanced settings" / "高级设置"
   - `channels.editor.section.advanced.description` — 一句话说明面板存放少改的调优项。
