@@ -13,6 +13,7 @@
  */
 
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -21,7 +22,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import {
@@ -42,11 +43,20 @@ interface Scenario {
   /** Files to create in the workspace, by relative path. */
   files?: Record<string, string>;
   settings?: JsonObject;
+  /** The model requests each run must send, retries included. */
+  requests: number;
+  /**
+   * The model rounds the TUI sends; a retry or a Stop-hook continuation runs
+   * inside its round.
+   */
+  rounds: number;
   /**
    * Text both runs must show at the end, for a scenario that sends and
    * records nothing.
    */
   shows?: string;
+  /** Text both runs' session records must contain. */
+  recorded?: string;
   /**
    * The model's reply to a streaming request, from its message history;
    * `index` counts this run's streaming requests, retries included.
@@ -63,7 +73,12 @@ interface Run {
   records: unknown[];
   /** The screen after the last prompt. */
   screen: string;
+  /** How many model rounds the debug log says ran on the shared loop. */
+  sharedRounds: number;
 }
+
+/** What the TUI logs for each model round it sends on the shared loop. */
+const SHARED_ROUND_LOG = 'model round on the shared agent loop';
 
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
@@ -125,11 +140,14 @@ const isDateReminder = (part: unknown) =>
   typeof (part as JsonObject)?.['text'] === 'string' &&
   ((part as JsonObject)['text'] as string).startsWith(DATE_REMINDER);
 
-function normalize(value: unknown, dir: string): unknown {
+/** `dir` is the workspace; `scratch`, which holds it, is the run's home. */
+function normalize(value: unknown, dir: string, scratch: string): unknown {
   const replaced = JSON.parse(
     JSON.stringify(value ?? null)
       .split(dir)
       .join('<DIR>')
+      .split(scratch)
+      .join('<SCRATCH>')
       .replace(RANDOM_ID, '<ID>'),
   );
   const strip = (node: unknown): unknown => {
@@ -146,30 +164,45 @@ function normalize(value: unknown, dir: string): unknown {
   return strip(replaced);
 }
 
-function modelRequests(server: FakeOpenAIServer, dir: string): unknown[] {
+/** Each request's messages, system prompt included, and the tools offered. */
+function modelRequests(
+  server: FakeOpenAIServer,
+  dir: string,
+  scratch: string,
+): unknown[] {
   return server.requests
     .filter((request) => request.body['stream'] === true)
     .map((request) =>
-      ((request.body['messages'] ?? []) as JsonObject[])
-        .filter((message) => message['role'] !== 'system')
-        .map((message) => ({
-          role: message['role'],
-          content: Array.isArray(message['content'])
-            ? message['content'].filter((part) => !isDateReminder(part))
-            : message['content'],
-          tool_calls: message['tool_calls'],
-          tool_call_id: message['tool_call_id'],
-        }))
-        .filter(
-          (message) =>
-            !Array.isArray(message.content) || message.content.length > 0,
-        )
-        .map((message) => normalize(message, dir)),
+      normalize(
+        {
+          tools: request.body['tools'],
+          tool_choice: request.body['tool_choice'],
+          messages: ((request.body['messages'] ?? []) as JsonObject[])
+            .map((message) => ({
+              role: message['role'],
+              content: Array.isArray(message['content'])
+                ? message['content'].filter((part) => !isDateReminder(part))
+                : message['content'],
+              tool_calls: message['tool_calls'],
+              tool_call_id: message['tool_call_id'],
+            }))
+            .filter(
+              (message) =>
+                !Array.isArray(message.content) || message.content.length > 0,
+            ),
+        },
+        dir,
+        scratch,
+      ),
     );
 }
 
 /** The session's chat records: what was said, run and reported, in order. */
-function sessionRecords(runtimeDir: string, dir: string): unknown[] {
+function sessionRecords(
+  runtimeDir: string,
+  dir: string,
+  scratch: string,
+): unknown[] {
   return files(runtimeDir)
     .filter((file) => file.endsWith('.jsonl') && file.includes('chats'))
     .flatMap((file) =>
@@ -186,8 +219,12 @@ function sessionRecords(runtimeDir: string, dir: string): unknown[] {
           message: record['message'],
           toolCallResult: record['toolCallResult'],
           systemPayload: record['systemPayload'],
+          usageMetadata: record['usageMetadata'],
+          model: record['model'],
+          contextWindowSize: record['contextWindowSize'],
         },
         dir,
+        scratch,
       ),
     );
 }
@@ -282,6 +319,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
         QWEN_CODE_DISABLE_CRON: '1',
         QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
         QWEN_CODE_MODELS_DEV_REFRESH: 'off',
+        QWEN_DEBUG_LOG_FILE: '1',
         NO_PROXY: 'localhost,127.0.0.1',
         no_proxy: 'localhost,127.0.0.1',
         ...(shared ? { QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '1' } : {}),
@@ -326,10 +364,19 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       () => session!.exitResult() !== undefined,
       '/quit exits the TUI',
     );
+    const debugDir = join(runtimeDir, 'debug');
+    const debugLog = existsSync(debugDir)
+      ? files(debugDir)
+          // `latest` points at the session's own log.
+          .filter((file) => basename(file) !== 'latest')
+          .map((file) => readFileSync(file, 'utf8'))
+          .join('')
+      : '';
     return {
-      requests: modelRequests(server, workspace),
-      records: sessionRecords(runtimeDir, workspace),
+      requests: modelRequests(server, workspace, scratch),
+      records: sessionRecords(runtimeDir, workspace, scratch),
       screen,
+      sharedRounds: debugLog.split(SHARED_ROUND_LOG).length - 1,
     };
   }
 
@@ -339,20 +386,27 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
   const scenarios: Scenario[] = [
     {
       name: 'plain text',
+      requests: 1,
+      rounds: 1,
       prompts: ['Say hello.'],
       reply: () => ({ content: 'Hello there.' }),
     },
     {
       name: 'streamed text and a thought',
+      requests: 1,
+      rounds: 1,
       prompts: ['Think, then answer.'],
       reply: () => ({
         reasoningChunks: ['Weighing ', 'the options.'],
         contentChunks: ['Hel', 'lo ', 'there.'],
         usage: { prompt_tokens: 40, completion_tokens: 9, total_tokens: 49 },
       }),
+      recorded: '"totalTokenCount":49',
     },
     {
       name: 'one tool',
+      requests: 2,
+      rounds: 2,
       prompts: ['Read the readme.'],
       files: { 'readme.txt': 'readme body\n' },
       reply: (messages, dir) =>
@@ -362,6 +416,8 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     },
     {
       name: 'two reads in one response',
+      requests: 2,
+      rounds: 2,
       prompts: ['Read both files.'],
       files: { 'a.txt': 'alpha\n', 'b.txt': 'beta\n' },
       reply: (messages, dir) =>
@@ -376,6 +432,9 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     },
     {
       name: 'an edit cut off by the output limit',
+      // The client asks again for the cut-off call inside its round.
+      requests: 3,
+      rounds: 2,
       prompts: ['Write the notes.'],
       reply: (messages, dir) =>
         toolResults(messages) === 0
@@ -396,6 +455,8 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     },
     {
       name: 'a stream that drops and is retried',
+      requests: 2,
+      rounds: 1,
       prompts: ['Tell me a story.'],
       reply: (_messages, _dir, index) =>
         index === 0
@@ -407,16 +468,22 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     },
     {
       name: 'two prompts in one session',
+      requests: 2,
+      rounds: 2,
       prompts: ['First question.', 'Second question.'],
       reply: (messages) => ({ content: `Answer ${userTurns(messages)}.` }),
     },
     {
       name: 'a model error',
+      requests: 1,
+      rounds: 1,
       prompts: ['Fail please.'],
       reply: () => ({ errorContent: 'upstream exploded' }),
     },
     {
       name: 'a UserPromptSubmit hook that blocks',
+      requests: 0,
+      rounds: 1,
       prompts: ['Do the blocked thing.'],
       settings: { hooks: hooks('UserPromptSubmit', 'block-prompt.mjs') },
       files: {
@@ -428,6 +495,8 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     },
     {
       name: 'a Stop hook that blocks once',
+      requests: 2,
+      rounds: 1,
       prompts: ['Answer, then keep going once.'],
       settings: { hooks: hooks('Stop', 'stop-once.mjs') },
       files: {
@@ -451,15 +520,21 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     async (scenario) => {
       const current = await run(scenario, false);
       const shared = await run(scenario, true);
-      if (scenario.shows) {
-        expect(current.screen).toContain(scenario.shows);
-        expect(shared.screen).toContain(scenario.shows);
-      } else {
-        expect(current.records.length).toBeGreaterThan(0);
+      // Only the run with the setting on sends its rounds on the shared loop.
+      expect(current.sharedRounds).toBe(0);
+      expect(shared.sharedRounds).toBe(scenario.rounds);
+      for (const run of [current, shared]) {
+        expect(run.requests).toHaveLength(scenario.requests);
+        if (scenario.shows) expect(run.screen).toContain(scenario.shows);
+        else expect(run.records.length).toBeGreaterThan(0);
+        if (scenario.recorded)
+          expect(JSON.stringify(run.records)).toContain(scenario.recorded);
       }
       expect(shared.requests).toEqual(current.requests);
       expect(shared.records).toEqual(current.records);
     },
-    240_000,
+    // The root config's `retry: 2` would rerun both TUI sessions after a
+    // stall, tripling its cost in the required gate.
+    { retry: 0, timeout: 240_000 },
   );
 });

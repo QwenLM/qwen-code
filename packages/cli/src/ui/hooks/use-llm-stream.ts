@@ -2994,7 +2994,8 @@ export const useLlmStream = (
       );
       const sharedRound = 'round' in source;
       // On the shared round, `runModelRound` collects the calls and drops
-      // those of an attempt a retry or fallback replaced.
+      // those of an attempt a retry or fallback replaced; the processor's own
+      // resets of `toolCallRequests` below matter only on the current path.
       let toolCallRequests: ToolCallRequestInfo[] = [];
       let roundStop: AgentLoopStopReason | undefined;
       let streamInteractionOwner = trackInteractionOwner
@@ -3518,6 +3519,9 @@ export const useLlmStream = (
       dualOutput?.startAssistantMessage();
       try {
         if (sharedRound) {
+          debugLogger.debug(
+            `[processLlmStreamEvents] model round on the shared agent loop (prompt ${source.round.promptId})`,
+          );
           const { calls, stop } = await runModelRound(
             source.client,
             source.round,

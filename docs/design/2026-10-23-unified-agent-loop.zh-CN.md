@@ -472,7 +472,9 @@ PR 4–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
 - 一个 Goal：第一次续写自行停下，第二次续写提出 Goal 已完成，verifier 接受；
 - 一个后台 shell：它的结果在 prompt 结束后到达，启动一个通知轮次。
 
-**Ink 场景**（`integration-tests/interactive/ink-agent-loop-parity.test.ts`）。TUI 在伪终端里对着假服务器运行。测试比较请求和会话的聊天记录；不比较屏幕，因为屏幕按定时器重绘：
+续发请求在现有 loop 上使用自己的 prompt id，在共享 loop 上沿用这一轮的 prompt id；对拍测试把两者视为相同。
+
+**Ink 场景**（`integration-tests/interactive/ink-agent-loop-parity.test.ts`）。TUI 在伪终端里对着假服务器运行。测试比较两次运行的请求（包括 system prompt 和提供的工具）以及会话的聊天记录（包括 usage）。它还检查每次运行的请求数，并通过 debug 日志确认只有开启设置的那次运行在共享 loop 上发送模型轮。对于既不发送也不记录任何内容的场景（例如被拦截的 prompt），改为检查每次运行最后屏幕上的提示；除此之外不比较屏幕，因为屏幕按定时器重绘：
 
 - 纯文本，以及带 thought 的流式文本；
 - 一个工具，以及一次响应中的两次读取；
@@ -482,8 +484,6 @@ PR 4–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
 - 模型错误；
 - 拦截的 UserPromptSubmit hook；
 - 拦截一次的 Stop hook。
-
-续发请求在现有 loop 上使用自己的 prompt id，在共享 loop 上沿用这一轮的 prompt id；对拍测试把两者视为相同。
 
 对拍测试在 integration 任务中运行。每晚的 E2E 运行（以及手动触发的运行）还会在一个不带沙箱的 Linux 分支上，在设置开启的情况下运行完整的集成测试；入口修改默认值时等待的就是这个定时任务。
 

@@ -472,7 +472,9 @@ A difference fails the scenario unless it is listed with a linked issue.
 - a Goal whose first continuation stops on its own and whose second proposes it complete, which the verifier accepts;
 - a background shell whose result arrives after the prompt ended and starts a notification turn.
 
-**Ink scenarios** (`integration-tests/interactive/ink-agent-loop-parity.test.ts`). The TUI runs in a pseudo-terminal against the fake server. The suite compares the requests and the session's chat records; it does not compare the screen, which repaints on timers:
+A continuation's request runs under a prompt id of its own on the current loop and under the turn's prompt id on the shared loop; the suite compares them as one.
+
+**Ink scenarios** (`integration-tests/interactive/ink-agent-loop-parity.test.ts`). The TUI runs in a pseudo-terminal against the fake server. The suite compares the two runs' requests, with the system prompt and the tools offered, and their session's chat records, with usage. It also checks each run's number of requests, and, through the debug log, that only the run with the setting on sends its rounds on the shared loop. A scenario that sends and records nothing, such as a blocked prompt, checks the notice on each run's last screen instead; the screen is not compared otherwise, since it repaints on timers:
 
 - plain text, and streamed text with a thought;
 - one tool, and two reads in one response;
@@ -482,8 +484,6 @@ A difference fails the scenario unless it is listed with a linked issue.
 - a model error;
 - a UserPromptSubmit hook that blocks;
 - a Stop hook that blocks once.
-
-A continuation's request runs under a prompt id of its own on the current loop and under the turn's prompt id on the shared loop; the suite compares them as one.
 
 The suite runs in the integration job. The nightly E2E run, and one started by hand, also runs the whole integration suite with the setting on, in a Linux leg without a sandbox; it is the scheduled job a surface's default change waits on.
 
