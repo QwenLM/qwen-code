@@ -203,20 +203,11 @@ class ManagedSessionGuardConvoyIT {
                 authorized.get(30, TimeUnit.SECONDS);
                 blockedAgain.get(30, TimeUnit.SECONDS);
 
-                // A record commit keeps bounded placement so it serializes
-                // with lifecycle admissions (#13800 R2); under a held guard
-                // it degrades to the named failure within the hot-path bound.
+                // A record commit orders on its own Session row, which every
+                // lifecycle admission locks before it writes, so a held tenant
+                // guard neither parks nor names it.
                 long commitBefore = System.nanoTime();
-                assertThatThrownBy(() -> committed.get(30, TimeUnit.SECONDS))
-                        .isInstanceOf(ExecutionException.class)
-                        .satisfies(error -> {
-                            var cause = error.getCause();
-                            assertThat(cause).isInstanceOf(ManagedAgentException.class);
-                            assertThat(((ManagedAgentException) cause).getStatus())
-                                    .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE.value());
-                            assertThat(((ManagedAgentException) cause).getCode())
-                                    .isEqualTo("tenant_guard_contended");
-                        });
+                assertThat(committed.get(30, TimeUnit.SECONDS).replayed()).isFalse();
                 long commitElapsedMs = (System.nanoTime() - commitBefore) / 1_000_000;
                 assertThat(commitElapsedMs).isLessThan(BOUNDED_FAILURE_CEILING_MS);
             }
@@ -300,11 +291,10 @@ class ManagedSessionGuardConvoyIT {
      * A duplicate commit parked behind the winner must replay the winner
      * once the winner commits: the retry's snapshot is only allowed to be
      * pinned after the head row is locked, or it misses the winner's
-     * transaction and the duplicate surfaces a 409 (#13800 R1). Since R2
-     * the duplicate parks at the commit's bounded placement guard first
-     * (placement precedes the head lock on the commit path), so the wait
-     * shows on the guard row, then the head FOR UPDATE runs unblocked
-     * (#13800 R2).
+     * transaction and the duplicate surfaces a 409 (#13800 R1). The
+     * duplicate parks on the Session row, the commit's first statement, so
+     * the wait shows there and not on the tenant guard; the plain replay
+     * lookup that follows reads a snapshot taken after that wait.
      */
     @Test
     void duplicateCommitReplaysOnceTheWinnerReleasesItsGuards() throws Exception {
@@ -335,7 +325,9 @@ class ManagedSessionGuardConvoyIT {
             try (var pool = Executors.newSingleThreadExecutor()) {
                 var retry = pool.submit(() ->
                         transactions.execute(ignored -> journalWriter.commit(request)));
-                awaitWaitingLock(jdbc, "ma_tenant_guard");
+                awaitWaitingLock(jdbc, "`ma_session`");
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM sys.innodb_lock_waits"
+                        + " WHERE locked_table LIKE ?", Integer.class, "%ma_tenant_guard%")).isZero();
                 manager.commit(winner);
                 var second = retry.get(30, TimeUnit.SECONDS);
                 assertThat(second.replayed()).isTrue();
@@ -349,6 +341,52 @@ class ManagedSessionGuardConvoyIT {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ? AND operation = 'commitMcpRecord'",
                 Integer.class, tenant, "victim")).isOne();
+    }
+
+    /**
+     * Commits of different Sessions in one tenant now run at once. Every
+     * revision publishes a new resource; a locking probe of each missing key
+     * would gap-lock the tenant-shared resource index, and two Sessions
+     * inserting into one gap would deadlock (InnoDB 1213). The probe-first
+     * write keeps them apart. H2 takes no gap locks, so only MySQL shows it.
+     */
+    @Test
+    void concurrentCommitsOfOneTenantDoNotDeadlock() throws Exception {
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
+        var chains = com.alibaba.qwen.code.managedagent.ManagedExtensionProjectionContractTest.fixtures()
+                .required("monitorChainCases");
+        int writers = 4;
+        var start = new CountDownLatch(1);
+        try (var pool = Executors.newFixedThreadPool(writers)) {
+            List<Future<Integer>> runs = new ArrayList<>();
+            for (int writer = 0; writer < writers; writer++) {
+                String prefix = "gap-" + writer;
+                runs.add(pool.submit(() -> {
+                    start.await();
+                    int committed = 0;
+                    int chainIndex = 0;
+                    for (var chain : chains) {
+                        String session = prefix + "-" + chainIndex++;
+                        var journal = transactions.execute(ignored ->
+                                new ExtensionRecordJournal(store, "tenant-a", "workspace-a", session).open());
+                        int index = 0;
+                        for (var revision : chain.required("revisions")) {
+                            String command = "gap-" + index++;
+                            transactions.executeWithoutResult(ignored -> journal.commitMonitor(command,
+                                    revision.required("monitorRun"), revision.required("occurredAt").longValue()));
+                            committed++;
+                        }
+                    }
+                    return committed;
+                }));
+            }
+            start.countDown();
+            for (var run : runs) {
+                assertThat(run.get(120, TimeUnit.SECONDS)).isPositive();
+            }
+        }
     }
 
     /**

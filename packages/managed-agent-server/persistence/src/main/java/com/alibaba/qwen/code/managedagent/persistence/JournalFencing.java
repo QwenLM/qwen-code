@@ -145,15 +145,42 @@ final class JournalFencing {
         return false;
     }
 
-    void requirePhysicalSessionOpen(String tenantId, String workspaceId, String sessionId) {
+    void lockPlacementBounded(String tenantId) {
         // Placement is the tenant-wide row migration admission shares; on
         // these per-turn paths it stays bounded with the shared named-failure
         // mapping, so a held row answers tenant_guard_contended instead of
         // out-waiting the caller (#13800).
         lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));
+    }
+
+    // The fence check: locking reads of the storage's alias and directory
+    // rows. Every caller takes them after its Session row and before the
+    // head row, the order Turn admission, Session commands and journal
+    // commits use without the tenant guard; taking them before the Session
+    // row would close a cycle with those lanes on the same Session.
+    void requireSessionStorageOpen(String tenantId, String workspaceId, String sessionId) {
         WorkspaceMigrationAdmission.requirePhysicalOpen(jdbc, tenantId,
                 WorkspaceMigrationAdmission.sessionStorage(jdbc, tenantId, sessionId, workspaceId));
+    }
+
+    // Locks the Session root by primary key (a record lock, never a gap) as
+    // the transaction's first statement and answers its CSI pin, which never
+    // changes once the row exists, for lockCsiContinuation to reuse instead
+    // of locking the root a second time. Outside a transaction the lock would
+    // be released at once, so nothing is taken and null is answered;
+    // lockCsiContinuation then keeps its standalone check.
+    Boolean lockSessionFirst(String tenantId, String sessionId) {
+        return transactional() ? ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId) : null;
+    }
+
+    private boolean transactional() {
+        Boolean transactional = jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection -> {
+            var target = org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection);
+            return !target.getAutoCommit() && org.springframework.jdbc.datasource.DataSourceUtils
+                    .isConnectionTransactional(target, jdbc.getDataSource());
+        });
+        return Boolean.TRUE.equals(transactional);
     }
 
     // An ordinary write against a v2-claimed Session must fail with the
@@ -282,12 +309,7 @@ final class JournalFencing {
     JournalStoreRows.HeadRow requireHeadAfterCsiCheck(String tenantId, String sessionId) {
         // A null continuation proves nothing in standalone mode. Only the CSI check
         // on this DataSource's transaction connection has retained the root lock.
-        Boolean transactional = jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection -> {
-            var target = org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection);
-            return !target.getAutoCommit() && org.springframework.jdbc.datasource.DataSourceUtils
-                    .isConnectionTransactional(target, jdbc.getDataSource());
-        });
-        return Boolean.TRUE.equals(transactional)
+        return transactional()
                 ? storeRows.requireHeadWithRootLocked(tenantId, sessionId)
                 : storeRows.requireHeadForUpdate(tenantId, sessionId);
     }
@@ -298,6 +320,12 @@ final class JournalFencing {
     }
 
     CsiContinuation lockCsiContinuation(String tenantId, String sessionId) {
+        return lockCsiContinuation(tenantId, sessionId, null);
+    }
+
+    // rootPin: the pin lockSessionFirst read under its root lock, or null
+    // when this transaction has not locked the root yet.
+    CsiContinuation lockCsiContinuation(String tenantId, String sessionId, Boolean rootPin) {
         Boolean pinned = jdbc.execute(
                 (org.springframework.jdbc.core.ConnectionCallback<Boolean>)
                         connection -> {
@@ -336,7 +364,9 @@ final class JournalFencing {
                             // inserted, and roots are never deleted, so an
                             // unpinned root can only have legacy markers,
                             // which no snapshot here is older than.
-                            return ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId)
+                            boolean rootPinned = rootPin != null ? rootPin
+                                    : ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
+                            return rootPinned
                                     || JdbcCsiFilesRetirementGuard.hasCsiRuntimeMarker(
                                             target, tenantId, sessionId);
                         });
