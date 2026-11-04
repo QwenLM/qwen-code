@@ -369,7 +369,11 @@ export function allowOriginCors(
       res.status(403).json({ error: 'Request denied by CORS policy' });
       return;
     }
-    const matched = matcher.allows(origin);
+    const listener = listenerIdentityOf(req);
+    const matched =
+      listener.kind === 'remote-access'
+        ? listener.allowedOrigins?.allows(origin) === true
+        : matcher.allows(origin);
     if (matched) {
       // Echo the request's origin verbatim (not literal `*`) even under
       // the any-origin pattern. Browser caches use the echo paired with
@@ -378,10 +382,25 @@ export function allowOriginCors(
       // a schema change (the CORS spec forbids `*` with credentials).
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Methods', allowedMethods);
-      res.setHeader('Access-Control-Allow-Headers', allowedHeaders);
+      res.setHeader(
+        'Access-Control-Allow-Methods',
+        listener.kind === 'remote-access'
+          ? `${allowedMethods}, PUT`
+          : allowedMethods,
+      );
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        listener.kind === 'remote-access'
+          ? `${allowedHeaders}, Acp-Connection-Id, Acp-Session-Id`
+          : allowedHeaders,
+      );
       res.setHeader('Access-Control-Max-Age', maxAgeSeconds);
-      res.setHeader('Access-Control-Expose-Headers', exposedHeaders);
+      res.setHeader(
+        'Access-Control-Expose-Headers',
+        listener.kind === 'remote-access'
+          ? `${exposedHeaders}, Acp-Connection-Id`
+          : exposedHeaders,
+      );
       if (
         req.method === 'OPTIONS' &&
         (req.headers['access-control-request-method'] ||
@@ -419,7 +438,7 @@ export function hostAllowlist(
   const primaryGate = buildPrimaryHostGate(bind, getPort);
   return (req: Request, res: Response, next: NextFunction) => {
     const listener = listenerIdentityOf(req);
-    if (listener.kind !== 'local-control') {
+    if (listener.kind === 'primary') {
       primaryGate(req, res, next);
       return;
     }

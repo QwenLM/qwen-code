@@ -217,6 +217,18 @@ export function createDaemonWorkspaceActions({
       return { catalog, snapshot };
     },
 
+    async listChannelEvents(query) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load channel events failed',
+      );
+      return withActionTimeout(
+        workspace.workspaceChannelEvents(query),
+        'Load channel events timed out',
+      );
+    },
+
     async upsertChannel(name, request) {
       const workspace = requireWorkspaceClient(
         getClient,

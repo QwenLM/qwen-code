@@ -28,6 +28,10 @@ import {
   TOKEN_USAGE_MESSAGES_ZH,
 } from './components/artifacts/token-usage-messages.js';
 import {
+  CHANNEL_EVENTS_MESSAGES_EN,
+  CHANNEL_EVENTS_MESSAGES_ZH,
+} from './components/channels/channel-events-messages.js';
+import {
   createContext,
   useContext,
   useMemo,
@@ -193,6 +197,44 @@ const EN: Messages = {
     `Current plan: Qwen ${v?.plan ?? ''}. Qwen Code is ready.`,
   'subscription.purchase-required': (v) =>
     `You're signed in with a ${v?.plan ?? ''} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; Qwen Code continues automatically after you subscribe.`,
+  'remoteAccess.title': 'Allow remote connections',
+  'remoteAccess.description':
+    'Enable access to this server without restarting it. Local sessions and tasks keep running.',
+  'remoteAccess.server': 'Current server',
+  'remoteAccess.loading': 'Reading remote access status…',
+  'remoteAccess.on': 'Remote access is enabled.',
+  'remoteAccess.off':
+    'Remote access is off. Enable it here when needed; it defaults to off after a server restart.',
+  'remoteAccess.external':
+    'The primary listener is externally configured. This switch cannot close access opened by startup or proxy configuration.',
+  'remoteAccess.localOnly':
+    'Open this server’s settings through its authorized local connection to manage remote access.',
+  'remoteAccess.unavailable':
+    'This daemon does not support remote access settings.',
+  'remoteAccess.network': 'Network interface',
+  'remoteAccess.noNetwork':
+    'No external IPv4 interface is available on this server.',
+  'remoteAccess.address': 'Connection address',
+  'remoteAccess.reveal': 'Show token',
+  'remoteAccess.hide': 'Hide token',
+  'remoteAccess.copyToken': 'Copy token',
+  'remoteAccess.reset': 'Reset token',
+  'remoteAccess.resetHint':
+    'Turning access off or resetting the token disconnects remote clients. Running server tasks continue.',
+  'remoteAccess.http':
+    'HTTP is unencrypted. Use this address on a trusted network; HTTPS pages require an HTTPS endpoint.',
+  'remoteAccess.encrypted':
+    'This endpoint uses HTTPS. The client must trust its certificate.',
+  'remoteAccess.advanced': 'Advanced connection settings',
+  'remoteAccess.port': 'Port (blank uses the current server port)',
+  'remoteAccess.origins': 'Additional page origins (one per line)',
+  'remoteAccess.originsHint':
+    'HTTP pages on localhost and 127.0.0.1 at any port are already allowed. Applying origins reconnects remote clients.',
+  'remoteAccess.apply': 'Apply origins',
+  'remoteAccess.copied': 'Copied.',
+  'remoteAccess.copyFailed':
+    'Could not copy. Reveal and select the value to copy it manually.',
+
   'capacityChoice.persistenceUnconfirmed':
     'Saving the last interrupted turn could not be confirmed.',
   'capacityChoice.title': 'Choose a workspace to stop',
@@ -321,7 +363,10 @@ const EN: Messages = {
   'managed.retry': 'Retry the same request',
   'managed.cancel': 'Cancel turn',
   'managed.uncertain':
-    'The request outcome is unconfirmed. Retry to check or complete the same submission.',
+    'The previous message was not confirmed as submitted. Retrying reuses the same request and will not run twice.',
+  'managed.pendingElsewhere':
+    'Another conversation has an unconfirmed request. Return to it before sending a new message.',
+  'managed.openPendingOwner': 'Open the original conversation',
   'managed.discard': 'Discard this request',
   'managed.pendingRestoreFailed':
     'The pending request cannot be restored and may already have been submitted. Check the session before discarding this pending record.',
@@ -1516,6 +1561,22 @@ const EN: Messages = {
     'The daemon did not accept the connection; the stored credential was left unchanged.',
   'daemon.connection.authFailed':
     'The daemon rejected that token; the stored credential was left unchanged.',
+  'daemon.connection.unreachable':
+    'The browser could not reach the daemon. A network, certificate, or cross-origin failure may be responsible. Check the remote connection setup below; your saved token has not changed.',
+  'daemon.connection.policyBlocked':
+    'The server or proxy refused the request (HTTP 403). Check its access rules, Host policy, and allowed page origins.',
+  'daemon.connection.mixedContent':
+    'This HTTPS page cannot connect to a remote HTTP daemon. Use an HTTPS address for the remote service.',
+  'daemon.connection.setup': 'Remote connection setup',
+  'daemon.connection.pageOrigin': "This page's origin",
+  'daemon.connection.setupCommand':
+    'On the server, open Settings → Connections and turn on Allow remote connections. Then enter the displayed address and bearer token here.',
+  'daemon.connection.setupHttps':
+    'An HTTPS address requires a trusted TLS certificate or an HTTPS proxy. Use HTTPS on untrusted networks.',
+  'daemon.connection.setupOrigins':
+    'For an HTTPS page or a custom page hostname, add the page origin shown above in the server’s advanced remote connection settings.',
+  'daemon.connection.existingService':
+    'The switch takes effect without restarting the server. Existing listeners or proxies configured separately remain independently managed.',
   'daemon.connection.reloadUnavailable':
     'Browser storage is unavailable, so the new token could not be applied to this connection.',
   'daemon.connection.switchUnavailable':
@@ -2232,6 +2293,7 @@ const EN: Messages = {
   'sidebar.moveWorkspaceDown': 'Move down',
   'sidebar.plugins': 'Plugins',
   'sidebar.channels': 'Channels',
+  'sidebar.channelEvents': 'Channel events',
   'sidebar.sessionSource': 'Session source',
   'sidebar.archiveSessionSource': 'Archived session source',
   'sidebar.sessionSource.tasks': 'Tasks',
@@ -3750,6 +3812,7 @@ const EN: Messages = {
   'contextUsage.unknown':
     'Context usage has not been observed for this session yet.',
   ...TOKEN_USAGE_MESSAGES_EN,
+  ...CHANNEL_EVENTS_MESSAGES_EN,
   'trajectory.title': 'Trajectory',
   'trajectory.description': 'View time and tokens',
   'trajectory.empty': 'No records in this session yet.',
@@ -4528,6 +4591,41 @@ const EN: Messages = {
   'channels.editor.field.github.baseUrl': 'API Base URL',
   'channels.editor.field.github.baseUrl.description':
     'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
+  'channels.editor.field.github.pollInterval': 'Poll Interval (ms)',
+  'channels.editor.field.github.pollInterval.description':
+    'How often to check GitHub for new notifications. Leave empty for 60000 (one minute).',
+  'channels.editor.field.github.repositorySettings': 'Per-repository settings',
+  'channels.editor.field.github.repositorySettings.description':
+    'Each allowlisted repository inherits the channel-wide settings below until you override it here.',
+  'channels.editor.field.github.requireMention': 'Require a mention',
+  'channels.editor.field.github.requireMention.inheritOn':
+    'Inherit (require a mention)',
+  'channels.editor.field.github.requireMention.inheritOff':
+    'Inherit (answer without a mention)',
+  'channels.editor.field.github.requireMention.on': 'Require a mention',
+  'channels.editor.field.github.requireMention.off': 'Answer without a mention',
+  'channels.editor.field.github.repositorySenders': 'Who may speak',
+  'channels.editor.field.github.repositorySenders.inheritOpen':
+    'Inherit (anyone)',
+  'channels.editor.field.github.repositorySenders.inheritAllowlist':
+    'Inherit (allowlist only)',
+  'channels.editor.field.github.repositorySenders.open': 'Anyone',
+  'channels.editor.field.github.repositorySenders.allowlist': 'Allowlist only',
+  'channels.editor.field.github.repositorySpeakers': 'Allowed speakers',
+  'channels.editor.field.github.repositorySpeakers.placeholder': 'alice, bob',
+  'channels.editor.field.github.repositorySpeakers.description':
+    'GitHub logins allowed to start tasks in this repository. Empty means nobody.',
+  'channels.editor.field.github.repositorySpeakers.inherited':
+    'GitHub logins allowed in this repository. Leave empty to use the channel-wide list.',
+  'channels.editor.field.github.retainedRepositorySettings.title':
+    'Repository settings still apply',
+  'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
+    `These repositories keep their own speaker and mention settings even though the group policy no longer uses an allowlist: ${v?.repositories ?? ''}. Switch the group policy back to Allowlist to edit them.`,
+  'channels.editor.field.github.retainedRepositorySettings.disabled.title':
+    'Repository settings are kept but not applied',
+  'channels.editor.field.github.retainedRepositorySettings.disabled.description':
+    (v) =>
+      `The group policy is Disabled, so no repository traffic is processed. These repositories keep their own speaker and mention settings, and they apply again once the policy admits group traffic: ${v?.repositories ?? ''}. Switch the group policy back to Allowlist to edit them.`,
   'channels.editor.field.github.groupPolicy': 'Group Policy',
   'channels.editor.field.github.groupPolicy.description':
     'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
@@ -4564,6 +4662,21 @@ const EN: Messages = {
     'member_feature_requested — organization members asked to enable a feature such as Copilot',
   'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
     'security_advisory_credit — the bot was credited for contributing to a security advisory',
+  'channels.editor.field.github.deliverToBoundSessions':
+    'Deliver To PR-Bound Sessions',
+  'channels.editor.field.github.deliverToBoundSessions.description':
+    'Deliver events for PRs bound to a live session into that session as a prompt, instead of a channel-owned session. Requires a daemon-managed channel.',
+  'channels.editor.field.github.prWatchEvents': 'PR Watch Events',
+  'channels.editor.field.github.prWatchEvents.description':
+    'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
+  'channels.editor.field.github.prWatchEvents.option.ci_failure':
+    'ci_failure — CI checks turn red on a head commit',
+  'channels.editor.field.github.prWatchEvents.option.merge_conflict':
+    'merge_conflict — the PR develops a merge conflict',
+  'channels.editor.field.github.prWatchEvents.option.head_change':
+    'head_change — the PR’s head commit changes',
+  'channels.editor.field.github.prWatchEvents.option.state_change':
+    'state_change — the PR is merged or closed',
   'channels.editor.field.gitlab.token': 'Personal Access Token',
   'channels.editor.field.gitlab.token.description':
     'PAT with "read_api" + "api" scopes',
@@ -4743,11 +4856,17 @@ const EN: Messages = {
     'Enter each repository as owner/repo.',
   'channels.editor.validation.conflictingRepoAliases':
     'This channel lists one repository twice with different settings, spelled differently (for example Owner/repo and owner/repo). Remove one of the entries from settings.json before saving.',
+  'channels.editor.validation.invalidGroupEntry': (v) =>
+    `This channel stores a group entry that is not an object: ${v?.repositories ?? ''}. The daemon refuses every save while it is there, and the form has no row for it. Fix or remove that entry in settings.json, then reload the channel.`,
   'channels.editor.validation.invalidOption':
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
   'channels.editor.validation.outOfRange': (v) =>
-    `Enter a number greater than ${v?.min ?? 0}.`,
+    v?.min !== undefined && v?.max !== undefined
+      ? `Enter a number greater than ${v.min} and at most ${v.max}.`
+      : v?.max !== undefined
+        ? `Enter a number at most ${v.max}.`
+        : `Enter a number greater than ${v?.min ?? 0}.`,
   'channels.editor.validation.policy': 'Choose an access policy.',
   'channels.editor.saveError': 'Changes were not saved',
   'channels.editor.reloadLatest': 'Reload latest',
@@ -4917,6 +5036,39 @@ const ZH: Messages = {
     `当前套餐：Qwen ${v?.plan ?? ''}，已可使用 Qwen Code`,
   'subscription.purchase-required': (v) =>
     `你已使用 ${v?.plan ?? ''} 账号登录，该账号不包含 Qwen Code。请在浏览器中选择 Plus 或 Pro；订阅后 Qwen Code 将自动继续。`,
+  'remoteAccess.title': '允许远程连接',
+  'remoteAccess.description':
+    '无需重启即可开放当前服务器，本地会话和任务继续运行。',
+  'remoteAccess.server': '当前服务器',
+  'remoteAccess.loading': '正在读取远程访问状态…',
+  'remoteAccess.on': '远程访问已开启。',
+  'remoteAccess.off': '远程访问已关闭。需要时在此开启；服务重启后默认关闭。',
+  'remoteAccess.external':
+    '主入口由外部配置开放；此开关无法关闭启动参数或代理配置开放的访问。',
+  'remoteAccess.localOnly':
+    '请通过该服务器已授权的本地连接打开设置，管理远程访问。',
+  'remoteAccess.unavailable': '此 daemon 不支持远程访问设置。',
+  'remoteAccess.network': '网络接口',
+  'remoteAccess.noNetwork': '当前服务器没有可用的外部 IPv4 网络接口。',
+  'remoteAccess.address': '连接地址',
+  'remoteAccess.reveal': '查看 token',
+  'remoteAccess.hide': '隐藏 token',
+  'remoteAccess.copyToken': '复制 token',
+  'remoteAccess.reset': '重置 token',
+  'remoteAccess.resetHint':
+    '关闭访问或重置 token 会断开远程客户端，服务器上运行的任务继续。',
+  'remoteAccess.http':
+    'HTTP 未加密，请在可信网络使用；HTTPS 页面需要连接 HTTPS 入口。',
+  'remoteAccess.encrypted': '该入口使用 HTTPS，客户端需信任其证书。',
+  'remoteAccess.advanced': '高级连接设置',
+  'remoteAccess.port': '端口（留空沿用当前服务器端口）',
+  'remoteAccess.origins': '额外页面来源（每行一个）',
+  'remoteAccess.originsHint':
+    '已允许 localhost 和 127.0.0.1 任意端口的 HTTP 页面。应用来源设置会断开远程客户端以便重新连接。',
+  'remoteAccess.apply': '应用来源',
+  'remoteAccess.copied': '已复制。',
+  'remoteAccess.copyFailed': '复制失败，请显示并选中内容后手动复制。',
+
   'capacityChoice.persistenceUnconfirmed':
     '无法确认最后一轮被中断内容是否已保存。',
   'capacityChoice.title': '选择要停止的工作区',
@@ -5029,7 +5181,11 @@ const ZH: Messages = {
   'managed.runningHint': '本轮执行中，暂时不能发送新消息。',
   'managed.retry': '重试同一请求',
   'managed.cancel': '取消本轮',
-  'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
+  'managed.uncertain':
+    '上一条消息未确认是否提交成功。重试使用同一请求标识，不会重复执行。',
+  'managed.pendingElsewhere':
+    '另一个对话有未确认请求，请返回原对话处理后再发送新消息。',
+  'managed.openPendingOwner': '返回原对话',
   'managed.discard': '丢弃本次请求',
   'managed.pendingRestoreFailed':
     '无法恢复待确认请求，此前的提交可能已成功。请先检查会话，再决定是否丢弃这条待确认记录。',
@@ -6215,6 +6371,22 @@ const ZH: Messages = {
   'daemon.connection.notReady': 'Daemon 未接受该连接，已保存的凭据未被修改。',
   'daemon.connection.authFailed':
     'Daemon 拒绝了该 token，已保存的凭据未被修改。',
+  'daemon.connection.unreachable':
+    '浏览器无法连接守护进程，可能是网络、证书或跨域问题。请查看下方的远程连接配置说明，已保存的 token 未被修改。',
+  'daemon.connection.policyBlocked':
+    '服务或代理拒绝了请求（HTTP 403），请检查访问规则、Host 策略和允许的页面来源。',
+  'daemon.connection.mixedContent':
+    '当前 HTTPS 页面无法连接远端 HTTP 服务，请使用远端服务的 HTTPS 地址。',
+  'daemon.connection.setup': '远程连接如何配置',
+  'daemon.connection.pageOrigin': '当前页面来源',
+  'daemon.connection.setupCommand':
+    '在服务器的「设置 → 连接」开启「允许远程连接」，然后在此填写显示的地址和 bearer token。',
+  'daemon.connection.setupHttps':
+    'HTTPS 地址需要可信的 TLS 证书或 HTTPS 代理；不可信网络上请使用 HTTPS。',
+  'daemon.connection.setupOrigins':
+    'HTTPS 页面或自定义页面域名，请在服务器的远程连接高级设置中添加上方显示的页面来源。',
+  'daemon.connection.existingService':
+    '开关无需重启即可生效；已有启动参数或代理开放的入口仍由原配置独立管理。',
   'daemon.connection.reloadUnavailable':
     '浏览器存储不可用，因此新 token 无法应用到当前连接。',
   'daemon.connection.switchUnavailable':
@@ -6882,6 +7054,7 @@ const ZH: Messages = {
   'sidebar.moveWorkspaceDown': '下移',
   'sidebar.plugins': '插件',
   'sidebar.channels': '频道',
+  'sidebar.channelEvents': '频道事件',
   'sidebar.sessionSource': '会话来源',
   'sidebar.archiveSessionSource': '归档会话来源',
   'sidebar.sessionSource.tasks': '任务',
@@ -8270,6 +8443,7 @@ const ZH: Messages = {
   'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'contextUsage.unknown': '当前会话尚无已观测的上下文占用数据。',
   ...TOKEN_USAGE_MESSAGES_ZH,
+  ...CHANNEL_EVENTS_MESSAGES_ZH,
   'trajectory.title': '轨迹',
   'trajectory.description': '查看时间和 token',
   'trajectory.empty': '这个会话还没有记录。',
@@ -8986,6 +9160,40 @@ const ZH: Messages = {
   'channels.editor.field.github.baseUrl': 'API 基础 URL',
   'channels.editor.field.github.baseUrl.description':
     'GitHub Enterprise API 根地址（如 https://ghe.example.com/api/v3），github.com 留空',
+  'channels.editor.field.github.pollInterval': '轮询间隔（毫秒）',
+  'channels.editor.field.github.pollInterval.description':
+    '多久向 GitHub 查一次新通知。留空为 60000（一分钟）。',
+  'channels.editor.field.github.repositorySettings': '按仓库设置',
+  'channels.editor.field.github.repositorySettings.description':
+    '每个已允许的仓库都继承下面的渠道级设置，直到你在这里覆盖它。',
+  'channels.editor.field.github.requireMention': '需要 @',
+  'channels.editor.field.github.requireMention.inheritOn': '继承（需要 @）',
+  'channels.editor.field.github.requireMention.inheritOff':
+    '继承（无需 @ 也响应）',
+  'channels.editor.field.github.requireMention.on': '需要 @',
+  'channels.editor.field.github.requireMention.off': '无需 @ 也响应',
+  'channels.editor.field.github.repositorySenders': '谁可以发言',
+  'channels.editor.field.github.repositorySenders.inheritOpen':
+    '继承（任何人）',
+  'channels.editor.field.github.repositorySenders.inheritAllowlist':
+    '继承（仅允许列表）',
+  'channels.editor.field.github.repositorySenders.open': '任何人',
+  'channels.editor.field.github.repositorySenders.allowlist': '仅允许列表',
+  'channels.editor.field.github.repositorySpeakers': '允许的发言人',
+  'channels.editor.field.github.repositorySpeakers.placeholder': 'alice, bob',
+  'channels.editor.field.github.repositorySpeakers.description':
+    '可以在该仓库发起任务的 GitHub 登录名。留空表示没有人。',
+  'channels.editor.field.github.repositorySpeakers.inherited':
+    '可以在该仓库发言的 GitHub 登录名。留空则使用渠道级列表。',
+  'channels.editor.field.github.retainedRepositorySettings.title':
+    '按仓库设置仍然生效',
+  'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
+    `虽然群组策略已不再使用白名单，这些仓库仍保留自己的发言人与 @ 设置：${v?.repositories ?? ''}。把群组策略切回「白名单」即可编辑它们。`,
+  'channels.editor.field.github.retainedRepositorySettings.disabled.title':
+    '按仓库设置已保留，但当前不生效',
+  'channels.editor.field.github.retainedRepositorySettings.disabled.description':
+    (v) =>
+      `群组策略为「禁用」，因此不处理任何仓库流量。这些仓库保留自己的发言人与 @ 设置，待策略重新放行群组流量后再次生效：${v?.repositories ?? ''}。把群组策略切回「白名单」即可编辑它们。`,
   'channels.editor.field.github.groupPolicy': '群组策略',
   'channels.editor.field.github.groupPolicy.description':
     '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能接收通知',
@@ -9022,6 +9230,20 @@ const ZH: Messages = {
     'member_feature_requested — 组织成员请求启用 Copilot 等功能',
   'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
     'security_advisory_credit — 机器人因参与安全公告而被致谢',
+  'channels.editor.field.github.deliverToBoundSessions': '投递到 PR 绑定会话',
+  'channels.editor.field.github.deliverToBoundSessions.description':
+    '将已绑定到活跃会话的 PR 事件以 prompt 形式投递进该会话，而不是频道自有会话。需要 daemon 托管的频道。',
+  'channels.editor.field.github.prWatchEvents': 'PR 状态监视事件',
+  'channels.editor.field.github.prWatchEvents.description':
+    '可选。为绑定 PR 监视的状态转换（需开启"投递到 PR 绑定会话"）。留空则禁用。',
+  'channels.editor.field.github.prWatchEvents.option.ci_failure':
+    'ci_failure — CI 检查在 head 提交上变红',
+  'channels.editor.field.github.prWatchEvents.option.merge_conflict':
+    'merge_conflict — PR 出现合并冲突',
+  'channels.editor.field.github.prWatchEvents.option.head_change':
+    'head_change — PR 的 head 提交变更',
+  'channels.editor.field.github.prWatchEvents.option.state_change':
+    'state_change — PR 被合并或关闭',
   'channels.editor.field.gitlab.token': '个人访问令牌',
   'channels.editor.field.gitlab.token.description':
     '需要 "read_api" + "api" 权限的 PAT',
@@ -9192,10 +9414,16 @@ const ZH: Messages = {
   'channels.editor.validation.invalidRepoId': '仓库需写成 owner/repo 形式。',
   'channels.editor.validation.conflictingRepoAliases':
     '该渠道把同一个仓库以不同大小写写了两次且设置不同（例如 Owner/repo 与 owner/repo）。请先在 settings.json 里删掉其中一条再保存。',
+  'channels.editor.validation.invalidGroupEntry': (v) =>
+    `该渠道把以下群组条目存成了非对象：${v?.repositories ?? ''}。只要它还在，daemon 就会拒绝每次保存，而表单里没有对应的行。请在 settings.json 里修正或删除该条目，然后重新加载渠道。`,
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>
-    `请输入大于 ${v?.min ?? 0} 的数字。`,
+    v?.min !== undefined && v?.max !== undefined
+      ? `请输入大于 ${v.min} 且不超过 ${v.max} 的数字。`
+      : v?.max !== undefined
+        ? `请输入不超过 ${v.max} 的数字。`
+        : `请输入大于 ${v?.min ?? 0} 的数字。`,
   'channels.editor.validation.policy': '请选择准入策略。',
   'channels.editor.saveError': '未能保存更改',
   'channels.editor.reloadLatest': '加载最新配置',

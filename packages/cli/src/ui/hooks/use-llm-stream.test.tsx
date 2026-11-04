@@ -68,6 +68,7 @@ import {
 import type { DirectUserAdmission, QueuedGoalTurn } from './useMessageQueue.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
+import { framePasteExpansion } from '../utils/paste-placeholders.js';
 
 // --- MOCKS ---
 const pendingToolPersistence = vi.hoisted(() => ({
@@ -499,6 +500,7 @@ describe('useLlmStream', () => {
     logger?: Parameters<typeof useLlmStream>[20],
     goalQueueRef?: Parameters<typeof useLlmStream>[24],
     modelSwitchedFromQuotaError = false,
+    onPromptReturned?: Parameters<typeof useLlmStream>[25],
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -581,6 +583,7 @@ describe('useLlmStream', () => {
           undefined, // terminalWidthRef
           undefined, // midTurnRestoreRef
           goalQueueRef,
+          onPromptReturned,
         );
       },
       {
@@ -9593,6 +9596,7 @@ describe('useLlmStream', () => {
         .mockReturnValue({
           ready: Promise.resolve(),
           invalidateTools: vi.fn(),
+          submitPrompt: vi.fn(async (text: string) => ({ text })),
           syncSession: vi.fn(() =>
             transition === 'session before chat'
               ? sessionSync
@@ -14284,13 +14288,24 @@ describe('useLlmStream', () => {
             _promptId?: string,
           ) => turn,
         );
+        const submitPrompt = vi.fn(
+          async (
+            text: string,
+            _signal: AbortSignal,
+          ): Promise<
+            { text: string; context?: string[] } | { drop: string }
+          > => ({
+            text,
+          }),
+        );
         vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
           ready: Promise.resolve(),
           startTurn,
+          submitPrompt,
         } as unknown as ReturnType<
           typeof interactiveMods.getInteractiveModSession
         >);
-        return { turn, startTurn };
+        return { turn, startTurn, submitPrompt };
       };
       // Admits the prompt as core does once UserPromptSubmit lets it through.
       const admitted = (events: () => AsyncGenerator<unknown>) =>
@@ -14347,6 +14362,317 @@ describe('useLlmStream', () => {
             await Promise.all([main, side]);
           });
         }
+      });
+
+      describe('prompt.submit', () => {
+        const finished = async function* () {
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        };
+        const userRows = () =>
+          mockAddItem.mock.calls
+            .map(([item]) => item)
+            .filter((item) => item.type === MessageType.USER);
+
+        it('sends, shows, recalls and starts the turn with the prompt the hooks let in', async () => {
+          const { turn, startTurn, submitPrompt } = installModTurn();
+          submitPrompt.mockResolvedValueOnce({
+            text: 'Fix it now',
+            context: ['From a Mod'],
+          });
+          admitted(finished);
+          const logMessage = vi.fn().mockResolvedValue(undefined);
+          const { result } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            undefined,
+            {
+              logMessage,
+            } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>,
+          );
+
+          await act(async () => {
+            await result.current.submitQuery(
+              'Fix it',
+              SendMessageType.UserQuery,
+              undefined,
+              { submittedPrompt: 'Fix it', humanInput: { text: 'Fix it' } },
+            );
+          });
+
+          await waitFor(() => expect(turn.complete).toHaveBeenCalledOnce());
+          expect(submitPrompt).toHaveBeenCalledExactlyOnceWith(
+            'Fix it',
+            expect.any(AbortSignal),
+          );
+          expect(logMessage).toHaveBeenCalledExactlyOnceWith(
+            MessageSenderType.USER,
+            'Fix it now',
+          );
+          expect(userRows().map((item) => item.text)).toEqual(['Fix it now']);
+          expect(mockSendMessageStream.mock.calls[0][0]).toBe('Fix it now');
+          expect(mockSendMessageStream.mock.calls[0][3]).toEqual(
+            expect.objectContaining({
+              submittedPrompt: 'Fix it now',
+              promptContext: ['From a Mod'],
+              humanInput: { text: 'Fix it now' },
+            }),
+          );
+          expect(startTurn.mock.calls[0][0]).toBe('Fix it now');
+        });
+
+        it('keeps the notices folded in ahead of a rewritten prompt', async () => {
+          const { submitPrompt } = installModTurn();
+          submitPrompt.mockResolvedValueOnce({ text: 'Fix it now' });
+          admitted(finished);
+          const notice = '<system-reminder>\nResumed\n</system-reminder>\n\n';
+          const { result } = renderTestHook();
+
+          await act(async () => {
+            await result.current.submitQuery(
+              notice + 'Fix it',
+              SendMessageType.UserQuery,
+              undefined,
+              { submittedPrompt: 'Fix it' },
+            );
+          });
+
+          expect(submitPrompt.mock.calls[0][0]).toBe('Fix it');
+          expect(mockSendMessageStream.mock.calls[0][0]).toBe(
+            notice + 'Fix it now',
+          );
+          expect(userRows().map((item) => item.text)).toEqual(['Fix it now']);
+        });
+
+        // A prompt as the composer sends it: a notice, an attachment and a
+        // framed paste ahead of and around the typed text.
+        const placeholder = '[Pasted text #1 +2 lines]';
+        const pastes = new Map([[placeholder, 'line1\nline2']]);
+        const resumed = '<system-reminder>\nResumed\n</system-reminder>\n\n';
+        const composed = (display: string) =>
+          `${resumed}@a.txt\n\n${framePasteExpansion(display, pastes)}`;
+
+        it('keeps attachments, notices and a framed paste around a rewrite', async () => {
+          const { submitPrompt } = installModTurn();
+          submitPrompt.mockImplementationOnce(async (text) => ({
+            text: `${text} please`,
+          }));
+          handleAtCommandSpy.mockResolvedValueOnce({
+            processedQuery: [{ text: 'resolved' }],
+            shouldProceed: true,
+          });
+          admitted(finished);
+          const { result } = renderTestHook();
+
+          await act(async () => {
+            await result.current.submitQuery(
+              composed(`look ${placeholder}`),
+              SendMessageType.UserQuery,
+              undefined,
+              {
+                submittedPrompt: `look ${placeholder}`,
+                displayText: `look ${placeholder}`,
+                pasteExpansions: pastes,
+              },
+            );
+          });
+
+          expect(submitPrompt.mock.calls[0][0]).toBe('look line1\nline2');
+          expect(handleAtCommandSpy.mock.calls[0][0].query).toBe(
+            composed(`look ${placeholder} please`),
+          );
+          expect(userRows()).toEqual([
+            expect.objectContaining({
+              text: `look ${placeholder} please`,
+              recallText: 'look line1\nline2 please',
+            }),
+          ]);
+          expect(mockSendMessageStream.mock.calls[0][3]).toEqual(
+            expect.objectContaining({
+              submittedPrompt: `look ${placeholder} please`,
+            }),
+          );
+        });
+
+        it('takes an answer that differs only in surrounding whitespace as the prompt it heard', async () => {
+          const { submitPrompt } = installModTurn();
+          submitPrompt.mockImplementationOnce(async (text) => ({
+            text: `${text}\n`,
+          }));
+          handleAtCommandSpy.mockResolvedValueOnce({
+            processedQuery: [{ text: 'resolved' }],
+            shouldProceed: true,
+          });
+          admitted(finished);
+          const { result } = renderTestHook();
+
+          await act(async () => {
+            await result.current.submitQuery(
+              composed(`look ${placeholder}`),
+              SendMessageType.UserQuery,
+              undefined,
+              {
+                submittedPrompt: `look ${placeholder}`,
+                displayText: `look ${placeholder}`,
+                pasteExpansions: pastes,
+              },
+            );
+          });
+
+          expect(handleAtCommandSpy.mock.calls[0][0].query).toBe(
+            composed(`look ${placeholder}`),
+          );
+          expect(userRows()[0].text).toBe(`look ${placeholder}`);
+        });
+
+        it('hands back a dropped prompt with its pastes collapsed', async () => {
+          const { submitPrompt } = installModTurn();
+          submitPrompt.mockResolvedValueOnce({ drop: 'Prompt dropped' });
+          const onPromptReturned = vi.fn();
+          const { result } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            false,
+            onPromptReturned,
+          );
+
+          await act(async () => {
+            await result.current.submitQuery(
+              composed(`look ${placeholder}`),
+              SendMessageType.UserQuery,
+              undefined,
+              {
+                submittedPrompt: `look ${placeholder}`,
+                displayText: `look ${placeholder}`,
+                pasteExpansions: pastes,
+              },
+            );
+          });
+
+          expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+            `look ${placeholder}`,
+            pastes,
+          );
+        });
+
+        it('shows a drop, keeps the prompt out of the transcript and recall, and hands it back', async () => {
+          const { startTurn, submitPrompt } = installModTurn();
+          submitPrompt.mockResolvedValueOnce({
+            drop: 'Prompt dropped by a hook: it holds a key',
+          });
+          const logMessage = vi.fn().mockResolvedValue(undefined);
+          const onPromptReturned = vi.fn();
+          const { result } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            undefined,
+            { logMessage } as unknown as NonNullable<
+              Parameters<typeof useLlmStream>[20]
+            >,
+            undefined,
+            false,
+            onPromptReturned,
+          );
+
+          await act(async () => {
+            await result.current.submitQuery(
+              'key AKIA',
+              SendMessageType.UserQuery,
+              undefined,
+              { submittedPrompt: 'key AKIA' },
+            );
+          });
+
+          expect(mockAddItem).toHaveBeenCalledWith(
+            {
+              type: MessageType.ERROR,
+              text: 'Prompt dropped by a hook: it holds a key',
+            },
+            expect.any(Number),
+          );
+          expect(userRows()).toEqual([]);
+          expect(logMessage).not.toHaveBeenCalled();
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          expect(startTurn).not.toHaveBeenCalled();
+          expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+            'key AKIA',
+            undefined,
+          );
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+        });
+
+        it('hands back a prompt cancelled while its hooks run', async () => {
+          const { submitPrompt } = installModTurn();
+          submitPrompt.mockImplementationOnce(
+            (_text, signal) =>
+              new Promise((_, reject) =>
+                signal.addEventListener('abort', () => reject(signal.reason)),
+              ),
+          );
+          const onPromptReturned = vi.fn();
+          const { result } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            false,
+            onPromptReturned,
+          );
+
+          let submission!: Promise<void>;
+          await act(async () => {
+            submission = result.current.submitQuery(
+              'Fix it',
+              SendMessageType.UserQuery,
+              undefined,
+              { submittedPrompt: 'Fix it' },
+            );
+          });
+          await waitFor(() => expect(submitPrompt).toHaveBeenCalledOnce());
+          act(() => {
+            result.current.cancelOngoingRequest();
+          });
+          await act(async () => {
+            await submission;
+          });
+
+          expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+            'Fix it',
+            undefined,
+          );
+          expect(userRows()).toEqual([]);
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+        });
+
+        it.each([
+          ['a slash command', '/review', SendMessageType.UserQuery],
+          ['a scheduled prompt', 'Check the build', SendMessageType.Cron],
+        ])('is not raised for %s', async (_, query, type) => {
+          const { submitPrompt } = installModTurn();
+          mockHandleSlashCommand.mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'review it' }],
+          });
+          admitted(finished);
+          const { result } = renderTestHook();
+
+          await act(async () => {
+            await result.current.submitQuery(query, type);
+          });
+
+          expect(mockSendMessageStream).toHaveBeenCalledOnce();
+          expect(submitPrompt).not.toHaveBeenCalled();
+        });
       });
 
       it('hears a submitted prompt from its admission until the stream goes idle', async () => {

@@ -4161,6 +4161,99 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('applies a reasoning write confirmed while the attach metadata is in flight', async () => {
+    // attachSession() resolves before the load's metadata settles, so a
+    // first-prompt reasoning write runs inside that window. The config-sync
+    // domain must already exist by then: recreating it once the metadata
+    // landed invalidated the write's ownership token, dropping both the
+    // daemon-confirmed value and its reconciliation, and the composer stayed
+    // on the pre-write choice (#16065).
+    const sessionId = 'lazy-reasoning-session';
+    const lateMetadata = createDeferred<unknown>();
+    sdkMocks.workspaceProviders.mockReturnValue(lateMetadata.promise);
+    // A daemon that confirmed the write reports it on every later context
+    // read. Every read issued from the write onwards is held open, so the
+    // assertion below can only be satisfied by the write's own apply — a
+    // reconciliation that merely republishes the value cannot rescue it.
+    let sessionReasoning = 'none';
+    let holdContextReads = false;
+    const contextAnswer = () => ({
+      v: 1 as const,
+      sessionId,
+      workspaceCwd: '/mock-workspace',
+      state: { configOptions: reasoningConfigOptions(sessionReasoning) },
+    });
+    const postWriteRead = createDeferred<ReturnType<typeof contextAnswer>>();
+    const session = createMockSession({
+      sessionId,
+      context: vi.fn(() =>
+        holdContextReads
+          ? postWriteRead.promise
+          : Promise.resolve(contextAnswer()),
+      ),
+    });
+    session.setConfigOption = vi.fn(async () => {
+      sessionReasoning = 'medium';
+      return {
+        configOptions: reasoningConfigOptions('medium'),
+        persisted: true,
+      };
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId,
+    });
+    expect(connection?.sessionId).toBe(sessionId);
+    // Pin the window itself: the session is attached and usable while its
+    // metadata read is still outstanding, which is exactly where a
+    // first-prompt config write lands.
+    expect(sdkMocks.workspaceProviders).toHaveBeenCalled();
+    const readsBeforeWrite = vi.mocked(session.context).mock.calls.length;
+    expect(readsBeforeWrite).toBeGreaterThan(0);
+
+    let writing!: Promise<void>;
+    act(() => {
+      holdContextReads = true;
+      writing = requireActions(actions).setReasoningEffort('medium', {
+        persist: true,
+      });
+    });
+    await act(async () => {
+      lateMetadata.resolve(workspaceProvidersWithReasoningPreview());
+      await writing;
+      await flushPromises();
+    });
+
+    // The reconciliation was scheduled but has not answered, so this value
+    // came from the confirmed write itself.
+    expect(vi.mocked(session.context).mock.calls.length).toBeGreaterThan(
+      readsBeforeWrite,
+    );
+    expect(connection?.reasoning).toMatchObject({
+      enabled: true,
+      effort: 'medium',
+    });
+
+    await act(async () => {
+      postWriteRead.resolve(contextAnswer());
+      await flushPromises();
+    });
+    expect(connection?.reasoning).toMatchObject({
+      enabled: true,
+      effort: 'medium',
+    });
+  });
+
   it('can create a session after connecting from the empty state', async () => {
     sdkMocks.sessions.push(
       createMockSession({ sessionId: 'lazy-session' }),
@@ -26244,12 +26337,20 @@ describe('DaemonSessionProvider', () => {
         const metadata = createDeferred<typeof initial>();
         const approval = createDeferred<{ mode: string }>();
         const replay = createDeferred<void>();
+        // A daemon that confirmed an approval-mode write reports that mode on
+        // every later context read. Reading this at call time (rather than
+        // re-mocking after the write settles) keeps the post-write
+        // reconciliation honest: it must not republish the pre-write mode.
+        let confirmedMode = 'default';
         const context = vi
           .fn()
           .mockImplementationOnce(() =>
             approvalPending ? metadata.promise : Promise.resolve(initial),
           )
-          .mockResolvedValue(latest);
+          .mockImplementation(async () => ({
+            ...latest,
+            state: { modes: { currentModeId: confirmedMode } },
+          }));
         let actions: DaemonSessionActions | undefined;
         let connection: DaemonConnectionState | undefined;
         let firstEventSeen = false;
@@ -26301,16 +26402,16 @@ describe('DaemonSessionProvider', () => {
             await flushPromises();
           });
           await act(async () => {
+            confirmedMode = 'auto-edit';
             approval.resolve({ mode: 'auto-edit' });
             await changing;
             await flushPromises();
           });
-          expect(connection?.currentMode).toBeUndefined();
+          // The confirmed write must survive the load's late metadata: neither
+          // the stale snapshot nor the post-write reconciliation may republish
+          // the pre-write mode (#16065).
+          expect(connection?.currentMode).toBe('auto-edit');
           expect(connection?.context?.recovery).toEqual(latest.recovery);
-          context.mockResolvedValue({
-            ...latest,
-            state: { modes: { currentModeId: 'auto-edit' } },
-          });
           await act(async () => {
             replay.resolve();
             await flushPromises();
@@ -26318,8 +26419,11 @@ describe('DaemonSessionProvider', () => {
           expect(connection?.currentMode).toBe('auto-edit');
         }
         expect(firstEventSeen).toBe(true);
+        // The confirmed approval write now also gets its post-write
+        // reconciliation read: the config-sync domain survives the load's late
+        // metadata instead of being recreated underneath it (#16065).
         expect(context).toHaveBeenCalledTimes(
-          (history ? 1 : 2) + (approvalPending ? 1 : 0),
+          (history ? 1 : 2) + (approvalPending ? 2 : 0),
         );
         expect(connection?.context?.recovery).toEqual(
           history ? initial.recovery : latest.recovery,

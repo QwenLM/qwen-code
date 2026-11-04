@@ -1334,6 +1334,8 @@ export interface ConfigParameters {
   outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
+  /** Whether to refresh the models.dev catalog during initialization. */
+  modelCatalogRefreshEnabled?: boolean;
   /**
    * If true, disables the per-session FileReadCache short-circuit
    * (file_unchanged placeholder). Useful for sessions that may undergo
@@ -3106,6 +3108,7 @@ export class Config {
   private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
+  private readonly modelCatalogRefreshEnabled: boolean;
   private readonly fileReadCacheDisabled: boolean;
   private activeTodoReminders = new Map<string, string>();
   private activeTodoWorkChainOwners = new Map<string, string>();
@@ -3576,6 +3579,7 @@ export class Config {
       email: 'qwen-coder@alibabacloud.com',
     };
     this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
+    this.modelCatalogRefreshEnabled = params.modelCatalogRefreshEnabled ?? true;
     // A Managed session reads in its Runtime worker, so this process could
     // neither elide a repeated read nor prove the read an edit requires.
     this.fileReadCacheDisabled =
@@ -4246,7 +4250,9 @@ export class Config {
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
-    void refreshModelCatalog();
+    if (this.modelCatalogRefreshEnabled && this.usageStatisticsEnabled) {
+      void refreshModelCatalog();
+    }
     options?.signal?.throwIfAborted();
     // Omni multimodal support declares ffmpeg/ffprobe as hard runtime
     // prerequisites: fail fast at startup with an actionable message
@@ -11848,15 +11854,21 @@ export class Config {
 
   /**
    * Get project-level hooks configuration.
-   * Returns hooks from workspace settings, only in trusted folders.
+   * Returns hooks from workspace settings, only in explicitly trusted folders.
    * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
     if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
-    // Only return project hooks if workspace is trusted
-    if (!this.isTrustedFolder()) {
+    // Interactive sessions need explicit trust for repo-supplied hooks: a
+    // disabled folder-trust feature must not silently authorize them.
+    // Non-interactive invocations (`-p`, piped stdin, ACP/SDK embeddings)
+    // treat trust as implicit — the caller chose the directory and there is
+    // no prompt surface; only run them in directories you trust. An explicit
+    // refusal is already enforced upstream: an untrusted workspace
+    // contributes no settings, so it supplies no project hooks.
+    if (this.isInteractive() && !this.isExplicitlyTrustedFolder()) {
       return undefined;
     }
     // The legacy merged `hooks` stands in only when no scope was supplied.
@@ -12030,6 +12042,13 @@ export class Config {
     }
 
     return this.trustedFolder ?? !this.folderTrust;
+  }
+
+  isExplicitlyTrustedFolder(): boolean {
+    const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+    return (
+      (this.folderTrust || ideTrust !== undefined) && this.isTrustedFolder()
+    );
   }
 
   setIdeMode(value: boolean): void {

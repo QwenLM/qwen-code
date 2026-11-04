@@ -733,7 +733,7 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
-    it('grantWorkspaceTrust refuses a reported deny when only workspace settings enable trust', async () => {
+    it('grantWorkspaceTrust ignores workspace settings that try to enable trust', async () => {
       await withIsolatedWorkspace(async ({ home, workspace }) => {
         await writeJson(path.join(workspace, '.qwen', 'settings.json'), {
           security: { folderTrust: { enabled: true } },
@@ -753,14 +753,16 @@ describe('createDaemonWorkspaceService', () => {
           }),
         );
 
-        await expect(svc.grantWorkspaceTrust(makeCtx())).rejects.toThrow(
-          WorkspaceTrustGrantIneffectiveError,
+        // The workspace flag is stripped from the merged settings, so the
+        // feature stays disabled and the grant reports the disabled state
+        // instead of refusing an ineffective grant. If the restriction ever
+        // regresses, the alias DO_NOT_TRUST wins again and the grant throws.
+        await expect(svc.grantWorkspaceTrust(makeCtx())).resolves.toMatchObject(
+          {
+            folderTrustEnabled: false,
+            effective: { source: 'disabled', state: 'trusted' },
+          },
         );
-        await expect(
-          svc.getWorkspaceTrustStatus(makeCtx()),
-        ).resolves.toMatchObject({
-          effective: { state: 'untrusted', source: 'file' },
-        });
       });
     });
 

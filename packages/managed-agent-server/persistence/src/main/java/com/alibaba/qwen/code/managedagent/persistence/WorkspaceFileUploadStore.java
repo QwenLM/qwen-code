@@ -16,6 +16,8 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -219,17 +221,36 @@ public class WorkspaceFileUploadStore {
         }
     }
 
+    // Admission takes no tenant guard. It locks the alias, directory and new operation rows in the
+    // directory-membership order; a concurrent receipt for the same upload ID loses on the unique
+    // operation key and then replays the committed receipt.
     private Operation admit(String tenant, String actor, WorkspaceFileStore.Locator locator, String path,
             String revision, String uploadId, int size, String sha256, String digest) {
+        try {
+            return admitOnce(tenant, actor, locator, path, revision, uploadId, size, sha256, digest);
+        } catch (DuplicateKeyException | PessimisticLockingFailureException race) {
+            Operation previous = find(tenant, uploadId, false);
+            if (previous == null) {
+                throw race;
+            }
+            return replay(previous, actor, digest);
+        }
+    }
+
+    private Operation replay(Operation previous, String actor, String digest) {
+        authorize(previous, actor);
+        if (!previous.digest().equals(digest)) {
+            throw new ManagedAgentException(409, "workspace_upload_conflict", "Upload ID belongs to another request.");
+        }
+        return previous;
+    }
+
+    private Operation admitOnce(String tenant, String actor, WorkspaceFileStore.Locator locator, String path,
+            String revision, String uploadId, int size, String sha256, String digest) {
         return transaction.execute(status -> {
-            WorkspaceStorageKindGuard.lockDomain(jdbc, tenant);
-            Operation previous = find(tenant, uploadId, true);
+            Operation previous = find(tenant, uploadId, false);
             if (previous != null) {
-                authorize(previous, actor);
-                if (!previous.digest().equals(digest)) {
-                    throw new ManagedAgentException(409, "workspace_upload_conflict", "Upload ID belongs to another request.");
-                }
-                return previous;
+                return replay(previous, actor, digest);
             }
             var scope = files.scope(tenant, actor, locator);
             if (!revision.equals(scope.revision())) {
@@ -239,14 +260,16 @@ public class WorkspaceFileUploadStore {
                 throw new ManagedAgentException(409, "workspace_files_unsupported", "This Workspace storage does not support uploads.");
             }
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenant, scope.binding().getStorageId());
-            String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage WHERE alias_key = ?", String.class,
+            String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage WHERE alias_key = ? FOR UPDATE", String.class,
                     JdbcRuntimeBindingRepository.storageAliasKey(tenant, scope.binding().getStorageId()));
-            var owners = jdbc.queryForList("SELECT holder_key, maintenance_id, mount_state FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", physical);
-            if (owners.size() != 1 || !"READY".equals(owners.getFirst().get("mount_state"))) {
+            var owners = jdbc.queryForList("SELECT holder_key, maintenance_id, mount_state, mount_revision, exclusive_member_key FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", physical);
+            if (owners.size() != 1 || !"READY".equals(owners.getFirst().get("mount_state"))
+                    || !(owners.getFirst().get("mount_revision") instanceof Number mount)
+                    || !Long.valueOf(mount.longValue()).equals(scope.mountRevision())) {
                 throw changed();
             }
             if (owners.getFirst().get("holder_key") != null || owners.getFirst().get("maintenance_id") != null
-                    || WorkspaceExecutionStore.hasExecutionMembers(jdbc, physical)) {
+                    || owners.getFirst().get("exclusive_member_key") != null) {
                 throw busy();
             }
             Map<String, Object> request = null;
@@ -278,7 +301,9 @@ public class WorkspaceFileUploadStore {
                     scope.binding().getStorageId().getBytes(StandardCharsets.UTF_8),
                     JdbcRuntimeBindingRepository.storageAliasKey(tenant, scope.binding().getStorageId()), physical,
                     com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor), digest, encode(target));
-            if (jdbc.update("UPDATE ma_storage_owner SET holder_key = ? WHERE storage_key = ? AND holder_key IS NULL AND maintenance_id IS NULL", key, physical) != 1) {
+            if (jdbc.update("UPDATE ma_storage_owner SET member_count = member_count + 1 WHERE storage_key = ?"
+                    + " AND mount_state = 'READY' AND mount_revision = ? AND holder_key IS NULL AND maintenance_id IS NULL"
+                    + " AND exclusive_member_key IS NULL", physical, scope.mountRevision()) != 1) {
                 throw busy();
             }
             return new Operation(key, digest, target, null, true);
@@ -333,8 +358,9 @@ public class WorkspaceFileUploadStore {
 
     private UploadStatus finish(Operation operation, UploadStatus result) {
         return transaction.execute(status -> {
+            // No tenant guard: lock the directory row before the operation row, as admission does.
             Frozen target = operation.target();
-            WorkspaceStorageKindGuard.lockDomain(jdbc, target.tenant());
+            jdbc.queryForList("SELECT member_count FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", target.physical());
             Operation current = find(target.tenant(), target.uploadId(), true);
             if (current == null || !current.digest().equals(operation.digest())) {
                 throw pending();
@@ -342,13 +368,16 @@ public class WorkspaceFileUploadStore {
             if (current.result() != null) {
                 return current.result();
             }
-            if (jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL WHERE storage_key = ? AND holder_key = ?"
-                    + " AND maintenance_id IS NULL", target.physical(), operation.key()) != 1) {
+            if (jdbc.update("UPDATE ma_storage_owner SET member_count = member_count - 1 WHERE storage_key = ?"
+                    + " AND member_count > 0 AND holder_key IS NULL AND maintenance_id IS NULL"
+                    + " AND exclusive_member_key IS NULL", target.physical()) != 1) {
                 throw pending();
             }
-            jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, result_json = ?, completed_at = "
+            if (jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, result_json = ?, completed_at = "
                     + ManagedSchemaTime.SQL_NOW + ", gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE operation_key = ? AND state = 'RUNNING'",
-                    result.state(), result.state(), encode(result), operation.key());
+                    result.state(), result.state(), encode(result), operation.key()) != 1) {
+                throw pending();
+            }
             return result;
         });
     }

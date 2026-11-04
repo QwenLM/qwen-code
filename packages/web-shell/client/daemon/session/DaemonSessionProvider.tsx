@@ -3483,6 +3483,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 activeSession.lastEventId != null ||
                 undefined,
           }));
+          // The config-sync domain belongs to the attachment, so establish it
+          // here rather than at SSE setup below: resolving the pending load
+          // lets first-prompt config writes start immediately, while the
+          // metadata await can still be outstanding. Recreating the domain
+          // after that await invalidated their ownership tokens mid-write and
+          // silently dropped daemon-confirmed values (#16065).
+          resetSessionConfigSync(
+            sessionConfigGenerationRef.current,
+            activeSession,
+          );
           if (pendingLoadToResolve) {
             lastHandledSessionIdRef.current = activeSession.sessionId;
             lastHandledSessionContextRef.current = activeProductSessionContext;
@@ -3877,10 +3887,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           };
           eventStreamRef.current = eventStream;
           configStreamOwner = activeSession;
-          resetSessionConfigSync(
-            sessionConfigGenerationRef.current,
-            activeSession,
-          );
           const configState = getSessionConfigSync(
             sessionConfigGenerationRef.current,
             activeSession,
