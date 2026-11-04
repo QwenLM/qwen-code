@@ -11783,6 +11783,25 @@ export class Config {
   }
 
   /**
+   * The project hooks block the trust gate withholds, for diagnostics only.
+   * Never feed this to the registry; `getProjectHooks()` is the execution
+   * accessor. `undefined` when the trust gate is not what withholds them.
+   */
+  getTrustWithheldProjectHooks():
+    | { [K in HookEventName]?: HookDefinition[] }
+    | undefined {
+    if (this.getBareMode() || this.isSafeMode()) {
+      return undefined;
+    }
+    if (this.isExplicitlyTrustedFolder()) {
+      return undefined;
+    }
+    const hooks =
+      this.projectHooks ?? (this.hasScopedHooks() ? undefined : this.hooks);
+    return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
+  }
+
+  /**
    * Get user-level hooks configuration.
    * Returns hooks from user settings, always available regardless of folder trust.
    * Used by HookRegistry to load user-specific hooks with proper source attribution.

@@ -1667,6 +1667,17 @@ export async function main() {
       settings,
     );
 
+    // The TUI shows a startup warning when the trust gate withholds project
+    // hooks; a headless run gets one stderr line so the failure is not silent.
+    if (
+      !nonInteractiveConfig.isInteractive() &&
+      nonInteractiveConfig.getTrustWithheldProjectHooks()
+    ) {
+      writeStderrLine(
+        'Project hooks in .qwen/settings.json were not loaded: the folder is not explicitly trusted. Enable security.folderTrust.enabled and trust the folder to run them.',
+      );
+    }
+
     const prompt_id = createNonInteractivePromptId(
       config.getSessionId(),
       config.getResumedSessionData?.()?.conversation.messages,

@@ -189,15 +189,14 @@ describe('tool hook additionalContext delivery', () => {
       'read_file',
       'note.txt',
       'call_feature_off',
-      undefined,
-      { security: { folderTrust: { enabled: false } } },
     );
-    // The child must see the feature-off user settings, not the rig's
-    // pre-trusted home: the inherited trust-store env var outranks
-    // QWEN_HOME, so drop the grant it points at.
+    // The gate must see the feature OFF in the USER scope: a workspace
+    // `security.folderTrust` is stripped by WORKSPACE_RESTRICTED_SETTINGS,
+    // so writing it via setup() would leave the rig's user-scope `true`
+    // in charge and the test would pass on the pre-change code too.
     writeFileSync(
-      join(rig.testDir!, '.qwen-home', 'trustedFolders.json'),
-      JSON.stringify({}),
+      join(rig.testDir!, '.qwen-home', 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: false } } }),
     );
     await rig.run('read the note', ...fakeModelLaunchArgs(server));
 
