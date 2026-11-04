@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   GIT_HARDENING,
+  REVIEW_STATE_QUERY,
   artifactDirName,
   detectCredentialSignals,
   detectIsolation,
@@ -28,6 +29,7 @@ import {
   localFilterOverrides,
   parseArgs,
   parseRepo,
+  reviewState,
   validateContext,
 } from '../../scripts/verify-pr-prepare.mjs';
 
@@ -88,22 +90,116 @@ function makeRepo() {
 /**
  * A `gh` stand-in that returns the snapshot this test controls. It lives
  * outside the clone: prepare refuses untracked files, and a harness planted
- * inside the tree under test would trip the very check it exercises.
+ * inside the tree under test would trip the very check it exercises. `gh api`
+ * records its arguments and answers with the review pages, failing the way
+ * gh does when there are none.
  */
-function installFakeGh(snapshot) {
+function installFakeGh(snapshot, reviewPages) {
   const dir = makeTmpDir();
   const bin = join(dir, 'bin');
   mkdirSync(bin);
   const snapshotPath = join(dir, 'snapshot.json');
   writeFileSync(snapshotPath, JSON.stringify(snapshot));
+  const reviewPath = join(dir, 'review.json');
+  if (reviewPages) writeFileSync(reviewPath, JSON.stringify(reviewPages));
   const gh = join(bin, 'gh');
-  writeFileSync(gh, '#!/bin/sh\ncat "$FAKE_GH_SNAPSHOT"\n');
+  writeFileSync(
+    gh,
+    [
+      '#!/bin/sh',
+      'if [ "$1" = api ]; then',
+      '  printf "%s\\n" "$@" > "$FAKE_GH_API_ARGS"',
+      '  [ -f "$FAKE_GH_REVIEW" ] && exec cat "$FAKE_GH_REVIEW"',
+      '  echo "HTTP 502: Bad Gateway" >&2',
+      '  exit 1',
+      'fi',
+      'cat "$FAKE_GH_SNAPSHOT"',
+      '',
+    ].join('\n'),
+  );
   chmodSync(gh, 0o755);
   return {
     ...gitEnv,
     PATH: `${bin}:${process.env.PATH ?? ''}`,
     FAKE_GH_SNAPSHOT: snapshotPath,
+    FAKE_GH_REVIEW: reviewPath,
+    FAKE_GH_API_ARGS: join(dir, 'api-args'),
   };
+}
+
+/** Two pages of REVIEW_STATE_QUERY, as `gh api graphql --paginate --slurp` returns them. */
+function reviewPages() {
+  const opinionated = {
+    nodes: [
+      {
+        state: 'CHANGES_REQUESTED',
+        submittedAt: '2026-11-01T01:00:00Z',
+        url: 'https://github.com/QwenLM/qwen-code/pull/42#pullrequestreview-1',
+        body: 'Blocking: the retry drops the cursor.',
+        author: { login: 'maintainer' },
+        authorAssociation: 'COLLABORATOR',
+        commit: { oid: OID('a') },
+      },
+      {
+        state: 'APPROVED',
+        submittedAt: '2026-11-01T02:00:00Z',
+        url: 'https://github.com/QwenLM/qwen-code/pull/42#pullrequestreview-2',
+        body: 'LGTM',
+        author: { login: 'colleague' },
+        authorAssociation: 'MEMBER',
+        commit: { oid: OID('b') },
+      },
+    ],
+  };
+  const thread = (isResolved, isOutdated, path, line, originalLine, body) => ({
+    isResolved,
+    isOutdated,
+    path,
+    line,
+    originalLine,
+    comments: {
+      totalCount: 1,
+      nodes: [
+        {
+          createdAt: '2026-11-01T00:00:00Z',
+          url: `https://github.com/QwenLM/qwen-code/pull/42#discussion_${originalLine}`,
+          body,
+          author: { login: 'reviewer' },
+          authorAssociation: 'MEMBER',
+          originalCommit: { oid: OID('c') },
+          pullRequestReview: {
+            url: 'https://github.com/QwenLM/qwen-code/pull/42#pullrequestreview-1',
+          },
+        },
+      ],
+    },
+  });
+  const page = (nodes, hasNextPage) => ({
+    data: {
+      repository: {
+        pullRequest: {
+          latestOpinionatedReviews: opinionated,
+          reviewThreads: {
+            pageInfo: { hasNextPage, endCursor: hasNextPage ? 'c1' : 'c2' },
+            nodes,
+          },
+        },
+      },
+    },
+  });
+  return [
+    page(
+      [thread(false, true, 'a.ts', 3, 2, '**[Critical]** R1-1: lost cursor')],
+      true,
+    ),
+    page(
+      [
+        thread(true, false, 'b.ts', null, 5, '**[Blocker]** R1-2: unbounded'),
+        thread(false, false, 'c.ts', 9, 9, 'Is this reachable?'),
+      ],
+      false,
+    ),
+  ];
 }
 
 function snapshotFor({ head, base, title = 'test(scope): subject' }) {
@@ -533,6 +629,94 @@ describe('parseArgs', () => {
   });
 });
 
+describe('reviewState', () => {
+  it('keeps every thread and only the standing change requests', () => {
+    const state = reviewState(reviewPages());
+    // Resolved threads stay: resolving is the author's claim, and the round
+    // re-measures a blocking one rather than taking the claim.
+    expect(
+      state.threads.map((t) => [
+        t.resolved,
+        t.outdated,
+        t.path,
+        t.line,
+        t.originalLine,
+        t.commentCount,
+      ]),
+    ).toEqual([
+      [false, true, 'a.ts', 3, 2, 1],
+      [true, false, 'b.ts', null, 5, 1],
+      [false, false, 'c.ts', 9, 9, 1],
+    ]);
+    expect(state.threads[0].comments).toEqual([
+      {
+        author: 'reviewer',
+        association: 'MEMBER',
+        createdAt: '2026-11-01T00:00:00Z',
+        url: 'https://github.com/QwenLM/qwen-code/pull/42#discussion_2',
+        review:
+          'https://github.com/QwenLM/qwen-code/pull/42#pullrequestreview-1',
+        commit: OID('c'),
+        body: '**[Critical]** R1-1: lost cursor',
+      },
+    ]);
+    // Every page repeats the reviews; the first page answers for them.
+    expect(state.changeRequests).toEqual([
+      {
+        author: 'maintainer',
+        association: 'COLLABORATOR',
+        submittedAt: '2026-11-01T01:00:00Z',
+        commit: OID('a'),
+        url: 'https://github.com/QwenLM/qwen-code/pull/42#pullrequestreview-1',
+        body: 'Blocking: the retry drops the cursor.',
+      },
+    ]);
+  });
+
+  // The stand-ins answer any query, so only GitHub can reject a field: a
+  // typo makes every live fetch fail while every test stays green. Change this
+  // text only after running the new query against a real PR.
+  it('sends the query that was checked against the live API', () => {
+    expect(REVIEW_STATE_QUERY).toBe(
+      'query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { latestOpinionatedReviews(first: 100) { nodes { state submittedAt url body author { login } authorAssociation commit { oid } } } reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line originalLine comments(first: 50) { totalCount nodes { createdAt url body author { login } authorAssociation originalCommit { oid } pullRequestReview { url } } } } } } } }',
+    );
+  });
+
+  it('returns null for pages that are not the query answer', () => {
+    const [first] = reviewPages();
+    const pull = first.data.repository.pullRequest;
+    const withPull = (patch) => [
+      { data: { repository: { pullRequest: { ...pull, ...patch } } } },
+    ];
+    for (const pages of [
+      null,
+      {},
+      [],
+      [{ data: null }],
+      withPull({ reviewThreads: null }),
+      withPull({ latestOpinionatedReviews: null }),
+      withPull({
+        reviewThreads: {
+          ...pull.reviewThreads,
+          nodes: [{ ...pull.reviewThreads.nodes[0], comments: null }],
+        },
+      }),
+      withPull({ reviewThreads: { ...pull.reviewThreads, nodes: [null] } }),
+      withPull({
+        reviewThreads: {
+          ...pull.reviewThreads,
+          nodes: [
+            { ...pull.reviewThreads.nodes[0], comments: { nodes: [null] } },
+          ],
+        },
+      }),
+      withPull({ latestOpinionatedReviews: { nodes: [null] } }),
+    ]) {
+      expect(reviewState(pages)).toBeNull();
+    }
+  });
+});
+
 // These cases drive the real CLI through a POSIX `gh` stand-in; a Windows
 // runner cannot express it, and the Linux lane owns that coverage.
 describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
@@ -570,6 +754,68 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(
       JSON.parse(readFileSync(join(artifacts, 'context.json'), 'utf8')),
     ).toEqual({ repo: REPO, pr: 42, baseRefOid: base, headRefOid: head });
+  });
+
+  // The CI lane writes the same review state beside its metadata, and a round
+  // reads a missing file as "unknown": a failed fetch must leave none, not
+  // even the one an earlier prepare wrote.
+  it('snapshots the review state, and leaves none when the fetch fails', () => {
+    const { dir, base, head } = makeRepo();
+    const pages = reviewPages();
+    const env = installFakeGh(snapshotFor({ base, head }), pages);
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(0);
+    const reviewPath = join(
+      realpathSync(dir),
+      'tmp',
+      'verify-context',
+      'pr42-review-threads.json',
+    );
+    expect(JSON.parse(readFileSync(reviewPath, 'utf8'))).toEqual(
+      reviewState(pages),
+    );
+    expect(result.stdout).toContain(
+      `review     ${reviewPath} (2 of 3 threads unresolved, 1 change requests)`,
+    );
+    const args = readFileSync(env.FAKE_GH_API_ARGS, 'utf8').split('\n');
+    expect(args.slice(0, 4)).toEqual([
+      'api',
+      'graphql',
+      '--paginate',
+      '--slurp',
+    ]);
+    expect(args).toEqual(
+      expect.arrayContaining([
+        'owner=QwenLM',
+        'name=qwen-code',
+        'number=42',
+        `query=${REVIEW_STATE_QUERY}`,
+      ]),
+    );
+    // -F types the number for the query's Int!; -f keeps a name raw.
+    expect(args[args.indexOf('number=42') - 1]).toBe('-F');
+    expect(args[args.indexOf('owner=QwenLM') - 1]).toBe('-f');
+    expect(args[args.indexOf('name=qwen-code') - 1]).toBe('-f');
+
+    // All threads arrive before the filter, comment bodies included: one
+    // busy PR's pages measured 790 KB, close to spawnSync's 1 MB default.
+    const large = reviewPages();
+    large[0].data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes[0].body =
+      'x'.repeat(1536 * 1024);
+    writeFileSync(env.FAKE_GH_REVIEW, JSON.stringify(large));
+    const busy = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(busy.status).toBe(0);
+    expect(
+      JSON.parse(readFileSync(reviewPath, 'utf8')).threads[0].comments[0].body,
+    ).toHaveLength(1536 * 1024);
+
+    rmSync(env.FAKE_GH_REVIEW);
+    const failed = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(failed.status).toBe(0);
+    expect(existsSync(reviewPath)).toBe(false);
+    expect(failed.stdout).toContain(
+      'review     not written — gh api graphql failed: HTTP 502: Bad Gateway; the round lists review findings as not covered',
+    );
   });
 
   it('keeps an earlier report bound to its prepared head', async () => {

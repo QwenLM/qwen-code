@@ -886,6 +886,21 @@ describe('local container recipe pins', () => {
     );
   });
 
+  it('copies the review snapshot only when prepare wrote one', () => {
+    // Absent means the fetch failed; an earlier round's copy left in the
+    // cache would read as this round's review state.
+    expect(skill).toContain(
+      'rm -f ~/.cache/qwen-verify/pr<n>/review-threads.json',
+    );
+    expect(skill).toContain(
+      'if [ -f <pr-clone>/tmp/verify-context/pr<n>-review-threads.json ]; then',
+    );
+    // The container sees only the name the skill tells the round to read.
+    expect(skill).toContain(
+      'cp <pr-clone>/tmp/verify-context/pr<n>-review-threads.json ~/.cache/qwen-verify/pr<n>/review-threads.json',
+    );
+  });
+
   it('keeps the proxy JSON parseable and the base extraction fresh', () => {
     // One stderr line folded into proxy.json breaks every parse of it.
     expect(skill).toContain(

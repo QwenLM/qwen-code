@@ -45,6 +45,10 @@ import {
   VERDICTS,
   checkArtifacts,
 } from '../../scripts/verify-pr-check.mjs';
+import {
+  REVIEW_STATE_QUERY,
+  reviewState,
+} from '../../scripts/verify-pr-prepare.mjs';
 
 const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 const hasGnuRealpath =
@@ -1689,6 +1693,339 @@ describe('qwen-triage verify workflow', () => {
     const mk = verifyJob.indexOf('mkdir -p "$RUNNER_TEMP/verify-results"');
     expect(rm).toBeGreaterThan(-1);
     expect(mk).toBeGreaterThan(rm);
+  });
+
+  // The token-free agent learns the PR's review state only from this file,
+  // and the local preflight writes the same file with its own transform. One
+  // set of pages through both must give one answer, or a local round and a CI
+  // round read different review states for the same PR.
+  it('snapshots review threads in the shape the local preflight writes', () => {
+    const resolveStep = stepIn('verify', 'Resolve PR and snapshot metadata');
+    const snippet = resolveStep
+      .match(/\n( {10}if ! gh api graphql[\s\S]*?\n {10}fi)\n/)?.[1]
+      ?.replace(/^ {10}/gm, '');
+    expect(snippet).toBeTruthy();
+    // After the context directory is reset, or the file never survives to
+    // the agent; before the decision line, so only a run pays for it.
+    const at = resolveStep.indexOf(snippet.split('\n')[0]);
+    const reset = resolveStep.indexOf('rm -rf "$RUNNER_TEMP/verify-context"');
+    const made = resolveStep.indexOf('mkdir -p "$RUNNER_TEMP/verify-context"');
+    expect(reset).toBeGreaterThan(-1);
+    expect(made).toBeGreaterThan(reset);
+    expect(at).toBeGreaterThan(made);
+    expect(at).toBeLessThan(
+      resolveStep.lastIndexOf('echo "decision=run" >> "$GITHUB_OUTPUT"'),
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'verify-review-snapshot-'));
+    try {
+      writeFileSync(
+        join(dir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'printf "%s\\n" "$@" > "$GH_ARGS"',
+          '[ -n "${GH_FAIL:-}" ] && exit 1',
+          '[ -n "${GH_EMPTY:-}" ] && exit 0',
+          'cat "$GH_PAGES"',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const context = join(dir, 'verify-context');
+      const file = join(context, 'review-threads.json');
+      const run = (pages, env = {}) => {
+        rmSync(context, { recursive: true, force: true });
+        mkdirSync(context);
+        writeFileSync(join(dir, 'pages.json'), JSON.stringify(pages));
+        const proc = spawnSync(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-eo',
+            'pipefail',
+            '-c',
+            `set -euo pipefail\n${snippet}`,
+          ],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              RUNNER_TEMP: dir,
+              GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+              PR_NUMBER: '7999',
+              GH_ARGS: join(dir, 'args'),
+              GH_PAGES: join(dir, 'pages.json'),
+              ...env,
+            },
+          },
+        );
+        expect(proc.status, proc.stderr).toBe(0);
+        return {
+          out: `${proc.stdout}${proc.stderr}`,
+          args: readFileSync(join(dir, 'args'), 'utf8').split('\n'),
+          state: existsSync(file)
+            ? JSON.parse(readFileSync(file, 'utf8'))
+            : null,
+        };
+      };
+      const comment = (body, login = 'reviewer', review = null) => ({
+        createdAt: '2026-11-01T00:00:00Z',
+        url: `https://github.com/QwenLM/qwen-code/pull/7999#discussion_${body.length}`,
+        body,
+        author: login === null ? null : { login },
+        authorAssociation: 'MEMBER',
+        originalCommit: login === null ? null : { oid: 'c'.repeat(40) },
+        pullRequestReview: review === null ? null : { url: review },
+      });
+      const opinionated = {
+        nodes: [
+          {
+            state: 'CHANGES_REQUESTED',
+            submittedAt: '2026-11-01T01:00:00Z',
+            url: 'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-1',
+            body: 'Blocking: the retry drops the cursor.',
+            author: { login: 'maintainer' },
+            authorAssociation: 'COLLABORATOR',
+            commit: { oid: 'a'.repeat(40) },
+          },
+          {
+            state: 'APPROVED',
+            submittedAt: '2026-11-01T02:00:00Z',
+            url: 'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-2',
+            body: 'LGTM',
+            author: { login: 'colleague' },
+            authorAssociation: 'MEMBER',
+            commit: { oid: 'b'.repeat(40) },
+          },
+          {
+            state: 'CHANGES_REQUESTED',
+            submittedAt: '2026-11-01T03:00:00Z',
+            url: 'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-3',
+            body: '',
+            author: null,
+            authorAssociation: 'NONE',
+            commit: null,
+          },
+        ],
+      };
+      // Two pages, as --paginate --slurp returns them: the threads continue,
+      // and the change requests repeat with every page.
+      const pages = [
+        {
+          data: {
+            repository: {
+              pullRequest: {
+                latestOpinionatedReviews: opinionated,
+                reviewThreads: {
+                  pageInfo: { hasNextPage: true, endCursor: 'c1' },
+                  nodes: [
+                    {
+                      isResolved: false,
+                      isOutdated: false,
+                      path: 'packages/core/src/a.ts',
+                      line: 12,
+                      originalLine: 10,
+                      comments: {
+                        totalCount: 2,
+                        nodes: [
+                          comment(
+                            '**[Critical]** R1-1: the cursor is lost',
+                            'maintainer',
+                            'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-1',
+                          ),
+                          comment('Fixed in abc1234.', 'author'),
+                        ],
+                      },
+                    },
+                    {
+                      isResolved: true,
+                      isOutdated: false,
+                      path: 'packages/core/src/b.ts',
+                      line: null,
+                      originalLine: 7,
+                      comments: {
+                        totalCount: 1,
+                        nodes: [comment('**[Blocker]** R1-2: unbounded')],
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+        {
+          data: {
+            repository: {
+              pullRequest: {
+                latestOpinionatedReviews: opinionated,
+                reviewThreads: {
+                  pageInfo: { hasNextPage: false, endCursor: 'c2' },
+                  nodes: [
+                    {
+                      isResolved: false,
+                      isOutdated: true,
+                      path: 'docs/c.md',
+                      line: null,
+                      originalLine: null,
+                      // Longer than the 50 the query asks for.
+                      comments: {
+                        totalCount: 51,
+                        nodes: [comment('Typo?', null)],
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      ];
+
+      const ok = run(pages);
+      expect(ok.state).toEqual(reviewState(pages));
+      // `line` and `originalLine` stay apart: an outdated thread's line in
+      // the current diff and its line in the comment's commit differ.
+      expect(
+        ok.state.threads.map((t) => [
+          t.resolved,
+          t.outdated,
+          t.path,
+          t.line,
+          t.originalLine,
+          t.commentCount,
+        ]),
+      ).toEqual([
+        [false, false, 'packages/core/src/a.ts', 12, 10, 2],
+        [true, false, 'packages/core/src/b.ts', null, 7, 1],
+        [false, true, 'docs/c.md', null, null, 51],
+      ]);
+      // An inline comment names the review it belongs to, so a change
+      // request with an empty body still has its defects.
+      expect(
+        ok.state.threads[0].comments.map((c) => [c.author, c.review, c.commit]),
+      ).toEqual([
+        [
+          'maintainer',
+          'https://github.com/QwenLM/qwen-code/pull/7999#pullrequestreview-1',
+          'c'.repeat(40),
+        ],
+        ['author', null, 'c'.repeat(40)],
+      ]);
+      expect(ok.state.threads[2].comments[0].author).toBeNull();
+      expect(ok.state.changeRequests.map((r) => [r.author, r.commit])).toEqual([
+        ['maintainer', 'a'.repeat(40)],
+        [null, null],
+      ]);
+      // The query the local preflight sends, against this PR of this repo.
+      expect(ok.args).toEqual(
+        expect.arrayContaining([
+          'graphql',
+          '--paginate',
+          '--slurp',
+          'owner=QwenLM',
+          'name=qwen-code',
+          'number=7999',
+          `query=${REVIEW_STATE_QUERY}`,
+        ]),
+      );
+      expect(ok.args[ok.args.indexOf('number=7999') - 1]).toBe('-F');
+      expect(ok.args[ok.args.indexOf('owner=QwenLM') - 1]).toBe('-f');
+
+      // A failed fetch, or pages that are not this query's answer, leave no
+      // file: the skill reads its absence as "unknown", and a partial file
+      // would read as "nothing open".
+      for (const [input, env] of [
+        [pages, { GH_FAIL: '1' }],
+        // gh exits 0 with nothing on stdout, and jq then exits 0 too.
+        [pages, { GH_EMPTY: '1' }],
+        [[{ data: null }], {}],
+        [[], {}],
+      ]) {
+        const failed = run(input, env);
+        expect(failed.state).toBeNull();
+        expect(failed.out).toContain(
+          "Could not snapshot the PR's review threads",
+        );
+      }
+      expect(reviewState([{ data: null }])).toBeNull();
+      expect(reviewState([])).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The snapshot only helps if the round treats it as the skill says: an
+  // absent file is unknown, a resolved thread is a claim, and an open
+  // blocking finding nobody measured keeps the round from merge-ready.
+  it('tells the agent what the review snapshot means and what it rules out', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      'If that directory also holds `review-threads.json`',
+    );
+    // Absent is unknown: disclosed, and not a verdict of its own.
+    expect(flat).toContain(
+      'A missing file means the snapshot failed, not that nothing is open: it does not change the verdict by itself, but say so under _Not covered_ and in the verdict line',
+    );
+    // PR code the round runs can rewrite the directory.
+    expect(flat).toContain('Read it before you run any PR code');
+    // Every term the verdict turns on is computed from snapshot fields, so
+    // two rounds reading one snapshot reach one verdict.
+    expect(flat).toContain(
+      "A thread is **blocking** when its first comment is tagged Critical, Blocker, P0 or P1 and that comment's `association` is `OWNER`, `MEMBER` or `COLLABORATOR`",
+    );
+    // An author resolving a change request's thread does not close it:
+    // GitHub's review decision still counts the change request.
+    expect(flat).toContain(
+      "A blocking thread is **open** when it is unresolved, or when its first comment's `review` is a standing change request's `url`, resolved or not: resolving a thread is a claim, not a measurement",
+    );
+    // A body is prose: listed and counted, never parsed into the verdict.
+    expect(flat).toContain(
+      'It does not hold the verdict by itself, because a body carries no severity the round can read the same way twice; a blocker its body names with no thread of its own is counted with the blocking threads that are not open',
+    );
+    expect(flat).toContain(
+      'a finding the previous-finding table already carries keeps that row instead of a second one here',
+    );
+    expect(flat).toContain(
+      "`line` is the thread's line in the current diff, null when GitHub could not carry it forward, and `originalLine` its line in the first comment's `commit`",
+    );
+    expect(flat).toContain(
+      'Measure every open blocking thread at the verified head.',
+    );
+    // `findings` at fail 0 publishes ✅ "non-blocking findings", which an
+    // open blocker nobody measured is not.
+    expect(flat).toContain(
+      'One left `not measured` rules out `merge-ready`; with nothing failed, the verdict is `inconclusive`',
+    );
+    expect(flat).toContain(
+      'no new blocking finding, and no known open blocking review thread left unmeasured',
+    );
+    expect(flat).toContain(
+      'central claim, or an open blocking review thread, from being tested',
+    );
+    // A blocker that is not open, left unmeasured, is disclosed, not
+    // silently covered.
+    expect(flat).toContain(
+      'the verdict line says how many there are, so a `merge-ready` cannot read as having checked them',
+    );
+    expect(flat).toContain(
+      'the verdict line also gives the open blocking threads measured out of their total and how many of the others were left unmeasured',
+    );
+    // The plan the agent follows is the budget list, not the report contract.
+    expect(verifySkill).toMatch(/^5\. \*\*Open blocking review threads\*\*/m);
+    expect(flat).toContain(
+      'measure each at the verified head (report item 4 has the rule). One left unmeasured rules out `merge-ready`, so this is budget, not breadth. The blocking threads that are not open get what is left after this list, and are not out of scope',
+    );
+    // A VM boundary gets the file under the name the agent looks for.
+    expect(flat).toContain(
+      "with prepare's `pr<n>-review-threads.json`, when it wrote one, beside it as `review-threads.json`",
+    );
+    // Report items are cited by number elsewhere in the skill.
+    expect(flat).toContain('It feeds report item 4 below');
+    expect(verifySkill).toMatch(/^4\. \*\*Existing review findings\*\*/m);
+    expect(flat).toContain('report item 7 (_Not covered_)');
+    expect(verifySkill).toMatch(/^7\. \*\*Not covered\*\*/m);
+    expect(flat).toContain('Title, body, comments, review threads,');
   });
 
   // The lane trigger was unpinned: deleting the gate from the verify job's
