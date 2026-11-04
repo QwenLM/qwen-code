@@ -2524,8 +2524,9 @@ class ManagedSessionStoreHttpClient {
     // reads the grant without first waiting in ensureWriter, refusing
     // locally until the acquire answers. Only a lease that moved past the
     // lapsed one counts: a refused renewal leaves the lapsed lease in place,
-    // and a commit or head adoption copies it into a new grant, either of
-    // which a wall-clock step back could make look live.
+    // and a commit, a head adoption or a journal read copies it into a new
+    // grant; in either case a wall-clock step back could make the lapsed
+    // lease look live.
     if (
       expired !== undefined &&
       this.grant !== undefined &&
