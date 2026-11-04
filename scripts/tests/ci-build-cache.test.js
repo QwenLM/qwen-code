@@ -106,9 +106,11 @@ describe('ci-build-cache', () => {
 const scriptPath = join(import.meta.dirname, '..', 'ci-build-cache.mjs');
 
 function makeFixture() {
-  const repo = mkdtempSync(join(tmpdir(), 'ci-build-cache-fixture-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'ci-build-cache-fixture-'));
+  const repo = join(fixtureDir, 'repo');
   const shims = join(repo, '.shims');
-  const calls = join(repo, '.calls');
+  // Keep observations outside the tree that `pack` archives and `build` restores.
+  const calls = join(fixtureDir, '.calls');
   const workspacesJson = join(repo, '.workspaces.json');
 
   for (const name of ['a', 'b']) {
@@ -124,12 +126,10 @@ function makeFixture() {
   }
   mkdirSync(join(repo, 'node_modules/x'), { recursive: true });
   mkdirSync(shims, { recursive: true });
-  // `.calls` is ignored because the restage step in the changed-workspace
-  // case would otherwise stage it: a root-level file, it edits the global
-  // hash and makes every workspace look changed. `.cache/` is deliberately
-  // not ignored — CI's cache directory is not ignored either, and an ignored
-  // one lands in `builtPaths()` and gets tarred into itself.
-  writeFileSync(join(repo, '.gitignore'), 'dist/\nnode_modules/\n.calls\n');
+  // `.cache/` is deliberately not ignored — CI's cache directory is not
+  // ignored either, and an ignored one lands in `builtPaths()` and gets
+  // tarred into itself.
+  writeFileSync(join(repo, '.gitignore'), 'dist/\nnode_modules/\n');
   writeFileSync(join(repo, 'package.json'), '{"name":"root","private":true}\n');
   writeFileSync(join(repo, 'node_modules/x/index.js'), 'dep\n');
   writeFileSync(
@@ -179,7 +179,7 @@ function makeFixture() {
     env,
     calls,
     run,
-    cleanup: () => rmSync(repo, { recursive: true, force: true }),
+    cleanup: () => rmSync(fixtureDir, { recursive: true, force: true }),
   };
 }
 
