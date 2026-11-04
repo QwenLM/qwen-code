@@ -103,6 +103,7 @@ export class JavaManagedAgentHttpError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    readonly requestId?: string,
   ) {
     super(message);
     this.name = 'JavaManagedAgentHttpError';
@@ -340,6 +341,13 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ): Promise<JavaAgentTranscript> {
     return this.post('/transcript/query', request, signal);
+  }
+
+  getRecentTranscriptItems(
+    request: Schemas['WebShellExportRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellExportPage']> {
+    return this.post('/transcript/items/query', request, signal);
   }
 
   createSession(
@@ -1119,6 +1127,7 @@ async function toHttpError(
 ): Promise<JavaManagedAgentHttpError> {
   let code = `http_${response.status}`;
   let message = `Managed Agent request failed (${response.status})`;
+  let requestId = response.headers.get('x-request-id')?.trim() || undefined;
   try {
     const payload: unknown = await response.json();
     if (typeof payload === 'object' && payload !== null) {
@@ -1127,10 +1136,17 @@ async function toHttpError(
         const fields = error as Record<string, unknown>;
         if (typeof fields['code'] === 'string') code = fields['code'];
         if (typeof fields['message'] === 'string') message = fields['message'];
+        if (typeof fields['request_id'] === 'string')
+          requestId = fields['request_id'].trim() || undefined;
       }
     }
   } catch {
     // Preserve the stable HTTP fallback when the response is not JSON.
   }
-  return new JavaManagedAgentHttpError(response.status, code, message);
+  return new JavaManagedAgentHttpError(
+    response.status,
+    code,
+    message,
+    requestId,
+  );
 }

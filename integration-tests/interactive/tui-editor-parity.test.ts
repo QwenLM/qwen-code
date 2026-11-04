@@ -29,6 +29,7 @@ import {
 } from '../fake-openai-server.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
+import { createUntil } from './wait.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
@@ -52,13 +53,7 @@ const keys = {
   editor: '\x18',
 };
 
-async function until(check: () => boolean | Promise<boolean>, label: string) {
-  const deadline = Date.now() + 12_000;
-  while (!(await check())) {
-    if (Date.now() > deadline) throw new Error(label);
-    await sleep(100);
-  }
-}
+const until = createUntil(12_000);
 
 function lastUser(server: FakeOpenAIServer): string {
   const messages = server.requests.at(-1)?.body['messages'];
@@ -695,9 +690,7 @@ it('ctrl-c-clear-then-exit', () =>
         () => session.exitResult() !== undefined,
         'second Ctrl+C must exit',
       );
-      expect(session.exitResult()?.exitCode).toBe(
-        renderer === 'opentui' ? 130 : 0,
-      );
+      expect(session.exitResult()?.exitCode).toBe(0);
       expect(server.requests).toHaveLength(0);
     },
   ));
@@ -749,9 +742,7 @@ for (const key of ['c', 'd'] as const) {
           () => session.exitResult() !== undefined,
           'second exit key must exit',
         );
-        expect(session.exitResult()?.exitCode).toBe(
-          renderer === 'opentui' ? 130 : 0,
-        );
+        expect(session.exitResult()?.exitCode).toBe(0);
         expect(server.requests).toHaveLength(1);
       },
       100,
@@ -797,9 +788,7 @@ for (const key of ['c', 'd'] as const) {
           () => session.exitResult() !== undefined,
           'confirmation second key must exit',
         );
-        expect(session.exitResult()?.exitCode).toBe(
-          renderer === 'opentui' ? 130 : 0,
-        );
+        expect(session.exitResult()?.exitCode).toBe(0);
         expect(existsSync(sentinel)).toBe(false);
       },
       100,

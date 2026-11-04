@@ -39,14 +39,76 @@ const failureIssue = parse(
 );
 // `on:` parses as the boolean true in YAML 1.1.
 const triggers = ci[true] ?? ci['on'];
-const LANES = ['test_macos', 'test_windows'];
-const PUSH_JOBS = ['classify_pr', 'test', 'lint_and_static'];
+const LANES = ['test_macos_shards', 'test_windows'];
+const PUSH_JOBS = [
+  'classify_pr',
+  'test_build',
+  'test',
+  'test_ubuntu',
+  'lint_and_static',
+];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
 
+describe('complete macOS test groups', () => {
+  it('partitions both heavy suites and retains every remaining test group', () => {
+    const job = ci.jobs.test_macos_shards;
+    expect(job.strategy['fail-fast']).toBe(false);
+    expect(job.strategy.matrix.include).toEqual([
+      { group: 'cli', shard: '1/3' },
+      { group: 'cli', shard: '2/3' },
+      { group: 'cli', shard: '3/3' },
+      { group: 'core', shard: '1/2' },
+      { group: 'core', shard: '2/2' },
+      { group: 'rest', shard: '' },
+      { group: 'scripts', shard: '' },
+    ]);
+    const step = job.steps.find(
+      (candidate) => candidate.name === 'Run tests and generate reports',
+    );
+    expect(step.env.MACOS_TEST_GROUP).toBe('${{ matrix.group }}');
+    expect(step.env.MACOS_TEST_SHARD).toBe('${{ matrix.shard }}');
+    expect(step.run).toContain(
+      'node scripts/run-macos-ci-group.js "$MACOS_TEST_GROUP" "$MACOS_TEST_SHARD"',
+    );
+  });
+
+  it('keeps the original check name and rejects incomplete matrix results', () => {
+    const aggregate = ci.jobs.test_macos;
+    expect(aggregate.name).toBe('Test (macos-latest, Node 22.x)');
+    expect(aggregate.needs).toBe('test_macos_shards');
+    expect(aggregate.if).toContain('always()');
+    const [step] = aggregate.steps;
+    expect(step.env.MACOS_RESULT).toBe('${{ needs.test_macos_shards.result }}');
+    expect(step.run).toBe('test "$MACOS_RESULT" = success');
+    for (const result of ['failure', 'cancelled', 'skipped', '']) {
+      expect(() =>
+        execFileSync('bash', ['-c', step.run], {
+          env: { ...process.env, MACOS_RESULT: result },
+          stdio: 'pipe',
+        }),
+      ).toThrow();
+    }
+  });
+
+  it('keeps the aggregate gate on exactly the events the shards run on', () => {
+    // The aggregate only reads `needs.test_macos_shards.result`, so a gate
+    // that drifts from the shards' makes the preserved check name report
+    // `skipped` while the seven legs run and fail.
+    for (const event of ['merge_group', 'schedule', 'workflow_dispatch']) {
+      expect(gateRunsOn(condOf('test_macos'), event)).toBe(
+        gateRunsOn(condOf('test_macos_shards'), event),
+      );
+    }
+    expect(gateRunsOn(condOf('test_macos'), 'pull_request')).toBe(false);
+  });
+});
+
 // The extended ceilings below, except the test lane's, are scoped to the
-// self-hosted pool: `runs-on` falls back to ubuntu-latest for fork PRs from
-// untrusted authors and when MAINTAINER_ECS_RUNNER_DISABLED=true, so those
-// hosted paths keep the pre-contention ceiling. The ARM64 fleet renders
+// self-hosted pool: `runs-on` falls back to ubuntu-latest when
+// MAINTAINER_ECS_RUNNER_DISABLED=true (and, for the association-gated lanes,
+// for fork PRs from untrusted authors — lint_and_static reads lint_runner,
+// which routes every PR to the pool), so those hosted paths keep the
+// pre-contention ceiling. The ARM64 fleet renders
 // `["self-hosted", "linux", "arm64"]` — no `ecs-qwen` label — so the scope
 // cannot key on the x64 fleet's name. Evaluate the real timeout expression for
 // each routing instead of pinning a bare number -- the same
@@ -57,15 +119,42 @@ const condOf = (job) => String(ci.jobs[job].if ?? '');
 const ECS_RUNNER = '["self-hosted", "linux", "x64", "ecs-qwen"]';
 const ARM_RUNNER = '["self-hosted", "linux", "arm64"]';
 const HOSTED_RUNNER = '["ubuntu-latest"]';
-const timeoutMinutesOn = (job, ubuntuRunner) => {
+// The classifier output a job's own `runs-on` reads. Deriving it is what makes
+// a ceiling pointed at the OTHER output red: only this name is substituted, so
+// `lint_runner` left inside a gate that runs on `ubuntu_runner` survives the
+// substitution and trips the unmodelled-term throw below.
+const runnerOutputOf = (job) => {
+  const names = [
+    ...new Set(
+      [
+        ...String(ci.jobs[job]['runs-on']).matchAll(
+          /needs\.classify_pr\.outputs\.(\w+)/g,
+        ),
+      ].map((match) => match[1]),
+    ),
+  ];
+  if (names.length !== 1) {
+    throw new Error(
+      `${job} runs-on names ${names.length} classifier outputs: ${names}`,
+    );
+  }
+  return names[0];
+};
+const timeoutMinutesOn = (job, runner) => {
   // The same `|| '["ubuntu-latest"]'` default the runs-on expression carries:
-  // a missing output (classify_pr skipped) is the hosted routing.
-  const effective = ubuntuRunner || HOSTED_RUNNER;
+  // a missing output (classify_pr skipped) is the hosted routing. The caller
+  // passes the value of the output the job itself reads — ubuntu_runner for
+  // the association-gated lanes, lint_runner for lint_and_static.
+  const effective = runner || HOSTED_RUNNER;
+  const output = runnerOutputOf(job);
   let expr = String(ci.jobs[job]['timeout-minutes'])
     .replace(/^\$\{\{\s*/, '')
     .replace(/\s*\}\}$/, '')
     .replace(
-      /contains\(needs\.classify_pr\.outputs\.ubuntu_runner \|\| '\["ubuntu-latest"\]', 'self-hosted'\)/g,
+      new RegExp(
+        `contains\\(needs\\.classify_pr\\.outputs\\.${output} \\|\\| '\\["ubuntu-latest"\\]', 'self-hosted'\\)`,
+        'g',
+      ),
       String(effective.includes('self-hosted')),
     )
     .replace(/fromJSON\(/g, '(');
@@ -133,9 +222,12 @@ describe('raw JUnit report retention', () => {
     (event, repo, name) => {
       expect(upload.if).toContain('always()');
       expect(evaluate(upload.if, event, repo, 'false', 'full')).toBe(true);
-      expect(evaluate(upload.with.name, event, repo, 'false', 'full')).toBe(
-        name,
-      );
+      // Each shard uploads under its own name: upload-artifact v4+ rejects
+      // a duplicate within the run.
+      const shardSuffix = '-shard-${{ matrix.shard }}';
+      expect(upload.with.name.endsWith(shardSuffix)).toBe(true);
+      const prefix = upload.with.name.slice(0, -shardSuffix.length);
+      expect(evaluate(prefix, event, repo, 'false', 'full')).toBe(name);
       expect(evaluate(upload.if, event, repo, 'true', 'full')).toBe(false);
       expect(evaluate(upload.if, event, repo, 'false', 'web-shell-only')).toBe(
         false,
@@ -187,7 +279,8 @@ describe('raw JUnit report retention', () => {
 // but picks its own architecture, so its `runs-on` cannot be compared with
 // another lane's. Evaluate the real expression the way
 // `.github/scripts/ci-runner-routing.test.mjs` does.
-const runnerOn = (job, ubuntuRunner) => {
+const runnerOn = (job, runner) => {
+  const output = runnerOutputOf(job);
   const expression = String(ci.jobs[job]['runs-on'])
     .replace(/^\$\{\{\s*/, '')
     .replace(/\s*\}\}$/, '');
@@ -197,18 +290,146 @@ const runnerOn = (job, ubuntuRunner) => {
     'contains',
     `return (${expression});`,
   )(
-    { classify_pr: { outputs: { ubuntu_runner: ubuntuRunner } } },
+    { classify_pr: { outputs: { [output]: runner } } },
     JSON.parse,
     (labels, label) => labels.includes(label),
   );
 };
 
 it('gives the shared Linux test lane one ceiling on both pools', () => {
-  // The full suite outgrew 60 minutes on hosted runners too: on 2026-10-17,
+  // The unsharded suite outgrew 60 minutes on hosted runners: on 2026-10-17,
   // 17 of the 30 hosted runs that ended on their own were cancelled at 60.
-  expect(timeoutMinutesOn('test', ECS_RUNNER)).toBe(120);
-  expect(timeoutMinutesOn('test', HOSTED_RUNNER)).toBe(120);
-  expect(timeoutMinutesOn('test', '')).toBe(120);
+  // Each shard runs an eighth of it, beside one build of the tree.
+  for (const runner of [ECS_RUNNER, HOSTED_RUNNER, '']) {
+    expect(timeoutMinutesOn('test_build', runner)).toBe(45);
+    expect(timeoutMinutesOn('test', runner)).toBe(60);
+  }
+  expect(ci.jobs.test.strategy['fail-fast']).toBe(false);
+  expect(ci.jobs.test.strategy.matrix.shard).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+});
+
+it('skips every build-consuming shard step when test_build failed', () => {
+  // `!cancelled()` is true when a needed job fails, so without this term a
+  // failed build still starts all eight shards: each pays a full install and
+  // then dies at the missing artifact, and every shard reports artifact
+  // plumbing as its failing step instead of the build that broke. The steps
+  // are gated, not the job or the matrix: `test_ubuntu` compares
+  // `needs.test.result` to `success`, so a shard must still conclude success
+  // when the build failed and let the aggregate report the failure.
+  const steps = new Map(
+    (ci.jobs.test.steps ?? []).map((step) => [step.name, step]),
+  );
+  for (const name of [
+    'Install dependencies',
+    'Download the built tree',
+    'Unpack the built tree',
+    'Run tests and generate reports',
+    'Package and scan Chrome extension artifacts',
+  ]) {
+    expect(String(steps.get(name)?.if ?? ''), name).toContain(
+      "needs.test_build.result == 'success'",
+    );
+  }
+});
+
+it('keeps every blocking test_build step under the job ceiling', () => {
+  // The job cap cancels the job, and a cancelled job skips the failure-gated
+  // collectors at the end — the file they upload is the reason this job has
+  // them. A step cap fails only that step, so the collectors still run. Each
+  // cap therefore has to fire before the job's.
+  const jobCap = Number(ci.jobs.test_build['timeout-minutes']);
+  const steps = new Map(
+    (ci.jobs.test_build.steps ?? []).map((step) => [step.name, step]),
+  );
+  for (const name of [
+    'Install dependencies',
+    'Build',
+    'Pack the build cache',
+    'Archive the built tree',
+  ]) {
+    const minutes = steps.get(name)?.['timeout-minutes'];
+    expect(typeof minutes, `${name} has no step timeout`).toBe('number');
+    expect(minutes, `${name} cannot outlast the job`).toBeLessThan(jobCap);
+  }
+});
+
+it('keeps every shard step cap under the job ceiling', () => {
+  // Same reason as the build job: the job cap cancels the job, and a cancelled
+  // job skips the failure-gated disk-pressure collector at the end. The caps
+  // are pinned one by one rather than summed — they are alternatives in
+  // practice, since a step only runs when the previous one left work to do,
+  // and install plus the test step already add up past the ceiling by design.
+  // The job cap therefore stays the outer backstop, not the sum of the parts.
+  const jobCap = Number(ci.jobs.test['timeout-minutes']);
+  const steps = new Map(
+    (ci.jobs.test.steps ?? []).map((step) => [step.name, step]),
+  );
+  for (const name of [
+    'Install dependencies',
+    'Download the built tree',
+    'Retry downloading the built tree',
+    'Run tests and generate reports',
+  ]) {
+    const minutes = steps.get(name)?.['timeout-minutes'];
+    expect(typeof minutes, `${name} has no step timeout`).toBe('number');
+    expect(minutes, `${name} cannot outlast the job`).toBeLessThan(jobCap);
+  }
+});
+
+it('reports the required Linux check only when the build and every shard pass', () => {
+  const gate = ci.jobs.test_ubuntu;
+  expect(gate.name).toBe('Test (ubuntu-latest, Node 22.x)');
+  expect(gate.needs).toEqual(['classify_pr', 'test_build', 'test']);
+  // On the shards' runners, not a hosted one that can queue it for minutes.
+  expect(gate['runs-on']).toBe(ci.jobs.test['runs-on']);
+  expect(condOf('test_ubuntu')).toBe(condOf('test'));
+  expect(gate.steps[0].run).toBe(
+    'test "$BUILD_RESULT" = success && test "$SHARDS_RESULT" = success',
+  );
+  // The shard count in the step's --shard has to match the matrix.
+  const run = ci.jobs.test.steps.find(
+    (step) => step.name === 'Run tests and generate reports',
+  );
+  expect(run.env.UNIT_TEST_SHARD).toBe(
+    `\${{ matrix.shard }}/${ci.jobs.test.strategy.matrix.shard.length}`,
+  );
+});
+
+it('pins the build-to-shard artifact handoff on both ends', () => {
+  const built = new Map(
+    (ci.jobs.test_build.steps ?? []).map((step) => [step.name, step]),
+  );
+  const shard = new Map(
+    (ci.jobs.test.steps ?? []).map((step) => [step.name, step]),
+  );
+
+  // The shards install with QWEN_SKIP_PREPARE and never build packages/*/dist
+  // themselves, so the archive must define the tree with the same path list
+  // `pack` uses — a local copy that drifts ships a tree nothing tested.
+  const archive = built.get('Archive the built tree').run;
+  expect(archive).toContain('node scripts/ci-build-cache.mjs paths');
+  expect(archive).not.toContain('git ls-files');
+
+  // Four coupled literals tie the producer to the consumers. Renaming any one
+  // fails all eight shards at unpack after a full build, on the required
+  // check, so the name has to be pinned in one place.
+  const name = built.get('Upload the built tree').with.name;
+  expect(name).toBeTruthy();
+  expect(shard.get('Download the built tree').with.name).toBe(name);
+  expect(shard.get('Retry downloading the built tree').with.name).toBe(name);
+  // Both attempts have to outlast the slow tail, not the median: eight shards
+  // fetch this same artifact at once, the slowest completed one on main took
+  // just under five minutes, and one exceeded the old five-minute cap on two
+  // runs in a row, skipping the unpack entirely.
+  for (const step of [
+    'Download the built tree',
+    'Retry downloading the built tree',
+  ]) {
+    expect(shard.get(step)?.['timeout-minutes'], step).toBe(15);
+  }
+  expect(shard.get('Unpack the built tree').run).toContain(
+    `\${RUNNER_TEMP}/${name}/${name}.tgz`,
+  );
 });
 
 it('keeps the no-AK gate above its dependency-install budget on ECS', () => {
@@ -258,7 +479,29 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
   const smoke = ci.jobs.web_shell_e2e_smoke.steps.find(
     (step) => step.name === 'Run web-shell browser smoke',
   );
-  expect(smoke.run).toMatch(/ -- --workers=2$/);
+  // Each of the four shards runs a quarter of the smoke at the hosted
+  // worker count; the transcript gate runs once, on the first shard.
+  expect(smoke.run).toMatch(
+    / -- --shard=\$\{\{ matrix\.shard \}\}\/4 --workers=2$/,
+  );
+  expect(ci.jobs.web_shell_e2e_smoke.strategy.matrix.shard).toEqual([
+    1, 2, 3, 4,
+  ]);
+  expect(ci.jobs.web_shell_e2e_smoke.strategy['fail-fast']).toBe(false);
+  const result = ci.jobs.web_shell_e2e_smoke_result;
+  expect(result.name).toBe('web-shell E2E Smoke (ubuntu-latest, Node 22.x)');
+  expect(result.needs).toEqual(['classify_pr', 'web_shell_e2e_smoke']);
+  expect(result['runs-on']).toBe(ci.jobs.web_shell_e2e_smoke['runs-on']);
+  expect(condOf('web_shell_e2e_smoke_result')).toBe(
+    condOf('web_shell_e2e_smoke'),
+  );
+  expect(result.steps[0].run).toBe('test "$SMOKE_RESULT" = success');
+  expect(smoke.env.TMPDIR).toBe('${{ runner.temp }}');
+  const transcript = ci.jobs.web_shell_e2e_smoke.steps.find(
+    (step) => step.name === 'Run transcript document browser gate',
+  );
+  expect(transcript.env.TMPDIR).toBe('${{ runner.temp }}');
+  expect(transcript.if).toBe('${{ matrix.shard == 1 }}');
   // Slow hosted browser installs took over 23 min, so reserve time in the
   // 60-minute job for transcript/smoke tests and artifact upload, while the
   // install step itself stays bounded.
@@ -452,7 +695,7 @@ describe('platform lanes — triggers', () => {
     // therefore either exclude `schedule` outright or gate on an event
     // allowlist that cannot contain it — otherwise the nightly quietly
     // becomes a full CI run every day.
-    assertEventReachesOnly('schedule', LANES);
+    assertEventReachesOnly('schedule', [...LANES, 'test_macos']);
   });
 });
 
@@ -499,18 +742,19 @@ describe('post-merge push lane', () => {
     expect(condOf('lint_and_static')).toBe(condOf('test'));
   });
 
-  it('routes lint_and_static through the classify_pr fork-trust output', () => {
+  it('routes lint_and_static through the classify_pr lint output', () => {
     // runs-on is where the contributor code this describe's other pins talk
-    // about actually executes. classify_pr's pick_runner is the fork-trust
-    // boundary — untrusted fork PRs stay on hosted runners — and a literal
-    // pool label array here would bypass that indirection whole (and desync
-    // from timeout-minutes, which reads the same output). Whole-expression
-    // match, as no-ak-integration-ci does for test_windows.
+    // about actually executes. classify_pr's pick_runner publishes TWO
+    // routings: ubuntu_runner keeps the fork-trust boundary for test and the
+    // integration lanes, while lint_runner routes every pull request —
+    // untrusted forks included — to the fleet (maintainer decision
+    // 2026-10-31, shared-pool code-execution risk accepted). A literal pool
+    // label array here would bypass the classifier indirection whole (and
+    // desync from timeout-minutes, which reads the same output), and reading
+    // ubuntu_runner would silently restore the hosted fork lane. Whole-
+    // expression match, as no-ak-integration-ci does for test_windows.
     expect(String(ci.jobs.lint_and_static['runs-on'])).toBe(
-      String(ci.jobs.test['runs-on']),
-    );
-    expect(String(ci.jobs.lint_and_static['runs-on'])).toBe(
-      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+      '${{ fromJSON(needs.classify_pr.outputs.lint_runner || \'["ubuntu-latest"]\') }}',
     );
     // The needs edge is what makes every needs.classify_pr.outputs.* this
     // describe relies on non-empty at runtime. Drop it and the lane silently
@@ -522,6 +766,18 @@ describe('post-merge push lane', () => {
       [].concat(ci.jobs.lint_and_static.needs ?? []),
       'lint_and_static must consume the classifier',
     ).toContain('classify_pr');
+  });
+
+  it('keeps test on the association-gated output', () => {
+    // Nothing else reads test's runs-on: switching it to lint_runner would
+    // hand every untrusted fork the pool while the timeout pins above stayed
+    // green — timeoutMinutesOn derives each lane's output from its own
+    // runs-on, so it cannot catch a lane pointed at the wrong output. Pin the
+    // expression, not an equality with lint_and_static — the two are meant
+    // to differ.
+    expect(String(ci.jobs.test['runs-on'])).toBe(
+      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+    );
   });
 
   it('lint_and_static keeps the minimal token its required-check role needs', () => {
@@ -571,12 +827,30 @@ describe('post-merge push lane', () => {
       new Map(
         (ci.jobs[job].steps ?? []).map((s) => {
           const { name: _artifactName, ...restWith } = s.with ?? {};
-          if (job === 'lint_and_static' && s.name === 'Install dependencies') {
-            expect(s.env).toEqual({
-              QWEN_SKIP_PREPARE: '1',
-              QWEN_SKIP_NOTICE_GENERATION: '1',
-            });
-            const { env: _installEnv, ...install } = s;
+          // Both install without the prepare build: lint needs none, and
+          // the test shards unpack the one test_build made. Their `if`s now
+          // differ on purpose — a shard's install must not run when the
+          // build failed, while lint has no such dependency — so it is
+          // stripped here and each side is pinned explicitly below.
+          if (job !== 'test_build' && s.name === 'Install dependencies') {
+            if (job === 'test') {
+              expect(s.env).toEqual({
+                QWEN_SKIP_PREPARE: '1',
+                QWEN_SKIP_NOTICE_GENERATION: '1',
+                // The shards' test step overrides HOME, which would hide the
+                // corepack cache install warms here; pin COREPACK_HOME to a
+                // per-run path so the warmup hits it. lint_and_static routes
+                // HOME and COREPACK_HOME together via GITHUB_ENV, so its
+                // install needs no step-level override.
+                COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack',
+              });
+            } else {
+              expect(s.env).toEqual({
+                QWEN_SKIP_PREPARE: '1',
+                QWEN_SKIP_NOTICE_GENERATION: '1',
+              });
+            }
+            const { env: _installEnv, if: _installIf, ...install } = s;
             return [
               s.name,
               JSON.stringify(canon({ ...install, with: restWith })),
@@ -587,6 +861,56 @@ describe('post-merge push lane', () => {
       );
     const t = byName('test');
     const l = byName('lint_and_static');
+    // test_build carries the test shards' whole prelude, up to the install.
+    const b = byName('test_build');
+    const buildShared = [...b.keys()].filter((n) => t.has(n));
+    // The number is the real intersection, not a floor to drift above: with
+    // 15 written here while the intersection is 16, renaming one shared step
+    // in `test` alone drops it back to 15, the loop stops comparing it, and
+    // `test_build`'s copy can change freely. Raise it with the membership.
+    expect(buildShared.length).toBeGreaterThanOrEqual(16);
+    for (const n of buildShared) {
+      if (n === 'Install dependencies') continue;
+      expect(b.get(n), `step "${n}" drifted between test_build and test`).toBe(
+        t.get(n),
+      );
+    }
+    // The one step pair the loop above skips is the only body duplicated
+    // verbatim between the two jobs: the sampler, the kill trap and the
+    // install command must stay identical, or the shards install differently
+    // from how the build installed. Only `env` and `if` may differ, and each
+    // difference is stated below instead of hidden by the skip.
+    const install = (job) =>
+      (ci.jobs[job].steps ?? []).find(
+        (candidate) => candidate.name === 'Install dependencies',
+      );
+    const withoutVariants = (job) => {
+      const { env: _env, if: _if, ...rest } = install(job);
+      return JSON.stringify(canon(rest));
+    };
+    expect(
+      withoutVariants('test_build'),
+      'Install dependencies drifted between test_build and test',
+    ).toBe(withoutVariants('test'));
+    expect(install('test_build').env).toEqual({ QWEN_SKIP_PREPARE: '1' });
+    expect(install('test').env).toEqual({
+      QWEN_SKIP_PREPARE: '1',
+      QWEN_SKIP_NOTICE_GENERATION: '1',
+      // The test step's HOME override would hide the corepack cache install
+      // warms here; pin COREPACK_HOME to a per-run path so the warmup hits it.
+      COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack',
+    });
+    const namesIn = (job) => (ci.jobs[job].steps ?? []).map((x) => x.name);
+    // Values alone are order-blind, and order is load-bearing here: `steps`
+    // exposes only steps that already ran, and a missing property reads as
+    // ''. Moving `Use trusted CI profile` below its consumers changes no
+    // serialized value while every `ci_profile == 'full'` gate reads '' and
+    // the lane completes green having built and uploaded nothing.
+    const buildSharedSet = new Set(buildShared);
+    expect(
+      namesIn('test_build').filter((n) => t.has(n)),
+      'shared prelude reordered between test_build and test',
+    ).toEqual(namesIn('test').filter((n) => buildSharedSet.has(n)));
     // The serializer is the guard's eyes: both sides of every comparison below
     // flow through it, so a regression that drops nested fields compares `{}`
     // to `{}` and the drift loop reports green — the exact array-replacer blind
@@ -607,13 +931,20 @@ describe('post-merge push lane', () => {
         t.get(n),
       );
     }
+    // The exemption above is only for the field that must differ: the shard
+    // install carries the build guard, and the lint install must not.
+    expect(String(install('test')?.if ?? '')).toContain(
+      "needs.test_build.result == 'success'",
+    );
+    expect(String(install('lint_and_static')?.if ?? '')).not.toContain(
+      'needs.test_build',
+    );
     // Name-keyed maps are order-blind, and order is load-bearing here: the
     // `steps` context only exposes steps that have already run, and a
     // nonexistent property reads as '' — so if `Use trusted CI profile`
     // (id: ci_profile) ever lands below its consumers, every
     // `ci_profile == 'full'` gate evaluates '' == 'full' and the lane
     // completes green having executed nothing.
-    const namesIn = (job) => (ci.jobs[job].steps ?? []).map((x) => x.name);
     const sharedSet = new Set(shared);
     expect(
       namesIn('lint_and_static').filter((n) => sharedSet.has(n)),
@@ -1197,6 +1528,32 @@ describe('GitHub helper tests', () => {
         expect(invocation, step.name).toContain('--test-concurrency=1');
       }
     }
+  });
+
+  it('routes the battery tmpdir off the host /tmp tmpfs', () => {
+    // #15965: e2e-build.test.mjs mkdtemps thousands of chunk files via
+    // os.tmpdir(); on the ECS pool that defaulted to the shared /tmp tmpfs,
+    // whose ~1M inode quota filled up and failed the lane with ENOSPC while
+    // 202G of capacity stayed free. RUNNER_TEMP sits on the roomy data disk,
+    // same routing the unit lanes already use (#10035).
+    const step = (ci.jobs.lint_and_static.steps ?? []).find(
+      (candidate) => candidate.name === 'Run .github/scripts helper tests',
+    );
+    expect(step, 'helper-tests step missing').toBeDefined();
+    // Comments stripped: the rationale above the export names it too, so a pin
+    // satisfied by prose would stay green with the routing commented out.
+    const run = String(step.run)
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+    expect(run).toContain('export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"');
+    expect(run.indexOf('export TMPDIR')).toBeLessThan(
+      run.indexOf('node --test'),
+    );
+    // The routed dir is private to the run and reaped on exit: RUNNER_TEMP
+    // itself is shared with every other job on the host.
+    expect(run).toContain('mktemp -d "${TMPDIR}/helper-tests-XXXXXX"');
+    expect(run).toContain('trap \'rm -rf "$HELPER_TMPDIR"\' EXIT');
   });
 
   it('retries the full-profile battery once against pool contention', () => {

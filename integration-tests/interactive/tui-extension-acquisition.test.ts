@@ -21,20 +21,14 @@ import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import { startFakeOpenAIServer } from '../fake-openai-server.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
 import { InteractiveSession } from './interactive-session.js';
+import { createUntil } from './wait.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const renderer = pickE2eRenderer();
 const runtime = resolveE2eCliCommand(renderer);
 const json = (file: string, value: unknown) =>
   writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
-const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
-async function until(check: () => boolean | Promise<boolean>, reason: string) {
-  const deadline = Date.now() + 15_000;
-  while (!(await check())) {
-    if (Date.now() > deadline) throw new Error(reason);
-    await sleep(100);
-  }
-}
+const until = createUntil(15_000);
 type Policy = {
   name: string;
   defaultActivation: string;

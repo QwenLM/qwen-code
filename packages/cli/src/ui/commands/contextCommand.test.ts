@@ -20,9 +20,13 @@ import {
   resolveInteractionMode,
   ToolNames,
   resolveSlimmingConfig,
+  Storage,
   wrapSystemReminder,
 } from '@qwen-code/qwen-code-core';
 import { AUTO_MEMORY_SNAPSHOT_METADATA } from '@qwen-code/qwen-code-core/memory/request-context.js';
+import { ToolRegistry } from '@qwen-code/qwen-code-core/tools/tool-registry.js';
+import { SearchMemoryTool } from '@qwen-code/qwen-code-core/tools/search-memory.js';
+import { ManageMemoryTool } from '@qwen-code/qwen-code-core/tools/manage-memory.js';
 import { t } from '../../i18n/index.js';
 import type { ContextCategoryBreakdown } from '../types.js';
 import {
@@ -83,6 +87,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
     isInteractive: vi.fn().mockReturnValue(true),
     getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+    storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
   } as unknown as Config;
 }
 
@@ -123,7 +128,115 @@ describe('collectContextData (contextCommand)', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
     } as unknown as Config;
+  });
+
+  it('exposes the absolute path of real memory files but not synthetic aggregates', async () => {
+    const config = {
+      ...makeMockConfig(200_000),
+      getWorkingDir: vi.fn().mockReturnValue('/workspace'),
+      storage: { getProjectRoot: vi.fn().mockReturnValue('/workspace') },
+      getUserMemory: vi
+        .fn()
+        .mockReturnValue(
+          '--- Context from: AGENTS.md ---\nproject rules\n--- End of Context from: AGENTS.md ---',
+        ),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue('auto memory catalog'),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    // Real instruction files carry an absolute path; the auto-memory
+    // aggregate is synthetic and must not.
+    const agents = data.instructionFiles?.find(
+      (file) => file.path === 'AGENTS.md',
+    );
+    expect(agents?.absolutePath).toBe(path.resolve('/workspace', 'AGENTS.md'));
+    const autoMemory = data.memoryFiles.find(
+      (file) => file.path === t('auto memory'),
+    );
+    expect(autoMemory).toBeDefined();
+    expect(autoMemory?.absolutePath).toBeUndefined();
+  });
+
+  it('gates openable paths on the admission root, not the live working dir', async () => {
+    // A session that cd'd into a subdirectory keeps its admission root. The
+    // gate must key on that root (the same one the client resolves the owner
+    // from), so the root's own AGENTS.md stays openable even though it is
+    // above the live cwd, while files outside the admission root (an
+    // unrelated directory, an installed extension) stay non-interactive.
+    const admissionRoot = '/workspace/repo';
+    const workingDir = '/workspace/repo/sub';
+    const globalMemory = path.join(Storage.getGlobalQwenDir(), 'QWEN.md');
+    const rootFile = path.join(admissionRoot, 'AGENTS.md');
+    const subdirFile = path.join(workingDir, 'AGENTS.md');
+    const outsideFile = '/tmp/outside/AGENTS.md';
+    const extensionFile = '/opt/extensions/foo/AGENTS.md';
+    const marker = (absolute: string) => {
+      const relative = path.relative(workingDir, absolute);
+      return `--- Context from: ${relative} ---\nbody\n--- End of Context from: ${relative} ---`;
+    };
+    const config = {
+      ...makeMockConfig(200_000),
+      getWorkingDir: vi.fn().mockReturnValue(workingDir),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(admissionRoot) },
+      getUserMemory: vi
+        .fn()
+        .mockReturnValue(
+          [globalMemory, rootFile, subdirFile, outsideFile, extensionFile]
+            .map(marker)
+            .join('\n\n'),
+        ),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+    const rows = data.instructionFiles ?? [];
+    expect(rows).toHaveLength(5);
+    const openPaths = rows
+      .map((file) => file.absolutePath)
+      .filter((value): value is string => value !== undefined);
+    expect(new Set(openPaths)).toEqual(
+      new Set([globalMemory, rootFile, subdirFile]),
+    );
+    // The admission root's own file is openable after cd into a subdirectory.
+    expect(
+      rows.find((file) => file.absolutePath === rootFile)?.absolutePath,
+    ).toBe(rootFile);
+    expect(rows.filter((file) => file.absolutePath === undefined)).toHaveLength(
+      2,
+    );
+  });
+
+  it('keeps the global memory row openable when QWEN_HOME has a trailing separator', async () => {
+    // getGlobalQwenDir() returns an absolute QWEN_HOME verbatim, so a trailing
+    // separator must not defeat the exact-directory match against dirname().
+    const previousHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = '/srv/qwen/';
+    try {
+      const workingDir = '/workspace';
+      const globalMemory = path.join('/srv/qwen/', 'QWEN.md');
+      const relative = path.relative(workingDir, globalMemory);
+      const config = {
+        ...makeMockConfig(200_000),
+        getWorkingDir: vi.fn().mockReturnValue(workingDir),
+        storage: { getProjectRoot: vi.fn().mockReturnValue(workingDir) },
+        getUserMemory: vi
+          .fn()
+          .mockReturnValue(
+            `--- Context from: ${relative} ---\nbody\n--- End of Context from: ${relative} ---`,
+          ),
+      } as unknown as Config;
+
+      const data = await collectContextData(config, true);
+      const globalRow = (data.instructionFiles ?? []).find(
+        (file) => file.absolutePath === globalMemory,
+      );
+      expect(globalRow?.absolutePath).toBe(globalMemory);
+    } finally {
+      if (previousHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousHome;
+    }
   });
 
   it('queries getFunctionDeclarations with no args, matching the actual API request', async () => {
@@ -138,6 +251,45 @@ describe('collectContextData (contextCommand)', () => {
     expect(getFunctionDeclarationsSpy).toHaveBeenCalledTimes(1);
     expect(getFunctionDeclarationsSpy).toHaveBeenCalledWith();
   });
+
+  it.each(['legacy', 'structured'] as const)(
+    'reports only declared memory tools in %s recall mode',
+    async (mode) => {
+      const config = Object.assign(makeMockConfig(), {
+        getMemoryRecallMode: () => mode,
+        getMcpTransportPool: () => undefined,
+        getDisabledTools: () => new Set<string>(),
+      });
+      const registry = new ToolRegistry(config);
+      vi.mocked(config.getToolRegistry).mockReturnValue(registry);
+      registry.registerTool(new SearchMemoryTool(config));
+      registry.registerTool(new ManageMemoryTool(config));
+
+      const data = await collectContextData(config, true);
+
+      expect(data.builtinTools.map((tool) => tool.name).sort()).toEqual(
+        mode === 'structured' ? ['manage_memory', 'search_memory'] : [],
+      );
+      if (mode === 'structured') {
+        expect(data.builtinTools.every((tool) => tool.tokens > 0)).toBe(true);
+      }
+    },
+  );
+
+  it.each(['propose_goal', 'blocked_tool'])(
+    'omits a registered %s absent from the declarations',
+    async (name) => {
+      const config = makeMockConfig();
+      vi.mocked(config.getToolRegistry().getAllTools).mockReturnValue([
+        { name, schema: { name, description: 'Hidden tool' } },
+      ] as ReturnType<ToolRegistry['getAllTools']>);
+
+      const data = await collectContextData(config, true);
+
+      expect(data.builtinTools).toEqual([]);
+      expect(data.mcpTools).toEqual([]);
+    },
+  );
 
   it('reads the per-session chat token count, not the process-global singleton (#5763)', async () => {
     // uiTelemetryService is a module-level singleton shared by every session
@@ -190,6 +342,18 @@ describe('collectContextData (contextCommand)', () => {
     expect(getLastCachedContentTokenCount).toHaveBeenCalled();
     expect(data.totalTokens).toBe(65_267);
     expect(data.breakdown.cachedTokens).toBe(1_000);
+  });
+
+  it('shows a million-token context window in millions', async () => {
+    const text = async (window: number) =>
+      formatContextUsageText(
+        await collectContextData(makeMockConfig(window), false),
+      );
+
+    expect(await text(2_000_000)).toContain('Context window: 2.0m tokens');
+    expect(await text(1_000_000)).toContain('Context window: 1.0m tokens');
+    expect(await text(999_950)).toContain('Context window: 1.0m tokens');
+    expect(await text(999_949)).toContain('Context window: 999.9k tokens');
   });
 
   it('keeps a zero per-session cached count instead of the foreign global (#12047)', async () => {
@@ -319,10 +483,8 @@ describe('collectContextData (contextCommand)', () => {
       tools?: unknown[];
       /**
        * What getFunctionDeclarations() returns. Defaults to the schemas of
-       * `tools`, because production declares the non-deferred tools it
-       * registers; a registry holding a tool it never declares is the state
-       * that drives `displayBuiltinTools` into its clamp, so a fixture that
-       * wants the clamp passes `declared` explicitly (#12235).
+       * `tools`. Pass `declared` explicitly for tools that are registered but
+       * hidden from the model, or declarations generated from their schemas.
        */
       declared?: unknown[];
       /** Overrides the default one-skill list. */
@@ -373,11 +535,102 @@ describe('collectContextData (contextCommand)', () => {
       } as unknown as Config;
     }
 
+    it.each([0, 1, 100_000])(
+      'separates instruction and auto-memory accounting at total %s',
+      async (total) => {
+        const config = makeChatConfig({ total, history: [] });
+        const instructions = 'Project instructions. '.repeat(100);
+        const policy = 'Automatic memory policy. '.repeat(50);
+        Object.assign(config, {
+          getUserMemory: () =>
+            '--- Context from: QWEN.md ---\n' +
+            instructions +
+            '\n--- End of Context from: QWEN.md ---',
+          getAutoMemoryPrompt: () => policy,
+          getAutoMemoryContext: () => '',
+        });
+        const data = await collectContextData(config, true);
+        expect(data.instructionFiles?.map((file) => file.path)).toEqual([
+          'QWEN.md',
+        ]);
+        expect(data.memoryFiles.map((file) => file.path)).toEqual([
+          t('auto memory'),
+        ]);
+        if (total !== 1) {
+          expect(data.breakdown.instructionFiles).toBe(
+            estimateContextTextTokens(instructions + '\n'),
+          );
+          expect(data.breakdown.memoryFiles).toBe(
+            estimateContextTextTokens(policy),
+          );
+        }
+        if (total) {
+          expect(sumRows(data.breakdown)).toBe(total);
+        } else {
+          expect(data.breakdown.freeSpace).toBe(
+            data.contextWindowSize -
+              sumRows(data.breakdown) -
+              data.breakdown.autocompactBuffer,
+          );
+        }
+        const summary = await collectContextData(config, false);
+        expect(summary.breakdown).toEqual(data.breakdown);
+        expect(summary.instructionFiles).toEqual([]);
+        expect(summary.memoryFiles).toEqual([]);
+        const text = formatContextUsageText(data);
+        expect(text).toContain('**Instruction files**');
+        expect(text).toContain('**Auto memory**');
+        expect(formatContextUsageText(summary)).toMatch(
+          /Instruction files\s+\S+ tokens/,
+        );
+        expect(formatContextUsageText(summary)).toMatch(
+          /Auto memory\s+\S+ tokens/,
+        );
+        expect(text).not.toContain('Memory files');
+      },
+    );
+
+    it('scales nonzero instruction and auto-memory rows and their details together', async () => {
+      const sources = {
+        getUserMemory: () =>
+          '--- Context from: QWEN.md ---\n' +
+          'Project instructions. '.repeat(100) +
+          '\n--- End of Context from: QWEN.md ---',
+        getAutoMemoryPrompt: () => 'Automatic memory policy. '.repeat(50),
+        getAutoMemoryContext: () => '',
+      };
+      const collect = (total: number) =>
+        collectContextData(
+          Object.assign(makeChatConfig({ total, history: [] }), sources),
+          true,
+        );
+      const raw = await collect(0);
+      const total = 1000;
+      const scale = total / sumRows(raw.breakdown);
+      expect(scale).toBeLessThan(1);
+      const scaled = await collect(total);
+
+      for (const category of ['instructionFiles', 'memoryFiles'] as const) {
+        const expected = Math.floor(raw.breakdown[category]! * scale);
+        expect(expected).toBeGreaterThan(0);
+        expect(scaled.breakdown[category]).toBe(expected);
+        expect(scaled[category]).toEqual(
+          raw[category]!.map((entry) => ({
+            ...entry,
+            tokens: Math.round(entry.tokens * scale),
+          })),
+        );
+      }
+      expect(scaled.breakdown.unattributed).toBe(0);
+      expect(sumRows(scaled.breakdown)).toBe(total);
+    });
+
     function sumRows(breakdown: ContextCategoryBreakdown): number {
       return (
         breakdown.systemPrompt +
         breakdown.builtinTools +
         breakdown.mcpTools +
+        (breakdown.instructionFiles ?? 0) +
         breakdown.memoryFiles +
         breakdown.skills +
         (breakdown.startupContext ?? 0) +
@@ -1145,13 +1398,7 @@ describe('collectContextData (contextCommand)', () => {
       expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
-    it('charges the builtin-clamp deficit to the mcp row, not to messages', async () => {
-      // Under `tools.codeModeOnly` the declarations collapse to a few control
-      // tools while an `alwaysLoadTools` MCP server still bills every schema
-      // the detail loop sees, so the billed tools exceed the declared ones and
-      // `displayBuiltinTools` clamps at 0. The clamp deficit must come out of
-      // the mcp row — the row whose billing overshoots the declarations;
-      // otherwise `attributedOverhead` silently takes it out of `messages`.
+    it('bills generated control declarations without undeclared MCP schemas', async () => {
       // Own value properties shadow the prototype's getters (Object.assign
       // would trip the setter-less `schema` accessor on DeclarativeTool).
       const mcpToolDouble = Object.defineProperties(
@@ -1160,6 +1407,7 @@ describe('collectContextData (contextCommand)', () => {
           name: { value: 'mcp__server__big_tool' },
           serverName: { value: 'server' },
           serverToolName: { value: 'big_tool' },
+          alwaysLoad: { value: true },
           schema: {
             value: {
               name: 'mcp__server__big_tool',
@@ -1170,20 +1418,24 @@ describe('collectContextData (contextCommand)', () => {
         },
       ) as DiscoveredMCPTool;
       const controlSchema = {
-        name: 'tool_call',
+        name: 'exec',
+        description: 'Generated code-mode bindings. '.repeat(8),
         parameters: { type: 'OBJECT', properties: {} },
       };
       const tools = [
         { ...skillToolDouble, getLoadedSkillContentNames: () => new Map() },
         mcpToolDouble,
-        { name: controlSchema.name, schema: controlSchema },
+        {
+          name: controlSchema.name,
+          schema: { ...controlSchema, description: 'Original exec schema' },
+        },
       ];
       const declared = [skillToolSchema, controlSchema];
       const history = [prelude, ...conversation];
 
       const unscaled = await collectContextData(
         makeChatConfig({ total: 0, tools, declared, history }),
-        false,
+        true,
       );
       // Free space retains its zero floor when the estimate exceeds the window.
       expect(unscaled.breakdown.freeSpace).toBe(
@@ -1194,23 +1446,26 @@ describe('collectContextData (contextCommand)', () => {
             unscaled.breakdown.autocompactBuffer,
         ),
       );
-      // The deficit comes out of the mcp row, not the built-in or skills rows.
-      expect(unscaled.breakdown.mcpTools).toBe(
+      expect(unscaled.breakdown.mcpTools).toBe(0);
+      expect(unscaled.breakdown.builtinTools).toBe(
         estimateContextTextTokens(JSON.stringify(declared)) -
           estimateContextTextTokens(JSON.stringify(skillToolSchema)),
       );
-      expect(unscaled.breakdown.mcpTools).toBeGreaterThan(0);
-      expect(unscaled.breakdown.builtinTools).toBe(0);
-      // With nothing declared the mcp row cannot absorb the whole deficit, so
-      // the rest is charged to skills and the window still adds up.
+      expect(unscaled.builtinTools).toEqual([
+        {
+          name: 'exec',
+          tokens: estimateContextTextTokens(JSON.stringify(controlSchema)),
+        },
+      ]);
       const undeclared = await collectContextData(
         makeChatConfig({ total: 0, tools, declared: [], history }),
-        false,
+        true,
       );
+      expect(undeclared.builtinTools).toEqual([]);
+      expect(undeclared.mcpTools).toEqual([]);
       expect(undeclared.breakdown.mcpTools).toBe(0);
       expect(undeclared.breakdown.skills).toBe(
-        estimateContextTextTokens(listingReminder) +
-          estimateContextTextTokens(JSON.stringify([])),
+        estimateContextTextTokens(listingReminder),
       );
       expect(undeclared.breakdown.freeSpace).toBe(
         Math.max(
@@ -1233,32 +1488,78 @@ describe('collectContextData (contextCommand)', () => {
         false,
       );
 
-      // The fixture does put the clamp in force: billed skill definition plus
-      // mcp schemas exceed the declared tools.
-      expect(
-        estimateContextTextTokens(JSON.stringify(skillToolSchema)) +
-          estimateContextTextTokens(JSON.stringify(mcpToolDouble.schema)),
-      ).toBeGreaterThan(estimateContextTextTokens(JSON.stringify(declared)));
       expect(data.breakdown.messages).toBe(300);
       expect(sumRows(data.breakdown)).toBe(total);
 
-      // `/context detail` lists the MCP tools under the mcp row, so they must
-      // add up to it on both paths.
-      const mcpDetailSum = (
-        item: Awaited<ReturnType<typeof collectContextData>>,
-      ) => item.mcpTools.reduce((sum, tool) => sum + tool.tokens, 0);
       for (const options of [
         { total: 0, tools, declared, history },
         { total: 0, tools, declared: [], history },
         { total, tools, declared, history },
+        { total: 1, tools, declared, history },
       ]) {
         const detailed = await collectContextData(
           makeChatConfig(options),
           true,
         );
-        expect(mcpDetailSum(detailed)).toBe(detailed.breakdown.mcpTools);
+        expect(detailed.mcpTools).toEqual([]);
+        expect(detailed.breakdown.mcpTools).toBe(0);
+        if (options.total > 0) {
+          expect(sumRows(detailed.breakdown)).toBe(options.total);
+        }
       }
+
+      const exposed = await collectContextData(
+        makeChatConfig({
+          total: 0,
+          tools,
+          declared: [...declared, mcpToolDouble.schema],
+          history,
+        }),
+        true,
+      );
+      expect(exposed.mcpTools).toEqual([
+        {
+          name: 'server__big_tool',
+          tokens: estimateContextTextTokens(
+            JSON.stringify(mcpToolDouble.schema),
+          ),
+        },
+      ]);
     });
+
+    it.each([false, true])(
+      'uses the emitted Skill schema while retaining its body (declared: %s)',
+      async (declared) => {
+        const declaration = {
+          ...skillToolSchema,
+          description: 'Emitted skill schema. '.repeat(20),
+        };
+        const data = await collectContextData(
+          makeChatConfig({
+            total: 100_000,
+            tools: [skillToolDouble],
+            declared: declared ? [declaration] : [],
+            skillList: trackedSkillList,
+            history: [prelude, conversation[0]!, skillResponse(trackedBody)],
+          }),
+          true,
+        );
+
+        expect(data.breakdown.skills).toBe(
+          (declared
+            ? estimateContextTextTokens(JSON.stringify(declaration))
+            : 0) +
+            estimateContextTextTokens(listingReminder) +
+            estimateContextTextTokens(trackedBody),
+        );
+        expect(data.skills[0].bodyTokens).toBe(
+          estimateContextTextTokens(trackedBody),
+        );
+        expect(data.breakdown.messages).toBe(100);
+        expect(data.builtinTools).toEqual([]);
+        expect(sumRows(data.breakdown)).toBe(100_000);
+      },
+    );
 
     it('bills a path-activation envelope folded into a tool response as messages (#12235)', async () => {
       // coreToolScheduler appends this reminder to the tool result and then
@@ -1664,14 +1965,13 @@ describe('collectContextData (contextCommand)', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
 
     expect(data.builtinTools).toHaveLength(0);
     expect(data.mcpTools).toHaveLength(0);
-    expect(isDeferredAndHidden).toHaveBeenCalledWith('web_fetch');
-    expect(isDeferredAndHidden).toHaveBeenCalledWith('mcp__server__tool');
   });
 
   it('includes visibleTools in per-tool breakdown when deferred and not revealed (#6372)', async () => {
@@ -1715,6 +2015,7 @@ describe('collectContextData (contextCommand)', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
@@ -1837,8 +2138,10 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(1);
-    expect(data.memoryFiles[0].path).toBe(path.join('~', '.qwen', 'QWEN.md'));
+    expect(data.instructionFiles!).toHaveLength(1);
+    expect(data.instructionFiles![0].path).toBe(
+      path.join('~', '.qwen', 'QWEN.md'),
+    );
   });
 
   it('renders project-local markers as relative paths when workingDir != cwd', async () => {
@@ -1863,9 +2166,9 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(2);
-    expect(data.memoryFiles[0].path).toBe('QWEN.md');
-    expect(data.memoryFiles[1].path).toBe(path.join('docs', 'QWEN.md'));
+    expect(data.instructionFiles!).toHaveLength(2);
+    expect(data.instructionFiles![0].path).toBe('QWEN.md');
+    expect(data.instructionFiles![1].path).toBe(path.join('docs', 'QWEN.md'));
   });
 
   it('attributes all injected skill bodies after refresh, removal and disable', async () => {
@@ -2001,10 +2304,10 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(2);
+    expect(data.instructionFiles!).toHaveLength(2);
     // The project file keeps its path; only the extension's file is renamed.
-    expect(data.memoryFiles[0].path).toBe('QWEN.md');
-    expect(data.memoryFiles[1].path).toBe(
+    expect(data.instructionFiles![0].path).toBe('QWEN.md');
+    expect(data.instructionFiles![1].path).toBe(
       `${t('Extension')}: Report Tools · QWEN.md`,
     );
   });
@@ -2040,14 +2343,14 @@ describe('collectContextData (contextCommand)', () => {
 
     const after = await collectContextData(config, true);
 
-    expect(after.memoryFiles.map((file) => file.path)).toEqual(
+    expect(after.instructionFiles!.map((file) => file.path)).toEqual(
       ['docs', 'prompts'].map(
         (dir) =>
           `${t('Extension')}: Report Tools · ${path.join(dir, 'QWEN.md')}`,
       ),
     );
-    expect(after.memoryFiles.map((file) => file.tokens)).toEqual(
-      before.memoryFiles.map((file) => file.tokens),
+    expect(after.instructionFiles!.map((file) => file.tokens)).toEqual(
+      before.instructionFiles!.map((file) => file.tokens),
     );
   });
 
@@ -2068,8 +2371,8 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(1);
-    expect(data.memoryFiles[0].path).toBe('QWEN.md');
+    expect(data.instructionFiles!).toHaveLength(1);
+    expect(data.instructionFiles![0].path).toBe('QWEN.md');
   });
 
   it('measures the listing a session would send before a chat exists (#12235)', async () => {
@@ -2151,6 +2454,40 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.skills.map((skill) => skill.name)).toEqual(['enabled-skill']);
   });
 });
+
+it.each([false, true])(
+  'preserves the combined memory category in legacy text snapshots (details: %s)',
+  (showDetails) => {
+    const text = formatContextUsageText({
+      type: 'context_usage',
+      modelName: 'legacy-model',
+      totalTokens: 200,
+      contextWindowSize: 1000,
+      breakdown: {
+        systemPrompt: 0,
+        builtinTools: 0,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        messages: 0,
+        freeSpace: 600,
+        autocompactBuffer: 200,
+        thresholds: { effectiveWindow: 1000, warn: 700, auto: 800, hard: 900 },
+        currentTier: 'safe',
+      },
+      builtinTools: [],
+      mcpTools: [],
+      skills: [],
+      memoryFiles: [{ path: 'QWEN.md', tokens: 200 }],
+      showDetails,
+    });
+    expect(text).toMatch(/Memory files\s+200 tokens/);
+    expect(text).not.toContain('Instruction files');
+    expect(text).not.toContain('Auto memory');
+    expect(text.includes('QWEN.md')).toBe(showDetails);
+    expect(text.includes('**Memory files**')).toBe(showDetails);
+  },
+);
 
 describe('/context shows three-tier thresholds', () => {
   beforeEach(() => {

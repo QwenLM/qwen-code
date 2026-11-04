@@ -68,6 +68,27 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/hosted-harness-session.ts',
+    {
+      reason:
+        'Packaged E2E fault arms set process-scoped test switches on a single Harness generation, never in production. The load-reply-lost arm sets QWEN_E2E_DROP_LOAD_REPLY=<sessionId> on the replacement so the session bridge loses exactly the first load attach reply for that Session; the finished-before-commit arm sets QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT=<sessionId> on the generation that must crash so the turn holds after its stream Finished marker is durable but before the assistant output commits. Each is read once and fires once.',
+      accesses: {
+        'key:QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT': 1,
+        'key:QWEN_E2E_DROP_LOAD_REPLY': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/hosted-workspace-tool-turn.ts',
+    {
+      reason:
+        'The packaged A3 mixed-sibling fault arm sets QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL=<sessionId> on the single replacement generation that must crash, so the turn holds the first sibling approval it asks (the pending sibling after an earlier decided one) once its durable wait is committed. Test-gated, never set in production; read once and fires once.',
+      accesses: {
+        'key:QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL': 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/workspace-recovery-worker.ts',
     {
       reason:
@@ -484,6 +505,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:PATH': 2,
         'key:PYTHONPATH': 2,
         'key:QWEN_CODE_INTEGRATION_TEST': 1,
+        'key:QWEN_CODE_HOOK_APPROVALS_PATH': 2,
         'key:QWEN_CODE_MCP_APPROVALS_PATH': 2,
         'key:QWEN_CODE_WARNINGS_FILE': 2,
         'key:QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE': 1,

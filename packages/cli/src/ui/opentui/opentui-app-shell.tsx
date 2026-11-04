@@ -87,9 +87,10 @@ import type {
 } from './live-turn.js';
 import {
   restoreInputSubmissions,
+  returnToComposer,
   type OpenTuiInputSubmission,
   type OpenTuiCancelSettled,
-  type OpenTuiComposerHandle,
+  type OpenTuiComposerSlot,
 } from './input-submission.js';
 import { rewindSession } from '../utils/session-rewind.js';
 import { isRewindableUserTurn } from '../utils/historyMapping.js';
@@ -103,6 +104,7 @@ import type { RestoreOption } from './session-rewind.js';
 import { realUserPromptTexts } from '../utils/historyUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { t } from '../../i18n/index.js';
+import { requestConsentOrFail } from '../../commands/extensions/consent.js';
 import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
@@ -133,11 +135,15 @@ import { modBandMaxRows } from '../utils/mod-band-tree.js';
 import {
   OpenTuiActionConfirmation,
   OpenTuiMcpApprovalDialog,
+  OpenTuiProjectHooksApprovalDialog,
   OpenTuiShellConfirmation,
   OpenTuiToolConfirmation,
 } from './dialogs-confirm.js';
 import { useMcpApproval } from '../hooks/useMcpApproval.js';
+import { useProjectHooksApproval } from '../hooks/use-project-hooks-approval.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
+import { sanitizeTerminalText } from '../utils/textUtils.js';
+import { C } from './theme.js';
 import {
   getDialogMaxHeight,
   STATIC_EXTRA_HEIGHT,
@@ -266,9 +272,7 @@ export interface OpenTuiAppProps {
   onRenderError?: (error: Error) => void;
   vim?: InputPromptProps['vim'];
   /** Entry-owned composer buffer handle (early-input injection). */
-  composerHandle?: {
-    current: OpenTuiComposerHandle | null;
-  };
+  composerHandle?: OpenTuiComposerSlot;
   /** U-7: finished follow-up suggestion, shown as the ghost placeholder. */
   promptSuggestion?: string | null;
   /** U-7: clears the published suggestion (accept/typing/submit). */
@@ -617,6 +621,29 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     [],
   );
 
+  useEffect(() => {
+    const manager = config.getExtensionManager();
+    const controller = new AbortController();
+    manager.setRequestConsent((options) => {
+      if (controller.signal.aborted)
+        return Promise.reject(
+          new Error(t('Extension installation cancelled.')),
+        );
+      return requestConsentOrFail(
+        (description) =>
+          confirmations.presentAction(
+            <text fg={C.text}>{sanitizeTerminalText(description)}</text>,
+            {
+              signal: controller.signal,
+              isCurrent: () => !controller.signal.aborted,
+            },
+          ),
+        options,
+      );
+    });
+    return () => controller.abort();
+  }, [config, confirmations]);
+
   const activeModal = modals[0] ?? null;
   const closeShellModal = useCallback(
     (modal: ShellModal, resolution: ShellConfirmationResolution) => {
@@ -638,6 +665,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // app level; without it a `.mcp.json` checked into the project is never
   // offered here and its servers stay silently disconnected.
   const mcpApproval = useMcpApproval(config);
+  const hooksApproval = useProjectHooksApproval(config, settings, (text) =>
+    addInfoItem({ type: MessageType.INFO, text }),
+  );
 
   const shellControl = props.foregroundShellControl;
   const foregroundShell = shellControl?.foregroundShell;
@@ -649,6 +679,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       activeModal ||
       activeToolCall ||
       mcpApproval.isMcpApprovalDialogOpen ||
+      hooksApproval.isProjectHooksApprovalDialogOpen ||
       shellModeActive,
   );
   const shellFocused =
@@ -755,6 +786,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       !activeModal &&
       !activeToolCall &&
       !mcpApproval.isMcpApprovalDialogOpen &&
+      !hooksApproval.isProjectHooksApprovalDialogOpen &&
       (name === 'escape' || (name === 'c' && ctrl))
     ) {
       for (const controller of shellControllersRef.current) {
@@ -1117,6 +1149,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       switch (outcome.kind) {
         case 'handled':
           return true;
+        case 'refused':
+          return false;
         case 'open_dialog':
           if (outcome.request.dialog === 'rewind') {
             if (
@@ -1132,6 +1166,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               return true;
             }
           }
+          // Read before the render that mounts the dialog, so a drain that
+          // opened it sees the composer is about to unmount.
+          dialogRef.current = outcome.request;
           setDialog(outcome.request);
           return true;
         case 'submit_prompt':
@@ -1141,6 +1178,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               modelOverride: outcome.modelOverride,
               refreshContextFilesOnWrite: outcome.refreshContextFilesOnWrite,
               onComplete: outcome.onComplete,
+              promptContext: outcome.promptContext,
               invocationEchoed: true,
             });
           notify('The live prompt turn is not wired in this shell.');
@@ -1258,6 +1296,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             ...(blockedByRunningShell && !shellEntry
               ? { prompt: true, imagePaths, options }
               : {}),
+            // A `?`-form input keeps what the composer showed, so the hooks
+            // hear its pastes expanded and a refusal hands it back collapsed.
+            ...(!shellEntry && !blockedByRunningShell ? { options } : {}),
           });
           setDeferredRevision((revision) => revision + 1);
           notify(
@@ -1270,7 +1311,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         return false;
       const settlement = hasImages
         ? { kind: 'settled' as const, outcome: false as const }
-        : await gateway.dispatch(submission);
+        : await gateway.dispatch(submission, {
+            displayText: options?.displayText,
+            pasteExpansions: options?.pasteExpansions,
+          });
       if (settlement.kind === 'rejected') {
         notify(settlement.reason);
         return false;
@@ -1371,6 +1415,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       // A holdsUi pause re-queues the remainder for the turn/dialog it waits
       // for; re-arming here would drain it before that owner even starts.
       let paused = false;
+      // Refused `?`-form inputs go back to the composer together, in the
+      // order they were sent.
+      const refused: OpenTuiInputSubmission[] = [];
       try {
         for (const [i, entry] of pending.entries()) {
           if (isExitInProgress() || drainSessionId !== config.getSessionId())
@@ -1422,13 +1469,29 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             }
             return;
           }
-          const settlement = await gateway.dispatch(entry.text);
+          const settlement = await gateway.dispatch(entry.text, {
+            displayText: entry.options?.displayText,
+            pasteExpansions: entry.options?.pasteExpansions,
+          });
           if (settlement.kind === 'rejected') {
             notify(settlement.reason);
             continue;
           }
           if (settlement.outcome === false) continue;
           const outcome = settlement.outcome;
+          if (outcome.kind === 'refused') {
+            // A queued `?`-form input the Mods refused, or one cancelled while
+            // they heard it, has left the composer, so it goes back there.
+            refused.push({
+              text: entry.text,
+              displayText: entry.options?.displayText,
+              pasteExpansions: entry.options?.pasteExpansions,
+              submittedPrompt: entry.options?.submittedPrompt,
+              humanInput: entry.options?.humanInput,
+              hasUnknownInput: entry.options?.hasUnknownInput,
+            });
+            continue;
+          }
           applyOutcome(outcome);
           // A submit_prompt outcome starts a turn and an open_dialog outcome
           // takes the UI over, so the commands behind either wait for that turn
@@ -1444,6 +1507,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           }
         }
       } finally {
+        if (refused.length && props.composerHandle)
+          returnToComposer(
+            props.composerHandle,
+            restoreInputSubmissions(refused),
+            { unmounting: dialogRef.current !== null },
+          );
         drainingRef.current = false;
         // Entries that arrived mid-drain strand unless the completion re-arms
         // the drain (the queue is a ref; a push alone triggers nothing) — but
@@ -1462,6 +1531,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onSubmitPrompt,
     runShellCommand,
     config,
+    props.composerHandle,
   ]);
 
   const hostHistory = host.getHistory();
@@ -1532,6 +1602,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           !activeModal &&
           !activeToolCall &&
           !mcpApproval.isMcpApprovalDialogOpen &&
+          !hooksApproval.isProjectHooksApprovalDialogOpen &&
           updateNotice ? (
             <text>{updateNotice}</text>
           ) : null}
@@ -1561,6 +1632,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               pendingServers={mcpApproval.pendingMcpApprovals}
               remaining={mcpApproval.mcpApprovalRemaining}
               onSelect={mcpApproval.handleMcpApprovalSelect}
+            />
+          ) : hooksApproval.isProjectHooksApprovalDialogOpen &&
+            hooksApproval.pendingProjectHooks ? (
+            <OpenTuiProjectHooksApprovalDialog
+              key="project-hooks-approval"
+              lines={hooksApproval.pendingProjectHooks.lines}
+              availableTerminalHeight={dialogRegionHeight}
+              onSelect={hooksApproval.handleProjectHooksApprovalSelect}
             />
           ) : activeToolCall ? (
             <box key="tool-confirm-area" flexDirection="column">
@@ -1725,6 +1804,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             !activeModal &&
             !activeToolCall &&
             !mcpApproval.isMcpApprovalDialogOpen &&
+            !hooksApproval.isProjectHooksApprovalDialogOpen &&
             !showSuggestions) ? (
             <OpenTuiFooter
               config={config}

@@ -40,6 +40,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { isValidElement, type ReactNode } from 'react';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -86,12 +87,18 @@ import {
   expandCollapsedHistory,
 } from '../utils/resumeHistoryUtils.js';
 import { projectHistoryToStreamEvents } from './item-projection.js';
+import type { OpenTuiComposerSlot } from './input-submission.js';
+import {
+  CLIPBOARD_PASTE_FRAMING,
+  framePasteExpansion,
+} from '../utils/paste-placeholders.js';
 
 const mocks = vi.hoisted(() => {
   const state = {
     handleResult: undefined as unknown,
     modBand: undefined as unknown,
     handleResults: [] as unknown[],
+    handledTyped: [] as unknown[],
     loadCommandsOverride: null as null | (() => Promise<readonly unknown[]>),
     loadRejects: false,
     useRealDispatcher: false,
@@ -112,6 +119,11 @@ const mocks = vi.hoisted(() => {
     /** The gated-server queue the shell's approval hook reports. */
     mcpQueue: [] as Array<Record<string, unknown>>,
     handleMcpApprovalSelect: vi.fn(),
+    hooksApprovalProps: null as Record<string, unknown> | null,
+    /** Hook lines the project hooks approval hook reports as pending. */
+    pendingHookLines: null as string[] | null,
+    handleProjectHooksApprovalSelect: vi.fn(),
+    hooksAddInfo: null as ((text: string) => void) | null,
     bannerProps: null as Record<string, unknown> | null,
     footerProps: null as Record<string, unknown> | null,
     statusLineState: null as StatusLineState | null,
@@ -244,7 +256,7 @@ vi.mock('./commands-dispatch.js', async (importOriginal) => {
       mocks.state.releaseHandle?.();
     }
     dispose() {}
-    async handle(text: string) {
+    async handle(text: string, typed?: unknown) {
       if (
         mocks.state.holdHandleOn === text &&
         mocks.state.releaseHandle === null
@@ -254,6 +266,7 @@ vi.mock('./commands-dispatch.js', async (importOriginal) => {
         });
       }
       mocks.state.handledTexts.push(text);
+      mocks.state.handledTyped.push(typed);
       mocks.state.onHandle?.(text);
       const queued = mocks.state.handleResults;
       return queued.length > 0 ? queued.shift() : mocks.state.handleResult;
@@ -344,15 +357,17 @@ vi.mock('./dialogs-confirm.js', () => ({
     return (
       <>
         <span>action-confirm</span>
-        <span>
-          {typeof props['prompt'] === 'string' ? props['prompt'] : null}
-        </span>
+        <span>{props['prompt'] as ReactNode}</span>
       </>
     );
   },
   OpenTuiMcpApprovalDialog: (props: Record<string, unknown>) => {
     mocks.state.mcpApprovalProps = props;
     return 'mcp-approval';
+  },
+  OpenTuiProjectHooksApprovalDialog: (props: Record<string, unknown>) => {
+    mocks.state.hooksApprovalProps = props;
+    return 'hooks-approval';
   },
 }));
 vi.mock('../hooks/useMcpApproval.js', () => ({
@@ -363,6 +378,23 @@ vi.mock('../hooks/useMcpApproval.js', () => ({
     mcpApprovalRemaining: Math.max(0, mocks.state.mcpQueue.length - 1),
     handleMcpApprovalSelect: mocks.state.handleMcpApprovalSelect,
   }),
+}));
+vi.mock('../hooks/use-project-hooks-approval.js', () => ({
+  useProjectHooksApproval: (
+    _config: unknown,
+    _settings: unknown,
+    addInfo?: (text: string) => void,
+  ) => {
+    mocks.state.hooksAddInfo = addInfo ?? null;
+    return {
+      isProjectHooksApprovalDialogOpen: mocks.state.pendingHookLines !== null,
+      pendingProjectHooks: mocks.state.pendingHookLines
+        ? { hooks: {}, lines: mocks.state.pendingHookLines }
+        : undefined,
+      handleProjectHooksApprovalSelect:
+        mocks.state.handleProjectHooksApprovalSelect,
+    };
+  },
 }));
 vi.mock('./exit-lifecycle.js', () => ({
   isExitInProgress: () => mocks.state.exitInProgress,
@@ -395,7 +427,9 @@ vi.mock('../hooks/useStatusLine.js', () => ({
   },
 }));
 
+const extensionManager = { setRequestConsent: vi.fn() };
 const CONFIG = {
+  getExtensionManager: () => extensionManager,
   getSessionId: () => 'test-session',
   getContextFilePaths: () => [],
   getAccessibility: () => ({}),
@@ -460,6 +494,7 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.deferDuringStreaming = false;
     mocks.state.deferGate = null;
     mocks.state.handledTexts.length = 0;
+    mocks.state.handledTyped.length = 0;
     mocks.state.host = null;
     mocks.state.hosts.length = 0;
     mocks.state.dispatcherConstructions = 0;
@@ -472,6 +507,10 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.mcpApprovalProps = null;
     mocks.state.mcpQueue.length = 0;
     mocks.state.handleMcpApprovalSelect.mockClear();
+    mocks.state.hooksApprovalProps = null;
+    mocks.state.pendingHookLines = null;
+    mocks.state.hooksAddInfo = null;
+    mocks.state.handleProjectHooksApprovalSelect.mockClear();
     mocks.state.bannerProps = null;
     mocks.state.footerProps = null;
     mocks.state.loadingProps = null;
@@ -996,6 +1035,60 @@ describe('OpenTuiApp shell wiring', () => {
     act(() => mocks.state.keyboardHandlers.at(-1)!(promote));
     expect(control.promoteShellToBackground).not.toHaveBeenCalled();
     expect(control.writeShellInput).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
+  it('keeps a focused foreground shell behind the project hooks approval', async () => {
+    const owner = { callId: 'shell', pid: 4300, turn: 1 };
+    const control = {
+      foregroundShell: owner,
+      promoteShellToBackground: vi.fn(() => true),
+      writeShellInput: vi.fn(() => true),
+      resizeShell: vi.fn(() => true),
+      scrollShell: vi.fn(() => true),
+    };
+    const props = {
+      config: {
+        ...CONFIG,
+        getShellExecutionConfig: () => ({}),
+        setShellExecutionConfig: vi.fn(),
+      } as unknown as Config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [],
+      getSessionStats,
+      foregroundShellControl: control,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    const key = (name: string, sequence: string, ctrl = false) => ({
+      name,
+      sequence,
+      ctrl,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    });
+    act(() =>
+      (mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean)(
+        key('f', '\x06', true),
+      ),
+    );
+    expect(mocks.state.inputProps?.['focus']).toBe(false);
+    mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+    const before = mocks.state.keyboardHandlers.length;
+    view.rerender(<OpenTuiApp {...props} />);
+    expect(screen.getByText('hooks-approval')).toBeTruthy();
+    const handlers = mocks.state.keyboardHandlers.slice(before);
+    for (const k of [
+      key('a', 'a'),
+      key('f', '\x06', true),
+      key('a', 'a'),
+      key('b', '\x02', true),
+    ]) {
+      for (const handler of handlers) act(() => handler(k));
+    }
+    expect(control.writeShellInput).not.toHaveBeenCalled();
+    expect(control.promoteShellToBackground).not.toHaveBeenCalled();
     view.unmount();
   });
 
@@ -1817,6 +1910,64 @@ describe('OpenTuiApp shell wiring', () => {
     { name: 'c', ctrl: true, sequence: '\x03' },
     { name: 'escape', ctrl: false, sequence: '\x1b' },
   ])(
+    'leaves the local shell running on $name while the project hooks approval is open',
+    async (key) => {
+      let release!: () => void;
+      const done = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const signals: AbortSignal[] = [];
+      mocks.state.executeUserShell.mockImplementation(((
+        _config: unknown,
+        _command: string,
+        _emit: unknown,
+        signal: AbortSignal,
+      ) => {
+        signals.push(signal);
+        return done;
+      }) as unknown as () => Promise<void>);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const props: AppProps = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [],
+        getSessionStats,
+        streaming: false,
+        onTranscriptEvent: vi.fn(),
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      try {
+        await submit('sleep 10');
+        expect(signals).toHaveLength(1);
+        mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+        view.rerender(<OpenTuiApp {...props} />);
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(false);
+      } finally {
+        await act(async () => {
+          release();
+          await done;
+        });
+        await settle();
+      }
+    },
+  );
+
+  it.each([
+    { name: 'c', ctrl: true, sequence: '\x03' },
+    { name: 'escape', ctrl: false, sequence: '\x1b' },
+  ])(
     'keeps a held local shell alive while the model owns $name, then cancels it when the model settles',
     async (key) => {
       let release!: () => void;
@@ -2084,6 +2235,7 @@ describe('OpenTuiApp shell wiring', () => {
       modelOverride: 'qwen3-max',
       refreshContextFilesOnWrite: true,
       onComplete,
+      promptContext: ['Use the runbook'],
     } satisfies OpenTuiDispatchOutcome;
 
     await submit('/model summarize');
@@ -2091,6 +2243,7 @@ describe('OpenTuiApp shell wiring', () => {
       modelOverride: 'qwen3-max',
       refreshContextFilesOnWrite: true,
       onComplete,
+      promptContext: ['Use the runbook'],
       invocationEchoed: true,
     });
   });
@@ -2632,6 +2785,129 @@ describe('OpenTuiApp shell wiring', () => {
     ).toBeTruthy();
   });
 
+  describe('direct extension consent owner', () => {
+    type Consent = Parameters<
+      ReturnType<Config['getExtensionManager']>['setRequestConsent']
+    >[0];
+    const options = (name: string) => ({
+      extensionConfig: { name, version: '1.0.0' },
+      originSource: 'QwenCode' as const,
+    });
+    function owner() {
+      const register = vi.fn<(request: Consent) => void>();
+      const config = {
+        ...CONFIG,
+        getExtensionManager: () => ({ setRequestConsent: register }),
+      } as unknown as Config;
+      return {
+        config,
+        register,
+        request: () => register.mock.calls.at(-1)![0],
+      };
+    }
+    function shell(config: Config, streaming = false) {
+      return (
+        <OpenTuiApp
+          config={config}
+          settings={SETTINGS}
+          logger={null}
+          commands={[]}
+          getSessionStats={getSessionStats}
+          streaming={streaming}
+        />
+      );
+    }
+    const answer = (yes: boolean) =>
+      (mocks.state.actionConfirmProps!['onResolve'] as (yes: boolean) => void)(
+        yes,
+      );
+
+    it('formats direct consent and preserves its pending owner on ordinary rerenders', async () => {
+      const o = owner();
+      const view = render(shell(o.config));
+      await settle();
+      let pending!: Promise<void>;
+      await act(async () => {
+        pending = o.request()(options('owned'));
+      });
+      const prompt = mocks.state.actionConfirmProps!['prompt'];
+      expect(isValidElement(prompt)).toBe(true);
+      if (!isValidElement(prompt))
+        throw new Error('native prompt node missing');
+      // buildJsxRuntime maps native text to span; raw strings still fail above.
+      expect(prompt.type).toBe('span');
+      expect(screen.getByText(/Installing extension "owned"/)).toBeTruthy();
+      view.rerender(shell(o.config, true));
+      await settle();
+      expect(o.register).toHaveBeenCalledTimes(1);
+      expect(screen.getByText(/Installing extension "owned"/)).toBeTruthy();
+      await act(async () => answer(true));
+      await expect(pending).resolves.toBeUndefined();
+    });
+
+    it('keeps independent FIFO Yes and No resolutions', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let first!: Promise<void>;
+      let second!: Promise<void>;
+      await act(async () => {
+        first = o.request()(options('first'));
+        second = o.request()(options('second'));
+      });
+      const rejected = second.catch((error: unknown) => error);
+      expect(screen.getByText(/Installing extension "first"/)).toBeTruthy();
+      expect(screen.queryByText(/Installing extension "second"/)).toBeNull();
+      await act(async () => answer(true));
+      await expect(first).resolves.toBeUndefined();
+      expect(screen.getByText(/Installing extension "second"/)).toBeTruthy();
+      await act(async () => answer(false));
+      await expect(rejected).resolves.toMatchObject({
+        message: expect.stringContaining('Installation cancelled'),
+      });
+    });
+
+    it.each(['replacement', 'unmount'] as const)(
+      'rejects pending and captured stale callbacks on %s',
+      async (change) => {
+        const old = owner();
+        const next = owner();
+        const view = render(shell(old.config));
+        await settle();
+        const captured = old.request();
+        let pending!: Promise<void>;
+        await act(async () => {
+          pending = captured(options('old'));
+        });
+        const rejected = pending.catch((error: unknown) => error);
+        const late = mocks.state.actionConfirmProps!['onResolve'] as (
+          yes: boolean,
+        ) => void;
+        await act(async () => {
+          if (change === 'replacement') view.rerender(shell(next.config));
+          else view.unmount();
+        });
+        await expect(rejected).resolves.toMatchObject({
+          message: expect.stringContaining('Installation cancelled'),
+        });
+        await expect(captured(options('stale'))).rejects.toThrow(
+          'Extension installation cancelled',
+        );
+        await act(async () => late(true));
+        if (change === 'replacement') {
+          expect(screen.queryByText(/Installing extension "old"/)).toBeNull();
+          let fresh!: Promise<void>;
+          await act(async () => {
+            fresh = next.request()(options('new'));
+          });
+          await act(async () => answer(true));
+          await expect(fresh).resolves.toBeUndefined();
+          expect(next.register).toHaveBeenCalledTimes(1);
+        }
+      },
+    );
+  });
+
   it('renders the shell confirmation modal and settles with its resolution', async () => {
     renderApp();
     await settle();
@@ -2848,6 +3124,68 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.handleMcpApprovalSelect).toHaveBeenCalledWith('approve');
   });
 
+  it('shows the project hooks approval below MCP, above a parked tool call, without the footer', async () => {
+    mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+    mocks.state.mcpQueue.push({ name: 'acceptance-server' });
+    renderApp({
+      waitingToolCalls: [
+        {
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { type: 'info', title: 'ok?' },
+        } as never,
+      ],
+      onToolCallSettled: vi.fn(),
+    });
+    await settle();
+    expect(screen.getByText('mcp-approval')).toBeTruthy();
+    expect(screen.queryByText('hooks-approval')).toBeNull();
+  });
+
+  it('routes the project hooks choice to the approval hook', async () => {
+    mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+    renderApp({
+      waitingToolCalls: [
+        {
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { type: 'info', title: 'ok?' },
+        } as never,
+      ],
+      onToolCallSettled: vi.fn(),
+    });
+    await settle();
+    expect(screen.getByText('hooks-approval')).toBeTruthy();
+    expect(screen.queryByText('tool-confirm')).toBeNull();
+    expect(screen.queryByText('footer')).toBeNull();
+    expect(mocks.state.hooksApprovalProps?.['lines']).toEqual([
+      'SessionStart  ./setup.sh',
+    ]);
+    const onSelect = mocks.state.hooksApprovalProps?.['onSelect'] as
+      | ((choice: string) => void)
+      | undefined;
+    if (typeof onSelect !== 'function') {
+      throw new Error('hooks approval dialog was not given onSelect');
+    }
+    onSelect('approve');
+    expect(mocks.state.handleProjectHooksApprovalSelect).toHaveBeenCalledWith(
+      'approve',
+    );
+  });
+
+  it('writes the hooks approval note to the transcript', async () => {
+    const onTranscriptEvent = vi.fn();
+    renderApp({ onTranscriptEvent });
+    await settle();
+    await act(async () => {
+      mocks.state.hooksAddInfo?.('Project hooks were not loaded.');
+    });
+    expect(onTranscriptEvent).toHaveBeenCalledWith({
+      type: 'info',
+      text: 'Project hooks were not loaded.',
+    });
+  });
+
   it('passes streaming state and interrupt through to the composer', async () => {
     const onInterrupt = vi.fn();
     renderApp({ streaming: true, onInterrupt });
@@ -2929,6 +3267,157 @@ describe('OpenTuiApp shell wiring', () => {
       await Promise.resolve();
     });
     expect(mocks.state.handledTexts).toEqual(['/compress']);
+  });
+
+  it('hands a queued ?-form command the Mods refused back to the composer', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.handleResults.push({ kind: 'refused' });
+    const restoreSubmission = vi.fn();
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      composerHandle: {
+        current: { getText: () => '', setText: vi.fn(), restoreSubmission },
+      },
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('?compress now');
+    expect(screen.getByText(/Queued \?compress now/)).toBeTruthy();
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(restoreSubmission).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ text: '?compress now' }),
+      ),
+    );
+    expect(mocks.state.handledTexts).toEqual(['?compress now']);
+  });
+
+  it('hands refused queued ?-form inputs back once, in the order sent, with their pastes', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.handleResults.push({ kind: 'refused' }, { kind: 'refused' });
+    const restoreSubmission = vi.fn();
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      composerHandle: {
+        current: { getText: () => '', setText: vi.fn(), restoreSubmission },
+      },
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    const entry = (name: string) => {
+      const placeholder = `[Pasted Content ${name}]`;
+      const pastes = new Map([[placeholder, `${name} `.repeat(300)]]);
+      const displayText = `?compress ${placeholder}`;
+      return {
+        framed: framePasteExpansion(displayText, pastes),
+        displayText,
+        pastes,
+      };
+    };
+    const alpha = entry('alpha');
+    const beta = entry('beta');
+    for (const { framed, displayText, pastes } of [alpha, beta]) {
+      await submit(framed, undefined, {
+        displayText,
+        pasteExpansions: pastes,
+      });
+    }
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(restoreSubmission).toHaveBeenCalled());
+    expect(restoreSubmission).toHaveBeenCalledOnce();
+    // The hooks were offered what the composer showed.
+    expect(mocks.state.handledTyped).toEqual([
+      { displayText: alpha.displayText, pasteExpansions: alpha.pastes },
+      { displayText: beta.displayText, pasteExpansions: beta.pastes },
+    ]);
+    const restored = restoreSubmission.mock.calls[0][0];
+    expect(restored.text).toBe(`${alpha.displayText}\n\n${beta.displayText}`);
+    expect(restored.restoredDraft.pasteExpansions).toEqual(
+      new Map([...alpha.pastes, ...beta.pastes]),
+    );
+    // What the resubmit sends carries both pastes, framed once.
+    const modelText: string = restored.restoredDraft.modelText;
+    for (const { pastes } of [alpha, beta])
+      expect(modelText).toContain([...pastes.values()][0]);
+    expect(modelText.endsWith(CLIPBOARD_PASTE_FRAMING)).toBe(true);
+    expect(modelText.split(CLIPBOARD_PASTE_FRAMING)).toHaveLength(2);
+  });
+
+  it('keeps refused queued input for the composer a dialog opened behind it unmounts', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.handleResults.push(
+      { kind: 'refused' },
+      { kind: 'open_dialog', request: { dialog: 'help' } },
+    );
+    const restoreSubmission = vi.fn();
+    const composerHandle: OpenTuiComposerSlot = {
+      current: { getText: () => '', setText: vi.fn(), restoreSubmission },
+    };
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      composerHandle,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('?compress now');
+    await submit('/help');
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(screen.getByText('dialog:help')).toBeTruthy(),
+    );
+    expect(mocks.state.handledTexts).toEqual(['?compress now', '/help']);
+    // The composer is about to unmount, so the text waits for its next mount.
+    expect(restoreSubmission).not.toHaveBeenCalled();
+    expect(composerHandle.returned).toEqual(
+      expect.objectContaining({ text: '?compress now' }),
+    );
+  });
+
+  it('keeps ?-form input the Mods refused at once in the composer', async () => {
+    mocks.state.handleResults.push({ kind: 'refused' });
+    renderApp({ streaming: false });
+    await settle();
+    const onSubmit = mocks.state.inputProps?.['onSubmit'] as (
+      t: string,
+      i?: string[],
+      metadata?: OpenTuiSubmitOptions,
+    ) => Promise<boolean>;
+    let accepted: boolean | undefined;
+    await act(async () => {
+      accepted = await onSubmit('?btw key AKIA1', undefined, {
+        displayText: '?btw key AKIA1',
+      });
+    });
+    expect(mocks.state.handledTexts).toEqual(['?btw key AKIA1']);
+    // Not accepted, so the composer keeps the draft to edit.
+    expect(accepted).toBe(false);
   });
 
   it('runs a mid-turn slash command that opted into streaming at once', async () => {
@@ -3702,6 +4191,7 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     mocks.state.handleResult = { kind: 'handled' };
     mocks.state.handleResults.length = 0;
     mocks.state.handledTexts.length = 0;
+    mocks.state.handledTyped.length = 0;
     mocks.state.host = null;
     mocks.state.hosts.length = 0;
     mocks.state.dispatcherConstructions = 0;
@@ -3713,6 +4203,10 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     mocks.state.mcpApprovalProps = null;
     mocks.state.mcpQueue.length = 0;
     mocks.state.handleMcpApprovalSelect.mockClear();
+    mocks.state.hooksApprovalProps = null;
+    mocks.state.pendingHookLines = null;
+    mocks.state.hooksAddInfo = null;
+    mocks.state.handleProjectHooksApprovalSelect.mockClear();
   });
 
   function fakeConfig(
@@ -3963,6 +4457,7 @@ describe('OpenTuiApp transcript scroll region', () => {
     mocks.state.handleResult = { kind: 'handled' };
     mocks.state.handleResults.length = 0;
     mocks.state.handledTexts.length = 0;
+    mocks.state.handledTyped.length = 0;
     mocks.state.host = null;
     mocks.state.hosts.length = 0;
     mocks.state.dispatcherConstructions = 0;
@@ -3974,6 +4469,10 @@ describe('OpenTuiApp transcript scroll region', () => {
     mocks.state.mcpApprovalProps = null;
     mocks.state.mcpQueue.length = 0;
     mocks.state.handleMcpApprovalSelect.mockClear();
+    mocks.state.hooksApprovalProps = null;
+    mocks.state.pendingHookLines = null;
+    mocks.state.hooksAddInfo = null;
+    mocks.state.handleProjectHooksApprovalSelect.mockClear();
   });
 
   const layoutOf = (

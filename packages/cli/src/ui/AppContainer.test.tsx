@@ -283,7 +283,6 @@ vi.mock('./hooks/useWorktreeSession.js');
 vi.mock('./hooks/useProviderUpdates.js', () => ({
   useProviderUpdates: vi.fn(() => ({
     providerUpdateRequest: undefined,
-    dismissProviderUpdate: vi.fn(),
   })),
 }));
 vi.mock('./contexts/VimModeContext.js');
@@ -377,16 +376,23 @@ describe('AppContainer State Management', () => {
   // timeout without any real hang.
   vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 
-  // That same initialize() creates a real ExtensionStore under ~/.qwen; some
-  // runners — including the review-address verification gate's clean child —
-  // inherit a HOME the test process cannot write to. Ordinary CI already
-  // overrides HOME, so point it at a scratch directory for this suite, and
-  // leave that directory alone: the mount effect's initialize() is un-awaited,
-  // so store work can still be in flight at afterAll, and deleting the tree
+  // That same initialize() creates a real ExtensionStore under the resolved
+  // QWEN_HOME (~/.qwen when unset); some runners — including the
+  // review-address verification gate's clean child — inherit a HOME the test
+  // process cannot write to. Ordinary CI already overrides HOME, so point
+  // both HOME and QWEN_HOME at a scratch directory for this suite, and leave
+  // that directory alone: the mount effect's initialize() is un-awaited, so
+  // store work can still be in flight at afterAll, and deleting the tree
   // there fails it with ENOENT — an unhandled rejection that fails the run.
+  // QWEN_HOME must be pinned here explicitly: test-setup.ts otherwise pins it
+  // to a per-file directory that it deletes at afterAll, and QWEN_HOME
+  // outranks HOME for the store root, so the in-flight chain would target
+  // exactly the tree the suite pin deletes.
   const savedHome = process.env['HOME'];
+  const savedQwenHome = process.env['QWEN_HOME'];
   const suiteHome = mkdtempSync(join(tmpdir(), 'qwen-appcontainer-home-'));
   process.env['HOME'] = suiteHome;
+  process.env['QWEN_HOME'] = suiteHome;
 
   afterAll(() => {
     if (savedHome === undefined) {
@@ -394,6 +400,20 @@ describe('AppContainer State Management', () => {
     } else {
       process.env['HOME'] = savedHome;
     }
+    if (savedQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = savedQwenHome;
+    }
+  });
+
+  it('keeps the extension store root on the never-deleted suite scratch home', () => {
+    // The mount effect's initialize() runs real store work against the
+    // resolved QWEN_HOME that can still be in flight at afterAll;
+    // test-setup.ts deletes its per-file pin there. If this redirect is
+    // lost, that work fails ENOENT as an unhandled rejection and fails the
+    // whole run — so pin the redirect itself down deterministically.
+    expect(process.env['QWEN_HOME']).toBe(suiteHome);
   });
 
   let mockConfig: Config;
@@ -873,6 +893,80 @@ describe('AppContainer State Management', () => {
       }
     },
   );
+
+  it('raises prompt.submit in Ink, holds steering for its hooks and hands a prompt back', async () => {
+    const initialize = vi.fn().mockResolvedValue(undefined);
+    const modSession = {
+      ready: Promise.resolve(),
+      hearsPrompts: true,
+      initialize,
+      subscribe: () => () => {},
+      setPresentation: vi.fn(),
+      setRenderInput: vi.fn(),
+    };
+    const owner = vi
+      .spyOn(interactiveMods, 'getInteractiveModSession')
+      .mockReturnValue(
+        modSession as unknown as interactiveMods.InteractiveModSession,
+      );
+    vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+    vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+    const drainQueue = vi.fn().mockReturnValue(['queued']);
+    mockedUseMessageQueue.mockReturnValue({
+      ...mockedUseMessageQueue(),
+      drainQueue,
+    });
+    const setText = vi.fn();
+    const buffer = { text: '', setText };
+    mockedUseTextBuffer.mockReturnValue(buffer);
+    try {
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await flushConfigInitialization();
+      await vi.waitFor(() =>
+        expect(initialize).toHaveBeenCalledWith(['AbovePrompt'], {
+          prompts: true,
+        }),
+      );
+
+      // Prompts typed during a turn wait for it to end while hooks hear them.
+      const drain = (
+        mockedUseLlmStream.mock.lastCall![19] as {
+          current: (includeDeferred?: boolean) => string[];
+        }
+      ).current;
+      expect(drain(false)).toEqual([]);
+      expect(drainQueue).not.toHaveBeenCalled();
+      modSession.hearsPrompts = false;
+      expect(drain(false)).toEqual(['queued']);
+      expect(drainQueue).toHaveBeenCalledOnce();
+
+      const returnPrompt = mockedUseLlmStream.mock.lastCall![25] as (
+        text: string,
+        pastes?: ReadonlyMap<string, string>,
+      ) => void;
+      const placeholder = '[Pasted text #1 +2 lines]';
+      act(() =>
+        returnPrompt(
+          `look ${placeholder}`,
+          new Map([[placeholder, 'line1\nline2']]),
+        ),
+      );
+      expect(setText).toHaveBeenLastCalledWith(`look ${placeholder}`);
+      // What the person typed since stays, after the prompt handed back.
+      buffer.text = 'next prompt';
+      act(() => returnPrompt('key AKIA'));
+      expect(setText).toHaveBeenLastCalledWith('key AKIA\nnext prompt');
+    } finally {
+      owner.mockRestore();
+    }
+  });
 
   it.each([
     ['workflow', 'Please use a workflow.', true, false, true, false],
@@ -1462,6 +1556,166 @@ describe('AppContainer State Management', () => {
           />,
         );
       }).not.toThrow();
+    });
+
+    it.each([
+      ['the folder is explicitly trusted', { trusted: true }],
+      ['every hook is disabled', { trusted: false, disableAllHooks: true }],
+      ['the block is approved and served', { trusted: false, served: true }],
+    ] as Array<
+      [
+        string,
+        { trusted: boolean; disableAllHooks?: boolean; served?: boolean },
+      ]
+    >)(
+      'does not warn about withheld project hooks when %s',
+      async (_, state) => {
+        const addItem = vi.fn();
+        mockedUseHistory.mockReturnValue({
+          history: [],
+          addItem,
+          updateItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+          truncateToItem: vi.fn(),
+        });
+        vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+        vi.spyOn(mockConfig, 'isExplicitlyTrustedFolder').mockReturnValue(
+          state.trusted,
+        );
+        vi.spyOn(mockConfig, 'getDisableAllHooks').mockReturnValue(
+          state.disableAllHooks ?? false,
+        );
+        vi.spyOn(mockConfig, 'getProjectHooks').mockReturnValue(
+          state.served ? { SessionStart: [] } : undefined,
+        );
+        const settings = {
+          ...mockSettings,
+          workspace: { settings: { hooks: { SessionStart: [] } } },
+        } as unknown as LoadedSettings;
+
+        const { unmount } = render(
+          <AppContainer
+            config={mockConfig}
+            settings={settings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        await act(async () => {});
+
+        expect(addItem).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            text: expect.stringContaining(
+              'Project hooks in .qwen/settings.json',
+            ),
+          }),
+          expect.any(Number),
+        );
+        unmount();
+      },
+    );
+
+    it('warns when an untrusted folder with the trust feature on leaves nothing to approve', async () => {
+      // pending === false here means "no approvable object" (the untrusted
+      // workspace contributes no settings), not "approved": the warning is
+      // the only signal that project hooks are absent, so it must survive.
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'isExplicitlyTrustedFolder').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'getDisableAllHooks').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'isProjectHooksApprovalGated').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'isProjectHooksPendingApproval').mockReturnValue(
+        false,
+      );
+      vi.spyOn(mockConfig, 'getProjectHooks').mockReturnValue(undefined);
+      const settings = {
+        ...mockSettings,
+        workspace: {
+          settings: {
+            hooks: {
+              SessionStart: [
+                { hooks: [{ type: 'command', command: 'echo x' }] },
+              ],
+            },
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      const { unmount } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await act(async () => {});
+
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.WARNING,
+          text: expect.stringContaining(
+            'Project hooks in .qwen/settings.json were not loaded',
+          ),
+        }),
+        expect.any(Number),
+      );
+      unmount();
+    });
+
+    it('warns once when an untrusted interactive session withholds project hooks', async () => {
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'isExplicitlyTrustedFolder').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'getDisableAllHooks').mockReturnValue(false);
+      const settings = {
+        ...mockSettings,
+        workspace: {
+          settings: {
+            hooks: {
+              SessionStart: [
+                { hooks: [{ type: 'command', command: 'echo x' }] },
+              ],
+            },
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      const { unmount } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await act(async () => {});
+
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.WARNING,
+          text: expect.stringContaining('Project hooks in .qwen/settings.json'),
+        }),
+        expect.any(Number),
+      );
+      unmount();
     });
 
     it('renders with startup warnings', () => {

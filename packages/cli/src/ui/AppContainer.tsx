@@ -211,6 +211,7 @@ import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalProgress } from './hooks/useTerminalProgress.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useMcpApproval } from './hooks/useMcpApproval.js';
+import { useProjectHooksApproval } from './hooks/use-project-hooks-approval.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from './CommandFormatMigrationNudge.js';
@@ -969,7 +970,7 @@ export const AppContainer = (props: AppContainerProps) => {
     config.getWorkingDir(),
   );
 
-  const { providerUpdateRequest, dismissProviderUpdate } = useProviderUpdates(
+  const { providerUpdateRequest } = useProviderUpdates(
     settings,
     config,
     historyManager.addItem,
@@ -1269,7 +1270,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Restore the transcript before Mod diagnostics, without making input
       // or Mod startup wait for asynchronous session recovery.
       void getInteractiveModSession(config)
-        ?.initialize(['AbovePrompt'])
+        ?.initialize(['AbovePrompt'], { prompts: true })
         .catch(() => {});
 
       if (resumedSessionData) {
@@ -1633,6 +1634,25 @@ export const AppContainer = (props: AppContainerProps) => {
   });
   const setBufferText = buffer.setText;
   setBufferTextRef.current = setBufferText;
+  const bufferRef = useRef(buffer);
+  bufferRef.current = buffer;
+  const pendingPastesRef = useRef(pendingPastes);
+  pendingPastesRef.current = pendingPastes;
+  // A typed prompt the Mods did not let in comes back to the composer with
+  // its pastes collapsed, ahead of anything typed since, as typed text whose
+  // provenance is gone.
+  const returnPrompt = useCallback(
+    (text: string, pastes: ReadonlyMap<string, string> = new Map()) => {
+      const draft = restorePasteDraft(text, pastes, pendingPastesRef.current);
+      const current = bufferRef.current.text;
+      invalidateSubmittedPromptProvenance();
+      setPendingPastes(draft.pasteExpansions);
+      bufferRef.current.setText(
+        current ? `${draft.text}\n${current}` : draft.text,
+      );
+    },
+    [invalidateSubmittedPromptProvenance],
+  );
   const restoredPromptStashTargetsRef = useRef(new Set<string>());
   const promptStashTargetDir = config.getTargetDir();
   useEffect(() => {
@@ -1957,6 +1977,52 @@ export const AppContainer = (props: AppContainerProps) => {
       );
     });
   }, [addHistoryItem, config]);
+
+  useEffect(() => {
+    // Surface the fail-closed project-hook gate instead of letting hooks
+    // stop silently after the explicit-trust requirement.
+    if (
+      !config.isInteractive() ||
+      config.isExplicitlyTrustedFolder() ||
+      config.getBareMode() ||
+      config.isSafeMode() ||
+      // With every hook disabled the trust gate is not why they are absent.
+      config.getDisableAllHooks() ||
+      // Warn only when the hooks really are withheld: the execution accessor
+      // serves an approved block despite the trust gate. `pending === false`
+      // alone is not "approved" — it also means "nothing to approve" (an
+      // untrusted folder with the trust feature on), the case this warning
+      // exists for.
+      config.getProjectHooks() !== undefined
+    ) {
+      return;
+    }
+    const projectHooks = settings.workspace?.settings?.hooks;
+    if (
+      !projectHooks ||
+      typeof projectHooks !== 'object' ||
+      Object.keys(projectHooks).length === 0
+    ) {
+      return;
+    }
+    addHistoryItem(
+      {
+        type: MessageType.WARNING,
+        text:
+          config.isProjectHooksApprovalGated() &&
+          config.isProjectHooksPendingApproval()
+            ? t(
+                'Project hooks in .qwen/settings.json were not loaded. Approve them in the dialog, or enable security.folderTrust.enabled and trust the folder.',
+              )
+            : t(
+                'Project hooks in .qwen/settings.json were not loaded: this folder is not explicitly trusted. Enable security.folderTrust.enabled and trust the folder to run them.',
+              ),
+      },
+      Date.now(),
+    );
+    // Startup notice only; later trust changes take effect on restart/reload.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config]);
 
   const clearPendingStateRef = useRef<() => void>(() => {});
   const clearPendingStateFromRef = useCallback(
@@ -2582,6 +2648,7 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidthRef,
     midTurnRestoreRef,
     goalQueueRef,
+    returnPrompt,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;
@@ -2715,7 +2782,11 @@ export const AppContainer = (props: AppContainerProps) => {
     restorePeerMessage,
   } = useMessageQueue();
 
-  midTurnDrainRef.current = drainQueue;
+  // While a Mod hooks prompt.submit, prompts typed during a turn are not
+  // steered into it at a tool boundary: they wait for the turn to end and are
+  // sent, and heard by the hooks, then.
+  midTurnDrainRef.current = (...args) =>
+    getInteractiveModSession(config)?.hearsPrompts ? [] : drainQueue(...args);
   midTurnRestoreRef.current = restoreMessages;
   goalQueueRef.current = {
     peekNextUserBatchKey,
@@ -4279,6 +4350,13 @@ export const AppContainer = (props: AppContainerProps) => {
     handleMcpApprovalSelect,
   } = useMcpApproval(config);
   const {
+    isProjectHooksApprovalDialogOpen,
+    pendingProjectHooks,
+    handleProjectHooksApprovalSelect,
+  } = useProjectHooksApproval(config, settings, (text) =>
+    addHistoryItem({ type: MessageType.INFO, text }, Date.now()),
+  );
+  const {
     needsRestart: ideNeedsRestart,
     restartReason: ideTrustRestartReason,
   } = useIdeTrustListener(!config.getShellExecutionSandbox?.());
@@ -4301,6 +4379,7 @@ export const AppContainer = (props: AppContainerProps) => {
     shouldShowCommandMigrationNudge ||
     isFolderTrustDialogOpen ||
     isMcpApprovalDialogOpen ||
+    isProjectHooksApprovalDialogOpen ||
     !!shellConfirmationRequest ||
     !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
@@ -5322,6 +5401,8 @@ export const AppContainer = (props: AppContainerProps) => {
       currentMcpApproval,
       pendingMcpApprovals,
       mcpApprovalRemaining,
+      isProjectHooksApprovalDialogOpen,
+      pendingProjectHooks,
       isTrustedFolder,
       constrainHeight,
       ideContextState,
@@ -5472,6 +5553,8 @@ export const AppContainer = (props: AppContainerProps) => {
       currentMcpApproval,
       pendingMcpApprovals,
       mcpApprovalRemaining,
+      isProjectHooksApprovalDialogOpen,
+      pendingProjectHooks,
       isTrustedFolder,
       constrainHeight,
       ideContextState,
@@ -5583,7 +5666,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
@@ -5592,6 +5674,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
       handleMcpApprovalSelect,
+      handleProjectHooksApprovalSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
       onTabConsumerChange: setHasTabConsumer,
@@ -5678,7 +5761,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
@@ -5687,6 +5769,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
       handleMcpApprovalSelect,
+      handleProjectHooksApprovalSelect,
       setConstrainHeight,
       handleEscapePromptChange,
       refreshStatic,

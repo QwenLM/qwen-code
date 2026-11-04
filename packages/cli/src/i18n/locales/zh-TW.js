@@ -666,6 +666,8 @@ export default {
   'disabled (bare mode)': '已禁用（精簡模式）',
   'disabled (safe mode)': '已禁用（安全模式）',
   'disabled (disableAllHooks)': '已禁用（disableAllHooks）',
+  'disabled (not approved)': '已禁用（未核准）',
+  'disabled (rejected)': '已禁用（已拒絕）',
   'disabled (folder not trusted)': '已禁用（資料夾未受信任）',
   'disabled (turned off for this session)': '已禁用（本工作階段中已關閉）',
   'View Details': '查看詳情',
@@ -2022,6 +2024,8 @@ export default {
   'System prompt': '系統提示',
   'Built-in tools': '內置工具',
   'MCP tools': 'MCP tools',
+  'Instruction files': '指令檔案',
+  'Auto memory': '自動記憶',
   'Memory files': '記憶檔案',
   Skills: '技能',
   Messages: '消息',
@@ -2372,6 +2376,8 @@ export default {
   'start server': '啟動伺服器',
   'No compression needed.': '無需壓縮。',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    '指定版本升級需要獨立安裝。請使用目前的安裝方式手動安裝 {{version}} 版本。',
   'Check for Qwen Code updates and install if available':
     '檢查 Qwen Code 更新並安裝（如果可用）',
   'Qwen Code update available! {{current}} → {{latest}}':

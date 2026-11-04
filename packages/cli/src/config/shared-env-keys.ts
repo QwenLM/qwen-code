@@ -37,6 +37,7 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // Project reloads must not replace or relabel an operator container requirement.
   'QWEN_AGENT_EXECUTION_BACKEND',
   'QWEN_CODE_MCP_APPROVALS_PATH',
+  'QWEN_CODE_HOOK_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
   // These two select which file becomes the System / SystemDefaults settings
   // layer. A project `.env` must never redirect them: the System layer
@@ -510,6 +511,37 @@ export function scrubInheritedLoaderEnv(
     }
   }
   return removedKeys;
+}
+
+// NODE_OPTIONS carries more than loader hooks: --icu-data-dir, resource caps
+// and tuning flags are legitimate cross-process state, and a bare `-e` probe
+// child still needs them. When a child must not inherit a broken module hook,
+// drop only the hook flags and keep the rest of the value intact.
+const NODE_OPTIONS_LOADER_FLAGS = new Set([
+  '--require',
+  '-r',
+  '--import',
+  '--loader',
+  '--experimental-loader',
+]);
+
+export function scrubNodeOptionsLoaderFlags(value: string): string {
+  const tokens = value.split(/\s+/).filter(Boolean);
+  const kept: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    if (NODE_OPTIONS_LOADER_FLAGS.has(token)) {
+      // Both the bare flag and its value go: `--require foo` is two tokens.
+      i++;
+      continue;
+    }
+    const flag = token.split('=', 1)[0]!;
+    if (NODE_OPTIONS_LOADER_FLAGS.has(flag)) {
+      continue;
+    }
+    kept.push(token);
+  }
+  return kept.join(' ');
 }
 
 // Runs the scrub and leaves a stderr breadcrumb naming the removed keys, so a

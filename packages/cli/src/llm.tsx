@@ -9,6 +9,7 @@ import {
   hasLoadedEnvironmentValues,
 } from './config/environment.js';
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import { MODEL_CATALOG_REFRESH_ENV } from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { validateExecutionSandboxSelection } from './config/execution-sandbox-settings.js';
 import {
   AuthType,
@@ -29,6 +30,7 @@ import {
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
+  resolveUsageStatisticsEnabled,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -113,6 +115,12 @@ import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getInterruptedWorkflowRunsNotice } from './utils/interrupted-workflow-runs.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
+import {
+  getProjectHooksApprovalState,
+  getProjectHooksForApproval,
+  getProjectHooksHeadlessWarning,
+  getSeparatedHookSettings,
+} from './config/hook-approvals.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
@@ -742,11 +750,7 @@ export async function main() {
         undefined,
         [],
         // Pass separated hooks for proper source attribution
-        {
-          systemHooks: settings.getSystemHooks(),
-          userHooks: settings.getUserHooks(),
-          projectHooks: settings.getProjectHooks(),
-        },
+        getSeparatedHookSettings(settings),
         buildDisabledSkillNamesProvider(settings),
         undefined,
         undefined,
@@ -854,6 +858,18 @@ export async function main() {
       // validation above re-runs the environment load, and the accepted
       // provenance travels in `privateAcpChildEnv`, which is spread last.
       delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
+
+      // The container mounts only the user settings dir and builds its env
+      // passthrough from `process.env`, so a System-scope opt-out would never
+      // reach the sandboxed CLI and it would fetch models.dev.
+      if (
+        settings.merged.model?.catalogRefresh === false ||
+        resolveUsageStatisticsEnabled(
+          settings.merged.privacy?.usageStatisticsEnabled,
+        ) === false
+      ) {
+        process.env[MODEL_CATALOG_REFRESH_ENV] = 'off';
+      }
 
       await relaunchOnExitCode(
         () =>
@@ -1090,11 +1106,7 @@ export async function main() {
       process.cwd(),
       argv.extensions,
       // Pass separated hooks for proper source attribution
-      {
-        systemHooks: settings.getSystemHooks(),
-        userHooks: settings.getUserHooks(),
-        projectHooks: settings.getProjectHooks(),
-      },
+      getSeparatedHookSettings(settings),
       buildDisabledSkillNamesProvider(settings),
       undefined,
       settingsWatcher,
@@ -1108,9 +1120,21 @@ export async function main() {
           }
         : undefined,
       buildEnabledSkillNamesProvider(settings),
+      // Close over the live LoadedSettings: the YOLO-exit re-gate must see
+      // blocks a `/hooks` reload replaced, not the startup snapshot.
+      () => getProjectHooksForApproval(settings),
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
+
+    // The interactive UI segments text through Intl.Segmenter; on an ICU-less
+    // Node the first segmentation segfaults the process (#11747). Probe here,
+    // where interactivity is known, so headless and ACP runs (which never
+    // segment) are untouched by the gate.
+    if (config.isInteractive() && !config.getExperimentalZedIntegration()) {
+      const { assertFullIcuAvailable } = await import('./startup/icu-check.js');
+      assertFullIcuAvailable();
+    }
 
     const nonInteractiveHousekeeping =
       !config.isInteractive() || config.getExperimentalZedIntegration()
@@ -1564,6 +1588,13 @@ export async function main() {
     if (!config.isInteractive()) {
       const yoloWarning = getHeadlessYoloSafetyWarning(config);
       if (yoloWarning) writeStderrLine(yoloWarning);
+      if (config.isProjectHooksPendingApproval()) {
+        writeStderrLine(
+          getProjectHooksHeadlessWarning(
+            getProjectHooksApprovalState(getProjectHooksForApproval(settings)),
+          ),
+        );
+      }
     }
 
     // For non-stream-json mode, initialize config here. Stream-json defers
