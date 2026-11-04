@@ -467,15 +467,6 @@ function descriptionOf(element: HTMLElement | null): string {
   return element?.parentElement?.querySelector('p')?.textContent?.trim() ?? '';
 }
 
-// The watch-events field carries a second paragraph (the disabled hint)
-// ahead of the description while bound delivery is off, so copy assertions
-// scan every paragraph in the field wrapper.
-function fieldParagraphsOf(element: HTMLElement | null): string {
-  return Array.from(element?.parentElement?.querySelectorAll('p') ?? [])
-    .map((p) => p.textContent ?? '')
-    .join('\n');
-}
-
 beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -829,7 +820,7 @@ describe('ChannelEditorDialog', () => {
     expect(
       descriptionOf(fieldByLabel('Deliver To PR-Bound Sessions')),
     ).toContain('instead of a channel-owned session');
-    expect(fieldParagraphsOf(fieldByLabel('PR Watch Events'))).toContain(
+    expect(descriptionOf(fieldByLabel('PR Watch Events'))).toContain(
       'Leave empty to disable',
     );
   });
@@ -851,7 +842,7 @@ describe('ChannelEditorDialog', () => {
     expect(descriptionOf(fieldByLabel('投递到 PR 绑定会话'))).toContain(
       '以 prompt 形式投递进该会话，而不是频道自有会话',
     );
-    expect(fieldParagraphsOf(fieldByLabel('PR 状态监视事件'))).toContain(
+    expect(descriptionOf(fieldByLabel('PR 状态监视事件'))).toContain(
       '为绑定 PR 监视的状态转换',
     );
   });
@@ -961,7 +952,8 @@ describe('ChannelEditorDialog', () => {
       '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
     );
     expect(box!.checked).toBe(true);
-    expect(box!.disabled).toBe(true);
+    // The stored selection stays clearable even while the gate is closed.
+    expect(box!.disabled).toBe(false);
 
     const save = Array.from(document.querySelectorAll('button')).find(
       (button) => button.textContent?.trim() === 'Save',
@@ -973,6 +965,114 @@ describe('ChannelEditorDialog', () => {
     expect(onSave).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain(
       'Enable "Deliver To PR-Bound Sessions" to save the selected watch events.',
+    );
+
+    // Following the instruction must retire the instruction: turning the
+    // switch on clears the stale dependency error without another Save.
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+    expect(document.body.textContent).not.toContain(
+      'to save the selected watch events.',
+    );
+  });
+
+  it('lets a stored selection be cleared while delivery is off', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        prWatchEvents: ['ci_failure'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance, onSave });
+
+    const boxes = Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+      ),
+    );
+    const selected = boxes.find((b) =>
+      b.closest('label')?.textContent?.includes('ci_failure'),
+    )!;
+    expect(selected.checked).toBe(true);
+    expect(selected.disabled).toBe(false);
+    expect(boxes.filter((b) => b !== selected).every((b) => b.disabled)).toBe(
+      true,
+    );
+
+    await act(async () => {
+      selected.click();
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['prWatchEvents']).toBeUndefined();
+    expect(request.config['deliverToBoundSessions']).toBe(false);
+  });
+
+  it('associates the disabled hint with the checkbox group', async () => {
+    await renderDialog({ descriptor: GITHUB_BOUND });
+
+    const group = document.querySelector(
+      '[role="group"][aria-label="PR Watch Events"]',
+    )!;
+    const describedBy = group.getAttribute('aria-describedby');
+    expect(describedBy).not.toBeNull();
+    const hint = document.getElementById(describedBy!);
+    expect(hint?.textContent).toContain('above to select watch events');
+    expect(hint?.getAttribute('aria-live')).toBe('polite');
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+    expect(group.getAttribute('aria-describedby')).toBeNull();
+  });
+
+  it('mounts a stored delivery-on instance with its events enabled', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        deliverToBoundSessions: true,
+        prWatchEvents: ['ci_failure'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance });
+
+    const boxes = Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+      ),
+    );
+    expect(boxes.length).toBeGreaterThan(0);
+    expect(boxes.every((box) => !box.disabled)).toBe(true);
+    expect(
+      boxes.find((b) =>
+        b.closest('label')?.textContent?.includes('ci_failure'),
+      )!.checked,
+    ).toBe(true);
+    expect(document.body.textContent).not.toContain(
+      'above to select watch events.',
     );
   });
 

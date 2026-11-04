@@ -156,7 +156,9 @@
   opacity: 0.55;
 }
 
-.optionRow[data-disabled='true']:hover {
+/* A checked-but-disabled row keeps the selected border; only unselected
+   disabled rows lose the hover emphasis. */
+.optionRow[data-disabled='true']:not([data-selected='true']):hover {
   border-color: var(--border);
 }
 

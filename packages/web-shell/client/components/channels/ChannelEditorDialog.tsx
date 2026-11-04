@@ -220,6 +220,7 @@ function FieldShell({
   label,
   required,
   hint,
+  hintId,
   description,
   error,
   children,
@@ -228,6 +229,7 @@ function FieldShell({
   label: string;
   required?: boolean;
   hint?: string;
+  hintId?: string;
   description?: string;
   error?: string;
   children: ReactNode;
@@ -243,7 +245,17 @@ function FieldShell({
             </span>
           ) : null}
         </Label>
-        {hint ? <span className={styles.hint}>{hint}</span> : null}
+        {hint || hintId ? (
+          // A hintId keeps the live region mounted while the hint is empty,
+          // so screen readers announce the hint when it appears.
+          <span
+            id={hintId}
+            className={styles.hint}
+            aria-live={hintId ? 'polite' : undefined}
+          >
+            {hint}
+          </span>
+        ) : null}
       </div>
       {children}
       {description ? (
@@ -594,6 +606,15 @@ export function ChannelEditorDialog({
         field.key === 'useLocalGh' &&
         isRepositoryOnlyChannelType(descriptor.type);
       const updateSwitch = (checked: boolean) => {
+        if (field.key === 'deliverToBoundSessions' && checked) {
+          // The dependency error asked for this exact action; leaving it
+          // under the now-on switch would keep instructing a done deal.
+          setErrors((current) => {
+            const next = { ...current };
+            delete next['prWatchEvents'];
+            return next;
+          });
+        }
         if (!isLocalGhSwitch) {
           update(checked);
           return;
@@ -679,9 +700,11 @@ export function ChannelEditorDialog({
     }
     if (field.kind === 'string-list' && field.options?.length) {
       const options = field.options;
-      const disabled =
-        field.key === 'prWatchEvents' &&
-        draft.values['deliverToBoundSessions'] !== true;
+      // Same scope as the validation mirror in channel-editor-state.
+      const watchField =
+        field.key === 'prWatchEvents' && descriptor.type === 'github';
+      const gated =
+        watchField && draft.values['deliverToBoundSessions'] !== true;
       const selected = toList(String(value ?? ''));
       // The adapter matches these values case-insensitively, so a stored
       // `COMMENT` has to tick the canonical `comment` box instead of rendering
@@ -717,52 +740,56 @@ export function ChannelEditorDialog({
           label={fieldLabel(field)}
           required={field.required}
           description={fieldDescription(field)}
+          hint={
+            gated
+              ? t('channels.editor.field.github.prWatchEvents.disabledHint')
+              : undefined
+          }
+          hintId={watchField ? `${id}-disabled-hint` : undefined}
           error={error}
         >
-          <>
-            <div
-              id={id}
-              className={styles.optionGrid}
-              role="group"
-              aria-label={fieldLabel(field)}
-            >
-              {[
-                ...options,
-                ...stored.map((entry) => ({ value: entry, label: entry })),
-              ].map((option) => {
-                const isSelected = selectedKeys.has(option.value.toLowerCase());
-                const optionLabel = fieldOptionLabel(
-                  field,
-                  option.value,
-                  option.label,
-                );
-                return (
-                  <label
-                    key={option.value}
-                    className={styles.optionRow}
-                    data-selected={isSelected}
-                    data-disabled={disabled}
-                  >
-                    <input
-                      type="checkbox"
-                      className={styles.optionCheckbox}
-                      checked={isSelected}
-                      disabled={disabled}
-                      onChange={(event) =>
-                        toggleValue(option.value, event.target.checked)
-                      }
-                    />
-                    <span className={styles.optionLabel}>{optionLabel}</span>
-                  </label>
-                );
-              })}
-            </div>
-            {disabled ? (
-              <p className={styles.fieldDescription}>
-                {t('channels.editor.field.github.prWatchEvents.disabledHint')}
-              </p>
-            ) : null}
-          </>
+          <div
+            id={id}
+            className={styles.optionGrid}
+            role="group"
+            aria-label={fieldLabel(field)}
+            aria-describedby={gated ? `${id}-disabled-hint` : undefined}
+          >
+            {[
+              ...options,
+              ...stored.map((entry) => ({ value: entry, label: entry })),
+            ].map((option) => {
+              const isSelected = selectedKeys.has(option.value.toLowerCase());
+              // A stored selection stays clearable while gated, so turning
+              // delivery off never strands the operator with events they
+              // cannot remove.
+              const optionDisabled = gated && !isSelected;
+              const optionLabel = fieldOptionLabel(
+                field,
+                option.value,
+                option.label,
+              );
+              return (
+                <label
+                  key={option.value}
+                  className={styles.optionRow}
+                  data-selected={isSelected}
+                  data-disabled={optionDisabled}
+                >
+                  <input
+                    type="checkbox"
+                    className={styles.optionCheckbox}
+                    checked={isSelected}
+                    disabled={optionDisabled}
+                    onChange={(event) =>
+                      toggleValue(option.value, event.target.checked)
+                    }
+                  />
+                  <span className={styles.optionLabel}>{optionLabel}</span>
+                </label>
+              );
+            })}
+          </div>
         </FieldShell>
       );
     }
