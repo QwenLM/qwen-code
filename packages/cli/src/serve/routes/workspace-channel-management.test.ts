@@ -154,6 +154,7 @@ function mount(
       }
       return id;
     },
+    daemonEnv: process.env,
   });
   return { app, primaryService, secondaryService };
 }
@@ -226,6 +227,7 @@ describe('workspace Channel management routes', () => {
       mutate: () => (req, res, next) => next(),
       safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
       parseAndValidateClientId: () => undefined,
+      daemonEnv: process.env,
     });
 
     const response = await request(app).get('/workspace/channel-types');
@@ -366,6 +368,7 @@ describe('workspace Channel management routes', () => {
       mutate: () => (_req, _res, next) => next(),
       safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
       parseAndValidateClientId: () => undefined,
+      daemonEnv: process.env,
     });
 
     const response = await request(app)
@@ -397,6 +400,7 @@ describe('workspace Channel management routes', () => {
       mutate: () => (_req, _res, next) => next(),
       safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
       parseAndValidateClientId: () => undefined,
+      daemonEnv: process.env,
     });
 
     const response = await request(app).get(
@@ -437,6 +441,7 @@ describe('workspace Channel management routes', () => {
       mutate: () => (req, res, next) => next(),
       safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
       parseAndValidateClientId: () => undefined,
+      daemonEnv: process.env,
     });
 
     const response = await request(app).get('/workspace/channels');

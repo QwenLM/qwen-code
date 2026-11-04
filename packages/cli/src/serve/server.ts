@@ -3689,6 +3689,7 @@ export function createServeApp(
       safeBody,
       parseAndValidateClientId: (req, res, runtime) =>
         parseAndValidateWorkspaceClientId(req, res, runtime.bridge),
+      daemonEnv: daemonEnvAtBoot,
       conversationRuntimeActivity,
     });
   }

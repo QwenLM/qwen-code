@@ -59,6 +59,13 @@ interface RegisterWorkspaceChannelManagementRoutesDeps {
     res: Response,
     runtime: WorkspaceRuntime,
   ) => string | undefined | null;
+  /**
+   * The daemon's boot-time environment snapshot. Parent-process runtimes
+   * without an overlay resolve settings variables against it; reading the
+   * live process environment here would couple a read-only route to shared
+   * mutable state.
+   */
+  daemonEnv: Readonly<NodeJS.ProcessEnv>;
   conversationRuntimeActivity?: ConversationRuntimeActivityGate;
 }
 
@@ -546,7 +553,7 @@ export function registerWorkspaceChannelManagementRoutes(
             runtime.workspaceCwd,
             (cwd) => {
               const loaded = readSettingsSnapshot(cwd, {
-                environment: runtime.env.effectiveEnv ?? process.env,
+                environment: runtime.env.effectiveEnv ?? deps.daemonEnv,
                 workspaceTrusted: runtime.trusted,
               });
               const merged = loaded.merged as {
