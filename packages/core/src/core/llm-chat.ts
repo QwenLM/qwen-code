@@ -1861,8 +1861,11 @@ function copyPartContainer(part: Part): Part {
  * or a marked memory catalog snapshot.
  *
  * Shape-based for the two text envelopes, the same trust model
- * `isSystemReminderContent` uses. Only trailing parts are ever relocated (see
- * below), so a prompt the user typed in this shape keeps its own order.
+ * `isSystemReminderContent` uses. Classification spans the whole entry, which
+ * is what lets a mid-entry reminder bound the moving run; only the contiguous
+ * injected run after the caller's last own part is relocated, so a
+ * caller-authored part shaped like either envelope that ends the entry is
+ * treated as injected and moves ahead of the caller's text.
  */
 function isInjectedPromptContext(part: Part): boolean {
   return (

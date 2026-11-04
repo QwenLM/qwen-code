@@ -86,8 +86,10 @@ token undercount in the always-on-context warning remain separate work
 
 - A turn whose parts are all tool results, all injected context, or already
   ordered is returned unchanged.
-- User-authored text shaped like a reminder is only ever classified within the
-  trailing run, so a prompt typed in that shape keeps its own order.
+- Classification spans the whole entry, which is what bounds the moving run.
+  Only the contiguous injected run after the caller's last own part is
+  relocated, so a caller-authored part shaped like either envelope that ends
+  the entry is treated as injected and moves ahead of the caller's text.
 - Side queries (`getRequestHistoryForRoute` without a pending user turn) are
   unaffected.
 
