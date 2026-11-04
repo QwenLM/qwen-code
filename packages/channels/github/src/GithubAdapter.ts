@@ -767,13 +767,16 @@ type InboundTaskState =
 
 const MAX_INBOUND_TASK_ATTEMPTS = 3;
 /**
- * Consecutive polls one notification's thread may fail with a 5xx while it
- * holds the cursor back (~30 minutes at the default 60s poll). Past that it is
- * skipped like a permanent failure until the window commits, so a thread
- * GitHub keeps failing cannot freeze mark-as-read for every other thread: the
- * window is held until each failing thread recovers or is skipped.
+ * Polls of one notification window that may fail with a 5xx while reading a
+ * thread (~30 minutes at the default 60s poll, plus the in-call retries). The
+ * window stays unread through the first 29; on the 30th, threads that still
+ * fail are skipped like a permanent failure and the window can be marked
+ * read. The budget belongs to the window, not to a thread, so threads that
+ * fail in turn cannot keep mark-as-read and the cursor frozen indefinitely.
  */
-const MAX_TRANSIENT_NOTIFICATION_FAILURES = 30;
+const MAX_TRANSIENT_FAILURE_POLLS = 30;
+/** Bounds the once-per-window journal keys of a window held for very long. */
+const MAX_WINDOW_JOURNAL_KEYS = 8192;
 /**
  * The poll cursor does not advance while an inbound task is recoverable, so a
  * slow or stuck turn makes GitHub return the same notifications on every poll.
@@ -1256,7 +1259,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * never be listed again and its comment would be lost silently.
    */
   private notificationRetryPending = false;
+  /** Polls since the window was last marked read that a 5xx kept it unread. */
+  private transientHoldPolls = 0;
+  /** Polls since the window was last marked read stopped by a shared failure. */
+  private sharedHoldPolls = 0;
+  /**
+   * Failing polls per thread since the window was last marked read. Only the
+   * log throttle reads it; the retry decision is the window's budget.
+   */
   private transientNotificationFailures = new Map<string, number>();
+  /**
+   * Journal rows already written for the current window. A held window
+   * re-reads the same threads and comments on every poll, and rows that say
+   * nothing new (a repeated skip) are written once per window.
+   */
+  private windowJournalKeys = new Set<string>();
 
   constructor(
     name: string,
@@ -2195,6 +2212,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     let reasonFilterJournaled = 0;
     let reasonFilterCollapsed = 0;
+    let transientHeld = false;
+    let sharedHeld = false;
     for (const notification of notifications) {
       if (!notification.subject.url) continue;
       const extracted = this.extractFromSubjectUrl(notification.subject.url);
@@ -2268,32 +2287,37 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           default:
             await this.processCommentLane(ctx, false);
         }
-        this.transientNotificationFailures.delete(failureKey);
       } catch (err) {
         const failure = classifyThreadFailure(err);
-        let failures = this.transientNotificationFailures.get(failureKey) ?? 0;
-        if (failure === 'transient') failures += 1;
+        let failures = 0;
+        if (failure === 'transient') {
+          failures =
+            (this.transientNotificationFailures.get(failureKey) ?? 0) + 1;
+          this.transientNotificationFailures.set(failureKey, failures);
+        }
+        const transientPoll = this.transientHoldPolls + 1;
         const retry =
           failure === 'shared' ||
           (failure === 'transient' &&
-            failures < MAX_TRANSIENT_NOTIFICATION_FAILURES);
-        if (retry) this.notificationRetryPending = true;
-        // An exhausted streak stays recorded until the window commits or the
-        // thread succeeds: while another thread still holds the cursor, a
-        // fresh streak would let two out-of-phase threads hold it forever.
-        if (failure === 'transient') {
-          this.transientNotificationFailures.set(failureKey, failures);
-        } else if (failure === 'permanent') {
-          this.transientNotificationFailures.delete(failureKey);
+            transientPoll < MAX_TRANSIENT_FAILURE_POLLS);
+        if (retry) {
+          this.notificationRetryPending = true;
+          if (failure === 'shared') sharedHeld = true;
+          else transientHeld = true;
         }
-        // A held window re-reads the thread every poll: report a streak when
-        // it starts, every tenth retry and when it gives up.
-        if (
-          failure !== 'transient' ||
-          failures === 1 ||
-          (retry && failures % 10 === 0) ||
-          failures === MAX_TRANSIENT_NOTIFICATION_FAILURES
-        ) {
+        // A held window re-reads the thread every poll. Report a 5xx streak
+        // when it starts and on every tenth failing poll, a shared failure on
+        // the first and every tenth poll it stops, and a skip once.
+        const heldPolls =
+          failure === 'shared' ? this.sharedHoldPolls + 1 : transientPoll;
+        const milestone = (n: number) => n === 1 || n % 10 === 0;
+        const report =
+          failure === 'shared'
+            ? milestone(heldPolls)
+            : retry
+              ? milestone(failures)
+              : this.journalOncePerWindow(`skip\0${failureKey}`);
+        if (report) {
           const error = sanitizeLogText(
             err instanceof Error ? err.message : String(err),
             200,
@@ -2302,9 +2326,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             failure === 'shared'
               ? `[Channel:${this.name}] API error processing ${threadId} (rate limit or credentials), keeping notifications unread and stopping this poll: ${error}\n`
               : retry
-                ? `[Channel:${this.name}] API error processing ${threadId} (${failures}/${MAX_TRANSIENT_NOTIFICATION_FAILURES}), keeping it unread for the next poll: ${error}\n`
+                ? `[Channel:${this.name}] API error processing ${threadId} (${heldPolls}/${MAX_TRANSIENT_FAILURE_POLLS}), keeping it unread for the next poll: ${error}\n`
                 : `[Channel:${this.name}] API error processing ${threadId}, skipping: ${error}\n`,
           );
+          let detail: Record<string, number> | undefined;
+          if (failure === 'transient') {
+            detail = retry ? { failures, heldPolls } : { failures };
+          } else if (failure === 'shared') {
+            detail = { heldPolls };
+          }
           this.recordChannelEvent({
             type: 'inbound',
             outcome: retry ? 'failed' : 'skipped',
@@ -2314,7 +2344,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             thread: threadId,
             number: issueNumber,
             error,
-            ...(failure === 'transient' ? { detail: { failures } } : {}),
+            ...(detail ? { detail } : {}),
           });
         }
         // The same limit would answer every remaining thread.
@@ -2322,6 +2352,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         continue;
       }
     }
+    if (transientHeld) this.transientHoldPolls += 1;
+    if (sharedHeld) this.sharedHoldPolls += 1;
     if (reasonFilterCollapsed > 0) {
       // One counted row instead of a row per notification: the threads differ,
       // so this carries no single repository/thread, and the page renders the
@@ -2355,9 +2387,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           this.cursor.lastProcessedAt = committedAt;
         }
         this.pendingCursorUpdatedAt = undefined;
-        // Nothing is retrying past a commit; drop streaks of threads that
-        // stopped being listed (read elsewhere) so the map cannot grow.
+        // A new window starts: its hold budget, streaks and once-per-window
+        // journal keys start again.
+        this.transientHoldPolls = 0;
+        this.sharedHoldPolls = 0;
         this.transientNotificationFailures.clear();
+        this.windowJournalKeys.clear();
       }
     } finally {
       // Bound the comment-time map EVERY poll, independent of dispatch: fetch
@@ -2377,6 +2412,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
   }
 
+  /**
+   * True the first time `key` is seen in the current notification window (it
+   * resets when the window is marked read), so a held window that re-reads the
+   * same thread or comment every poll journals the repeat once.
+   */
+  private journalOncePerWindow(key: string): boolean {
+    if (this.windowJournalKeys.has(key)) return false;
+    if (this.windowJournalKeys.size >= MAX_WINDOW_JOURNAL_KEYS) {
+      this.windowJournalKeys.clear();
+    }
+    this.windowJournalKeys.add(key);
+    return true;
+  }
+
   private async processCommentLane(
     ctx: NotificationContext,
     onlyMentioned: boolean,
@@ -2389,6 +2438,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const key = comment.node_id || String(comment.id);
       const senderId = (comment.user?.login || 'unknown').toLowerCase();
       if (this.cursor.dispatchedComments?.includes(key)) {
+        if (!this.journalOncePerWindow(`duplicate\0${key}`)) continue;
         this.recordChannelEvent({
           type: 'inbound',
           outcome: 'skipped',
@@ -2408,6 +2458,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ? testBotMention(body, this.botUsername)
         : false;
       if (onlyMentioned && !hasMention) {
+        if (!this.journalOncePerWindow(`mention_required\0${key}`)) continue;
         this.recordChannelEvent({
           type: 'inbound',
           outcome: 'skipped',

@@ -1264,7 +1264,11 @@ outcome, an inbound task transition, or a poll result — and never carries
 message text. A GitHub poll that filters more than 20 notifications journals
 the first 20 individually and one further `reason_filter` row whose
 `detail.filtered` counts the rest, so a pinned poll cursor cannot flood the
-journal with repeats of the same batch. Query parameters: `limit` (1-500, default 100), `type`
+journal with repeats of the same batch. While the cursor is held, a comment the
+poll reads again is journaled as `duplicate` or `mention_required` once per
+window, and a thread GitHub fails to read as `github_api_error` when the
+failure starts, on every tenth failing poll (a rate limit: its first and every
+tenth poll), and once when it is skipped. Query parameters: `limit` (1-500, default 100), `type`
 (comma-separated `inbound`, `outbound`, `task`, `poll`), `channel`
 (repeat the parameter once per instance name), and `since` (ISO 8601). The route needs no
 operator authority. Journal reads are asynchronous and bounded: the current journal plus one

@@ -1541,6 +1541,21 @@ describe('GithubChannel', () => {
         }
       }
 
+      function journal(): Array<Record<string, unknown>> {
+        const path = inboundTaskPath().replace(
+          'github-inbound-tasks.json',
+          'channel-events.jsonl',
+        );
+        try {
+          return readFileSync(path, 'utf-8')
+            .split('\n')
+            .filter(Boolean)
+            .map((line) => JSON.parse(line) as Record<string, unknown>);
+        } catch {
+          return [];
+        }
+      }
+
       async function initFailing() {
         await initWithoutLoop();
         (
@@ -1548,6 +1563,15 @@ describe('GithubChannel', () => {
             abortableSleep: (ms: number) => Promise<void>;
           }
         ).abortableSleep = vi.fn().mockResolvedValue(undefined);
+        // A thread whose comment listing succeeds with nothing new falls
+        // through to first contact; its body does not mention the bot.
+        mockOctokit.rest.issues.get.mockResolvedValue({
+          data: {
+            title: 'Test Issue',
+            body: 'Nothing for the bot here',
+            user: { login: 'alice' },
+          },
+        });
       }
 
       it('keeps the notification unread and answers the comment on the next poll', async () => {
@@ -1633,6 +1657,12 @@ describe('GithubChannel', () => {
           'a secondary rate limit without retry-after',
           403,
           'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.',
+          false,
+        ],
+        [
+          'the older abuse-detection wording',
+          403,
+          'You have triggered an abuse detection mechanism. Please wait a few minutes before you try again.',
           false,
         ],
         [
@@ -1794,7 +1824,7 @@ describe('GithubChannel', () => {
         ]);
       });
 
-      it('restarts the count after a success while another thread holds the window', async () => {
+      it('shares one budget between threads that fail in turn', async () => {
         await initFailing();
         let poll = 0;
         mockOctokit.paginate.mockImplementation(
@@ -1803,20 +1833,39 @@ describe('GithubChannel', () => {
               poll += 1;
               return [issueNotification(1), issueNotification(2)];
             }
-            // Thread 1 fails except on poll 25; thread 2 always fails and
-            // keeps the window held throughout.
-            if (params.issue_number === 1 && poll === 25) return [];
-            throw transient();
+            // Thread 1 fails on odd polls and thread 2 on even ones: neither
+            // fails twice in a row, yet every poll has a failing thread.
+            if (params.issue_number === (poll % 2 === 1 ? 1 : 2)) {
+              throw transient();
+            }
+            return [];
           },
         );
 
-        for (let i = 0; i < 27; i++) await pollOnce();
+        for (let i = 0; i < 29; i++) await pollOnce();
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
 
-        const thread1 = journalRows()
-          .filter((row) => row['number'] === 1)
-          .map((row) => (row['detail'] as { failures: number }).failures);
-        // 1..24 failed, the success on 25 reset the streak, 26 starts again.
-        expect(thread1).toEqual([1, 10, 20, 1]);
+        await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          journalRows().map((row) => [
+            row['number'],
+            row['outcome'],
+            (row['detail'] as { failures: number }).failures,
+          ]),
+        ).toEqual([
+          [1, 'failed', 1],
+          [2, 'failed', 1],
+          [1, 'failed', 10],
+          [2, 'failed', 10],
+          // The window's 30th failing poll is thread 2's 15th failure.
+          [2, 'skipped', 15],
+        ]);
       });
 
       it('restarts the count of a thread that comes back after the window committed', async () => {
@@ -1844,36 +1893,36 @@ describe('GithubChannel', () => {
         ).toHaveBeenCalledTimes(1);
         const thread1 = journalRows()
           .filter((row) => row['number'] === 1)
-          .map((row) => (row['detail'] as { failures: number }).failures);
-        expect(thread1).toEqual([1, 10, 1]);
+          .map((row) => {
+            const detail = row['detail'] as {
+              failures: number;
+              heldPolls: number;
+            };
+            return [detail.failures, detail.heldPolls];
+          });
+        // The commit on poll 13 gives the next window a fresh budget.
+        expect(thread1).toEqual([
+          [1, 1],
+          [10, 10],
+          [1, 1],
+        ]);
       });
 
-      it('commits once out-of-phase failing threads are all exhausted', async () => {
+      it("skips every thread still failing on the window's 30th failing poll", async () => {
         await initFailing();
-        const thread = (n: number) =>
-          makeNotification({
-            id: String(n),
-            updated_at: `2026-07-02T0${n}:00:00.000Z`,
-            subject: {
-              title: `Issue ${n}`,
-              url: `https://api.github.com/repos/owner/repo/issues/${n}`,
-              type: 'Issue',
-            },
-          });
         let poll = 0;
         mockOctokit.paginate.mockImplementation(async (method: unknown) => {
-          if (
-            method ===
-            mockOctokit.rest.activity.listNotificationsForAuthenticatedUser
-          ) {
+          if (isListNotifications(method)) {
             poll += 1;
             // Thread 2 starts failing one poll after thread 1.
-            return poll === 1 ? [thread(1)] : [thread(1), thread(2)];
+            return poll === 1
+              ? [issueNotification(1)]
+              : [issueNotification(1), issueNotification(2)];
           }
           throw transient();
         });
 
-        for (let i = 0; i < 30; i++) await pollOnce();
+        for (let i = 0; i < 29; i++) await pollOnce();
         expect(
           mockOctokit.rest.activity.markNotificationsAsRead,
         ).not.toHaveBeenCalled();
@@ -1884,6 +1933,214 @@ describe('GithubChannel', () => {
           mockOctokit.rest.activity.markNotificationsAsRead,
         ).toHaveBeenCalledTimes(1);
         expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T02:00:00.000Z');
+        expect(
+          journalRows()
+            .filter((row) => row['outcome'] === 'skipped')
+            .map((row) => [
+              row['number'],
+              (row['detail'] as { failures: number }).failures,
+            ]),
+        ).toEqual([
+          [1, 30],
+          [2, 29],
+        ]);
+      });
+
+      it('journals a permanent failure once per window while a 5xx holds it', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return [issueNotification(1), issueNotification(2)];
+            }
+            if (params.issue_number === 1) {
+              throw Object.assign(new Error('Not Found'), { status: 404 });
+            }
+            // Thread 2 holds the window for three polls, then recovers.
+            if (poll <= 3) throw transient();
+            return [];
+          },
+        );
+
+        for (let i = 0; i < 4; i++) await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          journalRows()
+            .filter((row) => row['number'] === 1)
+            .map((row) => row['outcome']),
+        ).toEqual(['skipped']);
+
+        // A new window journals it again.
+        await pollOnce();
+        expect(
+          journalRows()
+            .filter((row) => row['number'] === 1)
+            .map((row) => row['outcome']),
+        ).toEqual(['skipped', 'skipped']);
+      });
+
+      it('journals a shared failure on its first and every tenth stopped poll', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (isListNotifications(method)) {
+            poll += 1;
+            return [issueNotification(1)];
+          }
+          // Rate-limited for twelve polls, then a poll that commits, then
+          // the limit again in the next window.
+          if (poll <= 12 || poll === 14) {
+            throw Object.assign(
+              new Error('You have exceeded a secondary rate limit'),
+              { status: 403, response: { headers: {} } },
+            );
+          }
+          return [];
+        });
+
+        for (let i = 0; i < 14; i++) await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          journalRows().map(
+            (row) => (row['detail'] as { heldPolls: number }).heldPolls,
+          ),
+        ).toEqual([1, 10, 1]);
+      });
+
+      it('journals a skip of a comment re-read by a held window once', async () => {
+        await initFailing();
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              return [issueNotification(1), issueNotification(2)];
+            }
+            if (params.issue_number === 2) throw transient();
+            const at = '2026-07-02T00:30:00.000Z';
+            return [
+              makeComment({ id: 1001, created_at: at, updated_at: at }),
+              makeComment({
+                id: 1002,
+                body: 'no mention',
+                created_at: at,
+                updated_at: at,
+              }),
+            ];
+          },
+        );
+
+        for (let i = 0; i < 3; i++) await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '1001',
+        ]);
+        expect(
+          journal()
+            .filter(
+              (row) =>
+                row['reason'] === 'duplicate' ||
+                row['reason'] === 'mention_required',
+            )
+            .map((row) => [row['reason'], row['messageId']]),
+        ).toEqual([
+          ['mention_required', 'C_1002'],
+          ['duplicate', 'C_1001'],
+        ]);
+      });
+
+      it('does not spend the 5xx budget on polls a rate limit stopped', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (isListNotifications(method)) {
+            poll += 1;
+            return [issueNotification(1)];
+          }
+          // Twenty rate-limited polls, then a 5xx on every poll.
+          if (poll <= 20) {
+            throw Object.assign(new Error('Too Many Requests'), {
+              status: 429,
+              response: { headers: {} },
+            });
+          }
+          throw transient();
+        });
+
+        for (let i = 0; i < 49; i++) await pollOnce();
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+
+        await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+      });
+
+      it('journals a give-up once while a rate limit keeps the window held', async () => {
+        await initFailing();
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              return [issueNotification(1), issueNotification(2)];
+            }
+            if (params.issue_number === 1) throw transient();
+            throw Object.assign(new Error('Too Many Requests'), {
+              status: 429,
+              response: { headers: {} },
+            });
+          },
+        );
+
+        for (let i = 0; i < 45; i++) await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+        expect(
+          journalRows()
+            .filter((row) => row['number'] === 1)
+            .map((row) => [
+              row['outcome'],
+              (row['detail'] as { failures: number }).failures,
+            ]),
+        ).toEqual([
+          ['failed', 1],
+          ['failed', 10],
+          ['failed', 20],
+          ['skipped', 30],
+        ]);
+        expect(
+          journalRows()
+            .filter((row) => row['number'] === 2)
+            .map((row) => (row['detail'] as { heldPolls: number }).heldPolls),
+        ).toEqual([1, 10, 20, 30, 40]);
+      });
+
+      it('bounds the once-per-window journal keys', async () => {
+        await initFailing();
+        const journalOnce = (
+          channel as unknown as {
+            journalOncePerWindow: (key: string) => boolean;
+          }
+        ).journalOncePerWindow.bind(channel);
+        const keys = (channel as unknown as { windowJournalKeys: Set<string> })
+          .windowJournalKeys;
+
+        for (let i = 0; i < 8192; i++) journalOnce(`k${i}`);
+        expect(keys.size).toBe(8192);
+        expect(journalOnce('k0')).toBe(false);
+
+        expect(journalOnce('one more')).toBe(true);
+        expect(keys.size).toBe(1);
       });
     });
 

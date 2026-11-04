@@ -111,8 +111,9 @@ handling.
 | `ChannelBase.processPreflightedInbound`                            | `inbound` / `accepted`                                                                                               |
 | `PollingChannelBase.runLoop`                                       | `poll` / `ok` with `durationMs` and the adapter's detail, `poll` / `failed` with `consecutiveErrors`                 |
 | `GithubAdapter` reason filter                                      | `inbound` / `skipped`, reason `reason_filter`; past 20 in one poll, one row with `detail.filtered` counting the rest |
-| `GithubAdapter` comment lane (`onlyMentioned` miss)                | `inbound` / `skipped`, reason `mention_required`                                                                     |
-| `GithubAdapter` dedupe hit                                         | `inbound` / `skipped`, reason `duplicate`                                                                            |
+| `GithubAdapter` comment lane (`onlyMentioned` miss)                | `inbound` / `skipped`, reason `mention_required`; once per comment while the window is held                          |
+| `GithubAdapter` dedupe hit                                         | `inbound` / `skipped`, reason `duplicate`; once per comment while the window is held                                 |
+| `GithubAdapter` thread read failure                                | `inbound` / `failed` (window held) or `skipped`, reason `github_api_error`; throttled while the window is held       |
 | `GithubAdapter.claimInboundTask`                                   | `task` / `accepted`                                                                                                  |
 | `GithubAdapter.transitionInboundTask`                              | `task` / `<state>` with `attempts` and `error`                                                                       |
 | `GithubAdapter.recordPublicationAudit`                             | `outbound` / `<outcome>` (also keep the audit file)                                                                  |
@@ -248,15 +249,21 @@ must not be the answer when the journal could not be read.
   returns the same notifications on every poll, and filtered notifications are
   skipped before any dedupe. An in-flight turn does not cause this on its own:
   the poll loop awaits `pollOnce`, so no poll runs while a turn is in progress;
-  the reachable case is a task that failed and is still retryable. A real
-  run with a 2 s poll and a turn that kept failing re-journaled one batch of
-  300 filtered notifications until the journal rotated, pushing the
-  accepted/posted rows out of the page's window. The adapter therefore journals
+  the reachable cases are a task that failed and is still retryable, a thread
+  GitHub failed to read with a 5xx (held for at most 30 polls), and a rate
+  limit. A real run with a 2 s poll and a turn that kept failing re-journaled
+  one batch of 300 filtered notifications until the journal rotated, pushing
+  the accepted/posted rows out of the page's window. The adapter therefore journals
   at most 20 `reason_filter` rows per poll and collapses the remainder into one
   row carrying `detail.filtered`, which the page renders as a count. Measured
   against the real adapter: 15 polls served 4,500 notifications and wrote 315
   rows instead of 4,500, and the journal did not rotate. The budget is per
-  poll, so a genuinely new batch is still described in full.
+  poll, so a genuinely new batch is still described in full. Rows that would
+  repeat on every poll of a held window are written once per window instead:
+  the `duplicate` or `mention_required` skip of a comment read again, and a
+  thread skipped for an API error. A failing thread's `github_api_error` row is
+  written when the failure starts and on every tenth failing poll, and a rate
+  limit's on its first and every tenth poll.
 - A synchronous append sits in the message path. The record is small, and a
   failure is swallowed; the alternative (async queue) would lose the last
   events on a crash, which is when they matter.
