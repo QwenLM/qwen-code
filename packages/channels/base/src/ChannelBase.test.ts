@@ -1,4 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+} from 'vitest';
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -39,6 +47,19 @@ import {
 } from './ChannelProactiveDeliveryError.js';
 import { PairingStore } from './PairingStore.js';
 import type { CreatePairingRequestResult } from './PairingStore.js';
+
+// Channel event journals are written from the message path; keep them out of
+// the developer's real ~/.qwen while these tests drive rejections.
+const testQwenHome = mkdtempSync(join(tmpdir(), 'channel-base-home-'));
+const savedQwenHome = process.env['QWEN_HOME'];
+beforeAll(() => {
+  process.env['QWEN_HOME'] = testQwenHome;
+});
+afterAll(() => {
+  rmSync(testQwenHome, { recursive: true, force: true });
+  if (savedQwenHome === undefined) delete process.env['QWEN_HOME'];
+  else process.env['QWEN_HOME'] = savedQwenHome;
+});
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
@@ -332,6 +353,12 @@ class TestChannel extends ChannelBase {
       sessionId,
       segment as ChannelOutputSegmentContext | undefined,
     );
+  }
+}
+
+class CaseInsensitiveGroupChannel extends TestChannel {
+  protected override normalizeGroupId(groupId: string): string {
+    return groupId.toLowerCase();
   }
 }
 
@@ -3569,6 +3596,345 @@ describe('ChannelBase', () => {
       });
     });
 
+    describe('request owner approval', () => {
+      const conversations = [
+        { sessionScope: 'single', isGroup: false },
+        { sessionScope: 'single', isGroup: true },
+        { sessionScope: 'chat_thread', isGroup: true },
+        { sessionScope: 'thread', isGroup: true },
+      ] as const;
+      const cases = conversations.flatMap((conversation) =>
+        [undefined, [], ['operator']].flatMap((operators) =>
+          (['approve', 'deny'] as const).map((decision) => ({
+            ...conversation,
+            operators,
+            decision,
+          })),
+        ),
+      );
+
+      it.each(cases)(
+        'lets the current owner $decision with $sessionScope, group=$isGroup, operators=$operators',
+        async ({ sessionScope, isGroup, operators, decision }) => {
+          const ch = createChannel({
+            sessionScope,
+            operators,
+            groupPolicy: 'open',
+          });
+          const inbound = { senderId: 'alice', isGroup, isMentioned: isGroup };
+          const active = await startActiveSession(ch, inbound);
+          try {
+            emitPermission(active.sessionId, 'req-owner');
+            await ch.handleInbound(
+              envelope({ ...inbound, text: `/${decision}` }),
+            );
+
+            expect(respondToPermissionMock()).toHaveBeenCalledExactlyOnceWith(
+              'req-owner',
+              {
+                outcome: {
+                  outcome: 'selected',
+                  optionId: decision === 'approve' ? 'proceed_once' : 'cancel',
+                },
+              },
+            );
+          } finally {
+            await active.finish();
+          }
+        },
+      );
+
+      it('rejects other members without consuming or listing the owner requests', async () => {
+        const ch = createChannel({
+          sessionScope: 'chat_thread',
+          groupPolicy: 'open',
+        });
+        const group = { isGroup: true, isMentioned: true, threadId: 'topic' };
+        const active = await startActiveSession(ch, {
+          ...group,
+          senderId: 'alice',
+        });
+        try {
+          emitPermission(active.sessionId, 'req-alice-1');
+          emitPermission(active.sessionId, 'req-alice-2');
+          await vi.waitFor(() => expect(ch.sent).toHaveLength(2));
+          ch.sent.length = 0;
+
+          for (const text of [
+            '/approve',
+            '/approve req-alice-1',
+            '/deny req-alice-1',
+          ]) {
+            await ch.handleInbound(
+              envelope({ ...group, senderId: 'bob', text }),
+            );
+          }
+          expect(respondToPermissionMock()).not.toHaveBeenCalled();
+          expect(ch.sent).toHaveLength(3);
+          for (const message of ch.sent) {
+            expect(message.text).not.toContain('Run req-alice');
+            expect(message.text).not.toContain('Multiple permission');
+          }
+
+          await ch.handleInbound(
+            envelope({
+              ...group,
+              senderId: 'alice',
+              text: '/approve req-alice-1',
+            }),
+          );
+          expect(respondToPermissionMock()).toHaveBeenCalledExactlyOnceWith(
+            'req-alice-1',
+            { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
+          );
+        } finally {
+          await active.finish();
+        }
+      });
+
+      it('rejects the owner in another chat or thread before accepting the correct target', async () => {
+        const ch = createChannel({
+          sessionScope: 'single',
+          groupPolicy: 'open',
+        });
+        const owner = {
+          senderId: 'alice',
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'group1',
+          threadId: 'topic1',
+        };
+        const active = await startActiveSession(ch, owner);
+        try {
+          emitPermission(active.sessionId, 'req-target');
+          for (const target of [{ chatId: 'group2' }, { threadId: 'topic2' }]) {
+            await ch.handleInbound(
+              envelope({ ...owner, ...target, text: '/approve req-target' }),
+            );
+          }
+          expect(respondToPermissionMock()).not.toHaveBeenCalled();
+          await ch.handleInbound(
+            envelope({ ...owner, text: '/approve req-target' }),
+          );
+          expect(respondToPermissionMock()).toHaveBeenCalledExactlyOnceWith(
+            'req-target',
+            { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
+          );
+        } finally {
+          await active.finish();
+        }
+      });
+
+      it('does not grant shared management or persistent approval to the owner', async () => {
+        const ch = createChannel({ sessionScope: 'single', operators: [] });
+        const active = await startActiveSession(ch, { senderId: 'alice' });
+        try {
+          emitPermission(active.sessionId, 'req-once-only');
+          await ch.handleInbound(
+            envelope({
+              senderId: 'alice',
+              text: '/approve-always req-once-only',
+            }),
+          );
+          await ch.handleInbound(
+            envelope({ senderId: 'alice', text: '/clear confirm' }),
+          );
+          expect(respondToPermissionMock()).not.toHaveBeenCalled();
+          expect(bridge.discardSession).not.toHaveBeenCalled();
+
+          await ch.handleInbound(
+            envelope({ senderId: 'alice', text: '/approve req-once-only' }),
+          );
+          expect(respondToPermissionMock()).toHaveBeenCalledExactlyOnceWith(
+            'req-once-only',
+            { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
+          );
+        } finally {
+          await active.finish();
+        }
+      });
+
+      it('does not reuse an earlier run owner when the same sender starts another turn', async () => {
+        const ch = createChannel({ sessionScope: 'single' });
+        const first = await startActiveSession(ch, { senderId: 'alice' });
+        emitPermission(first.sessionId, 'req-old-run');
+        await first.finish();
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockClear();
+        const current = await startActiveSession(ch, { senderId: 'alice' });
+        try {
+          await ch.handleInbound(
+            envelope({ senderId: 'alice', text: '/approve req-old-run' }),
+          );
+          expect(respondToPermissionMock()).not.toHaveBeenCalled();
+          emitPermission(current.sessionId, 'req-current-run');
+          await ch.handleInbound(
+            envelope({ senderId: 'alice', text: '/approve req-current-run' }),
+          );
+          expect(respondToPermissionMock()).toHaveBeenCalledExactlyOnceWith(
+            'req-current-run',
+            { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
+          );
+        } finally {
+          await current.finish();
+        }
+      });
+
+      it('allows a privately paired sender to answer their own single-session request', async () => {
+        const previousHome = process.env['QWEN_HOME'];
+        const home = mkdtempSync(join(tmpdir(), 'qwen-owner-pairing-'));
+        process.env['QWEN_HOME'] = home;
+        try {
+          const store = new PairingStore('test-chan', '/tmp');
+          store.approve(pairingCodeOf(store.createRequest('alice', 'Alice')));
+          const ch = createChannel({
+            senderPolicy: 'pairing',
+            sessionScope: 'single',
+          });
+          const active = await startActiveSession(ch, { senderId: 'alice' });
+          try {
+            emitPermission(active.sessionId, 'req-paired-owner');
+            await ch.handleInbound(
+              envelope({
+                senderId: 'stranger',
+                text: '/approve req-paired-owner',
+              }),
+            );
+            expect(respondToPermissionMock()).not.toHaveBeenCalled();
+            await ch.handleInbound(
+              envelope({
+                senderId: 'alice',
+                text: '/approve req-paired-owner',
+              }),
+            );
+            expect(respondToPermissionMock()).toHaveBeenCalledExactlyOnceWith(
+              'req-paired-owner',
+              { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
+            );
+          } finally {
+            await active.finish();
+          }
+        } finally {
+          if (previousHome === undefined) delete process.env['QWEN_HOME'];
+          else process.env['QWEN_HOME'] = previousHome;
+          rmSync(home, { recursive: true, force: true });
+        }
+      });
+
+      it('retains operator delegation for another sender attended text request', async () => {
+        const ch = createChannel({
+          sessionScope: 'chat_thread',
+          groupPolicy: 'open',
+          operators: ['admin'],
+        });
+        const group = { isGroup: true, isMentioned: true, threadId: 'topic' };
+        const active = await startActiveSession(ch, {
+          ...group,
+          senderId: 'alice',
+        });
+        try {
+          emitPermission(active.sessionId, 'req-delegated');
+          await ch.handleInbound(
+            envelope({
+              ...group,
+              senderId: 'admin',
+              text: '/approve req-delegated',
+            }),
+          );
+          expect(respondToPermissionMock()).toHaveBeenCalledExactlyOnceWith(
+            'req-delegated',
+            { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
+          );
+        } finally {
+          await active.finish();
+        }
+      });
+
+      it('does not infer request ownership without an attended turn', async () => {
+        const ch = createChannel({ sessionScope: 'single' });
+        const sessionId = await startSession(ch, { senderId: 'alice' });
+        emitPermission(sessionId, 'req-no-active-owner');
+        await ch.handleInbound(
+          envelope({ senderId: 'alice', text: '/approve req-no-active-owner' }),
+        );
+        expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      });
+
+      it('uses the current sender rather than the original single-session owner', async () => {
+        const ch = createChannel({ sessionScope: 'single' });
+        const sessionId = await startSession(ch, { senderId: 'alice' });
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockClear();
+        const active = await startActiveSession(ch, { senderId: 'bob' });
+        try {
+          expect(active.sessionId).toBe(sessionId);
+          emitPermission(active.sessionId, 'req-current-sender');
+          await ch.handleInbound(
+            envelope({
+              senderId: 'alice',
+              text: '/approve req-current-sender',
+            }),
+          );
+          expect(respondToPermissionMock()).not.toHaveBeenCalled();
+          await ch.handleInbound(
+            envelope({ senderId: 'bob', text: '/approve req-current-sender' }),
+          );
+          expect(respondToPermissionMock()).toHaveBeenCalledExactlyOnceWith(
+            'req-current-sender',
+            { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
+          );
+        } finally {
+          await active.finish();
+        }
+      });
+
+      it('does not let the owner approve after an operator cancels the turn', async () => {
+        const ch = createChannel({
+          sessionScope: 'single',
+          operators: ['admin'],
+        });
+        ch.enableCancelCommand();
+        const active = await startActiveSession(ch, { senderId: 'alice' });
+        try {
+          emitPermission(active.sessionId, 'req-cancelled-owner');
+          await ch.handleInbound(
+            envelope({ senderId: 'admin', text: '/cancel' }),
+          );
+          emitPermission(active.sessionId, 'req-late-after-cancel');
+          await ch.handleInbound(
+            envelope({
+              senderId: 'alice',
+              text: '/approve req-late-after-cancel',
+            }),
+          );
+          expect(respondToPermissionMock()).not.toHaveBeenCalled();
+        } finally {
+          await active.finish();
+        }
+      });
+
+      it('settles an owner text response to a native card exactly once', async () => {
+        const ch = createChannel({ sessionScope: 'single' });
+        ch.permissionPresentationResult = { kind: 'presented' };
+        const active = await startActiveSession(ch, { senderId: 'alice' });
+        try {
+          emitPermission(active.sessionId, 'req-owner-card');
+          await vi.waitFor(() =>
+            expect(ch.permissionPresentations).toHaveLength(1),
+          );
+          const presentation = ch.permissionPresentations[0]!;
+          await ch.handleInbound(
+            envelope({ senderId: 'alice', text: '/approve req-owner-card' }),
+          );
+          await expect(presentation.respond('deny')).resolves.toBe(false);
+          expect(respondToPermissionMock()).toHaveBeenCalledExactlyOnceWith(
+            'req-owner-card',
+            { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
+          );
+        } finally {
+          await active.finish();
+        }
+      });
+    });
+
     it('gates shared-session permission responses to authorized senders', async () => {
       const ch = createChannel({
         operators: ['boss'],
@@ -4202,6 +4568,50 @@ describe('ChannelBase', () => {
         .calls[0][1] as string;
       expect(prompt).toBe(
         '[Chat messages since your last reply - for context]\n- [Alice] first background\n- [Bob] second background\n\n[Current message - respond to this]\n[Carol] @bot summarize',
+      );
+    });
+
+    it('applies a per-group history limit across the platform ID casing', async () => {
+      // The history limit is resolved through the same group lookup as the
+      // allowlist, so a platform with case-insensitive IDs must not lose its
+      // per-group override when the reported ID is spelled differently.
+      const ch = new CaseInsensitiveGroupChannel(
+        'test-chan',
+        defaultConfig({
+          groupPolicy: 'open',
+          groups: {
+            'qwenlm/qwen-code': { requireMention: true, groupHistoryLimit: 10 },
+          },
+        }),
+        bridge,
+        { groupHistoryPath: groupHistoryPath() },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: false,
+          chatId: 'QwenLM/qwen-code',
+          senderId: 'u1',
+          senderName: 'Alice',
+          text: 'background context',
+        }),
+      );
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'QwenLM/qwen-code',
+          senderId: 'u2',
+          senderName: 'Bob',
+          text: '@bot summarize',
+        }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(prompt).toBe(
+        '[Chat messages since your last reply - for context]\n- [Alice] background context\n\n[Current message - respond to this]\n[Bob] @bot summarize',
       );
     });
 

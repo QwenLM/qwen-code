@@ -92,6 +92,8 @@ export interface ModTerminalHost {
   presentation(): ModCommandPresentation;
   /** The render sites the terminal draws, read once at load. */
   sites?(): readonly ModRenderSite[];
+  /** Whether the terminal raises `prompt.submit`, read once at load. */
+  prompts?(): boolean;
   /** Draws the tree the band's hooks settled on, drawn by `owner`. */
   draw?(tree: ModRenderElement, owner: string): void;
 }
@@ -404,8 +406,7 @@ export class ModSession implements ICommandLoader {
           sites.length
             ? { sites, invalidate: () => this.requestRender() }
             : undefined,
-          // The terminals raise no prompt.submit yet.
-          !this.terminal,
+          this.terminal ? this.terminal.prompts?.() === true : true,
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({
@@ -708,6 +709,11 @@ export class ModSession implements ICommandLoader {
    * never blocks a prompt, and neither does a prompt too long for a Mod
    * payload, which no hook hears. `signal` is the prompt's own.
    */
+  /** Whether a loaded Mod hooks `prompt.submit`. */
+  get hearsPrompts(): boolean {
+    return !this.closing && (this.runtime?.promptHooks.length ?? 0) > 0;
+  }
+
   async submitPrompt(
     text: string,
     signal: AbortSignal,

@@ -532,6 +532,9 @@ class ManagedRuntimeRetentionGuardTest {
                 var columns = new ArrayList<String>();
                 var seed = new ArrayList<Object>();
                 for (int index = 1; index <= rows.getMetaData().getColumnCount(); index++) {
+                    if (rows.getMetaData().isAutoIncrement(index)) {
+                        continue;
+                    }
                     columns.add(rows.getMetaData().getColumnName(index));
                     seed.add(rows.getObject(index));
                 }

@@ -230,8 +230,11 @@ class SessionWorktreeGitTest {
         Plan plan = plan("project", null);
         Path container = Files.createDirectory(root.resolve(SessionWorktreeGit.CONTAINER));
         Files.write(container.resolve(plan.worktreeId() + ".json"), new ObjectMapper().writeValueAsBytes(plan));
-        Process checkout = new ProcessBuilder("git", "-c", "core.hooksPath=/dev/null", "-C", repository.toString(),
-                "worktree", "add", "-b", plan.branch(), "--", target(plan).toString(), plan.baseCommit())
+        // Own the checkout directly: a failed worktree add removes its partial files.
+        run(repository, "worktree", "add", "--no-checkout", "-b", plan.branch(),
+                "--", target(plan).toString(), plan.baseCommit());
+        Process checkout = new ProcessBuilder("git", "-c", "core.hooksPath=/dev/null", "-C", target(plan).toString(),
+                "reset", "--hard", plan.baseCommit())
                 .redirectErrorStream(true).redirectOutput(root.resolve("checkout.log").toFile()).start();
         List<ProcessHandle> descendants = List.of();
         try {
@@ -242,12 +245,15 @@ class SessionWorktreeGitTest {
             }
             descendants = checkout.descendants().toList();
         } finally {
-            checkout.destroyForcibly();
-            descendants.forEach(ProcessHandle::destroyForcibly);
-            assertThat(checkout.waitFor(5, TimeUnit.SECONDS)).isTrue();
-            for (ProcessHandle child : descendants) {
-                child.onExit().get(5, TimeUnit.SECONDS);
+            try {
+                descendants.forEach(ProcessHandle::destroyForcibly);
+                for (ProcessHandle child : descendants) {
+                    child.onExit().get(5, TimeUnit.SECONDS);
+                }
+            } finally {
+                checkout.destroyForcibly();
             }
+            assertThat(checkout.waitFor(5, TimeUnit.SECONDS)).isTrue();
         }
         long checkedOut;
         try (var files = Files.list(target(plan).resolve("bulk"))) {

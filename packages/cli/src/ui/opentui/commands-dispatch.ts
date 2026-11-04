@@ -80,9 +80,16 @@ import { loadInteractiveCommands } from './slash-dispatch.js';
 import {
   getInteractiveModSession,
   isModRecoveryCommand,
+  MODS_FAILED_TO_INITIALIZE,
 } from '../../services/interactive-mod-session.js';
 import { ensureConfigInitialized, nextLivePromptId } from './live-session.js';
 import { MessageSenderType } from '@qwen-code/qwen-code-core/core/logger.js';
+import {
+  collapseRewrite,
+  REWRITE_CHANGED_PASTE,
+  expandPendingPastePlaceholders,
+  framePasteExpansion,
+} from '../utils/paste-placeholders.js';
 import { normalizeQuitSubmission } from './slash-gateway.js';
 import {
   createOpenTuiCommandContext,
@@ -176,12 +183,31 @@ export type OpenTuiDispatchOutcome =
       modelOverride?: string;
       /** ink parity: refresh memory when the turn writes a context file. */
       refreshContextFilesOnWrite?: boolean;
+      /** What the Mods' prompt hooks attached to the `?`-form input. */
+      promptContext?: readonly string[];
     }
   | { kind: 'quit'; messages: HistoryItem[] }
-  | { kind: 'open_dialog'; request: OpenTuiDialogRequest };
+  | { kind: 'open_dialog'; request: OpenTuiDialogRequest }
+  /** Typed input the Mods' prompt hooks kept out; the composer gets it back. */
+  | { kind: 'refused' };
+
+/**
+ * What the composer showed for a submission whose text frames its pastes:
+ * the typed text with placeholders, and the pastes behind them.
+ */
+export interface TypedInput {
+  displayText?: string;
+  pasteExpansions?: ReadonlyMap<string, string>;
+}
+
+/** What the Mods' prompt hooks made of `?`-form input. */
+type HeardPrompt =
+  | { text: string; context?: readonly string[] }
+  | { refused: string };
 
 interface RunOptions {
   recordRecall?: boolean;
+  typed?: TypedInput;
   oneTimeShellAllowlist?: Set<string>;
   overwriteConfirmed?: boolean;
   existingInvocationItemId?: number;
@@ -211,6 +237,9 @@ const STARTUP_REGISTRY_WAIT_MS = 15_000;
 const STARTUP_REGISTRY_POLL_MS = 100;
 
 const replayedExtensionRefresh = new WeakSet<ExtensionRefreshState>();
+
+const REWRITE_CHANGED_COMMAND =
+  'A prompt.submit hook rewrote this ?-form input into another command, so it did not run.';
 
 export class OpenTuiSlashDispatcher {
   private activeCommand: {
@@ -480,13 +509,16 @@ export class OpenTuiSlashDispatcher {
    * Entry point — parity of the top of `handleSlashCommand`: returns `false`
    * when the input is not a slash command at all.
    */
-  async handle(rawQuery: string): Promise<OpenTuiDispatchOutcome | false> {
+  async handle(
+    rawQuery: string,
+    typed?: TypedInput,
+  ): Promise<OpenTuiDispatchOutcome | false> {
     const trimmed = rawQuery.trim();
     if (!this.takesAsSlashCommand(trimmed)) {
       return false;
     }
     this.services.onInputProcessed?.();
-    return this.run(trimmed, { recordRecall: true });
+    return this.run(trimmed, { recordRecall: true, typed });
   }
 
   private addMessage(message: Message): void {
@@ -496,10 +528,91 @@ export class OpenTuiSlashDispatcher {
     );
   }
 
+  /**
+   * `?`-form input is a prompt the person typed rather than slash-form text,
+   * so the Mods' `prompt.submit` hooks hear it before it is recorded or run,
+   * as they hear any typed prompt. Returns the text to run, or the line that
+   * refuses it; rejects when `signal` aborts.
+   */
+  private async hearPrompt(
+    text: string,
+    signal: AbortSignal,
+    typed?: TypedInput,
+  ): Promise<HeardPrompt> {
+    const mods = this.services.config
+      ? getInteractiveModSession(this.services.config)
+      : undefined;
+    if (!mods) return { text };
+    if (mods.starting || mods.failed) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => reject(signal.reason);
+          signal.addEventListener('abort', onAbort, { once: true });
+          mods.ready
+            .finally(() => signal.removeEventListener('abort', onAbort))
+            .then(resolve, reject);
+        });
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (mods.failed) return { refused: MODS_FAILED_TO_INITIALIZE };
+      }
+    }
+    if (!mods.hearsPrompts) return { text };
+    // The hooks hear what the person typed, with pastes expanded, not the
+    // text the composer framed them in.
+    const pastes = typed?.pasteExpansions;
+    const framed =
+      pastes?.size &&
+      typed?.displayText !== undefined &&
+      framePasteExpansion(typed.displayText, pastes) === text
+        ? pastes
+        : undefined;
+    const heard = framed
+      ? expandPendingPastePlaceholders(typed!.displayText!, framed)
+      : text;
+    const submitted = await mods.submitPrompt(heard, signal);
+    if ('drop' in submitted) return { refused: submitted.drop };
+    // The hooks' context rides the first send of a turn the command starts;
+    // a command that starts none, such as `?btw`, has no send to carry it.
+    const context = submitted.context?.length ? submitted.context : undefined;
+    const rewritten = submitted.text.trim();
+    if (rewritten === heard.trim()) return { text, context };
+    // A rewrite keeps the command the person typed, or it would run one they
+    // never asked for.
+    if (!this.sameCommand(text, rewritten))
+      return { refused: REWRITE_CHANGED_COMMAND };
+    // Each paste comes back whole to be framed again, or the rewrite is
+    // refused rather than run unframed.
+    const collapsed = collapseRewrite(
+      typed?.displayText ?? '',
+      rewritten,
+      framed,
+    );
+    if (!collapsed) return { refused: REWRITE_CHANGED_PASTE };
+    return {
+      text: collapsed.pasteExpansions
+        ? framePasteExpansion(collapsed.text, collapsed.pasteExpansions)
+        : rewritten,
+      context,
+    };
+  }
+
+  /** Whether two `?`-form texts run the same command. */
+  private sameCommand(typed: string, rewritten: string): boolean {
+    if (!rewritten.startsWith('?')) return false;
+    const before = parseSlashCommand(typed, this.commandList).canonicalPath;
+    const after = parseSlashCommand(rewritten, this.commandList).canonicalPath;
+    if (before.length > 0) return before.join(' ') === after.join(' ');
+    // Before the commands resolve, the command word itself must stay.
+    const word = (value: string) => value.slice(1).split(/\s+/, 1)[0];
+    return word(typed) === word(rewritten);
+  }
+
   private async run(
-    trimmed: string,
+    typed: string,
     options: RunOptions,
   ): Promise<OpenTuiDispatchOutcome> {
+    let trimmed = typed;
     const recordedItems: HistoryItemWithoutId[] = [];
     const addItemWithRecording = (
       item: HistoryItemWithoutId,
@@ -523,6 +636,39 @@ export class OpenTuiSlashDispatcher {
         this.host.setIsProcessing(false);
       }
     };
+    let promptContext: readonly string[] | undefined;
+    if (options.recordRecall && trimmed.startsWith('?')) {
+      let heard: HeardPrompt;
+      try {
+        heard = await this.hearPrompt(
+          trimmed,
+          abortController.signal,
+          options.typed,
+        );
+      } catch (error) {
+        releaseOwnership();
+        if (abortController.signal.aborted) return { kind: 'refused' };
+        throw error;
+      }
+      if (
+        abortController.signal.aborted ||
+        this.activeCommand !== activeCommand
+      ) {
+        releaseOwnership();
+        return { kind: 'refused' };
+      }
+      if ('refused' in heard) {
+        // Neither recorded nor run, since it may hold what a hook kept out.
+        this.host.addItem(
+          { type: MessageType.ERROR, text: heard.refused },
+          Date.now(),
+        );
+        releaseOwnership();
+        return { kind: 'refused' };
+      }
+      trimmed = heard.text;
+      promptContext = heard.context;
+    }
     if (
       options.recordRecall &&
       this.services.logger &&
@@ -734,6 +880,7 @@ export class OpenTuiSlashDispatcher {
           ...(refreshContextFilesOnWrite
             ? { refreshContextFilesOnWrite: true }
             : {}),
+          ...(promptContext ? { promptContext } : {}),
           ...(onCompleteCallbacks.length
             ? {
                 onComplete: async () => {
@@ -979,6 +1126,7 @@ export class OpenTuiSlashDispatcher {
                   ...(result.refreshContextFilesOnWrite
                     ? { refreshContextFilesOnWrite: true }
                     : {}),
+                  ...(promptContext ? { promptContext } : {}),
                 };
               }
               case 'confirm_shell_commands': {
