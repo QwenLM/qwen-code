@@ -370,13 +370,14 @@ The core change of this step: `userTurnRecordedByHost` also covers a `Cron` and 
 
 The Ink TUI already sends every model round through `LlmClient.sendMessageStream`, from one function, `submitQuery`, for every kind of turn. Its loop is split by React instead: a response that requested tools hands them to the scheduler and returns, and the scheduler's completion callback sends the results as a new `ToolResult` turn. Moving the TUI means awaiting that batch, so it moves in these steps:
 
-| Step | Content                                                                                                                                                                                                                                                                                                                                                                                    |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 3a   | every model round on the loop's `runModelRound`; the TUI keeps its tool step; the Ink parity suite                                                                                                                                                                                                                                                                                         |
-| 3b   | the tool batch of a turn awaited on the shared batch, over the TUI's `InteractiveModToolScheduler`, with the display fed from callbacks; duplicates, finalizing and recording are the loop's; the TUI's own steps (its history repair, the tool-use summary, the stops for a quota model switch and for spent background-agent capacity, the split by interaction owner) become host hooks |
-| 3c-1 | input taken at a tool boundary through the loop's next round; a retry                                                                                                                                                                                                                                                                                                                      |
-| 3c-2 | cron, background-notification, teammate and Goal turns                                                                                                                                                                                                                                                                                                                                     |
-| 3d   | default on, then remove the current loop                                                                                                                                                                                                                                                                                                                                                   |
+| Step | Content                                                                                                                                                                                                                                                               |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 3a   | every model round on the loop's `runModelRound`; the TUI keeps its tool step; the Ink parity suite                                                                                                                                                                    |
+| 3b-1 | a model round's tool calls run as one shared batch over the TUI's `InteractiveModToolScheduler`, with the display, approvals and Mod tool middleware unchanged; duplicates, finalizing and recording are the loop's; the TUI's completion step continues the turn     |
+| 3b-2 | the TUI's own steps (its history repair, the tool-use summary, the stops for a quota model switch and for spent background-agent capacity, the split by interaction owner) become host hooks; the batch is awaited by the turn, and a tool that ends the turn ends it |
+| 3c-1 | input taken at a tool boundary through the loop's next round; a retry                                                                                                                                                                                                 |
+| 3c-2 | cron, background-notification, teammate and Goal turns                                                                                                                                                                                                                |
+| 3d   | default on, then remove the current loop                                                                                                                                                                                                                              |
 
 PR 3a puts every model round of the TUI on `runModelRound`. The round sends the same request with the same options, so the TUI's stream processor keeps handling every event as today. What moves is the part of the round the loop already owns:
 
@@ -387,6 +388,18 @@ PR 3a puts every model round of the TUI on `runModelRound`. The round sends the 
 | a detected loop keeps the collected calls from being scheduled         | any stop reason of the round keeps them from being scheduled |
 
 A stop reason other than a detected loop comes from an event the client sends before it asks the model (the session turn cap, the session token limit, a blocked prompt) or from a cancel, which ends the round as today, so its round has no calls to schedule. The TUI therefore behaves the same with the setting on and off.
+
+PR 3b-1 runs a shared round's tool calls as one batch of the shared loop, `runToolBatch`, on an executor over the TUI's scheduler. The scheduler takes the batch as before, so the tool group, its approvals and the Mod tool middleware are unchanged; the batch's completion comes back to the executor instead of the scheduler's callback. The TUI's completion step then runs as today with the batch's results:
+
+| The TUI today                                                                         | With the setting on                                                                                                               |
+| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| the stream processor answers a provider replay and holds it until the batch completes | the batch answers it in place                                                                                                     |
+| the completion step orders, finalizes and records the results                         | the batch does                                                                                                                    |
+| the completion step counts each completed call toward the session's tool calls        | the batch counts them, except the calls the Mod tool middleware counted per attempt and the skipped siblings of a plan-mode entry |
+| a batch that completes during a model stream waits for it to end                      | the same                                                                                                                          |
+| the completion step continues the turn with a `ToolResult` round                      | the same, with the batch's results                                                                                                |
+
+A response made only of provider replays keeps the current path, since it runs nothing.
 
 ## Migration
 
@@ -404,7 +417,8 @@ A stop reason other than a detected loop comes from an event the client sends be
 | 2c-4 | ACP: cron and background-notification turns                                                                                                         |
 | 2d   | ACP: default on, then remove its current loop                                                                                                       |
 | 3a   | Ink TUI: every model round on the loop's round; the TUI keeps its tool step; the Ink parity suite                                                   |
-| 3b   | Ink TUI: the tool batch awaited on the shared batch                                                                                                 |
+| 3b-1 | Ink TUI: a round's tool calls as one shared batch; the TUI's completion step continues the turn                                                     |
+| 3b-2 | Ink TUI: the TUI's own steps as host hooks; the batch awaited by the turn                                                                           |
 | 3c-1 | Ink TUI: input at a tool boundary through the loop's next round; a retry                                                                            |
 | 3c-2 | Ink TUI: cron, background-notification, teammate and Goal turns                                                                                     |
 | 3d   | Ink TUI: default on, then remove its current loop                                                                                                   |
@@ -474,11 +488,14 @@ A difference fails the scenario unless it is listed with a linked issue.
 
 A continuation's request runs under a prompt id of its own on the current loop and under the turn's prompt id on the shared loop; the suite compares them as one.
 
-**Ink scenarios** (`integration-tests/interactive/ink-agent-loop-parity.test.ts`). The TUI runs in a pseudo-terminal against the fake server. The suite compares the two runs' request bodies as sent, with the system prompt, the tools offered and each message's `reasoning_content`, and their session's chat records, with usage. It also checks each run's number of requests, and, through the debug log, that only the run with the setting on sends its rounds on the shared loop. A scenario that sends and records nothing, such as a blocked prompt, checks the notice on each run's last screen instead; the screen is not compared otherwise, since it repaints on timers:
+**Ink scenarios** (`integration-tests/interactive/ink-agent-loop-parity.test.ts`). The TUI runs in a pseudo-terminal against the fake server. The suite compares the two runs' request bodies as sent, with the system prompt, the tools offered and each message's `reasoning_content`, and their session's chat records, with usage. It also checks each run's number of requests, and, through the debug log, that only the run with the setting on sends its rounds and runs its tool batches on the shared loop, as many as the scenario has. A scenario that sends and records nothing, such as a blocked prompt, checks the notice on each run's last screen instead; the screen is not compared otherwise, since it repaints on timers:
 
 - plain text, and streamed text with a thought;
 - a thought before a tool, whose second request replays the reasoning;
 - one tool, and two reads in one response;
+- a replayed call next to a fresh one, which the batch answers;
+- an approved write, then a declined one, in the default approval mode;
+- a shell command cancelled with Esc while it runs;
 - an edit cut off by the output limit;
 - a stream that drops and is retried;
 - two prompts in one session;
@@ -490,7 +507,7 @@ The suite runs in the integration job. The nightly E2E run, and one started by h
 
 ## Compatibility
 
-- With the setting off, no surface changes. The shared code that changes is additive: the scheduler's optional `beforeToolLaunch`, from PR 2a the `Turn` event fields and send options above, from PR 2b the exported `runToolBatch` and the scheduler's `refuseToolCall` and `onPermissionPromptTerminalSequence`, and from PR 2c-1 `stopPolicies`, which change nothing for a caller that does not use them.
+- With the setting off, no surface changes. The shared code that changes is additive: the scheduler's optional `beforeToolLaunch`, from PR 2a the `Turn` event fields and send options above, from PR 2b the exported `runToolBatch` and the scheduler's `refuseToolCall` and `onPermissionPromptTerminalSequence`, from PR 2c-1 `stopPolicies`, and from PR 3b-1 a settled call's `recorded` and a batch's `responses`, which change nothing for a caller that does not use them.
 - With the setting on, headless differs from today in these intended ways. Most follow from scheduling a batch as one unit, as the TUI already does:
   - a stream-json message past `--max-session-turns` ends the run at the session turn limit, as `-p` does (the error on stderr, exit code 53), instead of a success that repeats the previous answer (#15325);
   - a notification turn (cron, monitor and other queued items) counts each of its model rounds toward `--max-session-turns`, as the main turn does, instead of one turn for the whole item, so a run whose notification turns call tools can reach the limit sooner;
@@ -532,6 +549,8 @@ The suite runs in the integration job. The nightly E2E run, and one started by h
   - a cron turn cancelled after its echo and before its first request keeps its prompt in history and in the record, as a cron turn cancelled while its request is going out does today;
 
   The ACP parity suite covers the common cases unchanged and asserts the date reminder, UserPromptSubmit on tool results, cancelling while that hook runs, and that a batch's approvals come before its calls run.
+
+- With the setting on, the Ink TUI differs from today in this intended way: from PR 3b-1, the skipped siblings of a plan-mode entry no longer count toward the session's completed tool calls, as on the other surfaces.
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 

@@ -61,6 +61,11 @@ export type ScheduleFn = (
   request: ToolCallRequestInfo | ToolCallRequestInfo[],
   signal: AbortSignal,
   modelOverride?: string,
+  /**
+   * Receives this batch's completed calls in place of the hook's
+   * `onComplete`, for a caller that awaits the batch.
+   */
+  onBatchComplete?: (tools: InteractiveToolCall[]) => Promise<void>,
 ) => void;
 export type MarkToolsAsSubmittedFn = (callIds: string[]) => void;
 
@@ -182,9 +187,22 @@ export function useReactToolScheduler(
     [],
   );
 
+  // The batches whose caller takes their completion, by call id.
+  const batchCompletionsRef = useRef(
+    new Map<string, (tools: InteractiveToolCall[]) => Promise<void>>(),
+  );
   const allToolCallsCompleteHandler = useCallback(
     async (completedToolCalls: InteractiveToolCall[]) => {
-      await onCompleteRef.current(completedToolCalls);
+      const completions = batchCompletionsRef.current;
+      const onBatchComplete = completedToolCalls
+        .map(({ request }) => completions.get(request.callId))
+        .find((completion) => completion !== undefined);
+      for (const { request } of completedToolCalls) {
+        if (completions.get(request.callId) === onBatchComplete) {
+          completions.delete(request.callId);
+        }
+      }
+      await (onBatchComplete ?? onCompleteRef.current)(completedToolCalls);
     },
     [],
   );
@@ -268,12 +286,18 @@ export function useReactToolScheduler(
       request: ToolCallRequestInfo | ToolCallRequestInfo[],
       signal: AbortSignal,
       modelOverride?: string,
+      onBatchComplete?: (tools: InteractiveToolCall[]) => Promise<void>,
     ) => {
       const owner = captureHookExecutionOwner(config);
       const sessionSignal =
         getInteractiveModSession(config)?.captureToolSignal();
       if (sessionSignal) signal = AbortSignal.any([signal, sessionSignal]);
       const requests = Array.isArray(request) ? request : [request];
+      if (onBatchComplete) {
+        for (const { callId } of requests) {
+          batchCompletionsRef.current.set(callId, onBatchComplete);
+        }
+      }
       const isQueuedCancellation = (error: unknown) =>
         signal.aborted &&
         error instanceof Error &&
