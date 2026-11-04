@@ -222,33 +222,6 @@
     </build>
     <profiles>
         <profile>
-            <id>alibaba-guidelines</id>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-pmd-plugin</artifactId>
-                        <version>3.28.0</version>
-                        <configuration>
-                            <targetJdk>21</targetJdk>
-                            <includeTests>false</includeTests>
-                            <excludeRoots>
-                                <excludeRoot>${managed.module.root}/persistence/src/main/java</excludeRoot>
-                            </excludeRoots>
-                            <excludes>
-                                <exclude>**/persistence/**</exclude>
-                            </excludes>
-                            <rulesets>
-                                <ruleset>${managed.module.root}/pmd-ruleset.xml</ruleset>
-                            </rulesets>
-                            <linkXRef>false</linkXRef>
-                            <skipPmdError>false</skipPmdError>
-                        </configuration>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-        <profile>
             <id>no-operator-tools</id>
             <activation>
                 <property>

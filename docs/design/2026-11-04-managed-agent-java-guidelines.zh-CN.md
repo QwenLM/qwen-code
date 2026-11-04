@@ -1,22 +1,20 @@
-# Managed Agent Java 规约接入
+# Managed Agent Java 规约整改
 
 [English](2026-11-04-managed-agent-java-guidelines.md) | [简体中文](2026-11-04-managed-agent-java-guidelines.zh-CN.md)
 
 ## 状态与范围
 
-2026-11-04 已在本 PR 实现，完整 CI 验收尚未完成。同一个 PR 包含扫描与低风险清理、并发与异常处理、聚焦的可维护性整理。数据库规约、持久化实现、表结构修改和大范围生命周期重写不在范围内。验证结果必须区分本地检查与尚未完成的 CI 验收。
+2026-11-04 已在本 PR 实现，完整 CI 验收尚未完成。同一个 PR 包含低风险清理、并发与异常处理、聚焦的可维护性整理。数据库规约、持久化实现、表结构修改和大范围生命周期重写不在范围内。验证结果必须区分本地检查与尚未完成的 CI 验收。
 
 ## 问题
 
-Alibaba Java 手册审查发现两个没有线程数上限的 cached 平台线程池、未命名的虚拟线程池、请求路径上重复编译的正则、缺少 Override、未使用的私有成员、通过异常进行的空值校验，以及静默的清理失败。首次独立 PMD 扫描没有应用依赖 classpath，因此结果是待核实候选项，不能作为合规评分。
+Alibaba Java 手册审查发现两个没有线程数上限的 cached 平台线程池、未命名的虚拟线程池、请求路径上重复编译的正则、缺少 Override、未使用的私有成员、通过异常进行的空值校验，以及静默的清理失败。
 
 当前本地 provisioner 还通过同一个 executor 执行对账与清理。有界共享队列可能让清理排在 worker 启动之后。Broker 目前会在 managed-context 启动失败后封堵恢复；如果把容量不足当作普通启动失败，就会把临时压力变成永久阻断。worker 返回 READY 后，其 stdout 必须保持打开并持续排空。
 
-## 扫描与低风险清理
+## 低风险清理
 
-增加按需启用的 `alibaba-guidelines` Maven profile，使用 `maven-pmd-plugin:3.28.0` 及其 PMD 7 引擎分析 Java 21。从 reactor 父目录执行 `mvn -Palibaba-guidelines -DskipTests compile pmd:pmd`，使每个模块提供真实依赖。排除 persistence 源码根目录和测试。CI 的 Java 21 Linux 通道生成并上传 XML 与 HTML 报告。分析错误使扫描失败；历史规约告警先只报告。现有 Checkstyle、SpotBugs、测试和 profile 门禁继续保留。
-
-所选规则是项目适配规则，不是旧版 P3C PMD 6 插件，也不代表手册全覆盖。保留宽泛或依赖类型信息的候选项供人工审查；在审阅完整 classpath 报告后，再由后续改动将可靠规则升级为门禁。本 PR 修复已核实的 Override、未使用私有成员、浮点后缀、虚拟线程名称和高频 action cursor 正则。
+修复已核实的 Override、未使用私有成员、浮点后缀、虚拟线程名称和高频 action cursor 正则。现有 Checkstyle、SpotBugs、测试和 profile 门禁继续保留。
 
 ## 并发与异常处理
 
@@ -38,14 +36,14 @@ Broker 私有 HTTP 分发使用显式平台线程池：最多 64 个线程、`Sy
 
 ## 涉及区域
 
-涉及 Maven 父配置与 PMD 规则、Java CI 及其工作流测试、本地 Runtime provisioner、Broker HTTP 分发与准入失败处理、SSH 清理、action cursor 校验、部分配置与适配器，以及公共生命周期契约。所有 Java 回归测试继续位于 `verification`。
+涉及本地 Runtime provisioner、Broker HTTP 分发与准入失败处理、SSH 清理、action cursor 校验、部分配置与适配器，以及公共生命周期契约。所有 Java 回归测试继续位于 `verification`。
 
 ## 验证与验收
 
 遵循模块共享十分钟本地验证预算，使用 JDK 21、任务隔离的 Maven 仓库及与当前源码一致的 sibling SDK 安装。CLI dry-run 无法覆盖这些私有 Java 路径，因此使用聚焦 Java 测试和真实 worker 进程。覆盖启动饱和、拒绝时不生成进程、失败或取消后容量恢复、并发清理、关闭、READY 后 stdout，以及使用原持久化身份的重试。确认其他启动失败仍封堵恢复，空值引用仍以异步失败返回。
 
-运行受影响的 action、SSH、Broker、本地进程测试，两套 Checkstyle 配置、完整 classpath 的 PMD 报告及改动的工作流元测试。确认 PMD 报告不含数据库源码。现有完整单元测试、SpotBugs、真实 MySQL、Hosted 和故障门禁继续作为 CI 验收要求。预算内无法本地运行相关真实 MySQL 路径时，明确记录等待 CI，不能用 H2 证据替代。固定并发上限与聚焦测试通过均不代表部署验收。
+运行受影响的 action、SSH、Broker、本地进程测试及两套 Checkstyle 配置。现有完整单元测试、SpotBugs、真实 MySQL、Hosted 和故障门禁继续作为 CI 验收要求。预算内无法本地运行相关真实 MySQL 路径时，明确记录等待 CI，不能用 H2 证据替代。固定并发上限与聚焦测试通过均不代表部署验收。
 
 ## 开放问题
 
-实现范围没有待决问题。负载容量设置以及单条 PMD 规则升级为阻断检查，留待后续依据新增报告与负载证据决定。
+实现范围没有待决问题。负载容量设置留待后续依据负载证据决定。

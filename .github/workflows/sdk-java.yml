@@ -515,28 +515,6 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle'
 
-      - name: 'Run Managed Agent guideline report'
-        if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '21' }}"
-        working-directory: 'packages/managed-agent-server'
-        env:
-          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
-        run: |-
-          if [ "${{ runner.environment }}" = "self-hosted" ]; then
-            export MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${{ runner.temp }}/m2-repo"
-          fi
-          mvn --batch-mode --no-transfer-progress -Palibaba-guidelines -DskipTests compile pmd:pmd
-
-      - name: 'Upload Managed Agent guideline reports'
-        if: "${{ always() && matrix.os == 'ubuntu-latest' && matrix.java == '21' }}"
-        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
-        with:
-          name: 'managed-agent-guidelines'
-          path: |
-            packages/managed-agent-server/**/target/pmd.xml
-            packages/managed-agent-server/**/target/reports/pmd.html
-          if-no-files-found: 'warn'
-          retention-days: 7
-
       - name: 'Build release artifacts'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
         working-directory: 'packages/sdk-java/qwencode'

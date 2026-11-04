@@ -1592,12 +1592,6 @@ authenticates the tenant before setting `X-Qwen-Tenant-Id`, map ports
 only inside your own network policy, and attach the container only to
 networks whose peers you trust.
 
-## Java guideline reports
-
-With JDK 21 and the matching sibling SDK installed, run `mvn -Palibaba-guidelines -DskipTests compile pmd:pmd` from this directory. Maven supplies each module's dependency classpath; reports appear in each module's `target/pmd.xml` and `target/reports/pmd.html`. The Java 21 Linux CI lane uploads them as `managed-agent-guidelines`. The profile excludes the persistence source root and tests. Rule violations are report-only; analysis failures fail the scan, and existing Checkstyle, SpotBugs, and test gates still apply.
-
-The rules adapt selected [Alibaba Java guidelines](https://github.com/alibaba/p3c) to PMD 7 and Java 21. They are candidates for review, not complete handbook coverage. The legacy P3C artifact uses PMD 6 and cannot be substituted into this PMD 7 plugin. Review type-sensitive findings with the full classpath, and preserve intentional protocol conventions such as snake_case fields and exact floating-point canonicalization. See the [design](../../docs/design/2026-11-04-managed-agent-java-guidelines.md) for scope and concurrency limits.
-
 ## Managed Session Store verification
 
 Run Maven from the parent directory. Unit and H2 tests run in `verification` with the normal test phase; all original profile names and test families remain available from the parent reactor. Focused commands such as `mvn -Dtest=ModuleArchitectureTest,ManagedAgentEmbeddingTest test` build required production modules first. Test reports are under `verification/target/{surefire-reports,failsafe-reports}` and aggregate coverage under `verification/target/site/jacoco-aggregate`. Do not run the verification POM alone against stale installed same-version artifacts. `mvn clean verify` checks the compiled module boundaries, the existing test families and packaged server artifacts. The embedding-host fixture is under `verification/src/test/embedding-host`; after installing the production reactor, run its normal and `embedded` profiles to verify an independent host. `mvn verify`
