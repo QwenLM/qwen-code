@@ -7,13 +7,19 @@
 每个测试组都从一个全新的一次性主目录开始，这样既不会读写操作者的真实配置，也不会让一个测试组看到另一个测试组的文件。有两个测试组有意沿用“全新安装”测试组的主目录，因为它们需要该次运行写入的标记：重新创建 `~/.qwen` 的测试组和 `~/.qwen/.env` 测试组。
 
 ```bash
+# 在被测检出目录中执行一次（npm run build 之后）。PATH 上已发布的 qwen
+# 测试的是错误的代码。
+REPO=$PWD
+qwen() { node "$REPO/scripts/cli-entry.js" "$@"; }
+# 每个测试组执行一次。
 export HOME=$(mktemp -d)
 unset QWEN_HOME XDG_CONFIG_HOME QWEN_USAGE_STATISTICS_ENABLED QWEN_CODE_SIMPLE
+for var in $(compgen -e | grep -E '_API_KEY$|_AUTH_TOKEN$'); do unset "$var"; done
 ```
 
 在 Windows 上，Node 从 `USERPROFILE` 而不是 `HOME` 读取主目录，因此还需设置 `export USERPROFILE="$HOME"`（使用 cmd 或 PowerShell 时还需设置 `HOMEDRIVE`/`HOMEPATH`），或者使用一个一次性的用户账户。否则运行会读写真实的用户目录。
 
-不带凭据运行 `qwen -p "say hi"` 即可。该运行会完成首次运行的初始化，然后停在 "No auth type is selected"，因此不会调用任何模型。
+不带凭据运行 `qwen -p "say hi"` 即可。该运行会完成首次运行的初始化，然后停在 "No auth type is selected"，因此不会调用任何模型。环境中残留的凭据会让运行调用真实模型，因此上述准备步骤会清除它们。
 
 ## 测试组
 
@@ -55,7 +61,7 @@ unset QWEN_HOME XDG_CONFIG_HOME QWEN_USAGE_STATISTICS_ENABLED QWEN_CODE_SIMPLE
 
 ### 迁移已有安装
 
-创建带有 `settings.json` 的 `~/.qwen`，然后运行设计说明中的迁移命令。预期有 `~/.config/qwen/settings.json` 和 `~/.config/qwen/.qwen-global-dir`，且没有 `~/.qwen`。在 `XDG_CONFIG_HOME=relative`、设置了 `QWEN_HOME`、在 macOS 上，或第二次运行时，它必须打印原因并保持一切不变。
+创建带有 `settings.json` 的 `~/.qwen`，然后运行设计说明中的迁移命令。预期有 `~/.config/qwen/settings.json` 和 `~/.config/qwen/.qwen-global-dir`，且没有 `~/.qwen`。在 `XDG_CONFIG_HOME=relative`、设置了 `QWEN_HOME` 或在 `~/.qwen/.env` 中写有它、`~/.qwen` 是符号链接、在 macOS 上，或第二次运行时，它必须打印原因并保持一切不变。
 
 ### 把 QWEN_HOME 指向 XDG 目录
 
@@ -94,8 +100,11 @@ unset QWEN_HOME XDG_CONFIG_HOME QWEN_USAGE_STATISTICS_ENABLED QWEN_CODE_SIMPLE
 - `cd packages/channels/base && npx vitest run src/paths.test.ts`。
 - `cd packages/sdk-typescript && npx vitest run test/unit/peer/registry.test.ts`。
 - `npx vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/cli-entry.test.js scripts/tests/global-dir-marker.test.js scripts/tests/xdg-migration-command.test.js`。
-- Linux 模拟：临时关闭每个解析逻辑中的 macOS 例外并重新构建 `dist/` 后，上述测试套件在一次性的 `HOME` 下通过。唯一的失败是断言 macOS 继续使用 `~/.qwen` 的用例，这是模拟有意关闭的行为。
+
+## Linux 和 macOS 运行
+
+上述 Linux 测试组在 `node:22-bookworm` 容器中以非特权用户运行，使用已构建检出目录中的启动器（`node scripts/cli-entry.js`），每个测试组使用一次性的 `HOME`，且没有任何凭据。全部 44 项检查通过，覆盖全新安装、关闭使用统计的 bare 模式、已有安装、无关和重新创建的目录、登录警告、`mcp list`、`serve --port 0`、`--version`、`--help`、遗留的 `~/.qwen/.env`、自定义和相对路径的 `XDG_CONFIG_HOME`、位于主目录之外的 `XDG_CONFIG_HOME`、`QWEN_HOME`，以及迁移命令及其拒绝情形。macOS 测试组以同样方式在 Mac 上运行：存在 `~/.config/qwen` 时仍使用 `~/.qwen`。
 
 ## 未运行
 
-上述测试组没有在 Linux 或 Windows 上执行。两种机器都不可用，也没有正在运行的容器运行时。Linux 规则由模拟平台的单元测试以及上述模拟运行覆盖。
+Windows 测试组没有运行，因为没有可用的 Windows 机器。模拟平台的单元测试覆盖了它。

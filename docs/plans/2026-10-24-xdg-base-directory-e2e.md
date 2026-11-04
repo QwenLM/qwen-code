@@ -7,13 +7,19 @@ This plan verifies the [design note](../design/2026-10-24-xdg-base-directory.md)
 Start every group from a fresh throwaway home, so the operator's real configuration is never read or written and no group sees another group's files. Two groups continue in the new-install group's home on purpose, because they need the marker its run wrote: the recreated `~/.qwen` group and the `~/.qwen/.env` group.
 
 ```bash
+# Once, in the checkout under test, after npm run build. A released qwen on PATH
+# would test the wrong code.
+REPO=$PWD
+qwen() { node "$REPO/scripts/cli-entry.js" "$@"; }
+# For each group.
 export HOME=$(mktemp -d)
 unset QWEN_HOME XDG_CONFIG_HOME QWEN_USAGE_STATISTICS_ENABLED QWEN_CODE_SIMPLE
+for var in $(compgen -e | grep -E '_API_KEY$|_AUTH_TOKEN$'); do unset "$var"; done
 ```
 
 On Windows, Node reads the home directory from `USERPROFILE`, not `HOME`, so also set `export USERPROFILE="$HOME"` (and `HOMEDRIVE`/`HOMEPATH` for cmd or PowerShell), or use a throwaway user account. Otherwise the run reads and writes the real profile.
 
-`qwen -p "say hi"` without credentials is enough. The run performs first-run setup and then stops at "No auth type is selected", so no model is called.
+`qwen -p "say hi"` without credentials is enough. The run performs first-run setup and then stops at "No auth type is selected", so no model is called. Credentials left in the environment would reach a real model, which is why the setup clears them.
 
 ## Test groups
 
@@ -55,7 +61,7 @@ In a fresh home, run the command with `XDG_CONFIG_HOME=$HOME/xdg`. Expect `$HOME
 
 ### Moving an existing install
 
-Create `~/.qwen` with a `settings.json`, then run the migration command from the design note. Expect `~/.config/qwen/settings.json` and `~/.config/qwen/.qwen-global-dir`, and no `~/.qwen`. With `XDG_CONFIG_HOME=relative`, with `QWEN_HOME` set, on macOS, or when run a second time, it must print why and leave everything in place.
+Create `~/.qwen` with a `settings.json`, then run the migration command from the design note. Expect `~/.config/qwen/settings.json` and `~/.config/qwen/.qwen-global-dir`, and no `~/.qwen`. With `XDG_CONFIG_HOME=relative`, with `QWEN_HOME` set or written in `~/.qwen/.env`, with `~/.qwen` as a symlink, on macOS, or when run a second time, it must print why and leave everything in place.
 
 ### QWEN_HOME pointed at the XDG directory
 
@@ -94,8 +100,11 @@ All runs used a throwaway `HOME` with `QWEN_HOME` and `XDG_CONFIG_HOME` unset.
 - `cd packages/channels/base && npx vitest run src/paths.test.ts`.
 - `cd packages/sdk-typescript && npx vitest run test/unit/peer/registry.test.ts`.
 - `npx vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/cli-entry.test.js scripts/tests/global-dir-marker.test.js scripts/tests/xdg-migration-command.test.js`.
-- Linux simulation: with the macOS exemption temporarily disabled in every resolver and `dist/` rebuilt, the same suites passed under a throwaway `HOME`. The only failures were the cases that assert macOS keeps `~/.qwen`, which the simulation disables by design.
+
+## Linux and macOS runs
+
+The Linux groups above ran in a `node:22-bookworm` container as an unprivileged user, using the launcher from a built checkout (`node scripts/cli-entry.js`), a throwaway `HOME` per group and no credentials. All 44 checks passed. They cover a new install, bare mode with usage statistics off, an existing install, unrelated and recreated directories, the sign-in warning, `mcp list`, `serve --port 0`, `--version`, `--help`, a left-behind `~/.qwen/.env`, a custom and a relative `XDG_CONFIG_HOME`, one outside the home directory, `QWEN_HOME`, and the migration command with its refusals. The macOS group ran the same way on a Mac: `~/.qwen` was used with a `~/.config/qwen` present.
 
 ## Not run
 
-The test groups above were not executed on Linux or Windows. No machine for either was available, and no container runtime was running. The Linux rules are covered by unit tests that stub the platform, plus the simulated run described above.
+The Windows group was not run, because no Windows machine was available. Unit tests that stub the platform cover it.
