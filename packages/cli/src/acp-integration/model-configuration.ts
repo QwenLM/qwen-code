@@ -88,6 +88,13 @@ const MODEL_CONFIGURATIONS: Readonly<
       defaultEffort: 'xhigh',
     },
   },
+  'qwen3.8-flash': {
+    reasoning: {
+      thinking: true,
+      efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
+    },
+  },
 };
 
 export const REASONING_EFFORT_DEFAULT = 'default';
