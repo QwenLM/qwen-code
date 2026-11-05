@@ -5144,6 +5144,38 @@ describe('workspace change propagation', () => {
     },
   );
 
+  it('propagates subscription logout to managed channels as a tightening change', async () => {
+    const p = paired(
+      {},
+      engineChannel('legacy'),
+      engineChannel('managed', {
+        extMethodImpl: (method, params) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceChange
+            ? { v: 1, revision: params['revision'], acknowledged: true }
+            : {},
+      }),
+    );
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.preheat();
+    await p.bridge.invokeWorkspaceCommand(
+      SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+      { cwd: WS_A, subscriptionSignedOut: true },
+    );
+    expect(p.managed.agent.extMethodCalls).toEqual(
+      expect.arrayContaining([
+        {
+          method: SERVE_CONTROL_EXT_METHODS.workspaceChange,
+          params: expect.objectContaining({
+            kind: 'modelProviders',
+            tightening: true,
+            subscriptionSignedOut: true,
+            cwd: WS_A,
+          }),
+        },
+      ]),
+    );
+  });
+
   it('refuses a prompt the quarantine overtakes while its attachments resolve', async () => {
     const resolving = deferred<void>();
     const p = paired(
