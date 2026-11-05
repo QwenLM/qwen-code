@@ -296,6 +296,49 @@ class ManagedLockScopeConcurrencyMySqlIT {
         }
     }
 
+    /**
+     * The Session-scoped read admission behind action responses: two Sessions
+     * on one storage share it, and a fence writer still waits for it.
+     */
+    @Test
+    void sessionScopedReadAdmissionSharesStorageAndHoldsOffTheFence() throws Exception {
+        storageWriters(false);
+        CountDownLatch admitted = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<?> reader = executor.submit(() -> transactions.executeWithoutResult(status -> {
+                WorkspaceMigrationAdmission.requireSessionOpenForAdmission(jdbc, TENANT, "storage-a");
+                admitted.countDown();
+                try {
+                    assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(error);
+                }
+            }));
+            assertThat(admitted.await(5, TimeUnit.SECONDS)).isTrue();
+            Future<?> neighbour = executor.submit(() -> transactions.executeWithoutResult(status ->
+                    WorkspaceMigrationAdmission.requireSessionOpenForAdmission(jdbc, TENANT, "storage-b")));
+            boolean neighbourBlocked;
+            boolean fenceBlocked;
+            Future<?> fence;
+            try {
+                neighbourBlocked = waitsForLock("session-read-admission", neighbour);
+                fence = executor.submit(() -> transactions.executeWithoutResult(status -> jdbc.update(fenceSql("alias"))));
+                fenceBlocked = waitsForLock("session-read-fence", fence);
+            } finally {
+                release.countDown();
+            }
+            reader.get(5, TimeUnit.SECONDS);
+            neighbour.get(5, TimeUnit.SECONDS);
+            fence.get(5, TimeUnit.SECONDS);
+            assertThat(neighbourBlocked).as("Sessions sharing storage share read admission").isFalse();
+            assertThat(fenceBlocked).as("the fence writer waits for the admitted reader").isTrue();
+        } finally {
+            release.countDown();
+        }
+    }
+
     private String fenceSql(String domain) {
         return "alias".equals(domain)
                 ? "UPDATE ma_storage SET fence_operation_id = 'fence' WHERE storage_id = 'storage'"

@@ -25,6 +25,16 @@ public class ResidentWorkspaceCatalog {
         }
     }
 
+    /**
+     * Whether a selection could resolve to a configured Resident Workspace, decided from
+     * configuration alone before any row is read: true for the tenant's default Workspace
+     * (workspaceId null) whenever the tenant configures one.
+     */
+    public boolean mayContain(String tenantId, String workspaceId) {
+        return configured.stream().anyMatch(value -> value.registration().tenantId().equals(tenantId)
+                && (workspaceId == null || value.workspaceId().equals(workspaceId)));
+    }
+
     public ResidentWorkspace find(ContextBinding binding) {
         if (binding == null) {
             return null;
