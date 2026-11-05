@@ -381,7 +381,10 @@ describe('DefaultOpenAICompatibleProvider', () => {
         const result = build(
           hello('gpt-5', { max_completion_tokens: 10_000_000 }),
         );
-        expect(result.max_completion_tokens).toBeLessThan(10_000_000);
+        // gpt-5's output limit (128K), not the 64K auto ceiling: a budget
+        // routed through defaultOutputCeiling instead of the model limit
+        // would emit 64_000 and must fail here.
+        expect(result.max_completion_tokens).toBe(131_072);
         expect(result).not.toHaveProperty('max_tokens');
       });
 

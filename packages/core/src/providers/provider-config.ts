@@ -6,7 +6,10 @@
 
 import { createHash } from 'node:crypto';
 import { AuthType } from '../core/contentGenerator.js';
-import { outputBudgetWireKey } from '../core/openaiContentGenerator/output-budget-key.js';
+import {
+  OUTPUT_BUDGET_KEYS,
+  outputBudgetWireKey,
+} from '../core/openaiContentGenerator/output-budget-key.js';
 import {
   resolveModelProtocol,
   tryResolveModelProtocol,
@@ -421,6 +424,25 @@ export function buildInstallPlan(
       if (!existing) return model;
       const preservedGeneration = { ...existing.generationConfig };
       const advanced = inputs.advancedConfig;
+      // A new "Max output tokens" value replaces the old budget whatever key
+      // either travels under: the installer writes `max_completion_tokens`
+      // for GPT-5 / o-series ids on Chat Completions and `max_tokens`
+      // elsewhere, and an entry must never carry both (the endpoint rejects
+      // the pair). Other preserved samplingParams stay untouched.
+      const incomingSampling = model.generationConfig?.samplingParams;
+      if (
+        preservedGeneration.samplingParams &&
+        incomingSampling &&
+        OUTPUT_BUDGET_KEYS.some((key) => incomingSampling[key] !== undefined)
+      ) {
+        preservedGeneration.samplingParams = {
+          ...preservedGeneration.samplingParams,
+        };
+        for (const key of OUTPUT_BUDGET_KEYS)
+          delete preservedGeneration.samplingParams[key];
+        if (!Object.keys(preservedGeneration.samplingParams).length)
+          delete preservedGeneration.samplingParams;
+      }
       if (!config.models && advanced) {
         if (advanced.replaceExisting) {
           delete preservedGeneration.contextWindowSize;
@@ -428,8 +450,8 @@ export function buildInstallPlan(
             preservedGeneration.samplingParams = {
               ...preservedGeneration.samplingParams,
             };
-            delete preservedGeneration.samplingParams.max_tokens;
-            delete preservedGeneration.samplingParams['max_completion_tokens'];
+            for (const key of OUTPUT_BUDGET_KEYS)
+              delete preservedGeneration.samplingParams[key];
             if (!Object.keys(preservedGeneration.samplingParams).length)
               delete preservedGeneration.samplingParams;
           }

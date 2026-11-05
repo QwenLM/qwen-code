@@ -4295,6 +4295,9 @@ describe('ContentGenerationPipeline', () => {
         'openai/gpt-5.4',
         'openai/gpt-5.5-pro:batch',
         'o3:batch',
+        // Bedrock build-tag shape: without the `:<digits>` pre-strip,
+        // normalize() keeps "0" and this row falls back to max_tokens.
+        'openai.gpt-5-1:0',
       ])(
         'sends the clamped budget as max_completion_tokens for %s',
         async (model) => {

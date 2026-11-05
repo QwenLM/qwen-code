@@ -20,6 +20,37 @@ const MAX_COMPLETION_TOKENS_FAMILIES = /^(?:gpt-[5-9]|o\d)(?![a-z])/;
 export type OutputBudgetWireKey = 'max_tokens' | 'max_completion_tokens';
 
 /**
+ * Keys a `samplingParams` output budget can travel under, in lookup order:
+ * the documented `max_tokens`, then the provider-specific stand-ins the
+ * installer writes for the families above and the pipeline clamps in place.
+ */
+export const OUTPUT_BUDGET_KEYS = [
+  'max_tokens',
+  'max_completion_tokens',
+  'max_new_tokens',
+] as const;
+
+/**
+ * The output ceiling the user configured in `samplingParams`, whichever key
+ * it travels under, or `undefined` when none carries a number. A `null`
+ * placeholder counts as unset, as it does for the pipeline's
+ * `reconcileMaxTokens`. Readers that treat `samplingParams.max_tokens` as
+ * "the user chose a ceiling" (first-send clamp, MAX_TOKENS escalation gate,
+ * side-query budget) go through here so an installer-written
+ * `max_completion_tokens` is honoured the same way.
+ */
+export function configuredOutputBudget(
+  samplingParams: { [key: string]: unknown } | undefined,
+): number | undefined {
+  if (!samplingParams) return undefined;
+  for (const key of OUTPUT_BUDGET_KEYS) {
+    const value = samplingParams[key];
+    if (typeof value === 'number') return value;
+  }
+  return undefined;
+}
+
+/**
  * Wire key the output budget travels under for `model` when the user has not
  * named one themselves: `max_completion_tokens` for the families above,
  * `max_tokens` for everything else. Explicit `samplingParams` keys always win

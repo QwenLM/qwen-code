@@ -1203,4 +1203,42 @@ describe('output budget key written by the installer', () => {
     )[0]!;
     expect(cleared.generationConfig?.samplingParams).toBeUndefined();
   });
+
+  it('replaces an older max_tokens budget on re-install without replaceExisting instead of keeping both keys', () => {
+    // An entry an earlier installer wrote as `max_tokens` for a GPT-5 id must
+    // not come out of a plain re-run as `{ max_tokens, max_completion_tokens }`:
+    // the pipeline would keep `max_tokens` as the wire key and the endpoint
+    // would still reject it. Only the budget key is swapped; the other
+    // preserved samplingParams stay.
+    const inputs = {
+      ...customInputs(['openai.gpt-5.5']),
+      protocol: AuthType.USE_OPENAI,
+    };
+    const existing = modelsOf(
+      buildInstallPlanSrc(customProvider, {
+        ...inputs,
+        advancedConfig: { maxTokens: 32000 },
+      }),
+    );
+    existing[0]!.generationConfig!.samplingParams = {
+      max_tokens: 32000,
+      temperature: 0.2,
+    };
+    const rerun = (
+      advancedConfig: NonNullable<ProviderSetupInputs['advancedConfig']>,
+    ) =>
+      modelsOf(
+        buildInstallPlanSrc(
+          customProvider,
+          { ...inputs, advancedConfig },
+          existing,
+        ),
+      )[0]!.generationConfig?.samplingParams;
+    expect(rerun({ maxTokens: 32000 })).toEqual({
+      temperature: 0.2,
+      max_completion_tokens: 32000,
+    });
+    // No new budget submitted: the preserved entry is left as it was.
+    expect(rerun({})).toEqual({ max_tokens: 32000, temperature: 0.2 });
+  });
 });

@@ -86,6 +86,7 @@ import {
   OUTPUT_TOKEN_CEILING,
   parsePositiveIntegerEnvValue,
 } from './tokenLimits.js';
+import { configuredOutputBudget } from './openaiContentGenerator/output-budget-key.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
@@ -3467,7 +3468,7 @@ export class LlmChat {
     );
     const explicitOutputCeiling: number | undefined =
       params.config?.maxOutputTokens ??
-      cgConfigForThresholds?.samplingParams?.max_tokens ??
+      configuredOutputBudget(cgConfigForThresholds?.samplingParams) ??
       parsedEnvMaxTokensForClamp;
     const outputCeiling: number =
       explicitOutputCeiling ?? defaultOutputCeiling(model);
@@ -4280,8 +4281,7 @@ export class LlmChat {
           process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
         );
         const hasUserMaxTokensOverride =
-          (cgConfig?.samplingParams?.max_tokens !== undefined &&
-            cgConfig?.samplingParams?.max_tokens !== null) ||
+          configuredOutputBudget(cgConfig?.samplingParams) !== undefined ||
           parsedEnvMaxTokens !== undefined;
         // params.config.maxOutputTokens is set by the first-send clamp; the
         // outputCeiling fallback is defensive and should not fire in practice.
