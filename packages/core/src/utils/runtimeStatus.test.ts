@@ -15,6 +15,7 @@ import {
   writeRuntimeStatus,
 } from './runtimeStatus.js';
 import { readProcStartToken } from './process-liveness.js';
+import * as processLiveness from './process-liveness.js';
 
 const fsMocks = vi.hoisted(() => ({
   readFile: vi.fn<typeof import('node:fs/promises').readFile>(),
@@ -70,6 +71,29 @@ describe('writeRuntimeStatus', () => {
     expect(data.proc_start).toBe(readProcStartToken(process.pid));
     expect(data.qwen_version).toBeNull();
   });
+
+  it.skipIf(process.platform !== 'linux')(
+    'retries the process start token once when the first read fails',
+    async () => {
+      const spy = vi
+        .spyOn(processLiveness, 'readProcStartToken')
+        .mockReturnValueOnce(null)
+        .mockReturnValueOnce('deadbeef:9999');
+      try {
+        await writeRuntimeStatus(targetPath(), {
+          sessionId: 'abc',
+          workDir: '/w',
+          pid: 4242,
+        });
+
+        const data = JSON.parse(await readFile(targetPath(), 'utf-8'));
+        expect(data.proc_start).toBe('deadbeef:9999');
+        expect(spy).toHaveBeenCalledTimes(2);
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
 
   it('round-trips an explicit process start token', async () => {
     await writeRuntimeStatus(targetPath(), {
