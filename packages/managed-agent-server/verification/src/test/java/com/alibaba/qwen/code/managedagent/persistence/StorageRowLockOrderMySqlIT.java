@@ -11,6 +11,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
@@ -84,6 +86,8 @@ class StorageRowLockOrderMySqlIT {
         admission.get(30, TimeUnit.SECONDS);
         assertThat(admissionJdbc.paused).as("admission read the storage row").isNotNull();
         admissionJdbc.paused.get(30, TimeUnit.SECONDS);
+        // Admission held the alias record first, so the locker queued on it.
+        assertThat(admissionJdbc.queuedOn).containsExactly("uk_ma_storage_business_key");
     }
 
     @ParameterizedTest(name = "shared admission = {0}")
@@ -101,6 +105,8 @@ class StorageRowLockOrderMySqlIT {
         recovery.get(30, TimeUnit.SECONDS);
         assertThat(recoveryJdbc.paused).as("recovery scanned the physical storage").isNotNull();
         recoveryJdbc.paused.get(30, TimeUnit.SECONDS);
+        // Admission asks for the alias record first, which recovery holds.
+        assertThat(recoveryJdbc.queuedOn).containsExactly("uk_ma_storage_business_key");
     }
 
     @Test
@@ -125,6 +131,7 @@ class StorageRowLockOrderMySqlIT {
         recovery.get(30, TimeUnit.SECONDS);
         assertThat(recoveryJdbc.paused).as("recovery locked the storage").isNotNull();
         recoveryJdbc.paused.get(30, TimeUnit.SECONDS);
+        assertThat(recoveryJdbc.queuedOn).containsExactly("uk_ma_storage_business_key");
     }
 
     @Test
@@ -176,7 +183,52 @@ class StorageRowLockOrderMySqlIT {
         assertThat(plan.text()).containsAnyOf("range scan", "\"range\"");
     }
 
+    @Test
+    void physicalRecoveryLocksAnAliasRegisteredAfterItsSnapshot() {
+        registerLocal();
+        String later = "lock-order-later-tenant";
+        var committed = new ManagedSchemaJdbcTemplate(new DriverManagerDataSource(database.url(),
+                System.getProperty("mysql.user"), System.getProperty("mysql.password", "")));
+        transactions.executeWithoutResult(status -> {
+            // The recovery's REPEATABLE READ snapshot starts here; the alias
+            // is committed after it, from another connection.
+            jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage", Integer.class);
+            insertLocal(committed, later, PHYSICAL);
+            assertThat(LocalStorageOwners.lockCovered(jdbc, TENANT, STORAGE)).isEqualTo(PHYSICAL);
+            assertThat(committed.queryForObject("SELECT COUNT(*) FROM performance_schema.data_locks"
+                    + " WHERE OBJECT_SCHEMA = ? AND INDEX_NAME = 'uk_ma_storage_business_key' AND LOCK_STATUS = 'GRANTED'"
+                    + " AND LOCK_DATA LIKE ?", Integer.class, schema,
+                    "'" + JdbcRuntimeBindingRepository.storageAliasKey(later, STORAGE) + "'%"))
+                    .as("recovery holds the later alias's record").isPositive();
+        });
+    }
+
+    @Test
+    void physicalRecoveryOnASingleConnectionKeepsItsCallersTransaction() {
+        registerLocal();
+        String alias = JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE);
+        // The offline recovery entry runs on one connection, as here.
+        var single = new SingleConnectionDataSource(database.url(), System.getProperty("mysql.user"),
+                System.getProperty("mysql.password", ""), true);
+        try {
+            var singleJdbc = new ManagedSchemaJdbcTemplate(single);
+            new TransactionTemplate(new DataSourceTransactionManager(single)).executeWithoutResult(status -> {
+                singleJdbc.update("UPDATE ma_storage SET gmt_modified = 42 WHERE alias_key = ?", alias);
+                assertThat(LocalStorageOwners.lockCovered(singleJdbc, TENANT, STORAGE)).isEqualTo(PHYSICAL);
+                status.setRollbackOnly();
+            });
+        } finally {
+            single.destroy();
+        }
+        assertThat(jdbc.queryForObject("SELECT gmt_modified FROM ma_storage WHERE alias_key = ?", Long.class, alias))
+                .as("the rollback discarded the caller's write").isNotEqualTo(42L);
+    }
+
     private void insertLocal(String tenant, String physical) {
+        insertLocal(jdbc, tenant, physical);
+    }
+
+    private static void insertLocal(ManagedSchemaJdbcTemplate jdbc, String tenant, String physical) {
         jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
                 + " registration_state, storage_kind, registration_revision, registration_json)"
                 + " VALUES (?, ?, ?, ?, ?, ?, 'REGISTERED', 'LOCAL', 1, '{}')",
@@ -246,6 +298,7 @@ class StorageRowLockOrderMySqlIT {
         private final String marker;
         private final Runnable other;
         private volatile Future<?> paused;
+        private volatile List<String> queuedOn;
 
         private PausingJdbc(DataSource source, String marker, Runnable other) {
             super(source);
@@ -283,6 +336,10 @@ class StorageRowLockOrderMySqlIT {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException(error);
             }
+            queuedOn = jdbc.queryForList("SELECT requested.INDEX_NAME FROM performance_schema.data_lock_waits waits"
+                    + " JOIN performance_schema.data_locks requested ON requested.ENGINE = waits.ENGINE"
+                    + " AND requested.ENGINE_LOCK_ID = waits.REQUESTING_ENGINE_LOCK_ID"
+                    + " WHERE requested.OBJECT_SCHEMA = ?", String.class, schema);
             assertThat(finished.getAsBoolean()).as("the second transaction waits").isFalse();
         }
     }

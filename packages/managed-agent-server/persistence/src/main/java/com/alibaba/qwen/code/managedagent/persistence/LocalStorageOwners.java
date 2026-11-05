@@ -111,21 +111,15 @@ final class LocalStorageOwners {
         // scan below reaches their primary records: storage admission locks an
         // alias record before its primary record (WorkspaceMigrationAdmission
         // .owner), and two recoveries of aliases sharing this storage take
-        // them in one order. The list comes from a fresh read rather than this
-        // transaction's snapshot. An alias registered after that read is
+        // them in one order. The list comes from a committed read (committedRead)
+        // rather than this transaction's snapshot. An alias registered after that read is
         // locked by the scan alone, which never locks its alias record; a
         // recovery of another alias that already saw it can then deadlock with
         // this one.
-        var known = new java.util.TreeSet<String>();
-        try (var connection = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
-            connection.setAutoCommit(true);
-            connection.setReadOnly(true);
-            known.addAll(new ManagedSchemaJdbcTemplate(new org.springframework.jdbc.datasource.SingleConnectionDataSource(connection, true))
-                    .queryForList("SELECT alias_key FROM ma_storage WHERE physical_key = ? ORDER BY alias_key LIMIT 129",
-                            String.class, physical));
-        } catch (java.sql.SQLException error) {
-            throw new IllegalStateException("Physical recovery alias list is unavailable", error);
-        }
+        java.util.List<String> listed = committedRead(jdbc, current -> current.queryForList(
+                "SELECT alias_key FROM ma_storage WHERE physical_key = ? ORDER BY alias_key LIMIT 129", String.class, physical),
+                "Physical recovery alias list is unavailable");
+        var known = new java.util.TreeSet<String>(listed);
         known.add(sourceAlias);
         // A range read of the alias index, which yields alias_key order. The
         // index is forced so this is never a table scan, and physical_key is
@@ -155,11 +149,8 @@ final class LocalStorageOwners {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
         // The caller may already hold a RR snapshot. Admissions wait on the locked aliases;
-        // an independent, nonlocking read sees committed authorities without reversing binding locks.
-        try (var connection = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
-            connection.setAutoCommit(true);
-            connection.setReadOnly(true);
-            var current = new ManagedSchemaJdbcTemplate(new org.springframework.jdbc.datasource.SingleConnectionDataSource(connection, true));
+        // a committed, nonlocking read (committedRead) sees authorities without reversing binding locks.
+        committedRead(jdbc, current -> {
             for (var candidate : aliases) {
                 if (sourceAlias.equals(candidate[0])) {
                     continue;
@@ -174,10 +165,33 @@ final class LocalStorageOwners {
                     throw uncovered();
                 }
             }
-        } catch (java.sql.SQLException error) {
-            throw new IllegalStateException("Physical recovery inventory is unavailable", error);
-        }
+            return null;
+        }, "Physical recovery inventory is unavailable");
         return physical;
+    }
+
+    /**
+     * Runs a nonlocking read on a connection of its own, so it sees what is committed rather than
+     * the caller's REPEATABLE READ snapshot. The offline recovery entry (WorkspaceRecoveryMain)
+     * runs on one SingleConnectionDataSource, whose every connection is the transaction's own:
+     * setting it to autocommit would commit the caller's work, and the read-only flag would then
+     * refuse the locking reads that follow. There the read runs on the caller's connection and
+     * sees the transaction's first consistent snapshot instead. With the server stopped, only
+     * another maintenance entry on a sibling alias can commit beside it, and the later
+     * transactions of the recovery recheck its boundary on fresh snapshots.
+     */
+    private static <T> T committedRead(JdbcTemplate jdbc, java.util.function.Function<JdbcTemplate, T> read, String failure) {
+        var source = java.util.Objects.requireNonNull(jdbc.getDataSource());
+        if (source instanceof org.springframework.jdbc.datasource.SingleConnectionDataSource) {
+            return read.apply(jdbc);
+        }
+        try (var connection = source.getConnection()) {
+            connection.setAutoCommit(true);
+            connection.setReadOnly(true);
+            return read.apply(new ManagedSchemaJdbcTemplate(new org.springframework.jdbc.datasource.SingleConnectionDataSource(connection, true)));
+        } catch (java.sql.SQLException error) {
+            throw new IllegalStateException(failure, error);
+        }
     }
 
     private static boolean exists(JdbcTemplate jdbc, String sql, Object... arguments) {
