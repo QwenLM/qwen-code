@@ -106,9 +106,38 @@ final class LocalStorageOwners {
         if (source == null || !(source.get("physical_key") instanceof String physical)) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
-        var aliases = jdbc.query("SELECT alias_key, tenant_id, storage_id, storage_kind FROM ma_storage WHERE physical_key = ? ORDER BY alias_key LIMIT 129 FOR UPDATE",
-                (row, index) -> new String[] {row.getString("alias_key"), row.getString("tenant_id"), row.getString("storage_id"), row.getString("storage_kind")}, physical);
         String sourceAlias = JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage);
+        // Lock the aliases through alias_key, in alias_key order, before the
+        // scan below reaches their primary records: storage admission locks an
+        // alias record before its primary record (WorkspaceMigrationAdmission
+        // .owner), and two recoveries of aliases sharing this storage take
+        // them in one order. The list comes from a fresh read rather than this
+        // transaction's snapshot. An alias registered after that read is
+        // locked by the scan alone, which never locks its alias record; a
+        // recovery of another alias that already saw it can then deadlock with
+        // this one.
+        var known = new java.util.TreeSet<String>();
+        try (var connection = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
+            connection.setAutoCommit(true);
+            connection.setReadOnly(true);
+            known.addAll(new ManagedSchemaJdbcTemplate(new org.springframework.jdbc.datasource.SingleConnectionDataSource(connection, true))
+                    .queryForList("SELECT alias_key FROM ma_storage WHERE physical_key = ? ORDER BY alias_key LIMIT 129",
+                            String.class, physical));
+        } catch (java.sql.SQLException error) {
+            throw new IllegalStateException("Physical recovery inventory is unavailable", error);
+        }
+        known.add(sourceAlias);
+        // Only alias_key, so the read stays on the alias index: with more
+        // columns the optimizer may scan the table and lock primary records first.
+        jdbc.queryForList("SELECT alias_key FROM ma_storage WHERE alias_key IN ("
+                + String.join(", ", java.util.Collections.nCopies(known.size(), "?")) + ") ORDER BY alias_key FOR UPDATE",
+                String.class, known.toArray());
+        // Through the physical index: a table scan, which the optimizer picks
+        // when one storage holds most rows, would lock other storages' primary
+        // records in id order and cross another recovery's alias locks.
+        var aliases = jdbc.query("SELECT alias_key, tenant_id, storage_id, storage_kind FROM ma_storage"
+                + " /*! FORCE INDEX (idx_ma_storage_physical) */ WHERE physical_key = ? ORDER BY alias_key LIMIT 129 FOR UPDATE",
+                (row, index) -> new String[] {row.getString("alias_key"), row.getString("tenant_id"), row.getString("storage_id"), row.getString("storage_kind")}, physical);
         if (aliases.size() > 128 || aliases.stream().noneMatch(candidate -> sourceAlias.equals(candidate[0]))) {
             throw new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(409, "storage_alias_inventory_limit",
                     "Physical recovery alias inventory is incomplete or exceeds 128 aliases.", false);
