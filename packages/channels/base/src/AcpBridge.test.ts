@@ -1498,6 +1498,35 @@ describe('AcpBridge', () => {
     await expect(bridge.prompt('s-1', 'question')).resolves.toBe('Model text');
   });
 
+  it('carries a turn notice ahead of the model text instead of shadowing it', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Only the first 5 skills were loaded.',
+            },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'Model text');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Only the first 5 skills were loaded.\n\nModel text',
+    );
+  });
+
   it('clears slash-command output at response boundaries', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

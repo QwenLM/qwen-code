@@ -19922,10 +19922,15 @@ export class Session implements SessionContext {
     switch (result.type) {
       case 'submit_prompt': {
         // Stacked-skill overflow is a warning, not a failure: the prompt still
-        // runs, so the client gets a notice and the turn continues.
+        // runs, so the client gets a notice and the turn continues. Channel
+        // bridges deliver only the turn's text, so tag the notice and let them
+        // carry it with the reply instead of the shadowed slash-command slot.
         if (result.stackedSkillOverflow) {
           await this.messageEmitter.emitSlashCommandOutput(
             result.stackedSkillOverflow,
+            undefined,
+            undefined,
+            { turnNotice: true },
           );
         }
         const expandedPrompt = normalizePartList(result.content);

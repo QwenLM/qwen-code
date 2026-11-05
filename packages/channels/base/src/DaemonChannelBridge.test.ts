@@ -2186,6 +2186,57 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('carries a turn notice ahead of the model text instead of shadowing it', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Only the first 5 skills were loaded.',
+            },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        },
+      });
+      events.push({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Model text' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe(
+      'Only the first 5 skills were loaded.\n\nModel text',
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
   it('ignores emitted slash-command output for another prompt session', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
