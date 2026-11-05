@@ -640,16 +640,17 @@ describe('collectContextData (contextCommand)', () => {
         expect(data.memoryFiles.map((file) => file.path)).toEqual([
           t('auto memory'),
         ]);
-        if (total !== 1) {
-          expect(data.breakdown.instructionFiles).toBe(
-            estimateContextTextTokens(instructions + '\n'),
-          );
-          expect(data.breakdown.memoryFiles).toBe(
-            estimateContextTextTokens(policy),
-          );
-        }
+        expect(data.breakdown.instructionFiles).toBe(
+          estimateContextTextTokens(instructions + '\n'),
+        );
+        expect(data.breakdown.memoryFiles).toBe(
+          estimateContextTextTokens(policy),
+        );
+        expect(data.breakdown.messages).toBe(0);
         if (total) {
-          expect(sumRows(data.breakdown)).toBe(total);
+          expect(data.breakdown.freeSpace).toBe(
+            data.contextWindowSize - total - data.breakdown.autocompactBuffer,
+          );
         } else {
           expect(data.breakdown.freeSpace).toBe(
             data.contextWindowSize -
@@ -674,7 +675,7 @@ describe('collectContextData (contextCommand)', () => {
       },
     );
 
-    it('scales nonzero instruction and auto-memory rows and their details together', async () => {
+    it('preserves instruction and auto-memory estimates above the provider total', async () => {
       const sources = {
         getUserMemory: () =>
           '--- Context from: QWEN.md ---\n' +
@@ -690,23 +691,16 @@ describe('collectContextData (contextCommand)', () => {
         );
       const raw = await collect(0);
       const total = 1000;
-      const scale = total / sumRows(raw.breakdown);
-      expect(scale).toBeLessThan(1);
-      const scaled = await collect(total);
+      expect(sumRows(raw.breakdown)).toBeGreaterThan(total);
+      const data = await collect(total);
 
       for (const category of ['instructionFiles', 'memoryFiles'] as const) {
-        const expected = Math.floor(raw.breakdown[category]! * scale);
-        expect(expected).toBeGreaterThan(0);
-        expect(scaled.breakdown[category]).toBe(expected);
-        expect(scaled[category]).toEqual(
-          raw[category]!.map((entry) => ({
-            ...entry,
-            tokens: Math.round(entry.tokens * scale),
-          })),
-        );
+        expect(raw.breakdown[category]).toBeGreaterThan(0);
+        expect(data.breakdown[category]).toBe(raw.breakdown[category]);
+        expect(data[category]).toEqual(raw[category]);
       }
-      expect(scaled.breakdown.unattributed).toBe(0);
-      expect(sumRows(scaled.breakdown)).toBe(total);
+      expect(data.breakdown).not.toHaveProperty('unattributed');
+      expect(data.breakdown.messages).toBe(0);
     });
 
     function sumRows(breakdown: ContextCategoryBreakdown): number {
@@ -718,8 +712,7 @@ describe('collectContextData (contextCommand)', () => {
         breakdown.memoryFiles +
         breakdown.skills +
         (breakdown.startupContext ?? 0) +
-        breakdown.messages +
-        (breakdown.unattributed ?? 0)
+        breakdown.messages
       );
     }
 
@@ -850,7 +843,9 @@ describe('collectContextData (contextCommand)', () => {
         );
         expect(data.totalTokens).toBe(total);
         if (total) {
-          expect(sumRows(data.breakdown)).toBe(total);
+          expect(data.breakdown.freeSpace).toBe(
+            200_000 - total - data.breakdown.autocompactBuffer,
+          );
         } else {
           expect(data.breakdown.freeSpace).toBe(
             200_000 -
@@ -890,7 +885,7 @@ describe('collectContextData (contextCommand)', () => {
       expect(data.breakdown.messages).toBe(300);
     });
 
-    it('closes the rows against the provider total, reporting the gap as unattributed', async () => {
+    it('allows estimates below the provider total without generating a residual', async () => {
       const data = await collectContextData(
         makeChatConfig({
           total: 100_000,
@@ -899,53 +894,108 @@ describe('collectContextData (contextCommand)', () => {
         false,
       );
 
-      expect(data.breakdown.unattributed).toBeGreaterThan(0);
-      expect(sumRows(data.breakdown)).toBe(100_000);
+      expect(sumRows(data.breakdown)).toBeLessThan(data.totalTokens);
+      expect(data.breakdown.messages).toBe(300);
+      expect(data.breakdown).not.toHaveProperty('unattributed');
     });
 
-    it('scales every row down when the estimates exceed the provider total', async () => {
-      const config = makeChatConfig({
-        total: 5_000,
-        cached: 4_000,
-        history: [
+    it.each([
+      { total: 0, cached: 0, estimated: false },
+      { total: 7, cached: 0, estimated: false },
+      { total: 100_000, cached: 90_000, estimated: false },
+      { total: 500, cached: 0, estimated: true },
+    ])(
+      'keeps category and detail estimates independent of usage: %j',
+      async (usage) => {
+        const mcpSchema = {
+          name: 'mcp__server__report',
+          description: 'Build a report. '.repeat(40),
+        };
+        const mcpTool = Object.defineProperties(
+          Object.create(DiscoveredMCPTool.prototype),
+          {
+            name: { value: mcpSchema.name },
+            serverName: { value: 'server' },
+            serverToolName: { value: 'report' },
+            schema: { value: mcpSchema },
+          },
+        );
+        const builtinTool = {
+          name: 'read_file',
+          schema: { name: 'read_file', description: 'Read a file.' },
+        };
+        const history = [
           prelude,
-          { role: 'user', parts: [{ text: 'c'.repeat(40_000) }] },
-        ],
-      });
-      vi.mocked(config.getSystemPrompt).mockReturnValue('s'.repeat(40_000));
-      const data = await collectContextData(config, true);
+          { role: 'user', parts: [{ text: 'c'.repeat(772) }] },
+          skillResponse(trackedBody),
+        ];
+        const config = makeChatConfig({
+          ...usage,
+          history,
+          tools: [skillToolDouble, mcpTool, builtinTool],
+          skillList: trackedSkillList,
+        });
+        vi.mocked(config.getSystemPrompt).mockReturnValue('s'.repeat(40_000));
+        vi.mocked(config.getUserMemory).mockReturnValue(
+          '--- Context from: QWEN.md ---\nProject instructions.\n--- End of Context from: QWEN.md ---',
+        );
+        vi.mocked(config.getAutoMemoryPrompt).mockReturnValue('Memory policy.');
+        const data = await collectContextData(config, true);
+        const chat = config.getLlmClient().getChat();
+        vi.mocked(chat.getLastPromptTokenCount).mockReturnValue(0);
+        const raw = await collectContextData(config, true);
 
-      expect(data.breakdown.unattributed).toBe(0);
-      expect(sumRows(data.breakdown)).toBe(5_000);
-      // The `scale < 1` branch forces `unattributed` to 0, so the row must be
-      // suppressed in the text renderer rather than printed as `0 tokens`.
-      // `totalTokens` is nonzero, so this witnesses the `> 0` guard and not
-      // the `hasTokenCount` gate.
-      expect(formatContextUsageText(data)).not.toContain('Unattributed');
-      // The cached count is an annotation, never a term of the row sum, and
-      // never subtracted when deriving `messages` (this is the only branch that
-      // still derives it by subtraction).
-      expect(data.breakdown.cachedTokens).toBe(4_000);
-      // Each row pinned against its own unscaled value: dropping `* scale` from
-      // a row this PR added leaves the two identities above intact, because
-      // `messages` absorbs the difference.
-      expect(data.breakdown.skills).toBeLessThan(
-        estimateContextTextTokens(listingReminder),
-      );
-      expect(data.breakdown.startupContext).toBeLessThan(
-        estimateContextTextTokens(environmentReminder),
-      );
-      expect(data.skills[0]!.tokens).toBeLessThan(
-        estimateContextTextTokens(skillEntry),
-      );
-    });
+        for (const category of [
+          'systemPrompt',
+          'builtinTools',
+          'mcpTools',
+          'instructionFiles',
+          'memoryFiles',
+          'skills',
+          'startupContext',
+          'messages',
+        ] as const) {
+          expect(data.breakdown[category]).toBe(raw.breakdown[category]);
+        }
+        for (const details of [
+          'builtinTools',
+          'mcpTools',
+          'instructionFiles',
+          'memoryFiles',
+          'skills',
+        ] as const) {
+          expect(data[details]).toEqual(raw[details]);
+        }
+        expect(data.totalTokens).toBe(usage.total);
+        expect(data.isEstimated).toBe(!usage.total || usage.estimated);
+        expect(data.breakdown.messages).toBe(193);
+        expect(data.breakdown).not.toHaveProperty('unattributed');
+        expect(formatContextUsageText(data)).not.toContain('Unattributed');
+        expect(data.breakdown.cachedTokens).toBe(usage.cached);
+        expect(data.breakdown.freeSpace).toBe(
+          Math.max(
+            0,
+            data.contextWindowSize -
+              (usage.total || sumRows(raw.breakdown)) -
+              data.breakdown.autocompactBuffer,
+          ),
+        );
+        expect(data.breakdown.startupContext).toBe(
+          estimateContextTextTokens(environmentReminder),
+        );
+        expect(data.skills[0]!.tokens).toBe(
+          estimateContextTextTokens(skillEntry),
+        );
+        expect(data.skills[0]!.bodyTokens).toBe(
+          estimateContextTextTokens(trackedBody),
+        );
+      },
+    );
 
     it('charges nested tool media at the flat image budget, not as base64 text', async () => {
       // Tool media rides on `functionResponse.parts[k].inlineData.data` — the
       // carrier core's tools actually use. Serializing the whole part bills
-      // 400,000 ASCII chars (~100,000 tokens) against a 40,000 provider total,
-      // which collapses `scale` and deflates every row, including this
-      // ASCII-only one.
+      // 400,000 ASCII chars (~100,000 tokens) as conversation text.
       const withScreenshot = [
         prelude,
         {
@@ -979,15 +1029,21 @@ describe('collectContextData (contextCommand)', () => {
         false,
       );
 
-      // The screenshot must never reach `scale`, so no overhead row moves.
+      // Media belongs to messages, so no overhead row moves.
       expect(control.breakdown.systemPrompt).toBeGreaterThan(1_000);
       expect(billed.breakdown.systemPrompt).toBe(
         control.breakdown.systemPrompt,
       );
       expect(billed.breakdown.skills).toBe(control.breakdown.skills);
-      // Charged at the flat per-image budget rather than at chars/4.
-      expect(billed.breakdown.messages).toBeLessThan(5_000);
-      expect(sumRows(billed.breakdown)).toBe(40_000);
+      expect(billed.breakdown.messages).toBe(
+        estimateContextTextTokens(
+          JSON.stringify({
+            id: 'call-1',
+            name: 'read_file',
+            response: { output: 'ok' },
+          }),
+        ) + resolveSlimmingConfig(undefined).imageTokenEstimate,
+      );
     });
 
     it('charges a top-level media part at the flat image budget', async () => {
@@ -1022,7 +1078,6 @@ describe('collectContextData (contextCommand)', () => {
       // An exact delta, not an upper bound: the text part is 400 ASCII chars
       // (100 tokens) and the image is billed at the flat per-image budget.
       expect(data.breakdown.messages).toBe(100 + imageTokens);
-      expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
     it('does not deflate rows when the total is itself a char/4 estimate', async () => {
@@ -1051,18 +1106,17 @@ describe('collectContextData (contextCommand)', () => {
         unscaled.breakdown.startupContext,
       );
       expect(data.breakdown.skills).toBe(unscaled.breakdown.skills);
-      // The rows still close against the estimated total.
-      expect(sumRows(data.breakdown)).toBe(estimatedTotal);
+      expect(data.breakdown.messages).toBe(estimateContextTextTokens(cjk));
+      expect(data.breakdown.messages).toBe(unscaled.breakdown.messages);
     });
 
-    it('does not deflate overhead rows against a provider total when only the conversation overshoots', async () => {
+    it('preserves conversation estimates when only the conversation overshoots', async () => {
       // Two ordinary triggers push `rawContent` past a provider-reported total
       // without any overhead row being wrong: the CJK-aware estimator runs
       // several times higher than the provider's count on zh-heavy text, and
       // `totalTokens` is the last request's prompt count, which excludes the
       // answer added since. Scaling the rows by total/rawContent deflated every
-      // exactly-measured row; only an overhead-side overshoot may scale them.
-      // A conversation-side overshoot is absorbed by the `messages` cap.
+      // row. Neither case should cap the independently measured conversation.
       const cjkHistory: Content[] = [
         prelude,
         { role: 'user', parts: [{ text: '中'.repeat(100_000) }] },
@@ -1080,7 +1134,8 @@ describe('collectContextData (contextCommand)', () => {
       expect(cjkData.breakdown.systemPrompt).toBe(
         cjkUnscaled.breakdown.systemPrompt,
       );
-      expect(sumRows(cjkData.breakdown)).toBe(57_000);
+      expect(cjkData.breakdown.messages).toBe(cjkUnscaled.breakdown.messages);
+      expect(cjkData.breakdown.messages).toBe(150_000);
 
       // Pure ASCII with an exact estimator: the stale-by-one-response gap
       // alone overshoots the provider total on every completed turn.
@@ -1101,16 +1156,16 @@ describe('collectContextData (contextCommand)', () => {
       expect(asciiData.breakdown.systemPrompt).toBe(
         asciiUnscaled.breakdown.systemPrompt,
       );
-      expect(sumRows(asciiData.breakdown)).toBe(15_000);
+      expect(asciiData.breakdown.messages).toBe(
+        asciiUnscaled.breakdown.messages,
+      );
+      expect(asciiData.breakdown.messages).toBe(10_100);
     });
 
-    it('closes the rows against an estimated total that sits below the measured overhead', async () => {
+    it('preserves estimates above a total seeded by compression or resume', async () => {
       // The total core stamps after a compression or resume covers the
       // compressed history alone, so a session carrying heavy declarations can
-      // stamp a total smaller than the measured overhead. The rows must still
-      // close against `Used` — scaling against `rawOverhead` is unconditional,
-      // so this state scales the overhead rows down to the stamped total
-      // instead of letting the category rows sum above it.
+      // stamp a total smaller than the measured overhead.
       const data = await collectContextData(
         makeChatConfig({
           total: 500,
@@ -1121,24 +1176,13 @@ describe('collectContextData (contextCommand)', () => {
       );
 
       expect(data.totalTokens).toBe(500);
-      expect(sumRows(data.breakdown)).toBeLessThanOrEqual(data.totalTokens);
-      // The rendered category rows must not exceed the printed `Used` either.
+      expect(data.isEstimated).toBe(true);
+      expect(data.breakdown.systemPrompt).toBeGreaterThan(data.totalTokens);
+      expect(data.breakdown.messages).toBe(300);
       const text = formatContextUsageText(data);
-      const usedMatch = text.match(/^ {2}Used +([\d.]+)(k?) tokens \(/m);
-      expect(usedMatch).not.toBeNull();
-      const used = Number(usedMatch![1]) * (usedMatch![2] === 'k' ? 1000 : 1);
-      expect(used).toBe(500);
-      const rowPattern = /^ {2}([A-Za-z][^\n]*?) +([\d.]+)(k?) tokens \(/gm;
-      let rowCount = 0;
-      for (const match of text.matchAll(rowPattern)) {
-        const label = match[1]!;
-        if (label === 'Used' || label === 'Free') continue;
-        const value = Number(match[2]) * (match[3] === 'k' ? 1000 : 1);
-        expect(value).toBeLessThanOrEqual(used);
-        rowCount += 1;
-      }
-      // The assertion above is vacuous unless the category rows were found.
-      expect(rowCount).toBeGreaterThanOrEqual(6);
+      expect(text).toMatch(/^ {2}Used +500 tokens \(/m);
+      expect(text).toMatch(/^ {2}Messages +300 tokens \(/m);
+      expect(text).toContain('Token usage is estimated');
     });
 
     it('never derives messages from the cached count', async () => {
@@ -1154,7 +1198,6 @@ describe('collectContextData (contextCommand)', () => {
       // The old `total − cached` derivation would print 10_000 here.
       expect(data.breakdown.messages).toBe(300);
       expect(data.breakdown.cachedTokens).toBe(90_000);
-      expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
     it('bills a tracked skill body under skills and keeps it out of messages', async () => {
@@ -1185,7 +1228,6 @@ describe('collectContextData (contextCommand)', () => {
           estimateContextTextTokens(listingReminder) +
           estimateContextTextTokens(trackedBody),
       );
-      expect(sumRows(data.breakdown)).toBe(100_000);
       const text = formatContextUsageText(data);
       expect(text).not.toContain('report-builder (body loaded)');
       expect(text).not.toContain('report-builder (active)');
@@ -1285,7 +1327,6 @@ describe('collectContextData (contextCommand)', () => {
         loaded: true,
         bodyTokens: estimateContextTextTokens(windowsBody),
       });
-      expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
     it('bills a skill response whose body was never tracked as messages', async () => {
@@ -1325,7 +1366,6 @@ describe('collectContextData (contextCommand)', () => {
 
       expect(untracked.breakdown.messages).toBe(expected);
       expect(trackingOtherBody.breakdown.messages).toBe(expected);
-      expect(sumRows(untracked.breakdown)).toBe(100_000);
     });
 
     it('gives a detail row to a listing entry listSkills does not return', async () => {
@@ -1416,10 +1456,9 @@ describe('collectContextData (contextCommand)', () => {
           estimateContextTextTokens(delta),
       );
       expect(data.breakdown.messages).toBe(300);
-      expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
-    it('prints the startup context, unattributed and cached rows in text output', async () => {
+    it('prints startup context and cached rows while ignoring legacy residuals', async () => {
       const data = await collectContextData(
         makeChatConfig({
           total: 100_000,
@@ -1428,10 +1467,11 @@ describe('collectContextData (contextCommand)', () => {
         }),
         false,
       );
+      data.breakdown.unattributed = 900;
       const text = formatContextUsageText(data);
 
       expect(text).toContain('Startup context');
-      expect(text).toContain('Unattributed');
+      expect(text).not.toContain('Unattributed');
       expect(text).toContain('Cached prefix');
     });
 
@@ -1479,7 +1519,6 @@ describe('collectContextData (contextCommand)', () => {
           estimateContextTextTokens(JSON.stringify(toolCall)) +
           estimateContextTextTokens(JSON.stringify(toolResponse)),
       );
-      expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
     it('bills generated control declarations without undeclared MCP schemas', async () => {
@@ -1587,9 +1626,12 @@ describe('collectContextData (contextCommand)', () => {
         );
         expect(detailed.mcpTools).toEqual([]);
         expect(detailed.breakdown.mcpTools).toBe(0);
-        if (options.total > 0) {
-          expect(sumRows(detailed.breakdown)).toBe(options.total);
-        }
+        expect(detailed.breakdown.messages).toBe(300);
+        const reference = options.declared.length ? unscaled : undeclared;
+        expect(detailed.builtinTools).toEqual(reference.builtinTools);
+        expect(detailed.breakdown.builtinTools).toBe(
+          reference.breakdown.builtinTools,
+        );
       }
 
       const exposed = await collectContextData(
@@ -1645,7 +1687,6 @@ describe('collectContextData (contextCommand)', () => {
         );
         expect(data.breakdown.messages).toBe(100);
         expect(data.builtinTools).toEqual([]);
-        expect(sumRows(data.breakdown)).toBe(100_000);
       },
     );
 

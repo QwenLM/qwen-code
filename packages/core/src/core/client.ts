@@ -176,7 +176,9 @@ import {
 // Utilities
 import {
   AUTO_MEMORY_SNAPSHOT_METADATA,
-  formatDateForContext,
+  buildDateReminder,
+  DATE_REMINDER_METADATA,
+  findLastAnnouncedDate,
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
@@ -726,14 +728,6 @@ export class LlmClient {
       this.agentRemindersInitialized = false;
     }
   }
-
-  /**
-   * Tracks the most recently injected date string to prevent injecting
-   * duplicate or conflicting dates when a session spans midnight.
-   * Only UserQuery turns inject dates; Cron/ToolResult turns reuse the
-   * startup-context date which is still current within the same session.
-   */
-  private lastInjectedDate: string | undefined;
 
   /**
    * Promises for pending background memory tasks (dream / extract / skill review).
@@ -2283,10 +2277,18 @@ export class LlmClient {
     // it…")] pair (getStartupContextLength === 2), so slice(1) would leave
     // the orphaned model-ack entry behind when re-prepending the prelude.
     const remaining = currentHistory.slice(startupLength);
+    // The turns kept ran under the date the old startup context recorded.
     const [[startupContext], snapshotEntries] = await getInitialChatHistory(
       this.config,
       undefined,
-      { gitStatus: this.getCachedGitStatus() },
+      {
+        gitStatus: this.getCachedGitStatus(),
+        announcedDate:
+          remaining.length > 0
+            ? (findLastAnnouncedDate(currentHistory.slice(0, startupLength)) ??
+              null)
+            : undefined,
+      },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
@@ -2323,10 +2325,11 @@ export class LlmClient {
       return;
     }
 
+    // The summary and the turns kept may come from another date.
     const [[startupContext], snapshotEntries] = await getInitialChatHistory(
       this.config,
       undefined,
-      { gitStatus: this.getCachedGitStatus() },
+      { gitStatus: this.getCachedGitStatus(), announcedDate: null },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
@@ -2926,7 +2929,6 @@ export class LlmClient {
     this.lastDeliveredMemoryTreeRevision = undefined;
     this.trustedUserAnswers.clear();
     this.forceFullIdeContext = true;
-    this.lastInjectedDate = undefined;
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
 
@@ -5096,21 +5098,16 @@ export class LlmClient {
           systemReminders.push(PAUSED_GOAL_SYSTEM_REMINDER);
         }
 
-        // Inject fresh date on UserQuery turns only; Cron and ToolResult turns
-        // reuse the same session and the startup-context date is still current.
-        if (messageType === SendMessageType.UserQuery) {
-          const today = formatDateForContext();
-
-          // Only inject if the date has changed since the last injection.
-          // This prevents accumulating conflicting dates when a session
-          // spans midnight.
-          if (today !== this.lastInjectedDate) {
-            systemReminders.push(
-              `<system-reminder>\nThe current date is: ${today}. Note: This is the authoritative current date — it may differ from the "Today's date" mentioned earlier in the conversation startup context.\n</system-reminder>`,
-            );
-            this.lastInjectedDate = today;
-          }
-        }
+        // Tell the model today's date only when the last date the history
+        // gives it is a different one, or there is none. The startup context
+        // that starts a conversation carries the date, so the first turn adds
+        // nothing; a reminder follows once the date changes, after a session
+        // runs past midnight, a rewind drops the reminder, or a resume or
+        // compaction rebuilds the startup context in front of earlier turns.
+        // The reminder part carries its date as part metadata, which the next
+        // turn reads back.
+        const dateReminder = buildDateReminder(this.getHistoryShallow());
+        if (dateReminder) systemReminders.push(dateReminder);
 
         // add plan mode system reminder if approval mode is plan
         if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
@@ -5204,6 +5201,24 @@ export class LlmClient {
         }
 
         requestToSend = [...systemReminders, ...requestToSend];
+      }
+
+      // A retry pops the failed entry and resends the parts the caller gave,
+      // without the date reminder the client added to that entry. Tell the
+      // date again, as the history now lacks it.
+      if (messageType === SendMessageType.Retry) {
+        const toldDate = (part: unknown) =>
+          typeof part === 'object' &&
+          part !== null &&
+          typeof (part as Part).partMetadata?.[DATE_REMINDER_METADATA] ===
+            'string';
+        if (
+          strippedRetryEntries.some((entry) => entry.parts?.some(toldDate)) &&
+          !requestToSend.some(toldDate)
+        ) {
+          const dateReminder = buildDateReminder(this.getHistoryShallow());
+          if (dateReminder) requestToSend = [dateReminder, ...requestToSend];
+        }
       }
 
       if (!signal.aborted) {

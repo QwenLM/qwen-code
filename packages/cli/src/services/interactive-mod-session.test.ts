@@ -280,6 +280,48 @@ describe('interactive Mod owner', () => {
     expect(runtime.submitPrompt).toHaveBeenCalledOnce();
   });
 
+  it('runs the Mods’ prompts only when its first initialize says so, until it closes', async () => {
+    const { owner, host, runtime } = setup();
+    const queued = { plugin: 'lint', text: 'Fix it' };
+    const queue = {
+      hasSubmittedPrompts: true,
+      takeSubmittedPrompt: vi.fn(() => queued),
+      returnSubmittedPrompt: vi.fn(),
+      notePersonPrompt: vi.fn(),
+      stopSubmittedPrompts: vi.fn(),
+    };
+    Object.assign(runtime, queue);
+    expect(host.runsPrompts!()).toBe(false);
+    await owner.initialize(['AbovePrompt'], {
+      prompts: true,
+      runsPrompts: true,
+    });
+    await owner.initialize(['AbovePrompt']);
+    expect(host.runsPrompts!()).toBe(true);
+    const listener = vi.fn();
+    const unsubscribe = owner.subscribePrompts(listener);
+    host.promptQueued!();
+    expect(listener).toHaveBeenCalledOnce();
+    unsubscribe();
+    host.promptQueued!();
+    expect(listener).toHaveBeenCalledOnce();
+    expect(owner.hasSubmittedPrompts).toBe(true);
+    expect(owner.takeSubmittedPrompt()).toBe(queued);
+    owner.returnSubmittedPrompt(queued);
+    expect(queue.returnSubmittedPrompt).toHaveBeenCalledWith(queued);
+    owner.notePersonPrompt();
+    owner.stopSubmittedPrompts();
+    expect(queue.notePersonPrompt).toHaveBeenCalledOnce();
+    expect(queue.stopSubmittedPrompts).toHaveBeenCalledOnce();
+    owner.subscribePrompts(listener);
+    await owner.close();
+    // A closed owner runs none, and its listeners hear no more.
+    expect(owner.hasSubmittedPrompts).toBe(false);
+    expect(owner.takeSubmittedPrompt()).toBeUndefined();
+    host.promptQueued!();
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
   it('closing before startup releases pending command loaders and removes the owner', async () => {
     const { config, owner, runtime } = setup();
     const commands = owner.loadCommands(new AbortController().signal);

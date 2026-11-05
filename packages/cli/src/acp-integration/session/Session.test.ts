@@ -2226,6 +2226,77 @@ describe('Session', () => {
     );
   });
 
+  it.each([false, true])(
+    'preserves the selected subscription and catalog after logout (other provider: %s)',
+    async (hasProvider) => {
+      let auth: AuthType | undefined = AuthType.QWEN_SUBSCRIPTION;
+      vi.mocked(mockConfig.getAuthType).mockImplementation(() => auth);
+      const clearAuth = vi.fn(() => {
+        auth = undefined;
+      });
+      Object.assign(mockConfig, {
+        clearAuth,
+        setSubscriptionPlan: vi.fn(),
+        getCurrentModelRegistryBaseUrl: vi.fn(),
+      });
+      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(
+        hasProvider
+          ? [
+              {
+                id: 'bailian',
+                label: 'Bailian',
+                authType: AuthType.USE_OPENAI,
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              },
+            ]
+          : [],
+      );
+      vi.mocked(mockConfig.switchModel).mockImplementation(async (next) => {
+        auth = next;
+      });
+      vi.mocked(mockConfig.getModel).mockReturnValue('server-only-model');
+      const registry = new core.BackgroundTaskRegistry();
+      const controller = new AbortController();
+      const task = registry.register({
+        agentId: 'subscription-logout-agent',
+        description: 'Subscription background agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: controller,
+        isBackgrounded: true,
+        outputFile: path.join(os.tmpdir(), `${randomUUID()}.jsonl`),
+      });
+      vi.mocked(mockConfig.getBackgroundTaskRegistry).mockReturnValue(registry);
+      vi.spyOn(session, 'sendAvailableCommandsUpdate').mockResolvedValue(
+        undefined,
+      );
+      await session.reloadModelProvidersFromDisk({
+        subscriptionSignedOut: true,
+      });
+      expect(controller.signal.aborted).toBe(true);
+      expect(task.status).toBe('cancelled');
+      expect(task.persistedCancellationStatus).toBe('cancelled');
+      expect(task.notified).toBe(true);
+      expect(clearAuth).not.toHaveBeenCalled();
+      expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
+      expect(
+        mockSettings.reloadScopesFromDiskAtomically,
+      ).not.toHaveBeenCalled();
+      expect(mockConfig.switchModel).not.toHaveBeenCalled();
+      expect(auth).toBe(AuthType.QWEN_SUBSCRIPTION);
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/model-update',
+        {
+          v: 1,
+          sessionId: 'test-session-id',
+          currentModelId: expect.stringContaining('server-only-model'),
+          subscriptionSignedOut: true,
+        },
+      );
+    },
+  );
+
   it('does not apply stale model providers when a settings scope cannot reload', async () => {
     vi.mocked(mockSettings.reloadScopesFromDiskAtomically).mockReturnValueOnce(
       false,
@@ -47577,6 +47648,50 @@ describe('Session', () => {
       });
 
       describe('StopFailure hook', () => {
+        it('forwards quota display context through the ACP error envelope', async () => {
+          const subscriptionQuota = {
+            type: 'subscription_quota',
+            memberType: 'pro',
+          };
+          const error = Object.assign(new Error('quota fallback'), {
+            status: 402,
+            code: 'insufficient_quota',
+            subscriptionQuota,
+          });
+          mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+            throw error;
+          });
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'hello' }],
+            }),
+          ).rejects.toMatchObject({
+            code: -32603,
+            message: 'quota fallback',
+            data: { details: 'quota fallback', subscriptionQuota },
+          });
+        });
+        it('preserves the subscription backend rate-limit message', async () => {
+          mockConfig.getAuthType = vi
+            .fn()
+            .mockReturnValue(AuthType.QWEN_SUBSCRIPTION);
+          const error = Object.assign(
+            new Error('Concurrent request limit exceeded (principal scope)'),
+            { status: 429 },
+          );
+          mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+            throw error;
+          });
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'hello' }],
+            }),
+          ).rejects.toThrow(
+            'Concurrent request limit exceeded (principal scope)',
+          );
+        });
         it('fires StopFailure hook when API error occurs during sendMessageStream', async () => {
           const mockFireStopFailureEvent = vi.fn().mockResolvedValue({
             success: true,

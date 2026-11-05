@@ -12,7 +12,7 @@ Every request a session sends carries the same prefix before any of your convers
 
 `/context` prints the breakdown by category; `detail` adds per-item rows — each built-in tool, each MCP tool, each context file, each listed skill — so you can see which single entry is the expensive one. Read it on the **first turn** of a session, where the conversation is still empty and everything you see is prefix.
 
-The categories are what `/context` reports plus two bookkeeping rows: `startupContext` (the environment block sent as the first user turn) and an explicit residual for whatever the categories do not attribute, so the parts always add up to the total.
+Categories and per-item details are independent local estimates, including `messages`, which is measured from conversation content. `startupContext` covers the environment block sent as the first user turn. These estimates are not scaled or capped to match the last request's input total, so their sum can be higher or lower than that total. The total, available capacity and compaction tier retain their own usage source.
 
 ## Use idle cost, not percent of window
 

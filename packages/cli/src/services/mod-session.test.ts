@@ -822,18 +822,92 @@ describe('Mod session ownership', () => {
       expect(session.takeSubmittedPrompt()?.text).toBe('after');
     });
 
-    it('offers no queue to a terminal yet', async () => {
-      const { session } = setup(
+    it('refuses the Mods’ prompts after the person stops a turn, until they send one', async () => {
+      const { session, config } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      expect(queue(prompt('queued'))).toBeUndefined();
+      const taken = session.takeSubmittedPrompt()!;
+      expect(queue(prompt('waiting'))).toBeUndefined();
+      session.stopSubmittedPrompts();
+      expect(session.hasSubmittedPrompts).toBe(false);
+      // What a stopped turn's hooks submit, awaited or not, does not run.
+      expect(queue(prompt('from turn.complete'))).toBe(
+        'the person stopped a turn and has not sent a prompt since',
+      );
+      session.returnSubmittedPrompt(taken);
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      session.notePersonPrompt();
+      expect(queue(prompt('after'))).toBeUndefined();
+      expect(session.takeSubmittedPrompt()?.text).toBe('after');
+      // A new session starts unstopped.
+      session.stopSubmittedPrompts();
+      config.getSessionId.mockReturnValue('session-2');
+      await session.syncSession('clear');
+      expect(queue(prompt('fresh'))).toBeUndefined();
+    });
+
+    const terminal = (runsPrompts?: boolean, promptQueued = vi.fn()) =>
+      setup(
         { isInteractive: () => true },
         {
           surface: 'terminal',
           log: vi.fn(),
           presentation: () => ({ isFullscreen: false, columns: 80 }),
           prompts: () => true,
+          ...(runsPrompts === undefined
+            ? {}
+            : { runsPrompts: () => runsPrompts }),
+          promptQueued,
         },
       );
+
+    it('offers a terminal a queue only once it runs the prompts', async () => {
+      for (const runs of [undefined, false]) {
+        mocks.create.mockClear();
+        const { session } = terminal(runs);
+        await session.initialize(new AbortController().signal);
+        expect(queueOf()).toBeUndefined();
+      }
+      mocks.create.mockClear();
+      const promptQueued = vi.fn();
+      const { session } = terminal(true, promptQueued);
       await session.initialize(new AbortController().signal);
-      expect(queueOf()).toBeUndefined();
+      expect(queueOf()!(prompt('one'))).toBeUndefined();
+      // The terminal hears each prompt queued, to run it once idle.
+      expect(promptQueued).toHaveBeenCalledTimes(1);
+      expect(session.takeSubmittedPrompt()).toEqual(prompt('one'));
+    });
+
+    it('puts back a prompt whose turn could not start, uncounted', async () => {
+      const { session, config } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      for (let index = 0; index < MOD_PROMPT_TURN_LIMIT - 1; index++)
+        queue(prompt(`p${index}`));
+      const first = session.takeSubmittedPrompt()!;
+      queue(prompt('last'));
+      expect(queue(prompt('over'))).toBeDefined();
+      session.returnSubmittedPrompt(first);
+      // A prompt is put back once.
+      session.returnSubmittedPrompt(first);
+      expect(queue(prompt('over'))).toBeDefined();
+      expect(session.takeSubmittedPrompt()).toEqual(prompt('p0'));
+      expect(session.takeSubmittedPrompt()).toEqual(prompt('p1'));
+      // A session that ended since takes nothing back.
+      const taken = session.takeSubmittedPrompt()!;
+      config.getSessionId.mockReturnValue('session-2');
+      session.returnSubmittedPrompt(taken);
+      config.getSessionId.mockReturnValue('session-1');
+      expect(session.takeSubmittedPrompt()).toEqual(prompt('p3'));
+      // Put back, it counts as queued, not as started too.
+      session.discardSubmittedPrompts();
+      session.notePersonPrompt();
+      queue(prompt('again'));
+      session.returnSubmittedPrompt(session.takeSubmittedPrompt()!);
+      session.discardSubmittedPrompts();
+      for (let index = 0; index < MOD_PROMPT_TURN_LIMIT; index++)
+        expect(queue(prompt(`n${index}`))).toBeUndefined();
     });
   });
 
