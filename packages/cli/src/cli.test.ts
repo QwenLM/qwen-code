@@ -976,7 +976,7 @@ describe('runCliEntry', () => {
       expect(helpText).toContain(`--${name}`);
     }
     expect(helpText).toContain(
-      '"openai", "openai-responses", "anthropic", "qwen-oauth", "gemini", "vertex-ai"',
+      '"openai", "openai-responses", "anthropic", "qwen-oauth", "qwen-subscription", "gemini", "vertex-ai"',
     );
     // The fast path mirrors config.ts and wraps help at the terminal width;
     // in a non-TTY (columns unset) that disables wrapping, so a description

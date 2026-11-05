@@ -68,7 +68,12 @@ describe('DW03: headless prompts remain unknown', () => {
     const body = JSON.stringify(requests[0].body['messages']);
     expect(body).toContain('workflow ultracode');
     expect(body).not.toContain("The user's message includes the");
-    expect(JSON.stringify(requests[0].body['tools'])).toContain('workflow');
+    expect(body).toContain('- \\"workflow\\":');
+    expect(requests[0].body['tools']).not.toContainEqual(
+      expect.objectContaining({
+        function: expect.objectContaining({ name: 'workflow' }),
+      }),
+    );
   };
 
   it.each(['text', 'json', 'stream-json'])(

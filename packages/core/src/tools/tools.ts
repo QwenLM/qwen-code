@@ -5,6 +5,7 @@
  */
 
 import type { ToolOutputSize } from './tool-output-size.js';
+import type { SubscriptionQuotaDisplay } from '../utils/subscription-quota.js';
 import type { ShellResultDisplay } from '../utils/shell-result.js';
 import type { FunctionDeclaration, Part, PartListUnion } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
@@ -925,6 +926,7 @@ export interface AskUserQuestionResultDisplay {
 }
 
 export type ToolResultDisplay =
+  | SubscriptionQuotaDisplay
   | ShellResultDisplay
   | string
   | AdvisorReviewDisplay

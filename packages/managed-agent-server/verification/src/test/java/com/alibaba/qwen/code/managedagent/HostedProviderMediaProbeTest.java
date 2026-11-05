@@ -170,10 +170,10 @@ class HostedProviderMediaProbeTest {
         jdbc.update("UPDATE ma_runtime_session SET binding_id='binding', runtime_generation=2");
         assertThatThrownBy(() -> ReflectionTestUtils.invokeMethod(probe, "check", session, "prepared", fields))
                 .isInstanceOf(AssertionError.class).hasMessageContaining("original runtime generation");
-        jdbc.update("UPDATE ma_runtime_session SET runtime_generation=1, is_execution_exclusive=TRUE");
+        jdbc.update("UPDATE ma_runtime_session SET runtime_generation=1, is_rewind_pending=TRUE");
         assertThatThrownBy(() -> ReflectionTestUtils.invokeMethod(probe, "check", session, "prepared", fields))
                 .isInstanceOf(AssertionError.class).hasMessageContaining("shared execution membership");
-        jdbc.update("UPDATE ma_runtime_session SET is_execution_exclusive=FALSE");
+        jdbc.update("UPDATE ma_runtime_session SET is_rewind_pending=FALSE");
         jdbc.update("UPDATE ma_tool_execution SET execution_state='SETTLED', execution_status='success',"
                 + " dispatch_generation=1, result_json='{}'");
         ReflectionTestUtils.setField(probe, "dispatches", Map.of("runtime", 1));

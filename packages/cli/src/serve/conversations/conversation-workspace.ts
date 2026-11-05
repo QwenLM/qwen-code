@@ -23,11 +23,13 @@ import {
   type ConversationRootIdentity,
 } from '../../utils/conversation-directory-identity.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
+import { isFullyQualifiedPath } from '../../config/storage-paths-lite.js';
 
 export type { ConversationRootIdentity } from '../../utils/conversation-directory-identity.js';
 
 export interface ConversationWorkspaceOptions {
   homeDir?: string;
+  rootPath?: string;
 }
 
 export type StandaloneDirectoryInspection =
@@ -58,6 +60,7 @@ export type StandaloneDeletionPathsInspection =
 
 function liveIdentityError(
   error: unknown,
+  rootPath: string,
   exactRoot = false,
   creatingRoot = false,
 ): never {
@@ -69,15 +72,15 @@ function liveIdentityError(
     switch (error.reason) {
       case 'not_directory':
         throw new Error(
-          'Live conversation root must be a non-symlink directory',
+          `Live conversation root ${JSON.stringify(rootPath)} must be a non-symlink directory; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`,
         );
       case 'wrong_owner':
         throw new Error(
-          'Live conversation root must be owned by the daemon user',
+          `Live conversation root ${JSON.stringify(rootPath)} must be owned by the daemon user; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`,
         );
       case 'wrong_mode':
         throw new Error(
-          'Live conversation root must be accessible only to its owner',
+          `Live conversation root ${JSON.stringify(rootPath)} must be accessible only to its owner; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`,
         );
       case 'canonical_path_changed':
         throw new Error('Live conversation root canonical path changed');
@@ -128,7 +131,7 @@ export async function revalidateConversationRoot(
   try {
     return await revalidateConversationRootIdentity(root);
   } catch (error) {
-    liveIdentityError(error);
+    liveIdentityError(error, root.configuredRoot);
   }
 }
 
@@ -139,7 +142,7 @@ export async function assertExactConversationRoot(
   try {
     return await assertExactConversationRootIdentity(root, candidate);
   } catch (error) {
-    liveIdentityError(error, true);
+    liveIdentityError(error, root.configuredRoot, true);
   }
 }
 
@@ -148,7 +151,20 @@ export class ConversationWorkspace {
   private rootPromise?: Promise<ConversationRootIdentity>;
 
   constructor(options: ConversationWorkspaceOptions = {}) {
-    this.rootPath = getConversationRootPath(options.homeDir);
+    if (options.rootPath === undefined) {
+      this.rootPath = getConversationRootPath(options.homeDir);
+    } else {
+      if (
+        typeof options.rootPath !== 'string' ||
+        !isFullyQualifiedPath(options.rootPath) ||
+        options.rootPath.includes('\0')
+      ) {
+        throw new TypeError(
+          'Invalid Conversations directory (--conversations-dir / QWEN_CONVERSATIONS_DIR): expected a nonempty, fully qualified absolute path without NUL.',
+        );
+      }
+      this.rootPath = resolve(options.rootPath);
+    }
   }
 
   private getRootIdentity(): Promise<ConversationRootIdentity> {
@@ -166,7 +182,7 @@ export class ConversationWorkspace {
     try {
       return await this.getRootIdentity();
     } catch (error) {
-      liveIdentityError(error, false, true);
+      liveIdentityError(error, this.rootPath, false, true);
     }
   }
 
@@ -205,7 +221,7 @@ export class ConversationWorkspace {
         )
       ).identity.canonicalPath;
     } catch (error) {
-      liveIdentityError(error);
+      liveIdentityError(error, this.rootPath);
     }
   }
 
@@ -228,7 +244,7 @@ export class ConversationWorkspace {
       ) {
         return false;
       }
-      liveIdentityError(error);
+      liveIdentityError(error, this.rootPath);
     }
     if (!identity) return false;
     try {

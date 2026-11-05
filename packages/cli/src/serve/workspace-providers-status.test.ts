@@ -535,6 +535,61 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     },
   );
 
+  it('previews the auth fallback for a missing saved model without rewriting settings', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      $version: 4,
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'qwen3.8-max' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3.8-max-preview',
+            name: '[Token Plan] preview',
+            baseUrl: 'https://token-plan.example/v1',
+            envKey: 'REPRO_PLAN_KEY',
+          },
+        ],
+      },
+    });
+    const before = await fs.readFile(
+      path.join(qwenHome, 'settings.json'),
+      'utf8',
+    );
+    const result = await provider(workspace, false);
+    expect(result.current).toMatchObject({
+      authType: 'openai',
+      modelId: 'qwen3.8-max-preview(openai)',
+      baseUrl: 'https://token-plan.example/v1',
+    });
+    expect(
+      result.providers
+        .flatMap((entry) => entry.models)
+        .find((model) => model.isCurrent)?.baseModelId,
+    ).toBe('qwen3.8-max-preview');
+    expect(
+      await fs.readFile(path.join(qwenHome, 'settings.json'), 'utf8'),
+    ).toBe(before);
+  });
+
+  it('preserves a missing model backed by explicit connection settings', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: {
+        auth: {
+          selectedType: 'openai',
+          apiKey: 'manual-key',
+          baseUrl: 'https://manual.example/v1',
+        },
+      },
+      model: { name: 'manual-model' },
+      modelProviders: { openai: [{ id: 'other-model' }] },
+    });
+    expect((await provider(workspace, false)).current?.modelId).toBe(
+      'manual-model',
+    );
+  });
+
   it('reads fresh default model settings on every request', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
