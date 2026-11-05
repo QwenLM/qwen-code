@@ -194,14 +194,8 @@ describe('projectSummary', () => {
 });
 
 /**
- * Pins the producer's arithmetic on a fixture, so editing one row cannot leave
- * behind a payload no producer can emit (#12235 R2-7). `ui/types.ts` documents
- * both identities: the category rows — including the `unattributed` residual,
- * excluding `cachedTokens`, which is an annotation spanning several categories
- * — account for the request, and `freeSpace` is what is left of the window
- * after that content and the autocompact buffer. With no provider total the
- * estimated rows are themselves the content total, so the free-space identity
- * keys on the rows instead of on `totalTokens`.
+ * Capacity uses the reported total when available and local category estimates
+ * otherwise. Legacy residuals and cached-prefix annotations are not categories.
  */
 function expectCoherentBreakdown(item: {
   totalTokens: number;
@@ -217,12 +211,8 @@ function expectCoherentBreakdown(item: {
     (breakdown.memoryFiles ?? 0) +
     (breakdown.skills ?? 0) +
     (breakdown.startupContext ?? 0) +
-    (breakdown.messages ?? 0) +
-    (breakdown.unattributed ?? 0);
+    (breakdown.messages ?? 0);
   const hasProviderTotal = item.totalTokens > 0;
-  if (hasProviderTotal) {
-    expect(rows).toBe(item.totalTokens);
-  }
   // The producer clamps at 0, so an over-full window reports no free space.
   expect(breakdown.freeSpace).toBe(
     Math.max(
@@ -291,18 +281,13 @@ describe('projectContextUsage', () => {
     expect(text).toContain('Run /context detail for per-item breakdown.');
     // MCP tools row is skipped at zero.
     expect(text).not.toContain('MCP tools');
-    // Parity with views/ContextUsage (#12033): the three optional rows are
-    // absent from this breakdown, so none of them may render. `totalTokens` is
-    // nonzero on purpose — `Cached prefix` and `Unattributed` are total-gated,
-    // so at 0 they cannot render with or without their own guard, and only the
-    // widened `startupContext` skip would be witnessed. This is also the shape
-    // of an older daemon payload; the pre-first-turn view is pinned below.
+    // Optional startup and cached-prefix rows remain absent in legacy payloads.
     expect(text).not.toContain('Cached prefix');
     expect(text).not.toContain('Startup context');
     expect(text).not.toContain('Unattributed');
   });
 
-  it('prints the cached prefix, startup context and unattributed rows when present (#12033)', () => {
+  it('prints cached prefix and startup context while ignoring legacy residuals', () => {
     const item = {
       modelName: 'qwen3-max',
       totalTokens: 5000,
@@ -313,8 +298,7 @@ describe('projectContextUsage', () => {
         mcpTools: 0,
         memoryFiles: 200,
         skills: 0,
-        // Rows sum to totalTokens, freeSpace is window − total − buffer, and
-        // the cached prefix is part of the total (ui/types.ts invariant).
+        // Category estimates do not need to add up to totalTokens.
         messages: 900,
         freeSpace: 94000,
         autocompactBuffer: 1000,
@@ -329,7 +313,7 @@ describe('projectContextUsage', () => {
     expectCoherentBreakdown(item);
     expect(text).toContain('█ Cached prefix 3.0k tokens (3.0%)');
     expect(text).toContain('█ Startup context 1.2k tokens (1.2%)');
-    expect(text).toContain('█ Unattributed 900 tokens (0.9%)');
+    expect(text).not.toContain('Unattributed');
   });
 
   it('renders the pre-first-turn estimate: startup context shown, no messages yet (#12235)', () => {

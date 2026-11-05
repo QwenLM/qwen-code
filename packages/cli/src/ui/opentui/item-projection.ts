@@ -516,12 +516,6 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     lines.push(
       `█ Messages ${fmtTokensShort(messages)} tokens (${pct(messages, windowSize)}%)`,
     );
-    const unattributed = Number(breakdown['unattributed'] ?? 0);
-    if (unattributed > 0) {
-      lines.push(
-        `█ Unattributed ${fmtTokensShort(unattributed)} tokens (${pct(unattributed, windowSize)}%)`,
-      );
-    }
   }
   // Three-tier compaction ladder — ink renders it whenever thresholds +
   // currentTier are present (even while usage is still estimated).
