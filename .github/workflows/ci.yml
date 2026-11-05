@@ -679,6 +679,17 @@ jobs:
           ( while sleep 10; do sample_disk; done ) &
           SAMPLER_PID=$!
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+          # Observed: the pinned cache entry existed with its pnpm binary
+          # missing, corepack trusts an existing entry without re-verifying
+          # its files, and the install died instantly with MODULE_NOT_FOUND
+          # (main run 41927887452). What left the entry incomplete is
+          # undetermined; _work/_temp survives across jobs on self-hosted
+          # runners, so such state persists. Start the shard-owned cache
+          # empty — and only that exact path, so a runner-exported shared
+          # cache and lint's already-warmed run-unique home stay untouched.
+          if [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
+            rm -rf -- "${COREPACK_HOME}"
+          fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Report npm cache usage (self-hosted)'
@@ -1078,11 +1089,13 @@ jobs:
         env:
           QWEN_SKIP_PREPARE: '1'
           QWEN_SKIP_NOTICE_GENERATION: '1'
-          # Pin COREPACK_HOME to a per-run path so the corepack cache written
-          # here is visible to the test step below, which overrides HOME for
-          # isolation. corepack does not re-verify extracted entries on cache
-          # hit, so this must NOT be a shared/persistent path (poisoning
-          # channel) — per-run is safe and sufficient.
+          # Pin COREPACK_HOME to a fixed path under runner.temp so the
+          # corepack cache written here is visible to the test step below,
+          # which overrides HOME for isolation. runner.temp survives across
+          # jobs on self-hosted runners, and corepack does not re-verify
+          # extracted entries on cache hit, so the install body below clears
+          # this exact path before use; the test step then reuses the cache
+          # this step warms within the same job.
           COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack'
         run: |-
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
@@ -1097,6 +1110,17 @@ jobs:
           ( while sleep 10; do sample_disk; done ) &
           SAMPLER_PID=$!
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+          # Observed: the pinned cache entry existed with its pnpm binary
+          # missing, corepack trusts an existing entry without re-verifying
+          # its files, and the install died instantly with MODULE_NOT_FOUND
+          # (main run 41927887452). What left the entry incomplete is
+          # undetermined; _work/_temp survives across jobs on self-hosted
+          # runners, so such state persists. Start the shard-owned cache
+          # empty — and only that exact path, so a runner-exported shared
+          # cache and lint's already-warmed run-unique home stay untouched.
+          if [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
+            rm -rf -- "${COREPACK_HOME}"
+          fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       # Eight shards pull this same artifact at once, so the cap has to clear
@@ -1873,6 +1897,17 @@ jobs:
           ( while sleep 10; do sample_disk; done ) &
           SAMPLER_PID=$!
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+          # Observed: the pinned cache entry existed with its pnpm binary
+          # missing, corepack trusts an existing entry without re-verifying
+          # its files, and the install died instantly with MODULE_NOT_FOUND
+          # (main run 41927887452). What left the entry incomplete is
+          # undetermined; _work/_temp survives across jobs on self-hosted
+          # runners, so such state persists. Start the shard-owned cache
+          # empty — and only that exact path, so a runner-exported shared
+          # cache and lint's already-warmed run-unique home stay untouched.
+          if [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
+            rm -rf -- "${COREPACK_HOME}"
+          fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Report npm cache usage (self-hosted)'
