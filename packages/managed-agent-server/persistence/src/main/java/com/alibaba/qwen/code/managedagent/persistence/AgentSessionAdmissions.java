@@ -160,8 +160,19 @@ final class AgentSessionAdmissions {
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
-        // InnoDB's first consistent read must follow the migration admission lock.
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        // InnoDB's first consistent read must follow the creation's first lock.
+        // A selection that may resolve to a Resident Workspace keeps the tenant
+        // guard first: its single-Session range lock can deadlock adjacent
+        // Workspaces' inserts. Other creations lock the selected Workspace
+        // before reading receipts, as resolveForCreation does below. Explicit
+        // selections lock one Workspace; default selections retain the tenant
+        // scan to preserve the lock order with default switches (see design
+        // 2026-11-04-managed-session-admission-tenant-guard).
+        if (residentWorkspaces.mayContain(tenantId,
+                selection == null ? null : selection.workspaceId())) {
+            WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        }
+        workspaces.lockSelectionForCreation(tenantId, selection);
         List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
                 actorId, idempotencyKey);
         if (!existing.isEmpty()) {

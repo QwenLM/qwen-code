@@ -575,6 +575,7 @@ describe('headless-owned Mod tool.check restriction', () => {
               chatRecording: true,
               workflowsEnabled: true,
               workflowNameOnly: true,
+              visibleTools: ['workflow'],
               approvalMode,
               interactive: approver === 'person',
               inputFormat:

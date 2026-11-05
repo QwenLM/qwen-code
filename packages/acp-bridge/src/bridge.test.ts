@@ -3244,11 +3244,19 @@ describe('createAcpSessionBridge', () => {
       await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       await expect(
-        bridge.setUserLanguage({ language: 'zh', syncOutputLanguage: true }),
+        bridge.setUserLanguage({
+          language: 'zh',
+          syncOutputLanguage: false,
+          scope: 'workspace',
+        }),
       ).resolves.toEqual({ language: 'zh', sessions: 2, failed: 0 });
       expect(handle.agent.extMethodCalls).toContainEqual({
         method: SERVE_CONTROL_EXT_METHODS.userLanguage,
-        params: { language: 'zh', syncOutputLanguage: true },
+        params: {
+          language: 'zh',
+          syncOutputLanguage: false,
+          scope: 'workspace',
+        },
       });
 
       await bridge.shutdown();

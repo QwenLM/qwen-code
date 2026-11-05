@@ -1102,7 +1102,7 @@ public final class ToolPublicationDataStore {
                 "Invalid admission outcome");
         byte[] bytes = outcome.toString().getBytes(StandardCharsets.UTF_8);
         require(bytes.length <= MAX_TERMINAL, "Admission outcome is too large");
-        grants.lockStagedPlacement(key, publicationId);
+        grants.lockStagedPlacement(key, publicationId, false);
         JsonNode original = finished(key, publicationId, writerToken);
         JsonNode envelope = original.path("result");
         String decision = "complete".equals(text(envelope.path("capture"), "captureStatus"))
@@ -1116,10 +1116,7 @@ public final class ToolPublicationDataStore {
         String digest = ToolPublicationContract.sha256(bytes);
         String scope = scope(key);
         AdmissionCandidate candidate = transactions.execute(status -> {
-            lockOriginalSettledResult(key, publicationId, original);
-            lockTenant(key);
-            sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
-                    text(key, "sessionId"), writerId, writerGeneration, writerToken);
+            grants.lockAdmissionLane(key, publicationId, original, writerId, writerGeneration, writerToken);
             var publication = jdbc.query("SELECT producer_phase, binding_json, binding_digest,"
                     + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined,"
                     + " admission_bytes, admission_used_bytes,"
@@ -1176,10 +1173,7 @@ public final class ToolPublicationDataStore {
         }
         if (!candidate.verified()) {
             transactions.executeWithoutResult(status -> {
-                lockOriginalSettledResult(key, publicationId, original);
-                lockTenant(key);
-                sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
-                        text(key, "sessionId"), writerId, writerGeneration, writerToken);
+                grants.lockAdmissionLane(key, publicationId, original, writerId, writerGeneration, writerToken);
                 var publication = jdbc.query("SELECT producer_phase, terminal_resource_id, binding_json, binding_digest,"
                         + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                         + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ? AND tenant_id = ?"
@@ -1939,16 +1933,16 @@ public final class ToolPublicationDataStore {
         grants.requireStagedCall(key, publicationId);
     }
 
-    void lockStagedPlacement(JsonNode key, String publicationId) {
-        grants.lockStagedPlacement(key, publicationId);
+    void lockStagedPlacement(JsonNode key, String publicationId, boolean requirePlacement) {
+        grants.lockStagedPlacement(key, publicationId, requirePlacement);
     }
 
-    void lockPublicationPlacement(JsonNode key, String publicationId) {
-        grants.lockPublicationPlacement(key, publicationId);
+    boolean lockPublicationPlacement(JsonNode key, String publicationId, boolean requirePlacement) {
+        return grants.lockPublicationPlacement(key, publicationId, requirePlacement);
     }
 
-    void lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {
-        grants.lockOriginalSettledResult(key, publicationId, finished);
+    boolean lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {
+        return grants.lockOriginalSettledResult(key, publicationId, finished);
     }
 
     private JsonNode exactSucceededReplay(String scope, String publicationId, String operationId,
@@ -1986,13 +1980,6 @@ public final class ToolPublicationDataStore {
                 String.class, scope, publicationId, operationId);
         require(saved != null, "Original receipt is missing");
         return ToolPublicationContract.readJson(saved.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private void lockTenant(JsonNode key) {
-        // The entry point's first tenant-guard acquisition on this lane, so
-        // it runs bounded with the shared named-failure mapping (#13800).
-        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
-                text(key, "tenantId"), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
     }
 
     private List<Map<String, Object>> sealRows(String scope, String publicationId, String streamId) {
