@@ -849,9 +849,10 @@ describe('post-merge push lane', () => {
                 QWEN_SKIP_NOTICE_GENERATION: '1',
                 // The shards' test step overrides HOME, which would hide the
                 // corepack cache install warms here; pin COREPACK_HOME to a
-                // per-run path so the warmup hits it. lint_and_static routes
-                // HOME and COREPACK_HOME together via GITHUB_ENV, so its
-                // install needs no step-level override.
+                // fixed path under runner.temp so the warmup hits it (the
+                // install body clears that exact path first). lint_and_static
+                // routes HOME and COREPACK_HOME together via GITHUB_ENV, so
+                // its install needs no step-level override.
                 COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack',
               });
             } else {
@@ -907,9 +908,48 @@ describe('post-merge push lane', () => {
       QWEN_SKIP_PREPARE: '1',
       QWEN_SKIP_NOTICE_GENERATION: '1',
       // The test step's HOME override would hide the corepack cache install
-      // warms here; pin COREPACK_HOME to a per-run path so the warmup hits it.
+      // warms here; pin COREPACK_HOME to a fixed path under runner.temp so
+      // the warmup hits it (the install body clears that exact path first).
       COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack',
     });
+    // Observed on the fleet: the pinned cache entry existed with its pnpm
+    // binary missing, corepack trusts an existing entry without re-verifying
+    // its files, and Install dependencies died instantly with
+    // MODULE_NOT_FOUND (main runs 41876940141, 41889761157, 41927887452).
+    // What left the entry incomplete is undetermined; _work/_temp survives
+    // across jobs on self-hosted runners (the lint job's isolated-HOME step
+    // documents the same fact), so such state persists. Every copy of the
+    // shared install body must clear the cache before corepack runs, and the
+    // guard must match ONLY the shard-owned path: a runner-exported shared
+    // COREPACK_HOME (test_build) and lint's run-unique home — already warmed
+    // by the hosted pnpm-store step — must never be deletion targets. The
+    // execution test below holds the semantics; these pins hold the spelling.
+    for (const job of ['test_build', 'test', 'lint_and_static']) {
+      const body = String(install(job).run ?? '');
+      expect(
+        body,
+        `${job} must scope the reset to the shard-owned path`,
+      ).toContain(
+        'if [ -n "${RUNNER_TEMP:-}" ] && [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then',
+      );
+      const reset = body.indexOf('rm -rf -- "${COREPACK_HOME}"');
+      expect(
+        reset,
+        `${job} must reset the pinned corepack cache`,
+      ).toBeGreaterThanOrEqual(0);
+      expect(
+        body.indexOf('corepack pnpm install'),
+        `${job} must reset the cache before corepack runs`,
+      ).toBeGreaterThan(reset);
+    }
+    // The test step must keep sharing the cache install warms: a drifted
+    // COREPACK_HOME sends the vitest globalSetup warmup back to the cold
+    // npmjs download whose ETIMEDOUT flake #16328 removed.
+    expect(
+      ci.jobs.test.steps.find(
+        (s) => s.name === 'Run tests and generate reports',
+      ).env.COREPACK_HOME,
+    ).toBe(install('test').env.COREPACK_HOME);
     const namesIn = (job) => (ci.jobs[job].steps ?? []).map((x) => x.name);
     // Values alone are order-blind, and order is load-bearing here: `steps`
     // exposes only steps that already ran, and a missing property reads as
@@ -1037,6 +1077,106 @@ describe('post-merge push lane', () => {
     expect(fetchCode).toMatch(/for _attempt in 1 2 3/);
     expect(fetchCode).toContain('Incremental lint history:');
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'executes the shared corepack reset only against the shard-owned path',
+    () => {
+      // Semantic witness for the reset guard. The string pins above hold its
+      // spelling, but a guard that never executes satisfies every one of
+      // them (the verify-pr round on 01d2b116 survived exactly that mutant),
+      // so run the shipped fragment — sliced from the real install body, not
+      // a copy — and watch what it deletes. The environment is built from
+      // scratch: this suite also runs inside CI shards that export their own
+      // COREPACK_HOME and RUNNER_TEMP, and inheriting those would point the
+      // cleanup at the running job's own directories.
+      const step = ci.jobs.test.steps.find(
+        (s) => s.name === 'Install dependencies',
+      );
+      const body = String(step.run ?? '');
+      const start = body.indexOf('if [ -n "${RUNNER_TEMP:-}" ]');
+      const end = body.indexOf('corepack pnpm install');
+      expect(
+        start,
+        'reset guard is missing from the install body',
+      ).toBeGreaterThanOrEqual(0);
+      expect(end, 'reset must sit before the corepack install').toBeGreaterThan(
+        start,
+      );
+      const fragment = body.slice(start, end);
+      const cells = [
+        {
+          name: 'shard-owned cache is cleared',
+          home: (temp) => join(temp, 'qwen-ci-corepack'),
+          cleared: true,
+        },
+        {
+          name: 'runner-exported shared cache survives',
+          home: (_temp, root) => join(root, 'shared-corepack'),
+          cleared: false,
+        },
+        {
+          name: 'lint run-unique warmed home survives',
+          home: (temp) =>
+            join(temp, 'qwen-lint-home-42-1', '.cache', 'node', 'corepack'),
+          cleared: false,
+        },
+        {
+          name: 'unset variable leaves the default cache alone',
+          home: null,
+          cleared: false,
+        },
+        {
+          name: 'empty variable is not a deletion target',
+          home: () => '',
+          cleared: false,
+        },
+      ];
+      for (const cell of cells) {
+        const root = mkdtempSync(join(tmpdir(), 'corepack-reset-'));
+        try {
+          const temp = join(root, 'temp');
+          const home = join(root, 'home');
+          mkdirSync(temp, { recursive: true });
+          mkdirSync(home, { recursive: true });
+          // With no COREPACK_HOME the default cache is the deletion target
+          // a naive guard would reach; give every cell a marker to watch.
+          const target =
+            cell.home === null
+              ? join(home, '.cache', 'node', 'corepack')
+              : cell.home(temp, root);
+          const marker = join(target, 'v1', 'pnpm', '11.24.0', '.corepack');
+          if (target) {
+            mkdirSync(join(target, 'v1', 'pnpm', '11.24.0'), {
+              recursive: true,
+            });
+            writeFileSync(marker, '{}');
+          }
+          const bystander = join(root, 'bystander');
+          mkdirSync(bystander, { recursive: true });
+          writeFileSync(join(bystander, 'sentinel'), 'keep');
+          const env = {
+            PATH: process.env.PATH,
+            HOME: home,
+            RUNNER_TEMP: temp,
+          };
+          if (cell.home !== null) env.COREPACK_HOME = target;
+          execFileSync(
+            'bash',
+            ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', fragment],
+            { env, cwd: root },
+          );
+          if (cell.cleared) {
+            expect(existsSync(target), cell.name).toBe(false);
+          } else if (target) {
+            expect(existsSync(marker), cell.name).toBe(true);
+          }
+          expect(existsSync(join(bystander, 'sentinel')), cell.name).toBe(true);
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 
   it.each([
     ['first fetch aborts', 1, 99, 99, 1, 0, 'deepen fetch aborted'],
@@ -1699,22 +1839,22 @@ describe('run-local pnpm cache startup', () => {
 
   for (const scenario of [
     {
-      name: 'repairs a missing pinned entry before installing',
+      name: 'recreates a broken run-local cache before installing',
       local: true,
       healthy: false,
       succeeds: true,
     },
     {
-      name: 'preserves a healthy run-local cache',
+      name: 'recreates a healthy run-local cache before installing',
       local: true,
       healthy: true,
       succeeds: true,
     },
     {
-      name: 'stops before installing when cache repair still fails',
+      name: 'fails installation when the fresh package manager is unavailable',
       local: true,
       healthy: false,
-      repairFails: true,
+      bootstrapFails: true,
       succeeds: false,
     },
     {
@@ -1741,7 +1881,10 @@ describe('run-local pnpm cache startup', () => {
       const bin = join(root, 'bin');
       const seed = join(root, 'pnpm.mjs');
       const marker = join(root, 'installed');
-      const sentinel = join(home, 'v1', 'pnpm', 'other-version');
+      const trace = join(root, 'trace.jsonl');
+      const oldEntryMarker = join(root, 'old-entry-ran');
+      const sentinel = join(root, 'bystander');
+      const cacheNeighbor = join(home, 'v1', 'pnpm', 'other-version');
       try {
         mkdirSync(join(cache, 'bin'), { recursive: true });
         mkdirSync(runnerTemp, { recursive: true });
@@ -1751,11 +1894,13 @@ describe('run-local pnpm cache startup', () => {
           '{"bin":{"pnpm":"bin/pnpm.mjs"}}',
         );
         writeFileSync(sentinel, 'keep');
+        writeFileSync(cacheNeighbor, 'old-cache');
         writeFileSync(
           seed,
           String.raw`
-import { writeFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 const args = process.argv.slice(2);
+appendFileSync(process.env.FIXTURE_TRACE, JSON.stringify({ stage: 'pnpm', args }) + '\n');
 if (args.length === 1 && args[0] === '--version') {
   console.log(process.env.FIXTURE_PINNED_VERSION);
 } else if (JSON.stringify(args) === JSON.stringify(['install', '--frozen-lockfile', '--prefer-offline', '--reporter=append-only'])) {
@@ -1765,7 +1910,12 @@ if (args.length === 1 && args[0] === '--version') {
 }
 `,
         );
-        if (scenario.healthy) writeFileSync(entry, readFileSync(seed));
+        if (scenario.healthy) {
+          writeFileSync(
+            entry,
+            `${readFileSync(seed, 'utf8')}\nwriteFileSync(process.env.FIXTURE_OLD_ENTRY_MARKER, 'ran');\n`,
+          );
+        }
         writeFileSync(
           join(bin, 'corepack'),
           String.raw`#!/usr/bin/env node
@@ -1773,16 +1923,22 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const root = fs.realpathSync(process.env.FIXTURE_ROOT);
-const home = fs.realpathSync(process.env.COREPACK_HOME);
+const configuredHome = path.resolve(process.env.COREPACK_HOME);
+const parent = fs.realpathSync(path.dirname(configuredHome));
+if (parent !== root && !parent.startsWith(root + path.sep)) throw new Error('Not a private fixture parent');
+fs.mkdirSync(configuredHome, { recursive: true });
+const home = fs.realpathSync(configuredHome);
 if (!home.startsWith(root + path.sep)) throw new Error('Not a private fixture');
 const args = process.argv.slice(2);
+fs.appendFileSync(process.env.FIXTURE_TRACE, JSON.stringify({ stage: 'corepack', args }) + '\n');
 if (args[0] !== 'pnpm') throw new Error('Unexpected package manager');
 const cache = path.join(home, 'v1', 'pnpm', process.env.FIXTURE_PINNED_VERSION);
 const entry = path.join(cache, 'bin', 'pnpm.mjs');
 if (!fs.existsSync(cache)) {
+  fs.appendFileSync(process.env.FIXTURE_TRACE, JSON.stringify({ stage: 'hydrate' }) + '\n');
   fs.mkdirSync(path.dirname(entry), { recursive: true });
   fs.writeFileSync(path.join(cache, '.corepack'), '{"bin":{"pnpm":"bin/pnpm.mjs"}}');
-  if (process.env.FIXTURE_REPAIR_FAILS !== '1') fs.copyFileSync(process.env.FIXTURE_SEED, entry);
+  if (process.env.FIXTURE_BOOTSTRAP_FAILS !== '1') fs.copyFileSync(process.env.FIXTURE_SEED, entry);
 }
 const result = spawnSync(process.execPath, [entry, ...args.slice(1)], { stdio: 'inherit' });
 process.exit(result.status ?? 1);
@@ -1804,10 +1960,12 @@ process.exit(result.status ?? 1);
               COREPACK_HOME: home,
               RUNNER_TEMP: runnerTemp,
               FIXTURE_ROOT: root,
+              FIXTURE_TRACE: trace,
+              FIXTURE_OLD_ENTRY_MARKER: oldEntryMarker,
               FIXTURE_PINNED_VERSION: version,
               FIXTURE_INSTALL_MARKER: marker,
               FIXTURE_SEED: seed,
-              FIXTURE_REPAIR_FAILS: scenario.repairFails ? '1' : '0',
+              FIXTURE_BOOTSTRAP_FAILS: scenario.bootstrapFails ? '1' : '0',
             },
             stdio: 'pipe',
           });
@@ -1816,7 +1974,26 @@ process.exit(result.status ?? 1);
         else expect(run).toThrow();
         expect(existsSync(marker)).toBe(scenario.succeeds);
         expect(readFileSync(sentinel, 'utf8')).toBe('keep');
-        if (scenario.healthy || !scenario.local) {
+        expect(existsSync(cacheNeighbor)).toBe(!scenario.local);
+        expect(existsSync(oldEntryMarker)).toBe(
+          !scenario.local && scenario.healthy,
+        );
+        const installArgs = [
+          'install',
+          '--frozen-lockfile',
+          '--prefer-offline',
+          '--reporter=append-only',
+        ];
+        const events = readFileSync(trace, 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line));
+        expect(events).toEqual([
+          { stage: 'corepack', args: ['pnpm', ...installArgs] },
+          ...(scenario.local ? [{ stage: 'hydrate' }] : []),
+          ...(scenario.succeeds ? [{ stage: 'pnpm', args: installArgs }] : []),
+        ]);
+        if (!scenario.local) {
           expect(statSync(cache).ino).toBe(before);
           expect(readFileSync(join(cache, '.corepack'), 'utf8')).toBe(
             '{"bin":{"pnpm":"bin/pnpm.mjs"}}',
