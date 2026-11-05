@@ -1228,6 +1228,135 @@ describe('Server Config (config.ts)', () => {
     }
   });
 
+  describe('project hooks approval gate', () => {
+    it('withholds project hooks while they await approval, never user hooks', () => {
+      const config = makeConfig({
+        userHooks,
+        projectHooks,
+        projectHooksPendingApproval: true,
+      });
+
+      expect(config.isProjectHooksPendingApproval()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getWithheldProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBe(userHooks);
+
+      config.setProjectHooksPendingApproval(false);
+
+      expect(config.isProjectHooksPendingApproval()).toBe(false);
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getWithheldProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['not gated', undefined, false, false],
+      ['gated and approved', false, true, false],
+      ['gated and pending', true, true, true],
+    ])(
+      'reports a session that is %s',
+      (_label, projectHooksPendingApproval, gated, pending) => {
+        const config = makeConfig({ projectHooksPendingApproval });
+        expect(config.isProjectHooksApprovalGated()).toBe(gated);
+        expect(config.isProjectHooksPendingApproval()).toBe(pending);
+      },
+    );
+
+    it('re-arms a --yolo session once it leaves YOLO', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksPendingApproval: false,
+        projectHooksYoloExempt: true,
+      });
+      expect(config.isProjectHooksApprovalGated()).toBe(false);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.isProjectHooksApprovalGated()).toBe(true);
+    });
+
+    it('withholds the legacy merged hooks from both getters while pending', () => {
+      const config = makeConfig({
+        hooks: projectHooks,
+        projectHooksPendingApproval: true,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getUserHooks()).toBeUndefined();
+
+      config.setProjectHooksPendingApproval(false);
+
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBe(projectHooks);
+    });
+
+    it('keeps a mid-session gate after the hooks are replaced', () => {
+      const config = makeConfig({ projectHooks });
+      config.setProjectHooksPendingApproval(true);
+
+      config.setHooksFromSettings({ projectHooks });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['the trust feature is off (default)', {}],
+      [
+        'the feature is on but the folder is untrusted',
+        { folderTrust: true, trustedFolder: false },
+      ],
+    ] as Array<[string, Partial<ConfigParameters>]>)(
+      'an approved block runs in an interactive session when %s',
+      (_label, trust) => {
+        const config = makeConfig({
+          interactive: true,
+          ...trust,
+          projectHooks,
+          projectHooksPendingApproval: false,
+        });
+
+        expect(config.getProjectHooks()).toBe(projectHooks);
+        // The registry loads the approved block; the listing must not add
+        // a second, trust-disabled copy of the same hooks.
+        expect(config.getTrustWithheldProjectHooks()).toBeUndefined();
+      },
+    );
+
+    it('a pending block stays withheld in an interactive untrusted session', () => {
+      const config = makeConfig({
+        interactive: true,
+        projectHooks,
+        projectHooksPendingApproval: true,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toBe(projectHooks);
+      // The approval reason stays reachable even though trust also withholds.
+      expect(config.getWithheldProjectHooks()).toBe(projectHooks);
+
+      config.setProjectHooksPendingApproval(true, true);
+      expect(config.isProjectHooksRejected()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getWithheldProjectHooks()).toBe(projectHooks);
+    });
+
+    it('an ungated interactive session still needs explicit folder trust', () => {
+      const config = makeConfig({
+        interactive: true,
+        projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toBe(projectHooks);
+
+      const trusted = makeConfig({
+        interactive: true,
+        folderTrust: true,
+        trustedFolder: true,
+        projectHooks,
+      });
+      expect(trusted.getProjectHooks()).toBe(projectHooks);
+      expect(trusted.getTrustWithheldProjectHooks()).toBeUndefined();
+    });
+  });
+
   describe('setHooksFromSettings', () => {
     it.each([
       [
@@ -1452,6 +1581,9 @@ describe('Server Config (config.ts)', () => {
         expect(config.getProjectHooks()).toEqual(
           explicit ? projectHooks : undefined,
         );
+        expect(config.getTrustWithheldProjectHooks()).toEqual(
+          explicit ? undefined : projectHooks,
+        );
         expect(config.getUserHooks()).toBeUndefined();
       },
     );
@@ -1473,6 +1605,7 @@ describe('Server Config (config.ts)', () => {
         });
 
         expect(config.getProjectHooks()).toEqual(projectHooks);
+        expect(config.getTrustWithheldProjectHooks()).toBeUndefined();
       },
     );
 
@@ -1482,6 +1615,18 @@ describe('Server Config (config.ts)', () => {
       ).toBeUndefined();
       expect(
         makeConfig({ bareMode: true, projectHooks }).getProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({
+          safeMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({
+          bareMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
       ).toBeUndefined();
     });
 
@@ -8186,6 +8331,107 @@ describe('Server Config (config.ts)', () => {
     );
     expect(config.getAutoMemoryContext()).toContain(
       '[Project Memory](project.md)',
+    );
+  });
+
+  describe('the main-session policy and the auto-memory reference (#16291)', () => {
+    /** A session that can load skills: a skill manager and a Skill tool. */
+    const withSkillTool = (config: Config) => {
+      vi.spyOn(config, 'getSkillManager').mockReturnValue(
+        {} as unknown as ReturnType<Config['getSkillManager']>,
+      );
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue({
+        getAllToolNames: () => ['skill'],
+        isPermissionDeferred: () => false,
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+    };
+
+    it('sends the resident policy with a pointer when the skill can be loaded', async () => {
+      const config = makeConfig();
+      withSkillTool(config);
+      loadProjectRules();
+
+      await config.refreshHierarchicalMemory();
+
+      const policy = config.getAutoMemoryPrompt();
+      expect(policy).toContain('# auto memory');
+      expect(policy).toContain('load the `auto-memory` skill');
+      expect(policy).not.toContain('<types>');
+    });
+
+    it('keeps the full policy when no skill can be loaded', async () => {
+      const config = makeConfig();
+      vi.spyOn(config, 'getSkillManager').mockReturnValue(null);
+      loadProjectRules();
+
+      await config.refreshHierarchicalMemory();
+
+      const policy = config.getAutoMemoryPrompt();
+      expect(policy).toContain('<types>');
+      expect(policy).not.toContain('auto-memory');
+    });
+
+    // The session-start refresh runs before the tool registry exists, so the
+    // route must be decided when the policy is read, not when it is built.
+    it('sends the full policy once the registry turns out to have no Skill tool', async () => {
+      const config = makeConfig();
+      vi.spyOn(config, 'getSkillManager').mockReturnValue(
+        {} as unknown as ReturnType<Config['getSkillManager']>,
+      );
+      const toolNames: string[] = [];
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue({
+        getAllToolNames: () => toolNames,
+        isPermissionDeferred: () => false,
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      loadProjectRules();
+
+      await config.refreshHierarchicalMemory();
+
+      expect(config.getAutoMemoryPrompt()).toContain('<types>');
+      toolNames.push('skill');
+      expect(config.getAutoMemoryPrompt()).toContain(
+        'load the `auto-memory` skill',
+      );
+    });
+
+    it('gives a derived Config with no skill manager the full policy', async () => {
+      const config = makeConfig();
+      withSkillTool(config);
+      loadProjectRules();
+      await config.refreshHierarchicalMemory();
+
+      // As buildSubagentContextOverride does for a skill-denied agent (#12424).
+      const subagent = deriveConfig(config);
+      subagent.getSkillManager = () => null;
+
+      expect(config.getAutoMemoryPrompt()).toContain(
+        'load the `auto-memory` skill',
+      );
+      expect(subagent.getAutoMemoryPrompt()).toContain('<types>');
+      expect(subagent.getAutoMemoryPrompt()).not.toContain('auto-memory');
+    });
+
+    it('does not list the bundled auto-memory skill under structured recall', () => {
+      const config = makeConfig({ enableManagedAutoMemory: true });
+      Object.assign(config, { memoryRecallMode: 'structured' });
+
+      expect(
+        config.isSkillEnabled({ name: 'auto-memory', level: 'bundled' }),
+      ).toBe(false);
+    });
+
+    it.each([
+      [true, true],
+      [false, false],
+    ])(
+      'lists the bundled auto-memory skill only with managed auto-memory (enabled: %s)',
+      (enableManagedAutoMemory, listed) => {
+        const config = makeConfig({ enableManagedAutoMemory });
+
+        expect(
+          config.isSkillEnabled({ name: 'auto-memory', level: 'bundled' }),
+        ).toBe(listed);
+      },
     );
   });
 

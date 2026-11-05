@@ -19,13 +19,17 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -344,6 +348,80 @@ class ManagedSessionGuardConvoyIT {
     }
 
     /**
+     * Workspace Session creation orders on the selected Workspace row, not
+     * the tenant guard, so creations in different Workspaces of one tenant
+     * run at once. Each inserts a Session, its stream, its command receipts
+     * and its creation-mode claim into indexes those Workspaces share; a
+     * locking probe of a missing key there would deadlock two of them
+     * (InnoDB 1213). H2 takes no gap locks, so only MySQL shows it.
+     */
+    @ParameterizedTest
+    @CsvSource({"false, false", "false, true", "true, false", "true, true"})
+    void concurrentWorkspaceSessionCreationsOfOneTenantDoNotDeadlock(
+            boolean defaultSelection, boolean sharedStorage) throws Exception {
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
+        String tenant = "tenant-create";
+        int writers = 4;
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        var mounts = new ArrayList<ManagedAgentProperties.RuntimeBroker.WorkspaceMount>();
+        for (int index = 0; index < writers; index++) {
+            String storage = sharedStorage ? "storage" : "storage-" + index;
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
+                    + " display_name, config_ref, policy_ref, state, is_default)"
+                    + " VALUES (?, ?, 1, ?, 'Workspace', ?, ?, 'ACTIVE', ?)",
+                    tenant, "ws-" + index, storage,
+                    com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONFIG_REF,
+                    com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF, index == 0);
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OWNER')",
+                    tenant, "ws-" + index, "actor".getBytes(StandardCharsets.UTF_8));
+            if (!sharedStorage || index == 0) {
+                mounts.add(new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, storage, "/tmp/create-" + storage));
+            }
+        }
+        properties.getRuntimeBroker().setWorkspaceMounts(mounts);
+        var registry = new ManagedWorkspaceRegistry(jdbc);
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        var service = new com.alibaba.qwen.code.managedagent.session.ManagedAgentService(store,
+                new com.alibaba.qwen.code.managedagent.model.RequestDigests(),
+                org.mockito.Mockito.mock(com.alibaba.qwen.code.managedagent.session.HarnessCoordinator.class),
+                org.mockito.Mockito.mock(com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.class),
+                registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        int perWriter = 10;
+        var start = new CountDownLatch(1);
+        try (var pool = Executors.newFixedThreadPool(writers)) {
+            List<Future<Integer>> runs = new ArrayList<>();
+            for (int writer = 0; writer < writers; writer++) {
+                String workspace = "ws-" + writer;
+                var selection = defaultSelection ? null
+                        : new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection(workspace, ".");
+                runs.add(pool.submit(() -> {
+                    start.await();
+                    for (int index = 0; index < perWriter; index++) {
+                        String key = workspace + "-create-" + index;
+                        transactions.execute(ignored -> service.createWorkspaceSession(tenant, "actor", key,
+                                "qwen-code", null, null, null, List.of(), selection));
+                    }
+                    return perWriter;
+                }));
+            }
+            start.countDown();
+            for (var run : runs) {
+                assertThat(run.get(120, TimeUnit.SECONDS)).isEqualTo(perWriter);
+            }
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_kind = 'PUBLIC'",
+                Integer.class, tenant)).isEqualTo(writers * perWriter);
+        if (defaultSelection) {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?"
+                            + " AND session_kind = 'PUBLIC' AND workspace_id = 'ws-0'",
+                    Integer.class, tenant)).isEqualTo(writers * perWriter);
+        }
+    }
+
+    /**
      * Commits of different Sessions in one tenant now run at once. Every
      * revision publishes a new resource; a locking probe of each missing key
      * would gap-lock the tenant-shared resource index, and two Sessions
@@ -390,25 +468,29 @@ class ManagedSessionGuardConvoyIT {
     }
 
     /**
-     * Publication lanes take their first tenant-wide acquisition with the
-     * hot-path bound: reserve (apply lane), prepareAdmission (admission
-     * lane), producer/dispatch, commitReceipt (receipt lane's placement-first
-     * entry) and publishToolResult (tool-result lane) all answer tenant_guard_contended
-     * within the bound while a guard row is externally held, and complete
-     * after the hold lifts (#13800 R1).
+     * Ordinary publication lanes take neither tenant guard: reserve,
+     * producer/dispatch, finish, prepareAdmission and commitReceipt all
+     * complete within the bound while placement and the publication guard
+     * are both externally held, for a Workspace-shared and a Session-isolated
+     * original binding. That also shows none takes either guard after its
+     * Session root (designs 2026-11-04-managed-publication-tenant-guards and
+     * 2026-11-04-managed-publication-placement).
      */
-    @Test
-    void heldTenantGuardsBoundPublicationLaneEntries() throws Exception {
-        var journal = PublicationJournalFixture.create(source);
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void heldTenantGuardsBoundPublicationLaneEntries(boolean sessionIsolated) throws Exception {
+        var journal = sessionIsolated ? PublicationJournalFixture.createSessionIsolated(source)
+                : PublicationJournalFixture.create(source);
         var jdbc = journal.jdbc;
         var manager = journal.manager;
         String tenant = "tenant-1";
         var key = journal.binding.get("sessionKey");
 
-        var hold = manager.getTransaction(new DefaultTransactionDefinition());
+        // The apply lane orders on its Session root and accepts a bounded
+        // tenant quota overshoot, so held guards neither park nor name it.
+        var hold = holdBothTenantGuards(jdbc, manager, tenant);
         try {
-            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
-            assertFastGuardFailure(() -> {
+            completesWhileHeld(() -> {
                 journal.reserve();
                 return null;
             });
@@ -442,22 +524,16 @@ class ManagedSessionGuardConvoyIT {
                 .put("captureReason", "storage_failed").put("previewTruncated", false)
                 .put("deliveryStatus", "pending").putNull("manifest"));
         var execution = journal.executions.findByExecutionCallId("execution-1");
-        hold = manager.getTransaction(new DefaultTransactionDefinition());
+        hold = holdBothTenantGuards(jdbc, manager, tenant);
         try {
-            WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
-            assertFastGuardFailure(() -> journal.store.verifyDispatch(execution, "pub-1",
-                    PublicationJournalFixture.PUBLICATION_TOKEN));
-            assertFastGuardFailure(() -> data.finish(key, "pub-1",
-                    PublicationJournalFixture.PUBLICATION_TOKEN, "finish",
-                    envelope.toString().getBytes(StandardCharsets.UTF_8)));
+            assertThat(completesWhileHeld(() -> journal.store.verifyDispatch(execution, "pub-1",
+                    PublicationJournalFixture.PUBLICATION_TOKEN)).path("publicationId").asText())
+                    .isEqualTo("pub-1");
+            completesWhileHeld(() -> data.finish(key, "pub-1", PublicationJournalFixture.PUBLICATION_TOKEN,
+                    "finish", envelope.toString().getBytes(StandardCharsets.UTF_8)));
         } finally {
             manager.rollback(hold);
         }
-        assertThat(journal.store.verifyDispatch(execution, "pub-1",
-                PublicationJournalFixture.PUBLICATION_TOKEN).path("publicationId").asText())
-                .isEqualTo("pub-1");
-        data.finish(key, "pub-1", PublicationJournalFixture.PUBLICATION_TOKEN, "finish",
-                envelope.toString().getBytes(StandardCharsets.UTF_8));
         var outcome = JSON.createObjectNode().put("schemaVersion", 1).put("decision", "blocked")
                 .putNull("manifestRef");
         outcome.set("envelope", envelope);
@@ -467,17 +543,14 @@ class ManagedSessionGuardConvoyIT {
         history.putArray("parts").addObject().put("text", "Shell capture unavailable");
         outcome.set("history", history);
 
-        hold = manager.getTransaction(new DefaultTransactionDefinition());
+        hold = holdBothTenantGuards(jdbc, manager, tenant);
+        JsonNode root;
         try {
-            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
-            assertFastGuardFailure(() ->
-                    data.prepareAdmission(key, "pub-1", "writer-1", 1,
-                            PublicationJournalFixture.WRITER_TOKEN, outcome));
+            root = completesWhileHeld(() -> data.prepareAdmission(key, "pub-1", "writer-1", 1,
+                    PublicationJournalFixture.WRITER_TOKEN, outcome));
         } finally {
             manager.rollback(hold);
         }
-        var root = data.prepareAdmission(key, "pub-1", "writer-1", 1,
-                PublicationJournalFixture.WRITER_TOKEN, outcome);
 
         long sequence = journal.sequence + 1;
         var payload = JSON.createObjectNode().put("executionCallId", "execution-1")
@@ -499,38 +572,166 @@ class ManagedSessionGuardConvoyIT {
         var admission = new ToolPublicationAdmissionStore(jdbc, journal.manager,
                 journal.sessions, data);
 
-        hold = manager.getTransaction(new DefaultTransactionDefinition());
+        hold = holdBothTenantGuards(jdbc, manager, tenant);
         try {
-            WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
-            assertFastGuardFailure(() ->
-                    admission.commitReceipt(key, "pub-1", PublicationJournalFixture.WRITER_TOKEN,
-                            request));
+            assertThat(completesWhileHeld(() -> admission.commitReceipt(key, "pub-1",
+                    PublicationJournalFixture.WRITER_TOKEN, request)).path("historyRevision").asLong())
+                    .isEqualTo(sequence);
         } finally {
             manager.rollback(hold);
         }
-        assertThat(admission.commitReceipt(key, "pub-1", PublicationJournalFixture.WRITER_TOKEN,
-                request).path("historyRevision").asLong()).isEqualTo(sequence);
+    }
 
-        // Tool-result publication takes the publication row behind bounded
-        // placement: a held row answers named and fast there too.
-        byte[] content = "tool output".getBytes(StandardCharsets.UTF_8);
-        var publish = new ManagedSessionStoreModels.PublishToolResultRequest("workspace-1", "writer-1", 1,
-                "result-content-1", "managed-tool-result-content", 1, content.length,
-                ToolPublicationContract.sha256(content), Base64.getEncoder().encodeToString(content));
-        var publications = new TransactionTemplate(manager);
-        hold = manager.getTransaction(new DefaultTransactionDefinition());
-        try {
-            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
-            assertFastGuardFailure(() -> publications.execute(ignored ->
-                    journal.sessions.publishToolResult(tenant, "session-1",
-                            PublicationJournalFixture.WRITER_TOKEN, publish)));
-        } finally {
-            manager.rollback(hold);
+    @Test
+    void ordinaryToolResultPublishesWhileBothTenantGuardsAreHeld() throws Exception {
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
+        var manager = new DataSourceTransactionManager(source);
+        var transactions = new TransactionTemplate(manager);
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
+        transactions.executeWithoutResult(status -> store.acquireWriter(TENANT, "inline", TOKEN,
+                new AcquireWriterRequest(WORKSPACE, "writer-inline", 60_000L)));
+        try (var pool = Executors.newSingleThreadExecutor()) {
+            var hold = manager.getTransaction(new DefaultTransactionDefinition());
+            try {
+                WorkspaceLifecycleStore.lockPlacement(jdbc, TENANT);
+                ToolPublicationRetentionStore.lockTenant(jdbc, TENANT);
+                var published = pool.submit(() -> transactions.execute(status ->
+                        store.publishToolResult(TENANT, "inline", TOKEN, inlineToolResult())))
+                        .get(10, TimeUnit.SECONDS);
+                assertThat(published.resourceId()).isEqualTo("inline-result");
+            } finally {
+                manager.rollback(hold);
+            }
         }
-        ManagedSessionStoreModels.ToolResultResourceRef published = publications.execute(ignored ->
-                journal.sessions.publishToolResult(tenant, "session-1", PublicationJournalFixture.WRITER_TOKEN,
-                        publish));
-        assertThat(published.resourceId()).isEqualTo("result-content-1");
+    }
+
+    @Test
+    void toolResultPublishesToAnotherSessionWhileNewResourceIsProbed() throws Exception {
+        var pausing = new PauseAfterDataSource(source, "SELECT " + ManagedSchemaProjection.RESOURCE.columns()
+                + " FROM ma_resource WHERE resource_key = ?");
+        var jdbc = new ManagedSchemaJdbcTemplate(pausing);
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(pausing));
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
+        for (String session : List.of("inline-one", "inline-two")) {
+            transactions.executeWithoutResult(status -> store.acquireWriter(TENANT, session, TOKEN,
+                    new AcquireWriterRequest(WORKSPACE, "writer-inline", 60_000L)));
+        }
+        try (var first = Executors.newSingleThreadExecutor(task -> new Thread(task, "paused"));
+                var second = Executors.newSingleThreadExecutor()) {
+            pausing.enabled = true;
+            var pending = first.submit(() -> transactions.execute(status ->
+                    store.publishToolResult(TENANT, "inline-one", TOKEN, inlineToolResult())));
+            try {
+                assertThat(pausing.reached.await(10, TimeUnit.SECONDS)).isTrue();
+                var published = second.submit(() -> transactions.execute(status ->
+                        store.publishToolResult(TENANT, "inline-two", TOKEN, inlineToolResult())))
+                        .get(10, TimeUnit.SECONDS);
+                assertThat(published.resourceId()).isEqualTo("inline-result");
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Integer.class)).isEqualTo(1);
+            } finally {
+                pausing.release.countDown();
+            }
+            assertThat(pending.get(10, TimeUnit.SECONDS).resourceId()).isEqualTo("inline-result");
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Integer.class)).isEqualTo(2);
+    }
+
+    private static ManagedSessionStoreModels.PublishToolResultRequest inlineToolResult() {
+        byte[] bytes = "tool output".getBytes(StandardCharsets.UTF_8);
+        return new ManagedSessionStoreModels.PublishToolResultRequest(WORKSPACE, "writer-inline", 1,
+                "inline-result", "managed-tool-result-content", 1, bytes.length,
+                ToolPublicationContract.sha256(bytes), Base64.getEncoder().encodeToString(bytes));
+    }
+
+    @Test
+    void readLeaseRenewalCompletesWhileTenantGuardIsHeld() throws Exception {
+        var journal = PublicationJournalFixture.create(source);
+        var jdbc = journal.jdbc;
+        var retention = new ToolPublicationRetentionStore(jdbc, journal.manager);
+        var transactions = new TransactionTemplate(journal.manager);
+        var hold = journal.manager.getTransaction(new DefaultTransactionDefinition());
+        try {
+            ToolPublicationRetentionStore.lockTenant(jdbc, "tenant-1");
+            completesWhileHeld(() -> transactions.execute(ignored -> {
+                jdbc.execute("SET SESSION innodb_lock_wait_timeout = 5");
+                try (var lease = retention.read("tenant-1", "session-1")) {
+                    long expiry = ToolPublicationRetentionStore.now(jdbc)
+                            + ToolPublicationRetentionStore.READ_BUDGET_MILLIS / 2;
+                    assertThat(jdbc.update("UPDATE ma_read_lease SET expires_at = ?", expiry)).isEqualTo(1);
+                    lease.check();
+                    assertThat(jdbc.queryForObject("SELECT expires_at FROM ma_read_lease", Long.class))
+                            .isGreaterThan(expiry);
+                }
+                return null;
+            }));
+        } finally {
+            journal.manager.rollback(hold);
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_read_lease", Integer.class)).isZero();
+    }
+
+    @Test
+    void expiredReservationFenceHasABoundedNamedWait() throws Exception {
+        var journal = PublicationJournalFixture.create(source);
+        var jdbc = journal.jdbc;
+        String scope = ToolPublicationRetentionStore.hash("expired-session");
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+                + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
+                + " expires_at, capture_bytes, producer_bytes, admission_bytes)"
+                + " VALUES (?, ?, 'tenant-1', 'workspace-1', 'expired-session', 'expired', ?, 'expired', '{}', ?, ?,"
+                + " 'OPEN', 0, 1, 1, 1)", scope, ToolPublicationRetentionStore.hash("tenant-1"), scope, scope, scope);
+        var transactions = new TransactionTemplate(journal.manager);
+        var hold = journal.manager.getTransaction(new DefaultTransactionDefinition());
+        try {
+            ToolPublicationRetentionStore.lockTenant(jdbc, "tenant-1");
+            jdbc.queryForList("SELECT publication_id FROM ma_output_capture WHERE scope_key = ? FOR UPDATE", scope);
+            assertFastGuardFailure(() -> transactions.execute(ignored -> {
+                jdbc.execute("SET SESSION innodb_lock_wait_timeout = 20");
+                return journal.reserve();
+            }));
+        } finally {
+            journal.manager.rollback(hold);
+        }
+        journal.reserve();
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_output_capture WHERE scope_key = ?", String.class, scope))
+                .isEqualTo("FENCED");
+    }
+
+    @Test
+    void quarantineUnderASessionRootCompletesWhileTenantGuardIsHeld() throws Exception {
+        var journal = PublicationJournalFixture.create(source);
+        journal.reserve();
+        var jdbc = journal.jdbc;
+        String scope = ToolPublicationDataStore.scope("tenant-1", "workspace-1", "session-1");
+        String resourceScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore
+                .sessionScopeKey("tenant-1", "session-1");
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
+                + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, scope_key,"
+                + " publication_id, slot_key, capture_state, capture_object_key, object_key, operation_id, gmt_create)"
+                + " VALUES (?, ?, 'tenant-1', 'workspace-1', 'session-1', 'corrupt-resource',"
+                + " 'managed-tool-result-content', 1, 1, ?, 'TOOL_PUBLICATION', 'PUBLISHED', ?, 'pub-1',"
+                + " 'segment:stdout:0', 'VERIFIED', 'corrupt-object', 'corrupt-object', 'op', "
+                + ManagedSchemaTime.SQL_NOW + ")", com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
+                        .key(resourceScope, "corrupt-resource"), resourceScope, scope, scope);
+        var retention = new ToolPublicationRetentionStore(jdbc, journal.manager);
+        var transactions = new TransactionTemplate(journal.manager);
+        var hold = journal.manager.getTransaction(new DefaultTransactionDefinition());
+        try {
+            ToolPublicationRetentionStore.lockTenant(jdbc, "tenant-1");
+            completesWhileHeld(() -> transactions.execute(ignored -> {
+                try (var lease = retention.read("tenant-1", "session-1")) {
+                    lease.check();
+                    retention.quarantineResource(scope, "corrupt-resource", "corrupt-object");
+                }
+                return null;
+            }));
+        } finally {
+            journal.manager.rollback(hold);
+        }
+        assertThat(jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE resource_id = 'corrupt-resource'",
+                String.class)).isEqualTo("QUARANTINED");
+        assertThat(jdbc.queryForObject("SELECT CASE WHEN is_quarantined THEN 1 ELSE 0 END FROM ma_output_capture",
+                Integer.class)).isEqualTo(1);
     }
 
     @Test
@@ -811,6 +1012,25 @@ class ManagedSessionGuardConvoyIT {
             Thread.sleep(100);
         }
         throw new AssertionError("Timed out waiting for a lock wait on " + table);
+    }
+
+    // Runs the action on a fresh thread, so it cannot join the holder's
+    // transaction, and requires it to finish within the hot-path bound.
+    private static org.springframework.transaction.TransactionStatus holdBothTenantGuards(JdbcTemplate jdbc,
+            DataSourceTransactionManager manager, String tenant) {
+        var hold = manager.getTransaction(new DefaultTransactionDefinition());
+        WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
+        ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
+        return hold;
+    }
+
+    private static <T> T completesWhileHeld(Callable<T> action) throws Exception {
+        long before = System.nanoTime();
+        try (var pool = Executors.newSingleThreadExecutor()) {
+            T result = pool.submit(action).get(30, TimeUnit.SECONDS);
+            assertThat((System.nanoTime() - before) / 1_000_000).isLessThan(BOUNDED_FAILURE_CEILING_MS);
+            return result;
+        }
     }
 
     private static void assertFastGuardFailure(Callable<Object> action) throws Exception {

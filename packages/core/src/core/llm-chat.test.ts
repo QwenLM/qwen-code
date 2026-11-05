@@ -3632,6 +3632,25 @@ describe('LlmChat', async () => {
       ]);
     });
 
+    it('records function-call thought signatures for session resume', async () => {
+      const recordAssistantTurn = vi.fn();
+      const signedCall = {
+        ...toolCall('call-signed'),
+        thoughtSignature: 'sig-call',
+      };
+      await consolidate(
+        [signedCall],
+        'signed-call',
+        'p-signed-call-recording',
+        chatWithRecorder(recordAssistantTurn),
+      );
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
+        signedCall,
+      ]);
+    });
+
     it('drops a dangling unsigned trailing thought episode when the turn is truncated before its terminating signature (avoids permanently wedging the session)', async () => {
       // ep2 is cut off (MAX_TOKENS) before its signature-only chunk, the case
       // flushThoughtEpisode's "Known limitation" note documents. Kept beside a
@@ -14220,6 +14239,38 @@ describe('LlmChat', async () => {
       expect(result!.functionCall.args).toEqual({
         path: '/tmp/x',
         content: 'hello',
+      });
+    });
+
+    it('preserves thoughtSignature on ordinary function calls', () => {
+      const result = redactStructuredOutputArgsForRecording({
+        functionCall: { id: 'call-read', name: 'read_file', args: {} },
+        thoughtSignature: 'sig-record',
+      });
+
+      expect(result).toEqual({
+        functionCall: { id: 'call-read', name: 'read_file', args: {} },
+        thoughtSignature: 'sig-record',
+      });
+    });
+
+    it('preserves thoughtSignature while redacting structured output args', () => {
+      const result = redactStructuredOutputArgsForRecording({
+        functionCall: {
+          id: 'call-output',
+          name: 'structured_output',
+          args: { sensitive: 'payload' },
+        },
+        thoughtSignature: 'sig-record',
+      });
+
+      expect(result).toEqual({
+        functionCall: {
+          id: 'call-output',
+          name: 'structured_output',
+          args: { __redacted: 'structured_output payload (see stdout result)' },
+        },
+        thoughtSignature: 'sig-record',
       });
     });
 

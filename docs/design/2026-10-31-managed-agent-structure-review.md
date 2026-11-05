@@ -404,7 +404,8 @@ cross-cutting "how the system works today" tour.
   `SessionCreationCommand`; the pin test is green and ratchets.
 - `ManagedAgentStore` has no public setter/configure wiring; the two target
   god classes are decomposed (P1 complete when no class in `persistence` or
-  `runtime-broker` exceeds the agreed size ratchet).
+  `runtime-broker` exceeds the agreed size ratchet, enforced by
+  `ClassSizeRatchetTest`).
 - Zero OpenAPI diff, zero schema diff, all ArchUnit/Checkstyle/SpotBugs gates
   green, CI full profiles green on the accepted revision.
 - README and the architecture tour exist in both languages with reciprocal
@@ -418,6 +419,9 @@ cross-cutting "how the system works today" tour.
   migrated call site uses it; the overload convergence and the builder landed
   in the same change. Role-interface segregation (P0 step 3) follows as a
   separate slice.
-- Whether to introduce the class-size ratchet gate before P1 (to stop
-  regrowth) or only after the splits land.
+- Resolved (2026-11-04): the class-size ratchet gate is introduced after the
+  splits land. `ClassSizeRatchetTest` pins the current large classes in
+  `persistence`/`runtime-broker` ratchet-down-only, with a global ceiling that
+  lowers as the remaining large classes are decomposed; see the
+  [class-size ratchet design](2026-11-04-managed-agent-class-size-ratchet.md).
 - Sequencing of P1 slices against in-flight feature work on the same classes.

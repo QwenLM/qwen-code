@@ -5053,6 +5053,26 @@ export interface DaemonChannelEventsSnapshot {
    * than the tail window the route reads.
    */
   truncated: boolean;
+  /**
+   * Non-secret link metadata (platform type, API base URL, and the resolved
+   * GitHub web origin) for the channels named in `events`, resolved from the
+   * merged system + user + workspace settings and filtered to channels owned
+   * by the queried workspace. Present only when at least one channel
+   * resolves; absent on older daemons. Lets a client link journal rows of
+   * channels configured outside the workspace's own settings scope.
+   */
+  channelLinkMeta?: Record<string, DaemonChannelLinkMeta>;
+}
+
+export interface DaemonChannelLinkMeta {
+  type?: string;
+  baseUrl?: string;
+  /**
+   * The resolved GitHub web origin (e.g. `https://github.com` or a GHE web
+   * host). Clients should concatenate it directly; `baseUrl` remains for
+   * daemons that predate this field.
+   */
+  webOrigin?: string;
 }
 
 export interface DaemonChannelEventsQuery {
