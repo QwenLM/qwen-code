@@ -17,6 +17,7 @@ export const MOD_METHODS = [
   'clock.now',
   'clock.sleep',
   'command.register',
+  'prompt.submit',
   'session.cwd',
   'session.id',
   'session.model',
@@ -116,6 +117,33 @@ export function jsonDepth(json: string): number {
 export function assertModDepth(json: string, label: string): void {
   if (jsonDepth(json) > MOD_MAX_DEPTH)
     throw new Error(`${label} nests deeper than ${MOD_MAX_DEPTH} levels.`);
+}
+
+/**
+ * The event input a `$.prompt.submit({ text, asUser? })` call raises: the
+ * caller's own name as its origin, and no wait, since it runs once idle.
+ */
+export function promptSubmitCall(value: unknown, plugin: string): ModInput {
+  if (
+    !record(value) ||
+    !only(value, ['text', 'asUser']) ||
+    !text(value['text']) ||
+    (value['asUser'] !== undefined && value['asUser'] !== true)
+  )
+    throw new Error(
+      record(value) && 'attachments' in value
+        ? 'Mod prompt.submit does not take attachments.'
+        : 'Mod prompt.submit takes { text, asUser? } with asUser true when given.',
+    );
+  return {
+    text: value['text'],
+    wait: false,
+    origin: {
+      kind: 'plugin',
+      name: plugin,
+      ...(value['asUser'] === true && { asUser: true }),
+    },
+  };
 }
 
 export function validateInput(

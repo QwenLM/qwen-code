@@ -12,7 +12,14 @@ import {
   MAX_SERVER_NAME_LENGTH,
 } from '../server/request-helpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
-import { resolveTrustedRuntime } from '../workspace-route-runtime.js';
+import {
+  WorkspaceProjectHooksChangedError,
+  WorkspaceProjectHooksNotPendingError,
+} from '../workspace-service/types.js';
+import {
+  resolveTrustedRuntime,
+  resolveWorkspaceRuntimeFromParam,
+} from '../workspace-route-runtime.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -228,11 +235,71 @@ export function registerWorkspaceStatusRoutes(
 
 export function registerWorkspaceQualifiedStatusRoutes(
   app: Application,
-  deps: Pick<RegisterWorkspaceStatusRoutesDeps, 'sendBridgeError'> & {
+  deps: Pick<
+    RegisterWorkspaceStatusRoutesDeps,
+    'sendBridgeError' | 'mutate'
+  > & {
     workspaceRegistry: WorkspaceRegistry;
   },
 ): void {
-  const { workspaceRegistry, sendBridgeError } = deps;
+  const { workspaceRegistry, sendBridgeError, mutate } = deps;
+
+  // Workspace-qualified twin of POST /workspace/hooks/approve. Uses the
+  // runtime's trust as-is: the decision is needed exactly when folder trust
+  // has not been granted, so it must not require a trusted runtime.
+  app.post(
+    '/workspaces/:workspace/hooks/approve',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime) return;
+      const body = req.body as Record<string, unknown> | undefined;
+      const decision = body?.['decision'];
+      if (decision !== 'approve' && decision !== 'reject') {
+        res.status(400).json({
+          error: '`decision` must be "approve" or "reject"',
+          code: 'invalid_hooks_decision',
+        });
+        return;
+      }
+      const hash = body?.['hash'];
+      if (hash !== undefined && typeof hash !== 'string') {
+        res.status(400).json({
+          error: '`hash` must be the hash string from the hooks status',
+          code: 'invalid_hooks_hash',
+        });
+        return;
+      }
+      const route = 'POST /workspaces/:workspace/hooks/approve';
+      try {
+        const ctx = createBuildWorkspaceCtx(runtime.workspaceCwd)(route);
+        const result = await runInRuntimeGeneration(runtime, () =>
+          runtime.workspaceService.approveProjectHooks(ctx, decision, hash),
+        );
+        res.status(200).json(result);
+      } catch (err) {
+        if (err instanceof WorkspaceProjectHooksNotPendingError) {
+          res.status(400).json({
+            error: err.message,
+            code: 'project_hooks_not_pending',
+          });
+          return;
+        }
+        if (err instanceof WorkspaceProjectHooksChangedError) {
+          res.status(409).json({
+            error: err.message,
+            code: 'project_hooks_changed',
+          });
+          return;
+        }
+        sendBridgeError(res, err, { route });
+      }
+    },
+  );
 
   app.get('/workspaces/:workspace/mcp', async (req, res) => {
     const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
@@ -374,7 +441,7 @@ export function registerWorkspaceDiagnosticStatusRoutes(
   app: Application,
   deps: RegisterWorkspaceStatusRoutesDeps,
 ): void {
-  const { boundWorkspace, workspace, sendBridgeError } = deps;
+  const { boundWorkspace, workspace, mutate, sendBridgeError } = deps;
   const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
   // TODO(#4175 PR 24 — PermissionMediator audit log): emit an
   // `audit.diagnostic_read` event from these two routes so a security
@@ -430,6 +497,59 @@ export function registerWorkspaceDiagnosticStatusRoutes(
       sendBridgeError(res, err, { route: 'GET /workspace/hooks' });
     }
   });
+
+  // POST /workspace/hooks/approve — explicit user trust decision for the
+  // workspace's pending project hooks. Deliberately not gated on workspace
+  // trust: the untrusted state is exactly when this decision is needed.
+  // Not session/request_permission: automation clients auto-answer those.
+  app.post(
+    '/workspace/hooks/approve',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const decision = (req.body as Record<string, unknown> | undefined)?.[
+        'decision'
+      ];
+      if (decision !== 'approve' && decision !== 'reject') {
+        res.status(400).json({
+          error: '`decision` must be "approve" or "reject"',
+          code: 'invalid_hooks_decision',
+        });
+        return;
+      }
+      const hash = (req.body as Record<string, unknown> | undefined)?.['hash'];
+      if (hash !== undefined && typeof hash !== 'string') {
+        res.status(400).json({
+          error: '`hash` must be the hash string from the hooks status',
+          code: 'invalid_hooks_hash',
+        });
+        return;
+      }
+      try {
+        const ctx = buildWorkspaceCtx('POST /workspace/hooks/approve');
+        const result = await runInCapturedGeneration(
+          deps.captureGenerationAssertion,
+          () => workspace.approveProjectHooks(ctx, decision, hash),
+        );
+        res.status(200).json(result);
+      } catch (err) {
+        if (err instanceof WorkspaceProjectHooksNotPendingError) {
+          res.status(400).json({
+            error: err.message,
+            code: 'project_hooks_not_pending',
+          });
+          return;
+        }
+        if (err instanceof WorkspaceProjectHooksChangedError) {
+          res.status(409).json({
+            error: err.message,
+            code: 'project_hooks_changed',
+          });
+          return;
+        }
+        sendBridgeError(res, err, { route: 'POST /workspace/hooks/approve' });
+      }
+    },
+  );
 }
 
 export function registerWorkspaceQualifiedDiagnosticStatusRoutes(

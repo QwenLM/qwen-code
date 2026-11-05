@@ -609,9 +609,9 @@ class WorkspaceRuntimeTest {
                     binding.getStorageId(), "child", binding.getContextConfigRef(), 1);
             assertUnavailable(() -> otherClient.claim(changedGeneration, second));
             authority.release(binding, first);
-            var undo = holder(secondSession, "undo");
+            var undo = ready(holder(secondSession, "undo"));
             otherClient.claim(binding, undo);
-            assertThat(otherClient.beginRewind(binding, undo)).isTrue();
+            otherClient.beginRewind(binding, undo);
             otherClient.endRewind(binding, undo);
             otherClient.release(binding, undo);
         }
@@ -657,7 +657,7 @@ class WorkspaceRuntimeTest {
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
-    void rewindDependsOnCurrentMembersRatherThanPastOverlap(boolean neighborHeld) throws Exception {
+    void rewindAllowsAnotherSessionWithCurrentMembership(boolean neighborHeld) throws Exception {
         var session = createSession("storage", ".");
         var fixture = transport(session);
         var ready = acquireReady(fixture);
@@ -672,41 +672,40 @@ class WorkspaceRuntimeTest {
         var neighbor = holder(sessions.findSessionById(created.sessionId()).orElseThrow(), "neighbor");
         authority.claim(session.workspace(), neighbor);
         var rewind = Map.<String, Object>of("kind", "raw-file-history", "action", "rewind", "promptId", "prompt");
-        if (neighborHeld) {
-            var snapshot = Map.of("ownerSessionId", session.sessionId(), "files", Map.of(), "snapshots", List.of());
-            when(fixture.http().control(any(), any(), eq(Map.of("kind", "raw-file-history", "action", "snapshot"))))
-                    .thenReturn(CompletableFuture.completedFuture(snapshot));
-            assertThat(fixture.transport().control(fixture.lease(), ready.getSession(), rewind).toCompletableFuture().join())
-                    .isEqualTo(Map.of("state", snapshot, "filesChanged", List.of(), "filesFailed", List.of(), "conflict", true));
-            verify(fixture.http(), never()).control(any(), any(), eq(rewind));
-            authority.assertHeld(session.workspace(), neighbor);
-        } else {
+        if (!neighborHeld) {
             authority.release(session.workspace(), neighbor);
-            var result = Map.of("state", Map.of(), "filesChanged", List.of("tracked.txt"), "filesFailed", List.of(), "conflict", false);
-            when(fixture.http().control(any(), any(), eq(rewind))).thenReturn(CompletableFuture.completedFuture(result));
-            assertThat(fixture.transport().control(fixture.lease(), ready.getSession(), rewind).toCompletableFuture().join())
-                    .isEqualTo(result);
-            verify(fixture.http()).control(any(), any(), eq(rewind));
+        }
+        var result = Map.of("state", Map.of(), "filesChanged", List.of("tracked.txt"), "filesFailed", List.of(), "conflict", false);
+        when(fixture.http().control(any(), any(), eq(rewind))).thenReturn(CompletableFuture.completedFuture(result));
+        assertThat(fixture.transport().control(fixture.lease(), ready.getSession(), rewind).toCompletableFuture().join())
+                .isEqualTo(result);
+        verify(fixture.http()).control(any(), any(), eq(rewind));
+        if (neighborHeld) {
+            authority.assertHeld(session.workspace(), neighbor);
         }
         authority.assertHeld(session.workspace(), ready);
     }
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
-    void rewindExcludesLateAdmissionAndRetainsExclusivityOnlyOnUncertainty(boolean uncertain) throws Exception {
+    void rewindAllowsLateSessionsAndRetainsOnlyItsOwnPendingStateOnUncertainty(boolean uncertain) throws Exception {
         var session = createSession("storage", ".");
         var fixture = transport(session);
         var ready = acquireReady(fixture);
-        var rival = holder(session, "late");
+        var rival = holder(neighbor(session), "late");
         var operation = Map.<String, Object>of("kind", "raw-file-history", "action", "rewind", "promptId", "prompt");
         var response = new CompletableFuture<Object>();
         when(fixture.http().control(any(), any(), eq(operation))).thenReturn(response);
         var rewinding = fixture.transport().control(fixture.lease(), ready.getSession(), operation).toCompletableFuture();
-        assertBusy(() -> authority.claim(session.workspace(), rival));
+        authority.claim(session.workspace(), rival);
+        authority.assertHeld(session.workspace(), rival);
+        assertThat(authority.hasPendingRewind(ready)).isTrue();
         if (uncertain) {
             response.completeExceptionally(new IllegalStateException("lost rewind result"));
             assertThatThrownBy(rewinding::join).hasRootCauseMessage("lost rewind result");
-            assertBusy(() -> authority.claim(session.workspace(), rival));
+            authority.claim(session.workspace(), rival);
+            authority.assertHeld(session.workspace(), rival);
+            assertThat(authority.hasPendingRewind(ready)).isTrue();
             assertThatThrownBy(() -> fixture.transport().releaseMount(fixture.lease(), ready.getSession()))
                     .isInstanceOfSatisfying(RuntimeBrokerException.class,
                             error -> assertThat(error.getCode()).isEqualTo("workspace_writer_unproven"));
@@ -720,6 +719,7 @@ class WorkspaceRuntimeTest {
             var result = Map.of("state", Map.of(), "filesChanged", List.of(), "filesFailed", List.of(), "conflict", false);
             response.complete(result);
             assertThat(rewinding.join()).isEqualTo(result);
+            assertThat(authority.hasPendingRewind(ready)).isFalse();
             authority.claim(session.workspace(), rival);
             authority.assertHeld(session.workspace(), ready);
             authority.assertHeld(session.workspace(), rival);
@@ -727,19 +727,60 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void twoSessionsKeepIndependentPendingRewindsUntilTheirOwnConfirmedRelease() throws Exception {
+        var session = createSession("storage", ".");
+        var first = transport(session);
+        var firstReady = acquireReady(first);
+        var second = transport(neighbor(session));
+        var secondReady = acquireReady(second);
+        var operation = Map.<String, Object>of("kind", "raw-file-history", "action", "rewind", "promptId", "prompt");
+        when(first.http().control(any(), any(), eq(operation)))
+                .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("first outcome unknown")));
+        when(second.http().control(any(), any(), eq(operation)))
+                .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("second outcome unknown")));
+        assertThatThrownBy(() -> first.transport().control(first.lease(), firstReady.getSession(), operation)
+                .toCompletableFuture().join()).hasRootCauseMessage("first outcome unknown");
+        assertThatThrownBy(() -> second.transport().control(second.lease(), secondReady.getSession(), operation)
+                .toCompletableFuture().join()).hasRootCauseMessage("second outcome unknown");
+        assertThat(authority.hasPendingRewind(firstReady)).isTrue();
+        assertThat(authority.hasPendingRewind(secondReady)).isTrue();
+        assertThat(first.transport().release(first.lease(), firstReady.getSession()).toCompletableFuture().join()).isTrue();
+        assertThat(authority.hasPendingRewind(firstReady)).isFalse();
+        assertThat(authority.isHeld(session.workspace(), firstReady)).isFalse();
+        assertThat(authority.hasPendingRewind(secondReady)).isTrue();
+        assertThat(authority.isHeld(session.workspace(), secondReady)).isTrue();
+        assertThat(second.transport().release(second.lease(), secondReady.getSession()).toCompletableFuture().join()).isTrue();
+        assertThat(authority.hasPendingRewind(secondReady)).isFalse();
+        assertThat(authority.isHeld(session.workspace(), secondReady)).isFalse();
+    }
+
+    @Test
+    void rewindRequiresReadyOriginalMembership() throws Exception {
+        var session = createSession("storage", ".");
+        var fixture = transport(session);
+        authority.claim(session.workspace(), fixture.record());
+        assertUnavailable(() -> authority.beginRewind(session.workspace(), fixture.record()));
+        var running = ready(fixture.record());
+        authority.beginRewind(session.workspace(), running);
+        authority.endRewind(session.workspace(), running);
+        authority.release(session.workspace(), running);
+        assertUnavailable(() -> authority.beginRewind(session.workspace(), running));
+    }
+
+    @Test
     void releasesAnUnclaimedSessionWithoutActivatingItOrReleasingTheWorkspaceHolder() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);
-        var rival = holder(session, "holder");
+        var rival = ready(holder(session, "holder"));
         authority.claim(session.workspace(), rival);
-        assertThat(authority.beginRewind(session.workspace(), rival)).isTrue();
-        assertBusy(() -> fixture.transport().acquire(fixture.lease(), fixture.record().getSession()));
+        authority.beginRewind(session.workspace(), rival);
         var repository = new JdbcRuntimeSessionRepository(dataSource);
         var releasing = repository.compareAndSet(fixture.record(),
                 fixture.record().withState(RuntimeSessionRecord.State.RELEASING, Instant.now()));
         assertThat(releasing).isNotNull();
         assertThat(fixture.transport().release(fixture.lease(), releasing.getSession()).toCompletableFuture().join()).isTrue();
         assertThat(authority.isHeld(session.workspace(), rival)).isTrue();
+        assertThat(authority.hasPendingRewind(rival)).isTrue();
         assertUnavailable(() -> authority.claim(session.workspace(), releasing));
         verify(fixture.http(), never()).installContext(any(), any(), any(), any());
         verify(fixture.http(), never()).activateWorkspace(any(), any(), any(), any(Boolean.class));
@@ -805,10 +846,9 @@ class WorkspaceRuntimeTest {
     void mountHandbackOfANeverInstalledSessionOwesNoDetach() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);
-        var rival = holder(session, "holder");
+        var rival = ready(holder(session, "holder"));
         authority.claim(session.workspace(), rival);
-        assertThat(authority.beginRewind(session.workspace(), rival)).isTrue();
-        assertBusy(() -> fixture.transport().acquire(fixture.lease(), fixture.record().getSession()));
+        authority.beginRewind(session.workspace(), rival);
         assertThat(fixture.transport().releaseMount(fixture.lease(), fixture.record().getSession())
                 .toCompletableFuture().join()).isTrue();
         var releasing = new JdbcRuntimeSessionRepository(dataSource).compareAndSet(fixture.record(),
@@ -817,6 +857,7 @@ class WorkspaceRuntimeTest {
         assertThat(fixture.transport().release(fixture.lease(), releasing.getSession()).toCompletableFuture().join())
                 .isTrue();
         assertThat(authority.isHeld(session.workspace(), rival)).isTrue();
+        assertThat(authority.hasPendingRewind(rival)).isTrue();
         verify(fixture.http(), never()).release(any(), any());
         verify(fixture.http(), never()).activateWorkspace(any(), any(), any(), any(Boolean.class));
     }
@@ -1400,6 +1441,7 @@ class WorkspaceRuntimeTest {
     void heldTenantGuardDoesNotBlockMembershipChanges() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);
+        var running = ready(fixture.record());
         String storageKey = com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage.key(
                 session.tenantId(), session.workspace().getStorageId());
         try (var connection = dataSource.getConnection()) {
@@ -1411,11 +1453,11 @@ class WorkspaceRuntimeTest {
                     assertThat(rows.next()).isTrue();
                 }
             }
-            authority.claim(session.workspace(), fixture.record());
+            authority.claim(session.workspace(), running);
             assertThat(memberCount(storageKey)).isEqualTo(1L);
-            assertThat(authority.beginRewind(session.workspace(), fixture.record())).isTrue();
-            authority.endRewind(session.workspace(), fixture.record());
-            authority.release(session.workspace(), fixture.record());
+            authority.beginRewind(session.workspace(), running);
+            authority.endRewind(session.workspace(), running);
+            authority.release(session.workspace(), running);
             assertThat(memberCount(storageKey)).isZero();
             connection.rollback();
         }
@@ -1465,6 +1507,19 @@ class WorkspaceRuntimeTest {
         return bindings().admitSession(new JdbcRuntimeSessionRepository(dataSource),
                 new RuntimeSessionRecord(new RuntimeSession(session.sessionId(), id, "bootstrap", scope),
                         runtime.getBindingId(), runtime.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+    }
+
+    private RuntimeSessionRecord ready(RuntimeSessionRecord session) {
+        return new JdbcRuntimeSessionRepository(dataSource).compareAndSet(session,
+                session.withState(RuntimeSessionRecord.State.READY, Instant.now()));
+    }
+
+    private SessionRecord neighbor(SessionRecord session) {
+        var created = sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(session.tenantId()).actorId("actor").idempotencyKey(UUID.randomUUID().toString())
+                .requestDigest("sha256:" + "b".repeat(64)).agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", ".")).build());
+        return sessions.requireSession(session.tenantId(), created.sessionId());
     }
 
     private static String digest(String text) throws Exception {

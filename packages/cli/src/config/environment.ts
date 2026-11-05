@@ -556,6 +556,7 @@ export interface EnvFileReadFailure {
 export function readProjectEnvFiles(
   settings: Settings,
   startDir: string,
+  workspaceTrusted?: boolean,
 ): Record<string, Record<string, string> | null> {
   const userLevelPaths = getUserLevelEnvPaths();
   // `hashProjectHooks` hashes this map, and the sandbox mounts only the
@@ -582,7 +583,12 @@ export function readProjectEnvFiles(
     return isWithinRoot(resolved, workspaceRoot);
   };
   const files: Record<string, Record<string, string> | null> = {};
-  for (const file of findEnvFiles(settings, startDir, userLevelPaths)) {
+  for (const file of findEnvFiles(
+    settings,
+    startDir,
+    userLevelPaths,
+    workspaceTrusted,
+  )) {
     if (userLevelPaths.has(path.normalize(file))) continue;
     if (!isInsideWorkspace(file)) continue;
     try {

@@ -136,8 +136,8 @@ this recovery exception.
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
 | API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
 | Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
-| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits, described in [Turn events](#turn-events)                                                             |
-| Prompts    | `prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                                                |
+| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and, in headless runs, those a Mod submits, described in [Turn events](#turn-events)                  |
+| Prompts    | `prompt.submit` in headless runs and the Ink and OpenTUI terminals, and `$.prompt.submit` in headless runs, described in [Submitted prompts](#submitted-prompts)                        |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
 | Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, described in [The band above the prompt](#the-band-above-the-prompt)                                        |
@@ -423,6 +423,7 @@ supports:
       "clock.sleep",
       "command.register",
       "command.run",
+      "prompt.submit",
       "session.cwd",
       "session.end",
       "session.id",
@@ -446,6 +447,7 @@ supports:
       "clock.now",
       "clock.sleep",
       "command.register",
+      "prompt.submit",
       "session.cwd",
       "session.id",
       "session.model",
@@ -464,15 +466,17 @@ supports:
 }
 ```
 
-This is a headless run. In the Ink and OpenTUI terminals, `events` also lists `ui.render`.
+This is a headless run. In the Ink and OpenTUI terminals, `events` also lists `ui.render`, and `methods` does not list `prompt.submit` yet.
 `claudeCode` is the Claude Code release whose event names are recognized,
 `events` lists the events hooks can receive and `methods` the `$` methods a Mod can
 call. A Mod can use it to choose a fallback, such as a command reply where a
 drawing hook would not run.
 
 A normal plugin layer has 10 seconds of its own time, excluding time waiting for
-cross-plugin `next` or API calls other than `$.clock.sleep`. Pending void `ui.log` notifications do not pause
-the caller's budget. Catch recovery uses a one-second budget.
+cross-plugin `next` or API calls other than `$.clock.sleep` and `$.prompt.submit`. Pending void `ui.log` notifications do not pause
+the caller's budget. Neither does `$.prompt.submit`, whose call can outlive the
+hook that made it: the time the other Mods' `prompt.submit` hooks take while a
+hook awaits it counts as the hook's own. Catch recovery uses a one-second budget.
 Qwen additionally caps each root dispatch at 60 seconds of charged time and each
 uninterrupted guest execution slice at 10 seconds. Only tool roots exclude the
 trusted native waits described above; load and command roots retain continuous
@@ -625,13 +629,14 @@ back in the composer. Queued prompts then run. The call rejects when no turn is
 running, when `turnId` is not the running turn's id, or when the turn is already
 ending. In a headless run the turn ends with the error result
 `A Mod ended the turn.` and exit code 130, and a stream-json session goes on to
-its next message. Qwen Code has no `$.prompt.submit` yet, so a Mod cannot send a
-prompt after it ends a turn.
+its next message. In a headless run a Mod can send a prompt of its own after it
+ends a turn, with [`$.prompt.submit`](#a-mods-own-prompt).
 
 ## Submitted prompts
 
 In headless runs and in the Ink and OpenTUI terminals, `prompt.submit` fires for
-each prompt a person submits, before UserPromptSubmit hooks and before `@` references are read. A hook can rewrite the
+each prompt a person submits, and in headless runs for each prompt a Mod submits
+([A Mod's own prompt](#a-mods-own-prompt)), before UserPromptSubmit hooks and before `@` references are read. A hook can rewrite the
 prompt, attach context the model reads beside it, or drop it:
 
 ```javascript
@@ -650,12 +655,12 @@ export function register(on) {
 
 The hook receives:
 
-| Field     | Value                                                                                          |
-| --------- | ---------------------------------------------------------------------------------------------- |
-| `text`    | the prompt as submitted, with pasted text expanded; for a stream-json message, its text blocks |
-| `context` | absent; each hook that attaches context passes the list on with its own entries added          |
-| `wait`    | `false`                                                                                        |
-| `origin`  | `{kind: 'sdk'}` in headless runs, `{kind: 'composer'}` in the terminals                        |
+| Field     | Value                                                                                                                                   |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `text`    | the prompt as submitted, with pasted text expanded; for a stream-json message, its text blocks                                          |
+| `context` | absent; each hook that attaches context passes the list on with its own entries added                                                   |
+| `wait`    | `false`                                                                                                                                 |
+| `origin`  | `{kind: 'sdk'}` in headless runs, `{kind: 'composer'}` in the terminals; `{kind: 'plugin', name, asUser?}` for a prompt a Mod submitted |
 
 `origin`, `wait` and `turnId` are pinned. The prompt that enters is the one that
 arrives beneath the hooks: `next(e)` resolves to `{text, context?, origin}`, and
@@ -722,6 +727,62 @@ A prompt longer than 128 KiB as JSON reaches no hook, and the line
 `prompt.submit hook skipped: the prompt is too long for a Mod payload` appears
 where transcript logs do.
 
+### A Mod's own prompt
+
+In headless runs, `$.prompt.submit({ text })` submits a prompt of the Mod's own.
+It starts a turn once the run is idle, after the turn that is running, and
+never joins a running turn:
+
+```javascript
+export function register(on) {
+  on('turn.complete', ($, e, next) => {
+    if (/TODO/.test(e.answer))
+      void $.prompt.submit({ text: 'List the TODOs you just mentioned.' });
+    return next(e);
+  });
+}
+```
+
+- The prompt raises `prompt.submit` through every hook but the calling one and
+  those it runs beneath, with `origin` `{ kind: 'plugin', name }`, `name` being
+  the Mod's. The Mod's other hooks hear it. They can rewrite it, attach context
+  or drop it, as for a typed prompt.
+- The call resolves once the hooks have answered and the prompt is queued, to
+  `{ text, context?, origin }`, or to `{ drop: reason }` when a hook dropped it
+  or Qwen Code refused it. A call the hook does not await, as above, still
+  queues after the hook returns.
+- What last arrives beneath the hooks is queued, once, even when a hook calls
+  `next(e)` more than once. A text that is empty or only whitespace, or longer
+  than 128 KiB as JSON, from the call or from a hook's rewrite, is not queued:
+  the call resolves to a drop. An input too large for any Mod call rejects.
+- The model is told the prompt came from the Mod and that the person did not
+  type it. With `asUser: true` the model reads the text as the person's own
+  words; `origin` still names the Mod.
+- The transcript records the prompt as the Mod's, with the Mod's name, not as
+  the person's. A stream-json client receives the text as a `user` message,
+  followed by a `system` message with the subtype `mod_prompt` and the data
+  `{ mod }`, before the turn's output.
+- UserPromptSubmit hooks hear the prompt, and its turn raises `turn.start` and
+  `turn.complete` like any other. It counts toward the session turn limit.
+- `@` references in the text are not read.
+- A Mod command that submits a prompt hands work on to the model: its reply is
+  shown, and the prompt's turn follows in the same run. The command itself
+  starts no turn.
+- The Mods' prompts start at most 8 turns before the person sends a prompt
+  again. Past that a call resolves to a drop, and the line
+  `$.prompt.submit refused: …` appears where transcript logs do. In a headless
+  run, the prompt the run was given is the person's, and in a stream-json
+  session each message the client sends is, a slash command too.
+- `/clear` and `/resume` start the new session with no prompts queued and the
+  count at 0. A prompt submitted while the old session ends, from a
+  `session.end` hook for instance, resolves to
+  `{ drop: 'the session is ending' }`.
+- A prompt still queued when the run stops early, on an interrupt, a structured
+  result, a detected loop or a slash command that fails, does not run.
+- In the Ink and OpenTUI terminals the method is not listed in `methods` yet,
+  and a call resolves to
+  `{ drop: 'this host does not run prompts a Mod submits' }`.
+
 These differ from Claude Code:
 
 - Slash commands, background notifications and the continuation of an
@@ -732,11 +793,12 @@ These differ from Claude Code:
 - A UserPromptSubmit hook that blocks the prompt beneath does not turn `next(e)`
   into `{drop}`: the Mod hooks have settled by the time it runs.
 - `next(e)` resolves once the hooks beneath have answered, not once the turn
-  starts.
+  starts. In the same way, `$.prompt.submit` resolves once its prompt is
+  queued.
 - A context the conversation already holds word for word is not sent again.
   Each Mod context and UserPromptSubmit's context count on their own, so a
   context that changes every turn does not make the others repeat.
-- `$.prompt.submit` does not exist yet.
+- `$.prompt.submit` takes no `attachments`.
 
 ## Elements
 

@@ -1249,6 +1249,9 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
     useWorkspaceActions: () => mockWorkspaceActions,
     useMcp: () => mockMcp,
     useWorkspaceEventSignals: () => testState.workspaceEventSignals,
+    // ProjectHooksApprovalCard mounts inside the chat slot; no workspace in
+    // this harness, so the card stays hidden and issues no daemon reads.
+    useOptionalWorkspace: () => undefined,
   };
 });
 
