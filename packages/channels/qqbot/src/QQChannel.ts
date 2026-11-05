@@ -6000,7 +6000,6 @@ export class QQChannel extends ChannelBase {
     routeText: string;
     body: string;
     text: string;
-    botTag: string;
     senderName: string;
   } | null {
     // Keep identity values out of the display-name position. In particular,
@@ -6135,10 +6134,11 @@ export class QQChannel extends ChannelBase {
       safeName,
       cleanText,
       commandText,
-      routeText: sanitizePromptText(safeDisplayText),
+      routeText: forwardedBot
+        ? `${botTag}${sanitizePromptText(safeDisplayText)}`
+        : sanitizePromptText(safeDisplayText),
       body,
       text,
-      botTag,
       senderName,
     };
   }
@@ -6370,15 +6370,8 @@ export class QQChannel extends ChannelBase {
       forceAtMention: true,
     });
     if (!result) return;
-    const {
-      isSlash,
-      text,
-      commandText,
-      routeText,
-      botTag,
-      senderName,
-      safeName,
-    } = result;
+    const { isSlash, text, commandText, routeText, senderName, safeName } =
+      result;
     const media = this.inboundMedia(event);
     const mediaOnly = result.body === '' && media.length > 0;
 
@@ -6415,9 +6408,9 @@ export class QQChannel extends ChannelBase {
       senderName,
       chatId,
       text: mediaOnly
-        ? `${botTag}${mediaPlaceholder(media)}`
+        ? mediaPlaceholder(media)
         : this.config.messageRoutes
-          ? `${botTag}${routeText}`
+          ? routeText
           : text,
       messageId: event.id,
       isGroup: true,
@@ -6481,7 +6474,6 @@ export class QQChannel extends ChannelBase {
       text,
       commandText,
       routeText,
-      botTag,
       senderName,
       isAtBot,
       safeName,
@@ -6586,9 +6578,9 @@ export class QQChannel extends ChannelBase {
       channelName: this.name,
       chatId,
       text: mediaOnly
-        ? `${botTag}${mediaPlaceholder(media)}`
+        ? mediaPlaceholder(media)
         : this.config.messageRoutes
-          ? `${botTag}${routeText}`
+          ? routeText
           : text,
       senderId,
       senderName,
