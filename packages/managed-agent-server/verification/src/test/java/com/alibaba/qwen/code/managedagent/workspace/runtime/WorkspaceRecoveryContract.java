@@ -74,7 +74,11 @@ public final class WorkspaceRecoveryContract {
             assertThat(a.get(10, TimeUnit.SECONDS)).isTrue();
             assertThat(b.get(10, TimeUnit.SECONDS)).isTrue();
         }
-        assertThat(authority.beginRewind(fixture.session.workspace(), first.session())).isFalse();
+        authority.beginRewind(fixture.session.workspace(), first.session());
+        other.assertHeld(fixture.session.workspace(), second.session());
+        other.beginRewind(fixture.session.workspace(), second.session());
+        assertThat(authority.hasPendingRewind(first.session())).isTrue();
+        assertThat(authority.hasPendingRewind(second.session())).isTrue();
         var children = new com.alibaba.qwen.code.managedagent.persistence.ChildWorkspaceStore(jdbc,
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
         var admitted = children.admit(fixture.tenant, fixture.session.sessionId(), UUID.randomUUID().toString(),
@@ -83,6 +87,9 @@ public final class WorkspaceRecoveryContract {
         assertThatThrownBy(() -> authority.holdForMaintenance(fixture.session.workspace(), maintenance.childWorkspaceId(), 1))
                 .isInstanceOf(RuntimeBrokerException.class);
         authority.release(fixture.session.workspace(), first.session());
+        assertThat(authority.hasPendingRewind(first.session())).isFalse();
+        assertThat(authority.hasPendingRewind(second.session())).isTrue();
+        other.endRewind(fixture.session.workspace(), second.session());
         // A locally released lifecycle row does not prove its physical membership ended.
         fixture.sessions.compareAndSet(second.session(), second.session().withState(RuntimeSessionRecord.State.RELEASED, Instant.now()));
         assertThatThrownBy(() -> authority.holdForMaintenance(fixture.session.workspace(), maintenance.childWorkspaceId(), 1))
@@ -93,7 +100,7 @@ public final class WorkspaceRecoveryContract {
         assertThatThrownBy(() -> other.claim(fixture.session.workspace(), first.session())).isInstanceOf(RuntimeBrokerException.class);
         authority.releaseMaintenance(fixture.session.workspace(), maintenance.childWorkspaceId(), 1, step);
         authority.claim(fixture.session.workspace(), first.session());
-        assertThat(authority.beginRewind(fixture.session.workspace(), first.session())).isTrue();
+        authority.beginRewind(fixture.session.workspace(), first.session());
         authority.endRewind(fixture.session.workspace(), first.session());
         authority.assertHeld(fixture.session.workspace(), first.session());
     }

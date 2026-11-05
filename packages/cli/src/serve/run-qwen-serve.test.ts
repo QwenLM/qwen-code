@@ -4956,6 +4956,144 @@ describe('validatePolicyConfig (#4335 boot validation)', () => {
   });
 });
 
+describe('runQwenServe Conversations directory configuration', () => {
+  let temporary: string;
+  let workspace: string;
+  let handle: RunHandle | undefined;
+
+  beforeEach(() => {
+    temporary = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-conversations-root-')),
+    );
+    workspace = path.join(temporary, 'project');
+    fs.mkdirSync(workspace);
+    vi.stubEnv('HOME', temporary);
+    vi.stubEnv('USERPROFILE', temporary);
+    vi.stubEnv('QWEN_HOME', path.join(temporary, '.qwen'));
+    vi.stubEnv('QWEN_CONVERSATIONS_DIR', undefined);
+    resetServeFastPathHomeEnvBootstrapForTesting();
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+    vi.mocked(createDaemonUpdateRestarter).mockClear();
+  });
+
+  afterEach(async () => {
+    await handle?.close();
+    handle = undefined;
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    resetServeFastPathHomeEnvBootstrapForTesting();
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+    fs.rmSync(temporary, { recursive: true, force: true });
+  });
+
+  it.each(['default', 'environment', 'option'] as const)(
+    'pins the %s root before asynchronous boot, without creating it, and preserves it for restart',
+    async (source) => {
+      const expectedRoot =
+        source === 'default'
+          ? path.join(temporary, 'Documents', 'Qwen Code', 'Conversations')
+          : path.join(temporary, `${source} conversations`);
+      const laterRoot = path.join(temporary, 'later-root');
+      vi.stubEnv(
+        'QWEN_CONVERSATIONS_DIR',
+        source === 'option'
+          ? 'invalid-relative-environment-root'
+          : source === 'environment'
+            ? expectedRoot
+            : undefined,
+      );
+      let selectedWorkspace: ConversationWorkspace | undefined;
+      const originalCreateServeApp = serverModule.createServeApp;
+      vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+        selectedWorkspace = args[2]?.liveConversationWorkspace;
+        return originalCreateServeApp(...args);
+      });
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: 'localhost',
+          mode: 'http-bridge',
+          workspace,
+          serveWebShell: false,
+          ...(source === 'option' ? { conversationsDir: expectedRoot } : {}),
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(temporary, 'debug'),
+          updateRestartArgv: ['serve'],
+          bindHostnameLookup: async () => {
+            vi.stubEnv('QWEN_CONVERSATIONS_DIR', laterRoot);
+            return { address: '127.0.0.1', family: 4 };
+          },
+        },
+      );
+      expect(selectedWorkspace?.rootPath).toBe(expectedRoot);
+      expect(fs.existsSync(expectedRoot)).toBe(false);
+      expect(fs.existsSync(laterRoot)).toBe(false);
+      expect(
+        readDaemonDiscoveries().entries.find(
+          (entry) => entry.record.port === Number(new URL(handle!.url).port),
+        )?.record,
+      ).toMatchObject({ conversationsDir: expectedRoot });
+      expect(createDaemonUpdateRestarter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({
+            QWEN_CONVERSATIONS_DIR: expectedRoot,
+          }),
+        }),
+      );
+      expect((await fetch(`${handle.url}/health`)).status).toBe(200);
+    },
+  );
+
+  it.each([
+    ['option', ''],
+    ['option', 'relative-root'],
+    ['option', null],
+    ['environment', ''],
+    ['environment', 'relative-root'],
+  ] as const)(
+    'rejects invalid %s root %j before listening',
+    async (source, root) => {
+      if (source === 'environment') vi.stubEnv('QWEN_CONVERSATIONS_DIR', root!);
+      const listen = vi.spyOn(net.Server.prototype, 'listen');
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace,
+            ...(source === 'option'
+              ? { conversationsDir: root as string }
+              : {}),
+          },
+          { bridge: makeRuntimeBridge() },
+        ),
+      ).rejects.toThrow(
+        /Conversations directory.*fully qualified absolute path/,
+      );
+      expect(listen).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reserves the environment-selected root from ordinary workspace registration', async () => {
+    const root = path.join(temporary, 'configured-root');
+    fs.mkdirSync(root, { mode: 0o700 });
+    vi.stubEnv('QWEN_CONVERSATIONS_DIR', root);
+    const listen = vi.spyOn(net.Server.prototype, 'listen');
+    await expect(
+      runQwenServe({
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: root,
+      }),
+    ).rejects.toThrow(/reserved for Conversations/);
+    expect(listen).not.toHaveBeenCalled();
+  });
+});
+
 /**
  * Integration test: verify daemon logger is initialized and written to
  * during `runQwenServe` boot + shutdown. Uses a fake bridge to avoid

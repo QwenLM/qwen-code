@@ -2,6 +2,8 @@
 
 [English](2026-11-03-managed-journal-commit-tenant-guard.md) | [简体中文](2026-11-03-managed-journal-commit-tenant-guard.zh-CN.md)
 
+下文关于普通 journal 提交和内联/发布结果的存储锁顺序已由 [2026-11-05 设计](2026-11-05-managed-publication-storage-sharing.zh-CN.md)取代。这些路径在现有离线维护约定下使用无锁物理状态检查；其他准入与生命周期锁仍按下文保留。
+
 ## 问题与现状
 
 `JournalCommit.commit` 是 Managed Session 写入最频繁的路径，Harness 的每一批 journal

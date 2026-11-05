@@ -4,6 +4,17 @@
   gap: 12px;
 }
 
+.platformHeaderText {
+  min-width: 0;
+  flex: 1;
+}
+
+/* Clears the absolutely positioned dialog close button (top-2 right-2). */
+.fullscreenToggle {
+  margin-right: 2rem;
+  flex: 0 0 auto;
+}
+
 .platformMark {
   display: inline-flex;
   width: 42px;
@@ -25,6 +36,10 @@
   gap: 0;
 }
 
+.formFullscreen {
+  flex: 1;
+}
+
 .body {
   display: flex;
   max-height: min(66vh, 650px);
@@ -33,6 +48,11 @@
   overflow-y: auto;
   padding-block: 4px 8px;
   padding-inline: 1px;
+}
+
+.bodyFullscreen {
+  max-height: none;
+  flex: 1;
 }
 
 .section {
@@ -233,10 +253,44 @@
   gap: 3px;
 }
 
+.recordRowHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .recordLabel {
   font-size: 12px;
   font-weight: 500;
+  font-family: ui-monospace, monospace;
   color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.recordDescription {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.recordEmpty {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.recordOption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.recordOptionDescription {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .secretState {

@@ -58,7 +58,8 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     private final String providerId;
     private final Duration startupTimeout;
     private final HttpRuntimeTransport transport = new HttpRuntimeTransport();
-    private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService executor = Executors.newThreadPerTaskExecutor(
+            Thread.ofVirtual().name("runtime-external-", 0).factory());
     private final Map<RuntimeProvisionSeed, Placement> placements = new ConcurrentHashMap<>();
     private final Map<List<Object>, Placement> placementsByLease = new ConcurrentHashMap<>();
 
