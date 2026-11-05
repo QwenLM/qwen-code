@@ -136,7 +136,7 @@ this recovery exception.
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
 | API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
 | Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
-| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and, in headless runs, those a Mod submits, described in [Turn events](#turn-events)                  |
+| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and, in headless and Ink sessions, those a Mod submits, described in [Turn events](#turn-events)      |
 | Prompts    | `prompt.submit` in headless runs and the Ink and OpenTUI terminals, and `$.prompt.submit` in headless runs and the Ink terminal, described in [Submitted prompts](#submitted-prompts)   |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
@@ -770,6 +770,8 @@ export function register(on) {
   command itself starts no turn.
 - In the Ink terminal the prompt's turn starts after the prompts the person
   queued and the background notifications, and waits while a Goal is running.
+  A Monitor update that waits out the minimum interval between its turns does
+  not hold it.
   The transcript shows it as the line `Mod <name>: <text>`, live and when the
   session is resumed, with `asUser` too, and it does not enter the input
   history.
@@ -785,8 +787,12 @@ export function register(on) {
   `{ drop: 'the session is ending' }`.
 - A prompt still queued when the run stops early, on an interrupt, a structured
   result, a detected loop or a slash command that fails, does not run. In the
-  Ink terminal, neither does one still queued when the person cancels a turn
-  with Esc; a turn a Mod ends with `$.turn.abort` keeps them.
+  Ink terminal, neither does one still queued when the person stops a turn,
+  with Esc or by declining every tool it asks to run. Until the person sends a
+  prompt again, a call then resolves to
+  `{ drop: 'the person stopped a turn and has not sent a prompt since' }`, so a
+  `turn.complete` hook of the stopped turn starts no turn. A turn a Mod ends
+  with `$.turn.abort` keeps them.
 - In the OpenTUI terminal the method is not listed in `methods` yet, and a
   call resolves to `{ drop: 'this host does not run prompts a Mod submits' }`.
 

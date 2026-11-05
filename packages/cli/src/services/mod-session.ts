@@ -184,6 +184,9 @@ export class ModSession implements ICommandLoader {
     [];
   // Turns the Mods' prompts started since the person last sent one.
   private modTurns = 0;
+  // The person stopped a turn and has not sent a prompt since: what the Mods
+  // submit does not run, also a call a hook did not await before it ended.
+  private stopped = false;
   // The session each prompt taken to run was queued for.
   private readonly taken = new WeakMap<ModQueuedPrompt, string>();
   // Also runs on every API response, so a session that no hook saw still has
@@ -554,6 +557,7 @@ export class ModSession implements ICommandLoader {
       // The Mods' prompts and the turns they started belong to the old one.
       this.submitted.length = 0;
       this.modTurns = 0;
+      this.stopped = false;
       this.adoptedAt = Date.now();
       this.startedAt = undefined;
       this.recorder = undefined;
@@ -735,8 +739,12 @@ export class ModSession implements ICommandLoader {
     // the hooks that hear it end cannot queue a prompt for it.
     if (this.closing || this.sessionId !== this.config.getSessionId())
       return 'the session is ending';
-    if (this.modTurns + this.submitted.length >= MOD_PROMPT_TURN_LIMIT) {
-      const refused = `the Mods have started ${MOD_PROMPT_TURN_LIMIT} turns since the last prompt from the person`;
+    const refused = this.stopped
+      ? 'the person stopped a turn and has not sent a prompt since'
+      : this.modTurns + this.submitted.length >= MOD_PROMPT_TURN_LIMIT
+        ? `the Mods have started ${MOD_PROMPT_TURN_LIMIT} turns since the last prompt from the person`
+        : undefined;
+    if (refused) {
       this.pendingLogs.push({
         text: `$.prompt.submit refused: ${refused}`,
         to: 'transcript',
@@ -779,6 +787,7 @@ export class ModSession implements ICommandLoader {
     if (
       sessionId === undefined ||
       this.closing ||
+      this.stopped ||
       sessionId !== this.config.getSessionId()
     )
       return;
@@ -798,15 +807,26 @@ export class ModSession implements ICommandLoader {
   /** The person sent a prompt, so the Mods' prompts may start turns again. */
   notePersonPrompt(): void {
     this.modTurns = 0;
+    this.stopped = false;
   }
 
   /**
    * Drops the prompts the Mods submitted that have not started: a headless
-   * run that stopped early does not run them, and neither does the next one;
-   * in a terminal, neither does a session whose turn the person cancelled.
+   * run that stopped early does not run them, and neither does the next one.
    */
   discardSubmittedPrompts(): void {
     this.submitted.length = 0;
+  }
+
+  /**
+   * The person stopped the running turn: drops the prompts the Mods submitted
+   * that have not started, and refuses those they submit until the person
+   * sends a prompt again. A `turn.complete` hook of the stopped turn that
+   * submits, awaited or not, starts no turn.
+   */
+  stopSubmittedPrompts(): void {
+    this.discardSubmittedPrompts();
+    this.stopped = true;
   }
 
   /** Whether a loaded Mod hooks `prompt.submit`. */

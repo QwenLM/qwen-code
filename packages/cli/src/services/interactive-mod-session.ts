@@ -295,9 +295,12 @@ export class InteractiveModSession implements ICommandLoader {
     this.session.notePersonPrompt();
   }
 
-  /** Drops the prompts the Mods submitted that have not started. */
-  discardSubmittedPrompts(): void {
-    this.session.discardSubmittedPrompts();
+  /**
+   * The person stopped the running turn: drops the Mods' queued prompts and
+   * refuses new ones until the person sends a prompt again.
+   */
+  stopSubmittedPrompts(): void {
+    this.session.stopSubmittedPrompts();
   }
 
   startTurn(

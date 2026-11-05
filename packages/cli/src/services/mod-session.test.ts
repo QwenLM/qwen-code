@@ -822,6 +822,31 @@ describe('Mod session ownership', () => {
       expect(session.takeSubmittedPrompt()?.text).toBe('after');
     });
 
+    it('refuses the Mods’ prompts after the person stops a turn, until they send one', async () => {
+      const { session, config } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      expect(queue(prompt('queued'))).toBeUndefined();
+      const taken = session.takeSubmittedPrompt()!;
+      expect(queue(prompt('waiting'))).toBeUndefined();
+      session.stopSubmittedPrompts();
+      expect(session.hasSubmittedPrompts).toBe(false);
+      // What a stopped turn's hooks submit, awaited or not, does not run.
+      expect(queue(prompt('from turn.complete'))).toBe(
+        'the person stopped a turn and has not sent a prompt since',
+      );
+      session.returnSubmittedPrompt(taken);
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      session.notePersonPrompt();
+      expect(queue(prompt('after'))).toBeUndefined();
+      expect(session.takeSubmittedPrompt()?.text).toBe('after');
+      // A new session starts unstopped.
+      session.stopSubmittedPrompts();
+      config.getSessionId.mockReturnValue('session-2');
+      await session.syncSession('clear');
+      expect(queue(prompt('fresh'))).toBeUndefined();
+    });
+
     const terminal = (runsPrompts?: boolean, promptQueued = vi.fn()) =>
       setup(
         { isInteractive: () => true },

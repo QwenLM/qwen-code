@@ -173,6 +173,7 @@ const mockDualOutput = vi.hoisted(() => ({
   finalizeAssistantMessage: vi.fn(),
   emitToolResult: vi.fn(),
   emitUserMessage: vi.fn(),
+  emitSystemMessage: vi.fn(),
 }));
 
 vi.mock('../../services/review-worktree-lease.js', () => ({
@@ -214,7 +215,7 @@ const modQueue = () => ({
   takeSubmittedPrompt: vi.fn(),
   returnSubmittedPrompt: vi.fn(),
   notePersonPrompt: vi.fn(),
-  discardSubmittedPrompts: vi.fn(),
+  stopSubmittedPrompts: vi.fn(),
 });
 const mockRunModelRound = vi.hoisted(() => vi.fn());
 vi.mock(
@@ -14436,7 +14437,7 @@ describe('useLlmStream', () => {
               queued.unshift(prompt);
             }),
             notePersonPrompt: vi.fn(),
-            discardSubmittedPrompts: vi.fn(() => {
+            stopSubmittedPrompts: vi.fn(() => {
               queued.length = 0;
             }),
           };
@@ -14623,7 +14624,7 @@ describe('useLlmStream', () => {
 
           // `$.turn.abort` keeps them.
           act(() => expect(mods.startTurn.mock.calls[0][2]()).toBe(true));
-          expect(mods.discardSubmittedPrompts).not.toHaveBeenCalled();
+          expect(mods.stopSubmittedPrompts).not.toHaveBeenCalled();
           release();
           await act(async () => {
             await running;
@@ -14637,9 +14638,199 @@ describe('useLlmStream', () => {
           act(() => {
             result.current.cancelOngoingRequest();
           });
-          expect(mods.discardSubmittedPrompts).toHaveBeenCalledOnce();
+          expect(mods.stopSubmittedPrompts).toHaveBeenCalledOnce();
           expect(queued).toEqual([]);
           release();
+        });
+
+        it('drops the queued prompts when the person declines every tool the turn asked for', async () => {
+          const { mods, queue, queued } = installQueue();
+          admitted(async function* () {
+            yield {
+              type: ServerLlmEventType.ToolCallRequest,
+              value: {
+                callId: 'declined',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-declined',
+              },
+            };
+          });
+          const { result, rerenderWithToolCalls, completeToolRound } =
+            renderTestHook();
+          await act(async () => {
+            await result.current.submitQuery(
+              'run the tool',
+              SendMessageType.UserQuery,
+              'prompt-declined',
+            );
+          });
+          await waitFor(() =>
+            expect(mockScheduleToolCalls).toHaveBeenCalledOnce(),
+          );
+          const request = {
+            callId: 'declined',
+            name: 'testTool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-declined',
+          };
+          const invocation = {
+            getDescription: () => 'Mock description',
+          } as unknown as AnyToolInvocation;
+          rerenderWithToolCalls([
+            {
+              request,
+              status: 'awaiting_approval',
+              responseSubmittedToLlm: false,
+              confirmationDetails: {
+                onConfirm: vi.fn(),
+                onCancel: vi.fn(),
+                message: 'Run it?',
+              },
+              tool: { name: 'testTool', displayName: 'testTool' },
+              invocation,
+            } as unknown as TrackedWaitingToolCall,
+          ]);
+          await queue({ plugin: 'lint', text: 'next' });
+          expect(mods.takeSubmittedPrompt).not.toHaveBeenCalled();
+
+          // The dialog takes the Esc, so no cancel runs: the declined batch
+          // ends the turn.
+          await completeToolRound([
+            {
+              request,
+              status: 'cancelled',
+              response: {
+                callId: 'declined',
+                responseParts: [{ text: 'cancelled' }],
+                errorType: undefined,
+              },
+              responseSubmittedToLlm: false,
+              tool: { displayName: 'testTool' },
+              invocation,
+            } as TrackedCancelledToolCall,
+          ]);
+
+          expect(mods.stopSubmittedPrompts).toHaveBeenCalledOnce();
+          expect(queued).toEqual([]);
+          rerenderWithToolCalls([]);
+          await act(async () => {
+            await new Promise((resolve) => setImmediate(resolve));
+          });
+          expect(mockSendMessageStream).toHaveBeenCalledOnce();
+        });
+
+        it('runs while a monitor update waits out its interval', async () => {
+          const { queue } = installQueue();
+          admitted(finished);
+          vi.useFakeTimers();
+          renderTestHook();
+          const pulse = mockMonitorRegistry.setNotificationCallback.mock
+            .calls[0][0] as (
+            displayText: string,
+            modelText: string,
+            meta: { monitorId: string; status: string },
+          ) => void;
+          const settle = () =>
+            act(async () => {
+              await vi.advanceTimersByTimeAsync(100);
+            });
+          await act(async () => {
+            pulse('Monitor event #1', '<n>pulse-1</n>', {
+              monitorId: 'mon_1',
+              status: 'running',
+            });
+          });
+          await settle();
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          await act(async () => {
+            pulse('Monitor event #2', '<n>pulse-2</n>', {
+              monitorId: 'mon_1',
+              status: 'running',
+            });
+          });
+          await settle();
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+          // The held pulse does not hold the Mod's prompt: a monitor that
+          // prints within every interval would hold it for good.
+          await queue({ plugin: 'lint', text: 'later' });
+          await settle();
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+          expect(options(1)['submittedByMod']).toBe('lint');
+
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(
+              INTERIM_MONITOR_MIN_TURN_INTERVAL_MS,
+            );
+          });
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+          expect(
+            JSON.stringify(mockSendMessageStream.mock.calls[2][0]),
+          ).toContain('pulse-2');
+        });
+
+        it('waits for a notification that can run now', async () => {
+          const { mods, queue } = installQueue();
+          let release!: () => void;
+          admitted(async function* () {
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            yield* finished();
+          });
+          const { result } = renderTestHook();
+          let running!: Promise<void>;
+          await act(async () => {
+            running = result.current.submitQuery('Fix it');
+          });
+          const pulse = mockMonitorRegistry.setNotificationCallback.mock
+            .calls[0][0] as (
+            displayText: string,
+            modelText: string,
+            meta: { monitorId: string; status: string },
+          ) => void;
+          await act(async () => {
+            pulse('Monitor done', '<n>done</n>', {
+              monitorId: 'mon_1',
+              status: 'completed',
+            });
+          });
+          await queue({ plugin: 'lint', text: 'later' });
+          admitted(finished);
+          release();
+          await act(async () => {
+            await running;
+          });
+
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(3),
+          );
+          expect(options(1)['type']).toBe(SendMessageType.Notification);
+          expect(options(2)['submittedByMod']).toBe('lint');
+          // It lost the idle moment to the notification and waited for it.
+          expect(mods.returnSubmittedPrompt).toHaveBeenCalledOnce();
+        });
+
+        it('sends the sidecar the Mod’s text and its name, not the frame', async () => {
+          const { queue } = installQueue();
+          admitted(finished);
+          mockUseDualOutput.mockReturnValue(mockDualOutput);
+          renderTestHook();
+
+          await queue({ plugin: 'lint', text: 'List the TODOs' });
+
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledOnce(),
+          );
+          expect(
+            mockDualOutput.emitUserMessage,
+          ).toHaveBeenCalledExactlyOnceWith([{ text: 'List the TODOs' }]);
+          expect(
+            mockDualOutput.emitSystemMessage,
+          ).toHaveBeenCalledExactlyOnceWith('mod_prompt', { mod: 'lint' });
         });
 
         it('puts the prompt back when its turn cannot start', async () => {

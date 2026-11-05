@@ -546,6 +546,27 @@ const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
 export const INTERIM_MONITOR_MIN_TURN_INTERVAL_MS = 10_000;
 
 /**
+ * How long the notification batch at the front of `queue` still waits out
+ * {@link INTERIM_MONITOR_MIN_TURN_INTERVAL_MS}, or 0 when it can run now.
+ */
+function interimMonitorWaitMs(
+  queue: readonly QueuedNotification[],
+  lastInterimMonitorTurnAt: number,
+): number {
+  const leading = queue[0];
+  if (
+    leading?.sendMessageType !== SendMessageType.Notification ||
+    leading.monitor?.status !== 'running'
+  )
+    return 0;
+  return Math.max(
+    0,
+    INTERIM_MONITOR_MIN_TURN_INTERVAL_MS -
+      (Date.now() - lastInterimMonitorTurnAt),
+  );
+}
+
+/**
  * An overflow summary taken from the tally and awaiting a turn to carry it.
  * `displayed` mirrors the per-notification flag so a re-queued summary is not
  * rendered twice.
@@ -879,6 +900,11 @@ export const useLlmStream = (
   const turnCancelledRef = useRef(false);
   const isSubmittingQueryRef = useRef(false);
   const submissionLeaseGenerationRef = useRef(0);
+  // Re-runs the drain of the Mods' prompts (`$.prompt.submit`). One put back
+  // because another submission won the idle moment waits for that one to
+  // settle: it may start no turn, so the session can stay idle throughout.
+  const [modPromptTrigger, setModPromptTrigger] = useState(0);
+  const modPromptReturnedRef = useRef(false);
   const setSubmissionInFlight = useCallback(
     (inFlight: boolean) => {
       const changed = isSubmittingQueryRef.current !== inFlight;
@@ -887,6 +913,10 @@ export const useLlmStream = (
       if (sharedRef) sharedRef.current = inFlight;
       if (changed && !inFlight) {
         goalQueueRef?.current?.onSubmissionSettled?.();
+        if (modPromptReturnedRef.current) {
+          modPromptReturnedRef.current = false;
+          setModPromptTrigger((n) => n + 1);
+        }
       }
     },
     [goalQueueRef],
@@ -1604,8 +1634,9 @@ export const useLlmStream = (
       return false;
     }
     // The person stopped the session's work: the Mods' prompts still queued
-    // do not start once it is idle. A Mod that ends a turn keeps them.
-    if (!quiet) getInteractiveModSession(config)?.discardSubmittedPrompts();
+    // do not start once it is idle, nor do those the stopped turn's hooks
+    // submit. A Mod that ends a turn keeps them.
+    if (!quiet) getInteractiveModSession(config)?.stopSubmittedPrompts();
     if (modTurnRef.current) {
       modTurnRef.current.ending = 'aborted';
       modTurnRef.current.cancel.abort();
@@ -4715,16 +4746,25 @@ export const useLlmStream = (
             submitType !== SendMessageType.ToolResult &&
             submitType !== SendMessageType.Goal
           ) {
-            const rawParts =
-              typeof finalQueryToSend === 'string'
-                ? [finalQueryToSend]
-                : Array.isArray(finalQueryToSend)
-                  ? finalQueryToSend
-                  : [finalQueryToSend];
-            const userParts: Part[] = rawParts.map((p) =>
-              typeof p === 'string' ? { text: p } : p,
-            );
-            dualOutput.emitUserMessage(userParts);
+            // A Mod's prompt reaches the sidecar as in a headless run: its
+            // text, not the frame the model reads, then who submitted it.
+            if (modPrompt) {
+              dualOutput.emitUserMessage([{ text: modPrompt.text }]);
+              dualOutput.emitSystemMessage('mod_prompt', {
+                mod: modPrompt.plugin,
+              });
+            } else {
+              const rawParts =
+                typeof finalQueryToSend === 'string'
+                  ? [finalQueryToSend]
+                  : Array.isArray(finalQueryToSend)
+                    ? finalQueryToSend
+                    : [finalQueryToSend];
+              const userParts: Part[] = rawParts.map((p) =>
+                typeof p === 'string' ? { text: p } : p,
+              );
+              dualOutput.emitUserMessage(userParts);
+            }
           }
 
           const workflowSessionId = config.getSessionId();
@@ -6628,6 +6668,10 @@ export const useLlmStream = (
           (toolCall) => toolCall.request.callId,
         );
         markToolsAsSubmitted(callIdsToMarkAsSubmitted);
+        // The person declined every tool the turn asked for, which ends it as
+        // Esc does; Esc and a Mod's `$.turn.abort` already set the cancel.
+        if (!turnCancelledRef.current)
+          getInteractiveModSession(config)?.stopSubmittedPrompts();
         if (toolGoalBinding) {
           // Every cancellation that reaches here originates in a user action:
           // either Esc through `cancelOngoingRequest`, or a declined tool
@@ -7820,22 +7864,19 @@ export const useLlmStream = (
       // interim (status 'running') monitor-led batches; terminal notifications
       // and cron fires stay prompt. Checking queue[0] before the cancelled-
       // monitor prune inside is conservative in the right direction.
-      const leading = notificationQueueRef.current[0]!;
-      if (
-        leading.sendMessageType === SendMessageType.Notification &&
-        leading.monitor?.status === 'running'
-      ) {
-        const elapsed = Date.now() - lastInterimMonitorTurnAtRef.current;
-        if (elapsed < INTERIM_MONITOR_MIN_TURN_INTERVAL_MS) {
-          // Re-fire this effect when the window elapses so queued pulses
-          // still batch into a single catch-up turn even if the monitor
-          // goes quiet in the meantime.
-          const timer = setTimeout(
-            () => setNotificationTrigger((n) => n + 1),
-            INTERIM_MONITOR_MIN_TURN_INTERVAL_MS - elapsed,
-          );
-          return () => clearTimeout(timer);
-        }
+      const waitMs = interimMonitorWaitMs(
+        notificationQueueRef.current,
+        lastInterimMonitorTurnAtRef.current,
+      );
+      if (waitMs > 0) {
+        // Re-fire this effect when the window elapses so queued pulses
+        // still batch into a single catch-up turn even if the monitor
+        // goes quiet in the meantime.
+        const timer = setTimeout(
+          () => setNotificationTrigger((n) => n + 1),
+          waitMs,
+        );
+        return () => clearTimeout(timer);
       }
 
       // Consumer-side guard for #7156: this effect can run on a render pass
@@ -8022,10 +8063,11 @@ export const useLlmStream = (
 
   // ─── A Mod's own prompts (`$.prompt.submit`) ───────────────
   // Each runs as a turn of its own once the session is idle, after the
-  // person's queued prompts and the notifications, and not while a Goal owns
-  // the session's turns: a Mod's prompt is neither the person's words nor a
-  // turn the Goal asked for.
-  const [modPromptTrigger, setModPromptTrigger] = useState(0);
+  // person's queued prompts and the notifications that can run now, and not
+  // while a Goal owns the session's turns: a Mod's prompt is neither the
+  // person's words nor a turn the Goal asked for. A monitor update waiting
+  // out its interval does not hold it, or a busy monitor would hold it for
+  // as long as it runs.
   useEffect(
     () =>
       getInteractiveModSession(config)?.subscribePrompts(() =>
@@ -8038,7 +8080,11 @@ export const useLlmStream = (
     if (
       streamingState !== StreamingState.Idle ||
       isSubmittingQueryRef.current ||
-      notificationQueueRef.current.length > 0 ||
+      (notificationQueueRef.current.length > 0 &&
+        interimMonitorWaitMs(
+          notificationQueueRef.current,
+          lastInterimMonitorTurnAtRef.current,
+        ) === 0) ||
       !mods?.hasSubmittedPrompts ||
       goalQueueRef?.current?.hasQueuedUserMessages?.() ||
       goalQueuePendingCount > 0
@@ -8063,8 +8109,11 @@ export const useLlmStream = (
           submittedPrompt: prompt.text,
           shellMode: false,
           // Another submission won this idle moment; the prompt waits for
-          // the next one.
-          onAdmissionFailed: () => mods.returnSubmittedPrompt(prompt),
+          // it to settle.
+          onAdmissionFailed: () => {
+            mods.returnSubmittedPrompt(prompt);
+            modPromptReturnedRef.current = true;
+          },
         },
       ).catch((error) => {
         debugLogger.warn("Failed to start a Mod's prompt", error);

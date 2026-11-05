@@ -288,7 +288,7 @@ describe('interactive Mod owner', () => {
       takeSubmittedPrompt: vi.fn(() => queued),
       returnSubmittedPrompt: vi.fn(),
       notePersonPrompt: vi.fn(),
-      discardSubmittedPrompts: vi.fn(),
+      stopSubmittedPrompts: vi.fn(),
     };
     Object.assign(runtime, queue);
     expect(host.runsPrompts!()).toBe(false);
@@ -310,9 +310,9 @@ describe('interactive Mod owner', () => {
     owner.returnSubmittedPrompt(queued);
     expect(queue.returnSubmittedPrompt).toHaveBeenCalledWith(queued);
     owner.notePersonPrompt();
-    owner.discardSubmittedPrompts();
+    owner.stopSubmittedPrompts();
     expect(queue.notePersonPrompt).toHaveBeenCalledOnce();
-    expect(queue.discardSubmittedPrompts).toHaveBeenCalledOnce();
+    expect(queue.stopSubmittedPrompts).toHaveBeenCalledOnce();
     owner.subscribePrompts(listener);
     await owner.close();
     // A closed owner runs none, and its listeners hear no more.
