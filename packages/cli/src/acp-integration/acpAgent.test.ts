@@ -38987,50 +38987,63 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('userLanguage: accepts auto without any session and performs no writes', async () => {
-    const settings = {
-      merged: { mcpServers: {} },
-      reloadScopeFromDisk: vi.fn(),
-      getSystemHooks: vi.fn().mockReturnValue(undefined),
-      getUserHooks: vi.fn().mockReturnValue({}),
-      getProjectHooks: vi.fn().mockReturnValue({}),
-    } as unknown as LoadedSettings;
+  it.each([undefined, 'workspace'] as const)(
+    'userLanguage: accepts auto without sessions or writes (scope=%s)',
+    async (scope) => {
+      const settings = {
+        merged: { mcpServers: {} },
+        reloadScopeFromDisk: vi.fn(),
+        getSystemHooks: vi.fn().mockReturnValue(undefined),
+        getUserHooks: vi.fn().mockReturnValue({}),
+        getProjectHooks: vi.fn().mockReturnValue({}),
+      } as unknown as LoadedSettings;
 
-    const agentPromise = runAcpAgent(
-      makeConfig() as unknown as Config,
-      settings,
-      mockArgv,
-    );
-    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
-    const agent = capturedAgentFactory!({
-      get closed() {
-        return mockConnectionState.promise;
-      },
-    });
+      const agentPromise = runAcpAgent(
+        makeConfig() as unknown as Config,
+        settings,
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      });
 
-    vi.mocked(updateOutputLanguageFile).mockClear();
-    vi.mocked(writeOutputLanguageAndRegisterPath).mockClear();
+      vi.mocked(updateOutputLanguageFile).mockClear();
+      vi.mocked(writeOutputLanguageAndRegisterPath).mockClear();
 
-    const result = await agent.extMethod('qwen/control/user/language', {
-      language: 'auto',
-      syncOutputLanguage: true,
-    });
+      const result = await agent.extMethod('qwen/control/user/language', {
+        language: 'auto',
+        syncOutputLanguage: true,
+        ...(scope ? { scope } : {}),
+      });
 
-    // Zero sessions is a success, and the daemon process owns persistence:
-    // the runtime must not write settings or output-language files itself.
-    expect(result).toEqual({ language: 'zh', sessions: 0, failed: 0 });
-    expect(vi.mocked(setLanguageAsync)).toHaveBeenCalledWith('auto');
-    expect(settings.reloadScopeFromDisk).toHaveBeenCalledWith(
-      SettingScope.User,
-    );
-    expect(vi.mocked(updateOutputLanguageFile)).not.toHaveBeenCalled();
-    expect(
-      vi.mocked(writeOutputLanguageAndRegisterPath),
-    ).not.toHaveBeenCalled();
+      // Zero sessions is a success, and the daemon process owns persistence:
+      // the runtime must not write settings or output-language files itself.
+      expect(result).toEqual({ language: 'zh', sessions: 0, failed: 0 });
+      expect(vi.mocked(setLanguageAsync)).toHaveBeenCalledWith('auto');
+      expect(settings.reloadScopeFromDisk).toHaveBeenCalledWith(
+        SettingScope.User,
+      );
+      if (scope === 'workspace') {
+        expect(settings.reloadScopeFromDisk).toHaveBeenCalledWith(
+          SettingScope.Workspace,
+        );
+      } else {
+        expect(settings.reloadScopeFromDisk).not.toHaveBeenCalledWith(
+          SettingScope.Workspace,
+        );
+      }
+      expect(vi.mocked(updateOutputLanguageFile)).not.toHaveBeenCalled();
+      expect(
+        vi.mocked(writeOutputLanguageAndRegisterPath),
+      ).not.toHaveBeenCalled();
 
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('userLanguage: wraps UI-language switch failures', async () => {
     const settings = {
