@@ -6075,3 +6075,40 @@ export interface DaemonMcpAppToolResult {
   structuredContent?: unknown;
   [key: string]: unknown;
 }
+
+export interface DaemonSubscriptionConfig {
+  enabled: boolean;
+  signedIn?: boolean;
+  plansUrl?: string;
+}
+
+export interface DaemonSubscriptionUserInfo {
+  sub: string;
+  name: string;
+  email: string;
+  member_type: string;
+}
+
+export interface DaemonSubscriptionFlow {
+  id: string;
+  status: 'waiting' | 'ready' | 'error' | 'cancelled';
+  authorizationUrl?: string;
+  userInfo?: DaemonSubscriptionUserInfo;
+  errorCode?: string;
+  errorStage?:
+    | 'device'
+    | 'exchange'
+    | 'credentials'
+    | 'userinfo'
+    | 'refresh'
+    | 'revoke'
+    | 'cleanup';
+  errorStatus?: number;
+  retryAfterMs?: number;
+}
+
+export interface DaemonSubscriptionActivation {
+  authType: 'qwen-subscription';
+  modelId: string;
+  runtimeSync: DaemonModelProviderRuntimeSyncResult;
+}

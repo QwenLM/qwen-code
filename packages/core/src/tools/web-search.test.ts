@@ -168,6 +168,7 @@ function passedBackend(config: Config) {
   const gate = evaluateWebSearchGate(config);
   expect(gate.ok).toBe(true);
   if (!gate.ok) throw new Error(gate.notice);
+  if (gate.backend.kind !== 'dashscope') throw new Error('Expected DashScope');
   return gate.backend;
 }
 
@@ -551,6 +552,49 @@ describe('evaluateWebSearchGate', () => {
       const gate = rejectedFor({ models: [dsModel({ baseUrl })] });
       expect(gate.notice).toContain('non-DashScope');
     }
+  });
+});
+
+describe('subscription web search gate', () => {
+  it.each([undefined, 'false', 'true'])(
+    'uses membership credentials without a separate search key when DEV=%s',
+    (dev) => {
+      vi.stubEnv('DEV', false);
+      if (dev === undefined) delete process.env['DEV'];
+      else process.env['DEV'] = dev;
+      expect(
+        evaluateWebSearchGate(
+          makeConfig({
+            settings: undefined,
+            primaryAuthType: AuthType.QWEN_SUBSCRIPTION,
+          }),
+        ),
+      ).toEqual({
+        ok: true,
+        backend: {
+          kind: 'qwen-subscription',
+          timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+        },
+      });
+    },
+  );
+
+  it('respects explicit disabling and a separate DashScope search configuration', () => {
+    vi.stubEnv('DEV', false);
+    delete process.env['DEV'];
+    vi.stubEnv(TEST_ENV_KEY, 'sk-search');
+    expect(
+      rejectedFor({
+        settings: { enabled: false },
+        primaryAuthType: AuthType.QWEN_SUBSCRIPTION,
+      }).silent,
+    ).toBe(true);
+    expect(
+      passedFor({
+        settings: envSettings(),
+        primaryAuthType: AuthType.QWEN_SUBSCRIPTION,
+      }).kind,
+    ).toBe('dashscope');
   });
 });
 

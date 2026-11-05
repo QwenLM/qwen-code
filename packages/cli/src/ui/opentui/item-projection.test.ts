@@ -836,6 +836,17 @@ describe('projectMcpStatus line spellings (R1-86)', () => {
   });
 });
 
+describe('projectAbout authentication', () => {
+  it.each([
+    ['qwen-subscription', 'Qwen Subscription'],
+    ['qwen-oauth', 'Qwen OAuth'],
+    ['openai', 'API Key - openai'],
+  ])('displays %s as %s', (selectedAuthType, label) => {
+    const text = projectAbout({ selectedAuthType });
+    expect(text.split('\n')).toContain(`Auth: ${label}`);
+  });
+});
+
 describe('projectAbout proxy redaction (R1-6)', () => {
   it('masks credentials in parseable proxy URLs', () => {
     const text = projectAbout({
