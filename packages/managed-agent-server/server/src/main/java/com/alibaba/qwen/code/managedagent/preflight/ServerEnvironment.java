@@ -228,11 +228,11 @@ final class ServerEnvironment {
         List<PropertySource<?>> sources = new ArrayList<>();
         for (PropertySource<?> source : environment.getPropertySources()) {
             if (!(source instanceof OriginTrackedMapPropertySource)
-                    && !(source instanceof ConfigTreePropertySource)
-                    && !ConfigurationPropertySources.isAttachedConfigurationPropertySource(source)) {
+                    && !(source instanceof ConfigTreePropertySource)) {
                 sources.add(source);
             }
         }
+        // from() skips the attached view of every source, files' included.
         return new Binder(ConfigurationPropertySources.from(sources))
                 .bind(property, String.class).orElse(null);
     }

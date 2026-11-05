@@ -656,6 +656,12 @@ class ServerEnvironmentTest {
         ManagedAgentPreflight.Prepared prepared = prepare(named("optional:file:"
                 + empty.getParent() + "/"), new ArrayList<>());
         assertEquals(List.of(empty), prepared.files());
+        // Without file:, Spring reads classpath:/ as the class path, not as
+        // a directory of that name.
+        write("classpath:/application.yml", "# only a comment\n");
+        prepared = prepare(environment(Map.of()), new ArrayList<>(),
+                "--spring.config.additional-location=optional:classpath:/");
+        assertEquals(List.of(), ServerEnvironment.files(prepared.environment(), directory));
     }
 
     @Test
