@@ -595,13 +595,20 @@ export function stripShellWrapper(command: string): string {
     if (!token) return trimmed;
 
     if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
-      const commandToken = takeLeadingToken(token.rest);
+      // `sh -c -- '…'` puts an option terminator before the command string;
+      // reading it as the program handed the guard a lone `--`.
+      let markerRest = token.rest;
+      const terminator = takeLeadingToken(markerRest);
+      if (terminator && terminator.token === '--') {
+        markerRest = terminator.rest;
+      }
+      const commandToken = takeLeadingToken(markerRest);
       if (!commandToken) return trimmed;
       const { value: innerCommand, quote } = stripSymmetricQuotes(
         commandToken.token,
       );
       if (!quote && shellWrapperCommandConsumesRest(wrapperToken.token)) {
-        return token.rest.trimStart() || trimmed;
+        return markerRest.trimStart() || trimmed;
       }
       return innerCommand || trimmed;
     }

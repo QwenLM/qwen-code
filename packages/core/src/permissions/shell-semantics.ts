@@ -119,24 +119,15 @@ function tokenize(
 
     if (inAnsiC) {
       if (ch === '\\') {
-        const next = command[i + 1];
-        if (next === undefined) {
+        const escape = decodeAnsiCEscape(command, i);
+        if (!escape) {
           current += '\\';
           bare += '0';
           continue;
         }
-        current +=
-          next === 'n'
-            ? '\n'
-            : next === 't'
-              ? '\t'
-              : next === 'r'
-                ? '\r'
-                : next === '\\'
-                  ? '\\'
-                  : next;
+        current += escape.text;
         bare += '0';
-        i++;
+        i += escape.length - 1;
         continue;
       }
       if (ch === "'") {
@@ -2596,7 +2587,10 @@ function shellDashCPayload(tokens: string[], index: number): string | null {
     // Tokenization drops the quote but keeps the word, so `-c'…'` arrives as
     // one token and its payload is the flag's own tail.
     const attached = token.slice(flag[0].length);
-    return attached.length > 0 ? attached : (tokens[inner + 1] ?? '');
+    if (attached.length > 0) return attached;
+    // `sh -c -- '…'`: the option terminator, not the program.
+    const payload = tokens[inner + 1] ?? '';
+    return payload === '--' ? (tokens[inner + 2] ?? '') : payload;
   }
   return null;
 }
@@ -2707,49 +2701,64 @@ const ANSI_C_SIMPLE: Record<string, string> = {
   '?': '?',
 };
 
+function decodeAnsiCEscape(
+  body: string,
+  index: number,
+): { text: string; length: number } | null {
+  if (body[index] !== '\\' || index + 1 >= body.length) return null;
+  const next = body[index + 1]!;
+  const simple = ANSI_C_SIMPLE[next];
+  if (simple !== undefined) return { text: simple, length: 2 };
+  if (next === 'x' || next === 'u' || next === 'U') {
+    const max = next === 'x' ? 2 : next === 'u' ? 4 : 8;
+    const digits = new RegExp(`^[0-9a-fA-F]{1,${max}}`).exec(
+      body.slice(index + 2),
+    )?.[0];
+    if (digits) {
+      const code = parseInt(digits, 16);
+      const length = 2 + digits.length;
+      // `String.fromCodePoint` throws above U+10FFFF, and bash rejects such a
+      // word rather than running it, so keep the escape literal. Throwing here
+      // would escape the permission guard instead of answering it.
+      if (next !== 'x' && code > 0x10ffff) {
+        return { text: body.slice(index, index + length), length };
+      }
+      return {
+        text:
+          next === 'x' ? String.fromCharCode(code) : String.fromCodePoint(code),
+        length,
+      };
+    }
+  }
+  if (next === 'c' && index + 2 < body.length) {
+    return {
+      text: String.fromCharCode(
+        body[index + 2]!.toUpperCase().charCodeAt(0) & 0x1f,
+      ),
+      length: 3,
+    };
+  }
+  if (next >= '0' && next <= '7') {
+    const digits = /^[0-7]{1,3}/.exec(body.slice(index + 1))![0];
+    return {
+      text: String.fromCharCode(parseInt(digits, 8) & 0xff),
+      length: 1 + digits.length,
+    };
+  }
+  return null;
+}
+
 function decodeAnsiCWord(body: string): string {
   let out = '';
   for (let index = 0; index < body.length; index++) {
-    const char = body[index]!;
-    if (char !== '\\' || index + 1 >= body.length) {
-      out += char;
+    const escape = decodeAnsiCEscape(body, index);
+    if (!escape) {
+      // Unknown escape: bash keeps the backslash and the letter.
+      out += body[index]!;
       continue;
     }
-    const next = body[index + 1]!;
-    const simple = ANSI_C_SIMPLE[next];
-    if (simple !== undefined) {
-      out += simple;
-      index++;
-      continue;
-    }
-    if (next === 'x' || next === 'u' || next === 'U') {
-      const max = next === 'x' ? 2 : next === 'u' ? 4 : 8;
-      const digits = new RegExp(`^[0-9a-fA-F]{1,${max}}`).exec(
-        body.slice(index + 2),
-      )?.[0];
-      if (digits) {
-        const code = parseInt(digits, 16);
-        out +=
-          next === 'x' ? String.fromCharCode(code) : String.fromCodePoint(code);
-        index += 1 + digits.length;
-        continue;
-      }
-    }
-    if (next === 'c' && index + 2 < body.length) {
-      out += String.fromCharCode(
-        body[index + 2]!.toUpperCase().charCodeAt(0) & 0x1f,
-      );
-      index += 2;
-      continue;
-    }
-    if (next >= '0' && next <= '7') {
-      const digits = /^[0-7]{1,3}/.exec(body.slice(index + 1))![0];
-      out += String.fromCharCode(parseInt(digits, 8) & 0xff);
-      index += digits.length;
-      continue;
-    }
-    // Unknown escape: bash keeps the backslash and the letter.
-    out += char;
+    out += escape.text;
+    index += escape.length - 1;
   }
   return out;
 }
@@ -2772,9 +2781,20 @@ function decodeBareAnsiCWord(text: string): string {
  */
 function stripUnquotedComments(segment: string): string {
   let quote: '"' | "'" | null = null;
+  let ansiC = false;
   let out = '';
   for (let index = 0; index < segment.length; index++) {
     const char = segment[index]!;
+    if (ansiC) {
+      if (char === '\\' && index + 1 < segment.length) {
+        out += char + segment[index + 1]!;
+        index++;
+        continue;
+      }
+      out += char;
+      if (char === "'") ansiC = false;
+      continue;
+    }
     if (char === '\\' && quote !== "'" && index + 1 < segment.length) {
       out += char + segment[index + 1]!;
       index++;
@@ -2785,12 +2805,29 @@ function stripUnquotedComments(segment: string): string {
       if (char === quote) quote = null;
       continue;
     }
+    // `$'…'` keeps a `#` inside the word as data, and `\'` does not close it.
+    if (char === '$' && segment[index + 1] === "'") {
+      ansiC = true;
+      out += "$'";
+      index++;
+      continue;
+    }
     if (char === '"' || char === "'") {
       quote = char;
       out += char;
       continue;
     }
-    if (char === '#' && (index === 0 || /\s/.test(segment[index - 1]!))) break;
+    if (char === '#' && (index === 0 || /\s/.test(segment[index - 1]!))) {
+      // Bash ends the command at the newline, not at the end of the whole
+      // segment: a note on one line must not swallow the next command. The
+      // newline becomes a separator because the tokenizer only splits on
+      // spaces and tabs.
+      const newline = segment.indexOf('\n', index);
+      if (newline === -1) break;
+      out += ' ';
+      index = newline;
+      continue;
+    }
     out += char;
   }
   return out;

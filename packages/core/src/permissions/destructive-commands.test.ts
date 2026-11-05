@@ -292,6 +292,57 @@ describe('isDestructiveCommand — git commit --amend', () => {
     expectBlocked(deep, 'amend the commit', 'amend');
   });
 
+  // `sh -c -- '…'` puts an option terminator before the program; reading `--`
+  // as the program answered "not an amend" (#16075 review, R5-3).
+  it.each([
+    "sh -c -- 'git commit --amend --no-edit'",
+    "bash -c -- 'git commit --amend --no-edit'",
+    "dash -c -- 'git commit --amend --no-edit'",
+  ])('blocks amend behind an option terminator: %s', (command) => {
+    expectBlocked(command, 'amend the commit', 'amend');
+  });
+
+  it('allows an option terminator with a safe program', () => {
+    expectAllowed(
+      ["sh -c -- 'echo A'", "bash -c -- 'git status'"],
+      'check status',
+    );
+  });
+
+  // Comment stripping stopped at the end of the segment rather than the line,
+  // and its quote model did not know `$'…'`, so a note deleted a real amend
+  // (#16075 review, R5-2).
+  it.each([
+    "git status # it's fine\ngit commit --amend --no-edit",
+    "git commit -m $'it\\'s #1' --amend",
+  ])('blocks amend after a comment or an ANSI-C hash: %s', (command) => {
+    expectBlocked(command, 'amend the commit', 'amend');
+  });
+
+  // `tokenize` decoded only `\n \t \r \\`, so `\x65` kept its spelling and
+  // `git commit $'--am\x65nd'` read as a different flag (#16075 review, R3-1).
+  it('blocks amend spelled with decoded ANSI-C escapes', () => {
+    expectBlocked(
+      "git commit $'--am\\x65nd' --no-edit",
+      'amend the commit',
+      'amend',
+    );
+  });
+
+  // `\UFFFFFFFF` is above the Unicode range; `String.fromCodePoint` threw out
+  // of the guard instead of answering it (#16075 review, R5-1).
+  it('answers instead of throwing on an out-of-range ANSI-C escape', () => {
+    for (const command of [
+      "bash -c $'\\UFFFFFFFF'",
+      "bash -c $'\\U0011FFFF'",
+      "eval $'\\UFFFFFFFF'",
+    ]) {
+      expect(() =>
+        isDestructiveCommand(command, 'amend the commit'),
+      ).not.toThrow();
+    }
+  });
+
   it.each([
     `node -e 'console.log("a report about git commit --amend behaviour")'`,
     'echo "git commit --amend"',
