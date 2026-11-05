@@ -124,14 +124,17 @@ final class LocalStorageOwners {
                     .queryForList("SELECT alias_key FROM ma_storage WHERE physical_key = ? ORDER BY alias_key LIMIT 129",
                             String.class, physical));
         } catch (java.sql.SQLException error) {
-            throw new IllegalStateException("Physical recovery inventory is unavailable", error);
+            throw new IllegalStateException("Physical recovery alias list is unavailable", error);
         }
         known.add(sourceAlias);
-        // Only alias_key, so the read stays on the alias index: with more
-        // columns the optimizer may scan the table and lock primary records first.
-        jdbc.queryForList("SELECT alias_key FROM ma_storage WHERE alias_key IN ("
-                + String.join(", ", java.util.Collections.nCopies(known.size(), "?")) + ") ORDER BY alias_key FOR UPDATE",
-                String.class, known.toArray());
+        // A range read of the alias index, which yields alias_key order. The
+        // index is forced so this is never a table scan, and physical_key is
+        // read so it is never a scan of the whole alias index either, which a
+        // covering read becomes once the list is as long as the estimated row
+        // count, locking every gap of the index.
+        jdbc.queryForList("SELECT alias_key, physical_key FROM ma_storage /*! FORCE INDEX (uk_ma_storage_business_key) */"
+                + " WHERE alias_key IN (" + String.join(", ", java.util.Collections.nCopies(known.size(), "?"))
+                + ") ORDER BY alias_key FOR UPDATE", known.toArray());
         // Through the physical index: a table scan, which the optimizer picks
         // when one storage holds most rows, would lock other storages' primary
         // records in id order and cross another recovery's alias locks.

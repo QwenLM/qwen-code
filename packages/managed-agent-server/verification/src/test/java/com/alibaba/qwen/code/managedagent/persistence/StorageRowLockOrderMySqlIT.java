@@ -136,15 +136,44 @@ class StorageRowLockOrderMySqlIT {
         insertLocal("lock-order-elsewhere-1", "q".repeat(64));
         insertLocal("lock-order-elsewhere-2", "r".repeat(64));
         jdbc.execute("ANALYZE TABLE ma_storage");
-        var capturing = new CapturingJdbc(database.source(), "LIMIT 129 FOR UPDATE");
+        var scan = new CapturingJdbc(database.source(), "LIMIT 129 FOR UPDATE");
         transactions.executeWithoutResult(status ->
-                assertThat(LocalStorageOwners.lockCovered(capturing, TENANT, STORAGE)).isEqualTo(PHYSICAL));
+                assertThat(LocalStorageOwners.lockCovered(scan, TENANT, STORAGE)).isEqualTo(PHYSICAL));
+        var aliases = new CapturingJdbc(database.source(), "alias_key IN (");
+        transactions.executeWithoutResult(status ->
+                assertThat(LocalStorageOwners.lockCovered(aliases, TENANT, STORAGE)).isEqualTo(PHYSICAL));
 
-        // A table scan would lock the other storages' rows, in id order.
-        assertThat(capturing.sql).as("recovery scanned the physical storage").isNotNull();
-        var plan = ExecutedQueryPlan.explain(jdbc, capturing.sql, capturing.arguments);
+        // A table scan would lock the other storages' rows, in id order; the
+        // alias locks must come from the alias index, in alias_key order.
+        assertThat(scan.sql).as("recovery scanned the physical storage").isNotNull();
+        var plan = ExecutedQueryPlan.explain(jdbc, scan.sql, scan.arguments);
         assertThat(plan.tableScan()).as(plan.text()).isFalse();
         assertThat(plan.usesIndex("idx_ma_storage_physical")).as(plan.text()).isTrue();
+        assertThat(aliases.sql).as("recovery locked the aliases").isNotNull();
+        var aliasPlan = ExecutedQueryPlan.explain(jdbc, aliases.sql, aliases.arguments);
+        assertThat(aliasPlan.tableScan()).as(aliasPlan.text()).isFalse();
+        assertThat(aliasPlan.usesIndex("uk_ma_storage_business_key")).as(aliasPlan.text()).isTrue();
+        // A range read, not a scan of the whole alias index.
+        assertThat(aliasPlan.text()).containsAnyOf("range scan", "\"range\"");
+    }
+
+    @Test
+    void physicalRecoveryLocksItsAliasesByRangeWhenTheyAreTheWholeTable() {
+        registerLocal();
+        for (int index = 1; index < 4; index++) {
+            insertLocal("lock-order-tenant-" + index, PHYSICAL);
+        }
+        jdbc.execute("ANALYZE TABLE ma_storage");
+        var aliases = new CapturingJdbc(database.source(), "alias_key IN (");
+        transactions.executeWithoutResult(status ->
+                assertThat(LocalStorageOwners.lockCovered(aliases, TENANT, STORAGE)).isEqualTo(PHYSICAL));
+
+        // A covering read of a list as long as the table scans the whole alias
+        // index instead, locking every gap of it.
+        assertThat(aliases.sql).as("recovery locked the aliases").isNotNull();
+        var plan = ExecutedQueryPlan.explain(jdbc, aliases.sql, aliases.arguments);
+        assertThat(plan.usesIndex("uk_ma_storage_business_key")).as(plan.text()).isTrue();
+        assertThat(plan.text()).containsAnyOf("range scan", "\"range\"");
     }
 
     private void insertLocal(String tenant, String physical) {
@@ -184,18 +213,34 @@ class StorageRowLockOrderMySqlIT {
 
         @Override
         public <T> List<T> query(String sql, RowMapper<T> mapper, Object... args) {
+            capture(sql, args);
+            return super.query(sql, mapper, args);
+        }
+
+        @Override
+        public <T> List<T> queryForList(String sql, Class<T> type, Object... args) {
+            capture(sql, args);
+            return super.queryForList(sql, type, args);
+        }
+
+        @Override
+        public List<java.util.Map<String, Object>> queryForList(String sql, Object... args) {
+            capture(sql, args);
+            return super.queryForList(sql, args);
+        }
+
+        private void capture(String sql, Object[] args) {
             if (this.sql == null && sql.contains(marker)) {
                 this.sql = sql;
                 this.arguments = args.clone();
             }
-            return super.query(sql, mapper, args);
         }
     }
 
     /**
-     * Right after the first query containing {@code marker}, through either
-     * entry point the code under test uses, starts {@code other} on another
-     * thread and waits until it queues on a lock.
+     * Right after the first query containing {@code marker}, through any of
+     * the overridden entry points, starts {@code other} on another thread and
+     * waits until it queues on a lock.
      */
     private final class PausingJdbc extends ManagedSchemaJdbcTemplate {
         private final String marker;
@@ -216,6 +261,11 @@ class StorageRowLockOrderMySqlIT {
         @Override
         public <T> List<T> queryForList(String sql, Class<T> type, Object... args) {
             return after(sql, super.queryForList(sql, type, args));
+        }
+
+        @Override
+        public List<java.util.Map<String, Object>> queryForList(String sql, Object... args) {
+            return after(sql, super.queryForList(sql, args));
         }
 
         private <T> List<T> after(String sql, List<T> rows) {
