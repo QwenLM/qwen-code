@@ -9816,6 +9816,16 @@ class QwenAgent implements Agent {
     pendingApprovalHash?: string;
   } {
     try {
+      // The prompt exists for hooks the gate actually withholds. A block
+      // the execution accessor serves (stored approval, or explicit folder
+      // trust) must not render a card claiming it stays disabled — and a
+      // "keep disabled" click there would stop hooks that are running.
+      if (
+        this.config.isExplicitlyTrustedFolder() ||
+        this.config.getProjectHooks() !== undefined
+      ) {
+        return {};
+      }
       const approval =
         getProjectHooksForApproval(this.settings) ??
         getProjectHooksForApprovalFromRawWorkspace(this.settings);

@@ -2631,10 +2631,15 @@ export async function loadCliConfig(
   // its project hooks without a stored approval, so the gate must not also
   // demand one. Only an explicit rejection still withholds there — the user
   // said no to this exact block, and trust does not override that decision.
+  // Mirror Config.isExplicitlyTrustedFolder(): IDE-reported workspace trust
+  // counts even with the feature off, as the docs promise.
+  const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+  const explicitlyTrusted =
+    (folderTrust || ideTrust !== undefined) && trustedFolder;
   const projectHooksPendingApproval = gateHooks
     ? projectHooksState !== undefined &&
       projectHooksState !== 'approved' &&
-      !(folderTrust && trustedFolder && projectHooksState !== 'rejected')
+      !(explicitlyTrusted && projectHooksState !== 'rejected')
     : undefined;
   // Read the stored decision even under command-line YOLO: an approved block
   // keeps its authority while the gate is exempt, without changing the

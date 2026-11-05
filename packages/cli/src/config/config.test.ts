@@ -5990,6 +5990,29 @@ describe('loadCliConfig with includeDirectories', () => {
       },
     );
 
+    it('IDE-reported workspace trust clears the gate even with the feature off', async () => {
+      const { ideContextStore } = await import('@qwen-code/qwen-code-core');
+      const getSpy = vi.spyOn(ideContextStore, 'get').mockReturnValue({
+        workspaceState: { isTrusted: true, openFiles: [] },
+      } as never);
+      vi.mocked(getProjectHooksApprovalState).mockReturnValue('pending');
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: true,
+        source: 'ide',
+      });
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      try {
+        await loadCliConfig({} as Settings, argv, cwd, undefined, {
+          projectHooks,
+          projectHooksApproval: approval,
+        });
+        expect(gateParam()).toBe(false);
+      } finally {
+        getSpy.mockRestore();
+      }
+    });
+
     it.each([
       [{ Stop: [{ hooks: [{ type: 'command', command: 'x' }] }] }, true],
       [projectHooks, undefined],

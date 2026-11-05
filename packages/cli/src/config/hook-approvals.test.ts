@@ -213,6 +213,25 @@ describe('hook-approvals (hash-bound approval store)', () => {
     },
   );
 
+  it.each([
+    [undefined, [false, false]],
+    ['rejected', [true, true]],
+    ['approved', [false, false]],
+  ] as const)(
+    'explicit trust keeps the gate clear on re-apply unless rejected (%#)',
+    async (decision, gate) => {
+      if (decision) await loadHookApprovals().setState(subject(), decision);
+      const config = {
+        setProjectHooksPendingApproval: vi.fn(),
+        isExplicitlyTrustedFolder: () => true,
+      };
+      applyProjectHooksApproval(config, subject());
+      expect(config.setProjectHooksPendingApproval).toHaveBeenCalledWith(
+        ...gate,
+      );
+    },
+  );
+
   it('roots the project hooks at the folder holding .qwen/settings.json', () => {
     expect(
       getProjectHooksRoot({

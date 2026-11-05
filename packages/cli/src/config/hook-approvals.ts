@@ -458,12 +458,20 @@ export function getProjectHooksApprovalState(
 export function applyProjectHooksApproval(
   config: {
     setProjectHooksPendingApproval(pending: boolean, rejected?: boolean): void;
+    isExplicitlyTrustedFolder?(): boolean;
   },
   approval: ProjectHooksApproval | undefined,
 ): HookApprovalState | undefined {
   const state = getProjectHooksApprovalState(approval);
+  // Explicit folder trust is the co-equal authority (same rule as the
+  // startup gate): re-applying the store must not re-pend a trusted
+  // folder's hooks on a `/hooks` reload or a YOLO exit. Only an explicit
+  // rejection of the exact block still wins over trust.
+  const trusted = config.isExplicitlyTrustedFolder?.() === true;
   config.setProjectHooksPendingApproval(
-    state !== undefined && state !== 'approved',
+    state !== undefined &&
+      state !== 'approved' &&
+      !(trusted && state !== 'rejected'),
     state === 'rejected',
   );
   return state;

@@ -1688,6 +1688,9 @@ export async function main() {
       // The approval-gate warning above already covers a pending/rejected
       // block; this line is only for the trust-withheld case it cannot see.
       !nonInteractiveConfig.isProjectHooksPendingApproval?.() &&
+      // Same guard as the TUI warning: an approved (or trust-authorized)
+      // block the execution accessor actually serves is not "not loaded".
+      nonInteractiveConfig.getProjectHooks?.() === undefined &&
       !nonInteractiveConfig.isExplicitlyTrustedFolder?.() &&
       !nonInteractiveConfig.getBareMode?.() &&
       !nonInteractiveConfig.isSafeMode?.() &&

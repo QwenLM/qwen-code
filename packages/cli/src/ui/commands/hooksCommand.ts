@@ -16,8 +16,8 @@ import type {
   Config,
   HookRegistryEntry,
   SessionHookEntry,
-  HookEventName,
 } from '@qwen-code/qwen-code-core';
+import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { supportsMatchers } from '../components/hooks/constants.js';
 import { normalizeMatcher } from '../components/hooks/matcherGrouping.js';
@@ -263,11 +263,15 @@ const listCommand: SlashCommand = {
     }
 
     if (withheld) {
+      const eventNames = new Set<string>(Object.values(HookEventName));
       for (const [eventName, defs] of Object.entries(withheld)) {
-        if (!Array.isArray(defs)) continue;
+        // Same filter as the registry path: non-event keys (e.g.
+        // notifications) are configuration, not hooks to render.
+        if (!eventNames.has(eventName) || !Array.isArray(defs)) continue;
         for (const def of defs) {
           if (!Array.isArray(def?.hooks)) continue;
           for (const hookConfig of def.hooks) {
+            if (!hookConfig || typeof hookConfig !== 'object') continue;
             addHook(eventName, normalizeMatcher(def.matcher), {
               name: extractName(
                 hookConfig as {

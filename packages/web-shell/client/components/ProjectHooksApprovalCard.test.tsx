@@ -118,10 +118,16 @@ describe('ProjectHooksApprovalCard', () => {
     const panel = element.querySelector<HTMLDivElement>(
       '[data-web-shell-permission-panel]',
     )!;
-    panel.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
-    );
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Dispatch inside a macrotask so React's discrete-event flush runs
+    // outside act (act never drains while the poll interval is live).
+    await new Promise((resolve) => {
+      setTimeout(() => {
+        panel.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+        setTimeout(resolve, 50);
+      }, 0);
+    });
     expect(approveWorkspaceHooks).not.toHaveBeenCalled();
     expect(
       element.querySelector('[data-testid="project-hooks-approval-card"]'),

@@ -12028,10 +12028,11 @@ export class Config {
     projectHooks?: Record<string, unknown>;
     hooks?: Record<string, unknown>;
   }): void {
-    // Under command-line YOLO the gate is exempt and no reload path
-    // re-derives the decision, so a replaced block must not keep the old
-    // block's approval authority. Drop it here; a caller that re-applies
-    // the stored decision for the new block restores it right after.
+    // Under command-line YOLO the gate is exempt and the `/hooks` reload
+    // does not re-derive the decision, so a replaced block must not keep
+    // the old block's approval authority. Fail-closed by design: an
+    // approval-only block stops until the session leaves YOLO (the
+    // mode-change listener re-applies the store) or restarts.
     if (
       this.projectHooksYoloExempt &&
       this.getApprovalMode() === ApprovalMode.YOLO &&

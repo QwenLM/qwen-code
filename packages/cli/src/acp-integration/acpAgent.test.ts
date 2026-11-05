@@ -35327,6 +35327,8 @@ describe('QwenAgent projectHooksApprove control', () => {
       getTargetDir: () => workspaceRoot,
       setProjectHooksPendingApproval: vi.fn(),
       getProjectHooksApprovalSubject: () => undefined,
+      isExplicitlyTrustedFolder: vi.fn().mockReturnValue(false),
+      getProjectHooks: vi.fn().mockReturnValue(undefined),
       getHookSystem: () => ({ reload: vi.fn().mockResolvedValue(undefined) }),
       getExecutionEnvironment: () => undefined,
       getToolRegistry: () => ({
@@ -35433,6 +35435,39 @@ describe('QwenAgent projectHooksApprove control', () => {
         hash: 42,
       }),
     ).rejects.toThrow('hash must be the hash string');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('shows no approval prompt when explicit trust already runs the hooks', async () => {
+    const hooks = {
+      SessionStart: [{ hooks: [{ type: 'command', command: './x.sh' }] }],
+    };
+    const settings = {
+      merged: {},
+      getProjectHooks: () => hooks,
+      workspace: {
+        path: '/work/repo/.qwen/settings.json',
+        originalSettings: { hooks },
+      },
+    } as unknown as LoadedSettings;
+    const bootstrap = makeConfig('/work/repo');
+    (
+      bootstrap.isExplicitlyTrustedFolder as ReturnType<typeof vi.fn>
+    ).mockReturnValue(true);
+    const agentPromise = runAcpAgent(bootstrap, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      closed: mockConnectionState.promise,
+    });
+
+    const status = (await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.workspaceHooks,
+      {},
+    )) as Record<string, unknown>;
+    expect(status['pendingApproval']).toBeUndefined();
+    expect(status['pendingApprovalHooks']).toBeUndefined();
 
     mockConnectionState.resolve();
     await agentPromise;

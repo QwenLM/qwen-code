@@ -32,11 +32,22 @@ export function ProjectHooksApprovalCard({
   const { t } = useI18n();
   const [status, setStatus] = useState<DaemonWorkspaceHooksStatus>();
   const [busy, setBusy] = useState(false);
-  const [dismissedHash, setDismissedHash] = useState<string>();
+  const [dismissedHash, setDismissedHash] = useState<{
+    identity: string;
+    hash: string;
+  }>();
+  const [decisionError, setDecisionError] = useState(false);
   const requestIdRef = useRef(0);
   const client = workspace?.client;
   const workspaceCwd = workspace?.workspaceCwd;
   const settingsVersion = signals?.settingsVersion;
+  // Defer is keyed by workspace identity at read time, so no reset effect
+  // can race the dismiss and resurrect the card.
+  const identity = `${workspaceCwd ?? ''}|${settingsVersion ?? 0}`;
+  const deferred =
+    dismissedHash !== undefined && dismissedHash.identity === identity
+      ? dismissedHash.hash
+      : undefined;
 
   const refresh = useCallback(async () => {
     if (!client || !available) return;
@@ -79,6 +90,7 @@ export function ProjectHooksApprovalCard({
     async (decision: 'approve' | 'reject') => {
       if (!client || busy) return;
       setBusy(true);
+      setDecisionError(false);
       try {
         const handle = workspaceCwd
           ? client.workspaceByCwd(workspaceCwd)
@@ -90,6 +102,9 @@ export function ProjectHooksApprovalCard({
           decision,
           status?.pendingApprovalHash,
         );
+      } catch {
+        // A failed POST must not look like a recorded decision.
+        setDecisionError(true);
       } finally {
         await refresh();
         setBusy(false);
@@ -101,11 +116,9 @@ export function ProjectHooksApprovalCard({
   const request = useMemo<PermissionRequest | undefined>(() => {
     if (!status?.pendingApproval) return undefined;
     // Escape defers the decision (TUI semantics): hide until the block
-    // changes, never record a rejection for a habitual keypress.
-    if (
-      status.pendingApprovalHash !== undefined &&
-      status.pendingApprovalHash === dismissedHash
-    ) {
+    // changes, never record a rejection for a habitual keypress. Daemons
+    // that predate the hash field defer until remount.
+    if ((status.pendingApprovalHash ?? '') === deferred) {
       return undefined;
     }
     const lines = status.pendingApprovalHooks ?? [];
@@ -120,6 +133,7 @@ export function ProjectHooksApprovalCard({
             ...lines,
             ...(lines.length > 0 ? [''] : []),
             t('hooksApproval.scopeNote'),
+            ...(decisionError ? ['', t('hooksApproval.failed')] : []),
           ].join('\n'),
         },
       ],
@@ -141,7 +155,7 @@ export function ProjectHooksApprovalCard({
         },
       ],
     };
-  }, [status, t, dismissedHash]);
+  }, [status, t, deferred, decisionError]);
 
   const active = request !== undefined;
   useEffect(() => {
@@ -157,7 +171,12 @@ export function ProjectHooksApprovalCard({
         variant="floating"
         disabled={busy}
         escapeDismisses
-        onDismiss={() => setDismissedHash(status?.pendingApprovalHash)}
+        onDismiss={() =>
+          setDismissedHash({
+            identity,
+            hash: status?.pendingApprovalHash ?? '',
+          })
+        }
         onConfirm={(_id, selectedOption) =>
           decide(selectedOption === 'hooks_approve' ? 'approve' : 'reject')
         }

@@ -794,6 +794,9 @@ export function createDaemonWorkspaceService(
       // workspace file. Read the same pending-decision truth locally.
       if (status.pendingApproval) return status;
       try {
+        // Same rule as the live child: explicit folder trust authorizes the
+        // block, so no card for hooks that would run.
+        if (isWorkspaceTrusted()) return status;
         const settings = loadSettings(boundWorkspace, {
           skipLoadEnvironment: true,
           skipWorkspaceSettings: false,
