@@ -564,13 +564,23 @@ export class SkillManager {
     // bubble up to the level boundary.
     const settled = await Promise.allSettled(
       levels.map(async (level) => {
-        let levelHasErrors = false;
-        const levelSkills = await this.listSkillsAtLevel(level, () => {
-          levelHasErrors = true;
-          onDiscoveryError();
+        // Only an unreadable source justifies retaining the previous level:
+        // a malformed manifest is reported per file and the level's other
+        // skills are still valid.
+        let levelHasReadErrors = false;
+        const levelSkills = await this.listSkillsAtLevel(level, (error) => {
+          if (
+            !(
+              error instanceof SkillError &&
+              error.code === SkillErrorCode.PARSE_ERROR
+            )
+          ) {
+            levelHasReadErrors = true;
+          }
+          onDiscoveryError(error);
         });
         debugLogger.debug(`Loaded ${levelSkills.length} ${level} level skills`);
-        return [level, levelSkills, levelHasErrors] as const;
+        return [level, levelSkills, levelHasReadErrors] as const;
       }),
     );
 
@@ -579,7 +589,7 @@ export class SkillManager {
     for (let i = 0; i < settled.length; i++) {
       const result = settled[i];
       if (result.status === 'fulfilled') {
-        const [level, levelSkills, levelHasErrors] = result.value;
+        const [level, levelSkills, levelHasReadErrors] = result.value;
         // An unreadable directory is not a rejection: `loadSkillsFromDir`
         // reports it through `onDiscoveryError` and returns `[]`. Publishing
         // that empty array would empty the level for every reader, so keep the
@@ -590,7 +600,9 @@ export class SkillManager {
         // the previous list there would advertise skills the extension no
         // longer loads.
         const retained =
-          level !== 'extension' && levelHasErrors && levelSkills.length === 0
+          level !== 'extension' &&
+          levelHasReadErrors &&
+          levelSkills.length === 0
             ? previousCache?.get(level)
             : undefined;
         skillsCache.set(level, retained ?? levelSkills);
