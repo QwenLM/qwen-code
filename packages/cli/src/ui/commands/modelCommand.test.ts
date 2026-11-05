@@ -813,6 +813,139 @@ describe('modelCommand', () => {
     });
   });
 
+  it('rejects typed Qwen OAuth selections', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn();
+    // Deliberately does NOT list the selected id. The guard has to fire before
+    // the availability lookup: if it ran after, this fixture would take the
+    // "not available for auth type" branch instead of the discontinued-tier
+    // one, and a typed `coder-model(qwen-oauth)` from the shipped registry
+    // would reach the switch's misleading "credentials expired" error.
+    const getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'qwen-plus', label: 'Qwen Plus' }]);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: `/model qwen-max(${AuthType.QWEN_OAUTH})`,
+        name: 'model',
+        args: `qwen-max(${AuthType.QWEN_OAUTH})`,
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType,
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      `qwen-max(${AuthType.QWEN_OAUTH})`,
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('Qwen OAuth free tier was discontinued'),
+    });
+    // The ordering the comment above declares, asserted rather than assumed.
+    expect(getAvailableModelsForAuthType).not.toHaveBeenCalled();
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
+  it('rejects a wrapped runtime Qwen OAuth snapshot selection', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn();
+    const getAvailableModelsForAuthType = vi.fn().mockReturnValue([]);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: `/model $runtime|${AuthType.QWEN_OAUTH}|coder-model(${AuthType.QWEN_OAUTH})`,
+        name: 'model',
+        args: `$runtime|${AuthType.QWEN_OAUTH}|coder-model(${AuthType.QWEN_OAUTH})`,
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType,
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      `$runtime|${AuthType.QWEN_OAUTH}|coder-model(${AuthType.QWEN_OAUTH})`,
+    );
+
+    // The wrapped snapshot form parses to `authType: QWEN_OAUTH` too (the
+    // parser keys off the trailing `(...)`), so the guard rejects it as well —
+    // wider than the picker's non-runtime predicate. Pinned on the message
+    // text: `switchModel` is not called on either arm, so only the text
+    // distinguishes "rejected by this guard" from "unavailable below".
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('Qwen OAuth free tier was discontinued'),
+    });
+    expect(getAvailableModelsForAuthType).not.toHaveBeenCalled();
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
+  it('rejects a typed Qwen OAuth selection when the session is already on that auth type', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn();
+    // The guard reads `parsed.authType` and never the session's current auth
+    // type, so a session already switched to qwen-oauth must be refused too —
+    // otherwise the discontinued tier stays selectable for exactly the users
+    // who hit the shutdown error.
+    const getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'qwen-plus', label: 'Qwen Plus' }]);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: `/model qwen-max(${AuthType.QWEN_OAUTH})`,
+        name: 'model',
+        args: `qwen-max(${AuthType.QWEN_OAUTH})`,
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'coder-model',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAvailableModelsForAuthType,
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      `qwen-max(${AuthType.QWEN_OAUTH})`,
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('Qwen OAuth free tier was discontinued'),
+    });
+    expect(getAvailableModelsForAuthType).not.toHaveBeenCalled();
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
   it('should switch provider-qualified models through switchModel', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);

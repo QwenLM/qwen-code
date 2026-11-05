@@ -10,9 +10,55 @@ import {
   type AvailableModel,
   type Config,
 } from '@qwen-code/qwen-code-core';
+import { RUNTIME_SNAPSHOT_PREFIX } from '@qwen-code/qwen-code-core/utils/runtimeModelPrefix.js';
 import { z } from 'zod';
 
 export const ACP_ROUTE_ID_PREFIX = 'qwen-route:v1:';
+
+/**
+ * The one message for the discontinued Qwen OAuth free tier. It is a
+ * translation key, not a free string — the same key is shipped in en/ca/de/fr/
+ * ja/pt/ru/zh/zh-TW — so it must stay byte-identical to what the callers passed
+ * to `t()` before the extraction.
+ */
+export const DISCONTINUED_QWEN_OAUTH_MESSAGE =
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.';
+
+/**
+ * The rule that blocks the discontinued tier, in one place. Callers used to
+ * hand-roll it — three copies inside `packages/cli`, each parsing the selection
+ * differently and each re-inlining the `$runtime|` prefix core already exports.
+ * A bare literal there drifts silently: no compile error, no failing test, and
+ * every legitimate cached-token OAuth selection starts receiving the
+ * discontinued error.
+ *
+ * The typed `/model` path has NO runtime carve-out, and that is deliberate and
+ * pinned by `modelCommand.test.ts`'s "rejects a wrapped runtime Qwen OAuth
+ * snapshot selection": the parser keys off the trailing `(...)`, so
+ * `$runtime|qwen-oauth|<id>(qwen-oauth)` parses to `authType: QWEN_OAUTH` and is
+ * refused here, one step earlier than the availability lookup that would have
+ * refused it anyway. Narrowing this to the pickers' predicate would change that
+ * error message, which is a behaviour change this extraction does not make.
+ */
+export function isDiscontinuedQwenOAuthSelection(
+  authType: AuthType | undefined,
+): boolean {
+  return authType === AuthType.QWEN_OAUTH;
+}
+
+/**
+ * The picker shape: `/model` has already parsed the ACP id, but the dialogs
+ * hold a selection key, either `authType::modelId` or a `$runtime|…` snapshot
+ * id. Equivalent to the parsed-id predicate above for every key the pickers
+ * produce; kept separate rather than moving the key parser in here, which would
+ * drag the UI's selection-key encoding into this module.
+ */
+export function isDiscontinuedQwenOAuthSelectionKey(
+  selectionKey: string,
+): boolean {
+  if (selectionKey.startsWith(RUNTIME_SNAPSHOT_PREFIX)) return false;
+  return selectionKey.startsWith(`${AuthType.QWEN_OAUTH}::`);
+}
 
 export function publicProviderBaseUrl(baseUrl: string): string | undefined {
   if (!/^https?:\/\//i.test(baseUrl.trim())) return undefined;
