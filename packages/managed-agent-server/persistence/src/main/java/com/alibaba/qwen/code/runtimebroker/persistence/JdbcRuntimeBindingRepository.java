@@ -202,16 +202,14 @@ public final class JdbcRuntimeBindingRepository
             }
         }
         try (var clear = connection.prepareStatement("UPDATE ma_runtime_session SET execution_storage_key = NULL,"
-                + " is_execution_exclusive = FALSE WHERE execution_storage_key = ? AND binding_id = ?"
+                + " is_rewind_pending = FALSE WHERE execution_storage_key = ? AND binding_id = ?"
                 + " AND runtime_generation = ? AND runtime_session_id = ?")) {
             clear.setString(1, key);
             JdbcRepositorySupport.setIdentity(clear, 2, session.getBindingId());
             clear.setLong(3, session.getRuntimeGeneration());
             JdbcRepositorySupport.setIdentity(clear, 4, session.getRuntimeSessionId());
             com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore.releaseMembers(connection, key,
-                    clear.executeUpdate(), com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore
-                            .exclusiveMemberKey(session.getBindingId(), session.getRuntimeGeneration(),
-                                    session.getRuntimeSessionId()));
+                    clear.executeUpdate());
         }
     }
 
