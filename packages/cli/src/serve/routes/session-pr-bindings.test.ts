@@ -10,7 +10,12 @@ import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Storage, upsertSessionPr } from '@qwen-code/qwen-code-core';
+import { PR_BINDING_ROLES } from '@qwen-code/channel-base';
+import {
+  PR_BINDING_ROLES as CORE_PR_BINDING_ROLES,
+  Storage,
+  upsertSessionPr,
+} from '@qwen-code/qwen-code-core';
 import type { BridgeSessionSummary } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   WorkspaceEntry,
@@ -122,7 +127,11 @@ async function seedBinding(
   cwd: string,
   sessionId: string,
   numbers: number[],
-  opts: { archived?: boolean; state?: 'open' | 'merged' | 'closed' } = {},
+  opts: {
+    archived?: boolean;
+    state?: 'open' | 'merged' | 'closed';
+    role?: 'review' | 'verify' | 'fix';
+  } = {},
 ): Promise<string> {
   const dir = opts.archived
     ? path.join(chatsDirFor(cwd), 'archive')
@@ -134,6 +143,7 @@ async function seedBinding(
       number,
       url: `https://github.com/acme/widgets/pull/${number}`,
       state: opts.state ?? 'open',
+      ...(opts.role !== undefined ? { role: opts.role } : {}),
     });
   }
   if (numbers.length === 0) {
@@ -236,7 +246,7 @@ interface BindingsBody {
     workspaceCwd: string;
     sourceType?: string;
     updatedAt?: string;
-    prs: Array<{ number: number; url: string; state?: string }>;
+    prs: Array<{ number: number; url: string; state?: string; role?: string }>;
   }>;
   partial: boolean;
 }
@@ -249,6 +259,14 @@ async function fetchBindings(entries: WorkspaceEntry[]): Promise<BindingsBody> {
 }
 
 describe('GET /sessions/pr-bindings', () => {
+  it('keeps the channel-side role vocabulary identical to core', () => {
+    // The channel packages cannot depend on core; the two closed lists are
+    // mirrors, and this pin is the drift guard between them. It lives here
+    // (not in daemon-worker.test.ts) because this file imports the REAL
+    // core — a mocked copy would pin nothing.
+    expect([...PR_BINDING_ROLES]).toEqual([...CORE_PR_BINDING_ROLES]);
+  });
+
   it('projects bound sessions from their sidecars with persisted attribution', async () => {
     const cwd = await makeWorkspace();
     const mtime = new Date('2026-11-02T12:00:00.000Z');
@@ -308,6 +326,30 @@ describe('GET /sessions/pr-bindings', () => {
       bindings: [{ sessionId: SESSION_A, workspaceCwd: cwd, prs: [] }],
       partial: false,
     });
+  });
+
+  it('projects the binding role additively', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [101], { role: 'review' });
+    await seedBinding(cwd, SESSION_A, [102]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.partial).toBe(false);
+    expect(body.bindings[0]!.prs).toEqual([
+      {
+        number: 101,
+        url: 'https://github.com/acme/widgets/pull/101',
+        state: 'open',
+        role: 'review',
+      },
+      {
+        number: 102,
+        url: 'https://github.com/acme/widgets/pull/102',
+        state: 'open',
+      },
+    ]);
   });
 
   it('flags an unreadable sidecar as partial instead of an unbind and names it once', async () => {

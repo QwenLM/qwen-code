@@ -49,6 +49,7 @@ import {
   SessionSourceError,
   validateSessionSourceInput,
   canonicalSessionPrUrl,
+  isSessionPrRole,
   toSessionPrInfo,
   normalizeTurnResultError,
   normalizeSnapshotPayload,
@@ -1758,6 +1759,7 @@ function broadcastTurnError(
 ): void {
   const message = extractErrorMessage(err);
   const structuredErrorKind = extractJsonRpcErrorField(err, 'errorKind');
+  const subscriptionQuota = getJsonRpcErrorDataField(err, 'subscriptionQuota');
   const errorKind = structuredErrorKind ?? classifyTurnErrorKind(message);
   const code =
     structuredErrorKind !== undefined
@@ -1797,6 +1799,7 @@ function broadcastTurnError(
       data: {
         sessionId,
         message,
+        ...(subscriptionQuota !== undefined ? { subscriptionQuota } : {}),
         ...(code ? { code } : {}),
         ...(errorKind ? { errorKind } : {}),
         ...(loopType ? { loopType } : {}),
@@ -4127,9 +4130,12 @@ export function createSessionControlPlane(
       case SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload:
         return {
           kind: 'modelProviders',
-          tightening: false,
+          tightening: params?.['subscriptionSignedOut'] === true,
           persistedByControl: false,
-          payload: {},
+          payload:
+            params?.['subscriptionSignedOut'] === true
+              ? { subscriptionSignedOut: true }
+              : {},
         };
       case SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh:
         return {
@@ -4839,8 +4845,13 @@ export function createSessionControlPlane(
       opts.fileSystem,
       // §2.3: centralised model_switched publish — keeps cache + generation
       // update atomic. BridgeClient calls this instead of inlining publish.
-      (entry, modelId, originator) =>
-        publishModelSwitched(entry as SessionEntry, modelId, originator),
+      (entry, modelId, originator, subscriptionSignedOut) =>
+        publishModelSwitched(
+          entry as SessionEntry,
+          modelId,
+          originator,
+          subscriptionSignedOut,
+        ),
       // A2: centralised approval_mode_changed publish on in-session mode
       // promotion. `previous` is read from the bridge state cache.
       (entry, modeId, originator, planExecutionMode) => {
@@ -6940,17 +6951,22 @@ export function createSessionControlPlane(
   // re-reads the persisted settings when it starts; a Managed channel that
   // starts later is sent this before its first session request instead.
   let rememberedUserLanguage:
-    | { language: string; syncOutputLanguage: boolean }
+    | { language: string; syncOutputLanguage: boolean; scope?: 'workspace' }
     | undefined;
   const sendUserLanguage = (
     info: ChannelInfo,
-    params: { language: string; syncOutputLanguage: boolean },
+    params: {
+      language: string;
+      syncOutputLanguage: boolean;
+      scope?: 'workspace';
+    },
   ): Promise<{ language: string; sessions: number; failed: number }> => {
     const response = withTimeout(
       raceLongLived(
         info.connection.extMethod(SERVE_CONTROL_EXT_METHODS.userLanguage, {
           language: params.language,
           syncOutputLanguage: params.syncOutputLanguage,
+          ...(params.scope ? { scope: params.scope } : {}),
         }),
         getChannelClosedReject(info),
       ),
@@ -7241,6 +7257,7 @@ export function createSessionControlPlane(
     entry: SessionEntry,
     modelId: string,
     originatorClientId: string | undefined,
+    subscriptionSignedOut?: boolean,
   ): void => {
     entry.currentModelId = modelId;
     entry.modelPublishGeneration++;
@@ -7251,7 +7268,11 @@ export function createSessionControlPlane(
     entry.events.publish({
       type: 'model_switched',
       ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
-      data: { sessionId: entry.sessionId, modelId },
+      data: {
+        sessionId: entry.sessionId,
+        modelId,
+        ...(subscriptionSignedOut ? { subscriptionSignedOut: true } : {}),
+      },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
   };
@@ -13270,11 +13291,13 @@ export function createSessionControlPlane(
           ((pr as SessionPrInfo).state !== undefined &&
             (pr as SessionPrInfo).state !== 'open' &&
             (pr as SessionPrInfo).state !== 'merged' &&
-            (pr as SessionPrInfo).state !== 'closed')
+            (pr as SessionPrInfo).state !== 'closed') ||
+          ((pr as SessionPrInfo).role !== undefined &&
+            !isSessionPrRole((pr as SessionPrInfo).role))
         ) {
           throw new InvalidSessionMetadataError(
             'pr',
-            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\``,
+            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\`, and an optional \`role\` that is one of \`review\`, \`verify\`, or \`fix\``,
           );
         }
       }
@@ -13383,7 +13406,8 @@ export function createSessionControlPlane(
           latest.url === bound.url &&
           // A re-bind carrying a new state is a change: the live entry,
           // the metadata event, and the catalog revision must all see it.
-          (bound.state === undefined || bound.state === latest.state)
+          (bound.state === undefined || bound.state === latest.state) &&
+          (bound.role === undefined || bound.role === latest.role)
         ) {
           // Same binding repeated — no change, no event.
         } else {
@@ -13405,6 +13429,11 @@ export function createSessionControlPlane(
                 ? {
                     state: (bound.state ??
                       known?.state) as SessionPrInfo['state'],
+                  }
+                : {}),
+              ...((bound.role ?? known?.role)
+                ? {
+                    role: (bound.role ?? known?.role) as SessionPrInfo['role'],
                   }
                 : {}),
               // The issue snapshot is daemon-derived, never client-bound.
@@ -14863,9 +14892,16 @@ export function createSessionControlPlane(
 
     async setUserLanguage(params) {
       if (executionEngines) {
+        // A user write cannot clear a persisted workspace language override.
+        const workspaceOverride =
+          params.scope !== 'workspace' &&
+          rememberedUserLanguage?.scope === 'workspace'
+            ? rememberedUserLanguage
+            : undefined;
         rememberedUserLanguage = {
-          language: params.language,
+          language: workspaceOverride?.language ?? params.language,
           syncOutputLanguage: params.syncOutputLanguage,
+          ...(params.scope || workspaceOverride ? { scope: 'workspace' } : {}),
         };
       }
       // Sessionless: runs on every channel that is already live — one per

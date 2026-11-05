@@ -43,6 +43,12 @@ interface Scenario {
   /** Files to create in the workspace, by relative path. */
   files?: Record<string, string>;
   settings?: JsonObject;
+  /** The approval mode; YOLO by default. */
+  approvalMode?: 'default';
+  /** Answers each tool approval the prompt asks for, in order. */
+  approvals?: Array<'allow' | 'deny'>;
+  /** Presses Esc once this text is on screen. */
+  cancelOn?: string;
   /** The model requests each run must send, retries included. */
   requests: number;
   /**
@@ -50,6 +56,8 @@ interface Scenario {
    * inside its round.
    */
   rounds: number;
+  /** The tool batches the TUI runs, one per round that calls tools. */
+  batches: number;
   /**
    * Text both runs must show at the end, for a scenario that sends and
    * records nothing.
@@ -77,6 +85,8 @@ interface Run {
   screen: string;
   /** How many model rounds the debug log says ran on the shared loop. */
   sharedRounds: number;
+  /** How many tool batches the debug log says ran on the shared loop. */
+  sharedBatches: number;
 }
 
 /**
@@ -87,6 +97,11 @@ const PARITY_CASE_OPTIONS = { retry: 0, timeout: 240_000 };
 
 /** What the TUI logs for each model round it sends on the shared loop. */
 const SHARED_ROUND_LOG = 'model round on the shared agent loop';
+/** The first option of a tool approval. */
+const APPROVAL_PROMPT = 'Yes, allow once';
+
+/** What the TUI logs for each tool batch it runs on the shared loop. */
+const SHARED_BATCH_LOG = 'tool batch on the shared agent loop';
 
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
@@ -127,12 +142,15 @@ const VOLATILE_KEYS = new Set([
   'startedAt',
   'endedAt',
   'event.timestamp',
+  // When a write backed up the file it replaced.
+  'backupTime',
 ]);
 
 // Timings, such as the telemetry recorded with each response.
 const TIMING_KEY = /(_ms|Ms)$/;
 
-const DATE_REMINDER = '<system-reminder>\nThe current date is:';
+const DATE_REMINDER =
+  /^<system-reminder>\n(?:Today's date is |The date has changed since earlier in this conversation\. )/;
 
 const toolResults = (messages: JsonObject[]) =>
   messages.filter((message) => message['role'] === 'tool').length;
@@ -146,7 +164,7 @@ const userTurns = (messages: JsonObject[]) =>
 
 const isDateReminder = (part: unknown) =>
   typeof (part as JsonObject)?.['text'] === 'string' &&
-  ((part as JsonObject)['text'] as string).startsWith(DATE_REMINDER);
+  DATE_REMINDER.test((part as JsonObject)['text'] as string);
 
 /** `dir` is the workspace; `scratch`, which holds it, is the run's home. */
 function normalize(value: unknown, dir: string, scratch: string): unknown {
@@ -343,7 +361,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
         '--model',
         'fake-model',
         '--approval-mode',
-        'yolo',
+        scenario.approvalMode ?? 'yolo',
       ],
     });
     await until(
@@ -354,6 +372,29 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
 
     for (const prompt of scenario.prompts) {
       await session.send(prompt);
+      for (const answer of scenario.approvals ?? []) {
+        // The viewport, not the whole output, which still holds the
+        // previous approval.
+        await until(
+          async () => (await session!.viewport()).includes(APPROVAL_PROMPT),
+          'the approval opens',
+        );
+        await session.idle(500, 10_000);
+        session.pressKey(answer === 'allow' ? '\r' : '\x1b');
+        await until(
+          async () => !(await session!.viewport()).includes(APPROVAL_PROMPT),
+          'the approval closes',
+        );
+      }
+      if (scenario.cancelOn) {
+        await until(
+          async () => (await session!.viewport()).includes(scenario.cancelOn!),
+          'the tool starts',
+        );
+        // Let the tool start before Esc reaches it.
+        await sleep(1_500);
+        session.pressKey('\x1b');
+      }
       // A turn is over once the spinner stops and no request is in flight.
       await sleep(500);
       await session.idle(2_000, 90_000);
@@ -386,17 +427,21 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       records: sessionRecords(runtimeDir, workspace, scratch),
       screen,
       sharedRounds: debugLog.split(SHARED_ROUND_LOG).length - 1,
+      sharedBatches: debugLog.split(SHARED_BATCH_LOG).length - 1,
     };
   }
 
   const read = (file: string, id: string) =>
     fakeToolCall('read_file', { file_path: file }, id);
+  const write = (file: string, content: string, id: string) =>
+    fakeToolCall('write_file', { file_path: file, content }, id);
 
   const scenarios: Scenario[] = [
     {
       name: 'plain text',
       requests: 1,
       rounds: 1,
+      batches: 0,
       prompts: ['Say hello.'],
       reply: () => ({ content: 'Hello there.' }),
     },
@@ -404,6 +449,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       name: 'streamed text and a thought',
       requests: 1,
       rounds: 1,
+      batches: 0,
       prompts: ['Think, then answer.'],
       reply: () => ({
         reasoningChunks: ['Weighing ', 'the options.'],
@@ -418,6 +464,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       name: 'a thought before a tool',
       requests: 2,
       rounds: 2,
+      batches: 1,
       prompts: ['Think, then read the readme.'],
       files: { 'readme.txt': 'readme body\n' },
       sent: '"reasoning_content":"Deciding to read."',
@@ -433,6 +480,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       name: 'one tool',
       requests: 2,
       rounds: 2,
+      batches: 1,
       prompts: ['Read the readme.'],
       files: { 'readme.txt': 'readme body\n' },
       reply: (messages, dir) =>
@@ -444,6 +492,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       name: 'two reads in one response',
       requests: 2,
       rounds: 2,
+      batches: 1,
       prompts: ['Read both files.'],
       files: { 'a.txt': 'alpha\n', 'b.txt': 'beta\n' },
       reply: (messages, dir) =>
@@ -457,10 +506,75 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
           : { content: 'Both read.' },
     },
     {
+      // The second response repeats the first call's provider id and
+      // arguments next to a fresh call, so the batch answers the replay.
+      name: 'a replayed call next to a fresh one',
+      requests: 3,
+      rounds: 3,
+      batches: 2,
+      prompts: ['Read a, then b.'],
+      files: { 'a.txt': 'alpha\n', 'b.txt': 'beta\n' },
+      reply: (messages, dir) => {
+        const done = toolResults(messages);
+        if (done === 0)
+          return { toolCalls: [read(join(dir, 'a.txt'), 'call_replayed')] };
+        if (done === 1)
+          return {
+            toolCalls: [
+              read(join(dir, 'a.txt'), 'call_replayed'),
+              read(join(dir, 'b.txt'), 'call_fresh'),
+            ],
+          };
+        return { content: 'Both read.' };
+      },
+    },
+    {
+      // Declining the second approval cancels its call and ends the turn.
+      name: 'an approved write, then a declined one',
+      requests: 2,
+      rounds: 2,
+      batches: 2,
+      approvalMode: 'default',
+      approvals: ['allow', 'deny'],
+      prompts: ['Write a, then b.'],
+      recorded: 'a body',
+      reply: (messages, dir) =>
+        toolResults(messages) === 0
+          ? { toolCalls: [write(join(dir, 'a.txt'), 'a body\n', 'call_a')] }
+          : toolResults(messages) === 1
+            ? {
+                toolCalls: [write(join(dir, 'b.txt'), 'b body\n', 'call_b')],
+              }
+            : { content: 'Should not be asked.' },
+    },
+    {
+      // Esc while the command runs cancels it and ends the turn.
+      name: 'a shell command cancelled while it runs',
+      requests: 1,
+      rounds: 1,
+      batches: 1,
+      cancelOn: 'waiting-for-esc',
+      prompts: ['Run the slow command.'],
+      reply: () => ({
+        toolCalls: [
+          fakeToolCall(
+            'run_shell_command',
+            {
+              command:
+                'echo waiting-for-esc && node -e "setTimeout(() => {}, 60000)"',
+              is_background: false,
+            },
+            'call_slow',
+          ),
+        ],
+      }),
+    },
+    {
       name: 'an edit cut off by the output limit',
       // The client asks again for the cut-off call inside its round.
       requests: 3,
       rounds: 2,
+      batches: 1,
       prompts: ['Write the notes.'],
       reply: (messages, dir) =>
         toolResults(messages) === 0
@@ -483,6 +597,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       name: 'a stream that drops and is retried',
       requests: 2,
       rounds: 1,
+      batches: 0,
       prompts: ['Tell me a story.'],
       reply: (_messages, _dir, index) =>
         index === 0
@@ -496,6 +611,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       name: 'two prompts in one session',
       requests: 2,
       rounds: 2,
+      batches: 0,
       prompts: ['First question.', 'Second question.'],
       reply: (messages) => ({ content: `Answer ${userTurns(messages)}.` }),
     },
@@ -503,6 +619,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       name: 'a model error',
       requests: 1,
       rounds: 1,
+      batches: 0,
       prompts: ['Fail please.'],
       reply: () => ({ errorContent: 'upstream exploded' }),
     },
@@ -510,6 +627,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       name: 'a UserPromptSubmit hook that blocks',
       requests: 0,
       rounds: 1,
+      batches: 0,
       prompts: ['Do the blocked thing.'],
       settings: { hooks: hooks('UserPromptSubmit', 'block-prompt.mjs') },
       files: {
@@ -523,6 +641,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       name: 'a Stop hook that blocks once',
       requests: 2,
       rounds: 1,
+      batches: 0,
       prompts: ['Answer, then keep going once.'],
       settings: { hooks: hooks('Stop', 'stop-once.mjs') },
       files: {
@@ -547,6 +666,8 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     // Only the run with the setting on sends its rounds on the shared loop.
     expect(current.sharedRounds).toBe(0);
     expect(shared.sharedRounds).toBe(scenario.rounds);
+    expect(current.sharedBatches).toBe(0);
+    expect(shared.sharedBatches).toBe(scenario.batches);
     for (const run of [current, shared]) {
       expect(run.requests).toHaveLength(scenario.requests);
       if (scenario.shows) expect(run.screen).toContain(scenario.shows);
