@@ -453,10 +453,7 @@ describe('subagent plan tool policy', () => {
       return config;
     };
 
-    it('reports no exec route when exec is eager-hidden in Hybrid', () => {
-      // `tools.eager` can demote `exec` too. prepareTools() then drops it from
-      // the Hybrid declarations and from the exec binding set, so the gateway
-      // is closed even though the registry still counts the factory.
+    it('retains the always-loaded exec route when permission-deferred in Hybrid', () => {
       const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
       const registry = new ToolRegistry(config);
       vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
@@ -468,14 +465,14 @@ describe('subagent plan tool policy', () => {
       vi.spyOn(config, 'getVisibleTools').mockReturnValue(
         new Set([ToolNames.SKILL]),
       );
-      expect(hasAgentSkillExecBinding(config)).toBe(false);
+      expect(hasAgentSkillExecBinding(config)).toBe(true);
       expect(
         toolConfigAllowsSkill(
           { tools: [ToolNames.EXEC] },
           hasAgentSkillExecBinding(config),
           isAgentSkillEagerHidden(config),
         ),
-      ).toBe(false);
+      ).toBe(true);
     });
 
     it.each([ToolMode.CodeMode, ToolMode.CodeModeOnly])(

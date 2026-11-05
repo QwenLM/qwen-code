@@ -151,9 +151,8 @@ export function hasAgentSkillExecBinding(
   return (
     mode === ToolMode.CodeModeOnly ||
     (mode === ToolMode.CodeMode &&
-      // `tools.eager` can demote exec too; prepareTools() then drops it from
-      // the Hybrid declarations and from the exec binding set.
-      !isAgentToolEagerHidden(context, ToolNames.EXEC, registryWillBeRebuilt) &&
+      // Exec is alwaysLoad: permission deferral cannot hide the registered gateway,
+      // including before its lazy factory has been warmed.
       !isAgentSkillEagerHidden(context, registryWillBeRebuilt))
   );
 }
