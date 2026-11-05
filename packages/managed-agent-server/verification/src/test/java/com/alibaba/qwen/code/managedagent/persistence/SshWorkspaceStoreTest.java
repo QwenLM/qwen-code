@@ -381,17 +381,20 @@ class SshWorkspaceStoreTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void publicationRequiresItsOriginalPhysicalOwner(boolean missing) {
+    @ValueSource(strings = {"missing", "registration", "physical"})
+    void publicationRequiresItsOriginalPhysicalOwner(String mismatch) {
         var intent = parkedReservation();
-        if (missing) {
+        if ("missing".equals(mismatch)) {
             jdbc.update("DELETE FROM ma_storage_owner");
-        } else {
+        } else if ("registration".equals(mismatch)) {
             jdbc.update("UPDATE ma_storage_owner SET mount_registration_id = ?", UUID.randomUUID().toString());
+        } else {
+            jdbc.update("UPDATE ma_storage_owner SET storage_key = 'replacement', physical_key = 'replacement'");
         }
         assertThatThrownBy(() -> store.completeParked("tenant", intent.operationId()))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE mount_state = 'READY'", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT registration_state FROM ma_storage", String.class)).isEqualTo("FENCE_ONLY");
         assertThat(store.parked("tenant", intent.operationId())).isPresent();
     }

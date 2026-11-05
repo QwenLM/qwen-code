@@ -160,13 +160,11 @@ public final class JdbcRuntimeBindingRepository
                     lock.setString(1, physical);
                     lock.setString(2, storageAliasKey(claim.getRequest().getScope().getTenantId(), claim.getRequest().getStorageId()));
                     try (var rows = lock.executeQuery()) {
-                        if (!rows.next() || !physical.equals(rows.getString(1))) {
+                        if (!rows.next() || !physical.equals(rows.getString(1))
+                                || !com.alibaba.qwen.code.managedagent.persistence.StorageOwnerMembership.membersAllowed(connection, physical, true)) {
                             throw unverifiedWorkspaceHolder();
                         }
                     }
-                }
-                if (!com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore.membersAllowed(connection, physical, true)) {
-                    throw unverifiedWorkspaceHolder();
                 }
             }
             var authority = claim.getRequest().getScope().getLifecycleAuthority();

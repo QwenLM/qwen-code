@@ -563,6 +563,19 @@ class WorkspaceFileUploadStoreTest {
     }
 
     @Test
+    void mismatchedRuntimeMemberRemainsUnavailableDuringPreparation() {
+        var binding = files.scope("tenant", "actor", workspace, ".").binding();
+        var authority = new WorkspaceExecutionStore(jdbc, manager, guard);
+        var runtime = runtime();
+        authority.holdForMaintenance(binding, worktreeOperation(binding, true), 1);
+        authority.claim(binding, runtime);
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = 'different-storage'");
+        jdbc.update("UPDATE ma_operation SET claim_generation = 2 WHERE operation_kind = 'SESSION_WORKTREE'");
+        assertThatThrownBy(() -> authority.claim(binding, runtime))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+    }
+
+    @Test
     void mismatchedPreparationGenerationNeverAdmitsAMember() {
         var binding = files.scope("tenant", "actor", workspace, ".").binding();
         var authority = new WorkspaceExecutionStore(jdbc, manager, guard);

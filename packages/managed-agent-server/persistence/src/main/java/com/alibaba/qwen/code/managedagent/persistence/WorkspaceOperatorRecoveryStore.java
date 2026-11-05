@@ -302,7 +302,7 @@ public final class WorkspaceOperatorRecoveryStore {
         var members = jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session"
                 + " WHERE execution_storage_key = ? AND binding_id = ? AND runtime_generation = ?"
                 + (locked ? " FOR UPDATE" : ""), String.class, storageKey, bindingId, generation);
-        if (owners.size() != 1 || members.size() != 1 || !WorkspaceExecutionStore.membersAllowed(jdbc, storageKey)) {
+        if (owners.size() != 1 || members.size() != 1 || !StorageOwnerMembership.membersAllowed(jdbc, storageKey)) {
             throw blocked();
         }
         String sessionId = members.getFirst();

@@ -262,13 +262,13 @@ public class WorkspaceFileUploadStore {
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenant, scope.binding().getStorageId());
             String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage WHERE alias_key = ? FOR UPDATE", String.class,
                     JdbcRuntimeBindingRepository.storageAliasKey(tenant, scope.binding().getStorageId()));
-            var owners = jdbc.queryForList("SELECT holder_key, maintenance_id, mount_state, mount_revision FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", physical);
+            var owners = jdbc.queryForList("SELECT mount_state, mount_revision FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", physical);
             if (owners.size() != 1 || !"READY".equals(owners.getFirst().get("mount_state"))
                     || !(owners.getFirst().get("mount_revision") instanceof Number mount)
                     || !Long.valueOf(mount.longValue()).equals(scope.mountRevision())) {
                 throw changed();
             }
-            if (!WorkspaceExecutionStore.membersAllowed(jdbc, physical)) {
+            if (!StorageOwnerMembership.membersAllowed(jdbc, physical)) {
                 throw busy();
             }
             Map<String, Object> request = null;
@@ -367,7 +367,7 @@ public class WorkspaceFileUploadStore {
             if (current.result() != null) {
                 return current.result();
             }
-            if (!WorkspaceExecutionStore.membersAllowed(jdbc, target.physical())
+            if (!StorageOwnerMembership.membersAllowed(jdbc, target.physical())
                     || jdbc.update("UPDATE ma_storage_owner SET member_count = member_count - 1 WHERE storage_key = ?"
                     + " AND member_count > 0", target.physical()) != 1) {
                 throw pending();

@@ -45,7 +45,7 @@
 
 普通成员可以与身份已验证的主 `SESSION_WORKTREE` 创建并行，维护操作之间仍通过现有 owner 和持久执行记录互斥。原始创建 operation ID 等于 worktree ID，cleanup 使用不同的 operation ID。分类匹配这一不可变身份、tenant、Session、逻辑及物理存储、claim 代际和 holder 摘要，不依赖会变化的 worktree/operation 状态或 claim 到期时间：Git 结果不明时，worktree 可能已标记 BLOCKED，而原物理执行仍持有维护占用。
 
-Runtime 准入/执行、上传准入/收尾以及 Runtime 停止/恢复共用这一条件。计数更新仍在 owner 行锁内完成。Operation/worktree 分类使用独立无锁查询，避免在 owner 锁之后获取 operation 锁。REPEATABLE READ 旧快照无法匹配当前代际时拒绝放行。原有挂载就绪检查保留在原调用位置，停止 Runtime 的清理路径不新增 READY 要求。结果不明、过期或未证明停止的维护，仍不得让后继维护进入。
+Runtime 准入/执行、上传准入/收尾以及 Runtime 停止/恢复共用 [StorageOwnerMembership](../../packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/StorageOwnerMembership.java) 中的条件。共享判断独立于各消费者，使消费者的类大小上限能够下降。计数更新仍在 owner 行锁内完成。Operation/worktree 分类使用独立无锁查询，避免在 owner 锁之后获取 operation 锁。REPEATABLE READ 旧快照无法匹配当前代际时拒绝放行。原有挂载就绪检查保留在原调用位置，停止 Runtime 的清理路径不新增 READY 要求。结果不明、过期或未证明停止的维护，仍不得让后继维护进入。Runtime 成员指向另一物理存储时，即使预期存储正忙，也继续返回 unavailable。
 
 创建仍会修改 Git common directory、refs 和 worktree 注册。并发用户 Git 操作采用 CLI 冲突语义：返回冲突，不重置或收编已有目标。这不表示创建只操作新目录。共享容器和目标冲突沿用现有失败语义及 marker/身份校验。
 
@@ -59,10 +59,10 @@ SSH 收尾和 worktree 创建保持可独立审阅。SSH 的 MySQL 验收覆盖�
 
 1. 持有同租户 placement guard，或另一物理 owner 的行锁，都不会阻塞目标注册收尾。
 2. 同一 parked operation 并发完成和释放，只能形成一种有效结果：完整的 Workspace/grant/READY owner，或注册失败且仅释放自己的未完成 reservation。
-3. 包括跨租户在内，对同一或重叠目录的竞争预留保持目录归属。延迟的旧请求不能发布或删除新 owner 的注册。
+3. 包括跨租户在内，对同一或重叠目录的竞争预留保持目录归属。延迟的旧请求不能发布或删除新 owner 的注册。即使 registration ID 相同，物理键不匹配时也必须拒绝发布。
 
 Worktree 验收覆盖 Runtime/上传在创建占用前后两种顺序下准入、BLOCKED/claim 到期之后的 pending 上传收尾、过期代际，以及 cleanup 继续排他。真实 Git 检查验证冻结 commit 和源 dirty files/index 不变，中断创建不覆盖已有目标。未证明 worker 停止时始终不允许后继维护。Child merge/discard 的现有覆盖保持不变。
 
 Runtime placement 仍扫描跨 binding/slot 的恢复障碍。Runtime retention、CSI 和 Resident retirement 仍依赖资源引用和更大范围的生命周期切换。普通 collector 以后可能继续缩小，但本次审计尚未完整确认 reader/recovery/归属交接的竞争关系，不能据此宣称这些 guard 可删。
 
-实现修改五个持久化类及针对性测试，未新增 schema/API。本地验证通过 131 个去重后的针对性用例（包含 17 个真实 Git 用例）、45 个真实 MySQL 用例及 Checkstyle。全量 Java/MySQL/Hosted CI 和 UI 验收仍待完成；命令、失败尝试及限制记录在 `.qwen/e2e-tests/2026-11-05-registration-worktree-locks.md`。加入/上传的实际等待频率以及现有当前读约定，仍是后续存储准入/计数重设计必须明确的输入。
+实现修改六个持久化类及针对性测试，未新增 schema/API。初始本地验证通过 131 个去重后的针对性用例（包含 17 个真实 Git 用例）、45 个真实 MySQL 用例及 Checkstyle。评审跟进额外验证类大小和模块/锁约定、迁移后的判断调用方，以及物理键和错误优先级回归。全量 Java/MySQL/Hosted CI 和 UI 验收仍待完成；命令、失败尝试及限制记录在 `.qwen/e2e-tests/2026-11-05-registration-worktree-locks.md`。加入/上传的实际等待频率以及现有当前读约定，仍是后续存储准入/计数重设计必须明确的输入。
