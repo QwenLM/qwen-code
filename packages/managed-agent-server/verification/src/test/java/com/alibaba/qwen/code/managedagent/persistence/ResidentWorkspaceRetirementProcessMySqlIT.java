@@ -4,7 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeB
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesHttpRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.provisioning.kubernetes.KubernetesHttpRuntimeClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Timeout;

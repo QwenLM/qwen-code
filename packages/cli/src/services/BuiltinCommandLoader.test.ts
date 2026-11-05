@@ -76,7 +76,15 @@ vi.mock('../ui/commands/hooksCommand.js', async () => {
   };
 });
 
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from 'vitest';
 import { BuiltinCommandLoader } from './BuiltinCommandLoader.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { CommandKind } from '../ui/commands/types.js';
@@ -126,6 +134,8 @@ describe('BuiltinCommandLoader', () => {
 
   const restoreCommandMock = restoreCommand as Mock;
 
+  afterEach(() => vi.unstubAllEnvs());
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockConfig = {
@@ -143,6 +153,21 @@ describe('BuiltinCommandLoader', () => {
       kind: CommandKind.BUILT_IN,
     });
   });
+
+  it.each([undefined, 'false', 'true'])(
+    'registers subscription account commands when DEV=%s',
+    async (dev) => {
+      vi.stubEnv('DEV', false);
+      if (dev === undefined) delete process.env['DEV'];
+      else process.env['DEV'] = dev;
+      const commands = await new BuiltinCommandLoader(mockConfig).loadCommands(
+        new AbortController().signal,
+      );
+      expect(commands.map((command) => command.name)).toEqual(
+        expect.arrayContaining(['upgrade', 'logout']),
+      );
+    },
+  );
 
   it('skips automatic IDE process detection in tool sandbox', async () => {
     const { ideCommand } = await import('../ui/commands/ideCommand.js');

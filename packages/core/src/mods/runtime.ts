@@ -41,6 +41,9 @@ import {
   type ModReply,
   type ModRequest,
   type ModSessionFacts,
+  type ModPromptSubmit,
+  type ModPromptSubmitted,
+  type ModQueuedPrompt,
   type ModTurnComplete,
   type ModTurnStart,
   type ModWorkerReply,
@@ -52,6 +55,12 @@ import {
 type ModToolResolver = (
   name: string,
 ) => Promise<AnyDeclarativeTool | undefined>;
+
+/**
+ * Takes a prompt a Mod submitted, to start a turn once the session is idle,
+ * or returns why it was refused.
+ */
+export type ModPromptQueue = (prompt: ModQueuedPrompt) => string | undefined;
 
 /** What a host that draws offers its Mods. */
 export interface ModRenderHost {
@@ -85,6 +94,7 @@ export class ModRuntime {
     start: false,
     complete: [],
   };
+  private prompts: string[] = [];
   private renders: string[] = [];
   // Asked for during the load, before the host knows which plugins draw.
   private early?: Set<string> = new Set();
@@ -122,6 +132,7 @@ export class ModRuntime {
     private readonly surface: 'terminal' | null = null,
     private readonly abortTurn?: (turnId: string) => void,
     private readonly renderHost?: ModRenderHost,
+    private readonly queuePrompt?: ModPromptQueue,
   ) {
     this.worker = new Worker(workerEntry(), {
       stdout: true,
@@ -141,6 +152,8 @@ export class ModRuntime {
         this.tool?.checks.get(reply.id)?.(reply);
       else if (reply.type === 'turn-abort')
         this.answerTurnAbort(reply, root.id);
+      else if (reply.type === 'prompt-queue')
+        this.answerPromptQueue(reply, root.id);
       else if (reply.type === 'invalidate') {
         if (reply.event !== 'ui.render' || this.failure) return;
         if (this.early) this.early.add(reply.plugin);
@@ -198,6 +211,10 @@ export class ModRuntime {
     facts?: () => ModSessionFacts,
     abortTurn?: (turnId: string) => void,
     render?: ModRenderHost,
+    // Whether this host raises `prompt.submit` for the prompts submitted.
+    prompts = false,
+    // Where `$.prompt.submit` queues a prompt; absent, the host runs none.
+    queuePrompt?: ModPromptQueue,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
@@ -226,6 +243,7 @@ export class ModRuntime {
       surface,
       abortTurn,
       render,
+      queuePrompt,
     );
     try {
       const result = await runtime.request(
@@ -236,6 +254,8 @@ export class ModRuntime {
           surface,
           version,
           sites: render?.sites ?? [],
+          prompts,
+          submits: queuePrompt !== undefined,
         },
         signal,
         60_000,
@@ -245,10 +265,12 @@ export class ModRuntime {
         value.every((name) => plugins.some((plugin) => plugin.name === name));
       const turnComplete = record(result) ? result['turnComplete'] : undefined;
       const renders = record(result) ? result['render'] : undefined;
+      const promptSubmit = record(result) ? result['promptSubmit'] : undefined;
       if (
         !record(result) ||
         typeof result['tools'] !== 'boolean' ||
         typeof result['turnStart'] !== 'boolean' ||
+        !names(promptSubmit) ||
         !names(turnComplete) ||
         !names(renders)
       )
@@ -275,6 +297,7 @@ export class ModRuntime {
         start: result['turnStart'],
         complete: turnComplete,
       };
+      runtime.prompts = promptSubmit;
       runtime.renders = renders;
       const early = runtime.early!;
       runtime.early = undefined;
@@ -303,6 +326,11 @@ export class ModRuntime {
     readonly complete: readonly string[];
   } {
     return this.turns;
+  }
+
+  /** The plugins whose hooks hear `prompt.submit`. */
+  get promptHooks(): readonly string[] {
+    return this.prompts;
   }
 
   /** The plugins whose `ui.render` hooks may draw where this host draws. */
@@ -554,6 +582,32 @@ export class ModRuntime {
     );
   }
 
+  /**
+   * Raises `prompt.submit`: the prompt that arrived beneath the hooks, or why
+   * it did not enter.
+   */
+  async submitPrompt(
+    input: ModPromptSubmit,
+    signal: AbortSignal,
+  ): Promise<ModPromptSubmitted> {
+    const result = await this.request({ type: 'prompt-submit', input }, signal);
+    if (
+      record(result) &&
+      (typeof result['drop'] === 'string'
+        ? Object.keys(result).length === 2 &&
+          typeof result['byHook'] === 'boolean'
+        : typeof result['text'] === 'string' &&
+          Object.keys(result).every(
+            (key) => key === 'text' || key === 'context',
+          ) &&
+          (result['context'] === undefined ||
+            (Array.isArray(result['context']) &&
+              result['context'].every((item) => typeof item === 'string'))))
+    )
+      return result as ModPromptSubmitted;
+    throw new Error('Invalid Mod prompt.submit result.');
+  }
+
   async completeTurn(
     input: ModTurnComplete,
     signal: AbortSignal,
@@ -582,6 +636,24 @@ export class ModRuntime {
       );
     }
     this.post({ type: 'turn-abort-result', id: reply.id, error }, root);
+  }
+
+  // The host owns the session's turns, so it takes the prompt or refuses it.
+  private answerPromptQueue(
+    reply: Extract<ModReply, { type: 'prompt-queue' }>,
+    root: number,
+  ): void {
+    let refused: string | undefined;
+    try {
+      refused = this.queuePrompt
+        ? this.queuePrompt(reply.prompt)
+        : 'this host does not run prompts a Mod submits';
+    } catch (caught) {
+      refused = (
+        caught instanceof Error ? caught.message : String(caught)
+      ).slice(0, 4000);
+    }
+    this.post({ type: 'prompt-queue-result', id: reply.id, refused }, root);
   }
 
   async end(

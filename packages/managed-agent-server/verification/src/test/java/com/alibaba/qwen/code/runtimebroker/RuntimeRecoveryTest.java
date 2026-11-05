@@ -5,7 +5,7 @@ import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
 import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.provisioning.StaticRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.staticruntime.StaticRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.junit.jupiter.api.Test;
 

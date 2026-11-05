@@ -7,6 +7,10 @@
 export { useDaemonAgents } from './useDaemonAgents.js';
 export { useDaemonAuth } from './useDaemonAuth.js';
 export { useDaemonChannels } from './useDaemonChannels.js';
+export {
+  CHANNEL_EVENTS_RELOAD_MS,
+  useDaemonChannelEvents,
+} from './useDaemonChannelEvents.js';
 export { useDaemonDiagnostics } from './useDaemonDiagnostics.js';
 export { useDaemonFiles } from './useDaemonFiles.js';
 export { useDaemonGlob } from './useDaemonGlob.js';

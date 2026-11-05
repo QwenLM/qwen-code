@@ -25,6 +25,7 @@ public final class RocketMqEventClients {
     public static final class Publisher implements java.io.Closeable {
         private final Producer producer;
         private Publisher(Producer producer) { this.producer = producer; }
+        @Override
         public void close() throws java.io.IOException { producer.close(); }
     }
     public LiteTopicEventTransport journal(Publisher publisher, ManagedAgentSettings properties) {
