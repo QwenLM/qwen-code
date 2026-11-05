@@ -806,6 +806,7 @@ export { parse, stringify } from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';
 export * from './agents/forkedAgent.js';
 export * from './utils/sideQuery.js';
+export * from './utils/outputLanguageTable.js';
 
 // ============================================================================
 // OAuth & Authentication

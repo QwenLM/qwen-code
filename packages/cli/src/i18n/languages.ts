@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { OUTPUT_LANGUAGE_TABLE } from '@qwen-code/qwen-code-core';
+
 export type SupportedLanguage =
   | 'en'
   | 'zh'
@@ -32,64 +34,21 @@ export interface LanguageDefinition {
   strictParity?: boolean;
 }
 
-export const SUPPORTED_LANGUAGES: readonly LanguageDefinition[] = [
-  {
-    code: 'en',
-    id: 'en-US',
-    fullName: 'English',
-    nativeName: 'English',
-  },
-  {
-    code: 'zh-TW',
-    id: 'zh-TW',
-    fullName: 'Traditional Chinese',
-    nativeName: '繁體中文',
-    strictParity: true,
-  },
-  {
-    code: 'zh',
-    id: 'zh-CN',
-    fullName: 'Chinese',
-    nativeName: '中文',
-    strictParity: true,
-  },
-  {
-    code: 'ru',
-    id: 'ru-RU',
-    fullName: 'Russian',
-    nativeName: 'Русский',
-  },
-  {
-    code: 'de',
-    id: 'de-DE',
-    fullName: 'German',
-    nativeName: 'Deutsch',
-  },
-  {
-    code: 'ja',
-    id: 'ja-JP',
-    fullName: 'Japanese',
-    nativeName: '日本語',
-  },
-  {
-    code: 'pt',
-    id: 'pt-BR',
-    fullName: 'Portuguese',
-    nativeName: 'Português',
-  },
-  {
-    code: 'fr',
-    id: 'fr-FR',
-    fullName: 'French',
-    nativeName: 'Français',
-  },
-  {
-    code: 'ca',
-    id: 'ca-ES',
-    fullName: 'Catalan',
-    nativeName: 'Català',
-  },
-];
+/**
+ * Locales maintained in-tree, whose coverage tooling pins to exact en.js key
+ * parity. The rest of the list is data: it comes from the shared
+ * output-language table in core, so the CLI's settings and the Goal
+ * verifier's closed set can never drift apart.
+ */
+const STRICT_PARITY_CODES = new Set<SupportedLanguage>(['zh', 'zh-TW']);
+
+export const SUPPORTED_LANGUAGES: readonly LanguageDefinition[] =
+  OUTPUT_LANGUAGE_TABLE.map((entry) => ({
+    ...entry,
+    ...(STRICT_PARITY_CODES.has(entry.code as SupportedLanguage)
+      ? { strictParity: true }
+      : {}),
+  }));
 
 function normalizeLanguageCandidate(input: string): string {
   return input.trim().replace(/_/g, '-').toLowerCase();

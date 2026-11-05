@@ -8,11 +8,12 @@ import { readFile } from 'node:fs/promises';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { runSideQuery } from '../utils/sideQuery.js';
-import type { GoalVerifierEvidenceRecord } from './goal-evidence.js';
 import {
-  GOAL_INFEASIBLE_NEXT_STEP,
-  type GoalTerminalProposal,
-} from './goal-protocol.js';
+  isBcp47LanguageTag,
+  isKnownOutputLanguageDesignation,
+} from '../utils/outputLanguageTable.js';
+import type { GoalVerifierEvidenceRecord } from './goal-evidence.js';
+import type { GoalTerminalProposal } from './goal-protocol.js';
 
 /**
  * One fixed ceiling, sized for a full window: the request can carry a
@@ -49,7 +50,7 @@ Every objective condition and factual claim in proposal.reason must be supported
 
 The runtime sends this request only after successfully executing update_goal and recording its proposal. Never require evidence that update_goal itself was called. Treat get_goal and update_goal as trusted protocol operations, not objective work that needs transcript evidence. Judge the remaining objective conditions from the supplied evidence.
 
-If you accept a blocked proposal whose blockerKind is "infeasible", your reason must also say what the user should do next: ${GOAL_INFEASIBLE_NEXT_STEP}
+If you accept a blocked proposal whose blockerKind is "infeasible", end your reason with a short note telling the user what to do next, written in the same language as the rest of the reason.
 
 Return exactly one JSON object with keys "decision" and "reason". decision must be "accept" or "reject". Include no markdown fence, preamble, extra key, or commentary.`;
 
@@ -229,20 +230,34 @@ export function validateGoalVerifierText(text: string): string | null {
 const OUTPUT_LANGUAGE_MARKER =
   /<!--\s*qwen-code:llm-output-language:\s*(.*?)\s*-->/i;
 const OUTPUT_LANGUAGE_TOKEN_MAX_LENGTH = 64;
-/**
- * Letters and digits of any script plus the punctuation that generated
- * language names and locale codes use ("English (US)", "pt_BR", "zh-CN").
- * Sentence punctuation, quotes and code syntax are excluded, so a token is
- * a language designation, not a payload.
- */
-const OUTPUT_LANGUAGE_TOKEN = /^[\p{L}\p{N} .@_()-]+$/u;
 
+/**
+ * Accepts only a closed set, not a character class. The file is authorable
+ * by the repository in the working tree, and a character class cannot
+ * separate a language name from an instruction written in the same script:
+ * a short CJK sentence needs no spaces and no punctuation, and it passed
+ * the previous `[\p{L}\p{N} .@_()-]` check as if it were a language. So the
+ * token must be `auto`, a designation the product itself writes (any
+ * spelling in the shared output-language table), or a well-formed BCP-47
+ * tag. Anything else is dropped: an unknown designation merely does not
+ * localize the verdict, and it is never handed to the verifier as
+ * instruction material.
+ */
 function parseOutputLanguageToken(content: string): string | undefined {
   const token = content.match(OUTPUT_LANGUAGE_MARKER)?.[1]?.trim();
   if (!token || token.length > OUTPUT_LANGUAGE_TOKEN_MAX_LENGTH) {
     return undefined;
   }
-  return OUTPUT_LANGUAGE_TOKEN.test(token) ? token : undefined;
+  if (token.toLowerCase() === 'auto') {
+    return 'auto';
+  }
+  if (
+    isKnownOutputLanguageDesignation(token) ||
+    isBcp47LanguageTag(token)
+  ) {
+    return token;
+  }
+  return undefined;
 }
 
 function goalVerifierLanguageInstruction(token: string): string {
