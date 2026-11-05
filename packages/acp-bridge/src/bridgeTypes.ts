@@ -2813,6 +2813,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   setUserLanguage(params: {
     language: string;
     syncOutputLanguage: boolean;
+    /** Reload workspace settings too after a workspace-owned UI language write. */
+    scope?: 'workspace';
   }): Promise<{
     language: string;
     sessions: number;

@@ -11,32 +11,61 @@ import {
 } from './GithubAdapter.js';
 
 /**
+ * One-line meaning of each unqualified boundSessionActions key, shown by
+ * management UIs next to the key and in the add picker. Role-qualified
+ * keys reuse their base event's description; the role's job is named by
+ * the picker group header instead.
+ */
+const BOUND_ACTION_DESCRIPTIONS: Record<string, string> = {
+  default: 'Fallback template for any event without a more specific key',
+  'watch:ci_failure': 'CI checks turn red on a head commit',
+  'watch:merge_conflict': 'The PR develops a merge conflict',
+  'watch:head_change': 'The PR’s head commit changes',
+  'watch:state_change': 'The PR is merged or closed',
+  mention: 'You are @mentioned in a comment',
+  review_requested: 'A review is requested from you',
+  assign: 'You are assigned to the PR',
+  author: 'Activity on a PR you authored',
+  comment: 'A new comment on a subscribed PR',
+  ci_activity: 'CI activity on a subscribed PR',
+  manual: 'You subscribed to the PR manually',
+  state_change: 'The PR is closed or merged',
+  subscribed: 'Activity on a PR you subscribed to',
+  team_mention: 'A team you belong to is @mentioned',
+  security_alert: 'A security alert on the repository',
+  approval_requested: 'Approval is requested from you',
+  invitation: 'You are invited to collaborate',
+  member_feature_requested: 'A member feature request notification',
+  security_advisory_credit: 'You are credited in a security advisory',
+};
+
+/**
  * The boundSessionActions key options offered by management UIs: the
  * fallback, every event class, and each role-qualified spelling — built
  * from the same constants the validator enforces so the three cannot
- * drift (the PR_WATCH_EVENTS pattern, R2-18).
+ * drift (the PR_WATCH_EVENTS pattern, R2-18). `group` buckets the picker
+ * by binding role; `description` explains each key.
  */
+const BOUND_ACTION_BASE_OPTIONS = [
+  'default',
+  ...PR_WATCH_EVENTS.map((event) => `watch:${event}`),
+  ...PR_NOTIFICATION_REASONS,
+].map((value) => ({
+  value,
+  label: value,
+  description: BOUND_ACTION_DESCRIPTIONS[value],
+}));
+
 const BOUND_ACTION_KEY_OPTIONS = [
-  { value: 'default', label: 'default — fallback for any unmatched event' },
-  ...PR_WATCH_EVENTS.map((event) => ({
-    value: `watch:${event}`,
-    label: `watch:${event}`,
-  })),
-  ...PR_NOTIFICATION_REASONS.map((reason) => ({
-    value: reason,
-    label: reason,
-  })),
-  ...PR_BINDING_ROLES.flatMap((role) => [
-    { value: `${role}:default`, label: `${role}:default` },
-    ...PR_WATCH_EVENTS.map((event) => ({
-      value: `${role}:watch:${event}`,
-      label: `${role}:watch:${event}`,
+  ...BOUND_ACTION_BASE_OPTIONS.map((option) => ({ ...option, group: 'any' })),
+  ...PR_BINDING_ROLES.flatMap((role) =>
+    BOUND_ACTION_BASE_OPTIONS.map((option) => ({
+      value: `${role}:${option.value}`,
+      label: `${role}:${option.value}`,
+      description: option.description,
+      group: role,
     })),
-    ...PR_NOTIFICATION_REASONS.map((reason) => ({
-      value: `${role}:${reason}`,
-      label: `${role}:${reason}`,
-    })),
-  ]),
+  ),
 ];
 
 export { GithubChannel };
@@ -133,7 +162,7 @@ export const plugin: ChannelPlugin = {
         label: 'Bound Session Actions',
         kind: 'record',
         description:
-          'Optional. Operator instruction templates delivered to PR-bound sessions, keyed by event class (watch:<type> or a notification reason), optionally role-qualified (review:, verify:, fix:). Requires Deliver To PR-Bound Sessions. With templates configured, each role gets its own delivery (one winner per role); a role with no matching key skips the event. Template variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%. Use %% for a literal %. Leave empty for the default generic prompt.',
+          'Optional. Instruction templates delivered to PR-bound sessions. Pick an event key below; a role prefix (review:, verify:, fix:) targets that binding role only. Requires Deliver To PR-Bound Sessions. Each role with a matching key gets its own delivery; roles without one skip the event. Variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%; %% for a literal %. Leave empty for the default generic prompt.',
         options: BOUND_ACTION_KEY_OPTIONS,
       },
     ],
