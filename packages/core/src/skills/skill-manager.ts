@@ -617,9 +617,11 @@ export class SkillManager {
       }
     }
 
-    // Levels this pass did not rescan keep what the previous scan committed:
-    // the caller asked for a partial refresh, not for those arrays to vanish.
-    if (previousCache) {
+    // Levels an explicit partial refresh did not rescan keep what the previous
+    // scan committed: the caller asked for those arrays to stay. Safe mode is
+    // not a partial refresh — it deliberately excludes the other levels, so
+    // carrying them forward would republish what safe mode is meant to hide.
+    if (previousCache && options?.levels) {
       for (const level of ALL_SKILL_LEVELS) {
         if (levels.includes(level)) continue;
         const retained = previousCache.get(level);

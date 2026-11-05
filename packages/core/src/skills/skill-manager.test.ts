@@ -1207,6 +1207,24 @@ describe('SkillManager', () => {
   });
 
   describe('discovery completeness', () => {
+    it('drops levels a safe-mode scan excludes instead of carrying them forward', async () => {
+      // Safe mode is not a partial refresh: it deliberately scans only the
+      // bundled level, so a project list already in the cache must not be
+      // republished by the retention path (QwenLM/qwen-code#16262 review R2-2).
+      const cacheOf = () =>
+        (manager as unknown as { skillsCache: Map<string, unknown[]> })
+          .skillsCache;
+      await manager.refreshCache();
+      cacheOf().set('project', [{ name: 'stale-project-skill' }]);
+
+      vi.spyOn(mockConfig, 'isSafeMode').mockReturnValue(true);
+      await manager.refreshCache();
+
+      // A scan publishes a fresh map, so read the current one.
+      expect(cacheOf().has('project')).toBe(false);
+      expect(cacheOf().has('bundled')).toBe(true);
+    });
+
     it('distinguishes invalid manifests from unreadable sources without weakening completeness', async () => {
       mockReaddir(bareDirent('broken'));
       vi.mocked(fs.access).mockResolvedValue(undefined);
