@@ -91,15 +91,21 @@ final class JournalWriterLifecycle {
 
     ManagedSessionStore.PublicationWriter lockPublicationWriter(String tenant, String workspace,
             String session, String writer, long generation, String token) {
-        return lockPublicationWriter(tenant, workspace, session, writer, generation, token, true);
+        return lockPublicationWriter(tenant, workspace, session, writer, generation, token, true, true);
     }
 
     ManagedSessionStore.PublicationWriter lockPublicationWriter(String tenant, String workspace,
-            String session, String writer, long generation, String token, boolean publicationGuard) {
+            String session, String writer, long generation, String token, boolean placement,
+            boolean publicationGuard) {
         JournalStoreRows.validateScope(tenant, workspace, session);
         fencing.requireCredential(tenant, workspace, session, token);
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenant, session);
-        fencing.lockPlacementBounded(tenant);
+        // A lane that took the Session root instead of placement must not take
+        // placement after it: binding and lifecycle owners lock this root
+        // behind placement (design 2026-11-04-managed-publication-placement).
+        if (placement) {
+            fencing.lockPlacementBounded(tenant);
+        }
         // Publication-lane writer: keeps the tenant CAS row before the
         // Session root the CSI check locks and before the head row, the
         // order retention reads take (CAS row, root, head) and the same as
