@@ -594,8 +594,10 @@ Named-task commands work on all channel types (Telegram, WeChat, QQ, DingTalk, W
 The Web Shell's **Channel events** page shows a timeline of what every Channel
 in the current workspace did: the inbound messages it accepted, and the ones it
 skipped and why (`reason_filter`, `mention_required`, `duplicate`, a sender-gate
-rejection), the replies it published or suppressed, its inbound task
-transitions, and how each poll went. Pick the workspace whose Channels you want
+rejection, `github_api_error` when reading or handling a GitHub thread failed;
+a `failed` row with that reason means the thread will be read again), the
+replies it published or suppressed, its inbound task transitions, and how each
+poll went. Pick the workspace whose Channels you want
 to inspect, then filter by Channel and by event type; the page refreshes every
 few seconds while its tab is visible, pauses in a background tab, and has a
 manual refresh.
