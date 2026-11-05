@@ -1548,6 +1548,7 @@ export const AUTH_PREFLIGHT_ENV_KEYS: Readonly<
  */
 export const AUTH_PREFLIGHT_WAIVED_AUTH_TYPES: ReadonlySet<string> = new Set([
   'qwen-oauth',
+  'qwen-subscription',
 ]);
 
 type QwenMemorySettings = {

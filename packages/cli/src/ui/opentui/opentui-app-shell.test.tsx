@@ -211,6 +211,13 @@ vi.mock('@opentui/react', () => ({
 }));
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
+const isSubscriptionSignedIn = vi.hoisted(() => vi.fn(() => false));
+vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
+  QwenSubscriptionSession: class {
+    isSignedIn = isSubscriptionSignedIn;
+    onChange = () => () => {};
+  },
+}));
 vi.mock('@opentui/core', () => ({
   SyntaxStyle: { fromStyles: () => ({}) },
   MouseButton: { LEFT: 0 },
@@ -443,6 +450,7 @@ const CONFIG = {
   getTargetDir: () => '/repo',
   getModel: () => 'session-model',
   onModelChange: () => () => {},
+  setSubscriptionPlan: () => {},
 } as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 const getSessionStats = () => ({}) as unknown as SessionStatsState;
@@ -493,6 +501,7 @@ async function submit(
 
 describe('OpenTuiApp shell wiring', () => {
   beforeEach(() => {
+    isSubscriptionSignedIn.mockReturnValue(false);
     mocks.state.handleResult = { kind: 'handled' };
     mocks.state.handleResults.length = 0;
     mocks.state.loadCommandsOverride = null;
@@ -534,6 +543,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it('keeps subscription commands working without the composer hint row', async () => {
+    isSubscriptionSignedIn.mockReturnValue(true);
     renderApp({
       config: { ...CONFIG, getAuthType: () => 'qwen-subscription' } as Config,
     });
@@ -567,6 +577,7 @@ describe('OpenTuiApp shell wiring', () => {
     );
     await settle();
     act(() => {
+      isSubscriptionSignedIn.mockReturnValue(true);
       (mocks.state.host as OpenTuiAppHost).addItem(
         {
           type: 'info',
@@ -1260,6 +1271,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it('updates subscription entries in help as the connection changes', async () => {
+    isSubscriptionSignedIn.mockReturnValue(true);
     let authType = AuthType.QWEN_SUBSCRIPTION;
     const listeners = new Set<(model: string) => void>();
     const config = {
@@ -1278,20 +1290,19 @@ describe('OpenTuiApp shell wiring', () => {
     await settle();
     const entries = () =>
       mocks.state.dialogProps?.['commands'] as readonly SlashCommand[];
-    expect(entries()).toHaveLength(2);
-    expect(entries().every((command) => !command.hidden)).toBe(true);
+    expect(entries()).toEqual([logoutCommand, upgradeCommand]);
 
     act(() => {
       authType = AuthType.USE_OPENAI;
       listeners.forEach((listener) => listener('same-model'));
     });
-    expect(entries().every((command) => command.hidden)).toBe(true);
+    expect(entries()).toEqual([]);
 
     act(() => {
       authType = AuthType.QWEN_SUBSCRIPTION;
       listeners.forEach((listener) => listener('same-model'));
     });
-    expect(entries().every((command) => !command.hidden)).toBe(true);
+    expect(entries()).toEqual([logoutCommand, upgradeCommand]);
   });
 
   it('projects active worktree details and confirmation state into the status command input', async () => {

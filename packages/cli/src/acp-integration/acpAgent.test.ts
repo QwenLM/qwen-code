@@ -36,6 +36,7 @@ import {
 import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
 import { getDefaultReasoningConfig } from './model-configuration.js';
 import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import { QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import { BTW_STREAM_TIMEOUT_MS } from './btw-generation.js';
 import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
 
@@ -12268,57 +12269,61 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('extMethod preflight auth cell reports unknown for qwen-oauth even with placeholder apiKey', async () => {
-    mockConfig = {
-      ...mockConfig,
-      getTargetDir: vi.fn().mockReturnValue('/work/status'),
-      getMcpServers: vi.fn().mockReturnValue({}),
-      getAuthType: vi.fn().mockReturnValue('qwen-oauth'),
-      getModel: vi.fn().mockReturnValue('qwen-plus'),
-      getModelsConfig: vi.fn().mockReturnValue({
-        getGenerationConfig: vi
-          .fn()
-          .mockReturnValue({ apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN' }),
-        getCurrentAuthType: vi.fn().mockReturnValue('qwen-oauth'),
-        syncAfterAuthRefresh: vi.fn(),
-      }),
-      getSkillManager: vi.fn().mockReturnValue({
-        listSkills: vi.fn().mockResolvedValue([]),
-      }),
-      getAllConfiguredModels: vi.fn().mockReturnValue([]),
-      getToolRegistry: vi.fn().mockReturnValue({ getAllTools: () => [] }),
-    } as unknown as Config;
+  it.each([
+    ['qwen-oauth', 'QWEN_OAUTH_DYNAMIC_TOKEN'],
+    ['qwen-subscription', QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER],
+  ])(
+    'extMethod preflight auth cell reports unknown for %s even with placeholder apiKey',
+    async (authType, apiKey) => {
+      mockConfig = {
+        ...mockConfig,
+        getTargetDir: vi.fn().mockReturnValue('/work/status'),
+        getMcpServers: vi.fn().mockReturnValue({}),
+        getAuthType: vi.fn().mockReturnValue(authType),
+        getModel: vi.fn().mockReturnValue('qwen-plus'),
+        getModelsConfig: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({ apiKey }),
+          getCurrentAuthType: vi.fn().mockReturnValue(authType),
+          syncAfterAuthRefresh: vi.fn(),
+        }),
+        getSkillManager: vi.fn().mockReturnValue({
+          listSkills: vi.fn().mockResolvedValue([]),
+        }),
+        getAllConfiguredModels: vi.fn().mockReturnValue([]),
+        getToolRegistry: vi.fn().mockReturnValue({ getAllTools: () => [] }),
+      } as unknown as Config;
 
-    const agentPromise = runAcpAgent(
-      mockConfig,
-      makeSessionSettings(),
-      mockArgv,
-    );
-    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
-    const agent = capturedAgentFactory!({
-      get closed() {
-        return mockConnectionState.promise;
-      },
-    }) as AgentLike;
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
 
-    const preflight = (await agent.extMethod(
-      SERVE_STATUS_EXT_METHODS.workspacePreflight,
-      {},
-    )) as {
-      cells: Array<{
-        kind: string;
-        status: string;
-        detail?: { hasToken: boolean | 'unknown'; envVarCandidates: string[] };
-      }>;
-    };
+      const preflight = (await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.workspacePreflight,
+        {},
+      )) as {
+        cells: Array<{
+          kind: string;
+          status: string;
+          detail?: { hasToken: boolean | 'unknown' };
+        }>;
+      };
 
-    const authCell = preflight.cells.find((c) => c.kind === 'auth');
-    expect(authCell?.status).toBe('unknown');
-    expect(authCell?.detail?.hasToken).toBe('unknown');
+      mockConnectionState.resolve();
+      await agentPromise;
 
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
+      const authCell = preflight.cells.find((c) => c.kind === 'auth');
+      expect(authCell?.status).toBe('unknown');
+      expect(authCell?.detail?.hasToken).toBe('unknown');
+    },
+  );
 
   it('provider status marks current only for matching models', async () => {
     mockConfig = {
