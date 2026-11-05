@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.maintenance.WorkspaceCsiSessionMain;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
@@ -34,6 +35,7 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
@@ -71,6 +73,68 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ToolPublicationLockOrderMySqlIT {
     private static final ObjectMapper JSON = new ObjectMapper();
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void projectionCompletionSkipsTheTenantGuardAndRefusesPrivateSessions(boolean privateSession) throws Exception {
+        String url = System.getProperty("mysql.url");
+        if (url == null || !url.matches("jdbc:mysql://[^/]+/[^?]+(?:\\?.*)?")) {
+            throw new IllegalArgumentException("A MySQL test database URL is required");
+        }
+        String user = System.getProperty("mysql.user");
+        String password = System.getProperty("mysql.password", "");
+        var admin = new JdbcTemplate(new DriverManagerDataSource(url, user, password));
+        String schema = "projection_guard_" + UUID.randomUUID().toString().replace("-", "");
+        admin.execute("CREATE DATABASE " + schema);
+        try {
+            var source = new DriverManagerDataSource(
+                    url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
+            var fixture = ToolPublicationStoreTest.apiFixture(source);
+            var jdbc = fixture.jdbc();
+            var artifacts = fixture.results().listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts();
+            var descriptor = JSON.readTree(jdbc.queryForObject(
+                    "SELECT result_json FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", String.class));
+            var projection = new ManagedToolResultStore.Projection(descriptor, "pub-1",
+                    artifacts.getFirst().binding(), artifacts.getFirst().manifestRef(), artifacts, fixture.policy().version());
+            ToolPublicationStoreTest.releaseArtifacts(jdbc, fixture.manager());
+            jdbc.update("DELETE FROM ma_public_event WHERE event_type = 'item.tool_result.updated'");
+            jdbc.update("UPDATE ma_operation SET state = 'PENDING', available_at = 0"
+                    + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION'");
+            var claim = fixture.results().claim().orElseThrow();
+            if (privateSession) {
+                jdbc.update("UPDATE ma_session SET runtime_request_key = 'projection-private'");
+            }
+            jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain)"
+                            + " VALUES (?, ?, 'output_publication') ON DUPLICATE KEY UPDATE tenant_key = tenant_key",
+                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("tenant-1"), "tenant-1");
+            var pool = Executors.newSingleThreadExecutor();
+            var hold = fixture.manager().getTransaction(new DefaultTransactionDefinition());
+            try {
+                assertThat(jdbc.queryForObject("SELECT tenant_id FROM ma_tenant_guard"
+                                + " WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE",
+                        String.class, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("tenant-1")))
+                        .isEqualTo("tenant-1");
+                long before = System.nanoTime();
+                assertThat(pool.submit(() -> fixture.results().complete(claim, projection, fixture.policy().version()))
+                        .get(15, TimeUnit.SECONDS)).isEqualTo(!privateSession);
+                assertThat((System.nanoTime() - before) / 1_000_000).isLessThan(15_000);
+            } finally {
+                fixture.manager().rollback(hold);
+                pool.shutdownNow();
+                assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+            }
+            assertThat(jdbc.queryForObject("SELECT state FROM ma_operation"
+                            + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", String.class))
+                    .isEqualTo(privateSession ? "LEASED" : "READY");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event"
+                            + " WHERE event_type = 'item.tool_result.updated'", Integer.class))
+                    .isEqualTo(privateSession ? 0 : 1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_artifact", Integer.class))
+                    .isEqualTo(privateSession ? 0 : artifacts.size());
+        } finally {
+            admin.execute("DROP DATABASE " + schema);
+        }
+    }
 
     @ParameterizedTest
     @ValueSource(strings = {"reserve", "renew"})
@@ -354,12 +418,14 @@ class ToolPublicationLockOrderMySqlIT {
 
     /**
      * On an ordinary Session every lane that holds the tenant CAS row
-     * reaches the Session root only after it: a publication renew takes
-     * placement → CAS → root, and the retention lane takes CAS → root.
-     * Taking the root first on the retention side (an earlier answer to
-     * #13800 R1-1) closes a cycle with every such lane on every Session,
-     * not only on pinned ones: the paused retention owner would hold the
-     * root while the renew holds CAS. Here both complete with no deadlock.
+     * reaches the Session root only after it, and the ordinary apply lane
+     * (reserve, renew) no longer takes the CAS row at all: a renew takes
+     * placement → root → head, including the read lease it takes for its
+     * evidence, and the retention lane takes CAS → root. Taking the CAS row
+     * after the root on either side (an earlier answer to #13800 R1-1, or a
+     * read lease that relocks the CAS row) closes a cycle. Here the renew
+     * completes while the retention owner holds the CAS row, and neither
+     * side deadlocks.
      */
     @Test
     void ordinaryPublicationBesideARetentionOwnerDoesNotDeadlock() throws Exception {
@@ -391,13 +457,13 @@ class ToolPublicationLockOrderMySqlIT {
                         .as("Retention owner holds its first row").isTrue();
                 var subject = subjects.submit(() -> journal.store.apply(journal.request("renew"),
                         WRITER_TOKEN, PUBLICATION_TOKEN));
-                MySqlLockProbe.awaitLockWaits(admin, schema, 1, "the publication renew");
-                source.releaseOwner.countDown();
-                owner.get(30, TimeUnit.SECONDS);
                 JsonNode renewed = subject.get(30, TimeUnit.SECONDS);
                 assertThat(renewed.path("state").asText()).isEqualTo(reserved.path("state").asText());
+                assertThat(owner.isDone()).as("The retention owner still holds the CAS row").isFalse();
+                source.releaseOwner.countDown();
+                owner.get(30, TimeUnit.SECONDS);
                 assertThat(MySqlLockProbe.innodbDeadlocks(admin) - deadlocksBefore)
-                        .as("Retention and publication agree on CAS before root").isZero();
+                        .as("The renew never takes the CAS row after the root").isZero();
             } finally {
                 source.releaseOwner.countDown();
                 source.enabled = false;

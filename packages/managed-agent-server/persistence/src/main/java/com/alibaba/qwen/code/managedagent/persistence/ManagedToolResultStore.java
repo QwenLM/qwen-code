@@ -146,12 +146,14 @@ public class ManagedToolResultStore
                             for (var candidate : rows) {
                                 String tenant = (String) candidate.get("tenant_id");
                                 String session = (String) candidate.get("session_id");
-                                ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
-                                        jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+                                // No tenant publication guard: a pinned Session is
+                                // skipped, and an ordinary one orders on its root and
+                                // head before the operation row, as collection does
+                                // (design 2026-11-04-managed-publication-tenant-guards, C2).
                                 if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
                                     continue;
                                 }
-                                ToolPublicationRetentionStore.lockSession(jdbc, tenant, session);
+                                ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(jdbc, tenant, session);
                                 var current =
                                         jdbc.queryForList(
                                                 "SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE operation_key = ? AND operation_kind = 'TOOL_RESULT_PROJECTION' FOR UPDATE",
@@ -241,12 +243,11 @@ public class ManagedToolResultStore
                             }
                             String tenant = (String) rows.getFirst().get("tenant_id");
                             String session = (String) rows.getFirst().get("session_id");
-                            ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
-                                    jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+                            // As in claim: no tenant publication guard.
                             if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
                                 return false;
                             }
-                            ToolPublicationRetentionStore.lockSession(jdbc, tenant, session);
+                            ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(jdbc, tenant, session);
                             var row =
                                     jdbc.queryForMap(
                                             "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ? FOR UPDATE",
@@ -316,7 +317,7 @@ public class ManagedToolResultStore
                             if (!admitsLegacyProjection(claim)) {
                                 return false;
                             }
-                            ToolPublicationRetentionStore.lockGenericSession(
+                            ManagedLegacySessionGuard.requireLegacyMutation(
                                     jdbc, source.tenantId(), source.sessionId());
                             var retired =
                                     jdbc.query(
