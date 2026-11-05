@@ -704,8 +704,7 @@ class ChildWorkspaceServiceTest {
         assertThat(parked.state()).isEqualTo(ChildWorkspaceStore.PREPARING);
         assertThat(parked.attempts()).isZero();
         assertThat(parked.nextRetryAt()).isEqualTo(clock.get() + ChildWorkspaceService.BUSY_DELAY_MS);
-        // #16369 reworded the busy-storage refusal; keep the assertion in sync.
-        assertThat(parked.lastError()).contains("Workspace is not available for this operation.");
+        assertThat(parked.lastError()).contains("Workspace is not available for this operation");
         assertThat(root.resolve(ChildWorktreeGit.CONTAINER)).doesNotExist();
 
         service.scan();
