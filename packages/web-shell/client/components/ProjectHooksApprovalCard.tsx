@@ -19,13 +19,20 @@ const POLL_INTERVAL_MS = 30_000;
  * Deliberately not a session permission prompt — automation clients
  * auto-answer those; a trust decision must be a user act.
  */
-export function ProjectHooksApprovalCard() {
+export function ProjectHooksApprovalCard({
+  onActiveChange,
+}: {
+  /** Reports whether the card owns the approval slot, so the host treats
+   * the composer as dormant exactly like a tool approval overlay. */
+  onActiveChange?: (active: boolean) => void;
+} = {}) {
   const workspace = useOptionalWorkspace();
   const available = useDaemonAvailability() === 'available';
   const signals = useWorkspaceEventSignals();
   const { t } = useI18n();
   const [status, setStatus] = useState<DaemonWorkspaceHooksStatus>();
   const [busy, setBusy] = useState(false);
+  const [dismissedHash, setDismissedHash] = useState<string>();
   const requestIdRef = useRef(0);
   const client = workspace?.client;
   const workspaceCwd = workspace?.workspaceCwd;
@@ -93,6 +100,14 @@ export function ProjectHooksApprovalCard() {
 
   const request = useMemo<PermissionRequest | undefined>(() => {
     if (!status?.pendingApproval) return undefined;
+    // Escape defers the decision (TUI semantics): hide until the block
+    // changes, never record a rejection for a habitual keypress.
+    if (
+      status.pendingApprovalHash !== undefined &&
+      status.pendingApprovalHash === dismissedHash
+    ) {
+      return undefined;
+    }
     const lines = status.pendingApprovalHooks ?? [];
     return {
       id: 'project-hooks-approval',
@@ -109,21 +124,30 @@ export function ProjectHooksApprovalCard() {
         },
       ],
       // Distinct ids without the generic i18n-keyed option ids so the shared
-      // card keeps these decision-specific labels.
+      // card keeps these decision-specific labels. Both are *_once kinds so
+      // the shared safe-default logic pre-selects the reject side: a stray
+      // Enter on this security gate must never grant hook execution. The
+      // decision itself is still persistent and hash-bound.
       options: [
         {
           id: 'hooks_approve',
           label: t('hooksApproval.approve'),
-          kind: 'allow_always',
+          kind: 'allow_once',
         },
         {
           id: 'hooks_reject',
           label: t('hooksApproval.reject'),
-          kind: 'reject_always',
+          kind: 'reject_once',
         },
       ],
     };
-  }, [status, t]);
+  }, [status, t, dismissedHash]);
+
+  const active = request !== undefined;
+  useEffect(() => {
+    onActiveChange?.(active);
+    return () => onActiveChange?.(false);
+  }, [active, onActiveChange]);
 
   if (!request) return null;
   return (
@@ -132,6 +156,8 @@ export function ProjectHooksApprovalCard() {
         request={request}
         variant="floating"
         disabled={busy}
+        escapeDismisses
+        onDismiss={() => setDismissedHash(status?.pendingApprovalHash)}
         onConfirm={(_id, selectedOption) =>
           decide(selectedOption === 'hooks_approve' ? 'approve' : 'reject')
         }

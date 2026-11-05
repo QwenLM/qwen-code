@@ -11891,7 +11891,14 @@ export class Config {
     }
     // A cleared approval gate serves the block (approved, or nothing to
     // approve); the listing must not add a second, trust-disabled copy.
-    if (this.isProjectHooksApprovalCleared()) {
+    // Exception: when the settings layer withheld the whole workspace
+    // scope, the execution block is empty and the display-only copy is the
+    // only record of what is configured — it must surface even though the
+    // gate reads "cleared" for the empty block.
+    if (
+      this.isProjectHooksApprovalCleared() &&
+      this.readProjectHooksBlock() !== undefined
+    ) {
       return undefined;
     }
     // The settings layer drops the workspace scope entirely when the feature
@@ -12021,6 +12028,17 @@ export class Config {
     projectHooks?: Record<string, unknown>;
     hooks?: Record<string, unknown>;
   }): void {
+    // Under command-line YOLO the gate is exempt and no reload path
+    // re-derives the decision, so a replaced block must not keep the old
+    // block's approval authority. Drop it here; a caller that re-applies
+    // the stored decision for the new block restores it right after.
+    if (
+      this.projectHooksYoloExempt &&
+      this.getApprovalMode() === ApprovalMode.YOLO &&
+      hooks.projectHooks !== this.projectHooks
+    ) {
+      this.projectHooksApproved = false;
+    }
     this.systemHooks = hooks.systemHooks;
     this.userHooks = hooks.userHooks;
     this.projectHooks = hooks.projectHooks;

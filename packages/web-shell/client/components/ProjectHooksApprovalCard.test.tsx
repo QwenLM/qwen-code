@@ -108,6 +108,39 @@ describe('ProjectHooksApprovalCard', () => {
     );
   });
 
+  it('Escape defers without recording a decision, and a changed block re-asks', async () => {
+    workspaceHooks.mockResolvedValue({
+      pendingApproval: true,
+      pendingApprovalHash: 'block-v1',
+      hooks: [],
+    });
+    const element = await mount();
+    const panel = element.querySelector<HTMLDivElement>(
+      '[data-web-shell-permission-panel]',
+    )!;
+    panel.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(approveWorkspaceHooks).not.toHaveBeenCalled();
+    expect(
+      element.querySelector('[data-testid="project-hooks-approval-card"]'),
+    ).toBeNull();
+  });
+
+  it('pre-selects the reject side so a stray Enter never approves', async () => {
+    workspaceHooks.mockResolvedValue({
+      pendingApproval: true,
+      pendingApprovalHooks: ['SessionStart  echo hi'],
+      hooks: [],
+    });
+    const element = await mount();
+    const selected = element.querySelector(
+      '[data-web-shell-permission-option][aria-checked="true"]',
+    );
+    expect(selected?.getAttribute('data-option-id')).toBe('hooks_reject');
+  });
+
   it('stays hidden when nothing awaits approval', async () => {
     workspaceHooks.mockResolvedValue({ hooks: [] });
     const element = await mount();

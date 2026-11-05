@@ -8361,6 +8361,8 @@ export function App({
       : null;
   const pendingApprovalRef = useRef(pendingApproval);
   pendingApprovalRef.current = canActOnPendingApproval ? pendingApproval : null;
+  const [projectHooksApprovalActive, setProjectHooksApprovalActive] =
+    useState(false);
   // True exactly when an actionable approval overlay (ToolApproval or
   // AskUserQuestion) is on screen. Single source of truth for the three places
   // that must treat the composer as dormant while an approval owns the keyboard:
@@ -8368,7 +8370,9 @@ export function App({
   // dialogOpen prop.
   const approvalOverlayActive =
     !managedMode &&
-    (pendingToolApproval !== null || pendingAskUserApproval !== null);
+    (pendingToolApproval !== null ||
+      pendingAskUserApproval !== null ||
+      projectHooksApprovalActive);
   const approvalOverlayActiveRef = useRef(approvalOverlayActive);
   approvalOverlayActiveRef.current =
     approvalOverlayActive ||
@@ -24570,7 +24574,9 @@ export function App({
                         !pendingToolApproval &&
                         mainView === 'chat' && (
                           <div className={styles.approvalOverlay}>
-                            <ProjectHooksApprovalCard />
+                            <ProjectHooksApprovalCard
+                              onActiveChange={setProjectHooksApprovalActive}
+                            />
                           </div>
                         )}
                       {pendingAskUserApproval && mainView === 'chat' && (
