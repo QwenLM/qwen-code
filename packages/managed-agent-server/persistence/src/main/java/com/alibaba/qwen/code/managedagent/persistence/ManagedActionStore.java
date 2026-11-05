@@ -655,7 +655,7 @@ public class ManagedActionStore
             throw new ManagedAgentException(409, "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }
-        WorkspaceMigrationAdmission.requireSessionOpen(jdbc, tenantId, sessionId);
+        WorkspaceMigrationAdmission.requireSessionOpenForAdmission(jdbc, tenantId, sessionId);
         String sessionStatus = jdbc.queryForObject("SELECT status FROM ma_session"
                 + " WHERE tenant_id = ? AND session_id = ?", String.class, tenantId, sessionId);
         if (!"ACTIVE".equals(sessionStatus)) {

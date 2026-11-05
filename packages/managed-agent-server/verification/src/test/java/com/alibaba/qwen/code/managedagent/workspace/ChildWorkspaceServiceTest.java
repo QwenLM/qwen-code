@@ -1342,7 +1342,7 @@ class ChildWorkspaceServiceTest {
                 }
                 if (calls.incrementAndGet() > budget) {
                     throw new RuntimeBrokerException(409, "workspace_busy",
-                            "Workspace storage is held by another tool turn.", true);
+                            "Workspace is not available for this operation.", true);
                 }
                 return storageRoot;
             }

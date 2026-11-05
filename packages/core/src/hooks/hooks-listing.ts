@@ -112,16 +112,10 @@ export type HooksListingConfig = Pick<
   | 'getSystemHooks'
   | 'getUserHooks'
   | 'getProjectHooks'
+  | 'getTrustWithheldProjectHooks'
   | 'getExtensions'
 > &
-  Partial<
-    Pick<
-      Config,
-      | 'getWithheldProjectHooks'
-      | 'isProjectHooksRejected'
-      | 'getTrustWithheldProjectHooks'
-    >
-  >;
+  Partial<Pick<Config, 'getWithheldProjectHooks' | 'isProjectHooksRejected'>>;
 
 const PROMPT_DISPLAY_LIMIT = 50;
 

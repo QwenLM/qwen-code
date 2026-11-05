@@ -45,6 +45,10 @@ final class WorkspaceMigrationAdmission {
         requireOpen(jdbc, tenant, storage, lockClause(jdbc, false));
     }
 
+    static void requireOpenForRead(JdbcTemplate jdbc, String tenant, String storage) {
+        requireOpen(jdbc, tenant, storage, "");
+    }
+
     static void requireOpenForAdmission(JdbcTemplate jdbc, String tenant, String storage) {
         requireOpen(jdbc, tenant, storage, lockClause(jdbc, true));
     }
@@ -62,6 +66,10 @@ final class WorkspaceMigrationAdmission {
 
     static void requirePhysicalOpenForAdmission(JdbcTemplate jdbc, String tenant, String storage) {
         requirePhysicalOpen(jdbc, tenant, storage, lockClause(jdbc, true));
+    }
+
+    static void requirePhysicalOpenForRead(JdbcTemplate jdbc, String tenant, String storage) {
+        requirePhysicalOpen(jdbc, tenant, storage, "");
     }
 
     private static void requirePhysicalOpen(JdbcTemplate jdbc, String tenant, String storage, String lock) {
@@ -106,6 +114,11 @@ final class WorkspaceMigrationAdmission {
 
     static void requireSessionOpen(JdbcTemplate jdbc, String tenant, String session, String workspace) {
         requireOpen(jdbc, tenant, sessionStorage(jdbc, tenant, session, workspace));
+    }
+
+    /** Read-only admission of a Session's storage: shared on MySQL; never followed by a write to these rows. */
+    static void requireSessionOpenForAdmission(JdbcTemplate jdbc, String tenant, String session) {
+        requireOpenForAdmission(jdbc, tenant, sessionStorage(jdbc, tenant, session, null));
     }
 
     static String sessionStorage(JdbcTemplate jdbc, String tenant, String session, String workspace) {
