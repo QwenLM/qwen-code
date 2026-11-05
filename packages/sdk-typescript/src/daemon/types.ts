@@ -4898,10 +4898,23 @@ export type DaemonChannelConfigFieldKind =
   | 'record'
   | 'object';
 
+/**
+ * One selectable value of a config field. `description` explains the value
+ * in management UIs; `group` buckets related values under one picker
+ * section. Both are optional display metadata — validators only ever read
+ * `value`.
+ */
+interface DaemonChannelConfigFieldOption {
+  value: string;
+  label: string;
+  description?: string;
+  group?: string;
+}
+
 interface DaemonChannelConfigFieldDescriptorBase {
   key: string;
   label: string;
-  options?: ReadonlyArray<{ value: string; label: string }>;
+  options?: readonly DaemonChannelConfigFieldOption[];
   default?: string;
   description?: string;
 }
@@ -4931,7 +4944,7 @@ export interface DaemonChannelConfigEnumFieldDescriptor
   required?: boolean;
   envResolvable?: never;
   multiline?: never;
-  options: ReadonlyArray<{ value: string; label: string }>;
+  options: readonly DaemonChannelConfigFieldOption[];
   properties?: never;
 }
 
@@ -5685,6 +5698,8 @@ export interface DaemonHookEntry {
   matcher?: string;
   sequential?: boolean;
   enabled: boolean;
+  /** Why a disabled hook is off (e.g. 'untrusted'); absent when enabled. */
+  disabledReason?: string;
   hookId?: string;
   skillRoot?: string;
 }
@@ -5696,6 +5711,16 @@ export interface DaemonWorkspaceHooksStatus {
   disabled: boolean;
   hooks: DaemonHookEntry[];
   events: Record<string, DaemonHookEventMeta>;
+  /** Project hooks await the user's approval; see the hooks approve control. */
+  pendingApproval?: boolean;
+  /** Sanitized display lines of the withheld hooks, for the approval prompt. */
+  pendingApprovalHooks?: string[];
+  /**
+   * The hash of the block the prompt renders. Echo it back to
+   * `approveWorkspaceHooks` so the decision binds to the exact block the
+   * user reviewed; a block that changed since the render stays pending.
+   */
+  pendingApprovalHash?: string;
   errors?: DaemonStatusCell[];
 }
 

@@ -2,6 +2,8 @@
 
 [English](2026-11-03-managed-workspace-membership-cas.md) | [简体中文](2026-11-03-managed-workspace-membership-cas.zh-CN.md)
 
+下述 rewind 排他决定已由[取消 rewind 的目录排他](2026-11-05-managed-rewind-concurrency.zh-CN.md)替代。共享成员资格和物理维护保护仍保留。
+
 ## 状态与范围
 
 状态：Implemented。针对性的 H2 用例和现有 MySQL 恢复、盘点用例已通过。

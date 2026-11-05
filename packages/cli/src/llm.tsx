@@ -1679,6 +1679,35 @@ export async function main() {
       settings,
     );
 
+    // The TUI shows a startup warning when the trust gate withholds project
+    // hooks; a headless run gets one stderr line so the failure is not silent.
+    // Mirror the TUI predicate: raw workspace hooks non-empty, trust absent,
+    // and no mode/switch that withholds hooks for a different reason. The
+    // Config accessor cannot see the feature-on case (the settings layer
+    // already dropped the workspace scope), so read the raw file like the
+    // TUI does.
+    const rawWorkspaceHooks = settings.workspace?.settings?.hooks;
+    if (
+      !nonInteractiveConfig.isInteractive?.() &&
+      // The approval-gate warning above already covers a pending/rejected
+      // block; this line is only for the trust-withheld case it cannot see.
+      !nonInteractiveConfig.isProjectHooksPendingApproval?.() &&
+      // Same guard as the TUI warning: an approved (or trust-authorized)
+      // block the execution accessor actually serves is not "not loaded".
+      nonInteractiveConfig.getProjectHooks?.() === undefined &&
+      !nonInteractiveConfig.isExplicitlyTrustedFolder?.() &&
+      !nonInteractiveConfig.getBareMode?.() &&
+      !nonInteractiveConfig.isSafeMode?.() &&
+      !nonInteractiveConfig.getDisableAllHooks?.() &&
+      rawWorkspaceHooks &&
+      typeof rawWorkspaceHooks === 'object' &&
+      Object.keys(rawWorkspaceHooks).length > 0
+    ) {
+      writeStderrLine(
+        'Project hooks in .qwen/settings.json were not loaded: the folder is not explicitly trusted. Enable security.folderTrust.enabled and trust the folder to run them.',
+      );
+    }
+
     const prompt_id = createNonInteractivePromptId(
       config.getSessionId(),
       config.getResumedSessionData?.()?.conversation.messages,

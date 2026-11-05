@@ -114,22 +114,33 @@ function buildWorkspaceProvidersStatus(
       generationConfigSources: resolvedCliConfig.sources,
     });
     const currentAuth = resolvedCliConfig.authType;
-    const currentModelId = (
+    let currentModelId = (
       resolvedCliConfig.model ||
       modelsConfig.getModel() ||
       ''
     ).trim();
+    const requestedModelId = currentModelId;
+    if (
+      currentAuth &&
+      !modelsConfig.getResolvedModel(currentAuth, currentModelId)
+    ) {
+      modelsConfig.syncAfterAuthRefresh(currentAuth, currentModelId);
+      currentModelId = (modelsConfig.getModel() || '').trim();
+    }
+    const usedFallback = currentModelId !== requestedModelId;
     const hasCurrentModel = currentModelId.length > 0;
     const modelCameFromSettings =
       !argv.model && settings.model?.name?.trim() === currentModelId;
-    const currentBaseUrl =
-      modelCameFromSettings && settings.model?.baseUrl !== undefined
+    const currentBaseUrl = usedFallback
+      ? modelsConfig.getGenerationConfig().baseUrl
+      : modelCameFromSettings && settings.model?.baseUrl !== undefined
         ? settings.model.baseUrl || undefined
         : resolvedCliConfig.sources['baseUrl']
           ? resolvedCliConfig.baseUrl || undefined
           : undefined;
-    const currentRegistryBaseUrl =
-      modelCameFromSettings && currentAuth
+    const currentRegistryBaseUrl = usedFallback
+      ? modelsConfig.getCurrentRegistryBaseUrl()
+      : modelCameFromSettings && currentAuth
         ? settings.model?.baseUrl !== undefined
           ? settings.model.baseUrl || null
           : (modelsConfig.getResolvedModel(currentAuth, currentModelId)
