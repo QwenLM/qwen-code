@@ -2,7 +2,8 @@
 
 [English](2026-11-04-managed-publication-tenant-guards.md) | [简体中文](2026-11-04-managed-publication-tenant-guards.zh-CN.md)
 
-Status: C1 and C2 implemented; C3 is a proposal.
+Status: C1 and C2 implemented; C3 is designed in
+[publication lanes without the placement guard](2026-11-04-managed-publication-placement.md).
 
 ## Problem and baseline state before C1/C2
 
@@ -131,28 +132,15 @@ writer overload without changing its transaction attributes.
 Not covered: the native journal snapshot writer, whose build transaction
 locks resource rows before the Session; its order needs its own analysis.
 
-### C3. Original Runtime binding instead of placement
+### C3. Placement
 
-Replace the placement guard in ordinary (non-CSI) publication lanes with a
-shared lock on the original binding row (`ma_runtime_binding`), taken where
-placement is taken today, before the Session root and head. The retention sweep locks that row `FOR UPDATE`
-before its reference checks, so either the lane waits for the sweep, and then
-finds the binding gone and refuses, or the sweep waits for the lane and then
-sees its references. CSI-pinned Sessions keep placement; the CSI retirement
-and application paths are out of scope.
-
-This is the binding handshake the
-[lock scope design](2026-11-04-managed-lock-scope.md) left open for hosted
-cleanup references; the same handshake can then serve those references.
+See [publication lanes without the placement guard](2026-11-04-managed-publication-placement.md).
+The binding-before-root sketch first proposed here does not hold: placement
+owners lock the binding and the Session root in both orders.
 
 ## Open questions
 
 1. The native journal snapshot writer still takes the guard (see C2).
-2. C3 needs validation of its proposed binding-before-root order: the sweep takes slot
-   then binding under placement; lanes would take binding before the Session
-   root and head. The sweep never locks Session rows after the binding, so no cycle is
-   expected, but the audit must cover `ma_tool_execution` locks taken by
-   lanes and by the sweep.
 
 ## Risks
 
