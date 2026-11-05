@@ -845,6 +845,30 @@ describe('ChannelEventsPage', () => {
     expect(rows[2]?.textContent).toContain('Delivered');
   });
 
+  it('labels the watch-guard recovery edge as recovered, not degraded', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'poll',
+          outcome: 'degraded',
+          reason: 'watch_reconcile_recovered',
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const rows = container.querySelectorAll('li');
+    // The wire outcome stays `degraded`; the recovery reason names the label,
+    // so the row cannot read as an ongoing failure.
+    expect(rows[0]?.textContent).toContain('Recovered');
+    expect(rows[0]?.textContent).not.toContain('Degraded');
+    expect(rows[0]?.textContent).toContain('watch_reconcile_recovered');
+  });
+
   it('shows which session a private delivery reached', async () => {
     eventsState.current.data = {
       truncated: false,

@@ -74,23 +74,23 @@ state files, so a Channel name cannot escape the directory.
 
 Record:
 
-| Field         | Meaning                                                                                                          |
-| ------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `at`          | ISO timestamp                                                                                                    |
-| `channel`     | Channel instance name, kept in full (see limits below)                                                           |
-| `type`        | `inbound` / `outbound` / `task` / `poll`                                                                         |
-| `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `ok` / a task state (§5)                                          |
-| `reason`      | machine reason code for a skip or an inbound failure (`sender_denied`, `reason_filter`, `github_api_error`, ...) |
-| `triggerKind` | Channel-specific trigger (`mention`, `assign`, ...)                                                              |
-| `repository`  | conversation container (for GitHub, `owner/repo`)                                                                |
-| `thread`      | thread identity (`issue:12`, `pr:34`)                                                                            |
-| `number`      | issue or PR number                                                                                               |
-| `actor`       | sender login                                                                                                     |
-| `sessionId`   | session the event was routed to; on a `retired` / `skipped` row, the one it lost (§5)                            |
-| `messageId`   | source message identity                                                                                          |
-| `durationMs`  | poll duration                                                                                                    |
-| `error`       | sanitized single-line error, capped at 200 characters                                                            |
-| `detail`      | flat primitive map, at most 12 keys                                                                              |
+| Field         | Meaning                                                                                                                                                                                      |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `at`          | ISO timestamp                                                                                                                                                                                |
+| `channel`     | Channel instance name, kept in full (see limits below)                                                                                                                                       |
+| `type`        | `inbound` / `outbound` / `task` / `poll`                                                                                                                                                     |
+| `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `failed_ambiguous` / `ok` / `degraded` / a task state (§5)                                                                                    |
+| `reason`      | machine reason code for a skip or an inbound failure (`sender_denied`, `reason_filter`, `github_api_error`, ...)                                                                             |
+| `triggerKind` | Channel-specific trigger (`mention`, `assign`, ...)                                                                                                                                          |
+| `repository`  | conversation container (for GitHub, `owner/repo`)                                                                                                                                            |
+| `thread`      | thread identity (`issue:12`, `pr:34`)                                                                                                                                                        |
+| `number`      | issue or PR number                                                                                                                                                                           |
+| `actor`       | sender login                                                                                                                                                                                 |
+| `sessionId`   | session the event was routed to; on the rows written while a delivery is cleared (`running` / `failed` / `reply_pending` / `retired`) and on a pre-claim `skipped` row, the one it lost (§5) |
+| `messageId`   | source message identity                                                                                                                                                                      |
+| `durationMs`  | poll duration                                                                                                                                                                                |
+| `error`       | sanitized single-line error, capped at 200 characters                                                                                                                                        |
+| `detail`      | flat primitive map, at most 12 keys                                                                                                                                                          |
 
 Limits: free-text fields and `detail` values are capped at 200 characters. The
 Channel identity is the exception: the management API accepts names up to 255
@@ -202,14 +202,16 @@ must not be the answer when the journal could not be read.
 - `ChannelEventsPage` renders a newest-first timeline with a workspace
   selector, a Channel filter, a type filter, and a row per event: time, Channel,
   type, outcome, target (`owner/repo#12`), actor, reason or trigger kind,
-  duration, and error. A bound delivery also shows the session it reached as a
+  duration, and error. A bound delivery also shows the session it reached — or
+  lost when the delivery was cleared — as a
   chip truncated to 8 characters, with the full identity in `title` — a UUID
   would otherwise push the reason and the counters out of the column. A
   binding-scan `degraded` row shows `detail.streak` (a count of scans, not
   polls) and, on the `bindings_partial` rows only, `detail.sessions`; the
   `bindings_cold_empty` and `bindings_unreachable` rows carry `streak` alone, so
   the presence of `sessions` is not a "this scan was partial" predicate. The
-  watch-guard rows carry only their reason. The workspace selector lists the registered, non-live
+  watch-guard rows carry only their reason, plus `error` when the watch state
+  could not be read. The workspace selector lists the registered, non-live
   workspaces exactly as the management page does, because the provider's cwd is
   the daemon-wide primary workspace and a Channel started in a secondary
   workspace would otherwise be unreachable. Changing the workspace resets the
@@ -219,6 +221,9 @@ must not be the answer when the journal could not be read.
   translator falls back to English and then to the raw key, so a missing
   Chinese label would otherwise render English silently. An outcome the page
   does not know still renders as its raw token, which is unreadable but safe.
+  The watch-guard recovery edge keeps `degraded` on the wire but takes its
+  label from the reason — **Recovered** / **已恢复** — so a recovery cannot
+  read as an ongoing failure.
 - It is a standalone page: `activePanel` value `channel-events`, URL
   `/channel-events`, and a sidebar primary-nav item `channelEvents`.
 - It is gated by the `channel_management` capability and a trusted workspace,
@@ -273,13 +278,17 @@ session lost the event. The field is attribution only: the delivery is
 deliberately not restored, since that would re-enter bound delivery and change
 routing. It is written only on an explicit clear, so a transition that merely
 omits the key cannot disturb it, and it is validated as an optional string like
-the record's other fields.
+the record's other fields. The gone-fallback horizon attributes the in-memory
+task the same way before retiring it, and a dead-letter record whose delivery
+is already cleared names the lost session in `lostSessionId`, so operator
+recovery keeps the target.
 
-The same rule reaches the two retires that happen before any task is claimed:
-their `inbound` / `skipped` rows carry the frozen target from the pending entry,
-which is already written into the dead-letter record for that same event. Without
-it the timeline and the dead-letter would disagree about attribution for one
-watched transition.
+The same rule reaches the retires that happen before any task is claimed:
+their `inbound` / `skipped` rows carry the frozen target from the pending entry
+when there is one. Only the overflow retire also writes a dead-letter record;
+the `watch_no_candidate` and `no_role_matched` retires write none, so the skip
+row is the event's only trace — without the frozen target it could not say
+whether the retired event ever belonged to a session.
 
 **New outcomes.** `task` / `delivered` and `task` / `retired` are journal-only
 terminal words, not persisted task states. `retired` carries a reason:
@@ -333,9 +342,11 @@ notification stalls, yet the poll itself reports `ok`. The adapter now journals
 (tenth, then every sixtieth, with `detail.sessions`), `bindings_cold_empty`
 (first, then every tenth, and once more when the bounded escape opens the lane)
 — and `watch_reconcile_blocked` / `watch_pending_unreconciled` on the false→true
-edge of the existing `watchReconcileBlocked` flag. Reusing those throttles and
-that flag means no new adapter state and no new flood: a permanent outage
-cannot rotate the useful rows out of the journal.
+edge of the existing `watchReconcileBlocked` flag, re-journaling whenever the
+blocking cause changes (a backlog that turns into an unreadable sidecar, or
+back) so the row never names a stale remedy. Reusing those throttles means no
+new flood: a permanent outage cannot rotate the useful rows out of the journal;
+the cause edge adds one small field, not a new throttle.
 
 `detail.streak` counts **binding scans, not polls**: `refreshBoundSessions` also
 runs on every gone-session retry, so one poll can advance it more than once.
@@ -357,9 +368,16 @@ listed-or-retained, and both surfaces print this same number.
 A `poll` / `ok` row cannot serve as that signal: the base writes one after every
 poll that does not throw, including every poll of a sustained outage, so it is
 present throughout the degraded window and unchanged at its end. Only the
-watch-guard reasons have a recovery row. `bindings_unreachable` and
-`bindings_cold_empty` recover implicitly, because a successful scan stops
-producing them and the next streak starts over. **`bindings_partial` is not a
+watch-guard reasons have a recovery row. `bindings_unreachable` recovers
+implicitly, because a successful scan stops producing it and the next streak
+starts over. **`bindings_cold_empty` does not**: an empty partial is a
+_successful_ scan, and `coldEmptyPartialStreak` resets only on a complete or
+non-empty snapshot, so a daemon whose workspaces keep answering empty partials
+keeps producing the row from the success path. Past the bounded escape the row
+goes silent because the throttle maxed out — the gate guards on
+`streak < MAX_COLD_EMPTY_PARTIAL_POLLS` and both escapes test `=== MAX` — not
+because the state recovered: the comment lane is open while the snapshot is
+still an empty partial. **`bindings_partial` is not a
 degradation with a recovery edge**: a successful multi-page scan is its
 _producer_, and `partialSnapshotStreak` resets only on a complete snapshot, which
 a permanently multi-page daemon never returns. It is a standing health hint, so
@@ -518,14 +536,24 @@ classes, the daemon route, the SDK types and the wire shape are unchanged.
   the cold-start escape is journaled at the horizon on both the success and the
   failure path; a retire is not claimed when the removal or the save throws;
   and the watch guard's clearing edge is journalled, because a `poll` / `ok`
-  row is written throughout the outage and cannot mark its end. Every one of
-  these guards was mutation-verified: 37 mutations, 37 killed. Two of them
+  row is written throughout the outage and cannot mark its end. The review
+  round added guards for the overflow dead-letter dedup (a second detection
+  with the sidecar still unwritable files exactly one record), the retention
+  cap on the reported session count, the public-path invariant on every
+  private retire, the gone-horizon attribution in the same run, the per-cause
+  watch-guard edge and its subscriptions-off recovery site, the scan-scoped
+  streak under gone retries, the role-aware retire reasons, and the recovered
+  label. Every one of
+  these guards was mutation-verified: 47 mutations, 47 killed. Two of them
   exist only to prove the privacy assertion is load-bearing — one smuggles the
   body into another field of a retire row, the other appends it after the write
-  error so the error assertion still passes. Two more initially survived and
+  error so the error assertion still passes. Three more initially survived and
   were investigated rather than accepted: a loose `sessionId` count that three
   correctly attributed rows still satisfied with the clearing row unattributed,
-  and a mutation filter that matched no test after a rename. A sweep that
+  a mutation filter that matched no test after a rename, and a cap-count
+  fixture whose first empty partial already capped `lastBindings`, so the
+  mutation was unobservable at the emitting scan — the fixture now keeps
+  retention above the cap exactly when the row is written. A sweep that
   cannot tell "no test ran" from "the guard held" is not evidence, so the
   harness now reports that case explicitly.
 - §5 Web Shell: `failed_ambiguous` renders its label in English and Chinese

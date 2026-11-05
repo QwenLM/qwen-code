@@ -1290,6 +1290,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    */
   private watchReconcileBlocked = false;
   /**
+   * The cause the blocking watch-guard row last named. The row is
+   * edge-triggered per CAUSE, not just per blocked window: a pending backlog
+   * that turns into an unreadable sidecar (or back) must re-journal, or the
+   * timeline keeps naming a remedy that no longer applies. Cleared on the
+   * recovery edge.
+   */
+  private watchReconcileBlockedCause:
+    | 'reconcile_failed'
+    | 'read_error'
+    | 'pending'
+    | undefined;
+  /**
    * Consecutive binding-refresh failures since the last success. While no
    * snapshot has ever succeeded, the cold-start gate defers the comment lane,
    * so a permanent failure (an old daemon lacking the route, rotated
@@ -1300,6 +1312,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private boundSnapshotFailureStreak = 0;
   private prWatchState: PrWatchStateFile = { version: 1, entries: {} };
   private prWatchStateLoaded = false;
+  /**
+   * Overflow heads whose dead-letter record is already durable while the
+   * sidecar save kept failing (entry key -> pending head key). The next
+   * detection skips the append instead of filing the same retired transition
+   * twice; a successful overflow save clears the entry. A head that leaves
+   * the queue through another path can leave a stale entry: it only
+   * suppresses a duplicate record for the identical transition key, never a
+   * delivery.
+   */
+  private overflowDeadLetteredHeads = new Map<string, string>();
   private inboundRecoveryPending = true;
   private recoverableInboundTasks = 0;
   /**
@@ -2139,6 +2161,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         await this.reconcilePendingWatch();
         const wasBlocked = this.watchReconcileBlocked;
         this.watchReconcileBlocked = false;
+        this.watchReconcileBlockedCause = undefined;
         // The clearing edge is the recovery signal. A `poll` / `ok` row is
         // not: the base writes one after every poll that does not throw,
         // including every poll of a sustained outage, so it is present
@@ -2149,7 +2172,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       } catch (err) {
         // Recovery must not deliver accepted watch tasks while their pending
         // records are unreconciled (a later drain would deliver them again).
-        const wasBlocked = this.watchReconcileBlocked;
         this.watchReconcileBlocked = true;
         const message = sanitizeLogText(
           err instanceof Error ? err.message : String(err),
@@ -2158,14 +2180,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         process.stderr.write(
           `[Channel:${this.name}] pending watch reconciliation failed, will retry next poll: ${message}\n`,
         );
-        // Edge-triggered: this catch runs on EVERY poll while the watch state
-        // stays unreadable, so a per-poll row would rotate the journal.
-        if (!wasBlocked) {
+        // Edge-triggered per cause: this catch runs on EVERY poll while the
+        // watch state stays unreadable, so a per-poll row would rotate the
+        // journal — but a cause that CHANGES while blocked must re-journal.
+        if (this.watchReconcileBlockedCause !== 'reconcile_failed') {
           this.recordPollDegraded(
             'watch_reconcile_blocked',
             undefined,
             message,
           );
+          this.watchReconcileBlockedCause = 'reconcile_failed';
         }
       }
     } else {
@@ -2216,9 +2240,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         process.stderr.write(
           `[Channel:${this.name}] watch subscriptions are disabled but pending watch events remain unreconciled; watch task recovery stays blocked until subscriptions are re-enabled and the pending events reconcile (legacy watch tasks parked as backpressure so the notification cursor keeps flowing)${watchStateError ? ` — the watch state is also unreadable, which alone blocks recovery: ${watchStateError}` : ''}\n`,
         );
-        // Edge-triggered for the same reason as the reconcile failure above:
-        // this branch runs on every poll until an operator re-enables watch.
-        if (!wasBlocked) {
+        // Edge-triggered per cause, for the same reason as the reconcile
+        // failure above: this branch runs on every poll until an operator
+        // re-enables watch, but a backlog that turns into a read error (or
+        // back) must re-journal so the row never names a stale remedy.
+        const cause = watchStateError ? 'read_error' : 'pending';
+        if (this.watchReconcileBlockedCause !== cause) {
           if (watchStateError) {
             this.recordPollDegraded(
               'watch_reconcile_blocked',
@@ -2228,9 +2255,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           } else {
             this.recordPollDegraded('watch_pending_unreconciled');
           }
+          this.watchReconcileBlockedCause = cause;
         }
-      } else if (wasBlocked) {
-        this.recordPollDegraded('watch_reconcile_recovered');
+      } else {
+        this.watchReconcileBlockedCause = undefined;
+        if (wasBlocked) {
+          this.recordPollDegraded('watch_reconcile_recovered');
+        }
       }
     }
 
@@ -3848,6 +3879,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       issueNumber: task.issueNumber,
       source: task.source,
       delivery: task.delivery,
+      // A cleared delivery leaves the record without a target; name the
+      // session the event lost so operator recovery knows where it was
+      // bound. Only when the delivery is gone — a live delivery is the
+      // authoritative target and an older lostSessionId would be stale.
+      ...(task.delivery?.kind !== 'bound-session' && task.lostSessionId
+        ? { lostSessionId: task.lostSessionId }
+        : {}),
       reason,
       text: task.envelope?.text,
     };
@@ -5516,6 +5554,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // HERE: its success path must not retire the record as delivered.
       if (this.lastBindingsPartial || this.boundRefreshFailed) {
         const deferCount = (task.deferCount ?? 0) + 1;
+        // Attribution only, mirroring the store's lostSessionId: the horizon
+        // retire below reads the IN-MEMORY task, which the store persistence
+        // in transitionInboundTask never touches. Without this the terminal
+        // row and the dead-letter record would file the event under the
+        // Channel with no victim when the horizon is reached in the same run
+        // that still held the target.
+        task.lostSessionId = lastTarget.sessionId;
         task.delivery = undefined;
         if (deferCount >= MAX_BOUND_DEFERRALS) {
           this.retireBoundTask(
@@ -6125,13 +6170,35 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // `slice`, not `shift`: the rollback below restores this reference, so
         // the queued array must not be mutated in place before the save lands.
         const pendingBefore = next.pending;
-        try {
-          const path = this.channelFilePath('github-bound-deadletter.jsonl');
-          mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-          appendFileSync(path, `${JSON.stringify(record)}\n`, {
-            encoding: 'utf-8',
-            mode: 0o600,
-          });
+        // The append and the save fail differently. A failed append leaves
+        // the body nowhere else to go, so the payload is dumped to stderr and
+        // the next detection retries the whole retire. A failed save leaves
+        // the record ALREADY durable: re-appending it on the next detection
+        // would file the same retired transition twice, so the head is
+        // remembered and the append skipped until a save lands.
+        let deadLetterDurable =
+          this.overflowDeadLetteredHeads.get(key) === oldest.key;
+        if (!deadLetterDurable) {
+          try {
+            const path = this.channelFilePath('github-bound-deadletter.jsonl');
+            mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+            appendFileSync(path, `${JSON.stringify(record)}\n`, {
+              encoding: 'utf-8',
+              mode: 0o600,
+            });
+            deadLetterDurable = true;
+          } catch (err) {
+            // Same fail-safe as retireBoundTask: if the exhaustion surface
+            // cannot be written, keep the event queued (over cap) and retry
+            // the overflow on the next detection instead of dropping it.
+            // Sanitized without truncation, like the retireBoundTask dump.
+            const payload = JSON.stringify(record);
+            process.stderr.write(
+              `[Channel:${this.name}] failed to write watch pending overflow dead-letter (${oldest.key}): ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}; payload: ${sanitizeLogText(payload, payload.length)}\n`,
+            );
+          }
+        }
+        if (deadLetterDurable) {
           next.pending = next.pending.slice(1);
           this.prWatchState.entries[key] = next;
           // The shift is only durable once the sidecar is saved, and the
@@ -6139,39 +6206,45 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           // the journal claims the retire: otherwise a failed save leaves the
           // event queued while the timeline says it was skipped, and a restart
           // drains it — a skip row for a transition that is delivered later.
-          this.savePrWatchState();
-          process.stderr.write(
-            `[Channel:${this.name}] watch pending overflow for ${key}: retired ${oldest.key} to dead-letter (cap ${MAX_PENDING_WATCH_PER_ENTRY})\n`,
-          );
-          // The overflow retire is a silent consumption otherwise: the event
-          // was never claimed, so there is no task row to close, and the
-          // dead-letter file plus stderr are its only trace. Identifiers only
-          // — `record.text` above carries the body and must not be copied.
-          this.recordChannelEvent({
-            type: 'inbound',
-            outcome: 'skipped',
-            reason: 'watch_pending_overflow',
-            repository: chatId,
-            thread: `pr:${number}`,
-            number,
-            messageId: oldest.key,
-            ...(oldest.delivery?.kind === 'bound-session'
-              ? { sessionId: oldest.delivery.sessionId }
-              : {}),
-          });
-        } catch (err) {
-          // Same fail-safe as retireBoundTask: if the exhaustion surface
-          // cannot be written, keep the event queued (over cap) and retry
-          // the overflow on the next detection instead of dropping it. The
-          // rollback also covers a failed sidecar save, so memory and disk
-          // agree about what is still queued.
-          next.pending = pendingBefore;
-          this.prWatchState.entries[key] = next;
-          // Sanitized without truncation, like the retireBoundTask dump.
-          const payload = JSON.stringify(record);
-          process.stderr.write(
-            `[Channel:${this.name}] failed to write watch pending overflow dead-letter (${oldest.key}): ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}; payload: ${sanitizeLogText(payload, payload.length)}\n`,
-          );
+          let saved = false;
+          try {
+            this.savePrWatchState();
+            saved = true;
+          } catch (err) {
+            // Only the shift failed; the record is already in the dead-letter
+            // file. Roll the shift back so memory and disk agree about what is
+            // still queued, remember the head so the next detection does not
+            // append a second copy, and name the file that actually failed —
+            // no payload dump, the body is already durable.
+            next.pending = pendingBefore;
+            this.prWatchState.entries[key] = next;
+            this.overflowDeadLetteredHeads.set(key, oldest.key);
+            process.stderr.write(
+              `[Channel:${this.name}] failed to save watch state after overflow dead-letter (${oldest.key}): ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}; the record is already in the dead-letter file and the event stays queued\n`,
+            );
+          }
+          if (saved) {
+            this.overflowDeadLetteredHeads.delete(key);
+            process.stderr.write(
+              `[Channel:${this.name}] watch pending overflow for ${key}: retired ${oldest.key} to dead-letter (cap ${MAX_PENDING_WATCH_PER_ENTRY})\n`,
+            );
+            // The overflow retire is a silent consumption otherwise: the event
+            // was never claimed, so there is no task row to close, and the
+            // dead-letter file plus stderr are its only trace. Identifiers only
+            // — `record.text` above carries the body and must not be copied.
+            this.recordChannelEvent({
+              type: 'inbound',
+              outcome: 'skipped',
+              reason: 'watch_pending_overflow',
+              repository: chatId,
+              thread: `pr:${number}`,
+              number,
+              messageId: oldest.key,
+              ...(oldest.delivery?.kind === 'bound-session'
+                ? { sessionId: oldest.delivery.sessionId }
+                : {}),
+            });
+          }
         }
       }
       if (event.type === 'ci_failure' && headSha !== undefined) {
@@ -6272,10 +6345,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             thread: pending.envelope.threadId,
             number: pending.issueNumber,
             messageId: pending.key,
-            // The frozen target is in hand and already goes into the
-            // dead-letter record for this same event; without it the timeline
-            // and the dead-letter disagree about attribution, and the row
-            // cannot say whether the retired event ever belonged to a session.
+            // The frozen target is in hand; this retire writes no dead-letter
+            // record (only the overflow retire does), so the skip row is the
+            // event's only trace — without the target it cannot say whether
+            // the retired event ever belonged to a session.
             ...(pending.delivery?.kind === 'bound-session'
               ? { sessionId: pending.delivery.sessionId }
               : {}),

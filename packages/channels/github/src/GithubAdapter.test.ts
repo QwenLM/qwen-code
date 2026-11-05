@@ -13420,6 +13420,99 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(rows[0]).toMatchObject({ detail: { streak: 10, sessions: 3 } });
     });
 
+    it('caps the reported session count at the retention cap', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // Nine partial scans list 1100 sessions each (listed rows are never
+      // capped); the tenth lists NOTHING, so retention holds the newest 1024
+      // (MAX_PARTIAL_RETAINED) of the 1100 and prunes the rest — exactly when
+      // the streak-10 row is emitted. The row must report the sessions that
+      // still ROUTE, not the 1100 the scan once saw: the pruned sessions'
+      // events defer to the dead-letter, and over-counting would hide the
+      // pruning this number exists to diagnose. The fixture must keep
+      // retained above the cap AT the emitting scan — after one empty
+      // partial, lastBindings is already capped and the count cannot differ.
+      const many = Array.from({ length: 1100 }, (_, i) =>
+        makeBinding({
+          sessionId: `s-${i}`,
+          updatedAt: new Date(Date.UTC(2026, 6, 2, 0, i)).toISOString(),
+          prs: [
+            {
+              number: i + 1,
+              url: `https://github.com/owner/repo/pull/${i + 1}`,
+            },
+          ],
+        }),
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: many,
+        partial: true,
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+      for (let i = 0; i < 9; i++) await pollOnce();
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      await pollOnce();
+
+      const rows = degradedRows('bindings_partial');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        detail: { streak: 10, sessions: 1024 },
+      });
+    });
+
+    it('advances the scan streak more than once per poll on gone retries', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      const a = makeBinding({
+        sessionId: 'session-a',
+        updatedAt: '2026-07-03T00:00:00.000Z',
+      });
+      const b = makeBinding({
+        sessionId: 'session-b',
+        updatedAt: '2026-07-02T00:00:00.000Z',
+      });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [a, b],
+        partial: true,
+      });
+      boundSessions.deliverPrompt.mockRejectedValue(
+        new BoundSessionGoneError('gone'),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        // Each poll: the poll-start scan plus one refresh per Gone follower
+        // (two here) = 3 scans. A fresh bound task is seeded every poll so
+        // the gone loop runs again; after 4 polls the streak is 12 and the
+        // row fired at scan 10, INSIDE poll 4. A poll-scoped counter would
+        // still be at 4 and silent.
+        for (let i = 0; i < 4; i++) {
+          writeInboundTasks([
+            makeInboundTaskRecord({
+              state: 'running',
+              attempts: 0,
+              issueNumber: 42,
+              delivery: { kind: 'bound-session', sessionId: 'session-a' },
+              source: {
+                chatId: 'owner/repo',
+                threadId: 'pr:42',
+                messageId: '1001',
+              },
+              dedupe: {},
+            }),
+          ]);
+          await pollOnce();
+        }
+      } finally {
+        stderr.mockRestore();
+      }
+
+      const rows = degradedRows('bindings_partial');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ detail: { streak: 10 } });
+    });
+
     it('keeps the lost session on every row through the deferrals to the dead-letter', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
       boundSessions.deliverPrompt.mockRejectedValue(
@@ -13465,6 +13558,59 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       // Attribution only — the delivery must NOT be restored, or the event
       // would re-enter bound delivery and change routing.
       expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
+    it('names the lost session when the gone horizon retires in the same run', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // deferCount one below MAX_BOUND_DEFERRALS (240): the next gone defer
+      // hits the horizon IN THIS RUN, while the in-memory task still holds
+      // the target. The store's lostSessionId persistence never touches that
+      // object, so without the in-memory attribution the terminal row and
+      // the dead-letter record would name no session at all.
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          state: 'running',
+          attempts: 0,
+          deferCount: 239,
+          issueNumber: 42,
+          delivery: { kind: 'bound-session', sessionId: 'bound-session' },
+          source: {
+            chatId: 'owner/repo',
+            threadId: 'pr:42',
+            messageId: '1001',
+          },
+          dedupe: {},
+        }),
+      ]);
+      boundSessions.deliverPrompt.mockRejectedValue(
+        new BoundSessionGoneError('bound-session'),
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [makeBinding()],
+        partial: true,
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await pollOnce();
+      } finally {
+        stderr.mockRestore();
+      }
+
+      const rows = readChannelEvents().filter(
+        (event) => event['type'] === 'task' && event['outcome'] === 'retired',
+      );
+      expect(rows.at(-1)).toMatchObject({
+        reason: 'dead_letter',
+        sessionId: 'bound-session',
+      });
+      const records = readFileSync(boundDeadLetterPath(), 'utf-8')
+        .split('\n')
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(records.at(-1)).toMatchObject({
+        lostSessionId: 'bound-session',
+      });
     });
 
     it('journals a stalled cold start the poll detail cannot reach', async () => {
@@ -17775,6 +17921,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         }
 
         expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(channel.inboundEnvelopes).toHaveLength(0);
         const rows = watchTaskRows(key);
         expect(rows.at(-1)).toMatchObject({
           outcome: 'retired',
@@ -17855,6 +18002,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         }
 
         expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(channel.inboundEnvelopes).toHaveLength(0);
         const rows = readChannelEvents().filter(
           (event) =>
             event['type'] === 'task' &&
@@ -17921,6 +18069,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(boundSessions.deliverPrompt.mock.calls.map((c) => c[0])).toEqual(
           ['session-a', 'session-b'],
         );
+        expect(channel.inboundEnvelopes).toHaveLength(0);
         const rows = readChannelEvents().filter(
           (event) =>
             event['type'] === 'task' &&
@@ -18188,11 +18337,29 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           // is the existing contract for an unwritable watch state. What must
           // NOT survive it is a journal claim for an event still on disk.
           await expect(watch.runPrStateWatch()).rejects.toThrow('ENOSPC');
+          // Second detection with the sidecar still unwritable: the record
+          // is already durable, so the append must be skipped — the operator
+          // must not see the same retired transition twice. Reloading from
+          // disk models a worker restarting into the same failure; the
+          // skip must not depend on the loaded state surviving.
+          (
+            channel as unknown as { prWatchStateLoaded: boolean }
+          ).prWatchStateLoaded = false;
+          mockPull({ mergeable: false, mergeable_state: 'dirty' });
+          await expect(watch.runPrStateWatch()).rejects.toThrow('ENOSPC');
         } finally {
           spy.mockRestore();
           stderr.mockRestore();
         }
 
+        const deadLetterLines = readFileSync(boundDeadLetterPath(), 'utf-8')
+          .split('\n')
+          .filter((line) => line.length > 0);
+        expect(deadLetterLines).toHaveLength(1);
+        expect(
+          (JSON.parse(deadLetterLines[0]!) as { source: { messageId: string } })
+            .source.messageId,
+        ).toBe('watch:merge_conflict:42:seed-0:1751446800000');
         expect(
           readChannelEvents().filter(
             (event) => event['reason'] === 'watch_pending_overflow',
@@ -18321,6 +18488,116 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
             (event) => event['reason'] === 'watch_pending_unreconciled',
           ),
         ).toBe(false);
+      });
+
+      it('re-journals when the blocking cause changes while recovery stays blocked', async () => {
+        // The sidecar is unreadable from the start (a directory at its
+        // path), so the first load fails and the row names the read error.
+        mkdirSync(watchStatePath(), { recursive: true });
+        await initChannel(
+          { deliverToBoundSessions: true, prWatchEvents: [] },
+          { boundSessions },
+        );
+        mockOctokit.paginate.mockResolvedValue([]);
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        const reasons = () =>
+          readChannelEvents()
+            .filter(
+              (event) =>
+                event['type'] === 'poll' && event['outcome'] === 'degraded',
+            )
+            .map((event) => event['reason']);
+        try {
+          await pollOnce();
+          expect(reasons()).toEqual(['watch_reconcile_blocked']);
+          await pollOnce(); // same cause: no new row
+          expect(reasons()).toEqual(['watch_reconcile_blocked']);
+          // The operator fixes the file while the backlog persists: the
+          // cause flips to a pending backlog, and the row must re-journal —
+          // the read-error remedy no longer applies.
+          rmSync(watchStatePath(), { recursive: true });
+          seedWatchState({
+            'owner/repo#42': {
+              headSha: 'sha-1',
+              mergeableState: 'clean',
+              prState: 'open',
+              fired: [],
+              pending: [
+                makePendingWatch({
+                  key: 'watch:state_change:42:1:1751446800000',
+                }),
+              ],
+            },
+          });
+          await pollOnce();
+          expect(reasons()).toEqual([
+            'watch_reconcile_blocked',
+            'watch_pending_unreconciled',
+          ]);
+          await pollOnce(); // same cause again: no new row
+          expect(reasons()).toEqual([
+            'watch_reconcile_blocked',
+            'watch_pending_unreconciled',
+          ]);
+        } finally {
+          stderr.mockRestore();
+        }
+      });
+
+      it('journals the subscriptions-off recovery edge when the backlog clears', async () => {
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            mergeableState: 'clean',
+            prState: 'open',
+            fired: [],
+            pending: [
+              makePendingWatch({
+                key: 'watch:state_change:42:1:1751446800000',
+              }),
+            ],
+          },
+        });
+        await initChannel(
+          { deliverToBoundSessions: true, prWatchEvents: [] },
+          { boundSessions },
+        );
+        mockOctokit.paginate.mockResolvedValue([]);
+        const state = channel as unknown as {
+          prWatchState: { entries: Record<string, { pending?: unknown[] }> };
+        };
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        const reasons = () =>
+          readChannelEvents()
+            .filter(
+              (event) =>
+                event['type'] === 'poll' && event['outcome'] === 'degraded',
+            )
+            .map((event) => event['reason']);
+        try {
+          await pollOnce(); // blocked: pending backlog
+          expect(reasons()).toEqual(['watch_pending_unreconciled']);
+          // The backlog clears while subscriptions stay off: this guard's
+          // own clearing edge must be journaled — the second recovered
+          // emission site, independent of the reconcile branch's one.
+          state.prWatchState.entries['owner/repo#42'] = { pending: [] };
+          await pollOnce();
+          expect(reasons()).toEqual([
+            'watch_pending_unreconciled',
+            'watch_reconcile_recovered',
+          ]);
+          await pollOnce(); // healthy: no further rows
+          expect(reasons()).toEqual([
+            'watch_pending_unreconciled',
+            'watch_reconcile_recovered',
+          ]);
+        } finally {
+          stderr.mockRestore();
+        }
       });
 
       it('journals the clearing edge, because a poll/ok row is not a recovery signal', async () => {

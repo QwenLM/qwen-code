@@ -151,10 +151,15 @@ export function ChannelEventsPage({
     [language],
   );
 
-  const outcomeLabel = (outcome: string) =>
-    KNOWN_OUTCOMES.has(outcome)
-      ? t(`channelEvents.outcome.${outcome}`)
-      : outcome;
+  // The watch-guard recovery edge keeps `degraded` on the wire (the outcome
+  // vocabulary is unchanged); labeling it "Degraded" would read as an ongoing
+  // failure, so the reason names the label instead.
+  const outcomeLabel = (outcome: string, reason?: string) =>
+    reason === 'watch_reconcile_recovered'
+      ? t('channelEvents.outcome.recovered')
+      : KNOWN_OUTCOMES.has(outcome)
+        ? t(`channelEvents.outcome.${outcome}`)
+        : outcome;
 
   return (
     <div className={styles.page}>
@@ -358,7 +363,7 @@ export function ChannelEventsPage({
                           className={styles.outcome}
                           data-outcome={event.outcome}
                         >
-                          {outcomeLabel(event.outcome)}
+                          {outcomeLabel(event.outcome, event.reason)}
                         </span>
                         <span className={styles.target}>
                           {safeTargetUrl ? (

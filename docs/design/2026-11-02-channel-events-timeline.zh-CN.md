@@ -45,23 +45,23 @@
 
 记录字段：
 
-| 字段          | 含义                                                                                  |
-| ------------- | ------------------------------------------------------------------------------------- |
-| `at`          | ISO 时间戳                                                                            |
-| `channel`     | 渠道实例名，完整保留（见下方上限）                                                    |
-| `type`        | `inbound` / `outbound` / `task` / `poll`                                              |
-| `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `ok` / 任务状态（见 §5）               |
-| `reason`      | 跳过与入站失败的机器原因码（`sender_denied`、`reason_filter`、`github_api_error` 等） |
-| `triggerKind` | 渠道特定的触发类型（`mention`、`assign` 等）                                          |
-| `repository`  | 会话容器（GitHub 下为 `owner/repo`）                                                  |
-| `thread`      | 线程标识（`issue:12`、`pr:34`）                                                       |
-| `number`      | issue 或 PR 编号                                                                      |
-| `actor`       | 发送方登录名                                                                          |
-| `sessionId`   | 事件被路由到的会话；在 `retired` / `skipped` 行上是它失去的那个（§5）                 |
-| `messageId`   | 来源消息标识                                                                          |
-| `durationMs`  | 轮询耗时                                                                              |
-| `error`       | 单行化错误信息，上限 200 字符                                                         |
-| `detail`      | 扁平原始类型映射，最多 12 个键                                                        |
+| 字段          | 含义                                                                                                                                                   |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `at`          | ISO 时间戳                                                                                                                                             |
+| `channel`     | 渠道实例名，完整保留（见下方上限）                                                                                                                     |
+| `type`        | `inbound` / `outbound` / `task` / `poll`                                                                                                               |
+| `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `failed_ambiguous` / `ok` / `degraded` / 任务状态（见 §5）                                              |
+| `reason`      | 跳过与入站失败的机器原因码（`sender_denied`、`reason_filter`、`github_api_error` 等）                                                                  |
+| `triggerKind` | 渠道特定的触发类型（`mention`、`assign` 等）                                                                                                           |
+| `repository`  | 会话容器（GitHub 下为 `owner/repo`）                                                                                                                   |
+| `thread`      | 线程标识（`issue:12`、`pr:34`）                                                                                                                        |
+| `number`      | issue 或 PR 编号                                                                                                                                       |
+| `actor`       | 发送方登录名                                                                                                                                           |
+| `sessionId`   | 事件被路由到的会话；在清除 delivery 时写出的行（`running` / `failed` / `reply_pending` / `retired`）与 claim 前的 `skipped` 行上，是它失去的那个（§5） |
+| `messageId`   | 来源消息标识                                                                                                                                           |
+| `durationMs`  | 轮询耗时                                                                                                                                               |
+| `error`       | 单行化错误信息，上限 200 字符                                                                                                                          |
+| `detail`      | 扁平原始类型映射，最多 12 个键                                                                                                                         |
 
 上限：自由文本字段与 `detail` 的值截断到 200 字符。渠道标识是例外：管理接口接受最长 255 UTF-8 字节的名字，而码点数不会超过字节数，因此标识保留到 255 个码点——任何合法名字都完整保留，并且仍能被 `channel` 过滤匹配。只有界面在展示时缩短它。
 
@@ -113,8 +113,8 @@ GET /workspaces/:workspace/channels/events
 ### 4. Web Shell
 
 - `useChannelEvents` 在页面挂载且可见期间轮询该路由（5 秒），标签页隐藏时暂停、重新可见时刷新；页面另提供手动刷新。**同一时刻只允许一个轮询周期在途**：请求未完成时恢复可见绝不能再启动一个，否则两者结束时都会 schedule，而只保留最后一个定时器句柄，另一个成为永远轮询的孤儿——慢响应下的普通标签页切换会永久倍增日志读取。因此请求在途时恢复可见，是让该请求结束后再重新排程。两条读取路径都有时间上界（SDK 默认 30 秒 fetch 超时与 action 超时），所以该守卫不会让循环停摆。每份快照都带上产生它的查询（工作区、渠道、类型、limit），不匹配的数据会被遮蔽，做法与 `useDaemonChannels` 一致：底层 resource 在请求进行中或失败后仍保留旧数据，没有这个标记的话，上一个工作区的行——以及过滤选项里它的渠道名——就会显示在新选中的工作区下。
-- `ChannelEventsPage` 渲染按时间倒序的时间线，带工作区选择器、渠道过滤、类型过滤，每行显示：时间、渠道、类型、结果、目标（`owner/repo#12`）、操作者、原因或触发类型、耗时、错误。私投递还会显示它到达的会话：一个截断到 8 个字符的标记，完整标识放在 `title` 里——否则一个 UUID 会把原因和计数挤出该列。绑定扫描的 `degraded` 行显示 `detail.streak`（扫描次数，不是轮询次数），且**只有 `bindings_partial` 行**带 `detail.sessions`；`bindings_cold_empty` 与 `bindings_unreachable` 只带 `streak`，因此「是否存在 sessions」不能当作「这次扫描是部分结果」的判据。watch 守卫行只显示原因。工作区选择器与管理页一样列出已注册的非 live 工作区，因为 provider 的 cwd 是 daemon 全局的主工作区，否则在次工作区启动的渠道将无法查看。切换工作区会重置渠道过滤。
-- 适配器能写出的每个结果都有中英文标签。`KNOWN_OUTCOMES` 被导出，以便测试断言两份目录都覆盖它：翻译器会先回退到英文、再回退到原始键，所以缺一个中文标签只会静默显示英文。页面不认识的结果仍按原始 token 渲染——不好读，但安全。
+- `ChannelEventsPage` 渲染按时间倒序的时间线，带工作区选择器、渠道过滤、类型过滤，每行显示：时间、渠道、类型、结果、目标（`owner/repo#12`）、操作者、原因或触发类型、耗时、错误。私投递还会显示它到达的会话——或 delivery 被清除时失去的那个：一个截断到 8 个字符的标记，完整标识放在 `title` 里——否则一个 UUID 会把原因和计数挤出该列。绑定扫描的 `degraded` 行显示 `detail.streak`（扫描次数，不是轮询次数），且**只有 `bindings_partial` 行**带 `detail.sessions`；`bindings_cold_empty` 与 `bindings_unreachable` 只带 `streak`，因此「是否存在 sessions」不能当作「这次扫描是部分结果」的判据。watch 守卫行只显示原因，状态无法读取时另带 `error`。工作区选择器与管理页一样列出已注册的非 live 工作区，因为 provider 的 cwd 是 daemon 全局的主工作区，否则在次工作区启动的渠道将无法查看。切换工作区会重置渠道过滤。
+- 适配器能写出的每个结果都有中英文标签。`KNOWN_OUTCOMES` 被导出，以便测试断言两份目录都覆盖它：翻译器会先回退到英文、再回退到原始键，所以缺一个中文标签只会静默显示英文。页面不认识的结果仍按原始 token 渲染——不好读，但安全。watch 守卫的恢复边沿在线上仍是 `degraded`，但标签取自原因——**Recovered** / **已恢复**——因此恢复不会被读成仍在发生的故障。
 - 它是独立页面：`activePanel` 取值 `channel-events`，URL 为 `/channel-events`，侧边栏主导航项为 `channelEvents`。
 - 由 `channel_management` 能力位与受信任工作区门禁，与管理页一致。
 
@@ -137,9 +137,9 @@ PR #16117 增加了第二条投递通道：开启 `deliverToBoundSessions` 后�
 
 `transitionInboundTask` 增加一个可选的日志覆盖参数，使私投递的接受标记仍能按 `running` 持久化（不存在 `delivered` 这个任务状态——记录紧接着就被删除），而日志的最后一个词是终态。没有这个覆盖，被 preflight 拒绝的事件仍会以 `running` 收尾——和「还在投递中」无法区分——因为那个出口在 delivery 仍然挂着的情况下就消费掉了任务。同一个方法还会记住任务进来时持有的目标，因此清除 delivery 时写的那些行仍带着 `sessionId`，不会丢掉它们所指的那个会话。
 
-这份记忆是**持久化**的（任务记录上的 `lostSessionId`），而不只够一行用。gone 会话回退会清掉 delivery，之后每一轮都重新进入缺失门禁、最终进入死信，届时已无 delivery 可读；只记一次转换会让这些行全部无名——包括终态行，而那正是运维用来判断「是哪个会话弄丢了事件」的那一行。该字段只用于归因：**刻意不恢复 delivery**，否则会重新进入私投递并改变路由。它只在显式清除时写入，因此只是省略该键的转换不会扰动它，并像记录的其他字段一样按可选字符串校验。
+这份记忆是**持久化**的（任务记录上的 `lostSessionId`），而不只够一行用。gone 会话回退会清掉 delivery，之后每一轮都重新进入缺失门禁、最终进入死信，届时已无 delivery 可读；只记一次转换会让这些行全部无名——包括终态行，而那正是运维用来判断「是哪个会话弄丢了事件」的那一行。该字段只用于归因：**刻意不恢复 delivery**，否则会重新进入私投递并改变路由。它只在显式清除时写入，因此只是省略该键的转换不会扰动它，并像记录的其他字段一样按可选字符串校验。gone 回退到达上限时也会先给内存中的任务写上同样的归因再退休；delivery 已被清除的死信记录用 `lostSessionId` 点名失去的会话，运维恢复因此仍拿得到目标。
 
-同一条规则也覆盖两处发生在任何任务被 claim 之前的退休：它们的 `inbound` / `skipped` 行带上待办条目里冻结的目标，而该目标本来就已写进同一事件的死信记录。没有它，时间线与死信就会对同一次被监视的状态变化给出不一致的归属。
+同一条规则也覆盖发生在任何任务被 claim 之前的退休：它们的 `inbound` / `skipped` 行在有待办条目时带上其中冻结的目标。只有溢出退休还会写死信记录；`watch_no_candidate` 与 `no_role_matched` 退休不写死信，skip 行就是事件唯一的痕迹——没有冻结的目标，它就说不出这个被退休的事件是否曾属于某个会话。
 
 **新增结果词。** `task` / `delivered` 与 `task` / `retired` 只是日志用的终态词，不是持久化的任务状态。`retired` 带原因：`preflight_rejected`、`watch_no_target`、`watch_no_candidate`、`watch_session_gone`、`dead_letter`，以及角色感知的三个出口：`bound_no_candidate`（评论的角色在完整快照下失去了匹配——`watch_no_candidate` 的非 watch 兄弟）、`siblings_still_follow`（gone 回退之所以退休，是因为其他角色仍关注该 PR、或投递环里已有该事件，公开回复会重复兄弟角色的私投递）、`already_delivered_other_role`（防御性的无目标去重抑制；claim 路径通常先经死信面退休这类事件）。死信追加失败记 `task` / `failed`，原因 `dead_letter_write_failed`，因为任务被保留、仍可恢复——那不是退休。每一条终态行都写在它所描述的持久化步骤**之后**，因此删除或保存抛错时，不会为一个下一轮还会重跑的事件留下退休声明。
 
@@ -149,11 +149,11 @@ PR #16117 增加了第二条投递通道：开启 `deliverToBoundSessions` 后�
 
 **绝不记录消息正文。** 死信记录为了运维恢复会带 `text`，其写失败路径还会把整个 payload dump 到 stderr。两者都不进日志：失败行只带写盘错误。有一条测试断言正文出现在 stderr、且不出现在任何日志行里。
 
-**依赖降级。** 绑定扫描是一个新的硬依赖：只要它从未成功过，冷启动门就会推迟评论通道，于是**所有**通知停摆，而轮询本身仍报 `ok`。适配器现在在它**本来就限流**的那几行 stderr 旁边记 `poll` / `degraded`——`bindings_unreachable`（首次失败，之后每十次）、`bindings_partial`（第十次，之后每六十次，带 `detail.sessions`）、`bindings_cold_empty`（首次，之后每十次，以及有界逃逸打开评论通道时再记一次）——并在既有 `watchReconcileBlocked` 标志的 false→true 边沿记 `watch_reconcile_blocked` / `watch_pending_unreconciled`。复用这些限流和这个标志意味着不新增适配器状态、也不新增洪水：永久故障不会把有用的行挤出日志轮转窗口。
+**依赖降级。** 绑定扫描是一个新的硬依赖：只要它从未成功过，冷启动门就会推迟评论通道，于是**所有**通知停摆，而轮询本身仍报 `ok`。适配器现在在它**本来就限流**的那几行 stderr 旁边记 `poll` / `degraded`——`bindings_unreachable`（首次失败，之后每十次）、`bindings_partial`（第十次，之后每六十次，带 `detail.sessions`）、`bindings_cold_empty`（首次，之后每十次，以及有界逃逸打开评论通道时再记一次）——并在既有 `watchReconcileBlocked` 标志的 false→true 边沿记 `watch_reconcile_blocked` / `watch_pending_unreconciled`；阻塞成因变化时（积压变成不可读的 sidecar，或反过来）会再记一条，因此行不会一直点名一个已经失效的补救。复用这些限流意味着不新增洪水：永久故障不会把有用的行挤出日志轮转窗口；成因边沿只新增一个字段，不是新的限流器。
 
 `detail.streak` 统计的是**绑定扫描次数，不是轮询次数**：`refreshBoundSessions` 在每次 gone 会话重试时也会跑，所以一次轮询可能让它加不止一次。标签与 stderr 措辞因此都说「扫描」。同理 `detail.sessions` 统计的是会话数，而不是路由映射的大小——映射按 PR 建键，一个会话关注两个 PR 就会被报成两个会话，把运维支使去查一个根本没发生的漏读。它等于本次扫描列出的会话行**加上部分快照下保留仍在路由的会话**，受 `MAX_PARTIAL_RETAINED` 封顶。只数 listed 行会把一个「保留会话仍在收投递」的 draining 工作区报成 0，并给出一个并非页容量的页容量诊断。它是会话行的计数，不是通过映射自身过滤后剩下的条目数（建映射时会跳过 channel 自有的会话与无法解析的绑定 URL）。行标签与 stderr 都写「列出 / listed」，这个词是「列出或被保留」的简写，两个表面打印的是同一个数字。
 
-**恢复记在清零边沿上**，即 `watch_reconcile_recovered`。`poll` / `ok` 行不能充当这个信号：基类在每次不抛错的轮询后都会写一条，包括持续故障期间的每一次，所以它在整个降级窗口都存在、结束时也没有变化。只有 watch 守卫这几个原因有恢复行。`bindings_unreachable` 与 `bindings_cold_empty` 是隐含恢复的——扫描一旦成功就不再产生它们，下一次 streak 从头开始。**`bindings_partial` 不是带恢复边沿的降级**：成功的多页扫描恰恰是它的*生产者*，而 `partialSnapshotStreak` 只在完整快照时清零，永远多页的守护进程永远不会返回完整快照。它是一条常驻健康提示，因此运维不能把「它安静下来」当作恢复的证据。
+**恢复记在清零边沿上**，即 `watch_reconcile_recovered`。`poll` / `ok` 行不能充当这个信号：基类在每次不抛错的轮询后都会写一条，包括持续故障期间的每一次，所以它在整个降级窗口都存在、结束时也没有变化。只有 watch 守卫这几个原因有恢复行。`bindings_unreachable` 是隐含恢复的——扫描一旦成功就不再产生它，下一次 streak 从头开始。**`bindings_cold_empty` 不是**：空 partial 是一次*成功*的扫描，而 `coldEmptyPartialStreak` 只在完整或非空快照时清零，所以 workspace 一直回答空 partial 的守护进程会持续从成功路径产生该行。超过有界逃逸之后该行安静下来，是因为节流到达上限——门按 `streak < MAX_COLD_EMPTY_PARTIAL_POLLS` 守卫、两个逃逸都判 `=== MAX`——而不是状态恢复了：此时评论通道已打开，快照却仍是空 partial。**`bindings_partial` 不是带恢复边沿的降级**：成功的多页扫描恰恰是它的*生产者*，而 `partialSnapshotStreak` 只在完整快照时清零，永远多页的守护进程永远不会返回完整快照。它是一条常驻健康提示，因此运维不能把「它安静下来」当作恢复的证据。
 
 watch 守卫行还会区分成因。`hasUnreconciledWatchPending()` 在读取错误时 fail-closed，所以不可读的 sidecar 同样会阻塞恢复——但把它报成待办积压，给出的补救（重新开启订阅）根本解决不了。订阅关闭时先加载状态：读取失败记 `watch_reconcile_blocked` 并带上错误，`watch_pending_unreconciled` 只留给确实持有待办事件的状态。门本身不变，仍然 fail-closed。
 
@@ -206,7 +206,7 @@ watch 守卫行还会区分成因。`hasUnreconciledWatchPending()` 在读取错
 - 单元测试：日志的追加/读取/过滤/轮转/上限与被吞掉的写失败；GitHub 的入站跳过、任务与发表事件；路由按渠道和类型过滤、夹在解析后的工作区内、支持 `since`。
 - Web Shell：页面渲染行、两个过滤器生效、空态与错误态正确。
 - 手工：用一个测试仓库跑 GitHub 渠道，确认页面能看到会话创建之前的过滤跳过，并按顺序看到接受的触发、任务状态变化与发表结果。
-- §5 单元测试：私投递以 `delivered` 收尾并点名会话；preflight 拒绝以 `retired` 收尾、绝不是 `delivered`；rebind 能看到两个会话 id，并钉住重定向那一行的用词；每一处 watch 退休——含 claim 前跳过与待办队列溢出——与死信（两种结果）都被记录；正文进了死信文件与 stderr 但没进任何日志行；每个降级原因在一个限流窗口只出现一次、在后续窗口重复发射、并在归零后重新开始；冷启动逃逸在成功与失败两条路径上都于上限处被记录；删除或保存抛错时不声称退休；watch 守卫的清零边沿被记录，因为 `poll` / `ok` 行在整个故障期间都在写、无法标记它的结束。以上每个守卫都做了变异验证：37 个变异，37 个被杀。其中两个专门用来证明隐私断言是真的在起作用——一个把正文塞进退休行的另一个字段，另一个把正文拼在写盘错误后面、让错误断言仍然通过。另有两个最初存活，被追查而不是被接受：一个宽松的 `sessionId` 计数——即使清除行没有归属，另外三条正确归属的行仍能满足它；以及一个在测试重命名后匹配不到任何测试的变异过滤器。分不清「没有测试运行」与「守卫成立」的 sweep 不算证据，因此 harness 现在会显式报出这种情况。
+- §5 单元测试：私投递以 `delivered` 收尾并点名会话；preflight 拒绝以 `retired` 收尾、绝不是 `delivered`；rebind 能看到两个会话 id，并钉住重定向那一行的用词；每一处 watch 退休——含 claim 前跳过与待办队列溢出——与死信（两种结果）都被记录；正文进了死信文件与 stderr 但没进任何日志行；每个降级原因在一个限流窗口只出现一次、在后续窗口重复发射、并在归零后重新开始；冷启动逃逸在成功与失败两条路径上都于上限处被记录；删除或保存抛错时不声称退休；watch 守卫的清零边沿被记录，因为 `poll` / `ok` 行在整个故障期间都在写、无法标记它的结束。评审轮新增的守卫覆盖：溢出死信去重（sidecar 仍不可写时的第二次检测只落一条记录）、报告会话数的保留上限、每一处私有退休的公共路径不变量、同一轮内到达 gone 上限时的归属、watch 守卫的按成因边沿及其订阅关闭分支的恢复点、gone 重试下按扫描计数的 streak、角色感知退休的原因词，以及恢复标签。以上每个守卫都做了变异验证：47 个变异，47 个被杀。其中两个专门用来证明隐私断言是真的在起作用——一个把正文塞进退休行的另一个字段，另一个把正文拼在写盘错误后面、让错误断言仍然通过。另有三个最初存活，被追查而不是被接受：一个宽松的 `sessionId` 计数——即使清除行没有归属，另外三条正确归属的行仍能满足它；一个在测试重命名后匹配不到任何测试的变异过滤器；以及一个上限计数 fixture——它的第一次空 partial 就把 `lastBindings` 裁到了上限，变异在发射行的那次扫描上不可观测，fixture 因此改为恰好在写行时让保留数高于上限。分不清「没有测试运行」与「守卫成立」的 sweep 不算证据，因此 harness 现在会显式报出这种情况。
 - §5 Web Shell：`failed_ambiguous` 在中英文下都渲染标签而不是原始 token；会话标记截断显示、完整 id 在 `title` 里；降级计数正确渲染，并在不带计数的行上断言其**不出现**；两份目录覆盖 `KNOWN_OUTCOMES` 的每一项。
 
 ## 验收标准
