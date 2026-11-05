@@ -3671,12 +3671,31 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     expectCompressed(result);
   });
 
-  it('drops a summary cut off mid-snapshot after an analysis that quotes a whole example snapshot', async () => {
-    // Without setting closed <analysis> blocks aside, the example's closing
-    // tag would stand in for the one the real snapshot never wrote.
+  it('drops a summary cut off mid-snapshot after an analysis that names a whole example snapshot mid-line', async () => {
+    // The example's tag is mid-line, so it opens nothing: the real snapshot's
+    // line-start tag is the one checked.
     mockVllmBackend(WINDOW, false, {
       text:
         '<analysis>The format is <state_snapshot>...</state_snapshot>.</analysis>\n' +
+        '<state_snapshot><overall_goal>port the parser</overall_goal><cur',
+      usage: windowFillingUsage,
+    });
+
+    const result = await compressChars(182_000, 45_000);
+
+    expectNoNewHistory(
+      result,
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+  });
+
+  it('drops a summary cut off mid-snapshot after an analysis that quotes a whole example snapshot on its own line', async () => {
+    // Without setting closed <analysis> blocks aside, the example's
+    // line-start tag would be the one checked, and its closing tag would
+    // stand in for the one the real snapshot never wrote.
+    mockVllmBackend(WINDOW, false, {
+      text:
+        '<analysis>The format is:\n<state_snapshot>...</state_snapshot>\n</analysis>\n' +
         '<state_snapshot><overall_goal>port the parser</overall_goal><cur',
       usage: windowFillingUsage,
     });
@@ -3835,7 +3854,12 @@ describe('issue #9455: compression requests fit the receiving window', () => {
           ?.maxOutputTokens ?? 0,
         o.outputCap ?? Infinity,
       );
-      sent.push({ contents, promptTokens, maxOutputTokens });
+      // A copy, so a later write into the caller's parts cannot show up here.
+      sent.push({
+        contents: structuredClone(contents),
+        promptTokens,
+        maxOutputTokens,
+      });
       if (
         o.stopAtWindow &&
         promptTokens <= window &&
@@ -4083,6 +4107,24 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     );
   });
 
+  it('fails locally with INPUT_TOO_LARGE on a payload-overflow compaction too', async () => {
+    // That path cuts the text before sizing, so the reduction has nothing
+    // left to cut; a request still too large is not sent with a budget
+    // clamped below the minimum.
+    const generateText = mockBackend();
+    configureWindow(2_048);
+
+    const result = await compressHistory(toolSession(10, 12_000), 40_000, {
+      requestPayloadTooLarge: true,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expectNoNewHistory(
+      result,
+      CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+    );
+  });
+
   it('leaves a small window a quarter of it for the summary', async () => {
     // A fixed 4,096-token minimum would take half of an 8K window, so the
     // minimum scales down to a quarter of the window.
@@ -4255,6 +4297,10 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     // overran the window while the prompt alone left the summary its
     // reserve. Only the output budget needs to shrink. A ratio taken from a
     // total that counts the output budget would cut the input instead.
+    const logger = { warn: vi.fn(), debug: vi.fn() };
+    (
+      mockConfig as unknown as { getDebugLogger: () => typeof logger }
+    ).getDebugLogger = () => logger;
     configureWindow(SMALL_WINDOW);
     mockBackend({
       ratio: 1.6,
@@ -4269,6 +4315,12 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     expect(sent).toHaveLength(2);
     expect(sent[0]!.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
     expect(sent[1]!.contents).toEqual(sent[0]!.contents);
+    // The same input was resent, so its usage still describes the history it
+    // replaces and the post-compression count comes from it.
+    const lines = logger.debug.mock.calls.map((args) => String(args[0]));
+    expect(lines.some((l) => l.includes('reduced compression request'))).toBe(
+      false,
+    );
     expect(sent[1]!.maxOutputTokens).toBeLessThan(sent[0]!.maxOutputTokens);
     expect(sent[1]!.maxOutputTokens).toBeGreaterThanOrEqual(
       Math.floor(SMALL_WINDOW / 4),
@@ -4614,10 +4666,13 @@ describe('issue #9455: compression requests fit the receiving window', () => {
       modelText('noted'),
       userText('BEGIN ' + 'u'.repeat(500_000) + ' END?'),
     ]);
+    const before = structuredClone(history);
 
     const result = await compressHistory(history, 200_000);
 
     expectCompressed(result);
+    // The cut lands in the request, never in the chat's own history.
+    expect(history).toEqual(before);
     expect(sent).toHaveLength(1);
     const text = textOf(sent[0]!.contents);
     expect(text).toContain('BEGIN ');
