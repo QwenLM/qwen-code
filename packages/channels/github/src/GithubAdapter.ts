@@ -3157,6 +3157,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       number: task.issueNumber,
       messageId: task.source.messageId,
       actor: envelope.senderId,
+      ...this.boundJournalIdentity(task.delivery),
     });
     return task;
   }
@@ -3831,11 +3832,36 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       thread: task.source.threadId,
       number: task.issueNumber,
       messageId: task.source.messageId,
+      // Read the delivery from the UPDATED record: a retarget or a gone
+      // fallback clears it mid-run, and the journal row must name the
+      // session the transition actually refers to.
+      ...this.boundJournalIdentity(task.delivery),
       ...(updates.attempts !== undefined
         ? { detail: { attempts: updates.attempts } }
         : {}),
       ...(updates.error ? { error: updates.error } : {}),
     });
+  }
+
+  /**
+   * Session identity for journal rows about a bound delivery, so the events
+   * page can link the row to the session that received the event. The
+   * binding snapshot is the only place the target's workspace is known; a
+   * frozen delivery on a restored task can outlive its binding, in which
+   * case the row keeps the sessionId without a workspace.
+   */
+  private boundJournalIdentity(delivery: InboundTaskRecord['delivery']): {
+    sessionId?: string;
+    sessionWorkspaceCwd?: string;
+  } {
+    if (delivery?.kind !== 'bound-session') return {};
+    const workspaceCwd = this.lastBindings.find(
+      (binding) => binding.sessionId === delivery.sessionId,
+    )?.workspaceCwd;
+    return {
+      sessionId: delivery.sessionId,
+      ...(workspaceCwd ? { sessionWorkspaceCwd: workspaceCwd } : {}),
+    };
   }
 
   private removeInboundTask(taskId: string): void {
@@ -3958,6 +3984,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ...(record.threadId ? { thread: record.threadId } : {}),
       ...(record.number !== undefined ? { number: record.number } : {}),
       sessionId: record.sessionId,
+      // The reply session is the Channel's own, created in its workspace.
+      sessionWorkspaceCwd: this.config.cwd,
       ...(record.sourceMessageId ? { messageId: record.sourceMessageId } : {}),
       ...(record.actor ? { actor: record.actor } : {}),
       ...(record.failureError ? { error: record.failureError } : {}),

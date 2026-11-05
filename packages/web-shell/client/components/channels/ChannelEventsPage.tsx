@@ -9,6 +9,7 @@ import {
   ActivityIcon,
   AlertCircleIcon,
   ArrowLeftIcon,
+  MessageSquareIcon,
   RefreshCwIcon,
 } from 'lucide-react';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
@@ -400,6 +401,35 @@ export function ChannelEventsPage({
                                 ms: event.durationMs,
                               })}
                             </span>
+                          ) : null}
+                          {event.sessionId ? (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className={styles.sessionButton}
+                              aria-label={t('channelEvents.openSession')}
+                              title={t('channelEvents.openSession')}
+                              onClick={() => {
+                                // Same navigation path as markdown session
+                                // links and turn notifications. Older
+                                // records lack the owner workspace; the
+                                // journal's own workspace is the fallback
+                                // (correct for the Channel's own reply
+                                // session).
+                                window.dispatchEvent(
+                                  new CustomEvent('qwen:open-session', {
+                                    detail: {
+                                      sessionId: event.sessionId,
+                                      workspaceCwd:
+                                        event.sessionWorkspaceCwd ??
+                                        workspaceCwd,
+                                    },
+                                  }),
+                                );
+                              }}
+                            >
+                              <MessageSquareIcon />
+                            </Button>
                           ) : null}
                         </span>
                         {event.error ? (
