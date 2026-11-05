@@ -2394,6 +2394,48 @@ describe('Gemini Client (client.ts)', () => {
       const reinstalled = vi.mocked(setHistory).mock.calls[0]![0] as Content[];
       expect(findApiHistoryPromptIndex(reinstalled, 'S########1')).toBe(1);
     });
+
+    it.each([
+      ['the date the old one recorded', 'Thursday, June 4, 2026'],
+      ['no date when the old one recorded none', undefined],
+    ])(
+      'records on the rebuilt startup context %s, for the turns it keeps',
+      async (_title, date) => {
+        const oldPrelude: Content = {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nold prelude\n</system-reminder>',
+              ...(date && { partMetadata: { [DATE_REMINDER_METADATA]: date } }),
+            },
+          ],
+        };
+
+        await refreshOver(
+          [oldPrelude, userText('hello'), modelText('hi')],
+          [userText('<system-reminder>\nfresh prelude\n</system-reminder>')],
+        );
+
+        expect(getInitialChatHistory).toHaveBeenLastCalledWith(
+          expect.anything(),
+          undefined,
+          expect.objectContaining({ announcedDate: date ?? null }),
+        );
+      },
+    );
+
+    it('lets a startup context with no turns after it record its own date', async () => {
+      await refreshOver(
+        [userText('<system-reminder>\nold prelude\n</system-reminder>')],
+        [userText('<system-reminder>\nfresh prelude\n</system-reminder>')],
+      );
+
+      expect(getInitialChatHistory).toHaveBeenLastCalledWith(
+        expect.anything(),
+        undefined,
+        expect.objectContaining({ announcedDate: undefined }),
+      );
+    });
   });
 
   describe('restoreStartupContextAfterCompaction', () => {
@@ -2432,6 +2474,12 @@ describe('Gemini Client (client.ts)', () => {
         .calls[0]![0] as Content[];
       expect(reinstalled[0]).toEqual(prelude);
       expect(findApiHistoryPromptIndex(reinstalled, 'S########1')).toBe(1);
+      // The summary and the kept turns may come from another date.
+      expect(getInitialChatHistory).toHaveBeenLastCalledWith(
+        expect.anything(),
+        undefined,
+        expect.objectContaining({ announcedDate: null }),
+      );
     });
   });
 
@@ -10482,12 +10530,22 @@ Other open files:
       mockTurnRunFn.mockReturnValue(textTurn('Hello'));
       return installChat({ getHistory: vi.fn().mockReturnValue(history) });
     };
-    const startupContext = (date: string) =>
-      userText(
-        wrapSystemReminder(
-          `This is the Qwen Code. We are setting up the context for our chat.\nToday's date is ${date}.\nMy operating system is: linux`,
-        ),
+    // A startup context that starts the conversation records its date; one
+    // rebuilt in front of earlier turns (resume, compaction) records none.
+    const startupText = (date: string) =>
+      wrapSystemReminder(
+        `This is the Qwen Code. We are setting up the context for our chat.\nToday's date is ${date}.\nMy operating system is: linux`,
       );
+    const startupContext = (date: string): Content => ({
+      role: 'user',
+      parts: [
+        {
+          text: startupText(date),
+          partMetadata: { [DATE_REMINDER_METADATA]: date },
+        },
+      ],
+    });
+    const rebuiltStartupContext = (date: string) => userText(startupText(date));
     const dateReminderTurn = (reminder: string | Part, prompt: string) => ({
       role: 'user' as const,
       parts: [
@@ -10495,7 +10553,14 @@ Other open files:
         { text: prompt },
       ],
     });
-    const CHANGED = (date: string) => buildDateReminder(date, true);
+    const PLAIN = (date: string) => buildDateReminder([], date)!;
+    const CHANGED = (date: string) =>
+      buildDateReminder([startupContext('Monday, June 1, 2026')], date)!;
+    const UNVERIFIED = (date: string) =>
+      buildDateReminder(
+        [rebuiltStartupContext(date), userText('Earlier')],
+        date,
+      )!;
 
     it('tells the date when the history carries none', async () => {
       dateSession('2026-06-05T12:00:00Z');
@@ -10503,7 +10568,7 @@ Other open files:
       await run([{ text: 'What day is it?' }], 'prompt-id-date-inject');
 
       expect(mockTurnRunFn).toHaveBeenCalledWith(
-        ...exactRequest(buildDateReminder('Friday, June 5, 2026', false), {
+        ...exactRequest(PLAIN('Friday, June 5, 2026'), {
           text: 'What day is it?',
         }),
       );
@@ -10540,11 +10605,11 @@ Other open files:
         [startupContext('Thursday, June 4, 2026'), modelText('Hello')],
       ],
       [
-        // A compressed record keeps an older reminder after the fresh
-        // startup context; the older one is the last the model read.
+        // A compressed record keeps an older reminder; it is the last date
+        // the model read.
         'a later entry carries an older date',
         [
-          startupContext('Friday, June 5, 2026'),
+          rebuiltStartupContext('Friday, June 5, 2026'),
           dateReminderTurn(
             '<system-reminder>\nThe current date is: Thursday, June 4, 2026. Note: This is the authoritative current date — it may differ from the "Today\'s date" mentioned earlier in the conversation startup context.\n</system-reminder>',
             'Kept turn',
@@ -10562,11 +10627,29 @@ Other open files:
       );
     });
 
+    it('tells the date after a resume rebuilt the startup context', async () => {
+      // The rebuilt startup context gives today, but the resumed turns ran
+      // under a date the history does not record.
+      dateSession('2026-06-05T12:00:00Z', [
+        rebuiltStartupContext('Friday, June 5, 2026'),
+        userText('What is the date today?'),
+        modelText('Thursday, June 4, 2026.'),
+      ]);
+
+      await run([{ text: 'Question' }], 'prompt-id-date-resumed');
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        ...exactRequest(UNVERIFIED('Friday, June 5, 2026'), {
+          text: 'Question',
+        }),
+      );
+    });
+
     it.each([
       ['as plain text', "Today's date is Friday, June 5, 2026."],
       [
         'inside a pasted date reminder',
-        `Log:\n${buildDateReminder('Friday, June 5, 2026', false).text}\nWhat happened?`,
+        `Log:\n${PLAIN('Friday, June 5, 2026').text}\nWhat happened?`,
       ],
     ])('does not read a date the user wrote %s', async (_title, text) => {
       dateSession('2026-06-05T12:00:00Z', [
@@ -10602,6 +10685,35 @@ Other open files:
       expect(mockTurnRunFn).toHaveBeenLastCalledWith(
         ...exactRequest({ text: 'Second' }),
       );
+    });
+
+    it.each([
+      [
+        'tells the date again when the failed entry told it',
+        [dateReminderTurn(CHANGED('Friday, June 5, 2026'), 'Question')],
+        [CHANGED('Friday, June 5, 2026'), { text: 'Question' }],
+      ],
+      [
+        'adds no date when the failed entry told none',
+        [userText('Question')],
+        [{ text: 'Question' }],
+      ],
+    ])('on a retry, %s', async (_title, stripped, expected) => {
+      dateSession('2026-06-05T12:00:00Z');
+      installChat({
+        // The strip already dropped the failed entry from the history.
+        getHistory: vi
+          .fn()
+          .mockReturnValue([startupContext('Thursday, June 4, 2026')]),
+        getHistoryLength: vi.fn().mockReturnValue(1),
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue(stripped),
+      });
+
+      await run([{ text: 'Question' }], 'prompt-id-date-retry', {
+        type: SendMessageType.Retry,
+      });
+
+      expect(mockTurnRunFn.mock.calls[0]![1]).toEqual(expected);
     });
 
     describe('output style turn reminder', () => {

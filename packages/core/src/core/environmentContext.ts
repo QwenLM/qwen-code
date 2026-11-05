@@ -76,15 +76,11 @@ export function formatDateForContext(date: Date = new Date()): string {
   });
 }
 
-// The startup context's opening lines (see getEnvironmentContext). A legacy
-// prelude carries the same lines without the reminder wrapper.
-const STARTUP_DATE_PATTERN =
-  /(?:^|\n)This is the Qwen Code\. We are setting up the context for our chat\.\nToday's date is ([^\n]+?)\.(?=\n|$)/;
-
 /**
- * `partMetadata` key on the date reminder part the client adds; its value is
- * the date the reminder gives. Part metadata never reaches the model, so text
- * the user writes, pastes or includes cannot carry it.
+ * `partMetadata` key on a part that tells the model the date; its value is
+ * that date. The client puts it on the date reminders it adds and on a startup
+ * context that starts a conversation. Part metadata never reaches the model,
+ * so text the user writes, pastes or includes cannot carry it.
  */
 export const DATE_REMINDER_METADATA = 'qwen-code:date-reminder';
 
@@ -97,30 +93,14 @@ const LEGACY_DATE_REMINDER_PATTERN = new RegExp(
 );
 
 /**
- * The reminder part that tells the model today's date. `changed` says an
- * earlier date in the conversation is no longer current.
- */
-export function buildDateReminder(today: string, changed: boolean): Part {
-  return {
-    text: wrapSystemReminder(
-      changed
-        ? `The date has changed since earlier in this conversation. Today's date is now ${today}. Use this date from here on; there is no need to mention the change to the user.`
-        : `Today's date is ${today}.`,
-    ),
-    partMetadata: { [DATE_REMINDER_METADATA]: today },
-  };
-}
-
-/**
  * The last date the history tells the model, read only from what the client
- * generates: the startup context and the marked date reminder parts. The date
+ * generates: the marked startup context and date reminder parts. The date
  * reminder is decided from this rather than from client state, so rewind,
  * resume, compaction and `/clear` cannot leave the two out of step.
  */
 export function findLastAnnouncedDate(
   history: readonly Content[],
 ): string | undefined {
-  const startupLength = getStartupContextLength(history);
   for (let index = history.length - 1; index >= 0; index--) {
     const content = history[index]!;
     if (content.role !== 'user') continue;
@@ -129,15 +109,43 @@ export function findLastAnnouncedDate(
       const part = parts[partIndex]!;
       const marked = part.partMetadata?.[DATE_REMINDER_METADATA];
       if (typeof marked === 'string') return marked;
-      if (typeof part.text !== 'string') continue;
-      const date =
-        index < startupLength
-          ? STARTUP_DATE_PATTERN.exec(part.text)?.[1]
-          : LEGACY_DATE_REMINDER_PATTERN.exec(part.text.trimEnd())?.[1];
+      if (
+        typeof part.text !== 'string' ||
+        !part.text.startsWith(SYSTEM_REMINDER_OPEN)
+      ) {
+        continue;
+      }
+      const date = LEGACY_DATE_REMINDER_PATTERN.exec(part.text.trimEnd())?.[1];
       if (date !== undefined) return date;
     }
   }
   return undefined;
+}
+
+/**
+ * The reminder part that tells the model today's date, or undefined when the
+ * history already gives it. With no date in the history, a history that holds
+ * earlier turns (a resumed or compacted conversation, whose startup context
+ * was rebuilt) is told that those turns may come from another date.
+ */
+export function buildDateReminder(
+  history: readonly Content[],
+  today: string = formatDateForContext(),
+): Part | undefined {
+  const announced = findLastAnnouncedDate(history);
+  if (announced === today) return undefined;
+  let text: string;
+  if (announced !== undefined) {
+    text = `The date has changed since earlier in this conversation. Today's date is now ${today}. Use this date from here on; there is no need to mention the change to the user.`;
+  } else if (history.length > getStartupContextLength(history)) {
+    text = `Today's date is ${today}. Earlier parts of this conversation may come from another date; use this date from here on.`;
+  } else {
+    text = `Today's date is ${today}.`;
+  }
+  return {
+    text: wrapSystemReminder(text),
+    partMetadata: { [DATE_REMINDER_METADATA]: today },
+  };
 }
 
 /**
@@ -184,8 +192,10 @@ ${folderStructure}`;
  * @param {Config} config - The runtime configuration and services.
  * @returns A promise that resolves to an array of `Part` objects containing environment information.
  */
-export async function getEnvironmentContext(config: Config): Promise<Part[]> {
-  const today = formatDateForContext();
+export async function getEnvironmentContext(
+  config: Config,
+  today: string = formatDateForContext(),
+): Promise<Part[]> {
   const platform = config.getExecutionEnvironment?.()
     ? ''
     : `My operating system is: ${process.platform}\n`;
@@ -639,8 +649,9 @@ export function buildChangedAgentsReminder(
 
 export async function buildStartupContextReminder(
   config: Config,
+  today?: string,
 ): Promise<string> {
-  const envParts = await getEnvironmentContext(config);
+  const envParts = await getEnvironmentContext(config, today);
   const envContextString = envParts.map((part) => part.text || '').join('\n\n');
   return wrapSystemReminder(envContextString);
 }
@@ -656,6 +667,13 @@ export interface InitialChatHistoryOptions {
   // prompt so a repository change between sessions does not invalidate the
   // provider-cached system prompt. Subagents leave it unset.
   gitStatus?: string | null;
+  // The date the turns after the startup context ran under, recorded on the
+  // startup context part for the date reminder (see findLastAnnouncedDate).
+  // Defaults to the startup context's own date when it starts the
+  // conversation, and to none when it goes in front of `extraHistory`, whose
+  // date is unknown. A caller that puts the startup context in front of turns
+  // whose date it knows passes that date; null records none.
+  announcedDate?: string | null;
 }
 
 /**
@@ -688,9 +706,16 @@ export async function getInitialChatHistory(
   const includeAvailableSkillsReminder =
     (options.includeAvailableSkillsReminder ?? true) &&
     toolRegistry.getAllToolNames().includes(ToolNames.SKILL);
+  const today = formatDateForContext();
   const startupReminder = config.getSkipStartupContext()
     ? null
-    : await buildStartupContextReminder(config);
+    : await buildStartupContextReminder(config, today);
+  const announcedDate =
+    options.announcedDate !== undefined
+      ? options.announcedDate
+      : extraHistory?.length
+        ? null
+        : today;
   const skillsResult = includeAvailableSkillsReminder
     ? await buildAvailableSkillsReminder(config)
     : null;
@@ -700,17 +725,26 @@ export async function getInitialChatHistory(
   // computed once per session, so it sits with the other session-constant
   // parts. Deferred-tools is last because progressive MCP discovery can
   // change it — only the tail recomputes.
+  const asPart = (text: string | null): Part | null =>
+    text === null ? null : { text };
   const reminderParts = [
-    buildMcpServerInstructionsReminder(toolRegistry),
-    skillsResult?.reminder ?? null,
-    startupReminder,
-    options.gitStatus ? wrapSystemReminder(options.gitStatus) : null,
-    includeDeferredToolsReminder
-      ? buildDeferredToolsReminder(toolRegistry)
-      : null,
-  ]
-    .filter((text): text is string => text !== null)
-    .map((text) => ({ text }));
+    asPart(buildMcpServerInstructionsReminder(toolRegistry)),
+    asPart(skillsResult?.reminder ?? null),
+    startupReminder === null
+      ? null
+      : {
+          text: startupReminder,
+          ...(announcedDate !== null && {
+            partMetadata: { [DATE_REMINDER_METADATA]: announcedDate },
+          }),
+        },
+    asPart(options.gitStatus ? wrapSystemReminder(options.gitStatus) : null),
+    asPart(
+      includeDeferredToolsReminder
+        ? buildDeferredToolsReminder(toolRegistry)
+        : null,
+    ),
+  ].filter((part): part is Part => part !== null);
 
   const prelude =
     reminderParts.length === 0
