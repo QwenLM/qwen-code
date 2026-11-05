@@ -26,10 +26,10 @@ import {
   tryResolveModelProtocol,
   resolveOwnsModel,
 } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings } from '../../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { getModelProvidersOwnerScope } from '../../config/modelProvidersScope.js';
 import { getErrorMessage } from '../../utils/errors.js';
 
 // ---------------------------------------------------------------------------
@@ -111,7 +111,8 @@ const LEGACY_KEY_MAP: Record<string, string> = {
 
 function migrateProviderMetadata(settings: LoadedSettings): void {
   const mergedSettings = settings.merged as Record<string, unknown>;
-  const persistScope = getPersistScopeForModelSelection(settings);
+  const persistScope =
+    getModelProvidersOwnerScope(settings) ?? SettingScope.User;
   let migrated = false;
 
   const migrateKey = (oldKey: string, newKey: string) => {
@@ -518,7 +519,10 @@ export function useProviderUpdates(
             activeConfig.baseUrl,
             activeConfig.apiKeyEnvKey,
           );
-        const settingsAdapter = createLoadedSettingsAdapter(settings);
+        const settingsAdapter = createLoadedSettingsAdapter(
+          settings,
+          getModelProvidersOwnerScope(settings) ?? SettingScope.User,
+        );
 
         await applyProviderInstallPlan(installPlan, {
           settings: {
@@ -601,7 +605,8 @@ export function useProviderUpdates(
               await executeUpdate(p);
             }
           } else if (choice === 'skip') {
-            const persistScope = getPersistScopeForModelSelection(settings);
+            const persistScope =
+              getModelProvidersOwnerScope(settings) ?? SettingScope.User;
             try {
               // Skipping accepts the current state, including any retained
               // models, until the served set or preset changes again.
@@ -637,7 +642,8 @@ export function useProviderUpdates(
             // partial persist cannot invalidate the cooldown guard on next launch.
             // An up-to-date install postpones its served-model set, so a later
             // change to that set still prompts.
-            const persistScope = getPersistScopeForModelSelection(settings);
+            const persistScope =
+              getModelProvidersOwnerScope(settings) ?? SettingScope.User;
             const postponedAt = Date.now();
             try {
               settings.setValues(
@@ -720,7 +726,8 @@ export function useProviderUpdates(
         .then((narrowed) => {
           if (signal.aborted) return;
           const toPrompt: PendingUpdate[] = [];
-          const persistScope = getPersistScopeForModelSelection(settings);
+          const persistScope =
+            getModelProvidersOwnerScope(settings) ?? SettingScope.User;
           for (const p of narrowed) {
             if (p.upToDate) {
               // Re-check a changed served set or a former selection's

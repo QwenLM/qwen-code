@@ -184,20 +184,27 @@ describe('tool hook additionalContext delivery', () => {
     expect(count(result, marker('PreToolUse', 'call_allow'))).toBe(1);
   });
 
-  it('headless: runs project hooks with the trust feature disabled (implicit trust)', async () => {
+  it('headless: withholds project hooks while the trust feature is disabled', async () => {
     const server = await setup(
-      'hook context headless implicit trust',
+      'hook context headless feature off',
       'read_file',
       'note.txt',
-      'call_implicit_trust',
-      undefined,
-      { security: { folderTrust: { enabled: false } } },
+      'call_feature_off',
+    );
+    // The gate must see the feature OFF in the USER scope: a workspace
+    // `security.folderTrust` is stripped by WORKSPACE_RESTRICTED_SETTINGS,
+    // so writing it via setup() would leave the rig's user-scope `true`
+    // in charge and the test would pass on the pre-change code too.
+    writeFileSync(
+      join(rig.testDir!, '.qwen-home', 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: false } } }),
     );
     await rig.run('read the note', ...fakeModelLaunchArgs(server));
 
-    expect(hookHits()).toEqual([
-      { event: 'PreToolUse', call: 'call_implicit_trust' },
-    ]);
+    expect(hookHits()).toEqual([]);
+    const result = toolResultFor(server, 'call_feature_off');
+    expect(result).toContain('hello from note');
+    expect(count(result, marker('PreToolUse', 'call_feature_off'))).toBe(0);
   });
 
   it('headless: delivers PreToolUse context with a denied result', async () => {
@@ -378,6 +385,13 @@ describe('tool hook additionalContext delivery', () => {
     // The agent keeps writing under QWEN_HOME briefly after it exits, so keep
     // it out of rig.testDir, whose teardown would otherwise race those writes.
     const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+    // Both authorities: enable the trust feature (the inherited rig trust
+    // store grants this directory) and record the approval an interactive
+    // user would give, so the ACP child loads the fixture's project hooks.
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
     approveProjectHooks(qwenHome, rig.testDir!);
     const child = spawn(
       'node',

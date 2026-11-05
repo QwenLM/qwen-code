@@ -354,6 +354,18 @@ describe('gates', () => {
     expect(raw('9007199254740991').errors).toEqual([]);
   });
 
+  it('calls a suite blank only when it is JSON whitespace', () => {
+    // The publisher's jq tests the same class. trim() also calls U+FEFF
+    // blank and jq's \S calls U+0085 blank, so with either one here the
+    // checker would refuse a suite the publisher renders.
+    expect(
+      withGates([{ suite: ' \t\n\r', pass: 1, fail: 0 }]).errors.join('\n'),
+    ).toMatch(GATES_ERROR);
+    for (const suite of ['\u0085', '\ufeff']) {
+      expect(withGates([{ suite, pass: 1, fail: 0 }]).errors).toEqual([]);
+    }
+  });
+
   it('warns when a suite-sized total comes with no gate results', () => {
     const big = check({
       assertions: JSON.stringify({ pass: 1001, fail: 0, total: 1001 }),
