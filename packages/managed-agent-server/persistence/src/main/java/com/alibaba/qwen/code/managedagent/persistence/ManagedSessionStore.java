@@ -157,6 +157,13 @@ public class ManagedSessionStore
         return writerLifecycle.lockPublicationWriter(tenant, workspace, session, writer, generation, token);
     }
 
+    /** As above; {@code publicationGuard} false skips the tenant publication guard (ordinary apply lane). */
+    PublicationWriter lockPublicationWriter(String tenant, String workspace,
+            String session, String writer, long generation, String token, boolean publicationGuard) {
+        return writerLifecycle.lockPublicationWriter(tenant, workspace, session, writer, generation, token,
+                publicationGuard);
+    }
+
     @Transactional
     public WriterGrant acquireWriter(String tenantId, String sessionId,
             String writerToken, AcquireWriterRequest request) {
