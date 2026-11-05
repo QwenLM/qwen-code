@@ -2696,6 +2696,53 @@ test('start and verify use server.env when the configuration does not resolve', 
   );
 });
 
+test('refusals neutralize the DEL and C1 bytes JSON leaves in a quoted value', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  host.services = [];
+  // eslint-disable-next-line no-control-regex -- detecting surviving control bytes is the assertion
+  const control = /[\u0000-\u001F\u007F-\u009F]/;
+  // U+009B is an 8-bit CSI introducer, so \u009b2K would erase the row;
+  // U+0085 would split it.
+  for (const [setup, args, shown] of [
+    [
+      () => (host.resolved = {}),
+      ['--server-url', 'http://127.0.0.1:18080/x\u009b2K\u0085y?q=1'],
+      '--server-url "http://127.0.0.1:18080/x\uFFFD2K\uFFFDy?q=1" carries a query',
+    ],
+    [
+      () => (host.resolved = {}),
+      ['--server-url', 'http://127.0.0.1:6000/x\u009b2K'],
+      '--server-url "http://127.0.0.1:6000/x\uFFFD2K" is on port 6000',
+    ],
+    [
+      () =>
+        (host.resolved = {
+          healthUrl: 'http://127.0.0.1:6000/x\u009b2K/actuator/health',
+        }),
+      [],
+      'puts the health endpoint at "http://127.0.0.1:6000/x\uFFFD2K/actuator/health", which is on port 6000',
+    ],
+    [
+      () =>
+        (host.resolved = {
+          harnessBaseUrl: 'http://127.0.0.1:4170/x\u009b2K?q',
+          harnessOrigin: 'false',
+        }),
+      [],
+      'reaches qwen-hosted-harness at "http://127.0.0.1:4170/x\uFFFD2K?q", which carries a query or a fragment',
+    ],
+  ]) {
+    setup();
+    assert.equal(await host.upgrade('start', ...args), 1, shown);
+    assert.ok(host.output.at(-1).includes(shown), host.output.at(-1));
+    assert.ok(
+      !host.output.some((line) => control.test(line)),
+      JSON.stringify(host.output),
+    );
+  }
+});
+
 test('start refuses listeners it cannot reach before it starts anything', async (t) => {
   const { host, target } = await backedUp(t);
   assert.equal(await host.upgrade('install', '--backup', target), 0);
@@ -3451,6 +3498,17 @@ test('verify says why an API read failed, in text the endpoint cannot steer', as
       `FAIL the API answered a Session whose id ${JSON.stringify(id)} names no route`,
     );
   }
+  // The id is the endpoint's, so its echo is neutralized and bounded as
+  // other endpoint text is: JSON escapes the lone surrogate but leaves the
+  // CSI introducer U+009B.
+  host.responses['GET /v1/agents/sessions'] = {
+    data: [{ id: `\u009b2K${'a'.repeat(300)}\uD800` }],
+  };
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
+  assert.equal(
+    rowsOf(host.output).session,
+    `FAIL the API answered a Session whose id "\uFFFD2K${'a'.repeat(196)}… (311 characters) names no route`,
+  );
   // An event ends the turn only when the API marks it terminal.
   host.responses['GET /v1/agents/sessions'] = { data: [{ id: 's1' }] };
   host.responses['POST /v1/agents/sessions'] = { id: 's1' };

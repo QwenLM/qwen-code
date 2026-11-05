@@ -2646,8 +2646,8 @@ async function listeners(
     if (refusal) {
       throw new Refusal(
         options.serverUrl
-          ? `--server-url ${JSON.stringify(withoutCredentials(options.serverUrl))} ${refusal}.`
-          : `The server's configuration puts ${name} at ${JSON.stringify(withoutCredentials(url))}, which ${refusal}. Bind it where fetch can reach it, or pass --server-url <${serves}>.`,
+          ? `--server-url ${quoted(withoutCredentials(options.serverUrl))} ${refusal}.`
+          : `The server's configuration puts ${name} at ${quoted(withoutCredentials(url))}, which ${refusal}. Bind it where fetch can reach it, or pass --server-url <${serves}>.`,
       );
     }
   }
@@ -2658,7 +2658,7 @@ async function listeners(
   // them, but the rest of a password that starts with digits may sit there.
   if (options.serverUrl && /[?#]/.test(options.serverUrl)) {
     throw new Refusal(
-      `--server-url ${JSON.stringify(withoutCredentials(options.serverUrl))} carries a query or a fragment, where the /actuator/health and API paths appended to it would land.`,
+      `--server-url ${quoted(withoutCredentials(options.serverUrl))} carries a query or a fragment, where the /actuator/health and API paths appended to it would land.`,
     );
   }
   return urls;
@@ -2734,6 +2734,13 @@ function printable(text) {
   // eslint-disable-next-line no-control-regex -- matching control bytes is the point
   const flat = head.replace(/[\u0000-\u001F\u007F-\u009F]/g, '\uFFFD');
   return points > PRINTABLE_LIMIT ? `${flat}… (${points} characters)` : flat;
+}
+
+// A value a refusal or a row quotes, as JSON, which escapes C0 controls but
+// not DEL or C1 bytes, such as the CSI introducer U+009B: printable() takes
+// those, and bounds the text.
+function quoted(value) {
+  return printable(JSON.stringify(value));
 }
 
 // Why fetch rejected: fetch itself words every failure as "fetch failed", and
@@ -2861,7 +2868,7 @@ async function phaseStart(system, deployment, options) {
                 : undefined;
   if (unusable) {
     throw new Refusal(
-      `The control plane reaches ${harness.name} at ${JSON.stringify(withoutCredentials(urls.harness))}, which ${unusable}; correct qwen.managed-agent.harness.base-url.`,
+      `The control plane reaches ${harness.name} at ${quoted(withoutCredentials(urls.harness))}, which ${unusable}; correct qwen.managed-agent.harness.base-url.`,
     );
   }
 
@@ -3032,7 +3039,7 @@ function sessionRoute(session) {
   // percent-encode, so encodeURIComponent() would throw "URI malformed".
   if (['', '.', '..'].includes(session.id) || !session.id.isWellFormed()) {
     throw new Error(
-      `the API answered a Session whose id ${JSON.stringify(session.id)} names no route`,
+      `the API answered a Session whose id ${quoted(session.id)} names no route`,
     );
   }
   return `/v1/agents/sessions/${encodeURIComponent(session.id)}`;
