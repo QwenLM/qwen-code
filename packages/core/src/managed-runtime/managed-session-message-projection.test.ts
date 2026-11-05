@@ -1474,6 +1474,40 @@ describe('managed message body cache', () => {
     await harness.close();
   });
 
+  it('serves a body it has read even after the store loses it', async () => {
+    // A cached body is not read through the store again: deliberate, since
+    // bodies are immutable, and documented on ManagedMessageBodyCache. Only a
+    // body never read fails the projection when the store no longer has it.
+    const harness = await createHarness();
+    const warm = new ManagedSessionMessageProjection(
+      harness.authority,
+      harness.store,
+      new ManagedMessageBodyCache(1024 * 1024),
+    );
+    await warm.commit(
+      command('commitMessage', 'cmd-msg-0'),
+      { record: records[0] },
+      HOLDS,
+    );
+    await expect(warm.project()).resolves.toEqual([records[0]]);
+    await fs.rm(
+      path.join(
+        managedSessionResourceRoot(harness.runtimeBaseDir, sessionId),
+        'managed-message',
+      ),
+      { recursive: true, force: true },
+    );
+
+    await expect(warm.project()).resolves.toEqual([records[0]]);
+    const cold = new ManagedSessionMessageProjection(
+      harness.authority,
+      harness.store,
+      new ManagedMessageBodyCache(1024 * 1024),
+    );
+    await expect(cold.project()).rejects.toThrow(/is not present for session/);
+    await harness.close();
+  });
+
   it('caches a chunked record whole', async () => {
     const harness = await createHarness();
     const bodies = new ManagedMessageBodyCache(4 * 1024 * 1024);
