@@ -275,6 +275,42 @@ describe('defaultModalities', () => {
     ]);
   });
 
+  describe('other open-weight vision models', () => {
+    casesFor('returns image for', [
+      ['llama3.2-vision (Ollama)', IMAGE, 'llama3.2-vision:11b'],
+      [
+        'Llama-3.2-11B-Vision-Instruct',
+        IMAGE,
+        'meta-llama/Llama-3.2-11B-Vision-Instruct',
+      ],
+      [
+        'Llama-4-Scout-17B-16E-Instruct',
+        IMAGE,
+        'meta-llama/Llama-4-Scout-17B-16E-Instruct',
+      ],
+      ['llama4 (Ollama)', IMAGE, 'llama4:16x17b'],
+      ['llava', IMAGE, 'llava:13b'],
+      ['pixtral-12b', IMAGE],
+      ['pixtral-large-latest', IMAGE],
+      [
+        'Mistral-Small-3.1-24B-Instruct',
+        IMAGE,
+        'mistralai/Mistral-Small-3.1-24B-Instruct-2503',
+      ],
+      ['mistral-small3.2 (Ollama)', IMAGE, 'mistral-small3.2:24b'],
+    ]);
+
+    casesFor('returns text-only for', [
+      ['llama3.2 (text model)', TEXT_ONLY, 'llama3.2:3b'],
+      ['llama3.1', TEXT_ONLY, 'llama3.1:8b'],
+      [
+        'Mistral Small 3 (text model)',
+        TEXT_ONLY,
+        'mistralai/Mistral-Small-24B-Instruct-2501',
+      ],
+    ]);
+  });
+
   describe('unknown models', () => {
     it('returns text-only for unrecognized models', () => {
       expect(defaultModalities('some-random-model-xyz')).toEqual({});
