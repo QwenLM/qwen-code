@@ -859,6 +859,12 @@ interface InboundTaskRecord {
    * bound session must not freeze mark-as-read for the whole channel.
    */
   backpressure?: boolean;
+  /**
+   * The comment reached the task only because the bound path waives the
+   * mention requirement. It never takes the public path: on an unbound
+   * thread the comment lane would have dropped it.
+   */
+  privateOnly?: boolean;
 }
 
 function isOptionalStringArray(value: unknown): value is string[] | undefined {
@@ -977,7 +983,9 @@ function isInboundTaskRecord(value: unknown): value is InboundTaskRecord {
     (record.deferCount === undefined ||
       (Number.isSafeInteger(record.deferCount) && record.deferCount >= 0)) &&
     (record.backpressure === undefined ||
-      typeof record.backpressure === 'boolean')
+      typeof record.backpressure === 'boolean') &&
+    (record.privateOnly === undefined ||
+      typeof record.privateOnly === 'boolean')
   );
 }
 
@@ -2522,6 +2530,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   ): Promise<void> {
     const comments = await this.fetchNewComments(ctx);
     let dispatched = false;
+    // Comments that only the bound path's mention waiver admits are private
+    // deliveries the lane did not make before. They run after the rest of
+    // the lane and the first-contact body, so their outcome (a gone session
+    // evicted from the binding map, a deferral) cannot change how those are
+    // handled.
+    const waived: Array<{
+      envelope: Envelope;
+      key: string;
+      privateOnly: boolean;
+    }> = [];
 
     for (const comment of comments) {
       const key = comment.node_id || String(comment.id);
@@ -2546,7 +2564,25 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const hasMention = this.botUsername
         ? testBotMention(body, this.botUsername)
         : false;
-      if (onlyMentioned && !hasMention) {
+      const text = this.botUsername
+        ? stripBotMention(body, this.botUsername)
+        : body;
+      // A plain comment on a bound PR passes when the private path would
+      // admit and deliver it: the preflight then only waives the mention
+      // requirement. It is a conversation comment, not the thread's mention
+      // or review request, so it resolves as a `comment` event.
+      const mentionWaived =
+        onlyMentioned &&
+        !hasMention &&
+        this.waivesBoundMention(ctx.chatId, senderId) &&
+        this.admitsMessageRoute(text) &&
+        this.resolveBoundTargets(
+          ctx.chatId,
+          ctx.issueNumber,
+          'comment',
+          'comment',
+        ).targets.length > 0;
+      if (onlyMentioned && !hasMention && !mentionWaived) {
         if (!this.journalOncePerWindow(`mention_required\0${key}`)) continue;
         this.recordChannelEvent({
           type: 'inbound',
@@ -2575,7 +2611,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         chatId: ctx.chatId,
         threadId: ctx.threadId,
         messageId: String(comment.id),
-        text: this.botUsername ? stripBotMention(body, this.botUsername) : body,
+        text,
         isGroup: true,
         // Never synthesize a mention into an unapproved pairing group: the
         // pairing step must keep dropping ambient comments, and a synthesized
@@ -2587,9 +2623,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             (this.config.groupPolicy !== 'pairing' ||
               this.groupGate.isGroupApproved(ctx.chatId))),
         isReplyToBot: false,
-        metadata: this.buildRouteMetadata(ctx),
+        metadata: this.buildRouteMetadata(
+          mentionWaived ? { ...ctx, reason: 'comment' } : ctx,
+        ),
       };
 
+      // Elsewhere the lane passes every comment, and the private path's
+      // preflight waives the mention a group requirement would refuse.
+      if (
+        mentionWaived ||
+        (!onlyMentioned &&
+          !envelope.isMentioned &&
+          this.resolveBoundTargets(
+            ctx.chatId,
+            ctx.issueNumber,
+            ctx.reason,
+            'comment',
+          ).targets.length > 0 &&
+          this.waivesBoundMention(ctx.chatId, senderId) &&
+          this.groupGate.check(envelope, { createPairingRequest: false })
+            .reason === 'mention_required')
+      ) {
+        waived.push({ envelope, key, privateOnly: mentionWaived });
+        continue;
+      }
       if (
         !(await this.dispatchEnvelope(envelope, ctx.issueNumber, {
           dispatchedComments: [key],
@@ -2613,8 +2670,24 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
     }
 
-    if (!dispatched && !ctx.lastReadAt) {
-      await this.tryFirstContactBody(ctx, onlyMentioned);
+    try {
+      if (!dispatched && !ctx.lastReadAt) {
+        await this.tryFirstContactBody(ctx, onlyMentioned);
+      }
+    } finally {
+      // A failing body read must not keep these from their sessions.
+      for (const { envelope, key, privateOnly } of waived) {
+        if (
+          await this.dispatchEnvelope(
+            envelope,
+            ctx.issueNumber,
+            { dispatchedComments: [key] },
+            privateOnly,
+          )
+        ) {
+          this.recordDispatchedComment(key);
+        }
+      }
     }
   }
 
@@ -3020,6 +3093,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     envelope: Envelope,
     issueNumber: number,
     dedupe: InboundTaskDedupe = {},
+    privateOnly = false,
   ): Promise<boolean> {
     // The publication audit is the durable consumption record for the
     // public path: a reply can land (audit `posted`), the task be removed,
@@ -3096,6 +3170,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
               ...(target.role ? { role: target.role } : {}),
             },
             first && targets.length > 1 ? targets : undefined,
+            privateOnly,
           ),
         );
         first = false;
@@ -3127,7 +3202,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
       return true;
     }
-    const task = this.claimInboundTask(envelope, issueNumber, dedupe);
+    const task = this.claimInboundTask(
+      envelope,
+      issueNumber,
+      dedupe,
+      undefined,
+      undefined,
+      privateOnly,
+    );
     return this.runInboundTask(task);
   }
 
@@ -3137,6 +3219,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     dedupe: InboundTaskDedupe,
     delivery?: InboundTaskRecord['delivery'],
     fanout?: InboundTaskRecord['fanout'],
+    privateOnly = false,
   ): InboundTaskRecord {
     const existing = this.readInboundTasks().find(
       (record) =>
@@ -3189,6 +3272,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       attempts: 0,
       ...(delivery ? { delivery } : {}),
       ...(fanout ? { fanout } : {}),
+      ...(privateOnly ? { privateOnly: true } : {}),
     };
     this.updateInboundTasks((records) => [...records, task]);
     this.applyTaskDedupe(task.dedupe);
@@ -3293,7 +3377,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
         return true;
       } else {
-        await this.handleInbound(envelope);
+        await this.publicFallback(task, envelope);
       }
       cancelled = this.cancelledInboundTaskIds.has(task.id);
     } catch (err) {
@@ -3330,7 +3414,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         let posted = task.errorCommentPosted === true;
         // Bound-session delivery is private: a failure must not post a public
         // error comment. The fallback path clears delivery before retrying.
-        if (!posted && !stillBound) {
+        if (!posted && !stillBound && task.privateOnly !== true) {
           posted = await this.postErrorComment(
             envelope.chatId,
             task.issueNumber,
@@ -3479,6 +3563,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             sessionId: target.sessionId,
             ...(target.role ? { role: target.role } : {}),
           },
+          undefined,
+          task.privateOnly === true,
         );
       }
     }
@@ -3581,6 +3667,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
                   sessionId: target.sessionId,
                   ...(target.role ? { role: target.role } : {}),
                 },
+                undefined,
+                task.privateOnly === true,
               );
             }
           } else if (
@@ -4664,6 +4752,25 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
+   * The channel path for an event without a private target. A comment that
+   * only the bound path's mention waiver admitted never goes public.
+   */
+  private publicFallback(
+    task: InboundTaskRecord,
+    envelope: Envelope,
+  ): Promise<void> {
+    if (task.privateOnly === true) {
+      process.stderr.write(
+        `[Channel:${this.name}] bound event ${envelope.messageId} has no bound session left and has no mention for a public reply; retiring without public fallback\n`,
+      );
+      this.markPrivatelyRetired(task);
+      return Promise.resolve();
+    }
+    // Returned, not awaited, so the channel path keeps its timing.
+    return this.handleInbound(envelope);
+  }
+
+  /**
    * Persist a terminal private retirement BEFORE the routing identity is
    * cleared or the task removed: if the removal then fails (EIO), restart
    * must find a non-recoverable task, not a running untargeted one that
@@ -4947,6 +5054,29 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     );
   }
 
+  /**
+   * Whether a plain comment by this sender reaches a bound session without
+   * the repository's mention requirement. That requirement keeps ambient
+   * chatter out of public replies and is no authorization boundary, so the
+   * private path can drop it — but only for senders the repository lists:
+   * with open senders every drive-by or bot comment would become a turn of
+   * the session. Callers check that the PR is bound.
+   */
+  private waivesBoundMention(chatId: string, senderId: string): boolean {
+    const target = { isGroup: true, chatId };
+    const sender = senderId.toLowerCase();
+    return (
+      // A bound session usually acts on GitHub as an operator's account, so
+      // without a mention its own comments would come back to it as turns.
+      !(this.config.operators ?? []).some(
+        (operator) => operator.toLowerCase() === sender,
+      ) &&
+      this.groupGate.admits(chatId) &&
+      this.groupSendersFor(target) === 'allowlist' &&
+      this.senderGateFor(target).isAllowed(senderId)
+    );
+  }
+
   private buildBoundSessionPrompt(
     envelope: Envelope,
     role?: PrBindingRole,
@@ -5051,7 +5181,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.markPrivatelyRetired(task);
         return true;
       }
-      await this.handleInbound(envelope);
+      await this.publicFallback(task, envelope);
       return true;
     }
     // The target was frozen at claim/detection time. Re-validate it against
@@ -5096,7 +5226,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // included). Watch events have no human sender — they are operator
     // opt-in state changes — and are exempt.
     if (!isWatch) {
-      const preflight = this.preflightInbound(envelope);
+      // A first-contact body is the PR's own description, not a comment
+      // for the session: it keeps the mention requirement.
+      const preflight = this.preflightInbound(envelope, {
+        waiveGroupMention:
+          !envelope.messageId?.startsWith('issue-body-') &&
+          this.waivesBoundMention(envelope.chatId, envelope.senderId),
+      });
       const admitted =
         typeof preflight === 'boolean' ? preflight : await preflight;
       if (!admitted) {
@@ -5232,12 +5368,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // its success path must not retire the record as delivered.
       if (this.lastBindingsPartial || this.boundRefreshFailed) {
         const deferCount = (task.deferCount ?? 0) + 1;
-        task.delivery = undefined;
         if (deferCount >= MAX_BOUND_DEFERRALS) {
-          this.retireBoundTask(
-            task,
-            `gone fallback deferred ${deferCount} times; binding snapshot never completed`,
-          );
+          // The dead-letter records no target, as before; if retiring
+          // fails, the task is still a bound one and its failure stays
+          // private (no public error comment).
+          const target = task.delivery;
+          task.delivery = undefined;
+          try {
+            this.retireBoundTask(
+              task,
+              `gone fallback deferred ${deferCount} times; binding snapshot never completed`,
+            );
+          } catch (err) {
+            task.delivery = target;
+            throw err;
+          }
           return false;
         }
         this.transitionInboundTask(task.id, 'failed', {
@@ -5248,11 +5393,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           deferCount,
           backpressure: true,
         });
+        // Cleared only once saved: if the save fails, the task is still a
+        // bound one, so the failure stays private (no public error comment).
+        task.delivery = undefined;
         return false;
       }
       this.transitionInboundTask(task.id, 'running', { delivery: undefined });
       task.delivery = undefined;
-      await this.handleInbound(envelope);
+      await this.publicFallback(task, envelope);
     }
     return true;
   }
