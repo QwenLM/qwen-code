@@ -108,6 +108,20 @@ final class AgentSessionPolicies {
     }
 
     /**
+     * Admission-side eligibility read. The registry predicate throws so execution
+     * paths fail closed; on admission an unreadable or drifted registration is a
+     * permanent record defect, so the caller answers its own 409 instead of the
+     * registry's retryable 503.
+     */
+    static boolean externalFilesAllowedOrRefuse(ManagedWorkspaceRegistry workspaces, ContextBinding binding) {
+        try {
+            return workspaces.externalFilesAllowed(binding);
+        } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException unreadable) {
+            return false;
+        }
+    }
+
+    /**
      * The execution identity a new Session pins (D8b): for the built-in {@code qwen-code} agent the
      * deployment revision with no definition digest; for a stored definition the resolved revision,
      * its digest and the approval mode and tool profile compiled from its content (D8c-1).
@@ -697,7 +711,7 @@ final class AgentSessionPolicies {
     void requireExternalTurnAllowed(String tenantId, String actorId, String sessionId,
             SessionRecord session, List<Map<String, Object>> input) {
         if (!WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
-                || !workspaces.externalFilesAllowed(session.workspace())
+                || !externalFilesAllowedOrRefuse(workspaces, session.workspace())
                 || !workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId()).canCreate()
                 || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null
                 || sessionQueries.findChildLineage(tenantId, sessionId) != null || session.publicChildAgentsVersion() != 0

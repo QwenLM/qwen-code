@@ -471,7 +471,9 @@ public class ManagedWorkspaceRegistry
                 || !"ROOT".equals(records.getFirst().kind()))) {
             throw new ManagedAgentException(404, "workspace_not_found", "Workspace not found.");
         }
-        if (isExternal(binding) && (!externalFilesAllowed(binding) || !".".equals(binding.getCwdRelative()))) {
+        if (isExternal(binding)
+                && (!AgentSessionPolicies.externalFilesAllowedOrRefuse(this, binding)
+                || !".".equals(binding.getCwdRelative()))) {
             throw new ManagedAgentException(HttpStatus.CONFLICT.value(), "workspace_unavailable", "External Workspace files are unavailable.");
         }
         return new ResolvedBinding(binding, record.getConfigRef(),

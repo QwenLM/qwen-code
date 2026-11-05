@@ -184,7 +184,8 @@ final class AgentSessionAdmissions {
         ResolvedBinding workspace = workspaces.resolveForCreation(tenantId, actorId, selection);
         boolean external = workspaces.isExternal(workspace.binding());
         if (external) {
-            if (!workspaces.externalFilesAllowed(workspace.binding()) || !"qwen-code".equals(agentId)
+            if (!AgentSessionPolicies.externalFilesAllowedOrRefuse(workspaces, workspace.binding())
+                    || !"qwen-code".equals(agentId)
                     || resolvedPin.digest() != null || resolvedPin.hooks() || resolvedPin.mcp()
                     || Boolean.TRUE.equals(requestedPlanMode) || !skills.isEmpty() || extensionPins != null
                     || input.stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {
