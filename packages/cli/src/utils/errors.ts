@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { SubscriptionQuotaTranslator } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   OutputFormat,
@@ -145,6 +146,7 @@ export async function handleError(
   error: unknown,
   config: Config,
   customErrorCode?: string | number,
+  translate?: SubscriptionQuotaTranslator,
 ): Promise<never> {
   // Producers that already reported a formatted message (see
   // AlreadyReportedError above) should not be reprinted or reformatted here.
@@ -166,6 +168,7 @@ export async function handleError(
   const errorMessage = parseAndFormatApiError(
     error,
     config.getContentGeneratorConfig()?.authType,
+    translate,
   );
 
   if (config.getOutputFormat() === OutputFormat.JSON) {

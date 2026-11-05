@@ -78,6 +78,37 @@ describe('channel events journal', async () => {
     });
   });
 
+  it('round-trips the session identity and its owner workspace', async () => {
+    appendChannelEvent('bot', cwd, {
+      type: 'task',
+      outcome: 'running',
+      sessionId: 'session-1',
+      sessionWorkspaceCwd: '/work/other',
+    });
+
+    const { events } = await readChannelEvents({
+      scopeDirs: [channelEventScopeDir(cwd)],
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      sessionId: 'session-1',
+      sessionWorkspaceCwd: '/work/other',
+    });
+  });
+
+  it('drops a non-string session owner workspace', async () => {
+    const record = normalizeChannelEventRecord({
+      at: new Date().toISOString(),
+      channel: 'bot',
+      type: 'task',
+      outcome: 'running',
+      sessionId: 'session-1',
+      sessionWorkspaceCwd: 42,
+    });
+    expect(record).toMatchObject({ sessionId: 'session-1' });
+    expect(record).not.toHaveProperty('sessionWorkspaceCwd');
+  });
+
   it('filters by channel and type and reports truncation', async () => {
     append(1, 'bot');
     append(2, 'other');
