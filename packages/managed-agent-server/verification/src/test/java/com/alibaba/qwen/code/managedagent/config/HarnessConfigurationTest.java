@@ -111,4 +111,61 @@ class HarnessConfigurationTest {
             }
         }
     }
+
+    @Test
+    void buildsEachPoolMembersConnectorFromTheSingleBaseUrl() throws Exception {
+        // The upgrade command judges the single base-url of a pooled Harness:
+        // each member's connector is built from it rather than from the
+        // member's own endpoint, and the pool drops a member whose connector
+        // refuses it, while the server keeps reporting UP.
+        Map<String, Integer> accepted = new java.util.LinkedHashMap<>();
+        for (String base : new String[] {"http://127.0.0.1:4170",
+                " http://127.0.0.1:4170 ", "http://qwen_harness:4170"}) {
+            var properties = new ManagedAgentProperties();
+            var harness = properties.getHarness();
+            harness.setEnabled(true);
+            harness.setBaseUrl(base);
+            harness.setToken("test-harness-token");
+            harness.setCapabilityDigest("sha256:" + "a".repeat(64));
+            harness.getPool().setEnabled(true);
+            var instance = new ManagedAgentProperties.HarnessInstance();
+            instance.setInstanceId("h1");
+            instance.setBaseUrl("http://127.0.0.1:4171");
+            harness.getPool().getInstances().add(instance);
+            properties.getSessionStore().setEnabled(true);
+            properties.getSessionStore().setBaseUrl("https://store.example");
+            properties.getSessionStore().setWorkspaceId("workspace");
+            properties.getSessionStore().setBindingKey("b".repeat(64));
+            var client = mock(HostedHarnessClient.class);
+            var capabilities = mock(HostedHarnessCapabilities.class);
+            when(client.capabilities()).thenReturn(capabilities);
+            when(capabilities.getInstanceId()).thenReturn("h1");
+            when(capabilities.getBootId()).thenReturn("boot");
+            when(capabilities.getFeatures()).thenReturn(
+                    List.of("harness-pool-owner/1", "harness-instance-lifecycle/1"));
+            when(capabilities.getLifecycleV2Profiles()).thenReturn(List.of());
+            when(client.readInstance()).thenReturn(Map.of("state", "ACCEPTING"));
+            var builder = mock(HostedHarnessClient.Builder.class, RETURNS_SELF);
+            when(builder.build()).thenReturn(client);
+            // A static mock holds on this thread only, so the refresh the
+            // pool schedules dials for real and fails; this one runs here.
+            try (var sdk = mockStatic(HostedHarnessClient.class, CALLS_REAL_METHODS)) {
+                sdk.when(HostedHarnessClient::builder).thenReturn(builder);
+                try (var connector = new HarnessConfiguration().hostedHarnessConnector(properties,
+                        mock(AgentStateStore.class), mock(WorkspaceExecutionStore.class),
+                        mock(ManagedActionStore.class), mock(ManagedAgentDefinitionStore.class),
+                        mock(ManagedSessionStore.class), mock(SshWorkspaceStore.class),
+                        mock(HarnessPlacementStore.class), mock(ManagedSessionSkills.class),
+                        new ObjectMapper(), mock(ManagedExtensionRecordStore.class))) {
+                    Object pool = ReflectionTestUtils.getField(connector, "delegate");
+                    ReflectionTestUtils.invokeMethod(pool, "refresh");
+                    accepted.put(base, ((List<?>) ReflectionTestUtils.getField(pool, "accepting")).size());
+                }
+            }
+        }
+        assertThat(accepted).containsExactly(
+                Map.entry("http://127.0.0.1:4170", 1),
+                Map.entry(" http://127.0.0.1:4170 ", 0),
+                Map.entry("http://qwen_harness:4170", 0));
+    }
 }

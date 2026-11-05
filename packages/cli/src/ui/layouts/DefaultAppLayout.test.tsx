@@ -86,6 +86,9 @@ const mockUIActions = {
 } as unknown as UIActions;
 
 const baseUIState: Partial<UIState> = {
+  confirmUpdateExtensionRequests: [],
+  settingInputRequests: [],
+  pluginChoiceRequests: [],
   dialogsVisible: false,
   isFeedbackDialogOpen: false,
   mainControlsRef: { current: null },

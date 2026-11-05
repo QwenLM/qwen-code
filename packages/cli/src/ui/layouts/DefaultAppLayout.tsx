@@ -30,6 +30,7 @@ import { useAgentViewState } from '../contexts/AgentViewContext.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { StreamingState } from '../types.js';
 import { STATUS_LINE_COMPOSER_ROWS } from '../status-line-model.js';
+import { isStatusLineDialogActive } from '../status-line-dialog-active.js';
 import { getStickyTodoMaxVisibleItemsForMode } from '../utils/todoSnapshot.js';
 import {
   getDialogMaxHeight,
@@ -38,6 +39,7 @@ import {
 
 export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
+  const showStatusLinePreview = isStatusLineDialogActive(uiState);
   const footerRef = useRef<DOMElement>(null);
   const scrollActionsRef = useRef<ScrollActions | null>(null);
   const scrollActions = useMemo<ScrollActions>(
@@ -66,7 +68,7 @@ export const DefaultAppLayout: React.FC = () => {
     ? Math.max(
         1,
         dialogMaxHeight -
-          (uiState.isStatusLineDialogOpen ? STATUS_LINE_COMPOSER_ROWS : 0),
+          (showStatusLinePreview ? STATUS_LINE_COMPOSER_ROWS : 0),
       )
     : undefined;
   // The /btw answer viewport only exists in VP mode. Its ScrollableList arms
@@ -152,7 +154,7 @@ export const DefaultAppLayout: React.FC = () => {
                 )}
               </>
             )}
-            {(!uiState.dialogsVisible || uiState.isStatusLineDialogOpen) && (
+            {(!uiState.dialogsVisible || showStatusLinePreview) && (
               <Composer footerRef={footerRef} />
             )}
             <ExitWarning />

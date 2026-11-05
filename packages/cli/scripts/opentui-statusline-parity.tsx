@@ -29,6 +29,11 @@ import {
   OpenTuiFooter,
   type OpenTuiFooterProps,
 } from '../src/ui/opentui/opentui-footer.js';
+import {
+  getDialogMaxHeight,
+  STATIC_EXTRA_HEIGHT,
+} from '../src/ui/utils/layoutUtils.js';
+import { STATUS_LINE_COMPOSER_ROWS } from '../src/ui/status-line-model.js';
 import { statusLineStyledText } from '../src/ui/opentui/status-line-text.js';
 import { dialogAreaWidth } from '../src/ui/opentui/dialogs-shared.js';
 import { applyOpenTuiTheme } from '../src/ui/opentui/theme.js';
@@ -673,4 +678,73 @@ await scenario(
   },
 );
 
-console.log('statusline native: all 11 scenarios passed');
+await scenario(
+  'compact-picker-region-and-live-footer-80x24',
+  async ({ dir, mount }) => {
+    const settings = settingsAt(dir);
+    const regionHeight =
+      getDialogMaxHeight(24, STATIC_EXTRA_HEIGHT) - STATUS_LINE_COMPOSER_ROWS;
+    const setup = await mount(
+      <box height={24} width={80} flexDirection="column">
+        <scrollbox flexGrow={1} flexShrink={1} minHeight={0}>
+          <text>Retained transcript</text>
+        </scrollbox>
+        <box flexDirection="column" flexShrink={0}>
+          <box
+            id="statusline-region"
+            height={regionHeight}
+            width={dialogAreaWidth(80)}
+            marginLeft={2}
+            flexDirection="column"
+            overflow="hidden"
+          >
+            <OpenTuiStatusLineDialog
+              settings={settings}
+              config={configFor()}
+              addItem={() => 0}
+              onClose={() => {}}
+              availableTerminalHeight={regionHeight}
+            />
+          </box>
+          <box flexDirection="column" marginTop={1}>
+            <box border height={3}>
+              <text>Inactive prompt</text>
+            </box>
+            <box id="statusline-footer">
+              <OpenTuiFooter
+                config={configFor()}
+                settings={settings}
+                sessionStats={stats}
+                activeWorktree={null}
+                streaming={false}
+                statusLine={{
+                  lines: ['LIVE_FOOTER_80x24'],
+                  respectUserColors: true,
+                  useThemeColors: false,
+                  hideContextIndicator: true,
+                }}
+              />
+            </box>
+          </box>
+        </box>
+      </box>,
+      80,
+      24,
+    );
+    const all = nodes(setup.renderer.root);
+    const region = all.find((node) => node.id === 'statusline-region');
+    const footer = all.find((node) => node.id === 'statusline-footer');
+    assert.ok(region && footer);
+    assert.equal(region.height, regionHeight);
+    assert.ok(footer.y >= region.y + region.height);
+    assert.ok(footer.y + footer.height <= 24, 'live footer escaped terminal');
+    assert.match(frame(setup), /LIVE_FOOTER_80x24/);
+    if (process.env['PATROL_EVIDENCE'])
+      fs.writeFileSync(
+        path.join(process.env['PATROL_EVIDENCE'], 'native-80x24.txt'),
+        frame(setup),
+      );
+  },
+);
+
+console.log('statusline native: all 12 scenarios passed');

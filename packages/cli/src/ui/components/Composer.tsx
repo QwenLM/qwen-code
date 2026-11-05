@@ -116,11 +116,13 @@ export const Composer = ({ footerRef }: ComposerProps) => {
         </Box>
       )}
 
-      <QueuedMessageDisplay messageQueue={uiState.messageQueue} />
+      {!uiState.isStatusLineDialogOpen && (
+        <QueuedMessageDisplay messageQueue={uiState.messageQueue} />
+      )}
 
       {uiState.isFeedbackDialogOpen && <FeedbackDialog />}
 
-      {uiState.isInputActive && (
+      {uiState.isInputActive && !uiState.isStatusLineDialogOpen && (
         <ModBand
           band={modBand}
           maxRows={modBandMaxRows(uiState.terminalHeight)}
@@ -172,7 +174,7 @@ export const Composer = ({ footerRef }: ComposerProps) => {
           all. The status-line picker also keeps its inactive input visible. */}
       {(showInput || !uiState.isConfigInitialized) &&
         (!showSuggestions || uiState.isStatusLineDialogOpen) &&
-        (showShortcuts ? (
+        (showShortcuts && !uiState.isStatusLineDialogOpen ? (
           <KeyboardShortcuts />
         ) : (
           !isScreenReaderEnabled && <Footer containerRef={footerRef} />

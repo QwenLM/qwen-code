@@ -59,6 +59,9 @@ vi.mock('../components/StickyTodoList.js', () => ({
 }));
 
 const baseUIState: Partial<UIState> = {
+  confirmUpdateExtensionRequests: [],
+  settingInputRequests: [],
+  pluginChoiceRequests: [],
   dialogsVisible: false,
   isFeedbackDialogOpen: false,
   mainAreaWidth: 80,
