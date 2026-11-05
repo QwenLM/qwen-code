@@ -4600,6 +4600,9 @@ const EN: Messages = {
     'head_change — the PR’s head commit changes',
   'channels.editor.field.github.prWatchEvents.option.state_change':
     'state_change — the PR is merged or closed',
+  'channels.editor.field.github.boundSessionActions': 'Bound Session Actions',
+  'channels.editor.field.github.boundSessionActions.description':
+    'Optional. Operator instruction templates delivered to PR-bound sessions, keyed by event class (watch:<type> or a notification reason), optionally role-qualified (review:, verify:, fix:). Requires Deliver To PR-Bound Sessions. With templates configured, each role gets its own delivery (one winner per role); a role with no matching key skips the event. Template variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%. Use %% for a literal %. Leave empty for the default generic prompt.',
   'channels.editor.field.gitlab.token': 'Personal Access Token',
   'channels.editor.field.gitlab.token.description':
     'PAT with "read_api" + "api" scopes',
@@ -9094,6 +9097,9 @@ const ZH: Messages = {
     'head_change — PR 的 head 提交变更',
   'channels.editor.field.github.prWatchEvents.option.state_change':
     'state_change — PR 被合并或关闭',
+  'channels.editor.field.github.boundSessionActions': '绑定会话动作模板',
+  'channels.editor.field.github.boundSessionActions.description':
+    '可选。投递给 PR 绑定会话的 operator 指令模板，键为事件类别（watch:<type> 或通知 reason），可加角色前缀（review:、verify:、fix:）。需开启"投递到 PR 绑定会话"。配置模板后每个角色各自投递（每角色一个 winner）；没有匹配键的角色跳过该事件。模板变量：%repo%、%pr%、%url%、%title%、%event%、%sender%、%role%。%% 表示字面 %。留空则使用默认通用 prompt。',
   'channels.editor.field.gitlab.token': '个人访问令牌',
   'channels.editor.field.gitlab.token.description':
     '需要 "read_api" + "api" 权限的 PAT',
