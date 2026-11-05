@@ -376,9 +376,10 @@ it('retains relay observation when its More trigger is removed and restored', as
 });
 
 it('falls back to English when the UI language has no relay dictionary', async () => {
-  // A locale the shell does not ship a relay dictionary for: the provider is
-  // typed to the known languages, but the runtime value is not checked.
-  const ru = 'ru' as unknown as WebShellLanguage;
+  // A locale outside the shipped languages union: the provider is typed to
+  // the known languages, but the runtime value is not checked, so the
+  // missing-dictionary fallback arm has to run.
+  const fr = 'fr' as unknown as WebShellLanguage;
   vi.stubGlobal('isSecureContext', true);
   const probe = vi.spyOn(relayClient, 'probeDesktopRelay').mockResolvedValue({
     kind: 'missing',
@@ -391,7 +392,7 @@ it('falls back to English when the UI language has no relay dictionary', async (
   try {
     await act(async () => {
       root!.render(
-        <I18nProvider language={ru}>
+        <I18nProvider language={fr}>
           <DesktopRelayControl triggerClassName="" portalContainer={slot} />
         </I18nProvider>,
       );
