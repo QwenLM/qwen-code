@@ -477,6 +477,41 @@ interface SharedToolBatchResults {
    * them when the scheduler completes its batch.
    */
   owner: { sessionId: string; chat: unknown };
+  /**
+   * The executed calls that launched a background agent. The completion
+   * step checks the background slots when it sends, since the batch may
+   * wait for another stream to end first.
+   */
+  backgroundLaunchCallIds: ReadonlySet<string>;
+}
+
+/** Whether a result launched a background agent. */
+function launchedBackgroundAgent(
+  request: ToolCallRequestInfo,
+  response: ToolCallResponseInfo,
+): boolean {
+  const display = response.resultDisplay;
+  return (
+    request.name === ToolNames.AGENT &&
+    typeof display === 'object' &&
+    display !== null &&
+    'type' in display &&
+    'status' in display &&
+    display.type === 'task_execution' &&
+    display.status === 'background'
+  );
+}
+
+/**
+ * Whether a background agent launch spent the last background slot, so the
+ * turn stops rather than wait on it.
+ */
+function backgroundSlotsSpent(config: Config): boolean {
+  const registry = config.getBackgroundTaskRegistry();
+  return (
+    registry.getMaxConcurrentBackgroundAgents() === 1 &&
+    !registry.canStartBackgroundAgent()
+  );
 }
 
 /**
@@ -1028,6 +1063,31 @@ export const useLlmStream = (
   const [isResponding, setIsResponding] = useState<boolean>(false);
   // React state can lag by one render; this tracks the actual stream lifetime.
   const activeModelStreamsRef = useRef(0);
+  // Shared tool batches that settled during a model stream, waiting for no
+  // stream to be active, as the current path holds such a batch. The drain
+  // resumes them and waits until each is `done`, so their results join the
+  // queue it drains.
+  const modelStreamsIdleWaitersRef = useRef<
+    Array<{ resume: () => void; done: Promise<void> }>
+  >([]);
+  const waitForModelStreamsIdle = useCallback(
+    (done: Promise<void>) =>
+      activeModelStreamsRef.current === 0
+        ? Promise.resolve()
+        : new Promise<void>((resume) => {
+            modelStreamsIdleWaitersRef.current.push({ resume, done });
+          }),
+    [],
+  );
+  // While the drain waits on the batches it resumed, completed batches join
+  // its queue, as during a model stream.
+  const completedToolBatchDrainHoldsRef = useRef(0);
+  // The quota switch as it is now, for tool batches that settle or drain
+  // renders after it changed.
+  const modelSwitchedFromQuotaErrorRef = useRef(modelSwitchedFromQuotaError);
+  useLayoutEffect(() => {
+    modelSwitchedFromQuotaErrorRef.current = modelSwitchedFromQuotaError;
+  }, [modelSwitchedFromQuotaError]);
   // A continuation may be admitted while an earlier submission is finalizing.
   const submissionActivitiesByGenerationRef = useRef(new Map<number, number>());
   const settleSubmissionStateIfIdle = useCallback(() => {
@@ -5079,7 +5139,30 @@ export const useLlmStream = (
           ) {
             activeGoalAdmissionRef.current = null;
           }
-          if (shouldDrainCompletedToolBatches) {
+          // A stream that started since leaves the batches to its own drain.
+          if (
+            shouldDrainCompletedToolBatches &&
+            activeModelStreamsRef.current === 0
+          ) {
+            const resumed = modelStreamsIdleWaitersRef.current.splice(0);
+            if (resumed.length > 0) {
+              completedToolBatchDrainHoldsRef.current += 1;
+              try {
+                // One at a time, in the order they settled, so their
+                // results join the queue, and go out, in that order.
+                for (const { resume, done } of resumed) {
+                  resume();
+                  await done;
+                }
+              } finally {
+                completedToolBatchDrainHoldsRef.current -= 1;
+              }
+            }
+          }
+          if (
+            shouldDrainCompletedToolBatches &&
+            activeModelStreamsRef.current === 0
+          ) {
             const pendingCompletedToolBatches =
               pendingCompletedToolBatchesRef.current.splice(0);
             const pendingCompletedTools = new Map<string, TrackedToolCall>();
@@ -5108,6 +5191,10 @@ export const useLlmStream = (
                       // The earliest batch's session: results of a session
                       // swapped away never go out in its successor.
                       owner: pendingShared.owner,
+                      backgroundLaunchCallIds: new Set([
+                        ...pendingShared.backgroundLaunchCallIds,
+                        ...shared.backgroundLaunchCallIds,
+                      ]),
                     }
                   : shared;
               }
@@ -5871,7 +5958,10 @@ export const useLlmStream = (
         }
       }
 
-      if (activeModelStreamsRef.current > 0) {
+      if (
+        activeModelStreamsRef.current > 0 ||
+        completedToolBatchDrainHoldsRef.current > 0
+      ) {
         const deferredTools = completedAndReadyToSubmitTools.filter(
           (toolCall) =>
             !historyCallIdsWithResponse.has(toolCall.request.callId),
@@ -6643,10 +6733,10 @@ export const useLlmStream = (
 
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
-      const terminatesGoalTurn = llmTools.some(
+      const terminatesTurn = llmTools.some(
         (toolCall) => toolCall.response.terminateTurn === true,
       );
-      if (terminatesGoalTurn && toolGoalBinding) {
+      if (terminatesTurn && toolGoalBinding) {
         llmClient.addHistory({ role: 'user', parts: responsesToSend });
         let goalFinishFailed = false;
         try {
@@ -6697,6 +6787,14 @@ export const useLlmStream = (
         } else {
           endToolInteraction('ok');
         }
+        return;
+      }
+      if (terminatesTurn && shared) {
+        // On the shared loop a tool that ends the turn ends it outside a
+        // Goal turn too, as on the other surfaces. Its results answer the
+        // calls in history, as a cancelled batch's do.
+        llmClient?.addHistory({ role: 'user', parts: responsesToSend });
+        endToolInteraction('ok');
         return;
       }
 
@@ -6795,10 +6893,14 @@ export const useLlmStream = (
         }
       }
 
-      // Don't continue if model was switched due to quota error
-      if (modelSwitchedFromQuotaError) {
-        if (toolGoalBinding) {
+      // Don't continue if model was switched due to quota error. On the
+      // shared loop the results answer the calls in history, as in a Goal
+      // turn.
+      if (modelSwitchedFromQuotaErrorRef.current) {
+        if (shared || toolGoalBinding) {
           llmClient?.addHistory({ role: 'user', parts: responsesToSend });
+        }
+        if (toolGoalBinding) {
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation stopped after a model switch',
@@ -6809,22 +6911,16 @@ export const useLlmStream = (
         return;
       }
 
-      const backgroundTaskRegistry = config.getBackgroundTaskRegistry();
+      // The shared batch noted the launches of the calls it executed; calls
+      // the scheduler ran alone, drained with it, are read from their
+      // results. The slots are checked now, as the continuation would wait.
       const backgroundLaunchExhaustedCapacity =
-        backgroundTaskRegistry.getMaxConcurrentBackgroundAgents() === 1 &&
-        !backgroundTaskRegistry.canStartBackgroundAgent() &&
-        llmTools.some((toolCall) => {
-          const display = toolCall.response.resultDisplay;
-          return (
-            toolCall.request.name === ToolNames.AGENT &&
-            typeof display === 'object' &&
-            display !== null &&
-            'type' in display &&
-            'status' in display &&
-            display.type === 'task_execution' &&
-            display.status === 'background'
-          );
-        });
+        llmTools.some((toolCall) =>
+          sharedResultsByCallId.has(toolCall.request.callId)
+            ? shared?.backgroundLaunchCallIds.has(toolCall.request.callId) ===
+              true
+            : launchedBackgroundAgent(toolCall.request, toolCall.response),
+        ) && backgroundSlotsSpent(config);
       if (backgroundLaunchExhaustedCapacity) {
         llmClient?.addHistory({ role: 'user', parts: responsesToSend });
         if (toolGoalBinding) {
@@ -7085,7 +7181,6 @@ export const useLlmStream = (
       markToolsAsSubmitted,
       llmClient,
       performMemoryRefresh,
-      modelSwitchedFromQuotaError,
       config,
       midTurnDrainRef,
       addItem,
@@ -7197,6 +7292,10 @@ export const useLlmStream = (
       let releaseBatchActivity: (() => void) | undefined;
       let owner: SharedToolBatchResults['owner'] | undefined;
       let committedToolGroup: { batchId: string | undefined } | undefined;
+      let finishBatch!: () => void;
+      const batchFinished = new Promise<void>((resolve) => {
+        finishBatch = resolve;
+      });
       const executor = createInkToolExecutor(
         scheduleToolCalls,
         batch.modelOverride,
@@ -7233,8 +7332,13 @@ export const useLlmStream = (
               error,
             );
           }
+          // The batch ends when no model stream is active, as the current
+          // path holds a batch that completes during one, so its stops and
+          // results see the session as the continuation will.
+          return waitForModelStreamsIdle(batchFinished);
         },
       );
+      const backgroundLaunchCallIds = new Set<string>();
       // Replay answers the batch marks as sent but never sends, when it
       // throws, must not count as answered.
       const providerKeys = batch.calls.flatMap(({ providerCallId, callId }) =>
@@ -7265,6 +7369,20 @@ export const useLlmStream = (
               if (origin !== 'executed') {
                 dualOutput?.emitToolResult(request, response);
               }
+              if (
+                origin === 'executed' &&
+                launchedBackgroundAgent(request, response)
+              ) {
+                backgroundLaunchCallIds.add(request.callId);
+              }
+              // The TUI's stops end the batch: a quota model switch, or a
+              // background agent launch that spent the last background
+              // slot. The completion step checks both again when it sends.
+              return (
+                modelSwitchedFromQuotaErrorRef.current ||
+                (backgroundLaunchCallIds.size > 0 &&
+                  backgroundSlotsSpent(config))
+              );
             },
           },
         });
@@ -7281,6 +7399,7 @@ export const useLlmStream = (
             ranCallIds: countedCallIds(settled),
             promptId: batch.promptId,
             owner,
+            backgroundLaunchCallIds,
           },
           committedToolGroup,
         );
@@ -7305,6 +7424,7 @@ export const useLlmStream = (
                 ranCallIds: countedCallIds(settled),
                 promptId: batch.promptId,
                 owner,
+                backgroundLaunchCallIds: new Set(),
               },
               committedToolGroup,
             );
@@ -7317,6 +7437,7 @@ export const useLlmStream = (
         }
       } finally {
         releaseBatchActivity?.();
+        finishBatch();
       }
     },
     [
@@ -7328,6 +7449,7 @@ export const useLlmStream = (
       dualOutput,
       getToolBatchId,
       addCompletedToolGroup,
+      waitForModelStreamsIdle,
     ],
   );
 
