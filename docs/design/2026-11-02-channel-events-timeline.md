@@ -74,23 +74,23 @@ state files, so a Channel name cannot escape the directory.
 
 Record:
 
-| Field         | Meaning                                                                               |
-| ------------- | ------------------------------------------------------------------------------------- |
-| `at`          | ISO timestamp                                                                         |
-| `channel`     | Channel instance name, kept in full (see limits below)                                |
-| `type`        | `inbound` / `outbound` / `task` / `poll`                                              |
-| `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `ok` / a task state (§5)               |
-| `reason`      | machine reason code for skips (`sender_denied`, `reason_filter`, ...)                 |
-| `triggerKind` | Channel-specific trigger (`mention`, `assign`, ...)                                   |
-| `repository`  | conversation container (for GitHub, `owner/repo`)                                     |
-| `thread`      | thread identity (`issue:12`, `pr:34`)                                                 |
-| `number`      | issue or PR number                                                                    |
-| `actor`       | sender login                                                                          |
-| `sessionId`   | session the event was routed to; on a `retired` / `skipped` row, the one it lost (§5) |
-| `messageId`   | source message identity                                                               |
-| `durationMs`  | poll duration                                                                         |
-| `error`       | sanitized single-line error, capped at 200 characters                                 |
-| `detail`      | flat primitive map, at most 12 keys                                                   |
+| Field         | Meaning                                                                                                          |
+| ------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `at`          | ISO timestamp                                                                                                    |
+| `channel`     | Channel instance name, kept in full (see limits below)                                                           |
+| `type`        | `inbound` / `outbound` / `task` / `poll`                                                                         |
+| `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `ok` / a task state (§5)                                          |
+| `reason`      | machine reason code for a skip or an inbound failure (`sender_denied`, `reason_filter`, `github_api_error`, ...) |
+| `triggerKind` | Channel-specific trigger (`mention`, `assign`, ...)                                                              |
+| `repository`  | conversation container (for GitHub, `owner/repo`)                                                                |
+| `thread`      | thread identity (`issue:12`, `pr:34`)                                                                            |
+| `number`      | issue or PR number                                                                                               |
+| `actor`       | sender login                                                                                                     |
+| `sessionId`   | session the event was routed to; on a `retired` / `skipped` row, the one it lost (§5)                            |
+| `messageId`   | source message identity                                                                                          |
+| `durationMs`  | poll duration                                                                                                    |
+| `error`       | sanitized single-line error, capped at 200 characters                                                            |
+| `detail`      | flat primitive map, at most 12 keys                                                                              |
 
 Limits: free-text fields and `detail` values are capped at 200 characters. The
 Channel identity is the exception: the management API accepts names up to 255
@@ -112,8 +112,9 @@ handling.
 | `ChannelBase.processPreflightedInbound`                            | `inbound` / `accepted`                                                                                                             |
 | `PollingChannelBase.runLoop`                                       | `poll` / `ok` with `durationMs` and the adapter's detail, `poll` / `failed` with `consecutiveErrors`                               |
 | `GithubAdapter` reason filter                                      | `inbound` / `skipped`, reason `reason_filter`; past 20 in one poll, one row with `detail.filtered` counting the rest               |
-| `GithubAdapter` comment lane (`onlyMentioned` miss)                | `inbound` / `skipped`, reason `mention_required`                                                                                   |
-| `GithubAdapter` dedupe hit                                         | `inbound` / `skipped`, reason `duplicate`                                                                                          |
+| `GithubAdapter` comment lane (`onlyMentioned` miss)                | `inbound` / `skipped`, reason `mention_required`; once per comment while the window is held                                        |
+| `GithubAdapter` dedupe hit                                         | `inbound` / `skipped`, reason `duplicate`; once per comment while the window is held                                               |
+| `GithubAdapter` thread read failure                                | `inbound` / `failed` (window held) or `skipped`, reason `github_api_error`; throttled while the window is held                     |
 | `GithubAdapter.claimInboundTask`                                   | `task` / `accepted`, with `sessionId` when the target is a bound session                                                           |
 | `GithubAdapter.transitionInboundTask`                              | `task` / `<state>` with `attempts`, `error` and the bound `sessionId`; §5 overrides the terminal word                              |
 | `GithubAdapter.recordPublicationAudit`                             | `outbound` / `<outcome>` (also keep the audit file)                                                                                |
@@ -121,6 +122,7 @@ handling.
 | `GithubAdapter.retireBoundTask`                                    | `task` / `retired`, reason `dead_letter`; `task` / `failed`, reason `dead_letter_write_failed` (§5)                                |
 | `GithubAdapter.drainPendingWatch` (retire before claim)            | `inbound` / `skipped`, reason `watch_no_candidate` (§5)                                                                            |
 | `GithubAdapter.watchOnePr` (pending-queue overflow)                | `inbound` / `skipped`, reason `watch_pending_overflow` (§5)                                                                        |
+| `GithubAdapter` comment lane (no role matched)                     | `inbound` / `skipped`, reason `no_role_matched` (§5)                                                                               |
 | `GithubAdapter` binding scan and watch guard                       | `poll` / `degraded` with a reason, at the existing throttles or on a state edge; binding-scan rows also carry `detail.streak` (§5) |
 
 `PollingChannelBase` gains a `setPollEventDetail` seam so an adapter can attach
@@ -282,16 +284,27 @@ watched transition.
 **New outcomes.** `task` / `delivered` and `task` / `retired` are journal-only
 terminal words, not persisted task states. `retired` carries a reason:
 `preflight_rejected`, `watch_no_target`, `watch_no_candidate`,
-`watch_session_gone`, `dead_letter`. A failed dead-letter append journals
+`watch_session_gone`, `dead_letter`, and the role-aware exits
+`bound_no_candidate` (a comment whose role lost its match on a complete
+snapshot — the non-watch sibling of `watch_no_candidate`),
+`siblings_still_follow` (the gone fallback retires because other roles still
+follow the PR or the delivery ring already holds the event, so a public reply
+would duplicate a sibling's private delivery) and `already_delivered_other_role`
+(the defensive targetless duplicate suppression; the claim path normally
+retires such an event through the dead-letter surface first). A failed
+dead-letter append journals
 `task` / `failed` with reason `dead_letter_write_failed`, because the task is
 kept and stays recoverable — it is not a retire. Every terminal row is written
 after the durable step it describes, so a throwing removal or save cannot leave
 a retire claim behind for an event the next poll re-runs.
 
-Two watch retires happen before any task is claimed, so they have no task row to
+Three retires happen before any task is claimed, so they have no task row to
 close and journal `inbound` / `skipped` instead: `watch_no_candidate` when a
-complete snapshot has no candidate left, and `watch_pending_overflow` when the
-per-PR pending queue passes its cap and the oldest event is retired undelivered.
+complete snapshot has no candidate left, `watch_pending_overflow` when the
+per-PR pending queue passes its cap and the oldest event is retired undelivered,
+and `no_role_matched` when followers exist but no role's template chain matched
+the event on a complete fresh snapshot — an operator subscription decision, not
+an absence, so the public path must not answer it either.
 The pre-claim retire rolls its slice back if the watch-state save throws: the
 slice mutates the loaded state before the save, and a failed save does not clear
 the loaded flag, so without the rollback the next poll would skip the entry and
@@ -455,15 +468,28 @@ classes, the daemon route, the SDK types and the wire shape are unchanged.
   returns the same notifications on every poll, and filtered notifications are
   skipped before any dedupe. An in-flight turn does not cause this on its own:
   the poll loop awaits `pollOnce`, so no poll runs while a turn is in progress;
-  the reachable case is a task that failed and is still retryable. A real
-  run with a 2 s poll and a turn that kept failing re-journaled one batch of
-  300 filtered notifications until the journal rotated, pushing the
-  accepted/posted rows out of the page's window. The adapter therefore journals
-  at most 20 `reason_filter` rows per poll and collapses the remainder into one
-  row carrying `detail.filtered`, which the page renders as a count. Measured
+  the reachable cases include a task that failed and is still retryable or that
+  an error in its own run left `running`, a task store the channel cannot read
+  or write or a publication audit it cannot read, a thread GitHub failed to read
+  with a 5xx (held for at most 30 polls), a rate limit or credential failure, and
+  a mark-as-read that keeps failing. A held window is read again from the start on
+  every poll; a rate limit or credential failure stops that poll at the first
+  thread GitHub refuses. A real run with a 2 s poll and a turn that kept failing
+  re-journaled one batch of 300 filtered notifications until the journal
+  rotated, pushing the accepted/posted rows out of the page's window. The
+  adapter therefore journals at most 20 `reason_filter` rows per poll and
+  collapses the remainder into one row carrying `detail.filtered`, which the
+  page renders as a count. Measured
   against the real adapter: 15 polls served 4,500 notifications and wrote 315
   rows instead of 4,500, and the journal did not rotate. The budget is per
-  poll, so a genuinely new batch is still described in full.
+  poll, so a genuinely new batch is still described in full. Rows that would
+  repeat on every poll of a held window are written once per window instead:
+  the `duplicate` or `mention_required` skip of a comment read again, and a
+  thread skipped for an API error, for up to 8,192 distinct keys per window
+  (past that, each new key is written on every poll). A failing thread's
+  `github_api_error` row is written on its first failing poll in the window and
+  on every tenth failing poll, and a rate limit's or credential failure's on its
+  first and every tenth poll.
 - A synchronous append sits in the message path. The record is small, and a
   failure is swallowed; the alternative (async queue) would lose the last
   events on a crash, which is when they matter.

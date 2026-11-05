@@ -45,23 +45,23 @@
 
 记录字段：
 
-| 字段          | 含义                                                                    |
-| ------------- | ----------------------------------------------------------------------- |
-| `at`          | ISO 时间戳                                                              |
-| `channel`     | 渠道实例名，完整保留（见下方上限）                                      |
-| `type`        | `inbound` / `outbound` / `task` / `poll`                                |
-| `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `ok` / 任务状态（见 §5） |
-| `reason`      | 跳过原因的机器码（`sender_denied`、`reason_filter` 等）                 |
-| `triggerKind` | 渠道特定的触发类型（`mention`、`assign` 等）                            |
-| `repository`  | 会话容器（GitHub 下为 `owner/repo`）                                    |
-| `thread`      | 线程标识（`issue:12`、`pr:34`）                                         |
-| `number`      | issue 或 PR 编号                                                        |
-| `actor`       | 发送方登录名                                                            |
-| `sessionId`   | 事件被路由到的会话；在 `retired` / `skipped` 行上是它失去的那个（§5）   |
-| `messageId`   | 来源消息标识                                                            |
-| `durationMs`  | 轮询耗时                                                                |
-| `error`       | 单行化错误信息，上限 200 字符                                           |
-| `detail`      | 扁平原始类型映射，最多 12 个键                                          |
+| 字段          | 含义                                                                                  |
+| ------------- | ------------------------------------------------------------------------------------- |
+| `at`          | ISO 时间戳                                                                            |
+| `channel`     | 渠道实例名，完整保留（见下方上限）                                                    |
+| `type`        | `inbound` / `outbound` / `task` / `poll`                                              |
+| `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `ok` / 任务状态（见 §5）               |
+| `reason`      | 跳过与入站失败的机器原因码（`sender_denied`、`reason_filter`、`github_api_error` 等） |
+| `triggerKind` | 渠道特定的触发类型（`mention`、`assign` 等）                                          |
+| `repository`  | 会话容器（GitHub 下为 `owner/repo`）                                                  |
+| `thread`      | 线程标识（`issue:12`、`pr:34`）                                                       |
+| `number`      | issue 或 PR 编号                                                                      |
+| `actor`       | 发送方登录名                                                                          |
+| `sessionId`   | 事件被路由到的会话；在 `retired` / `skipped` 行上是它失去的那个（§5）                 |
+| `messageId`   | 来源消息标识                                                                          |
+| `durationMs`  | 轮询耗时                                                                              |
+| `error`       | 单行化错误信息，上限 200 字符                                                         |
+| `detail`      | 扁平原始类型映射，最多 12 个键                                                        |
 
 上限：自由文本字段与 `detail` 的值截断到 200 字符。渠道标识是例外：管理接口接受最长 255 UTF-8 字节的名字，而码点数不会超过字节数，因此标识保留到 255 个码点——任何合法名字都完整保留，并且仍能被 `channel` 过滤匹配。只有界面在展示时缩短它。
 
@@ -76,8 +76,9 @@
 | `ChannelBase.processPreflightedInbound`                        | `inbound` / `accepted`                                                                                       |
 | `PollingChannelBase.runLoop`                                   | `poll` / `ok` 带 `durationMs` 与适配器详情；`poll` / `failed` 带 `consecutiveErrors`                         |
 | `GithubAdapter` 原因过滤                                       | `inbound` / `skipped`，原因 `reason_filter`；单轮超过 20 条后，其余合并为一条带 `detail.filtered` 计数的记录 |
-| `GithubAdapter` 评论通道（`onlyMentioned` 未命中）             | `inbound` / `skipped`，原因 `mention_required`                                                               |
-| `GithubAdapter` 去重命中                                       | `inbound` / `skipped`，原因 `duplicate`                                                                      |
+| `GithubAdapter` 评论通道（`onlyMentioned` 未命中）             | `inbound` / `skipped`，原因 `mention_required`；窗口被保持期间每条评论只记一次                               |
+| `GithubAdapter` 去重命中                                       | `inbound` / `skipped`，原因 `duplicate`；窗口被保持期间每条评论只记一次                                      |
+| `GithubAdapter` 线程读取失败                                   | `inbound` / `failed`（窗口被保持）或 `skipped`，原因 `github_api_error`；窗口被保持期间节流                  |
 | `GithubAdapter.claimInboundTask`                               | `task` / `accepted`；目标是绑定会话时带 `sessionId`                                                          |
 | `GithubAdapter.transitionInboundTask`                          | `task` / `<state>`，带 `attempts`、`error` 与绑定的 `sessionId`；终态用词由 §5 覆盖                          |
 | `GithubAdapter.recordPublicationAudit`                         | `outbound` / `<outcome>`（审计文件继续保留）                                                                 |
@@ -85,6 +86,7 @@
 | `GithubAdapter.retireBoundTask`                                | `task` / `retired`，原因 `dead_letter`；`task` / `failed`，原因 `dead_letter_write_failed`（§5）             |
 | `GithubAdapter.drainPendingWatch`（claim 前退休）              | `inbound` / `skipped`，原因 `watch_no_candidate`（§5）                                                       |
 | `GithubAdapter.watchOnePr`（待办队列溢出）                     | `inbound` / `skipped`，原因 `watch_pending_overflow`（§5）                                                   |
+| `GithubAdapter` 评论通道（无角色匹配）                         | `inbound` / `skipped`，原因 `no_role_matched`（§5）                                                          |
 | `GithubAdapter` 绑定扫描与 watch 守卫                          | `poll` / `degraded`，带原因，只打在既有限流点或状态边沿上；绑定扫描行另带 `detail.streak`（§5）              |
 
 `PollingChannelBase` 增加 `setPollEventDetail` 挂点，适配器可以挂自己的计数（GitHub 报告本次轮询取到多少条通知），基类不需要知道这些字段。基类在轮询开始前清空该字段，并在本次轮询结束后才消费它，因此事件绝不会把上一次轮询的计数记到本次的时间戳上。
@@ -139,9 +141,9 @@ PR #16117 增加了第二条投递通道：开启 `deliverToBoundSessions` 后�
 
 同一条规则也覆盖两处发生在任何任务被 claim 之前的退休：它们的 `inbound` / `skipped` 行带上待办条目里冻结的目标，而该目标本来就已写进同一事件的死信记录。没有它，时间线与死信就会对同一次被监视的状态变化给出不一致的归属。
 
-**新增结果词。** `task` / `delivered` 与 `task` / `retired` 只是日志用的终态词，不是持久化的任务状态。`retired` 带原因：`preflight_rejected`、`watch_no_target`、`watch_no_candidate`、`watch_session_gone`、`dead_letter`。死信追加失败记 `task` / `failed`，原因 `dead_letter_write_failed`，因为任务被保留、仍可恢复——那不是退休。每一条终态行都写在它所描述的持久化步骤**之后**，因此删除或保存抛错时，不会为一个下一轮还会重跑的事件留下退休声明。
+**新增结果词。** `task` / `delivered` 与 `task` / `retired` 只是日志用的终态词，不是持久化的任务状态。`retired` 带原因：`preflight_rejected`、`watch_no_target`、`watch_no_candidate`、`watch_session_gone`、`dead_letter`，以及角色感知的三个出口：`bound_no_candidate`（评论的角色在完整快照下失去了匹配——`watch_no_candidate` 的非 watch 兄弟）、`siblings_still_follow`（gone 回退之所以退休，是因为其他角色仍关注该 PR、或投递环里已有该事件，公开回复会重复兄弟角色的私投递）、`already_delivered_other_role`（防御性的无目标去重抑制；claim 路径通常先经死信面退休这类事件）。死信追加失败记 `task` / `failed`，原因 `dead_letter_write_failed`，因为任务被保留、仍可恢复——那不是退休。每一条终态行都写在它所描述的持久化步骤**之后**，因此删除或保存抛错时，不会为一个下一轮还会重跑的事件留下退休声明。
 
-有两处 watch 退休发生在任何任务被 claim 之前，因此没有 task 行可收尾，改记 `inbound` / `skipped`：完整快照下已无候选时记 `watch_no_candidate`；按 PR 的待办队列超过上限、最老的事件被未投递退休时记 `watch_pending_overflow`。claim 前退休在 watch 状态保存抛错时会回滚它的 slice：slice 在保存之前就改了已加载的内存态，而保存失败不会清除已加载标志，因此不回滚的话下一轮会跳过该条目、随后一次保存又把截断后的状态写回磁盘——事件就此丢失且不留任何痕迹。
+有三处退休发生在任何任务被 claim 之前，因此没有 task 行可收尾，改记 `inbound` / `skipped`：完整快照下已无候选时记 `watch_no_candidate`；按 PR 的待办队列超过上限、最老的事件被未投递退休时记 `watch_pending_overflow`；有关注者但完整的新鲜快照下没有任何角色的模板链匹配该事件时记 `no_role_matched`——这是运维的订阅决策，不是缺席，所以公开路径同样不能回答它。watch 的 claim 前退休在状态保存抛错时会回滚它的 slice：slice 在保存之前就改了已加载的内存态，而保存失败不会清除已加载标志，因此不回滚的话下一轮会跳过该条目、随后一次保存又把截断后的状态写回磁盘——事件就此丢失且不留任何痕迹。
 
 **不新增事件类型，不改线上形状。** `outcome` 在日志、SDK 和路由里都是自由字符串，所以四个类型、两条路由与响应形状都不变，只有页面的标签目录变大。协议**参考文档**是要更新的，因为集成方正是在那里读词汇：它现在写明了开放的 outcome 字符串、新的终态与原因，以及哪些行带 `sessionId` 与 `detail`。曾考虑用 `outbound` 表示私投递注入，被否掉了：那个类型的含义是「已发表到 GitHub」，而绑定会话的回复明确不发表。
 
@@ -195,7 +197,7 @@ watch 守卫行还会区分成因。`hasUnreconciledWatchPending()` 在读取错
 
 ## 风险
 
-- 繁忙群渠道的环境消息跳过可能很频繁。日志靠轮转封顶，页面请求最新 200 条事件，没有无界增长。（100 是调用方不带 `limit` 时路由自身的默认值。）但只靠轮转不足以保住窗口的**有用性**：只要还有可恢复的入站任务——`accepted`、`running`，或 `failed` 且仍有重试次数——GitHub 的轮询游标就不前进，于是服务端每轮都返回同一批通知，而被过滤的通知在任何去重之前就被跳过。进行中的回合本身不会造成这一点：轮询循环 `await pollOnce()`，回合进行中根本不会发起新的轮询；真正可达的情形是任务失败但仍可重试。一次真实运行（2 秒轮询 + 一个反复失败的回合）把同一批 300 条被过滤通知反复写入，直到日志轮转，把 accepted/posted 行挤出了页面窗口。因此适配器每轮最多记 20 条 `reason_filter`，其余合并为一条带 `detail.filtered` 的记录，页面把它渲染成计数。对真实适配器实测：15 轮共返回 4500 条通知，只写入 315 行而非 4500 行，且日志没有轮转。该额度按轮计算，因此真正新到的一批仍会被完整描述。
+- 繁忙群渠道的环境消息跳过可能很频繁。日志靠轮转封顶，页面请求最新 200 条事件，没有无界增长。（100 是调用方不带 `limit` 时路由自身的默认值。）但只靠轮转不足以保住窗口的**有用性**：只要还有可恢复的入站任务——`accepted`、`running`，或 `failed` 且仍有重试次数——GitHub 的轮询游标就不前进，于是服务端每轮都返回同一批通知，而被过滤的通知在任何去重之前就被跳过。进行中的回合本身不会造成这一点：轮询循环 `await pollOnce()`，回合进行中根本不会发起新的轮询；真正可达的情形包括：任务失败但仍可重试，或因自身运行中的错误停在 `running`；channel 无法读写任务存储，或无法读取发布审计；GitHub 读取某个线程返回 5xx（最多保持 30 轮）；限流或凭据失败；以及 mark-as-read 持续失败。被保持的窗口每轮都从头重读；遇到限流或凭据失败时，该轮在 GitHub 拒绝的第一个线程处停止。一次真实运行（2 秒轮询 + 一个反复失败的回合）把同一批 300 条被过滤通知反复写入，直到日志轮转，把 accepted/posted 行挤出了页面窗口。因此适配器每轮最多记 20 条 `reason_filter`，其余合并为一条带 `detail.filtered` 的记录，页面把它渲染成计数。对真实适配器实测：15 轮共返回 4500 条通知，只写入 315 行而非 4500 行，且日志没有轮转。该额度按轮计算，因此真正新到的一批仍会被完整描述。窗口被保持时每轮都会重复的记录改为每个窗口只写一次：重新读到的评论的 `duplicate` 或 `mention_required` 跳过，以及因 API 错误被跳过的线程；每个窗口最多跟踪 8192 个不同的键，超出后新的键每轮都会写。失败线程的 `github_api_error` 记录在它本窗口内首个失败轮次以及每第十个失败轮次写入；限流或凭据失败在第一轮和每第十轮写入。
 - 同步追加位于消息路径上。记录很小且失败被吞掉；改成异步队列会在崩溃时丢掉最后几条事件，而那时恰恰最需要它们。
 - 路由每次请求都读磁盘。读取以 64 KiB 分块 await、每次请求预算 4 MiB，因此一次轮询会让出事件循环而不是阻塞它；页面仅在标签页可见时每 5 秒轮询一次。
 

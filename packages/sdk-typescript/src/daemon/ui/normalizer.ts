@@ -110,6 +110,8 @@ export function normalizeDaemonEvent(
     case 'permission_already_resolved':
       return normalizePermissionResolved(event, base);
     case 'model_switched':
+      if (isRecord(event.data) && event.data['subscriptionSignedOut'] === true)
+        return [];
       return [
         {
           ...base,
@@ -250,6 +252,9 @@ export function normalizeDaemonEvent(
       ];
     }
     case 'turn_error': {
+      const subscriptionQuota = isRecord(event.data)
+        ? event.data['subscriptionQuota']
+        : undefined;
       const code = getString(event.data, 'code');
       const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       const promptId = getString(event.data, 'promptId');
@@ -262,6 +267,9 @@ export function normalizeDaemonEvent(
           ...base,
           type: 'error',
           source: 'turn_error',
+          ...(subscriptionQuota !== undefined
+            ? { data: { subscriptionQuota } }
+            : {}),
           recoverable: true,
           ...(code ? { code } : {}),
           ...(errorKind ? { errorKind } : {}),
