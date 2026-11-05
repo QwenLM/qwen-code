@@ -25,6 +25,7 @@ import {
   CHANNEL_TASK_RESULT_META_KEY,
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
+  CHANNEL_TURN_NOTICE_META_KEY,
   ChannelPromptCancelledError,
   parseBackgroundResponseContext,
   resolvePromptImages,
@@ -525,7 +526,9 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         taskResult.trim()
           ? taskResult
           : chunks.join('') || slashCommandOutput;
-      return turnNotice ? `${turnNotice}\n\n${body}` : body;
+      return turnNotice && body
+        ? `${turnNotice}\n\n${body}`
+        : turnNotice || body;
     } finally {
       this.off('textChunk', onChunk);
       this.off('slashCommandOutput', onSlashCommandOutput);
@@ -688,7 +691,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           break;
         }
         if (content?.type === 'text' && content.text) {
-          if (meta?.['turnNotice'] === true) {
+          if (meta?.[CHANNEL_TURN_NOTICE_META_KEY] === true) {
             // A notice emitted ahead of a turn has to ride the reply: channel
             // delivery returns only prompt()'s text, and the slash-command slot
             // is shadowed as soon as the turn produces model text.

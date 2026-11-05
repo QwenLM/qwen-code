@@ -340,6 +340,7 @@ import {
   CHANNEL_TASK_OUTPUT_META_KEY,
   CHANNEL_TASK_RESULT_META_KEY,
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
+  CHANNEL_TURN_NOTICE_META_KEY,
 } from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
@@ -19930,7 +19931,7 @@ export class Session implements SessionContext {
             result.stackedSkillOverflow,
             undefined,
             undefined,
-            { turnNotice: true },
+            { [CHANNEL_TURN_NOTICE_META_KEY]: true },
           );
         }
         const expandedPrompt = normalizePartList(result.content);

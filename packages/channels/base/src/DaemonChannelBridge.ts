@@ -9,6 +9,7 @@ import {
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
+  CHANNEL_TURN_NOTICE_META_KEY,
   ChannelPromptCancelledError,
   parseBackgroundResponseContext,
   resolvePromptImages,
@@ -868,7 +869,8 @@ export class DaemonChannelBridge
         options?.onTaskResult?.({ partial: taskOutput.partial === true });
       }
       const body = taskOutput?.text || chunks.join('') || slashCommandOutput;
-      const textResult = turnNotice ? `${turnNotice}\n\n${body}` : body;
+      const textResult =
+        turnNotice && body ? `${turnNotice}\n\n${body}` : turnNotice || body;
       this.emit('promptComplete', {
         sessionId,
         text: textResult,
@@ -1232,7 +1234,7 @@ export class DaemonChannelBridge
           break;
         }
         if (text) {
-          if (meta?.['turnNotice'] === true) {
+          if (meta?.[CHANNEL_TURN_NOTICE_META_KEY] === true) {
             // A notice emitted ahead of a turn has to ride the reply: channel
             // delivery returns only prompt()'s text, and the slash-command slot
             // is shadowed as soon as the turn produces model text.
