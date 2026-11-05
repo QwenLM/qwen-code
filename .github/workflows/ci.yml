@@ -679,6 +679,16 @@ jobs:
           ( while sleep 10; do sample_disk; done ) &
           SAMPLER_PID=$!
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+          # Self-hosted runners keep _work/_temp across jobs, and corepack
+          # trusts an existing cache entry without re-verifying its files: a
+          # partial pnpm tree left by an earlier job reddens every later job
+          # on the host with MODULE_NOT_FOUND seconds into this step (main
+          # run 41927887452). Enforce the per-run contract the COREPACK_HOME
+          # pin documents: start from an empty cache. Unset in test_build,
+          # which keeps its default cache.
+          if [ -n "${COREPACK_HOME:-}" ]; then
+            rm -rf -- "${COREPACK_HOME}"
+          fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Report npm cache usage (self-hosted)'
@@ -1097,6 +1107,16 @@ jobs:
           ( while sleep 10; do sample_disk; done ) &
           SAMPLER_PID=$!
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+          # Self-hosted runners keep _work/_temp across jobs, and corepack
+          # trusts an existing cache entry without re-verifying its files: a
+          # partial pnpm tree left by an earlier job reddens every later job
+          # on the host with MODULE_NOT_FOUND seconds into this step (main
+          # run 41927887452). Enforce the per-run contract the COREPACK_HOME
+          # pin documents: start from an empty cache. Unset in test_build,
+          # which keeps its default cache.
+          if [ -n "${COREPACK_HOME:-}" ]; then
+            rm -rf -- "${COREPACK_HOME}"
+          fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       # Eight shards pull this same artifact at once, so the cap has to clear
@@ -1873,6 +1893,16 @@ jobs:
           ( while sleep 10; do sample_disk; done ) &
           SAMPLER_PID=$!
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+          # Self-hosted runners keep _work/_temp across jobs, and corepack
+          # trusts an existing cache entry without re-verifying its files: a
+          # partial pnpm tree left by an earlier job reddens every later job
+          # on the host with MODULE_NOT_FOUND seconds into this step (main
+          # run 41927887452). Enforce the per-run contract the COREPACK_HOME
+          # pin documents: start from an empty cache. Unset in test_build,
+          # which keeps its default cache.
+          if [ -n "${COREPACK_HOME:-}" ]; then
+            rm -rf -- "${COREPACK_HOME}"
+          fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Report npm cache usage (self-hosted)'

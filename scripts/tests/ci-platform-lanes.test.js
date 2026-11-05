@@ -900,6 +900,39 @@ describe('post-merge push lane', () => {
       // warms here; pin COREPACK_HOME to a per-run path so the warmup hits it.
       COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack',
     });
+    // The per-run pin is only as per-run as the directory it names:
+    // self-hosted runners keep _work/_temp across jobs (the lint job's
+    // isolated-HOME step documents the same fact), and corepack trusts an
+    // existing cache entry without re-verifying its files, so a partial pnpm
+    // tree left by an earlier job fails every later job on that host seconds
+    // into Install dependencies with MODULE_NOT_FOUND (main runs
+    // 41876940141, 41889761157, 41927887452). Every copy of the shared
+    // install body must clear the pinned cache before corepack runs; the -n
+    // guard keeps test_build's copy (no COREPACK_HOME) a no-op on its
+    // default cache, and lint's run-unique home is already empty.
+    for (const job of ['test_build', 'test', 'lint_and_static']) {
+      const body = String(install(job).run ?? '');
+      expect(body, `${job} must guard the corepack cache reset`).toContain(
+        'if [ -n "${COREPACK_HOME:-}" ]; then',
+      );
+      const reset = body.indexOf('rm -rf -- "${COREPACK_HOME}"');
+      expect(
+        reset,
+        `${job} must reset the pinned corepack cache`,
+      ).toBeGreaterThanOrEqual(0);
+      expect(
+        body.indexOf('corepack pnpm install'),
+        `${job} must reset the cache before corepack runs`,
+      ).toBeGreaterThan(reset);
+    }
+    // The test step must keep sharing the cache install warms: a drifted
+    // COREPACK_HOME sends the vitest globalSetup warmup back to the cold
+    // npmjs download whose ETIMEDOUT flake #16328 removed.
+    expect(
+      ci.jobs.test.steps.find(
+        (s) => s.name === 'Run tests and generate reports',
+      ).env.COREPACK_HOME,
+    ).toBe(install('test').env.COREPACK_HOME);
     const namesIn = (job) => (ci.jobs[job].steps ?? []).map((x) => x.name);
     // Values alone are order-blind, and order is load-bearing here: `steps`
     // exposes only steps that already ran, and a missing property reads as
