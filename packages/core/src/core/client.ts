@@ -5060,7 +5060,8 @@ export class LlmClient {
         // gives it is a different one, or there is none. The startup context
         // carries the date at session start, so the first turn adds nothing;
         // a reminder follows once the date changes, after a session runs past
-        // midnight or a rewind drops the reminder.
+        // midnight or a rewind drops the reminder. The reminder part carries
+        // its date as part metadata, which the next turn reads back.
         const today = formatDateForContext();
         const announced = findLastAnnouncedDate(this.getHistoryShallow());
         if (announced !== today) {

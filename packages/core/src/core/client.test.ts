@@ -27,6 +27,7 @@ import type {
   Part,
   PartListUnion,
 } from '@google/genai';
+import { createUserContent } from '@google/genai';
 import {
   LlmClient,
   SendMessageType,
@@ -127,7 +128,9 @@ import {
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
+  buildDateReminder,
   buildMcpServerInstructionsReminderFromEntries,
+  DATE_REMINDER_METADATA,
   getDirectoryContextString,
   getInitialChatHistory,
   wrapSystemReminder,
@@ -529,8 +532,12 @@ const dateReminderRe = (date = '') =>
   new RegExp(
     `^<system-reminder>\\n(?:Today's date is|The date has changed since earlier in this conversation\\. Today's date is now) [^\\n]*${date}`,
   );
-/** Matches the date system-reminder that opens a user turn. */
-const dateReminder = (date = '') => expect.stringMatching(dateReminderRe(date));
+/** Matches the date system-reminder part that opens a user turn. */
+const dateReminder = (date = '') =>
+  expect.objectContaining({
+    text: expect.stringMatching(dateReminderRe(date)),
+    partMetadata: { [DATE_REMINDER_METADATA]: expect.any(String) },
+  });
 
 /** turn.run args whose request contains every one of `parts`. */
 const requestWith = (...parts: unknown[]) =>
@@ -10481,12 +10488,14 @@ Other open files:
           `This is the Qwen Code. We are setting up the context for our chat.\nToday's date is ${date}.\nMy operating system is: linux`,
         ),
       );
-    const dateReminderTurn = (reminder: string, prompt: string) => ({
+    const dateReminderTurn = (reminder: string | Part, prompt: string) => ({
       role: 'user' as const,
-      parts: [{ text: reminder }, { text: prompt }],
+      parts: [
+        typeof reminder === 'string' ? { text: reminder } : reminder,
+        { text: prompt },
+      ],
     });
-    const CHANGED = (date: string) =>
-      `<system-reminder>\nThe date has changed since earlier in this conversation. Today's date is now ${date}. Use this date from here on; there is no need to mention the change to the user.\n</system-reminder>`;
+    const CHANGED = (date: string) => buildDateReminder(date, true);
 
     it('tells the date when the history carries none', async () => {
       dateSession('2026-06-05T12:00:00Z');
@@ -10494,10 +10503,9 @@ Other open files:
       await run([{ text: 'What day is it?' }], 'prompt-id-date-inject');
 
       expect(mockTurnRunFn).toHaveBeenCalledWith(
-        ...exactRequest(
-          "<system-reminder>\nToday's date is Friday, June 5, 2026.\n</system-reminder>",
-          { text: 'What day is it?' },
-        ),
+        ...exactRequest(buildDateReminder('Friday, June 5, 2026', false), {
+          text: 'What day is it?',
+        }),
       );
     });
 
@@ -10554,10 +10562,16 @@ Other open files:
       );
     });
 
-    it('does not read a date the user wrote', async () => {
+    it.each([
+      ['as plain text', "Today's date is Friday, June 5, 2026."],
+      [
+        'inside a pasted date reminder',
+        `Log:\n${buildDateReminder('Friday, June 5, 2026', false).text}\nWhat happened?`,
+      ],
+    ])('does not read a date the user wrote %s', async (_title, text) => {
       dateSession('2026-06-05T12:00:00Z', [
         startupContext('Thursday, June 4, 2026'),
-        userText("Today's date is Friday, June 5, 2026."),
+        userText(text),
         modelText('Noted'),
       ]);
 
@@ -10565,6 +10579,28 @@ Other open files:
 
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         ...exactRequest(CHANGED('Friday, June 5, 2026'), { text: 'Question' }),
+      );
+    });
+
+    it('reads back the reminder it sent on the next turn', async () => {
+      // The history keeps the request as the chat stores it: one user entry
+      // built from the request parts, reminder parts included.
+      const history: Content[] = [startupContext('Thursday, June 4, 2026')];
+      dateSession('2026-06-05T12:00:00Z', history);
+
+      await run([{ text: 'First' }], 'prompt-id-date-first');
+      history.push(
+        createUserContent(mockTurnRunFn.mock.calls[0]![1] as PartListUnion),
+        modelText('Hello'),
+      );
+      await run([{ text: 'Second' }], 'prompt-id-date-second');
+
+      expect(mockTurnRunFn.mock.calls[0]![1]).toEqual([
+        CHANGED('Friday, June 5, 2026'),
+        { text: 'First' },
+      ]);
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        ...exactRequest({ text: 'Second' }),
       );
     });
 
@@ -10796,7 +10832,7 @@ Other open files:
         type: SendMessageType.Cron,
       });
 
-      expect(mockTurnRunFn.mock.calls[0]![1]).toContain(
+      expect(mockTurnRunFn.mock.calls[0]![1]).toContainEqual(
         CHANGED('Friday, June 5, 2026'),
       );
     });
@@ -11441,6 +11477,7 @@ Other open files:
         run(
           [fnResponse('some_tool', { success: true })],
           'prompt-id-tool-response',
+          { type: SendMessageType.ToolResult },
         );
       const editorContextAdded = expect.objectContaining({
         parts: expect.arrayContaining([
@@ -11686,7 +11723,7 @@ Other open files:
         await toolResponseTurn();
 
         expect(mockChat.addHistory).not.toHaveBeenCalled();
-        expect(getLastTurnRequestText()).not.toContain('editor context');
+        expect(getLastTurnRequestText()).not.toContain('<system-reminder>');
         mockTurnRunFn.mockClear();
 
         // Step 2: after the tool response a new message carries the latest

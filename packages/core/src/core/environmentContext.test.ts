@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createUserContent, type Content } from '@google/genai';
+import { createUserContent, type Content, type Part } from '@google/genai';
 import {
   buildAddedMcpToolsReminder,
   buildAddedAgentsReminder,
@@ -19,6 +19,7 @@ import {
   buildChangedSkillsReminder,
   buildDateReminder,
   buildStartupContextReminder,
+  DATE_REMINDER_METADATA,
   findLastAnnouncedDate,
   getEnvironmentContext,
   getDirectoryContextString,
@@ -189,9 +190,11 @@ describe('getDirectoryContextString', () => {
 });
 
 describe('findLastAnnouncedDate', () => {
-  const user = (...texts: string[]): Content => ({
+  const user = (...parts: Array<string | Part>): Content => ({
     role: 'user',
-    parts: texts.map((text) => ({ text })),
+    parts: parts.map((part) =>
+      typeof part === 'string' ? { text: part } : part,
+    ),
   });
   const model = (text: string): Content => ({
     role: 'model',
@@ -228,6 +231,9 @@ describe('findLastAnnouncedDate', () => {
     expect(findLastAnnouncedDate(history)).toBe('Monday, June 1, 2026');
   });
 
+  const legacyReminder = (date: string) =>
+    `<system-reminder>\nThe current date is: ${date}. Note: This is the authoritative current date — it may differ from the "Today's date" mentioned earlier in the conversation startup context.\n</system-reminder>`;
+
   it.each([
     ['a first reminder', buildDateReminder('Friday, June 5, 2026', false)],
     [
@@ -235,9 +241,12 @@ describe('findLastAnnouncedDate', () => {
       buildDateReminder('Friday, June 5, 2026', true),
     ],
     [
-      'the wording recorded before',
-      `<system-reminder>\nThe current date is: Friday, June 5, 2026. Note: This is the authoritative current date — it may differ from the "Today's date" mentioned earlier in the conversation startup context.\n</system-reminder>`,
+      'a reminder from a saved record',
+      JSON.parse(
+        JSON.stringify(buildDateReminder('Friday, June 5, 2026', true)),
+      ) as Part,
     ],
+    ['the wording recorded before', legacyReminder('Friday, June 5, 2026')],
   ])('reads %s after the startup context', (_title, reminder) => {
     const history = [
       startup('Thursday, June 4, 2026'),
@@ -248,14 +257,21 @@ describe('findLastAnnouncedDate', () => {
     expect(findLastAnnouncedDate(history)).toBe('Friday, June 5, 2026');
   });
 
-  it('reads a reminder concatenated into the prompt text', () => {
-    const history = [
-      startup('Thursday, June 4, 2026'),
-      user(`${buildDateReminder('Friday, June 5, 2026', true)}\nQuestion`),
-    ];
-
-    expect(findLastAnnouncedDate(history)).toBe('Friday, June 5, 2026');
-  });
+  it.each([
+    [false, "Today's date is Friday, June 5, 2026."],
+    [
+      true,
+      "The date has changed since earlier in this conversation. Today's date is now Friday, June 5, 2026. Use this date from here on; there is no need to mention the change to the user.",
+    ],
+  ])(
+    'marks the reminder part with the date it gives (changed: %s)',
+    (changed, body) => {
+      expect(buildDateReminder('Friday, June 5, 2026', changed)).toEqual({
+        text: `<system-reminder>\n${body}\n</system-reminder>`,
+        partMetadata: { [DATE_REMINDER_METADATA]: 'Friday, June 5, 2026' },
+      });
+    },
+  );
 
   it('returns the latest of several reminders', () => {
     const history = [
@@ -268,11 +284,35 @@ describe('findLastAnnouncedDate', () => {
     expect(findLastAnnouncedDate(history)).toBe('Friday, June 5, 2026');
   });
 
+  it('reads a marked reminder in the first entry', () => {
+    const history = [
+      user(
+        wrapSystemReminder('Skills are available.'),
+        buildDateReminder('Friday, June 5, 2026', false),
+      ),
+      model('Answer'),
+    ];
+
+    expect(findLastAnnouncedDate(history)).toBe('Friday, June 5, 2026');
+  });
+
   it.each([
     ['plain user text', "Today's date is Friday, June 5, 2026."],
     [
       'a reminder with other content',
       wrapSystemReminder("Note.\nToday's date is Friday, June 5, 2026."),
+    ],
+    [
+      'a pasted date reminder',
+      `Log:\n${buildDateReminder('Friday, June 5, 2026', false).text}\nWhat happened?`,
+    ],
+    [
+      'a whole part copying the date reminder text',
+      buildDateReminder('Friday, June 5, 2026', true).text!,
+    ],
+    [
+      'a pasted reminder of the wording recorded before',
+      `Log:\n${legacyReminder('Friday, June 5, 2026')}`,
     ],
   ])('ignores a date in %s', (_title, text) => {
     const history = [startup('Thursday, June 4, 2026'), user(text)];
@@ -284,7 +324,10 @@ describe('findLastAnnouncedDate', () => {
     expect(
       findLastAnnouncedDate([
         user('Hi'),
-        model(buildDateReminder('Friday, June 5, 2026', false)),
+        {
+          role: 'model',
+          parts: [buildDateReminder('Friday, June 5, 2026', false)],
+        },
       ]),
     ).toBeUndefined();
     expect(findLastAnnouncedDate([])).toBeUndefined();

@@ -81,46 +81,41 @@ export function formatDateForContext(date: Date = new Date()): string {
 const STARTUP_DATE_PATTERN =
   /(?:^|\n)This is the Qwen Code\. We are setting up the context for our chat\.\nToday's date is ([^\n]+?)\.(?=\n|$)/;
 
-// A date reminder block, in the current wordings or the one sessions recorded
-// before the date was derived from history.
-const DATE_REMINDER_PATTERN = new RegExp(
-  `${SYSTEM_REMINDER_OPEN}\\n(?:` +
-    [
-      `The date has changed since earlier in this conversation\\. Today's date is now ([^\\n]+?)\\.[^\\n]*`,
-      `Today's date is ([^\\n]+?)\\.`,
-      `The current date is: ([^\\n]+?)\\. Note: This is the authoritative current date[^\\n]*`,
-    ].join('|') +
-    `)\\n${SYSTEM_REMINDER_CLOSE}`,
-  'g',
+/**
+ * `partMetadata` key on the date reminder part the client adds; its value is
+ * the date the reminder gives. Part metadata never reaches the model, so text
+ * the user writes, pastes or includes cannot carry it.
+ */
+export const DATE_REMINDER_METADATA = 'qwen-code:date-reminder';
+
+// The date reminder sessions recorded before the date reminder carried
+// DATE_REMINDER_METADATA (a compressed record can keep one). Read only when it
+// is a whole part, as the client added it. Safe to remove once those sessions
+// have cycled out.
+const LEGACY_DATE_REMINDER_PATTERN = new RegExp(
+  `^${SYSTEM_REMINDER_OPEN}\\nThe current date is: ([^\\n]+?)\\. Note: This is the authoritative current date[^\\n]*\\n${SYSTEM_REMINDER_CLOSE}$`,
 );
 
 /**
- * The reminder that tells the model today's date. `changed` says an earlier
- * date in the conversation is no longer current.
+ * The reminder part that tells the model today's date. `changed` says an
+ * earlier date in the conversation is no longer current.
  */
-export function buildDateReminder(today: string, changed: boolean): string {
-  return wrapSystemReminder(
-    changed
-      ? `The date has changed since earlier in this conversation. Today's date is now ${today}. Use this date from here on; there is no need to mention the change to the user.`
-      : `Today's date is ${today}.`,
-  );
-}
-
-function lastDateReminderIn(text: string): string | undefined {
-  // Most user text has no reminder; skip the regex scan for it.
-  if (!text.includes(SYSTEM_REMINDER_OPEN)) return undefined;
-  let date: string | undefined;
-  for (const match of text.matchAll(DATE_REMINDER_PATTERN)) {
-    date = match[1] ?? match[2] ?? match[3];
-  }
-  return date;
+export function buildDateReminder(today: string, changed: boolean): Part {
+  return {
+    text: wrapSystemReminder(
+      changed
+        ? `The date has changed since earlier in this conversation. Today's date is now ${today}. Use this date from here on; there is no need to mention the change to the user.`
+        : `Today's date is ${today}.`,
+    ),
+    partMetadata: { [DATE_REMINDER_METADATA]: today },
+  };
 }
 
 /**
- * The last date the history tells the model, read only from text the client
- * generates: the startup context and date reminder blocks in user entries.
- * The date reminder is decided from this rather than from client state, so
- * rewind, resume, compaction and `/clear` cannot leave the two out of step.
+ * The last date the history tells the model, read only from what the client
+ * generates: the startup context and the marked date reminder parts. The date
+ * reminder is decided from this rather than from client state, so rewind,
+ * resume, compaction and `/clear` cannot leave the two out of step.
  */
 export function findLastAnnouncedDate(
   history: readonly Content[],
@@ -131,12 +126,14 @@ export function findLastAnnouncedDate(
     if (content.role !== 'user') continue;
     const parts = content.parts ?? [];
     for (let partIndex = parts.length - 1; partIndex >= 0; partIndex--) {
-      const text = parts[partIndex]!.text;
-      if (typeof text !== 'string') continue;
+      const part = parts[partIndex]!;
+      const marked = part.partMetadata?.[DATE_REMINDER_METADATA];
+      if (typeof marked === 'string') return marked;
+      if (typeof part.text !== 'string') continue;
       const date =
         index < startupLength
-          ? STARTUP_DATE_PATTERN.exec(text)?.[1]
-          : lastDateReminderIn(text);
+          ? STARTUP_DATE_PATTERN.exec(part.text)?.[1]
+          : LEGACY_DATE_REMINDER_PATTERN.exec(part.text.trimEnd())?.[1];
       if (date !== undefined) return date;
     }
   }
