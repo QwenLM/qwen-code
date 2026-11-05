@@ -419,7 +419,9 @@ describe('subagent plan tool policy', () => {
         ),
       ).toBe(false);
     }
-    // Both halves declared keep the route open.
+    // Both halves declared keep the route open only while the allowlist also
+    // admits the resolved target: the scheduler re-checks `skill` against the
+    // same list after the bridge resolves the wrapper.
     expect(
       toolConfigAllowsSkill(
         {
@@ -432,7 +434,64 @@ describe('subagent plan tool policy', () => {
         true,
         true,
       ),
+    ).toBe(false);
+    expect(
+      toolConfigAllowsSkill(
+        {
+          tools: ['*'],
+          executionAllowedTools: [
+            ToolNames.TOOL_SEARCH,
+            ToolNames.TOOL_CALL,
+            ToolNames.SKILL,
+          ],
+        },
+        false,
+        true,
+        false,
+        true,
+        true,
+      ),
     ).toBe(true);
+  });
+
+  it.each([ToolMode.Direct, ToolMode.CodeMode])(
+    'reports a permission-deferred skill as eager-hidden in %s',
+    (mode) => {
+      const config = makeFakeConfig({ toolMode: mode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerPermissionDeferredFactory(
+        ToolNames.SKILL,
+        async () => new MockTool({ name: ToolNames.SKILL }),
+      );
+
+      // prepareTools() removes the declaration outside CodeModeOnly, so the
+      // listing must not survive without a route to the tool.
+      expect(isAgentSkillEagerHidden(config)).toBe(true);
+      expect(
+        toolConfigAllowsSkill(
+          { tools: [ToolNames.SKILL] },
+          false,
+          isAgentSkillEagerHidden(config),
+          false,
+          true,
+          false,
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it('reports a permission-deferred skill as not hidden in CodeModeOnly', () => {
+    // The one mode whose admission pool retains eager-hidden targets: exec
+    // binds the registered tool even while its direct schema is withheld.
+    const config = makeFakeConfig({ toolMode: ToolMode.CodeModeOnly });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerPermissionDeferredFactory(
+      ToolNames.SKILL,
+      async () => new MockTool({ name: ToolNames.SKILL }),
+    );
+    expect(isAgentSkillEagerHidden(config)).toBe(false);
   });
 
   describe('hasAgentSkillExecBinding', () => {

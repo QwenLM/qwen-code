@@ -97,8 +97,11 @@ function isAgentToolEagerHidden(
   const registry = context.getToolRegistry?.();
   // Lazy factories may not have a Tool instance yet. Registry rebuilds copy
   // discovery metadata, but deliberately leave transient reveals behind.
+  // Only CodeModeOnly keeps eager-hidden targets in its admission pool (as
+  // exec bindings); every other mode filters the declaration out, so the
+  // predicate must mirror that filter rather than name a single mode.
   return (
-    context.getToolMode?.() === ToolMode.CodeMode &&
+    context.getToolMode?.() !== ToolMode.CodeModeOnly &&
     registry?.isPermissionDeferred?.(toolName) === true &&
     !context.getVisibleTools?.().has(toolName) &&
     (registryWillBeRebuilt ||
@@ -175,10 +178,10 @@ export function hasAgentSkillExecBinding(
  * registry, whether the Skill factory is registered there at all, and whether
  * the deferred-tool bridge is registered. A finite list naming exec can
  * therefore reach Skill without naming it directly. CodeModeOnly retains
- * eager-deferred nested targets. In Hybrid, an eager-hidden Skill is vetoed
- * only when the bridge cannot reach it: `prepareTools()` keeps the schema out
- * of the direct declarations, but `tool_search` + `tool_call` still discover
- * and invoke the registered tool. Other permission bounds stay in
+ * eager-deferred nested targets. Outside CodeModeOnly, an eager-hidden Skill
+ * is vetoed only when the bridge cannot reach it: `prepareTools()` keeps the
+ * schema out of the direct declarations, but `tool_search` + `tool_call` still
+ * discover and invoke the registered tool. Other permission bounds stay in
  * prepareTools().
  * Registry deny/exclude rules remain the bundled-reference resolver's concern;
  * this predicate supplies the per-agent policy that resolver cannot see.
@@ -239,10 +242,18 @@ export function toolConfigAllowsSkill(
     toolConfig?.executionAllowedTools === undefined ||
     (toolConfig.executionAllowedTools.includes(ToolNames.TOOL_SEARCH) &&
       toolConfig.executionAllowedTools.includes(ToolNames.TOOL_CALL));
+  // The bridge resolves to `skill` itself, and the scheduler re-checks that
+  // resolved target against the same execution allowlist (direct form). A
+  // defined list is authoritative for non-MCP names, so `tools: ['*']` must
+  // not re-admit a target the list omits.
+  const bridgeTargetAllowed =
+    toolConfig?.executionAllowedTools === undefined ||
+    toolConfig.executionAllowedTools.includes(ToolNames.SKILL);
   const bridgeReachesSkill =
     deferredBridgeAvailable &&
     !bridgeBlocked &&
     bridgeExecutionAllowed &&
+    bridgeTargetAllowed &&
     (inheritsRegistry ||
       (names.includes(ToolNames.TOOL_SEARCH) &&
         names.includes(ToolNames.TOOL_CALL)));
