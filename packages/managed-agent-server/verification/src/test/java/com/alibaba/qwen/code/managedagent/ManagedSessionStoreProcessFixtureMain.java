@@ -48,8 +48,8 @@ public final class ManagedSessionStoreProcessFixtureMain {
                 System.getenv().getOrDefault("D1_MYSQL_PASSWORD", ""));
         TransactionTemplate transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
-        ManagedSessionStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource)));
+        ManagedSessionStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource));
         String action = required("D1_PROCESS_ACTION");
         switch (action) {
             case "commit-and-crash" -> commitAndCrash(store, transactions);

@@ -50,7 +50,7 @@ class ManagedSessionPhysicalFenceTest {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
-        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         generation =
                 transactions
                         .execute(
@@ -320,13 +320,13 @@ class ManagedSessionPhysicalFenceTest {
                 TENANT,
                 com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(TENANT, "actor"));
         var publicStore =
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
                         jdbc,
                         new com.fasterxml.jackson.databind.ObjectMapper(),
                         java.time.Clock.systemUTC(),
                         ignored -> {},
                         new ManagedWorkspaceRegistry(jdbc),
-                        new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                        new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var selection =
                 new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection("workspace", ".");
         var parent =

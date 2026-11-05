@@ -2435,12 +2435,14 @@ ${boardState}
       vi
         .mocked(loggers.logLoopProtection)
         .mock.calls.map(([, event]) => `${event.loop_type}:${event.decision}`);
-    // Calls fn(i) for i < n and collects the reminder queued after each call.
+    // Calls fn(i) for i < n and collects the reminder queued after each call,
+    // committing each delivery the way a model-accepted send would.
     const reminders = (n: number, fn: (i: number) => boolean) => {
       const queued: Array<string | undefined> = [];
       for (let i = 0; i < n; i++) {
         expect(fn(i)).toBe(false);
         queued.push(service.takeLoopReminder());
+        service.commitLoopReminderDelivery();
       }
       return queued;
     };
@@ -2510,13 +2512,102 @@ ${boardState}
       expect(service.takeLoopReminder()).toBeUndefined();
     });
 
-    it('logs a reminder when it is sent, not when it is queued', () => {
+    it('credits and restores every entry of a multi-entry delivery', () => {
+      withMode('stop');
+      const queueTwoStreaks = () => {
+        const commands = [
+          'git status',
+          'git status --short',
+          'git status -sb',
+          'git status --porcelain',
+        ];
+        for (let i = 0; i < 6; i++) {
+          expect(
+            guardTool('run_shell_command', { command: commands[i % 4] }),
+          ).toBe(false);
+        }
+        for (let i = 0; i < 3; i++) expect(same()).toBe(false);
+      };
+
+      queueTwoStreaks();
+      expect(service.takeLoopReminder()?.split('\n\n')).toHaveLength(2);
+      service.abandonLoopReminderDelivery();
+      expect(decisions()).toEqual([]);
+
+      // The whole delivery was restored, not just its first entry: the next
+      // send carries both warnings and credits both decisions.
+      expect(service.takeLoopReminder()?.split('\n\n')).toHaveLength(2);
+      service.commitLoopReminderDelivery();
+      expect(decisions()).toHaveLength(2);
+      expect(decisions().every((entry) => entry.endsWith(':reminded'))).toBe(
+        true,
+      );
+      expect(service.takeLoopReminder()).toBeUndefined();
+    });
+
+    it('logs the reminder only when the delivery commits, not when queued or taken', () => {
       withMode('stop');
       reminders(2, same);
       expect(same()).toBe(false);
       expect(decisions()).toEqual([]);
-      service.takeLoopReminder();
+      const taken = service.takeLoopReminder();
+      expect(taken).toContain('3 times in a row');
+      expect(decisions()).toEqual([]);
+      service.commitLoopReminderDelivery();
       expect(decisions()).toEqual([`${IDENTICAL}:reminded`]);
+    });
+
+    it('abandons a prepared delivery back to the pending map without crediting it', () => {
+      withMode('stop');
+      reminders(2, same);
+      expect(same()).toBe(false);
+      const taken = service.takeLoopReminder();
+      expect(taken).toContain('3 times in a row');
+      service.abandonLoopReminderDelivery();
+      expect(decisions()).toEqual([]);
+      // Restored: the next send takes the same warning once, then nothing.
+      expect(service.takeLoopReminder()).toBe(taken);
+      expect(service.takeLoopReminder()).toBeUndefined();
+      service.commitLoopReminderDelivery();
+      expect(decisions()).toEqual([`${IDENTICAL}:reminded`]);
+    });
+
+    it('does not queue a duplicate when the pattern refires after an abandon', () => {
+      withMode('stop');
+      reminders(2, same);
+      expect(same()).toBe(false);
+      service.takeLoopReminder();
+      service.abandonLoopReminderDelivery();
+      // The key stays handled while the entry is restored, so the 4th
+      // identical call adds nothing alongside the restored reminder.
+      expect(same()).toBe(false);
+      const sent = service.takeLoopReminder()?.split('\n\n');
+      expect(sent).toHaveLength(1);
+      expect(sent?.[0]).toContain('3 times in a row');
+    });
+
+    it('keeps a prepared delivery across a retry and commits it once', () => {
+      withMode('stop');
+      reminders(2, same);
+      expect(same()).toBe(false);
+      expect(service.takeLoopReminder()).toBeDefined();
+      // The retry's drop only reaches pending reminders; the taken delivery
+      // stays prepared for the request the retry attempt re-sends.
+      expect(guard(RETRY)).toBe(false);
+      service.commitLoopReminderDelivery();
+      expect(decisions()).toEqual([`${IDENTICAL}:reminded`]);
+      expect(service.takeLoopReminder()).toBeUndefined();
+    });
+
+    it('drops a prepared delivery on a new prompt so an abandon cannot leak it', () => {
+      withMode('warn');
+      reminders(2, same);
+      expect(same()).toBe(false);
+      expect(service.takeLoopReminder()).toBeDefined();
+      service.reset('next-prompt');
+      service.abandonLoopReminderDelivery();
+      expect(service.takeLoopReminder()).toBeUndefined();
+      expect(decisions()).toEqual([]);
     });
 
     it('does not log a reminder cut off by a stop in the same batch', () => {
@@ -2596,6 +2687,7 @@ ${boardState}
       expect(same()).toBe(false);
       service.reset('side-prompt', { keepReminders: true });
       expect(service.takeLoopReminder()).toContain('3 times in a row');
+      service.commitLoopReminderDelivery();
       const [[, event]] = vi.mocked(loggers.logLoopProtection).mock.calls;
       expect(event.decision).toBe('reminded');
       expect(event.prompt_id).toBe('loop-protection');
@@ -2637,6 +2729,7 @@ ${boardState}
         service.checkAlwaysOnSafeties(toolCall('task_list', args, 'p-0')),
       ).toBe(false);
       expect(service.takeLoopReminder()).toContain('task_list');
+      service.commitLoopReminderDelivery();
       expect(decisions()).toEqual([
         `${IDENTICAL}:observed`,
         `${IDENTICAL}:reminded`,

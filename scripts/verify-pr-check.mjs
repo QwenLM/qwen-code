@@ -35,6 +35,14 @@ export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
  */
 export const ATTRIBUTIONS = ['pr', 'harness', 'environment'];
 
+/**
+ * Above this many assertions, a round has almost certainly folded an existing
+ * test suite into its own counts. The four such rounds among 18 recent CI
+ * artifacts (3918 to 7737) each counted whole workspace suites; one counted
+ * them again for every mutant run, so 7737 held a few dozen checks of its own.
+ */
+const SUITE_SIZED_TOTAL = 1000;
+
 const KEBAB_PNG = /^[a-z0-9]+(?:-[a-z0-9]+)*\.png$/;
 const OID = /^[0-9a-f]{7,40}$/;
 // GFM renders an ATX heading indented up to three spaces as a heading too
@@ -48,7 +56,7 @@ const HEADING_TITLE_MAX = 120;
 const FOOTER =
   /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
-const HELP = `Usage: node scripts/verify-pr-check.mjs <artifact-dir>
+const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] <artifact-dir>
 
 Checks a local round against the rules the CI publisher enforces:
 
@@ -56,6 +64,8 @@ Checks a local round against the rules the CI publisher enforces:
   - verdict.txt is exactly one of merge-ready | findings | blocked | inconclusive
   - assertions.json holds non-negative integers, a positive total, and
     total == pass + fail
+  - assertions.json gates, when present, lists { suite, pass, fail } entries
+    (skipped optional) with non-negative integer counts up to 2^53-1
   - a merge-ready verdict carries no failed assertion
   - a findings/blocked verdict whose failures ledger attributes no failure to
     the PR is a contradiction: expected reds are passes
@@ -65,9 +75,14 @@ Checks a local round against the rules the CI publisher enforces:
 and warns (without failing) when the report does not lead with its verdict and
 head OID, when the verdict line is a heading (GitHub renders the whole
 paragraph as one giant H1), when evidence/ carries no kebab-case PNG capture,
-when a round with failures carries no failures ledger at all, or when
-comment.md — the exact body a local round posts, optional — repeats the
-heading shape or lacks the attribution footer.
+when a round with failures carries no failures ledger at all, when over
+${SUITE_SIZED_TOTAL} assertions come with no gate results (an existing test suite
+counted as the round's own), or when comment.md — the exact body a local round
+posts, optional — repeats the heading shape or lacks the attribution footer.
+
+With --context <snapshot>, the head-OID check reads that file instead of the
+round's own context.json. Pass a copy the round never saw: the artifact
+directory is writable by the PR code the round executed.
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
@@ -270,6 +285,45 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
             attributions = ledger.map((entry) => entry.attribution);
           }
         }
+        // Gate counts are the repo's existing tests, kept apart so that
+        // pass/fail/total measure what this round wrote. The messages carry
+        // no suite name: the publisher forwards error lines to its log.
+        const gates = parsed.gates;
+        // The safe-integer ceiling keeps parity with the publisher's jq:
+        // a JSON literal like 1e309 parses to Infinity here, while jq
+        // clamps it to a finite double that would otherwise pass.
+        const isCount = (value) =>
+          Number.isInteger(value) &&
+          value >= 0 &&
+          value <= Number.MAX_SAFE_INTEGER;
+        // Blank means JSON whitespace only: trim() and jq's \S disagree on
+        // U+0085 and U+FEFF.
+        const gatesValid =
+          Array.isArray(gates) &&
+          gates.every(
+            (gate) =>
+              !!gate &&
+              typeof gate.suite === 'string' &&
+              /[^ \t\n\r]/.test(gate.suite) &&
+              isCount(gate.pass) &&
+              isCount(gate.fail) &&
+              (gate.skipped === undefined || isCount(gate.skipped)),
+          );
+        if (gates !== undefined && !gatesValid) {
+          errors.push(
+            'assertions.json gates must be an array of { suite, pass, fail } entries with non-negative integer counts (skipped optional)',
+          );
+        }
+        // Only recorded results silence the size warning: an empty list, or
+        // entries that count nothing, moved no suite out of the counts.
+        const gateResults = gatesValid
+          ? gates.reduce((sum, gate) => sum + gate.pass + gate.fail, 0)
+          : 0;
+        if (counts.total > SUITE_SIZED_TOTAL && gateResults === 0) {
+          warnings.push(
+            `assertions.json counts ${counts.total} assertions and records no gate results: an existing test suite's results belong in gates, not in pass, fail and total`,
+          );
+        }
       }
     }
   }
@@ -366,10 +420,29 @@ function main(argv) {
     process.stdout.write(HELP);
     return 0;
   }
-  const dir = argv.find((arg) => !arg.startsWith('-'));
-  if (!dir) {
+  let contextPath = null;
+  const positional = [];
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index];
+    if (arg === '--context') {
+      contextPath = argv[++index];
+      if (!contextPath) {
+        process.stderr.write(
+          `verify-pr check: --context requires a snapshot path\n\n${HELP}`,
+        );
+        return 2;
+      }
+    } else if (arg.startsWith('-')) {
+      process.stderr.write(`verify-pr check: unknown option ${arg}\n\n${HELP}`);
+      return 2;
+    } else {
+      positional.push(arg);
+    }
+  }
+  const dir = positional[0];
+  if (!dir || positional.length > 1) {
     process.stderr.write(
-      `verify-pr check: an artifact directory is required\n\n${HELP}`,
+      `verify-pr check: exactly one artifact directory is required\n\n${HELP}`,
     );
     return 2;
   }
@@ -398,25 +471,47 @@ function main(argv) {
   // rather than silently downgrading the check.
   let expectedHead = null;
   let snapshotWarning = null;
-  let snapshotPath = join(dir, 'context.json');
-  const prNumber = /^pr(\d+)-verify-/.exec(basename(resolve(dir)))?.[1];
-  if (!existsSync(snapshotPath) && prNumber) {
-    snapshotPath = join(
-      dirname(resolve(dir)),
-      'verify-context',
-      `pr${prNumber}.json`,
-    );
-  }
-  if (existsSync(snapshotPath)) {
+  let snapshotPath = null;
+  if (contextPath) {
+    // A host-held snapshot: the artifact directory is writable by the PR code
+    // the round just executed, so its own context.json cannot pin the head
+    // when the maintainer supplies a copy that code never saw.
     try {
-      const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+      const snapshot = JSON.parse(readFileSync(contextPath, 'utf8'));
       if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
         expectedHead = snapshot.headRefOid;
-      } else {
-        snapshotWarning = `snapshot ${snapshotPath} has no valid head OID; the head-OID check fell back to presence-only`;
+        snapshotPath = contextPath;
       }
     } catch {
-      snapshotWarning = `snapshot ${snapshotPath} is unreadable; the head-OID check fell back to presence-only`;
+      // Reported below; never falls back to the writable artifact copy.
+    }
+    if (!expectedHead) {
+      process.stderr.write(
+        `verify-pr check: --context ${contextPath} is missing, unreadable, or carries no valid head OID\n`,
+      );
+      return 1;
+    }
+  } else {
+    snapshotPath = join(dir, 'context.json');
+    const prNumber = /^pr(\d+)-verify-/.exec(basename(resolve(dir)))?.[1];
+    if (!existsSync(snapshotPath) && prNumber) {
+      snapshotPath = join(
+        dirname(resolve(dir)),
+        'verify-context',
+        `pr${prNumber}.json`,
+      );
+    }
+    if (existsSync(snapshotPath)) {
+      try {
+        const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+        if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
+          expectedHead = snapshot.headRefOid;
+        } else {
+          snapshotWarning = `snapshot ${snapshotPath} has no valid head OID; the head-OID check fell back to presence-only`;
+        }
+      } catch {
+        snapshotWarning = `snapshot ${snapshotPath} is unreadable; the head-OID check fell back to presence-only`;
+      }
     }
   }
 

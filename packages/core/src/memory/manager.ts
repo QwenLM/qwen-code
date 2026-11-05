@@ -22,7 +22,6 @@
  *   config.getMemoryManager().forget(projectRoot, query, options)
  *   config.getMemoryManager().getStatus(projectRoot)
  *   config.getMemoryManager().drain(options?)
- *   config.getMemoryManager().buildAutoMemoryPrompt(projectRoot)
  *
  * # Task records
  * Each scheduled operation is tracked as a lightweight MemoryTaskRecord.
@@ -89,12 +88,6 @@ import {
   type ResolveRelevantAutoMemoryPromptOptions,
 } from './recall.js';
 import { getManagedAutoMemoryStatus } from './status.js';
-import {
-  buildManagedAutoMemoryPrompt,
-  type BuildMemoryPromptOptions,
-  type UserAutoMemorySection,
-  type TeamAutoMemorySection,
-} from './prompt.js';
 import { writeDreamManualRunToMetadata } from './dream.js';
 import { buildConsolidationTaskPrompt } from './dreamAgentPlanner.js';
 import {
@@ -3092,32 +3085,6 @@ export class MemoryManager {
   /** Return a full status snapshot for the given project's memory. */
   getStatus(projectRoot: string) {
     return getManagedAutoMemoryStatus(projectRoot, this);
-  }
-
-  // ─── Prompt build ─────────────────────────────────────────────────────────────
-
-  /**
-   * Build the managed auto-memory section of the system prompt. This is the
-   * policy plus indexes by default. Session callers exclude indexes and send
-   * them as request-only catalog data. When
-   * `userSection` is provided, the prompt teaches the model to route saves
-   * between the project dir and the user (cross-project) dir using the
-   * per-type scope guidance.
-   */
-  buildAutoMemoryPrompt(
-    memoryDir: string,
-    indexContent?: string | null,
-    userSection?: UserAutoMemorySection,
-    teamSection?: TeamAutoMemorySection,
-    options?: BuildMemoryPromptOptions,
-  ): string {
-    return buildManagedAutoMemoryPrompt(
-      memoryDir,
-      indexContent,
-      userSection,
-      teamSection,
-      options,
-    );
   }
 
   // ─── Dream utilities ──────────────────────────────────────────────────────────

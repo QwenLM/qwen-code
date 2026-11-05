@@ -290,6 +290,14 @@ export function parsePathsField(
 export const SKILL_NAME_PATTERN = /^[\p{L}\p{N}_:.-]+$/u;
 
 /**
+ * Name of the bundled reference that carries the detailed auto-memory
+ * guidance (see `auto-memory-skill.ts`). Kept in this leaf module so the
+ * skill manager, the Skill tool and the daemon's skills catalog can name it
+ * without importing the prompt builders.
+ */
+export const AUTO_MEMORY_SKILL_NAME = 'auto-memory';
+
+/**
  * Parse the `allowedTools` field from skill frontmatter.
  * Returns `undefined` when the field is omitted. Throws when the field is
  * present but not an array.
