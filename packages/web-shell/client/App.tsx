@@ -4127,24 +4127,6 @@ export function App({
     () => workspaces.filter((entry) => entry.kind !== 'live'),
     [workspaces],
   );
-  const sidebarlessLiveStateWorkspaceCwds = useMemo(() => {
-    if (sidebarOptions.enabled) return [];
-    return workspaces
-      .filter((entry) => entry.trusted && isAbsolutePath(entry.cwd))
-      .map((entry) => entry.cwd);
-  }, [sidebarOptions.enabled, workspaces]);
-  useWorkspaceSessionLiveState(workspace.client, {
-    pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
-    enabled: Boolean(
-      sidebarlessLiveStateWorkspaceCwds.length > 0 &&
-        connection.capabilities?.features?.includes(
-          SESSION_LIVE_STATE_FEATURE,
-        ) &&
-        typeof workspace.client.getWorkspaceSessionLiveState === 'function',
-    ),
-    workspaceCwds: sidebarlessLiveStateWorkspaceCwds,
-    groupWorkspaceCwds: [],
-  });
   // Daemon-authoritative "turn is running" signal for the connected session:
   // keeps the conversation indicator (and its cancel affordances) alive
   // through >3s silent tool gaps where streamingState drops to idle (#9487).
@@ -4158,6 +4140,37 @@ export function App({
         ? trustedLiveWorkspaces[0]?.cwd
         : undefined
       : connection.workspaceCwd;
+  const sidebarlessLiveStateWorkspaceCwds = useMemo(() => {
+    if (
+      sidebarOptions.enabled ||
+      !connection.sessionId ||
+      !activePromptWorkspaceCwd ||
+      !isAbsolutePath(activePromptWorkspaceCwd)
+    ) {
+      return [];
+    }
+    const trusted = workspaces.some(
+      (entry) => entry.cwd === activePromptWorkspaceCwd && entry.trusted,
+    );
+    return trusted ? [activePromptWorkspaceCwd] : [];
+  }, [
+    sidebarOptions.enabled,
+    connection.sessionId,
+    activePromptWorkspaceCwd,
+    workspaces,
+  ]);
+  useWorkspaceSessionLiveState(workspace.client, {
+    pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
+    enabled: Boolean(
+      sidebarlessLiveStateWorkspaceCwds.length > 0 &&
+        connection.capabilities?.features?.includes(
+          SESSION_LIVE_STATE_FEATURE,
+        ) &&
+        typeof workspace.client.getWorkspaceSessionLiveState === 'function',
+    ),
+    workspaceCwds: sidebarlessLiveStateWorkspaceCwds,
+    groupWorkspaceCwds: [],
+  });
   const {
     hasActivePrompt: daemonHasActivePrompt,
     activeWorkState: sessionActiveWorkState,

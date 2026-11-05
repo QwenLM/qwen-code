@@ -14207,6 +14207,7 @@ describe('App composer footer renderer', () => {
 
 describe('App conversation indicator keep-alive (#9487)', () => {
   it('bridges a Live session through its resolved workspace owner', async () => {
+    mockConnection.capabilities.features = ['workspace_session_live_state'];
     mockConnection.sessionContext = { kind: 'live' };
     mockConnection.workspaceCwd = undefined;
     mockWorkspace.capabilities = {
@@ -14235,9 +14236,18 @@ describe('App conversation indicator keep-alive (#9487)', () => {
       '/tmp/live',
       'session-1',
     );
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      {
+        enabled: true,
+        pollIntervalMs: undefined,
+        workspaceCwds: ['/tmp/live'],
+        groupWorkspaceCwds: [],
+      },
+    );
   });
 
-  it('polls prompt authority only for trusted workspaces when the sidebar is disabled (#10989)', async () => {
+  it('polls only the connected workspace when the sidebar is disabled (#16355)', async () => {
     mockConnection.capabilities.features = ['workspace_session_live_state'];
     mockWorkspace.capabilities = {
       sessionLiveStatePollIntervalMs: 10_000,
@@ -14258,15 +14268,30 @@ describe('App conversation indicator keep-alive (#9487)', () => {
       ],
     };
 
+    mockConnection.sessionId = undefined;
     const { rerender } = renderApp({ sidebar: false });
     await flush();
 
-    expect(mockUseWorkspaceSessionLiveState).toHaveBeenCalledWith(
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      {
+        enabled: false,
+        pollIntervalMs: 10_000,
+        workspaceCwds: [],
+        groupWorkspaceCwds: [],
+      },
+    );
+
+    mockConnection.sessionId = 'session-1';
+    rerender({ sidebar: false });
+    await flush();
+
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
       mockWorkspace.client,
       {
         enabled: true,
         pollIntervalMs: 10_000,
-        workspaceCwds: ['/tmp/project', '/tmp/live'],
+        workspaceCwds: ['/tmp/project'],
         groupWorkspaceCwds: [],
       },
     );
