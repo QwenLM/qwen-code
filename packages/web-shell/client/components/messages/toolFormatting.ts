@@ -477,7 +477,8 @@ function parseGrepSummary(text: string): string | null {
   );
   if (
     summary === 'No matches found' ||
-    summary === 'No permitted matches found'
+    summary === 'No permitted matches found' ||
+    summary === 'Error: Search incomplete'
   )
     return text;
   if (
@@ -490,7 +491,7 @@ function parseGrepSummary(text: string): string | null {
 }
 
 function parseGlobSummary(text: string): string | null {
-  return /^(?:Found (?:\d+|at least \d+) matching file\(s\)(?: \(truncated\))?|No (?:permitted )?files found)(?: \[\d+ files? omitted by permission rules\])?$/.test(
+  return /^(?:Found (?:\d+|at least \d+) matching file\(s\)|No (?:permitted )?files found)(?: \(truncated\))?(?: \[\d+ files? omitted by permission rules\])?$/.test(
     text,
   )
     ? text

@@ -308,6 +308,22 @@ describe('toolFormatting', () => {
     ).toBe('Found 1 matching file(s)');
   });
 
+  it.each([
+    'Found 2 matching file(s)',
+    'Found at least 2 matching file(s) (truncated)',
+    'No files found',
+    'No permitted files found (truncated) [2 files omitted by permission rules]',
+  ])('keeps glob returnDisplay summaries unchanged', (rawOutput) => {
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'glob',
+          rawOutput,
+        }),
+      ),
+    ).toBe(rawOutput);
+  });
+
   it('keeps permission-aware glob summaries unchanged', () => {
     const rawOutput =
       'No permitted files found [1 file omitted by permission rules]';
@@ -387,6 +403,7 @@ describe('toolFormatting', () => {
   it.each([
     'No matches found [1 file omitted by permission rules]',
     'No permitted matches found [1 file omitted by permission rules]',
+    'Error: Search incomplete [1 file omitted by permission rules]',
     'Found 2 matches [1 file omitted by permission rules]',
     'Found 12 matches (truncated, incomplete) [2 files omitted by permission rules]',
   ])('keeps permission-aware grep_search summaries unchanged', (rawOutput) => {
