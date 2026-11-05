@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.maintenance;
 
 import com.alibaba.qwen.code.maintenance.WorkspaceRecoveryApplication;
+import com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceOperatorRecoveryStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
@@ -12,7 +13,6 @@ import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtecto
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -32,7 +32,6 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
-import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -42,11 +41,13 @@ public final class WorkspaceRecoveryCommand {
     }
 
     public static void main(String[] args) throws Exception {
+        if (args.length == 0) {
+            throw new IllegalArgumentException("Expected inspect, prepare or complete.");
+        }
+        var localFactory = new RuntimeProviderRegistry()
+                .require(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS);
         try (ConfigurableApplicationContext context = new SpringApplicationBuilder(
                 WorkspaceRecoveryApplication.class).web(WebApplicationType.NONE).run(args)) {
-            if (args.length == 0) {
-                throw new IllegalArgumentException("Expected inspect, prepare or complete.");
-            }
             ManagedAgentSettings.RuntimeBroker options = context.getBean(
                     ManagedAgentSettings.class).getRuntimeBroker();
             if (!options.isOperatorRecoveryEnabled()
@@ -71,9 +72,7 @@ public final class WorkspaceRecoveryCommand {
                 throw new IllegalStateException("Original Runtime state directory is unavailable.");
             }
             HttpRuntimeTransport http = new HttpRuntimeTransport();
-            try (LocalProcessRuntimeProvisioner local = LocalProcessRuntimeProvisioner.durable(
-                    List.of("maintenance-never-starts-worker"), stateDirectory, http,
-                    options.isTrustedLocalRebootRecovery())) {
+            try (var local = localFactory.createForMaintenance(options, http)) {
                 if ("inspect".equals(args[0]) && args.length == 3) {
                     long generation = Long.parseLong(args[2]);
                     var inspection = operator.inspect(args[1], generation);

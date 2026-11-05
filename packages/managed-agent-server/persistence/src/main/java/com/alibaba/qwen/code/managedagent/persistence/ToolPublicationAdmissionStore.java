@@ -129,11 +129,11 @@ public final class ToolPublicationAdmissionStore {
         String suffix = locked ? " FOR UPDATE" : "";
         var publication = jdbc.query("SELECT scope_key, publication_id, tenant_id, workspace_id, session_id, producer_phase,"
                 + " admission_resource_id, receipt_sequence, receipt_revision,"
-                + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                 + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?" + suffix, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope(key), id).getFirst();
         require(scope(key).equals(publication.get("scope_key")) && id.equals(publication.get("publication_id"))
                 && "REFERENCED".equals(publication.get("producer_phase"))
-                && ((Number) publication.get("quarantined")).intValue() == 0
+                && ((Number) publication.get("is_quarantined")).intValue() == 0
                 && text(key, "tenantId").equals(publication.get("tenant_id"))
                 && text(key, "workspaceId").equals(publication.get("workspace_id"))
                 && text(key, "sessionId").equals(publication.get("session_id"))
@@ -369,12 +369,21 @@ public final class ToolPublicationAdmissionStore {
         return transactions.execute(status -> {
             data.lockPublicationPlacement(key, publicationId);
             sessions.lockCsiOriginal(text(key, "tenantId"), text(key, "sessionId"));
-            data.lockOriginalSettledResult(key, publicationId, finished);
-            lockTenant(key);
+            boolean csi = data.lockOriginalSettledResult(key, publicationId, finished);
+            // An ordinary receipt without lifecycle authority skips the tenant
+            // publication guard: the journal commit below takes none, and the
+            // lane locks root, head, publication row, as collection does. A CSI
+            // original or a lifecycle-authority commit (which takes the guard
+            // in checkLifecycleWriter) keeps it where it was (design
+            // 2026-11-04-managed-publication-tenant-guards, C2).
+            boolean guard = csi || authority != null;
+            if (guard) {
+                lockTenant(key);
+            }
             sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
-                    text(key, "sessionId"), request.writerId(), request.writerGeneration(), writerToken);
+                    text(key, "sessionId"), request.writerId(), request.writerGeneration(), writerToken, guard);
             Map<String, Object> publication = jdbc.query("SELECT producer_phase, binding_json, binding_digest,"
-                    + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined, admission_resource_id,"
+                    + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined, admission_resource_id,"
                     + " receipt_sequence, receipt_revision, finish_digest, terminal_resource_id"
                     + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ? AND tenant_id = ?"
                     + " AND workspace_id = ? AND session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId,
@@ -382,7 +391,7 @@ public final class ToolPublicationAdmissionStore {
             ToolPublicationStore.requireLockedBinding(publication, finished.path("binding"));
             require(resourceId.equals(publication.get("admission_resource_id"))
                     && candidate.get("terminal_resource_id").equals(publication.get("terminal_resource_id"))
-                    && ((Number) publication.get("quarantined")).intValue() == 0,
+                    && ((Number) publication.get("is_quarantined")).intValue() == 0,
                     "Admission root changed");
             var object = jdbc.query("SELECT capture_state AS state, sha256, byte_length, capture_object_key AS object_key"
                     + " FROM ma_resource WHERE scope_key = ? AND publication_id = ?"
@@ -410,7 +419,7 @@ public final class ToolPublicationAdmissionStore {
             }
             var receipt = sessions.commit(text(key, "tenantId"), text(key, "sessionId"),
                     writerToken, request, authority);
-            jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", producer_phase = 'REFERENCED', admission_held_bytes = admission_used_bytes, receipt_sequence = ?, receipt_revision = ?, accepted_complete = ? WHERE scope_key = ? AND publication_id = ?",
+            jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", producer_phase = 'REFERENCED', admission_held_bytes = admission_used_bytes, receipt_sequence = ?, receipt_revision = ?, is_accepted_complete = ? WHERE scope_key = ? AND publication_id = ?",
                     request.lastSequence(), receipt.journalRevision(),
                     "committed".equals(outcome.path("decision").asText())
                             && "complete".equals(outcome.path("envelope").path("capture").path("captureStatus").asText()),

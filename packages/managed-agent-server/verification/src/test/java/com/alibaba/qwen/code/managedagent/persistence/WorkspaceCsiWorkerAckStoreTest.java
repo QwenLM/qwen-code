@@ -243,7 +243,7 @@ public class WorkspaceCsiWorkerAckStoreTest {
         var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("fixture", new byte[32]));
         var sessions = new JdbcRuntimeSessionRepository(source);
         var executions = new JdbcToolExecutionRepository(source);
-        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         var grants = new ToolPublicationStore(jdbc, manager, managed, executions, bindings,
                 new ToolPublicationStore.Capacity(1024, 16 * 1024 * 1024, 16 * 1024 * 1024, 10));
         var objects = mock(ToolPublicationObjectStore.class);
