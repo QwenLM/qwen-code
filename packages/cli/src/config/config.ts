@@ -1725,6 +1725,8 @@ export async function loadCliConfig(
     systemHooks?: Record<string, unknown>;
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
+    /** Display-only raw workspace block; never feeds execution. */
+    projectHooksDisplayOnly?: Record<string, unknown>;
     /** What the project hooks approval covers, when there is anything to gate. */
     projectHooksApproval?: ProjectHooksApproval;
   },
@@ -2625,9 +2627,30 @@ export async function loadCliConfig(
           ? 'pending'
           : undefined
       : undefined;
+  // Explicit folder trust is the co-equal authority: a trusted folder runs
+  // its project hooks without a stored approval, so the gate must not also
+  // demand one. Only an explicit rejection still withholds there — the user
+  // said no to this exact block, and trust does not override that decision.
+  // Mirror Config.isExplicitlyTrustedFolder(): IDE-reported workspace trust
+  // counts even with the feature off, as the docs promise.
+  const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+  const explicitlyTrusted =
+    (folderTrust || ideTrust !== undefined) && trustedFolder;
   const projectHooksPendingApproval = gateHooks
-    ? projectHooksState !== undefined && projectHooksState !== 'approved'
+    ? projectHooksState !== undefined &&
+      projectHooksState !== 'approved' &&
+      !(explicitlyTrusted && projectHooksState !== 'rejected')
     : undefined;
+  // Read the stored decision even under command-line YOLO: an approved block
+  // keeps its authority while the gate is exempt, without changing the
+  // exemption's pending-flag semantics.
+  const projectHooksApproved =
+    gateHooks &&
+    (projectHooksState === 'approved' ||
+      (commandLineYolo &&
+        hooksConfig?.projectHooksApproval !== undefined &&
+        getProjectHooksApprovalState(hooksConfig.projectHooksApproval) ===
+          'approved'));
   const advisorModel =
     bareMode || safeMode ? undefined : resolveAdvisorModel(argv, settings);
 
@@ -2777,6 +2800,18 @@ export async function loadCliConfig(
     pendingMcpServers,
     projectHooksPendingApproval,
     projectHooksRejected: projectHooksState === 'rejected',
+    // The stored approval is authority even while command-line YOLO exempts
+    // the gate; only a genuine approved decision sets this.
+    projectHooksApproved,
+    // The exact block the gate covers: mid-session decisions hash this
+    // startup subject, so a decision persisted for a block that changed
+    // since does not apply here.
+    projectHooksApprovalSubject: hooksConfig?.projectHooksApproval
+      ? {
+          hooks: hooksConfig.projectHooksApproval.hooks,
+          env: hooksConfig.projectHooksApproval.env,
+        }
+      : undefined,
     projectHooksYoloExempt: commandLineYolo,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
