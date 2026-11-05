@@ -708,6 +708,14 @@ export async function start_sandbox(
       )}`,
     );
   }
+  if (process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH']) {
+    args.push(
+      '--env',
+      `QWEN_CODE_TRUSTED_FOLDERS_PATH=${getContainerPath(
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      )}`,
+    );
+  }
   if (process.env['QWEN_CODE_WARNINGS_FILE']) {
     args.push(
       '--env',
