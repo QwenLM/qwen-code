@@ -6,8 +6,13 @@
 
 import type { Application, Request, Response } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import { isBaseUrlAllowed } from '@qwen-code/qwen-code-core/models/modelRegistry.js';
 import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
-import { loadSettings, SettingScope } from '../../config/settings.js';
+import {
+  loadSettings,
+  readModelPolicyOptions,
+  SettingScope,
+} from '../../config/settings.js';
 import {
   redactMcpServersSetting,
   restoreRedactedMcpServersSetting,
@@ -30,6 +35,7 @@ import { SUPPORTED_LANGUAGES } from '../../i18n/languages.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
+  findUnregisteredAllowlistDrop,
   isAuxModelSelectorSettingKey,
   publicAuxModelSelectorValue,
 } from '../../utils/aux-model-selector.js';
@@ -295,6 +301,19 @@ function buildSettingsResponse(
   };
 }
 
+/**
+ * A settings write refused by the managed model policy (issue #12805). The
+ * HTTP handlers answer it as a 400 carrying the message — it is an
+ * operator-actionable refusal, not a persistence failure.
+ */
+export class SettingWritePolicyError extends Error {}
+
+function sendSettingWritePolicyError(res: Response, err: unknown): boolean {
+  if (!(err instanceof SettingWritePolicyError)) return false;
+  res.status(400).json({ error: err.message, code: 'invalid_value' });
+  return true;
+}
+
 const SCOPE_MAP: Record<string, SettingScope> = {
   user: SettingScope.User,
   workspace: SettingScope.Workspace,
@@ -310,27 +329,67 @@ export function prepareSettingWrite(
 ): { persistedValue: unknown; publicValue: unknown } {
   if (key !== 'mcpServers') {
     let persistedValue = value;
+    // The registry these selectors resolve against, built under the managed
+    // model policy (issue #12805) exactly as a session would build it.
+    const loadPolicyModels = () => {
+      const loaded = loadSettings(workspace, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: !workspaceTrusted,
+        workspaceTrusted,
+      });
+      return {
+        policy: loaded.merged.model?.allowedBaseUrls,
+        models: new ModelsConfig({
+          modelProvidersConfig: loaded.merged.modelProviders,
+          providerProtocolConfig: loaded.merged.providerProtocol,
+          ...readModelPolicyOptions(loaded),
+        }),
+      };
+    };
     if (
       key === 'fastModel' &&
       typeof value === 'string' &&
       (value.startsWith(ACP_ROUTE_ID_PREFIX) ||
         parseAcpModelOption(value).authType)
     ) {
-      const { merged } = loadSettings(workspace, {
-        skipLoadEnvironment: true,
-        skipWorkspaceSettings: !workspaceTrusted,
-        workspaceTrusted,
-      });
-      const models = new ModelsConfig({
-        modelProvidersConfig: merged.modelProviders,
-        providerProtocolConfig: merged.providerProtocol,
-      });
+      const { models } = loadPolicyModels();
       persistedValue = resolveAcpFastModelSelector(
         value,
         models.getAllConfiguredModels(),
       );
       if (persistedValue === null) {
         throw new Error('Fast model ACP route is unavailable');
+      }
+    }
+    // Managed endpoint allowlist (issue #12805): the Web Shell can write
+    // back an advisor/image selector the daemon model listing emitted — that
+    // listing reads raw scopes, so a policy-excluded model is offerable in
+    // every selector form (endpoint-qualified, empty suffix, bare). Judge the
+    // selector, not its suffix shape: refuse an off-list endpoint suffix,
+    // and refuse a selector whose model the registry dropped with no
+    // registered route left — the same predicate the next CLI start uses to
+    // refuse it. Endpoint-less values for registered (or exempt built-in)
+    // models still persist.
+    if (
+      (key === 'advisorModel' || key === 'imageModel') &&
+      typeof value === 'string' &&
+      value.trim() !== ''
+    ) {
+      const { policy, models } = loadPolicyModels();
+      if (policy !== undefined) {
+        const endpointIndex = value.indexOf('\0');
+        const suffix = endpointIndex < 0 ? '' : value.slice(endpointIndex + 1);
+        if (suffix && !isBaseUrlAllowed(suffix, policy)) {
+          throw new SettingWritePolicyError(
+            `${key} endpoint is not in the managed allowlist 'model.allowedBaseUrls'; choose a model on an allowed endpoint or ask the operator to add it to the allowlist.`,
+          );
+        }
+        const dropped = findUnregisteredAllowlistDrop(models, value);
+        if (dropped) {
+          throw new SettingWritePolicyError(
+            `${key} model '${dropped.id}' was excluded from the model registry by the managed allowlist 'model.allowedBaseUrls'; choose a model on an allowed endpoint or ask the operator to allow its endpoint.`,
+          );
+        }
       }
     }
     return {
@@ -728,6 +787,9 @@ export function registerWorkspaceSettingsRoutes(
             }
           } catch (err) {
             if (sendGenerationClosedError(res, err)) return 'unchanged_failure';
+            if (sendSettingWritePolicyError(res, err)) {
+              return 'unchanged_failure';
+            }
             writeStderrLine(
               `qwen serve: POST /workspace/settings persist error (key=${key}, scope=${scope}, workspace=${boundWorkspace}): ${
                 err instanceof Error ? err.message : String(err)
@@ -1006,6 +1068,9 @@ export function registerWorkspaceQualifiedSettingsRoutes(
             }
           } catch (err) {
             if (sendGenerationClosedError(res, err)) return 'unchanged_failure';
+            if (sendSettingWritePolicyError(res, err)) {
+              return 'unchanged_failure';
+            }
             writeStderrLine(
               `qwen serve: POST /workspaces/:workspace/settings persist error (key=${key}, scope=${scope}, workspace=${runtime.workspaceCwd}): ${
                 err instanceof Error ? err.message : String(err)

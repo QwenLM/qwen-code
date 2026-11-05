@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isBaseUrlAllowed } from '@qwen-code/qwen-code-core/models/modelRegistry.js';
 import type { Settings } from '../../config/settings.js';
 import { deriveWebSocketBase } from '../../ui/voice/voice-stream-session.js';
 
@@ -287,6 +288,69 @@ function resolveLiveRouteEndpoint(route: LiveRealtimeRoute): string {
   return validateRealtimeEndpoint(derived);
 }
 
+/**
+ * The HTTPS form of an endpoint URL (wss→https, ws→http); non-URLs pass
+ * through unchanged. The managed allowlist lists endpoints, and the
+ * websocket scheme is a transport detail of the realtime path.
+ */
+function toHttpsForm(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+  if (parsed.protocol === 'wss:') {
+    parsed.protocol = 'https:';
+  } else if (parsed.protocol === 'ws:') {
+    parsed.protocol = 'http:';
+  }
+  return parsed.toString();
+}
+
+/**
+ * Managed endpoint allowlist gate for the Live Voice path (issue #12805).
+ * This module reads raw settings and never touches the model registry, so
+ * the policy must be applied here explicitly. `undefined` policy = no gate.
+ * Throws (does not return undefined) so a rejected route cannot fall
+ * through to the free-standing endpoint branch.
+ */
+function assertLiveEndpointAllowed(
+  endpoint: string,
+  allowedBaseUrls: readonly string[] | undefined,
+  what: string,
+): void {
+  if (allowedBaseUrls === undefined) return;
+  if (!isBaseUrlAllowed(toHttpsForm(endpoint), allowedBaseUrls)) {
+    throw new LiveProviderConfigError(
+      `${what} is not in the managed allowlist 'model.allowedBaseUrls'. Ask the operator to add it to the allowlist or configure a different endpoint.`,
+    );
+  }
+}
+
+/**
+ * The managed-allowlist refusal for a free-standing Live endpoint (a
+ * normalized Realtime URL), worded exactly as the dial path raises it, or
+ * `undefined` when allowed or no policy is set — so the setup status card
+ * shows the refusal the dial path enforces (issue #12805).
+ */
+export function liveEndpointPolicyError(
+  settings: Settings,
+  endpoint: string,
+): string | undefined {
+  try {
+    assertLiveEndpointAllowed(
+      endpoint,
+      settings.model?.allowedBaseUrls,
+      `Live Voice endpoint '${endpoint}'`,
+    );
+    return undefined;
+  } catch (error) {
+    if (error instanceof LiveProviderConfigError) return error.message;
+    throw error;
+  }
+}
+
 function resolveRouteCredential(
   settings: Settings,
   route: LiveRealtimeRoute,
@@ -335,6 +399,9 @@ export function resolveLiveProviderCredential(
     throw new LiveProviderConfigError('Live Voice is disabled.');
   }
   const route = findLiveRealtimeRoute(settings, live.model);
+  // Managed endpoint allowlist (issue #12805): this path never touches the
+  // model registry, so the policy is applied here, on the final endpoint.
+  const allowedBaseUrls = settings.model?.allowedBaseUrls;
   let endpoint: string;
   let apiKey: string;
   if (route) {
@@ -343,6 +410,11 @@ export function resolveLiveProviderCredential(
       route,
       options.env ?? {},
     ));
+    assertLiveEndpointAllowed(
+      endpoint,
+      allowedBaseUrls,
+      `Live Voice endpoint '${endpoint}' (modelProviders.${route.provider})`,
+    );
   } else {
     const configuredKey = settings.experimental?.liveVoice?.apiKey;
     apiKey =
@@ -355,6 +427,11 @@ export function resolveLiveProviderCredential(
     }
     // Stored as entered: an OpenAI-compatible base URL or a Realtime URL.
     endpoint = normalizeLiveRealtimeEndpoint(live.endpoint);
+    assertLiveEndpointAllowed(
+      endpoint,
+      allowedBaseUrls,
+      `Live Voice endpoint '${endpoint}'`,
+    );
   }
   const credential = {
     endpoint,

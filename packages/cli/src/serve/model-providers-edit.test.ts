@@ -59,6 +59,20 @@ describe('removeModelFromProviders', () => {
     expect(result.next).toEqual({ openai: [], gemini: [{ id: 'g-2.5' }] });
   });
 
+  it('keeps an emptied qwen-oauth key — the retired pin shape is now inert', () => {
+    const providers = { 'qwen-oauth': [{ id: 'personal-model' }] };
+    const result = removeModelFromProviders(providers, undefined, {
+      authType: 'qwen-oauth',
+      modelId: 'personal-model',
+    });
+    expect(result.removed).toBe(true);
+    // The key stays `[]` (dropping it would strand a zombie entry, since the
+    // settings writer merges per key), and an emptied qwen-oauth list no
+    // longer disables the built-in Qwen OAuth models — that is
+    // model.qwenOAuthBuiltinsDisabled now (issue #12805).
+    expect(result.next).toEqual({ 'qwen-oauth': [] });
+  });
+
   it('resolves a custom provider id to its protocol', () => {
     const providers = {
       openai: [{ id: 'gpt-4o' }],

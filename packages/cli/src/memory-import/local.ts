@@ -7,7 +7,10 @@ import { randomUUID } from 'node:crypto';
 import { proposeMemoryImport } from '@qwen-code/qwen-code-core/memory/import-model.js';
 import { validateAuthMethod } from '../config/auth.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
-import { loadSettings } from '../config/settings.js';
+import {
+  isAllowedBaseUrlsWorkspaceOnly,
+  loadSettings,
+} from '../config/settings.js';
 import { getSeparatedHookSettings } from '../config/hook-approvals.js';
 import { getAuthTypeFromEnv } from '../utils/modelConfigUtils.js';
 import { MemoryImportService } from './service.js';
@@ -27,6 +30,16 @@ export async function createLocalMemoryImportService(): Promise<MemoryImportServ
     process.cwd(),
     undefined,
     getSeparatedHookSettings(settings),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    // Same managed model policy as the interactive and ACP paths: a
+    // workspace-only allowlist must not drop the Qwen OAuth built-ins.
+    isAllowedBaseUrlsWorkspaceOnly(settings),
   );
   if (!config.isTrustedFolder() || !config.isManagedMemoryAvailable())
     throw new Error(

@@ -26,7 +26,7 @@ import type {
   ServeWorkspaceProvidersStatus,
 } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
-import { loadSettings } from '../config/settings.js';
+import { loadSettings, readModelPolicyOptions } from '../config/settings.js';
 import type { Settings } from '../config/settings.js';
 import {
   getAuthTypeFromEnv,
@@ -107,6 +107,9 @@ function buildWorkspaceProvidersStatus(
       initialAuthType: resolvedCliConfig.authType,
       modelProvidersConfig: settings.modelProviders,
       providerProtocolConfig: settings.providerProtocol,
+      // Managed model policy (issue #12805): the allowlist with its
+      // workspace-only exemption and the operator builtins disable.
+      ...readModelPolicyOptions(loaded),
       generationConfig: resolvedCliConfig.generationConfig,
       generationConfigSources: resolvedCliConfig.sources,
     });

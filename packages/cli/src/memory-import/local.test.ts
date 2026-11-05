@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   } as { merged: MockAuthSettings },
   currentAuthType: undefined as string | undefined,
   envAuthType: undefined as string | undefined,
+  workspaceOnly: false,
+  loadCliConfigArgs: [] as unknown[],
 }));
 vi.mock('../config/settings.js', () => ({
   loadSettings: () => ({
@@ -23,17 +25,21 @@ vi.mock('../config/settings.js', () => ({
     getProjectHooks: () => undefined,
     ...mocks.settings,
   }),
+  isAllowedBaseUrlsWorkspaceOnly: () => mocks.workspaceOnly,
 }));
 vi.mock('../config/config.js', () => ({
-  loadCliConfig: async () => ({
-    isTrustedFolder: () => true,
-    isManagedMemoryAvailable: () => true,
-    getProjectRoot: () => '/project',
-    getModelsConfig: () => ({
-      getCurrentAuthType: () => mocks.currentAuthType,
-    }),
-    refreshAuth: mocks.refreshAuth,
-  }),
+  loadCliConfig: async (...args: unknown[]) => {
+    mocks.loadCliConfigArgs = args;
+    return {
+      isTrustedFolder: () => true,
+      isManagedMemoryAvailable: () => true,
+      getProjectRoot: () => '/project',
+      getModelsConfig: () => ({
+        getCurrentAuthType: () => mocks.currentAuthType,
+      }),
+      refreshAuth: mocks.refreshAuth,
+    };
+  },
 }));
 vi.mock('../utils/modelConfigUtils.js', () => ({
   getAuthTypeFromEnv: () => mocks.envAuthType,
@@ -54,6 +60,8 @@ beforeEach(() => {
   };
   mocks.currentAuthType = undefined;
   mocks.envAuthType = undefined;
+  mocks.workspaceOnly = false;
+  mocks.loadCliConfigArgs = [];
 });
 
 it('authenticates with cached credentials only, never an interactive flow', async () => {
@@ -118,3 +126,14 @@ it('authenticates when the resolved auth type matches the enforced type', async 
   await createLocalMemoryImportService();
   expect(mocks.refreshAuth).toHaveBeenCalledWith('gemini', true);
 });
+
+it.each([true, false])(
+  'threads the workspace-only allowlist flag (%s) into loadCliConfig',
+  async (workspaceOnly) => {
+    mocks.workspaceOnly = workspaceOnly;
+    const { createLocalMemoryImportService } = await import('./local.js');
+    await createLocalMemoryImportService();
+    expect(mocks.loadCliConfigArgs).toHaveLength(13);
+    expect(mocks.loadCliConfigArgs[12]).toBe(workspaceOnly);
+  },
+);

@@ -66,9 +66,21 @@ type OperatorSettingsScope = SandboxSettingsInput & {
   /** Settings format version, used to date the legacy usage-statistics key. */
   $version?: unknown;
   privacy?: { usageStatisticsEnabled?: unknown };
-  model?: { catalogRefresh?: unknown };
   /** Pre-v2 location, migrated to `privacy.*` by a normal settings load. */
   usageStatisticsEnabled?: unknown;
+  /**
+   * Model controls bare mode keeps in force (issue #12805): the models.dev
+   * catalog refresh choice, the managed endpoint allowlist and the Qwen
+   * OAuth builtins disable. Values are read raw here; the same startup
+   * validation a normal load applies (non-array allowedBaseUrls is a
+   * FatalConfigError in config.ts) still runs, because bare-mode settings
+   * flow through the same config path.
+   */
+  model?: {
+    catalogRefresh?: unknown;
+    allowedBaseUrls?: unknown;
+    qwenOAuthBuiltinsDisabled?: unknown;
+  };
 };
 
 /**
@@ -116,15 +128,33 @@ export function readOperatorSandboxSettings(): SandboxSettingsInput {
   return sandboxSettingsFromScopes(readOperatorSettingsScopes());
 }
 
+/** The bare-mode model controls of one operator scope (issue #12805). */
+export interface BareModeModelControls {
+  allowedBaseUrls?: string[];
+  qwenOAuthBuiltinsDisabled?: boolean;
+}
+
 /**
  * The operator settings bare mode keeps: sandbox confinement, the
  * usage-statistics choice so `--bare` cannot turn a privacy opt-out back on,
- * and the models.dev refresh choice.
- * Scopes resolve like a normal load (system over user over system defaults).
+ * the models.dev refresh choice, and the model controls (managed endpoint
+ * allowlist, Qwen OAuth builtins disable) so `--bare` cannot escape an
+ * operator lockdown (issue #12805).
+ * Sandbox and privacy resolve here like a normal load (system over user over
+ * system defaults). The model controls are returned PER SCOPE, unmerged:
+ * the caller places each scope's controls in that scope's settings slot so
+ * the normal merge decides precedence and every scope-aware consumer (the
+ * disable warning's attribution, the workspace-only exemption) sees the
+ * scope a value came from.
  */
 export function readBareModeOperatorSettings(): SandboxSettingsInput & {
   privacy?: { usageStatisticsEnabled: boolean };
   model?: { catalogRefresh: boolean };
+  modelByScope: {
+    systemDefaults?: BareModeModelControls;
+    user?: BareModeModelControls;
+    system?: BareModeModelControls;
+  };
 } {
   const scopes = readOperatorSettingsScopes();
   const usageStatisticsEnabled = scopes.reduce<boolean | undefined>(
@@ -141,6 +171,32 @@ export function readBareModeOperatorSettings(): SandboxSettingsInput & {
     },
     undefined,
   );
+  // Values pass through raw: the config layer applies the same
+  // interpretation a normal load would (strict `=== true`, non-array
+  // allowedBaseUrls is a startup error), so bare mode cannot diverge.
+  const modelControls = (
+    scope: OperatorSettingsScope,
+  ): BareModeModelControls | undefined => {
+    const scopeModel = scope.model;
+    if (
+      scopeModel?.allowedBaseUrls === undefined &&
+      scopeModel?.qwenOAuthBuiltinsDisabled === undefined
+    ) {
+      return undefined;
+    }
+    return {
+      ...(scopeModel.allowedBaseUrls !== undefined
+        ? { allowedBaseUrls: scopeModel.allowedBaseUrls as string[] }
+        : {}),
+      ...(scopeModel.qwenOAuthBuiltinsDisabled !== undefined
+        ? {
+            qwenOAuthBuiltinsDisabled:
+              scopeModel.qwenOAuthBuiltinsDisabled as boolean,
+          }
+        : {}),
+    };
+  };
+  const [systemDefaultsScope, userScope, systemScope] = scopes;
   const catalogRefresh = selectOperatorCatalogRefresh(...scopes);
   return {
     ...sandboxSettingsFromScopes(scopes),
@@ -148,6 +204,11 @@ export function readBareModeOperatorSettings(): SandboxSettingsInput & {
       ? {}
       : { privacy: { usageStatisticsEnabled } }),
     ...(catalogRefresh === undefined ? {} : { model: { catalogRefresh } }),
+    modelByScope: {
+      systemDefaults: modelControls(systemDefaultsScope),
+      user: modelControls(userScope),
+      system: modelControls(systemScope),
+    },
   };
 }
 

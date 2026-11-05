@@ -5,7 +5,7 @@
  */
 
 import { ModelsConfig } from '@qwen-code/qwen-code-core';
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, readModelPolicyOptions } from '../../config/settings.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
   getAuthTypeFromEnv,
@@ -63,6 +63,9 @@ function buildModelsConfig(
     initialAuthType: resolvedCliConfig.authType,
     modelProvidersConfig: merged.modelProviders,
     providerProtocolConfig: merged.providerProtocol,
+    // Managed model policy (issue #12805): the allowlist with its
+    // workspace-only exemption and the operator builtins disable.
+    ...readModelPolicyOptions(settings),
     generationConfig: resolvedCliConfig.generationConfig,
     generationConfigSources: resolvedCliConfig.sources,
   });

@@ -841,6 +841,18 @@
           "description": "Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.",
           "type": "string"
         },
+        "allowedBaseUrls": {
+          "description": "Managed allowlist of model endpoint base URLs. When set, the list governs what the model registry registers — and therefore what the model picker and the --model list can offer: only models whose resolved baseUrl matches an entry — exactly, or under it across a path boundary (so https://corp.example also covers https://corp.example/v1, but not https://corp.example.evil.com) — register, for any provider, built-in or custom. The same predicate gates resolved model selections (including --model, --openaiBaseUrl, and the protocol default endpoint dialed when no baseUrl is set) and the credential restore/capture paths, so an off-list endpoint fails closed with an error that names this key instead of dialing. Matching is URL-semantic: scheme and host are case-insensitive, the path case-sensitive, trailing slashes are ignored on both the entry and the endpoint, and an explicit default port counts as absent (https://corp.example:443/v1 matches https://corp.example); non-default ports must match exactly. A query or fragment on an entry is ignored when matching (a warning is emitted — it then allows the whole path prefix), so confine with a path. A model without an explicit baseUrl is checked against its protocol default endpoint, so omitting that default from the list blocks such models; an empty list set in an operator scope registers no models at all (a workspace-only empty list still keeps the built-in Qwen OAuth models). Entries must be non-empty URL strings with a hostname; malformed entries are warned about and skipped, and a non-array value for this key is a startup error. The system scope takes precedence, and a workspace-scope list is honored only when no User, System, or SystemDefaults scope defines one — a repository cannot replace an operator-configured list, and a workspace-scope list narrows the configured provider endpoints without disabling the built-in Qwen OAuth (personal Qwen login) models. Setting this key in an operator scope (System, User, or SystemDefaults) disables those built-ins, because their endpoint is discovered dynamically at login and cannot be listed; the built-ins can additionally be disabled explicitly by setting model.qwenOAuthBuiltinsDisabled in System, User, or SystemDefaults settings (a workspace-scope value is ignored), and an active disable warns at load. A deployment that needs personal Qwen login should do neither. Changes take effect after restart.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "qwenOAuthBuiltinsDisabled": {
+          "description": "Disables the built-in Qwen OAuth (personal Qwen login) models. Honored only from System, User, or SystemDefaults scope settings; a workspace-scope value is ignored. An empty model list under the qwen-oauth provider no longer disables the built-ins — use this key instead. Setting model.allowedBaseUrls in an operator scope also disables the built-ins, because their dynamically discovered endpoint cannot be listed. While set, a Qwen OAuth session refuses to start with an error naming this key. Changes take effect after restart.",
+          "type": "boolean",
+          "default": false
+        },
         "reasoningEffort": {
           "type": "string",
           "enum": [

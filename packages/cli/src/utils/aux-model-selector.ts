@@ -17,10 +17,10 @@
  * The guarantee is per call site, not per key. Surfaces that interpolate the
  * stored value raw are not converted by this module and stay tracked in
  * #12856: the `/model --fast` and `/model --compaction` readbacks
- * (`modelCommand.ts:619`, `:841`) and the startup advisor-validation error,
- * which puts the raw selector into a `FatalConfigError` message
- * (`config.ts` `formatUnavailableAdvisorModelMessage`) that
- * `handleCriticalError` writes to stderr.
+ * (`modelCommand.ts:619`, `:841`). The startup advisor-validation error and
+ * its allowlist hint (`config.ts` `formatUnavailableAdvisorModelMessage`,
+ * `buildAdvisorAllowlistHint`, which `handleCriticalError` writes to stderr)
+ * delegate to this module's scrubbing.
  *
  * The persisted value is deliberately not rewritten. That suffix is the
  * routing key: `modelRegistry` copies the configured `baseUrl` verbatim, and
@@ -36,6 +36,12 @@
  * `model.baseUrl` and all five aux keys (#12856), not something to settle by
  * silently rewriting one of them.
  */
+
+import {
+  scrubBaseUrlForMessage,
+  type AllowlistDroppedModel,
+} from '@qwen-code/qwen-code-core/models/modelRegistry.js';
+import type { AvailableModel } from '@qwen-code/qwen-code-core/models/types.js';
 
 /** Settings keys that persist an `authType:id\0baseUrl` aux-model selector. */
 export const AUX_MODEL_SELECTOR_SETTING_KEYS: ReadonlySet<string> = new Set([
@@ -76,9 +82,13 @@ function hasFoldedCharacter(baseUrl: string): boolean {
  * an already-clean URL returns verbatim so republishing never rewrites a
  * clean persisted value. Anything else (scheme-less, non-http(s),
  * unparseable, or carrying a folded character) is not publishable, and the
- * caller must drop the suffix rather than emit it.
+ * caller must drop the suffix rather than emit it. Exported so error
+ * messages that echo a bare suffix (the startup advisor allowlist hint in
+ * `config.ts`) fail closed the same way the display and wire forms do.
  */
-function publishableSelectorBaseUrl(baseUrl: string): string | undefined {
+export function publishableSelectorBaseUrl(
+  baseUrl: string,
+): string | undefined {
   if (hasFoldedCharacter(baseUrl)) return undefined;
   // No `.trim()` here: the guard above already rejects every character
   // `String.prototype.trim` strips, so normalizing on this line could not
@@ -175,4 +185,54 @@ export function formatSettingRowValue(key: string, value: unknown): string {
   return typeof value === 'string' && isAuxModelSelectorSettingKey(key)
     ? formatAuxModelSelectorForDisplay(value)
     : String(value);
+}
+
+/**
+ * The managed-allowlist drop (issue #12805) a raw aux-model selector
+ * (`id` or `authType:id`, optionally `\0baseUrl`) refers to — only when no
+ * REGISTERED route satisfies the same selector. Drop records name routes
+ * (id + auth type + judged endpoint), not ids: a model id dropped on one
+ * endpoint can be registered on another, and that selector is valid. Only
+ * registry routes count as registered — a runtime snapshot of a dropped id
+ * is the escape this predicate closes. With a
+ * non-empty endpoint suffix only the route on that endpoint counts (the
+ * record is credential-scrubbed, so the suffix is compared scrubbed); an
+ * empty suffix names the route without an explicit baseUrl. The same
+ * predicate backs the startup advisor check, `/advisor <model>`, and the
+ * settings-write gate, so a value one of them accepts the others accept.
+ * `undefined` when nothing was dropped (no policy, or none matched).
+ */
+export function findUnregisteredAllowlistDrop(
+  models: {
+    getAllConfiguredModels(): AvailableModel[];
+    getAllowlistDroppedModels(): AllowlistDroppedModel[];
+  },
+  rawSelector: string,
+): AllowlistDroppedModel | undefined {
+  const dropped = models.getAllowlistDroppedModels();
+  if (dropped.length === 0) return undefined;
+  const endpointIndex = rawSelector.indexOf('\0');
+  const modelId = (
+    endpointIndex < 0 ? rawSelector : rawSelector.slice(0, endpointIndex)
+  ).trim();
+  if (modelId === '') return undefined;
+  const endpoint =
+    endpointIndex < 0 ? undefined : rawSelector.slice(endpointIndex + 1);
+  const idMatches = (id: string, authType: string) =>
+    modelId === id || modelId === `${authType}:${id}`;
+  const registered = models
+    .getAllConfiguredModels()
+    .some(
+      (model) =>
+        !model.isRuntimeModel &&
+        idMatches(model.id, model.authType) &&
+        (endpoint === undefined || (model.registryBaseUrl ?? '') === endpoint),
+    );
+  if (registered) return undefined;
+  const judgedEndpoint = endpoint ? scrubBaseUrlForMessage(endpoint) : '';
+  return dropped.find(
+    (entry) =>
+      idMatches(entry.id, entry.authType) &&
+      (!judgedEndpoint || entry.baseUrl === judgedEndpoint),
+  );
 }
