@@ -1469,6 +1469,19 @@ export async function* livePromptEvents(
         });
       }
     }
+    if (abort.aborted) {
+      if (responseParts.length > 0 && current()) {
+        await client.addHistory(
+          await settleToolResultHistory(
+            config.getChatRecordingService(),
+            { role: 'user', parts: responseParts },
+            responseParts,
+            hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
+          ),
+        );
+      }
+      return;
+    }
     pendingToolResultParts = responseParts.slice();
     // Sampling boundary: drained steering rides after the tool responses as
     // genuine user content (original useGeminiStream mid-turn drain).

@@ -851,6 +851,9 @@ describe('LlmChat', async () => {
         ),
       ).rejects.toBe(failure);
       expect(target.getHistory().at(-1)?.parts).toEqual([...message]);
+      expect(
+        getToolOutputProvenance(target['history'].at(-1)!.parts![0]),
+      ).toMatchObject({ callId: 'read', toolName: 'read_file' });
       expect(target.getUserContentPushCount()).toBe(1);
       expect(streamMock()).not.toHaveBeenCalled();
       mockStream(textStream('next response'));
@@ -859,6 +862,9 @@ describe('LlmChat', async () => {
         .flatMap((content) => content.parts ?? [])
         .filter((part) => part.functionResponse?.id === 'read');
       expect(responses).toHaveLength(1);
+      expect(getToolOutputProvenance(responses[0])).toMatchObject({
+        callId: 'read',
+      });
     },
   );
 
@@ -915,6 +921,7 @@ describe('LlmChat', async () => {
       expect(target.getHistory()).toEqual(
         mixed ? [{ role: 'user', parts: [userPart] }] : [],
       );
+      if (mixed) expect(target['history'][0]?.parts?.[0]).toBe(userPart);
       expect(message).toHaveLength(mixed ? 4 : 3);
       expect(streamMock()).not.toHaveBeenCalled();
       mockStream(streamOf(stopResponse([{ text: 'done' }])));

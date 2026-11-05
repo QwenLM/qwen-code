@@ -7032,6 +7032,13 @@ describe('useLlmStream', () => {
   it.each(['complete', 'paused'] as const)(
     'finishes a Goal turn as %s without another model call after update_goal',
     async (status) => {
+      mockConfig.getDisableAllHooks = () => false;
+      mockConfig.getMessageBus = vi.fn(() => ({
+        request: vi.fn(),
+      })) as Config['getMessageBus'];
+      mockConfig.hasHooksForEvent = vi.fn(
+        (event: string) => event === 'UserPromptSubmit',
+      );
       const permit: GoalTurnPermit = {
         goalId: 'goal-complete',
         revision: 1,
@@ -7067,9 +7074,9 @@ describe('useLlmStream', () => {
         release = resolve;
       });
       const recordToolResultAdmission = vi.fn(
-        async (parts: readonly Part[]) => {
+        async (_parts: readonly Part[]) => {
           await barrier;
-          return [{ parts, decision: 'admitted' as const }];
+          return [];
         },
       );
       mockConfig.getChatRecordingService = vi
@@ -7176,6 +7183,10 @@ describe('useLlmStream', () => {
         release();
         await completing;
       }
+      expect(recordToolResultAdmission).toHaveBeenCalledExactlyOnceWith(
+        responseParts,
+        undefined,
+      );
       expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['update-goal-1']);
       expect(client.addHistory).toHaveBeenCalledWith({
         role: 'user',
@@ -11517,9 +11528,16 @@ describe('useLlmStream', () => {
           ];
         },
       );
-      mockConfig.getChatRecordingService = vi
-        .fn()
-        .mockReturnValue({ recordToolResult, recordToolResultAdmission });
+      const capturedRecorder = { recordToolResult, recordToolResultAdmission };
+      const replacementRecorder = {
+        recordToolResult: vi.fn(),
+        recordToolResultAdmission: vi.fn(),
+      };
+      mockConfig.getChatRecordingService = vi.fn(() =>
+        mockConfig.getSessionId() === 'replacement-session'
+          ? replacementRecorder
+          : capturedRecorder,
+      ) as Config['getChatRecordingService'];
       mockUseDualOutput.mockReturnValue(mockDualOutput);
       mockDualOutput.emitToolResult.mockClear();
       const { completeToolRound } = renderTestHook([], client);
@@ -11546,6 +11564,10 @@ describe('useLlmStream', () => {
         release();
         await pending;
       }
+      expect(replacementRecorder.recordToolResult).not.toHaveBeenCalled();
+      expect(
+        replacementRecorder.recordToolResultAdmission,
+      ).not.toHaveBeenCalled();
       expect(mockSendMessageStream).not.toHaveBeenCalled();
       if (outcome === 'write-reject') {
         expect(apply).not.toHaveBeenCalled();
@@ -24975,6 +24997,30 @@ describe('useLlmStream', () => {
     // findLastIndex should land on 'second' (index 2), not the steer (index 4).
     // turnCount = history.length - 2 = 3.
     expect(event.turnCount).toBe(3);
+  });
+
+  it('keeps the legacy non-Goal quota-switch history policy when the shared loop is disabled', async () => {
+    mockConfig.isUnifiedAgentLoopEnabled = vi.fn(() => false);
+    const recordToolResultAdmission = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn(() => ({
+      recordToolResultAdmission,
+    })) as Config['getChatRecordingService'];
+    const client = new MockedLlmClientClass(mockConfig);
+    const { completeToolRound } = renderTestHook(
+      [],
+      client,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    await completeToolRound([
+      lateCompletedTool('quota-legacy', 'read_file', {}, 'legacy quota result'),
+    ]);
+    expect(client.addHistory).not.toHaveBeenCalled();
+    expect(recordToolResultAdmission).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
   });
 
   describe('shared agent loop round (experimental.unifiedAgentLoop)', () => {

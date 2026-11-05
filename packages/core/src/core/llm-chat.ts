@@ -3580,6 +3580,7 @@ export class LlmChat {
         // gap where `lastPromptTokenCount === 0` and the gate would otherwise
         // see only the stale prior-turn count (0).
         let userContent = cancelledContent ?? createUserContent(params.message);
+        let hasToolAdmission = false;
         if (!signal?.aborted) {
           const toolOutput =
             options?.toolResultParts ?? userContent.parts ?? [];
@@ -3592,7 +3593,7 @@ export class LlmChat {
             toolOutput,
             admissions,
           );
-          if (admissions.length > 0) retainedToolContent = userContent;
+          hasToolAdmission = admissions.length > 0;
         }
         // Restored responses have no original-size provenance. Never infer it from a preview.
         userContent = {
@@ -3610,6 +3611,7 @@ export class LlmChat {
               : part,
           ),
         };
+        if (hasToolAdmission) retainedToolContent = userContent;
         const { auto, hard } = computeThresholds(
           contextWindowForClamp,
           this.config.getAutoCompactThreshold(),

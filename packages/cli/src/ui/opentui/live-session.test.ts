@@ -2554,6 +2554,204 @@ describe('livePromptEvents', () => {
     expect(atMocks.calls).toEqual([]);
   });
 
+  describe('mixed tool-result admission on abort before steering', () => {
+    it.each([
+      'no-hook',
+      'pending-hook',
+      'prior-allow',
+      'prior-withheld',
+      'write-reject',
+    ] as const)(
+      'settles recorded mixed completion packet before history: %s',
+      async (decision) => {
+        const controller = new AbortController();
+        const hooked =
+          decision === 'pending-hook' || decision === 'prior-allow';
+        let sends = 0;
+        const stream = vi.fn(function* (...args: unknown[]) {
+          sends++;
+          if (sends === 1) {
+            yield {
+              type: 'tool_call_request',
+              value: {
+                callId: 'r2-success',
+                name: 'test_tool',
+                args: { __restoreResult: { output: 'R2_PRIVATE_SUCCESS' } },
+              },
+            };
+            yield {
+              type: 'tool_call_request',
+              value: {
+                callId: 'r2-cancel',
+                name: 'test_tool',
+                args: {
+                  __cancelled: true,
+                  __restoreResult: { output: 'R2_PRIVATE_CANCEL' },
+                },
+              },
+            };
+            return;
+          }
+          (args[3] as SendMessageOptions | undefined)?.steerInput?.accept();
+          yield { type: 'finished', value: {} };
+        });
+        let release!: () => void;
+        const barrier = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const recordToolResult =
+          vi.fn<ChatRecordingService['recordToolResult']>();
+        const admission = vi.fn(async (parts: readonly Part[]) => {
+          if (decision === 'write-reject') throw new Error('r2 receipt failed');
+          await barrier;
+          return [
+            {
+              parts,
+              decision:
+                decision === 'prior-withheld'
+                  ? { withheld: 'previous policy refusal' }
+                  : decision === 'pending-hook'
+                    ? {
+                        withheld:
+                          'The tool had already completed; its output was discarded.',
+                      }
+                    : ('admitted' as const),
+            },
+          ];
+        });
+        const config = createFakeConfig(stream, undefined, () => true, {
+          recordMidTurnUserMessage: vi.fn(),
+          recordToolResult,
+          recordToolResultAdmission: admission,
+        });
+        Object.assign(config, {
+          getDisableAllHooks: () => !hooked,
+          getMessageBus: () => ({ request: vi.fn() }),
+          hasHooksForEvent: (event: string) =>
+            hooked && event === 'UserPromptSubmit',
+        });
+        const drainSteering = vi.fn(() => steering('must remain queued'));
+        let failure: unknown;
+        const events: unknown[] = [];
+        const pending = (async () => {
+          for await (const event of livePromptEvents(
+            config,
+            'start',
+            controller.signal,
+            { drainSteering },
+          )) {
+            events.push(event);
+            // Abort at the completed batch boundary, before the steering gate.
+            // This final tool-end is yielded before its recordToolResult call;
+            // the real host then records both parts under the aborted signal.
+            if (event.type === 'tool-end' && event.id === 'r2-cancel')
+              controller.abort();
+          }
+        })().catch((error: unknown) => {
+          failure = error;
+        });
+        try {
+          await vi.waitFor(() =>
+            expect(recordToolResult).toHaveBeenCalledTimes(2),
+          );
+          expect(controller.signal.aborted).toBe(true);
+          await vi.waitFor(() => expect(admission).toHaveBeenCalledOnce());
+          expect(recordToolResult).toHaveBeenCalledTimes(2);
+          expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
+        } finally {
+          release();
+          await pending;
+        }
+        expect(controller.signal.aborted).toBe(true);
+        expect(drainSteering).not.toHaveBeenCalled();
+        expect(stream).toHaveBeenCalledOnce();
+        expect(admission).toHaveBeenCalledWith(
+          expect.any(Array),
+          hooked
+            ? 'The tool had already completed; its output was discarded.'
+            : undefined,
+        );
+        const packet = admission.mock.calls[0][0];
+        const recordedPacket = recordToolResult.mock.calls.flatMap(
+          ([parts]) => parts as Part[],
+        );
+        expect(packet).toHaveLength(2);
+        packet.forEach((part, index) =>
+          expect(part).toBe(recordedPacket[index]),
+        );
+        expect(packet.map((part) => part.functionResponse?.id)).toEqual([
+          'r2-success',
+          'r2-cancel',
+        ]);
+        const addHistory = vi.mocked(config.getGeminiClient().addHistory);
+        if (decision === 'write-reject') {
+          expect(failure).toBeDefined();
+          expect(addHistory).not.toHaveBeenCalled();
+        } else {
+          expect(failure).toBeUndefined();
+          expect(addHistory).toHaveBeenCalledOnce();
+          const kept = addHistory.mock.calls[0][0];
+          if (decision === 'pending-hook' || decision === 'prior-withheld') {
+            expect(JSON.stringify(kept)).not.toContain('R2_PRIVATE');
+            expect(
+              kept.parts?.map((part) => part.functionResponse?.id),
+            ).toEqual(['r2-success', 'r2-cancel']);
+            expect(JSON.stringify(kept)).toContain(
+              decision === 'prior-withheld'
+                ? 'previous policy refusal'
+                : 'output was discarded',
+            );
+          } else {
+            expect(kept).toEqual({ role: 'user', parts: packet });
+          }
+        }
+      },
+    );
+  });
+
+  it('continues the same mixed batch normally when it was not aborted', async () => {
+    let sends = 0;
+    const stream = vi.fn(function* (...args: unknown[]) {
+      sends++;
+      if (sends === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'r2-success',
+            name: 'test_tool',
+            args: { __restoreResult: { output: 'R2_PRIVATE_SUCCESS' } },
+          },
+        };
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'r2-cancel',
+            name: 'test_tool',
+            args: {
+              __cancelled: true,
+              __restoreResult: { output: 'R2_PRIVATE_CANCEL' },
+            },
+          },
+        };
+        return;
+      }
+      (args[3] as SendMessageOptions | undefined)?.steerInput?.accept();
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(stream);
+    await drain(
+      livePromptEvents(config, 'start', new AbortController().signal),
+    );
+    expect(stream).toHaveBeenCalledTimes(2);
+    const parts = stream.mock.calls[1][0] as Part[];
+    expect(
+      parts
+        .filter((part) => part.functionResponse)
+        .map((part) => part.functionResponse?.id),
+    ).toEqual(['r2-success', 'r2-cancel']);
+    expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
+  });
+
   describe('terminal tool-result admission', () => {
     const paths = ['all-cancelled', 'steering-abort'] as const;
     const decisions = [

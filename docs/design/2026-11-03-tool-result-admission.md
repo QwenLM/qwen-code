@@ -18,6 +18,7 @@ A completed tool result remains available to the local transcript. A new session
 - Restore re-execution writes an intentionally unmarked completion and inserts the same response directly into live history under its existing restore authorization. That writer is outside the new ordinary-result admission gate.
 - The full and indexed history readers use the same projection. Internal Code Mode results remain outside model history. A compression checkpoint already contains model history and supersedes earlier decisions.
 - Ink retains the shared loop’s stream-idle waiting, ordered batch drain and send-time capacity checks. Shared tool-requested termination outside Goal confirms admission before retaining results, following ACP’s explicit termination policy even with a prompt hook. Quota-switch and capacity stops continue to withhold when an applicable hook has not run. Terminal retention does not drain separately queued input.
+- A sent ACP message releases its tool-part ownership before a later independent steering message is prepared. OpenTUI settles mixed successful/cancelled batches even when cancellation arrives before steering. If model setup fails after confirmed admission, retained history keeps the tool-output provenance used for later dispatch accounting.
 
 ## Compatibility and verification
 

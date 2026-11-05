@@ -8321,6 +8321,7 @@ export class Session implements SessionContext {
                     // stripped and carries the restore's notices, even when
                     // its response then fails.
                     onSettled: (pushed) => {
+                      if (pushed) toolOutputParts = [];
                       if (!pushed || turnCount !== 1) return;
                       if (restoresOriginalRetry) retryHistoryReplaced = true;
                       strippedOrphanEntries = null;
@@ -8448,6 +8449,7 @@ export class Session implements SessionContext {
                       sendResult.responseStream,
                     );
                     nextMessage = null;
+                    toolOutputParts = [];
                     channelDeliveryResponseBlock =
                       beginChannelDeliveryResponseBlock(responseCapture);
                     channelDeliveryCheckpoint =

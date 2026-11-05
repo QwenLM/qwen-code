@@ -4762,6 +4762,103 @@ describe('Session', () => {
         )
         .filter((value) => value.length > 0);
 
+    it.each([false, true])(
+      'keeps ordinary steering after a sent tool lap when pre-push cancellation=%s',
+      async (cancelled) => {
+        const execute = useTool(core.Kind.Read, 'read_file');
+        let pushes = 0;
+        Object.assign(mockChat, {
+          getUserContentPushCount: vi.fn(() => pushes),
+        });
+        let allowSteer = false;
+        let taken = false;
+        let noteDrain!: () => void;
+        const drainTaken = new Promise<void>((resolve) => {
+          noteDrain = resolve;
+        });
+        vi.mocked(mockClient.extMethod).mockImplementation(async (method) => {
+          if (method === 'craft/drainMidTurnQueue' && allowSteer && !taken) {
+            taken = true;
+            noteDrain();
+            return {
+              messages: ['STEER_AFTER_TOOL_R2'],
+              hasQueuedPrompt: false,
+            };
+          }
+          return { messages: [], hasQueuedPrompt: false };
+        });
+        const send = useSharedRounds();
+        send
+          .mockImplementationOnce(() =>
+            (async function* () {
+              pushes++;
+              yield toolCall({
+                id: 'r2-read',
+                name: 'read_file',
+                args: { file_path: '/tmp/a.txt' },
+              });
+              yield finished();
+            })(),
+          )
+          .mockImplementationOnce((_parts: unknown, signal: AbortSignal) =>
+            (async function* () {
+              pushes++;
+              // watch() is active when this generator is read. First yield makes
+              // this a real text-only response, then take input during its stream.
+              yield text('Read it.');
+              allowSteer = true;
+              session.sendMidTurnInputNow();
+              await drainTaken;
+              // Let the actual response interrupt cut the response after it takes
+              // the independent input, rather than manually calling a private helper.
+              if (!signal.aborted)
+                await new Promise<void>((resolve) => {
+                  signal.addEventListener('abort', () => resolve(), {
+                    once: true,
+                  });
+                });
+              yield { type: core.LlmEventType.UserCancelled };
+            })(),
+          )
+          .mockImplementationOnce((_parts: unknown, _signal: AbortSignal) =>
+            (async function* () {
+              if (cancelled) {
+                // No push increment: compression/hook failed before history push.
+                await session.cancelPendingPrompt();
+                yield { type: core.LlmEventType.UserCancelled };
+                return;
+              }
+              pushes++;
+              yield text('Followed the steering.');
+              yield finished();
+            })(),
+          );
+        const result = await prompt();
+        expect(result.stopReason).toBe(cancelled ? 'cancelled' : 'end_turn');
+        expect(execute).toHaveBeenCalledOnce();
+        expect(send).toHaveBeenCalledTimes(3);
+        expect(send.mock.calls[1][3]).toMatchObject({
+          type: core.SendMessageType.ToolResult,
+        });
+        expect(send.mock.calls[2][3]).toMatchObject({
+          type: core.SendMessageType.Steer,
+        });
+        expect(
+          (send.mock.calls[2][0] as Part[]).some(
+            (part) => part.functionResponse,
+          ),
+        ).toBe(false);
+        expect(JSON.stringify(send.mock.calls[2][0])).toContain(
+          'STEER_AFTER_TOOL_R2',
+        );
+        if (cancelled)
+          expect(
+            JSON.stringify(vi.mocked(mockChat.addHistory).mock.calls),
+          ).toContain('STEER_AFTER_TOOL_R2');
+        expect(pushes).toBe(cancelled ? 2 : 3);
+      },
+    );
+
     it('sends a fresh prompt as a UserQuery whose user turn it recorded', async () => {
       const send = useSharedRounds([text('Hello'), finished()]);
       mockConfig.prepareWorkflowMode = vi.fn();
@@ -10826,6 +10923,72 @@ describe('Session', () => {
           prompt: [],
           _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
         } as unknown as Parameters<typeof session.prompt>[0]);
+
+      it('binds restored answer ownership when cancelled before the continuation push', async () => {
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const admission = vi.fn(async (parts: readonly Part[]) => {
+          await gate;
+          return [{ parts, decision: 'admitted' as const }];
+        });
+        Object.assign(mockChatRecordingService, {
+          recordToolResultAdmission: admission,
+        });
+        send.mockImplementationOnce(() =>
+          (async function* () {
+            // Permission has already been answered and the genuine restored batch ran.
+            // Preserve pushes=0: cancellation happened in setup before history push.
+            await session.cancelPendingPrompt();
+            yield { type: core.LlmEventType.UserCancelled };
+          })(),
+        );
+        const pending = restore();
+        try {
+          await vi.waitFor(() => expect(admission).toHaveBeenCalledOnce());
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+          expect(mockChatRecordingService.recordToolResult).toHaveBeenCalled();
+          expect(mockChat.addHistory).not.toHaveBeenCalled();
+          expect(pushes).toBe(0);
+        } finally {
+          release();
+        }
+        await expect(pending).resolves.toMatchObject({
+          stopReason: 'cancelled',
+        });
+        expect(send).toHaveBeenCalledOnce();
+        const [sent, , , options] = send.mock.calls[0] as unknown as [
+          Part[],
+          AbortSignal,
+          string,
+          { type: string },
+        ];
+        expect(options.type).toBe(core.SendMessageType.Retry);
+        expect(admission).toHaveBeenCalledWith(expect.any(Array), undefined);
+        const owned = admission.mock.calls[0][0];
+        const recorded = vi
+          .mocked(mockChatRecordingService.recordToolResult)
+          .mock.calls.map(([parts]) => parts as readonly Part[])
+          .find((parts) =>
+            parts.some((part) => part.functionResponse?.id === 'call-auq'),
+          )!;
+        expect(recorded).toBeDefined();
+        expect(owned).toHaveLength(recorded.length);
+        owned.forEach((part, index) => {
+          expect(part).toBe(recorded[index]);
+          expect(sent).toContain(part);
+        });
+        expect(
+          owned.some((part) => part.functionResponse?.id === 'call-auq'),
+        ).toBe(true);
+        expect(mockChat.addHistory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            parts: expect.arrayContaining([...owned]),
+          }),
+        );
+        expect(session.pendingWorktreeNotice).toBeNull();
+      });
 
       it('takes the notices once the answer reached history, even if the response fails', async () => {
         send.mockImplementationOnce(() =>

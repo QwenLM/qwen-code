@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Part } from '@google/genai';
 import type { RecordedToolResultAdmission } from './chatRecordingService.js';
+import { SessionTranscriptChangedError } from './session-writer-lease.js';
 import {
   matchToolResultParts,
   settleToolResultHistory,
@@ -31,6 +32,8 @@ describe('tool result history admission', () => {
   it.each(['admitted', { withheld: 'first block' }] as const)(
     'keeps the first confirmed decision: %j',
     async (decision) => {
+      const beforeMessage = structuredClone(message);
+      const beforeOutput = structuredClone(output);
       const recorder = {
         recordToolResultAdmission: vi
           .fn()
@@ -56,7 +59,9 @@ describe('tool result history admission', () => {
         ]);
         expect(history.parts?.[1]).toBe(input);
       }
-      expect(message.parts).toEqual([...output, input]);
+      expect(history).not.toBe(message);
+      expect(message).toEqual(beforeMessage);
+      expect(output).toEqual(beforeOutput);
     },
   );
 
@@ -249,7 +254,7 @@ describe('tool result history admission', () => {
   it('rejects an ambiguous packet before a decision can be committed', () => {
     const toolOutput = [...output, ...structuredClone(output)];
     expect(() => matchToolResultParts([output], toolOutput)).toThrow(
-      'transcript',
+      SessionTranscriptChangedError,
     );
   });
 
