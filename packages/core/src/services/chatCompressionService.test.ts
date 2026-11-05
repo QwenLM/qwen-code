@@ -3325,6 +3325,7 @@ describe('issue #7960: compression side-query output budget vs small windows', (
   let capturedModel: string | undefined;
 
   beforeEach(() => {
+    capturedContents = undefined;
     capturedPromptTokens = undefined;
     capturedMaxOutputTokens = undefined;
     capturedModel = undefined;
