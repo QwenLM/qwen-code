@@ -71,7 +71,10 @@ available skills ... no specific task."
 
 **在发送边界统一处理，而不是逐个生产者修改。** 提醒、hook 上下文、IDE 上下文和
 目录由不同模块在不同前端（TUI、headless、ACP、共享 agent loop）注入。在每轮主
-请求组装的唯一位置修正顺序，可以一次覆盖全部路径，避免四处并行修改后各自漂移。
+请求组装的唯一位置修正顺序，可以一次覆盖全部路径，避免四处并行修改后各自漂移；
+只有一个消费方绕过该位置、必须自己调用这次重排：压缩侧查询的 `promptCacheSharing`
+载荷在 `chatCompressionService.ts` 里由 `getHistoryShallow(true)` 构建，因此它
+重排自己那份副本，而冷路径与压缩后的图片恢复正常仍读取已存顺序。
 
 **不改预算。** 本次只处理位置。跨注入块的总量上限、把目录彻底移出 user 尾部，
 以及 always-on-context 告警对中文 token 的低估，仍是独立工作（#16184、#14976）。
@@ -93,6 +96,11 @@ available skills ... no specific task."
 - 没有注入分片的提示词保持原有分片顺序。
 - 调用方放在自己两个分片之间的提醒保持原位；只有最后一个自有分片之后追加的块
   会移动。
+- 压缩侧查询的 cache-sharing 载荷携带同一份重排后的条目，从而复用主请求刚预热
+  过的前缀，而冷路径与压缩后的图片恢复正常仍读取已存顺序
+  （`packages/core/src/services/chatCompressionService.test.ts`）。
+- 这个辅助函数本身由 `packages/core/src/core/prompt-context-order.test.ts` 直接
+  钉住，包括「分片全为工具结果」的那条条目。
 - 既有的目录预算、去重与缓存边界断言仍然成立。三处固定旧顺序的断言已更新：
   待发送轮次的检查改为断言目录存在且用户正文在最后；持久化恢复的检查改为断言
   请求与历史持有相同的条目和分片，只是目录被移到了恢复提示词之前；多轮前缀的

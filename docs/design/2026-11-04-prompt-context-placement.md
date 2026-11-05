@@ -86,7 +86,11 @@ extends request N's prefix exactly. Stored history is still untouched.
 IDE context and the catalog are injected by different modules on different
 frontends (TUI, headless, ACP, the shared agent loop). Fixing the order at the
 single point where every main-turn request is assembled covers all of them
-without four parallel edits that can drift.
+without four parallel edits that can drift — with one consumer that bypasses
+that point and must call the pass itself: the compaction side-query's
+`promptCacheSharing` payload is built from `getHistoryShallow(true)` inside
+`chatCompressionService.ts`, so it reorders its own copy, while the cold path
+and the post-compact image restore keep the stored order.
 
 **No budget change.** This addresses position only. The aggregate cap across
 injected blocks, moving the catalog off the user tail entirely, and the CJK
@@ -114,6 +118,12 @@ token undercount in the always-on-context warning remain separate work
 - A prompt with no injected parts keeps its original part order.
 - A reminder the caller placed between two of its own parts stays there; only
   the appended block after the last own part moves.
+- The compaction side-query's cache-sharing payload carries the same reordered
+  entries, so it reuses the prefix the main request just warmed, while the cold
+  path and the post-compact image restore keep the stored order
+  (`packages/core/src/services/chatCompressionService.test.ts`).
+- The helper itself is pinned directly, including the entry whose parts are all
+  tool results, by `packages/core/src/core/prompt-context-order.test.ts`.
 - Existing catalog budget, deduplication, and cache-boundary assertions still
   hold. Three assertions that pinned the old order were updated: the pending-turn
   check now asserts the catalog is present and the user text is last; the
