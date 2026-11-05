@@ -1763,12 +1763,16 @@ export function createDaemonWorkspaceService(
       };
     },
 
-    async reloadModelProviders(_ctx: WorkspaceRequestContext) {
+    async reloadModelProviders(_ctx: WorkspaceRequestContext, options) {
       assertActiveGeneration();
+      if (options?.subscriptionSignedOut) {
+        await deps.preheatAcpChild?.();
+        assertActiveGeneration();
+      }
       let failed = false;
       const reloadModelProvidersDaemonEnv =
         deps.reloadModelProvidersDaemonEnv ?? deps.reloadDaemonEnv;
-      if (reloadModelProvidersDaemonEnv) {
+      if (reloadModelProvidersDaemonEnv && !options?.subscriptionSignedOut) {
         try {
           const result = await reloadModelProvidersDaemonEnv(
             boundWorkspace,
@@ -1790,10 +1794,18 @@ export function createDaemonWorkspaceService(
           configsFailed?: number;
         }>(
           SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
-          { cwd: boundWorkspace },
+          {
+            cwd: boundWorkspace,
+            ...(options?.subscriptionSignedOut
+              ? { subscriptionSignedOut: true }
+              : {}),
+          },
           { timeoutMs: 30_000 },
         );
         if ((child.configsFailed ?? 0) > 0) failed = true;
+        if (options?.subscriptionSignedOut) {
+          assertActiveGeneration();
+        }
         return { status: failed ? 'failed' : 'applied' };
       } catch (err) {
         assertActiveGeneration();

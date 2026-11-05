@@ -562,7 +562,7 @@ The suite runs in the integration job. The nightly E2E run, and one started by h
   - a cron turn cancelled between rounds keeps the results of its last tool batch in history, as a prompt does, and a notification turn whose response is retried shows only the retried text;
   - a cron turn cancelled after its echo and before its first request keeps its prompt in history and in the record, as a cron turn cancelled while its request is going out does today;
 
-  The ACP parity suite covers the common cases unchanged and asserts the date reminder, UserPromptSubmit on tool results, cancelling while that hook runs, that a batch's approvals come before its calls run, and the plan-mode notice.
+  The ACP parity suite covers the common cases unchanged and asserts that a first prompt carries no date reminder, UserPromptSubmit on tool results, cancelling while that hook runs, that a batch's approvals come before its calls run, and the plan-mode notice.
 
 - With the setting on, the Ink TUI differs from today in these intended ways, as on the other surfaces:
   - from PR 3b-1, the skipped siblings of a plan-mode entry no longer count toward the session's completed tool calls;

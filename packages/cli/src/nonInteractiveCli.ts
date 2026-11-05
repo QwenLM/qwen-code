@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { t } from './i18n/index.js';
 import { settleToolResultHistory } from '@qwen-code/qwen-code-core/services/tool-result-history.js';
 
 import { isWrappedSystemReminderPart } from '@qwen-code/qwen-code-core/core/environmentContext.js';
@@ -2839,6 +2840,7 @@ export async function runNonInteractive(
                 const errorText = parseAndFormatApiError(
                   event.value.error,
                   config.getContentGeneratorConfig()?.authType,
+                  outputFormat === OutputFormat.TEXT ? t : undefined,
                 );
                 if (outputFormat === OutputFormat.TEXT) {
                   process.stderr.write(`${errorText}\n`);
@@ -3277,6 +3279,7 @@ export async function runNonInteractive(
               const errorText = parseAndFormatApiError(
                 event.value.error,
                 config.getContentGeneratorConfig()?.authType,
+                outputFormat === OutputFormat.TEXT ? t : undefined,
               );
               if (outputFormat === OutputFormat.TEXT) {
                 process.stderr.write(`${errorText}\n`);
@@ -3721,6 +3724,7 @@ export async function runNonInteractive(
                   const errorText = parseAndFormatApiError(
                     event.value.error,
                     config.getContentGeneratorConfig()?.authType,
+                    outputFormat === OutputFormat.TEXT ? t : undefined,
                   );
                   if (outputFormat === OutputFormat.TEXT) {
                     process.stderr.write(`${errorText}\n`);
@@ -4163,7 +4167,12 @@ export async function runNonInteractive(
       if (recoverableCancellation) {
         return 130;
       }
-      await handleError(error, config);
+      await handleError(
+        error,
+        config,
+        undefined,
+        outputFormat === OutputFormat.TEXT ? t : undefined,
+      );
     } finally {
       // A prompt a Mod submitted that this run did not start does not wait
       // for the next one, which a stream-json session runs on the same Mods.

@@ -47,6 +47,7 @@ import {
   type Config,
   type Logger,
 } from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import type { PartListUnion } from '@google/genai';
 import { MessageSenderType } from '@qwen-code/qwen-code-core/core/logger.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -58,6 +59,7 @@ import type { SessionStatsState } from '../contexts/SessionContext.js';
 import { useWorktreeSession } from '../hooks/useWorktreeSession.js';
 import { useGitBranchName } from '../hooks/useGitBranchName.js';
 import { useStatusLineState } from '../hooks/useStatusLine.js';
+import { useSubscriptionCommandVisibility } from '../hooks/use-subscription-command-visibility.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 import {
   MessageType,
@@ -340,6 +342,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const [commandList, setCommandList] = useState<readonly SlashCommand[]>(
     commands ?? [],
   );
+  const presentedCommands = useSubscriptionCommandVisibility(
+    commandList,
+    config,
+  );
 
   const notify = useCallback((text: string) => setNoticeText(text), []);
 
@@ -373,6 +379,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // ink's Composer hides the footer while the completion list is open; the
   // list lives inside the composer, so its visibility is lifted here.
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const subscriptionActive =
+    config.getAuthType() === AuthType.QWEN_SUBSCRIPTION;
   const onSuggestionsVisibilityChange = useCallback(
     (visible: boolean) => setShowSuggestions(visible),
     [],
@@ -1703,7 +1711,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 host={host}
                 config={config}
                 settings={settings}
-                commands={commandList}
+                commands={presentedCommands}
                 onClose={() => setDialog(null)}
                 notify={notify}
                 fillInput={fillComposer}
@@ -1739,6 +1747,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 maxRows={modBandMaxRows(terminalHeight)}
               />
               <OpenTuiInputPrompt
+                placeholder={
+                  subscriptionActive
+                    ? '  ' + t('Type your request, or /usage')
+                    : undefined
+                }
                 onSubmit={onSubmit}
                 onNotice={notify}
                 voice={{

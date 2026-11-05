@@ -319,7 +319,7 @@
                                     qwen.hosted.mysql.isolation = true
                                 </configurationParameters>
                             </properties>
-                            <forkedProcessTimeoutInSeconds>11591</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>11658</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

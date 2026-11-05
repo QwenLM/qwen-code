@@ -142,7 +142,8 @@ const VOLATILE_KEYS = new Set([
 const CONTINUATION_PROMPT_ID =
   /(########\d+)_(?:stop_hook|todo_stop_guard)_\d+/g;
 
-const DATE_REMINDER = '<system-reminder>\nThe current date is:';
+const DATE_REMINDER =
+  /^<system-reminder>\n(?:Today's date is |The date has changed since earlier in this conversation\. )/;
 
 const toolResults = (messages: JsonObject[]) =>
   messages.filter((message) => message['role'] === 'tool').length;
@@ -156,7 +157,7 @@ const userTurns = (messages: JsonObject[]) =>
 
 const isDateReminder = (part: unknown) =>
   typeof (part as JsonObject)?.['text'] === 'string' &&
-  ((part as JsonObject)['text'] as string).startsWith(DATE_REMINDER);
+  DATE_REMINDER.test((part as JsonObject)['text'] as string);
 
 /** Removes the date reminder the client adds when the date changed. */
 function withoutDateReminder(content: unknown): unknown {
@@ -1080,7 +1081,9 @@ const allowOnce = () => ({
       expect(written).toEqual([false, false]);
     }, 120_000);
 
-    it('sends the date reminder with a prompt, as other surfaces do', async () => {
+    it('adds no date reminder to a first prompt, as other surfaces do', async () => {
+      // The startup context already carries today's date; the client adds a
+      // reminder only once the date changes.
       const { current, shared } = await both({
         name: 'date reminder',
         prompts: ['Say hello.'],
@@ -1088,7 +1091,7 @@ const allowOnce = () => ({
       });
 
       expect(current.dateReminders).toBe(0);
-      expect(shared.dateReminders).toBe(1);
+      expect(shared.dateReminders).toBe(0);
     }, 120_000);
   },
 );
