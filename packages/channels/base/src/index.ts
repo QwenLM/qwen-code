@@ -3,7 +3,20 @@ export {
   getWorkspaceScopeDirName,
   resolvePath,
 } from './paths.js';
-export { PollingChannelBase } from './PollingChannelBase.js';
+export {
+  appendChannelEvent,
+  channelEventFilePath,
+  channelEventScopeDir,
+  CHANNEL_EVENT_MAX_READ,
+  CHANNEL_EVENT_TYPES,
+  readChannelEvents,
+} from './channel-events.js';
+export type { ChannelEventQuery, ChannelEventType } from './channel-events.js';
+export {
+  PollingChannelBase,
+  MIN_POLL_INTERVAL_MS,
+  MAX_POLL_INTERVAL_MS,
+} from './PollingChannelBase.js';
 export { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
 export {
   ACP_PRIVATE_PARENT_CAPABILITY_ENV,
@@ -34,7 +47,10 @@ export type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
-export { CHANNEL_PROMPT_META_KEY } from './ChannelAgentBridge.js';
+export {
+  CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+} from './ChannelAgentBridge.js';
 export type { AcpBridgeOptions } from './AcpBridge.js';
 export { DaemonChannelBridge } from './DaemonChannelBridge.js';
 export type {
@@ -55,6 +71,11 @@ export {
   isChannelProactiveDeliveryError,
 } from './ChannelProactiveDeliveryError.js';
 export type { ChannelProactiveDeliveryDisposition } from './ChannelProactiveDeliveryError.js';
+export {
+  BoundSessionGoneError,
+  BoundSessionQueueFullError,
+  BoundSessionUnavailableError,
+} from './bound-session-delivery.js';
 export type {
   ChannelBaseOptions,
   ChannelMemoryRecallCacheStatus,
@@ -114,7 +135,7 @@ export {
   truncateCodePoints,
   truncateUtf16Units,
 } from './sanitize.js';
-export { isTerminalTaskLifecycleType } from './types.js';
+export { isTerminalTaskLifecycleType, PR_BINDING_ROLES } from './types.js';
 export {
   CHANNEL_OUTPUT_MODE_FIELD,
   DEFAULT_CHANNEL_OUTPUT_MODE,
@@ -131,10 +152,12 @@ export type {
 } from './background-output-coordinator.js';
 export type {
   Attachment,
+  ChannelBoundSessions,
   ChannelConfig,
   ChannelConfigEnumFieldDescriptor,
   ChannelConfigFieldDescriptor,
   ChannelConfigFieldKind,
+  ChannelConfigFieldOption,
   ChannelConfigNestedFieldDescriptor,
   ChannelConfigNumberFieldDescriptor,
   ChannelConfigObjectFieldDescriptor,
@@ -168,6 +191,10 @@ export type {
   Envelope,
   GroupConfig,
   GroupPolicy,
+  PrBindingEntry,
+  PrBindingRole,
+  PrBindingsSnapshot,
+  PrBindingSummary,
   PrivatePolicy,
   GroupSenderPolicy,
   ObservedChannelIdentity,

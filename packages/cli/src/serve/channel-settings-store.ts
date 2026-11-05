@@ -354,8 +354,14 @@ function assertDescriptorValue(
     (field.kind === 'number' &&
       typeof value === 'number' &&
       Number.isFinite(value) &&
-      (field.exclusiveMinimum === undefined ||
-        value > field.exclusiveMinimum)) ||
+      (((field.exclusiveMinimum === undefined ||
+        value > field.exclusiveMinimum) &&
+        (field.maximum === undefined || value <= field.maximum)) ||
+        // A newly declared bound must not strand an unrelated edit: the editor
+        // re-sends the stored number verbatim, and the runtime already tolerates
+        // it (a non-positive poll interval falls back to the default). Only the
+        // range is forgiven — a wrong type is still rejected, unchanged or not.
+        isDeepStrictEqual(previous, value))) ||
     (field.kind === 'enum' &&
       typeof value === 'string' &&
       field.options?.some((option) => option.value === value) === true) ||

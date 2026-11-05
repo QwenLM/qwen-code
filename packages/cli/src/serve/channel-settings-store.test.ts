@@ -125,6 +125,13 @@ describe('WorkspaceChannelSettingsStore', () => {
             exclusiveMinimum: 0,
           },
           {
+            key: 'boundedSeconds',
+            label: 'Bounded seconds',
+            kind: 'number',
+            exclusiveMinimum: 0,
+            maximum: 10,
+          },
+          {
             key: 'mode',
             label: 'Mode',
             kind: 'enum',
@@ -1516,6 +1523,49 @@ describe('WorkspaceChannelSettingsStore', () => {
       ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
     },
   );
+
+  it('rejects a non-record per-entry group value even when it is unchanged', async () => {
+    // The tolerance above covers the whole `groups` value, not an entry inside
+    // it. A hand-written non-record entry is therefore refused on every save,
+    // so an editor that passes one through cannot promise a no-op — it has to
+    // refuse earlier with a message that names the entry.
+    const groups = {
+      'Acme/Widgets': 'hand-written-garbage',
+      'acme/widgets': { senders: 'open' },
+    };
+    writeWorkspaceSettings(
+      JSON.stringify({
+        $version: 4,
+        channels: {
+          bot: {
+            type: 'management-validation-test',
+            clientId: 'client-id',
+            clientSecret: 'existing-secret',
+            groups,
+          },
+        },
+      }),
+    );
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'client-id',
+          groups,
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel field "groups.Acme/Widgets" is invalid.',
+    });
+
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
 
   it('rejects unchanged non-record groups containing an unsafe key', async () => {
     const groups = [JSON.parse('{"__proto__":{"polluted":true}}') as unknown];
@@ -3287,6 +3337,104 @@ describe('WorkspaceChannelSettingsStore', () => {
       } finally {
         resetHomeEnvBootstrapForTesting();
       }
+    });
+  });
+
+  describe('numeric bounds and unchanged stored values', () => {
+    const baseConfig = {
+      type: 'management-validation-test',
+      clientId: 'client-id',
+    };
+
+    it('tolerates re-sending a stored number a newer bound would reject', async () => {
+      // The editor re-sends stored values verbatim on every save. Declaring a
+      // field must not block an unrelated edit to a channel whose stored value
+      // the runtime already tolerates.
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            bounded: {
+              ...baseConfig,
+              clientSecret: '$BOT_TOKEN',
+              backoffSeconds: 0,
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, backoffSeconds: 0, retries: 4 } as never,
+        secrets: {},
+      });
+
+      expect(next.channels['bounded']['backoffSeconds']).toBe(0);
+      expect(next.channels['bounded']['retries']).toBe(4);
+    });
+
+    it('still rejects a number the operator changed to an invalid value', async () => {
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, backoffSeconds: 5 } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...baseConfig, backoffSeconds: 0 } as never,
+          secrets: {},
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    });
+
+    it('enforces a declared maximum', async () => {
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const revision = store.snapshot().revision;
+
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: revision,
+          config: { ...baseConfig, boundedSeconds: 11 } as never,
+          secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, boundedSeconds: 10 } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+      expect(next.channels['bounded']['boundedSeconds']).toBe(10);
+    });
+
+    it('tolerates re-sending a stored number above a newly declared maximum', async () => {
+      // The minimum half alone would leave an operator storing 300000000
+      // stranded on every unrelated edit once a ceiling is declared, which is
+      // the regression the tolerance exists to prevent.
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            bounded: {
+              ...baseConfig,
+              clientSecret: '$BOT_TOKEN',
+              boundedSeconds: 300,
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, boundedSeconds: 300, retries: 4 } as never,
+        secrets: {},
+      });
+
+      expect(next.channels['bounded']['boundedSeconds']).toBe(300);
+      expect(next.channels['bounded']['retries']).toBe(4);
     });
   });
 });
