@@ -14814,6 +14814,102 @@ describe('useLlmStream', () => {
           expect(mods.returnSubmittedPrompt).toHaveBeenCalledOnce();
         });
 
+        it('runs a prompt queued while a submission that starts no turn held the session', async () => {
+          const { queue } = installQueue();
+          admitted(finished);
+          let finishCommand!: (result: unknown) => void;
+          mockHandleSlashCommand.mockImplementation(
+            () =>
+              new Promise((resolve) => {
+                finishCommand = resolve;
+              }),
+          );
+          const { result } = renderTestHook();
+          let running!: Promise<void>;
+          await act(async () => {
+            running = result.current.submitQuery(
+              '/lint-mod',
+              SendMessageType.Cron,
+            );
+          });
+          await waitFor(() =>
+            expect(mockHandleSlashCommand).toHaveBeenCalled(),
+          );
+          // A cron's Mod command submits; the session stays idle throughout.
+          await queue({ plugin: 'lint', text: 'from the command' });
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          await act(async () => {
+            finishCommand({ type: 'handled' });
+            await running;
+          });
+
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledOnce(),
+          );
+          expect(options()['submittedByMod']).toBe('lint');
+        });
+
+        it('tells the cancel handler the person stopped a Mod’s prompt, not their own', async () => {
+          const { mods, queue } = installQueue();
+          // A stream that never ends until the person stops it.
+          admitted(async function* () {
+            await new Promise(() => {});
+            yield* finished();
+          });
+          const onCancelSubmit = vi.fn();
+          const { result } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            onCancelSubmit,
+          );
+          await queue({ plugin: 'lint', text: 'next' });
+          await waitFor(() => expect(mods.startTurn).toHaveBeenCalledOnce());
+
+          act(() => {
+            result.current.cancelOngoingRequest();
+          });
+
+          expect(onCancelSubmit).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              lastTurnUserItem: null,
+              wasModPromptTurn: true,
+            }),
+          );
+        });
+
+        it('does not mark the person’s own cancelled turn as a Mod’s', async () => {
+          installQueue();
+          // A stream that never ends until the person stops it.
+          admitted(async function* () {
+            await new Promise(() => {});
+            yield* finished();
+          });
+          const onCancelSubmit = vi.fn();
+          const { result } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            onCancelSubmit,
+          );
+          await act(async () => {
+            void result.current.submitQuery('Fix it');
+          });
+          await waitFor(() =>
+            expect(result.current.streamingState).toBe(
+              StreamingState.Responding,
+            ),
+          );
+
+          act(() => {
+            result.current.cancelOngoingRequest();
+          });
+
+          expect(onCancelSubmit).toHaveBeenLastCalledWith(
+            expect.objectContaining({ wasModPromptTurn: false }),
+          );
+        });
+
         it('sends the sidecar the Mod’s text and its name, not the frame', async () => {
           const { queue } = installQueue();
           admitted(finished);

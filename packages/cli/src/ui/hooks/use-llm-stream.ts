@@ -700,6 +700,13 @@ export interface CancelSubmitInfo {
    * strip that prompt so it can't merge into the user's next real message.
    */
   wasGoalTurn: boolean;
+  /**
+   * True when the cancelled turn ran a prompt a Mod submitted with
+   * `$.prompt.submit`. Like a Goal continuation it adds no UI user item, so
+   * the handler strips its framed prompt: the person stopped it, and the next
+   * prompt must not reach the model behind it.
+   */
+  wasModPromptTurn: boolean;
 }
 
 /**
@@ -898,13 +905,15 @@ export const useLlmStream = (
   );
   const flushBufferedStreamEventsRef = useRef<Set<() => void>>(new Set());
   const turnCancelledRef = useRef(false);
+  // Whether the turn running now (or the last one) runs a Mod's own prompt.
+  const modPromptTurnRef = useRef(false);
   const isSubmittingQueryRef = useRef(false);
   const submissionLeaseGenerationRef = useRef(0);
-  // Re-runs the drain of the Mods' prompts (`$.prompt.submit`). One put back
-  // because another submission won the idle moment waits for that one to
-  // settle: it may start no turn, so the session can stay idle throughout.
+  // Re-runs the drain of the Mods' prompts (`$.prompt.submit`). One queued
+  // or put back while another submission held the session waits for that one
+  // to settle: it may start no turn (a cron's command, a notification dropped
+  // before sending), so the session can stay idle throughout.
   const [modPromptTrigger, setModPromptTrigger] = useState(0);
-  const modPromptReturnedRef = useRef(false);
   const setSubmissionInFlight = useCallback(
     (inFlight: boolean) => {
       const changed = isSubmittingQueryRef.current !== inFlight;
@@ -913,13 +922,11 @@ export const useLlmStream = (
       if (sharedRef) sharedRef.current = inFlight;
       if (changed && !inFlight) {
         goalQueueRef?.current?.onSubmissionSettled?.();
-        if (modPromptReturnedRef.current) {
-          modPromptReturnedRef.current = false;
+        if (getInteractiveModSession(config)?.hasSubmittedPrompts)
           setModPromptTrigger((n) => n + 1);
-        }
       }
     },
-    [goalQueueRef],
+    [config, goalQueueRef],
   );
   // Teammate message queue. Declared here (above `handleCompletedTools`)
   // because the tool-round boundary drains it (#8172): in a multi-round
@@ -1764,6 +1771,7 @@ export const useLlmStream = (
           canUndoLastLoggedUserMessage: canUndoLastLoggedUserMessageRef.current,
           turnProducedMeaningfulContent: turnSawContentEventRef.current,
           wasGoalTurn: activeGoalTurnRef.current !== null,
+          wasModPromptTurn: modPromptTurnRef.current,
         });
     } finally {
       setIsResponding(false);
@@ -4313,6 +4321,7 @@ export const useLlmStream = (
       // turn that already owns its own snapshot.
       if (!isTurnContinuation && !allowConcurrentBtwDuringResponse) {
         lastTurnUserItemRef.current = null;
+        modPromptTurnRef.current = modPrompt !== undefined;
         canUndoLastLoggedUserMessageRef.current = false;
         turnSawContentEventRef.current = false;
         handledToolCallFingerprintsRef.current.clear();
@@ -8110,10 +8119,7 @@ export const useLlmStream = (
           shellMode: false,
           // Another submission won this idle moment; the prompt waits for
           // it to settle.
-          onAdmissionFailed: () => {
-            mods.returnSubmittedPrompt(prompt);
-            modPromptReturnedRef.current = true;
-          },
+          onAdmissionFailed: () => mods.returnSubmittedPrompt(prompt),
         },
       ).catch((error) => {
         debugLogger.warn("Failed to start a Mod's prompt", error);
