@@ -245,19 +245,8 @@ describe('start_sandbox', () => {
 
   it('mounts a custom trust store at its real path so the container can read it', async () => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
-    const configuredStore = path.resolve(
-      path.sep,
-      'etc',
-      'qwen-code',
-      'trustedFolders.json',
-    );
-    const realStore = path.resolve(
-      path.sep,
-      'mnt',
-      'data',
-      'qwen-code',
-      'trustedFolders.json',
-    );
+    const configuredStore = '/etc/qwen-code/trustedFolders.json';
+    const realStore = '/mnt/data/qwen-code/trustedFolders.json';
     vi.stubEnv('QWEN_CODE_TRUSTED_FOLDERS_PATH', configuredStore);
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
     vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
@@ -288,13 +277,59 @@ describe('start_sandbox', () => {
 
     await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
     const args = spawnMock.mock.calls[1]?.[1] as string[];
-    const volumeSpec = `${realStore}:${realStore}:rw`;
+    const volumeSpec = `${realStore}:${realStore}:ro`;
     const volumeIndex = args.indexOf(volumeSpec);
     expect(args.slice(volumeIndex - 1, volumeIndex + 1)).toEqual([
       '--volume',
       volumeSpec,
     ]);
     const envFlag = `QWEN_CODE_TRUSTED_FOLDERS_PATH=${realStore}`;
+    const envIndex = args.indexOf(envFlag);
+    expect(args.slice(envIndex - 1, envIndex + 1)).toEqual(['--env', envFlag]);
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
+
+  it('does not mount a custom trust store that does not exist yet', async () => {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    const configuredStore = '/etc/qwen-code/trustedFolders.json';
+    vi.stubEnv('QWEN_CODE_TRUSTED_FOLDERS_PATH', configuredStore);
+    vi.spyOn(fs, 'existsSync').mockImplementation(
+      (filePath) => String(filePath) !== configuredStore,
+    );
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const result = start_sandbox(
+      { command: 'docker', image: 'example.com/qwen-code:latest' },
+      [],
+      undefined,
+      [process.execPath, '/path/to/cli.js'],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    expect(args.some((arg) => arg.startsWith(`${configuredStore}:`))).toBe(
+      false,
+    );
+    const envFlag = `QWEN_CODE_TRUSTED_FOLDERS_PATH=${configuredStore}`;
     const envIndex = args.indexOf(envFlag);
     expect(args.slice(envIndex - 1, envIndex + 1)).toEqual(['--env', envFlag]);
 
