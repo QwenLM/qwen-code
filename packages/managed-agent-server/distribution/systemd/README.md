@@ -100,16 +100,25 @@ Check with `readlink -f "$(command -v qwen)"`.
 
 ## Verify
 
-Load the same environment file the unit uses, then run the preflight while the
-service is stopped:
+Load the same environment file the unit uses, and run in the unit's working
+directory, then run the preflight while the service is stopped:
 
 ```bash
 sudo systemd-run --wait --pipe --collect \
   --property=User=qwen-managed-agent \
   --property=EnvironmentFile=/etc/qwen-managed-agent/server.env \
+  --working-directory=/opt/qwen-managed-agent \
   /opt/qwen-managed-agent/bin/qwen-managed-agent-server --check
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
+
+The preflight reads the configuration as the server does, and the server
+also reads `application.yml` and `config/application.yml` in its working
+directory beside the file `SPRING_CONFIG_ADDITIONAL_LOCATION` names, so
+`--working-directory` must match the unit's `WorkingDirectory`. It prints a
+`config` row for each file it read, and fails that row where the server would
+not start: a named file that does not exist, or a YAML error, with the file
+and line.
 
 `--check` binds the configured ports, and its `workers` row warns about Runtime
 workers still running from an earlier start, so run it while the service is

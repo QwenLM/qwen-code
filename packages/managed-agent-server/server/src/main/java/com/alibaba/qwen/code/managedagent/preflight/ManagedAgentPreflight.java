@@ -18,6 +18,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
 import org.flywaydb.core.api.FlywayException;
 import org.flywaydb.core.api.MigrationVersion;
+import org.springframework.boot.ApplicationContextFactory;
+import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.web.ServerProperties;
 import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
 import org.springframework.boot.context.properties.bind.Bindable;
@@ -28,7 +30,6 @@ import org.springframework.core.env.PropertySource;
 import org.springframework.core.env.SimpleCommandLinePropertySource;
 import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.io.ClassPathResource;
-import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 
 import java.io.File;
@@ -77,23 +78,20 @@ import java.util.stream.Collectors;
 /**
  * Read-only deployment preflight for the reference distribution.
  *
- * <p>It binds the same configuration Spring would load, checks the inputs that
- * otherwise fail during startup or on the first Turn, and never opens the web
- * server, a scheduler or a worker.
+ * <p>It binds the configuration the server reads, prepared as
+ * {@link ServerEnvironment} prepares it, so files at Spring Boot's default
+ * locations count, read in the working directory; run it with the server
+ * unit's working directory. It checks the inputs that otherwise fail during
+ * startup or on the first Turn, and never opens the web server, a scheduler
+ * or a worker.
  */
 public final class ManagedAgentPreflight {
-    static final String CONFIG_LOCATION_ARG =
-            "--spring.config.additional-location=";
-    static final String CONFIG_LOCATION_ENV =
-            "SPRING_CONFIG_ADDITIONAL_LOCATION";
     static final String ONLINE_ARG = "--online";
     private static final String WORKER_ARG = "managed-runtime-worker";
     // The kernel appends this to /proc/<pid>/cwd once the directory is removed.
     private static final String DELETED_SUFFIX = " (deleted)";
     private static final String SHELL_MCP_FEATURE = "workspace-shell-mcp/1";
     private static final Pattern QWEN_CODE_VERSION = Pattern.compile("[0-9A-Za-z.+-]{1,64}");
-    private static final String OPTIONAL_PREFIX = "optional:";
-    private static final String FILE_PREFIX = "file:";
     private static final Pattern DIGEST =
             Pattern.compile("sha256:[0-9a-f]{64}");
     private static final int TIMEOUT_MILLIS = 5_000;
@@ -139,18 +137,26 @@ public final class ManagedAgentPreflight {
     }
 
     static List<Check> checks(String[] args) {
+        return checks(args, ApplicationContextFactory.DEFAULT
+                .createEnvironment(WebApplicationType.SERVLET));
+    }
+
+    /**
+     * The checks against {@code base}, prepared as the server prepares its
+     * environment; a test may replace its process variables.
+     */
+    static List<Check> checks(String[] args, ConfigurableEnvironment base) {
         List<Check> checks = new ArrayList<>();
         // While the server runs it holds its ports and its Runtime workers.
         boolean online = online(args, checks);
-        ConfigurableEnvironment environment = baseEnvironment(args);
-        List<String> locations = configLocations(args, environment);
-        loadConfiguration(environment, locations, checks);
+        Prepared prepared = prepare(args, base, checks);
+        ConfigurableEnvironment environment = prepared.environment();
         ManagedAgentProperties properties = bind(environment, checks);
         checks.add(javaCheck());
         AccessCheck access = serviceUserCheck(properties.getServiceUser(),
                 System.getProperty("user.name", ""), ServiceAccount::lookup);
         checks.add(access.check());
-        checks.add(configFileCheck(locations, access.account()));
+        checks.addAll(configFileChecks(prepared.files(), access.account()));
         checks.add(startupValidationCheck(properties));
         checks.add(keyRingCheck(properties));
         checks.add(authCheck(environment, properties));
@@ -182,6 +188,35 @@ public final class ManagedAgentPreflight {
         return checks;
     }
 
+    /**
+     * The environment the checks read, and the configuration files it holds
+     * from the file system; no files when it could not be prepared.
+     */
+    record Prepared(ConfigurableEnvironment environment, List<Path> files) {
+    }
+
+    /**
+     * The environment as the server prepares it. When Spring would refuse to
+     * start, as for a named location that does not exist or a file it cannot
+     * read, a config row says why, and the other rows read the packaged
+     * defaults, the arguments and the process environment.
+     */
+    static Prepared prepare(String[] args, ConfigurableEnvironment base,
+            List<Check> checks) {
+        try {
+            ConfigurableEnvironment environment =
+                    ServerEnvironment.prepare(args, base);
+            return new Prepared(environment,
+                    ServerEnvironment.files(environment));
+        } catch (RuntimeException error) {
+            ServerEnvironment.Failure failure = ServerEnvironment.failure(error, base);
+            checks.add(new Check("config", Status.FAIL, failure.detail(), failure.fix()));
+            ConfigurableEnvironment environment = baseEnvironment(args);
+            loadDefaults(environment, checks);
+            return new Prepared(environment, null);
+        }
+    }
+
     static ConfigurableEnvironment baseEnvironment(String[] args) {
         StandardEnvironment environment = new StandardEnvironment();
         if (args.length > 0) {
@@ -191,60 +226,11 @@ public final class ManagedAgentPreflight {
         return environment;
     }
 
-    static List<String> configLocations(
-            String[] args, ConfigurableEnvironment environment) {
-        List<String> locations = new ArrayList<>();
-        for (String arg : args) {
-            if (arg.startsWith(CONFIG_LOCATION_ARG)) {
-                addLocations(locations,
-                        arg.substring(CONFIG_LOCATION_ARG.length()));
-            }
-        }
-        if (locations.isEmpty()) {
-            String configured = environment.getProperty(CONFIG_LOCATION_ENV);
-            if (configured != null) {
-                addLocations(locations, configured);
-            }
-        }
-        return locations;
-    }
-
-    private static void addLocations(List<String> locations, String value) {
-        for (String part : value.split(",")) {
-            String trimmed = part.trim();
-            if (!trimmed.isEmpty()) {
-                locations.add(trimmed);
-            }
-        }
-    }
-
-    static void loadConfiguration(
-            ConfigurableEnvironment environment, List<String> locations,
+    /** Adds the packaged defaults, below what the environment holds. */
+    static void loadDefaults(ConfigurableEnvironment environment,
             List<Check> checks) {
-        YamlPropertySourceLoader loader = new YamlPropertySourceLoader();
-        for (int index = locations.size() - 1; index >= 0; index--) {
-            String location = locations.get(index);
-            boolean optional = location.startsWith(OPTIONAL_PREFIX);
-            String path = optional
-                    ? location.substring(OPTIONAL_PREFIX.length()) : location;
-            if (path.startsWith(FILE_PREFIX)) {
-                path = path.substring(FILE_PREFIX.length());
-            }
-            Resource resource = new FileSystemResource(path);
-            if (!resource.exists()) {
-                if (!optional) {
-                    checks.add(new Check("config", Status.FAIL,
-                            path + " does not exist",
-                            "copy config/application.example.yml to "
-                                    + "config/application.yml"));
-                }
-                continue;
-            }
-            addYaml(loader, environment, resource, "external-" + index,
-                    checks);
-        }
-        addYaml(loader, environment, new ClassPathResource("application.yml"),
-                "defaults", checks);
+        addYaml(new YamlPropertySourceLoader(), environment,
+                new ClassPathResource("application.yml"), "defaults", checks);
     }
 
     private static void addYaml(
@@ -352,29 +338,32 @@ public final class ManagedAgentPreflight {
         }
     }
 
-    static Check configFileCheck(List<String> locations) {
-        return configFileCheck(locations, null);
+    /**
+     * One row for each configuration file the server reads, which Spring
+     * found at a location named or at one of its defaults, such as
+     * ./config/application.yml in the working directory. None when the
+     * environment could not be prepared, which a row has said already.
+     */
+    static List<Check> configFileChecks(List<Path> files,
+            ServiceAccount account) {
+        if (files == null) {
+            return List.of();
+        }
+        if (files.isEmpty()) {
+            return List.of(new Check("config", Status.WARN,
+                    "no configuration file; packaged defaults and the"
+                            + " environment only",
+                    "create config/application.yml for the credential key ring"));
+        }
+        List<Check> checks = new ArrayList<>();
+        for (Path file : files) {
+            checks.add(configFileCheck(file, account));
+        }
+        return checks;
     }
 
-    static Check configFileCheck(List<String> locations,
-            ServiceAccount account) {
-        if (locations.isEmpty()) {
-            return new Check("config", Status.WARN,
-                    "no external configuration; environment only",
-                    "create config/application.yml for the credential key ring");
-        }
-        String location = locations.get(0);
-        boolean optional = location.startsWith(OPTIONAL_PREFIX);
-        String path = optional
-                ? location.substring(OPTIONAL_PREFIX.length()) : location;
-        if (path.startsWith(FILE_PREFIX)) {
-            path = path.substring(FILE_PREFIX.length());
-        }
-        Path file = Path.of(path);
-        if (!Files.exists(file) && optional) {
-            return new Check("config", Status.WARN,
-                    path + " does not exist (optional)", null);
-        }
+    static Check configFileCheck(Path file, ServiceAccount account) {
+        String path = file.toString();
         if (!readable(file, account)) {
             return account == null
                     ? new Check("config", Status.FAIL,

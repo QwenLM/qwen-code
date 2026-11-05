@@ -96,29 +96,6 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
-    void readsTheConfigLocationFromArgumentsBeforeTheEnvironment() {
-        MockEnvironment environment = new MockEnvironment();
-        environment.setProperty("SPRING_CONFIG_ADDITIONAL_LOCATION",
-                "file:/from-env.yml");
-        List<String> locations = ManagedAgentPreflight.configLocations(
-                new String[] {"--spring.config.additional-location="
-                        + "file:/from-arg.yml"}, environment);
-        assertEquals(List.of("file:/from-arg.yml"), locations);
-    }
-
-    @Test
-    void fallsBackToTheEnvironmentConfigLocation() {
-        MockEnvironment environment = new MockEnvironment();
-        environment.setProperty("SPRING_CONFIG_ADDITIONAL_LOCATION",
-                "file:/from-env.yml,optional:file:/optional.yml");
-        List<String> locations = ManagedAgentPreflight.configLocations(
-                new String[0], environment);
-        assertEquals(
-                List.of("file:/from-env.yml", "optional:file:/optional.yml"),
-                locations);
-    }
-
-    @Test
     void rejectsAutoModeOnANonLoopbackBind() {
         MockEnvironment environment = new MockEnvironment();
         environment.setProperty("server.address", "0.0.0.0");
@@ -1306,22 +1283,6 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
-    void treatsAMissingOptionalConfigAsAWarning() {
-        assertEquals(ManagedAgentPreflight.Status.WARN,
-                ManagedAgentPreflight.configFileCheck(
-                        List.of("optional:file:/does-not-exist/"
-                                + "application.yml")).status());
-    }
-
-    @Test
-    void treatsAMissingRequiredConfigAsAFailure() {
-        assertEquals(ManagedAgentPreflight.Status.FAIL,
-                ManagedAgentPreflight.configFileCheck(
-                        List.of("file:/does-not-exist/application.yml"))
-                        .status());
-    }
-
-    @Test
     void reportsTheEffectiveSessionStoreWiring() {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getSessionStore().setEnabled(true);
@@ -1359,8 +1320,7 @@ class ManagedAgentPreflightTest {
                                 workspace.toString(),
                                 "server.port", "9090")));
         List<ManagedAgentPreflight.Check> checks = new ArrayList<>();
-        ManagedAgentPreflight.loadConfiguration(environment, List.of(),
-                checks);
+        ManagedAgentPreflight.loadDefaults(environment, checks);
         ManagedAgentProperties properties =
                 ManagedAgentPreflight.bind(environment, checks);
         assertTrue(checks.isEmpty(), checks.toString());
@@ -1388,8 +1348,7 @@ class ManagedAgentPreflightTest {
                                 workspace.toString(),
                                 "server.ssl.bundle", "web")));
         List<ManagedAgentPreflight.Check> checks = new ArrayList<>();
-        ManagedAgentPreflight.loadConfiguration(environment, List.of(),
-                checks);
+        ManagedAgentPreflight.loadDefaults(environment, checks);
         ManagedAgentProperties properties =
                 ManagedAgentPreflight.bind(environment, checks);
         ManagedAgentPreflight.startupValidationCheck(properties);
@@ -1450,13 +1409,13 @@ class ManagedAgentPreflightTest {
         Files.setPosixFilePermissions(file,
                 java.nio.file.attribute.PosixFilePermissions.fromString("rw-r-----"));
         ManagedAgentPreflight.Check shared = ManagedAgentPreflight
-                .configFileCheck(List.of("file:" + file));
+                .configFileCheck(file, null);
         assertEquals(ManagedAgentPreflight.Status.WARN, shared.status());
         assertEquals("chmod 600 " + file, shared.fix());
         Files.setPosixFilePermissions(file,
                 java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
         assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight
-                .configFileCheck(List.of("file:" + file)).status());
+                .configFileCheck(file, null).status());
     }
 
     @Test
@@ -1904,7 +1863,7 @@ class ManagedAgentPreflightTest {
                 + " directory on its path, following symbolic links",
                 credentials.fix());
         ManagedAgentPreflight.Check config = ManagedAgentPreflight.configFileCheck(
-                List.of("file:" + application), stranger);
+                application, stranger);
         assertEquals(ManagedAgentPreflight.Status.FAIL, config.status());
         assertEquals(application + " is not readable by qwen-preflight-stranger",
                 config.detail());
@@ -1912,7 +1871,7 @@ class ManagedAgentPreflightTest {
         assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight
                 .credentialsFileCheck(properties, ownerAccount).status());
         assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight
-                .configFileCheck(List.of("file:" + application), ownerAccount)
+                .configFileCheck(application, ownerAccount)
                 .status());
     }
 
@@ -2019,21 +1978,6 @@ class ManagedAgentPreflightTest {
         assertEquals("0.0.0.0", environment.getProperty("server.address"));
         assertEquals("open",
                 environment.getProperty("qwen.managed-agent.auth.mode"));
-    }
-
-    @Test
-    void laterExternalYamlOverridesEarlierWithoutDroppingKeys(
-            @TempDir Path directory) throws IOException {
-        Path first = Files.writeString(directory.resolve("first.yml"),
-                "server:\n  address: 0.0.0.0\n");
-        Path second = Files.writeString(directory.resolve("second.yml"),
-                "server:\n  port: 0\n");
-        var environment = new StandardEnvironment();
-        ManagedAgentPreflight.loadConfiguration(environment,
-                List.of(first.toString(), second.toString()),
-                new ArrayList<>());
-        assertEquals("0.0.0.0", environment.getProperty("server.address"));
-        assertEquals("0", environment.getProperty("server.port"));
     }
 
     @Test
