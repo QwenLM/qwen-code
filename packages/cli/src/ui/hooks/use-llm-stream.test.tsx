@@ -24814,6 +24814,15 @@ describe('useLlmStream', () => {
       });
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+      // The results answer the calls in history, outside a Goal turn too.
+      expect(client.addHistory).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({ id: 'read_a' }),
+          }),
+        ],
+      });
     });
 
     it('stops without a continuation when a background agent took the last background slot', async () => {
@@ -25111,6 +25120,71 @@ describe('useLlmStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
     });
 
+    it('sends the results of batches that settled during one stream in one continuation', async () => {
+      const completions: Array<() => Promise<void>> = [];
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          completions.push(
+            () =>
+              onBatchComplete?.(
+                requests.map((request) => completedCall(request)),
+              ) ?? Promise.resolve(),
+          );
+        },
+      );
+      let endThirdStream!: () => void;
+      const thirdStreamHeld = new Promise<void>((resolve) => {
+        endThirdStream = resolve;
+      });
+      rounds([toolRequest('read_a')], [toolRequest('read_b')]);
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'Thinking.' };
+          await thirdStreamHeld;
+        })(),
+      );
+      rounds([{ type: ServerLlmEventType.Content, value: 'Both read.' }]);
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read a.');
+      });
+      await act(async () => {
+        await result.current.submitQuery('Read b.');
+      });
+      let thirdSubmission!: Promise<void>;
+      await act(async () => {
+        thirdSubmission = result.current.submitQuery('Something else.');
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      expect(completions).toHaveLength(2);
+      // Both batches settle while the third stream is active.
+      await act(async () => {
+        await Promise.all(completions.map((complete) => complete()));
+      });
+
+      await act(async () => {
+        endThirdStream();
+        await thirdSubmission;
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(4);
+      });
+      expect([...sentIds(3)].sort()).toEqual(['read_a', 'read_b']);
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(4);
+    });
+
     it('decides its stops when no model stream is active, as the session is then', async () => {
       let completeBatch: (() => Promise<void>) | undefined;
       mockScheduleToolCalls.mockImplementation(
@@ -25289,8 +25363,11 @@ describe('useLlmStream', () => {
             ([item]) => (item as { type?: string }).type === 'tool_group',
           );
 
+        // The submission drains the batch that settled during its stream,
+        // so it ends once the batch does.
+        let submission!: Promise<void>;
         await act(async () => {
-          await result.current.submitQuery('Read the file.');
+          submission = result.current.submitQuery('Read the file.');
         });
         await waitFor(() => expect(persistenceEntered).toHaveBeenCalled());
         // The finalize persists the result; the group is already in history.
@@ -25304,6 +25381,7 @@ describe('useLlmStream', () => {
         client.getChat = vi.fn(() => ({ addHistory: vi.fn() }));
         await act(async () => {
           releaseFinalizer();
+          await submission;
         });
 
         await act(async () => {

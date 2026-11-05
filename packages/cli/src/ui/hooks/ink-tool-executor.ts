@@ -8,8 +8,11 @@ import type {
   AgentLoopSettledCall,
   AgentLoopToolExecutor,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { InteractiveToolCall } from '../../services/interactive-mod-tool-scheduler.js';
 import type { ScheduleFn } from './useReactToolScheduler.js';
+
+const debugLogger = createDebugLogger('INK_TOOL_EXECUTOR');
 
 /**
  * Runs the shared loop's tool batches on the TUI's scheduler, so the tool
@@ -69,7 +72,9 @@ export function createInkToolExecutor(
             throw error;
           }
           void Promise.resolve(pending)
-            .catch(() => {})
+            .catch((error: unknown) => {
+              debugLogger.error('Settling a shared tool batch failed:', error);
+            })
             .then(() => resolve(settledCalls));
         });
       });
