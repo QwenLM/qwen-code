@@ -478,29 +478,20 @@ interface SharedToolBatchResults {
    */
   owner: { sessionId: string; chat: unknown };
   /**
-   * The TUI step that ended the batch without a continuation: a quota model
-   * switch, or a background agent launch that spent the last background
-   * slot.
+   * The executed calls that launched a background agent. The completion
+   * step checks the background slots when it sends, since the batch may
+   * wait for another stream to end first.
    */
-  stop?: SharedToolBatchStop;
+  backgroundLaunchCallIds: ReadonlySet<string>;
 }
 
-type SharedToolBatchStop = 'model_switch' | 'background_capacity';
-
-/**
- * Whether a result launched a background agent into the last background
- * slot, so the turn stops rather than wait on it.
- */
-function launchedIntoLastBackgroundSlot(
-  config: Config,
+/** Whether a result launched a background agent. */
+function launchedBackgroundAgent(
   request: ToolCallRequestInfo,
   response: ToolCallResponseInfo,
 ): boolean {
-  const registry = config.getBackgroundTaskRegistry();
   const display = response.resultDisplay;
   return (
-    registry.getMaxConcurrentBackgroundAgents() === 1 &&
-    !registry.canStartBackgroundAgent() &&
     request.name === ToolNames.AGENT &&
     typeof display === 'object' &&
     display !== null &&
@@ -511,14 +502,16 @@ function launchedIntoLastBackgroundSlot(
   );
 }
 
-/** The stop of merged batches: a quota model switch wins. */
-function mergeSharedToolBatchStops(
-  first: SharedToolBatchStop | undefined,
-  second: SharedToolBatchStop | undefined,
-): SharedToolBatchStop | undefined {
-  return first === 'model_switch' || second === 'model_switch'
-    ? 'model_switch'
-    : (first ?? second);
+/**
+ * Whether a background agent launch spent the last background slot, so the
+ * turn stops rather than wait on it.
+ */
+function backgroundSlotsSpent(config: Config): boolean {
+  const registry = config.getBackgroundTaskRegistry();
+  return (
+    registry.getMaxConcurrentBackgroundAgents() === 1 &&
+    !registry.canStartBackgroundAgent()
+  );
 }
 
 /**
@@ -5155,8 +5148,12 @@ export const useLlmStream = (
             if (resumed.length > 0) {
               completedToolBatchDrainHoldsRef.current += 1;
               try {
-                for (const { resume } of resumed) resume();
-                await Promise.all(resumed.map(({ done }) => done));
+                // One at a time, in the order they settled, so their
+                // results join the queue, and go out, in that order.
+                for (const { resume, done } of resumed) {
+                  resume();
+                  await done;
+                }
               } finally {
                 completedToolBatchDrainHoldsRef.current -= 1;
               }
@@ -5194,10 +5191,10 @@ export const useLlmStream = (
                       // The earliest batch's session: results of a session
                       // swapped away never go out in its successor.
                       owner: pendingShared.owner,
-                      stop: mergeSharedToolBatchStops(
-                        pendingShared.stop,
-                        shared.stop,
-                      ),
+                      backgroundLaunchCallIds: new Set([
+                        ...pendingShared.backgroundLaunchCallIds,
+                        ...shared.backgroundLaunchCallIds,
+                      ]),
                     }
                   : shared;
               }
@@ -6896,13 +6893,13 @@ export const useLlmStream = (
         }
       }
 
-      // Don't continue if model was switched due to quota error, now or when
-      // the shared batch ended. The results answer the calls in history.
-      if (
-        shared?.stop === 'model_switch' ||
-        modelSwitchedFromQuotaErrorRef.current
-      ) {
-        llmClient?.addHistory({ role: 'user', parts: responsesToSend });
+      // Don't continue if model was switched due to quota error. On the
+      // shared loop the results answer the calls in history, as in a Goal
+      // turn.
+      if (modelSwitchedFromQuotaErrorRef.current) {
+        if (shared || toolGoalBinding) {
+          llmClient?.addHistory({ role: 'user', parts: responsesToSend });
+        }
         if (toolGoalBinding) {
           await failClosedGoalTurn(
             toolGoalBinding,
@@ -6914,19 +6911,16 @@ export const useLlmStream = (
         return;
       }
 
-      // The shared batch decided this for its calls when it ended; calls
-      // the scheduler ran alone, drained with it, are checked now.
+      // The shared batch noted the launches of the calls it executed; calls
+      // the scheduler ran alone, drained with it, are read from their
+      // results. The slots are checked now, as the continuation would wait.
       const backgroundLaunchExhaustedCapacity =
-        shared?.stop === 'background_capacity' ||
-        llmTools.some(
-          (toolCall) =>
-            !sharedResultsByCallId.has(toolCall.request.callId) &&
-            launchedIntoLastBackgroundSlot(
-              config,
-              toolCall.request,
-              toolCall.response,
-            ),
-        );
+        llmTools.some((toolCall) =>
+          sharedResultsByCallId.has(toolCall.request.callId)
+            ? shared?.backgroundLaunchCallIds.has(toolCall.request.callId) ===
+              true
+            : launchedBackgroundAgent(toolCall.request, toolCall.response),
+        ) && backgroundSlotsSpent(config);
       if (backgroundLaunchExhaustedCapacity) {
         llmClient?.addHistory({ role: 'user', parts: responsesToSend });
         if (toolGoalBinding) {
@@ -7344,7 +7338,7 @@ export const useLlmStream = (
           return waitForModelStreamsIdle(batchFinished);
         },
       );
-      let stop: SharedToolBatchStop | undefined;
+      const backgroundLaunchCallIds = new Set<string>();
       // Replay answers the batch marks as sent but never sends, when it
       // throws, must not count as answered.
       const providerKeys = batch.calls.flatMap(({ providerCallId, callId }) =>
@@ -7375,17 +7369,20 @@ export const useLlmStream = (
               if (origin !== 'executed') {
                 dualOutput?.emitToolResult(request, response);
               }
-              // The TUI's stops: the batch ends without a continuation. A
-              // quota model switch wins, as in the current path.
-              if (modelSwitchedFromQuotaErrorRef.current) {
-                stop = 'model_switch';
-              } else if (
+              if (
                 origin === 'executed' &&
-                launchedIntoLastBackgroundSlot(config, request, response)
+                launchedBackgroundAgent(request, response)
               ) {
-                stop ??= 'background_capacity';
+                backgroundLaunchCallIds.add(request.callId);
               }
-              return stop !== undefined;
+              // The TUI's stops end the batch: a quota model switch, or a
+              // background agent launch that spent the last background
+              // slot. The completion step checks both again when it sends.
+              return (
+                modelSwitchedFromQuotaErrorRef.current ||
+                (backgroundLaunchCallIds.size > 0 &&
+                  backgroundSlotsSpent(config))
+              );
             },
           },
         });
@@ -7402,8 +7399,7 @@ export const useLlmStream = (
             ranCallIds: countedCallIds(settled),
             promptId: batch.promptId,
             owner,
-            // Why the batch ended, when one of the TUI's stops ended it.
-            ...(stop ? { stop } : {}),
+            backgroundLaunchCallIds,
           },
           committedToolGroup,
         );
@@ -7428,6 +7424,7 @@ export const useLlmStream = (
                 ranCallIds: countedCallIds(settled),
                 promptId: batch.promptId,
                 owner,
+                backgroundLaunchCallIds: new Set(),
               },
               committedToolGroup,
             );

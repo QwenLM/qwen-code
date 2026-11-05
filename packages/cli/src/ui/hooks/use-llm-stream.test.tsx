@@ -5406,6 +5406,45 @@ describe('useLlmStream', () => {
     expect(mockSendMessageStream).not.toHaveBeenCalled();
   });
 
+  it('leaves history alone when a quota switch stops a turn outside a Goal turn', async () => {
+    const completedTool = {
+      request: {
+        callId: 'quota-tool',
+        name: 'testTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-quota-switch',
+      },
+      status: 'success',
+      responseSubmittedToLlm: false,
+      response: {
+        callId: 'quota-tool',
+        responseParts: [{ text: 'quota-tool response' }],
+        errorType: undefined,
+      },
+      tool: { displayName: 'MockTool' },
+      invocation: {
+        getDescription: () => 'quota-tool',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+    const client = new MockedLlmClientClass(mockConfig);
+    const { completeToolRound } = renderTestHook(
+      [],
+      client,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+    await completeToolRound([completedTool]);
+
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['quota-tool']);
+    expect(client.addHistory).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
   it('ignores a deduplicated tool without Goal context when forwarding a fresh Goal result', async () => {
     const permit: GoalTurnPermit = {
       goalId: 'goal-dedup',
@@ -24859,6 +24898,41 @@ describe('useLlmStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
 
+    it('continues when the last background slot is free again by the time it sends', async () => {
+      mockBackgroundTaskRegistry.getMaxConcurrentBackgroundAgents.mockReturnValue(
+        1,
+      );
+      // Spent when the batch ends, free when the completion step sends.
+      mockBackgroundTaskRegistry.canStartBackgroundAgent
+        .mockReturnValueOnce(false)
+        .mockReturnValue(true);
+      completeBatchesWith(() => ({
+        resultDisplay: { type: 'task_execution', status: 'background' },
+      }));
+      rounds(
+        [
+          {
+            ...toolRequest('agent_a'),
+            value: { ...toolRequest('agent_a').value, name: 'agent' },
+          },
+        ],
+        [{ type: ServerLlmEventType.Content, value: 'Started.' }],
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Start the agent.');
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(sentIds(1)).toEqual(['agent_a']);
+      expect(
+        mockBackgroundTaskRegistry.canStartBackgroundAgent,
+      ).toHaveBeenCalledTimes(2);
+    });
+
     it('continues past a background agent launch while background slots remain', async () => {
       completeBatchesWith(() => ({
         resultDisplay: { type: 'task_execution', status: 'background' },
@@ -25178,7 +25252,8 @@ describe('useLlmStream', () => {
       await waitFor(() => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(4);
       });
-      expect([...sentIds(3)].sort()).toEqual(['read_a', 'read_b']);
+      // In the order the batches settled.
+      expect(sentIds(3)).toEqual(['read_a', 'read_b']);
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
       });

@@ -404,12 +404,12 @@ A response made only of provider replays keeps the current path, since it runs n
 
 PR 3b-2a moves the TUI's stops into the batch. The batch ends only when no model stream is active, as the TUI holds a batch that completes during a stream today, so the batch sees the session as the continuation will:
 
-| The TUI today                                                                                                                                 | With the setting on                                                                         |
-| --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| the completion step stops without a continuation after a quota model switch, or when a background agent launch spent the last background slot | the batch's result callback ends the batch on either, and the completion step stops on that |
-| a tool that ends the turn ends a Goal turn; outside one the turn continues                                                                    | it ends the turn either way, with its results in history                                    |
+| The TUI today                                                                                                                                 | With the setting on                                                                                                                                                                                |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| the completion step stops without a continuation after a quota model switch, or when a background agent launch spent the last background slot | the batch's result callback ends the batch on either; the completion step checks both again when it sends, since a batch may wait for another stream to end, and stops with the results in history |
+| a tool that ends the turn ends a Goal turn; outside one the turn continues                                                                    | it ends the turn either way, with its results in history                                                                                                                                           |
 
-Batches that wait for the streams join the queue that the end of the last stream drains, so the results of every batch completed during one stream go out in one continuation, as today.
+Batches that wait for the streams join the queue that the end of the last stream drains, so the results of every batch completed during one stream go out in one continuation, as today, in the order the batches completed.
 
 The history repair, the split by interaction owner and the tool-use summary check what the next round sends, so they stay in the completion step for now. PR 3b-2b has the turn await the batch, and they run right before the next round.
 
