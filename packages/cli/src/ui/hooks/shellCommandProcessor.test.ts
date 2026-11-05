@@ -52,11 +52,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
-import { ToolCallStatus } from '../types.js';
+import { ToolCallStatus, type HistoryItemWithoutId } from '../types.js';
+import type { SetStateAction } from 'react';
 
 describe('useShellCommandProcessor', () => {
   let addItemToHistoryMock: Mock;
   let setPendingHistoryItemMock: Mock;
+  let pendingHistoryItem: HistoryItemWithoutId | null;
   let onExecMock: Mock;
   let onDebugMessageMock: Mock;
   let mockConfig: Config;
@@ -74,7 +76,13 @@ describe('useShellCommandProcessor', () => {
     );
 
     addItemToHistoryMock = vi.fn();
-    setPendingHistoryItemMock = vi.fn();
+    pendingHistoryItem = null;
+    setPendingHistoryItemMock = vi.fn(
+      (item: SetStateAction<HistoryItemWithoutId | null>) => {
+        pendingHistoryItem =
+          typeof item === 'function' ? item(pendingHistoryItem) : item;
+      },
+    );
     onExecMock = vi.fn();
     onDebugMessageMock = vi.fn();
     setShellInputFocusedMock = vi.fn();
@@ -165,9 +173,10 @@ describe('useShellCommandProcessor', () => {
 
   it('should initiate command execution and set pending state', async () => {
     const { result } = renderProcessorHook();
+    const signal = new AbortController().signal;
 
     act(() => {
-      result.current.handleShellCommand('ls -l', new AbortController().signal);
+      result.current.handleShellCommand('ls -l', signal);
     });
 
     expect(addItemToHistoryMock).toHaveBeenCalledWith(
@@ -194,7 +203,7 @@ describe('useShellCommandProcessor', () => {
       false,
       expect.any(Object),
     );
-    expect(onExecMock).toHaveBeenCalledWith(expect.any(Promise));
+    expect(onExecMock).toHaveBeenCalledWith(expect.any(Promise), signal);
   });
 
   it('closes a dangling line continuation before appending the terminator so it is not escaped (R6-8)', async () => {
@@ -237,7 +246,7 @@ describe('useShellCommandProcessor', () => {
     });
     await act(async () => await execPromise);
 
-    expect(setPendingHistoryItemMock).toHaveBeenCalledWith(null);
+    expect(pendingHistoryItem).toBeNull();
     expect(addItemToHistoryMock).toHaveBeenCalledTimes(2); // Initial + final
     expect(addItemToHistoryMock.mock.calls[1][0]).toEqual(
       expect.objectContaining({
@@ -611,7 +620,7 @@ describe('useShellCommandProcessor', () => {
 
     await act(async () => await execPromise);
 
-    expect(setPendingHistoryItemMock).toHaveBeenCalledWith(null);
+    expect(pendingHistoryItem).toBeNull();
     expect(addItemToHistoryMock).toHaveBeenCalledTimes(2);
     expect(addItemToHistoryMock.mock.calls[1][0]).toEqual({
       type: 'error',
@@ -646,7 +655,7 @@ describe('useShellCommandProcessor', () => {
 
     await act(async () => await execPromise);
 
-    expect(setPendingHistoryItemMock).toHaveBeenCalledWith(null);
+    expect(pendingHistoryItem).toBeNull();
     expect(addItemToHistoryMock).toHaveBeenCalledTimes(2);
     expect(addItemToHistoryMock.mock.calls[1][0]).toEqual({
       type: 'error',
@@ -661,6 +670,52 @@ describe('useShellCommandProcessor', () => {
     );
     expect(setShellInputFocusedMock).toHaveBeenCalledWith(false);
   });
+
+  it.each(['success', 'result rejection', 'launch rejection'])(
+    'settles after %s even if the pwd temp file cannot be removed',
+    async (outcome) => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('/test/dir');
+      vi.mocked(fs.unlinkSync).mockImplementationOnce(() => {
+        throw new Error('EPERM: operation not permitted');
+      });
+      if (outcome === 'result rejection') {
+        mockShellExecutionService.mockResolvedValue({
+          result: Promise.reject(new Error('result failed')),
+        });
+      } else if (outcome === 'launch rejection') {
+        mockShellExecutionService.mockRejectedValue(new Error('launch failed'));
+      }
+      const { result } = renderProcessorHook();
+      act(() => {
+        result.current.handleShellCommand(
+          'printf done',
+          new AbortController().signal,
+        );
+      });
+      let settled = false;
+      const done = onExecMock.mock.calls[0][0] as Promise<void>;
+      void done.then(() => {
+        settled = true;
+      });
+      await act(async () => {
+        if (outcome === 'success') {
+          resolveExecutionPromise(createMockServiceResult());
+        }
+      });
+      await vi.waitFor(() => expect(settled).toBe(true));
+      expect(fs.unlinkSync).toHaveBeenCalledTimes(1);
+      expect(addItemToHistoryMock).toHaveBeenCalledTimes(2);
+      expect(setShellInputFocusedMock).toHaveBeenLastCalledWith(false);
+      expect(result.current.activeShellPtyId).toBeNull();
+      if (outcome === 'success') {
+        expect(mockLlmClient.addHistory).toHaveBeenCalledTimes(1);
+        expect(addItemToHistoryMock.mock.calls[1][0].tools[0].status).toBe(
+          ToolCallStatus.Success,
+        );
+      }
+    },
+  );
 
   describe('Directory Change Warning', () => {
     it('should show a warning if the working directory changes', async () => {
