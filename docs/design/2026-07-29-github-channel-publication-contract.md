@@ -1,5 +1,7 @@
 # GitHub Channel Publication Contract
 
+[English](2026-07-29-github-channel-publication-contract.md) | [简体中文](2026-07-29-github-channel-publication-contract.zh-CN.md)
+
 ## Goal
 
 Make GitHub-channel replies safe to publish automatically and traceable after the fact. The channel publishes only the agent's final response through the adapter; intermediate reasoning, tool output, and streaming chunks never become GitHub comments.
@@ -30,4 +32,4 @@ Make GitHub-channel replies safe to publish automatically and traceable after th
 
 ## Verification
 
-Focused GitHub adapter tests cover sentinel suppression, normal final-comment delivery, audit fields without reply text, and non-blocking audit write failures. Existing routing and delivery tests remain unchanged.
+Focused GitHub adapter tests cover sentinel suppression, normal final-comment delivery, audit fields without reply text, and non-blocking audit write failures. Existing routing and delivery tests remain unchanged. Further adapter tests cover which rejections count as a definite no-write, the in-process waits and the stop during them, and the start-up pass over pending deliveries.
