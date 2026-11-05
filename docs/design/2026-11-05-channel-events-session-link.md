@@ -76,8 +76,11 @@ selectedWorkspaceCwd }`. The app shell closes the panel and loads the
 - A frozen delivery can outlive its binding (restored task, gone session);
   such rows keep `sessionId` without a workspace rather than guessing.
 - The jump reuses `qwen:open-session` instead of a URL: it is the same
-  in-app path as markdown session links, honors locked-workspace mode, and
-  needs no router changes.
+  in-app path as markdown session links and needs no router changes. The
+  handler's locked-workspace guard applies to browser-notification clicks
+  (dispatched on a dedicated EventTarget), not to window-dispatched
+  in-page links, so in a locked-workspace shell the button behaves exactly
+  like an existing markdown session link.
 
 ## Constraints and risks
 
@@ -85,8 +88,9 @@ selectedWorkspaceCwd }`. The app shell closes the panel and loads the
   unchanged. Journal normalization drops invalid values.
 - The workspace lookup is best-effort decoration; a miss degrades to the
   fallback workspace, never breaks delivery.
-- Locked-workspace shells ignore cross-workspace jumps, matching existing
-  session-link behavior.
+- In locked-workspace shells the jump is not separately restricted: it
+  shares the window-event path of markdown session links, whose dispatches
+  bypass the notification-only locked-workspace guard.
 
 ## Validation
 
