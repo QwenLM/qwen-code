@@ -1349,6 +1349,12 @@ export interface DaemonTranscriptState
   activeThoughtBlockByParent: Record<string, string>;
   blockIndexById: Readonly<Record<string, number>>;
   toolBlockByCallId: Record<string, string>;
+  /**
+   * Late tool name keyed by call id, for lifecycle frames that arrive before
+   * the block they name (mid-run attach). The create path consumes its entry;
+   * the oldest entry is evicted past `MAX_PENDING_TOOL_NAMES`. #16301
+   */
+  pendingToolNameByCallId: Record<string, string>;
   trimmedToolNotificationByCallId: Record<string, true>;
   permissionBlockByRequestId: Record<string, string>;
   nextOrdinal: number;

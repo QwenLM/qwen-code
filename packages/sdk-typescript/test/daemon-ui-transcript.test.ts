@@ -1219,4 +1219,165 @@ describe('tool name carried only by the lifecycle metadata', () => {
       title: 'Output retained',
     });
   });
+
+  it('does not rename an already-named block from a later lifecycle frame', () => {
+    const explicit = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(
+        producerFrame({
+          status: 'completed',
+          title: 'Output retained',
+          _meta: {
+            toolLifecycle: producerFrame().data.update._meta.toolLifecycle,
+            toolName: 'explicit_tool',
+          },
+        }),
+      ),
+      { now: 1 },
+    );
+    const afterLifecycle = reduceDaemonTranscriptEvents(
+      explicit,
+      // The lifecycle stream normally ends after the result frame; the name
+      // must not overwrite the explicit one.
+      normalizeDaemonEvent(producerFrame()),
+      { now: 2 },
+    );
+    expect(afterLifecycle.blocks).toHaveLength(1);
+    expect(afterLifecycle.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'explicit_tool',
+      title: 'Output retained',
+    });
+  });
+
+  it('drops a lifecycle name that fails the v1 validator when a status rides along', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(
+        producerFrame({
+          status: 'completed',
+          title: 'Output retained',
+          _meta: {
+            // Schema bump: the metadata-only arm already rejects `v !== 1`;
+            // the status-bearing path must make the same decision.
+            toolLifecycle: {
+              ...producerFrame().data.update._meta.toolLifecycle,
+              v: 2,
+            },
+          },
+        }),
+      ),
+      { now: 1 },
+    );
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      title: 'Output retained',
+    });
+    expect(state.blocks[0].toolName).toBeUndefined();
+  });
+
+  // Producer-shaped create frame: the literal `createTranscriptToolCallStartUpdate`
+  // emits (title + content + locations + kind + rawInput + `_meta.toolName`).
+  const startFrame = {
+    v: 1 as const,
+    id: 2,
+    type: 'session_update' as const,
+    data: {
+      update: {
+        sessionUpdate: 'tool_call' as const,
+        toolCallId: 'call-1',
+        status: 'pending',
+        title: 'Read file',
+        content: [],
+        locations: [],
+        kind: 'read',
+        rawInput: {},
+        _meta: { toolName: 'read_file', provenance: 'builtin' },
+      },
+    },
+  };
+  const lifecycleFrame = (phase: 'started' | 'ended') => ({
+    v: 1 as const,
+    id: 3,
+    type: 'session_update' as const,
+    data: {
+      update: {
+        sessionUpdate: 'tool_call_update' as const,
+        toolCallId: 'call-1',
+        _meta: {
+          toolLifecycle: {
+            v: 1,
+            kind: 'tool',
+            sessionId: 'session',
+            executionId: 'exec-1',
+            callId: 'call-1',
+            toolName: 'read_file',
+            phase,
+            executionStatus: phase === 'ended' ? 'success' : 'running',
+            startedAt: 100,
+            ...(phase === 'ended'
+              ? {
+                  endedAt: 120,
+                  executionDurationMs: 20,
+                  outcome: 'success',
+                }
+              : {}),
+          },
+        },
+      },
+    },
+  });
+
+  it('names a block created after the lifecycle frame (mid-run attach)', () => {
+    const attached = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(lifecycleFrame('started')),
+      { now: 1 },
+    );
+    // Name-only frames never create a card, even for an unseen call id.
+    expect(attached.blocks).toHaveLength(0);
+
+    const created = reduceDaemonTranscriptEvents(
+      attached,
+      normalizeDaemonEvent(startFrame),
+      { now: 2 },
+    );
+    expect(created.blocks).toHaveLength(1);
+    expect(created.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'read_file',
+      title: 'Read file',
+    });
+  });
+
+  it('seeds the late name when the status frame carries none', () => {
+    const attached = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(lifecycleFrame('started')),
+      { now: 1 },
+    );
+    const completed = reduceDaemonTranscriptEvents(
+      attached,
+      normalizeDaemonEvent({
+        v: 1 as const,
+        id: 4,
+        type: 'session_update' as const,
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update' as const,
+            toolCallId: 'call-1',
+            status: 'completed',
+          },
+        },
+      }),
+      { now: 2 },
+    );
+    expect(completed.blocks).toHaveLength(1);
+    expect(completed.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'read_file',
+      title: 'read_file',
+      status: 'completed',
+    });
+  });
 });

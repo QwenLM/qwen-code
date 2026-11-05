@@ -1292,10 +1292,9 @@ function normalizeToolUpdate(
     // transcript-replay's `createTranscriptToolLifecycleUpdate`), so a
     // subagent tool call whose surviving frame carries no explicit title or
     // toolName would otherwise project as the generic "Tool". Explicit names
-    // above still win. #16301
-    (metadata && isRecord(metadata['toolLifecycle'])
-      ? getString(metadata['toolLifecycle'], 'toolName')
-      : undefined);
+    // above still win. Read it through the same validator as the metadata-only
+    // arm so one payload gets one trust decision. #16301
+    extractToolLifecycle(update)?.toolName;
   const toolKind = getString(update, 'kind');
   const explicitTitle = getString(update, 'title');
   const title =
