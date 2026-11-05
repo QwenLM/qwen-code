@@ -2752,6 +2752,231 @@ describe('livePromptEvents', () => {
     expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
   });
 
+  it('does not retain an aborted batch after the core session changed before the turn owner reset', async () => {
+    let sessionId = 'session-1';
+    const controller = new AbortController();
+    const admission = vi.fn().mockResolvedValue([]);
+    const recordToolResult = vi.fn();
+    const stream = oneToolBatchStream({
+      callId: 'old-session-result',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(stream, undefined, () => true, {
+      recordMidTurnUserMessage: vi.fn(),
+      recordToolResult,
+      recordToolResultAdmission: admission,
+    });
+    Object.assign(config, { getSessionId: () => sessionId });
+    for await (const event of livePromptEvents(
+      config,
+      'start',
+      controller.signal,
+      { isCurrentTurn: () => true },
+    )) {
+      if (event.type === 'tool-end') {
+        sessionId = 'successor-session';
+        controller.abort();
+      }
+    }
+    expect(recordToolResult).not.toHaveBeenCalled();
+    expect(admission).not.toHaveBeenCalled();
+    expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
+    expect(stream).toHaveBeenCalledOnce();
+  });
+
+  it.each(['session', 'turn'] as const)(
+    'does not publish an aborted batch when %s ownership changes during receipt acknowledgement',
+    async (changed) => {
+      let sessionId = 'session-1';
+      let ownsTurn = true;
+      const controller = new AbortController();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const admission = vi.fn(async (parts: readonly Part[]) => {
+        await gate;
+        return [{ parts, decision: 'admitted' as const }];
+      });
+      const config = createFakeConfig(
+        oneToolBatchStream({
+          callId: 'old-receipt',
+          name: 'test_tool',
+          args: {},
+        }),
+        undefined,
+        () => true,
+        {
+          recordMidTurnUserMessage: vi.fn(),
+          recordToolResultAdmission: admission,
+        },
+      );
+      Object.assign(config, { getSessionId: () => sessionId });
+      const pending = (async () => {
+        for await (const event of livePromptEvents(
+          config,
+          'start',
+          controller.signal,
+          { isCurrentTurn: () => ownsTurn },
+        )) {
+          if (event.type === 'tool-end') controller.abort();
+        }
+      })();
+      try {
+        await vi.waitFor(() => expect(admission).toHaveBeenCalledOnce());
+        expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
+        if (changed === 'session') sessionId = 'successor-session';
+        else ownsTurn = false;
+      } finally {
+        release();
+        await pending;
+      }
+      expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(
+    ['all-cancelled', 'steering-abort'].flatMap((path) =>
+      ['before', 'during-session', 'during-turn'].map((phase) => ({
+        path,
+        phase,
+      })),
+    ),
+  )(
+    'keeps $path retention inside its owner when it changes $phase',
+    async ({ path, phase }) => {
+      let sessionId = 'session-1';
+      let ownsTurn = true;
+      const controller = new AbortController();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const admission = vi.fn(async (parts: readonly Part[]) => {
+        await gate;
+        return [{ parts, decision: 'admitted' as const }];
+      });
+      const config = createFakeConfig(
+        oneToolBatchStream({
+          callId: 'scoped-terminal',
+          name: 'test_tool',
+          args: { __cancelled: path === 'all-cancelled' },
+        }),
+        undefined,
+        () => true,
+        {
+          recordMidTurnUserMessage: vi.fn(),
+          recordToolResultAdmission: admission,
+        },
+      );
+      Object.assign(config, { getSessionId: () => sessionId });
+      const stop = () => {
+        if (phase === 'before') sessionId = 'successor-session';
+        controller.abort();
+      };
+      if (path === 'steering-abort') atMocks.hang = stop;
+      const pending = (async () => {
+        for await (const event of livePromptEvents(
+          config,
+          'start',
+          controller.signal,
+          {
+            isCurrentTurn: () => ownsTurn,
+            ...(path === 'steering-abort'
+              ? { drainSteering: () => steering('read @a.ts') }
+              : {}),
+          },
+        )) {
+          if (path === 'all-cancelled' && event.type === 'tool-end') stop();
+        }
+      })();
+      try {
+        if (phase === 'before') {
+          release();
+          await pending;
+          expect(admission).not.toHaveBeenCalled();
+        } else {
+          await vi.waitFor(() => expect(admission).toHaveBeenCalledOnce());
+          expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
+          if (phase === 'during-session') sessionId = 'successor-session';
+          else ownsTurn = false;
+        }
+      } finally {
+        release();
+        await pending;
+      }
+      expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'keeps the completed packet across context refresh; abort=%s',
+    async (cancelled) => {
+      const core = await import('@qwen-code/qwen-code-core');
+      const { getAllMemoryFilenames } = await import(
+        '@qwen-code/qwen-code-core/utils/memory-constants.js'
+      );
+      const controller = new AbortController();
+      const refresh = vi
+        .spyOn(core, 'refreshMemoryInstruction')
+        .mockImplementationOnce(async () => {
+          if (cancelled) controller.abort();
+        });
+      const stream = oneToolBatchStream({
+        callId: 'context-write',
+        name: 'write_file',
+        args: {
+          file_path: path.join('/test/project', getAllMemoryFilenames()[0]),
+        },
+      });
+      const admission = vi.fn(async (parts: readonly Part[]) => [
+        { parts, decision: 'admitted' as const },
+      ]);
+      const config = createFakeConfig(stream, undefined, () => true, {
+        recordMidTurnUserMessage: vi.fn(),
+        recordToolResultAdmission: admission,
+      });
+      Object.assign(config, { getProjectRoot: () => '/test/project' });
+      const queued = steering('independent input');
+      const restoreSteering = vi.fn();
+      try {
+        await drain(
+          livePromptEvents(config, 'start', controller.signal, {
+            refreshContextFilesOnWrite: true,
+            drainSteering: () => queued,
+            restoreSteering,
+          }),
+        );
+        expect(refresh).toHaveBeenCalledOnce();
+        if (cancelled) {
+          expect(admission).toHaveBeenCalledOnce();
+          expect(
+            config.getGeminiClient().addHistory,
+          ).toHaveBeenCalledExactlyOnceWith({
+            role: 'user',
+            parts: admission.mock.calls[0][0],
+          });
+          expect(JSON.stringify(admission.mock.calls[0][0])).not.toContain(
+            'independent input',
+          );
+          expect(restoreSteering).toHaveBeenCalledExactlyOnceWith(queued);
+          expect(stream).toHaveBeenCalledOnce();
+        } else {
+          expect(admission).not.toHaveBeenCalled();
+          expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
+          expect(JSON.stringify(stream.mock.calls[1][0])).toContain(
+            'independent input',
+          );
+          expect(restoreSteering).not.toHaveBeenCalled();
+          expect(stream).toHaveBeenCalledTimes(2);
+        }
+      } finally {
+        refresh.mockRestore();
+      }
+    },
+  );
+
   describe('terminal tool-result admission', () => {
     const paths = ['all-cancelled', 'steering-abort'] as const;
     const decisions = [

@@ -760,6 +760,21 @@ export async function* livePromptEvents(
   const dualOutput = options?.dualOutput;
   const promptId = options?.promptId ?? nextLivePromptId(config);
   const abort = signal ?? new AbortController().signal;
+  const retainTerminalToolResults = async (parts: Part[]) => {
+    if (!parts.length || !current() || config.getSessionId() !== sessionId) {
+      return;
+    }
+    const retained = await settleToolResultHistory(
+      config.getChatRecordingService(),
+      { role: 'user', parts },
+      parts,
+      hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
+    );
+    if (current() && config.getSessionId() === sessionId) {
+      await client.addHistory(retained);
+    }
+  };
+
   // Read per boundary rather than once: the vision bridge can pick a full-turn
   // model mid-turn, and the rest of the turn then stays on it (ink parity).
   const turnModel: TurnModelOverride = {
@@ -846,6 +861,9 @@ export async function* livePromptEvents(
   for (;;) {
     if (!current() || abort.aborted) {
       pendingSteer?.restore();
+      if (abort.aborted && pendingToolResultParts) {
+        await retainTerminalToolResults([...pendingToolResultParts]);
+      }
       return;
     }
     const steerInput = pendingSteer;
@@ -1441,16 +1459,7 @@ export async function* livePromptEvents(
     // texts stay parked for the post-turn queue drain instead of riding a
     // request that will never be sent.
     if (completed.every((call) => call.status === 'cancelled')) {
-      if (responseParts.length > 0) {
-        await client.addHistory(
-          await settleToolResultHistory(
-            config.getChatRecordingService(),
-            { role: 'user', parts: responseParts },
-            responseParts,
-            hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
-          ),
-        );
-      }
+      await retainTerminalToolResults(responseParts);
       options?.onToolsCancelled?.();
       return;
     }
@@ -1470,16 +1479,7 @@ export async function* livePromptEvents(
       }
     }
     if (abort.aborted) {
-      if (responseParts.length > 0 && current()) {
-        await client.addHistory(
-          await settleToolResultHistory(
-            config.getChatRecordingService(),
-            { role: 'user', parts: responseParts },
-            responseParts,
-            hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
-          ),
-        );
-      }
+      await retainTerminalToolResults(responseParts);
       return;
     }
     pendingToolResultParts = responseParts.slice();
@@ -1506,18 +1506,7 @@ export async function* livePromptEvents(
           options?.restoreSteering?.(
             steered.restore.length > 0 ? steered.restore : texts,
           );
-          if (responseParts.length > 0) {
-            await client.addHistory(
-              await settleToolResultHistory(
-                config.getChatRecordingService(),
-                { role: 'user', parts: responseParts },
-                responseParts,
-                hasToolResultPromptHook(config)
-                  ? UNSENT_TOOL_RESULT
-                  : undefined,
-              ),
-            );
-          }
+          await retainTerminalToolResults(responseParts);
           return;
         }
         if (steered.restore.length > 0) {
