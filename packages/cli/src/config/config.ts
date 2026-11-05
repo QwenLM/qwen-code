@@ -2627,8 +2627,14 @@ export async function loadCliConfig(
           ? 'pending'
           : undefined
       : undefined;
+  // Explicit folder trust is the co-equal authority: a trusted folder runs
+  // its project hooks without a stored approval, so the gate must not also
+  // demand one. Only an explicit rejection still withholds there — the user
+  // said no to this exact block, and trust does not override that decision.
   const projectHooksPendingApproval = gateHooks
-    ? projectHooksState !== undefined && projectHooksState !== 'approved'
+    ? projectHooksState !== undefined &&
+      projectHooksState !== 'approved' &&
+      !(folderTrust && trustedFolder && projectHooksState !== 'rejected')
     : undefined;
   // Read the stored decision even under command-line YOLO: an approved block
   // keeps its authority while the gate is exempt, without changing the

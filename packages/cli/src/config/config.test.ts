@@ -5962,6 +5962,35 @@ describe('loadCliConfig with includeDirectories', () => {
     });
 
     it.each([
+      ['pending', false],
+      ['rejected', true],
+      ['approved', false],
+    ] as const)(
+      'an explicitly trusted folder runs a %s block without demanding approval (pending=%s)',
+      async (state, expectedPending) => {
+        vi.mocked(getProjectHooksApprovalState).mockReturnValue(state);
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await loadCliConfig(
+          { security: { folderTrust: { enabled: true } } } as Settings,
+          argv,
+          cwd,
+          undefined,
+          { projectHooks, projectHooksApproval: approval },
+        );
+
+        // Trust is the co-equal authority: pending clears, an explicit
+        // rejection still withholds, approved stays cleared.
+        expect(gateParam()).toBe(expectedPending);
+      },
+    );
+
+    it.each([
       [{ Stop: [{ hooks: [{ type: 'command', command: 'x' }] }] }, true],
       [projectHooks, undefined],
     ])(
