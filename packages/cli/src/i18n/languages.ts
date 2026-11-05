@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { OUTPUT_LANGUAGE_TABLE } from '@qwen-code/qwen-code-core';
+import { OUTPUT_LANGUAGE_TABLE } from '@qwen-code/qwen-code-core/utils/output-language-table.js';
 
 export type SupportedLanguage =
   | 'en'

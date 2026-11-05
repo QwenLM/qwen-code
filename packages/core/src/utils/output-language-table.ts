@@ -103,7 +103,7 @@ export const OUTPUT_LANGUAGE_TABLE: readonly OutputLanguageEntry[] = [
  * match, and a malformed pseudo-code like "pt-BR-2" or "en@US" does not.
  */
 const BCP47_TAG =
-  /^[a-z]{2,3}(?:-[a-z]{4})?(?:-[a-z]{2}|\-\d{3})?(?:-(?:[a-z0-9]{5,8}|\d[a-z0-9]{3,4})){0,2}$/i;
+  /^[a-z]{2,3}(?:-[a-z]{4})?(?:-[a-z]{2}|-\d{3})?(?:-(?:[a-z0-9]{5,8}|\d[a-z0-9]{3,4})){0,2}$/i;
 
 /**
  * Whether the value is one of the designations the product itself writes:

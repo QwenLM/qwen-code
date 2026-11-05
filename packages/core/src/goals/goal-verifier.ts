@@ -11,7 +11,7 @@ import { runSideQuery } from '../utils/sideQuery.js';
 import {
   isBcp47LanguageTag,
   isKnownOutputLanguageDesignation,
-} from '../utils/outputLanguageTable.js';
+} from '../utils/output-language-table.js';
 import type { GoalVerifierEvidenceRecord } from './goal-evidence.js';
 import type { GoalTerminalProposal } from './goal-protocol.js';
 
@@ -251,10 +251,7 @@ function parseOutputLanguageToken(content: string): string | undefined {
   if (token.toLowerCase() === 'auto') {
     return 'auto';
   }
-  if (
-    isKnownOutputLanguageDesignation(token) ||
-    isBcp47LanguageTag(token)
-  ) {
+  if (isKnownOutputLanguageDesignation(token) || isBcp47LanguageTag(token)) {
     return token;
   }
   return undefined;
