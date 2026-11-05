@@ -843,11 +843,19 @@ launcher; clients cannot supply a version or command.
   captured when the update was requested. Because staging runs after the `202`
   and can take minutes, the client measures its restart deadline from continuous
   unreachability, not from the click: a daemon that keeps answering is still
-  working. Once the restart is acknowledged, `restarting` is sticky until the
+  working. A generous absolute cap above the daemon's own staging ceilings
+  (five-minute archive download, ten-minute managed npm child) backstops a daemon
+  that stays reachable but never leaves `restarting`. Once the restart is
+  acknowledged, `restarting` is sticky until the
   process is replaced, so a reachable daemon that reports any other state with an
   unchanged `currentVersion` means the replacement did not land on the new build;
   the client stops waiting, publishes that settled state, and reports a failure
-  rather than waiting forever for a version change. Standalone launcher validation runs before closing
+  rather than waiting forever for a version change. That check applies only to a
+  poll _initiated_ after the acknowledgement: the status and restart requests are
+  independent, so a poll started earlier can deliver a pre-restart snapshot
+  afterwards, and reading that as a settled daemon would report a false failure
+  and suppress the reload a successful update still owes the user.
+  Standalone launcher validation runs before closing
   services; a failed check leaves the daemon running. Failures after shutdown
   begins or during process replacement are not guaranteed to recover.
 

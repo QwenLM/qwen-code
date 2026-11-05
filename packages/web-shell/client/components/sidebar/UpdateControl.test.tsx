@@ -417,6 +417,68 @@ describe('UpdateControl', () => {
     expect(onRestarted).not.toHaveBeenCalled();
   });
 
+  it('ignores a stale status response delivered after the acknowledgement', async () => {
+    client.daemonUpdateStatus.mockResolvedValue(ready);
+    const container = render();
+    await flushReact();
+    // The status request and the restart request are independent, so a poll
+    // started before the acknowledgement can still be in flight when the
+    // restart resolves, and deliver its pre-restart snapshot afterwards.
+    let deliverStale: (value: DaemonUpdateStatus) => void = () => {};
+    client.daemonUpdateStatus.mockReturnValueOnce(
+      new Promise<DaemonUpdateStatus>((resolve) => {
+        deliverStale = resolve;
+      }),
+    );
+    await act(async () =>
+      getByRole(container, 'button', { name: 'Update' }).click(),
+    );
+    await act(async () => {
+      deliverStale(ready);
+    });
+    expect(onError).not.toHaveBeenCalled();
+    expect(
+      getByRole(container, 'button', { name: 'Restarting…' }).hasAttribute(
+        'disabled',
+      ),
+    ).toBe(true);
+    // The update itself still succeeds and must still restore the task URL.
+    client.daemonUpdateStatus.mockResolvedValue({
+      state: 'up-to-date',
+      currentVersion: '0.24.6',
+      canInstall: false,
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    expect(onRestarted).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('gives up on a reachable daemon wedged in restarting', async () => {
+    client.daemonUpdateStatus.mockResolvedValue(ready);
+    const container = render();
+    await flushReact();
+    client.daemonUpdateStatus.mockResolvedValue(restarting);
+    await act(async () =>
+      getByRole(container, 'button', { name: 'Update' }).click(),
+    );
+    // Reachable throughout, so the unreachability deadline never starts. Only
+    // the absolute backstop above the daemon's own staging ceilings can end
+    // this, and it must not fire during a slow but progressing update.
+    await act(async () => vi.advanceTimersByTimeAsync(14 * 60_000));
+    expect(onError).not.toHaveBeenCalled();
+    expect(
+      getByRole(container, 'button', { name: 'Restarting…' }).hasAttribute(
+        'disabled',
+      ),
+    ).toBe(true);
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onRestarted).not.toHaveBeenCalled();
+    expect(
+      queryByRole(container, 'button', { name: 'Restarting…' }),
+    ).toBeNull();
+  });
+
   it('keeps the collapsed button accessible in Chinese', async () => {
     client.daemonUpdateStatus.mockResolvedValue(ready);
     const container = render(true, 'zh-CN');

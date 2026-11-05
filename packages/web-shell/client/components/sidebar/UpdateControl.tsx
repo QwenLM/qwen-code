@@ -30,6 +30,14 @@ function reloadPage(url: string) {
   window.location.reload();
 }
 
+// Backstop above the daemon's own staging ceilings (5-minute archive download,
+// 10-minute managed npm child). A daemon that stays reachable but wedged in
+// `restarting` — a hung activation or process replacement — must not leave the
+// control disabled forever with no error. Generous enough that a slow but
+// successful update never reaches it.
+const RESTART_ABSOLUTE_CAP_MS = 15 * 60_000;
+const RESTART_UNREACHABLE_CAP_MS = 60_000;
+
 export function UpdateControl({
   client,
   collapsed,
@@ -41,6 +49,7 @@ export function UpdateControl({
   const { t } = useI18n();
   const [status, setStatus] = useState<DaemonUpdateStatus | null>(null);
   const [restarting, setRestarting] = useState<{
+    startedAt: number;
     version: string;
     url: string;
   } | null>(null);
@@ -74,6 +83,11 @@ export function UpdateControl({
     const check = async () => {
       let delay = restarting !== null ? 2000 : 60_000;
       let failure: unknown;
+      // Sample before the request, not after: this poll may have been started
+      // while the restart was still unacknowledged and deliver its pre-restart
+      // snapshot afterwards. Reading the ref after the await would treat that
+      // stale snapshot as a daemon that settled after restarting.
+      const acknowledged = restartAcknowledged.current;
       try {
         let next = await client.daemonUpdateStatus();
         if (cancelled) return;
@@ -95,7 +109,7 @@ export function UpdateControl({
             );
             return;
           }
-          if (restartAcknowledged.current && next.state !== 'restarting') {
+          if (acknowledged && next.state !== 'restarting') {
             // The daemon settled without changing version, so the process
             // replacement did not land on the new build. Nothing further will
             // arrive; waiting for a version change would hang the control.
@@ -125,8 +139,9 @@ export function UpdateControl({
       if (cancelled) return;
       if (
         restarting !== null &&
-        unreachableSince !== undefined &&
-        Date.now() - unreachableSince >= 60_000
+        ((unreachableSince !== undefined &&
+          Date.now() - unreachableSince >= RESTART_UNREACHABLE_CAP_MS) ||
+          Date.now() - restarting.startedAt >= RESTART_ABSOLUTE_CAP_MS)
       ) {
         restartRequested.current = false;
         setRestarting(null);
@@ -151,6 +166,7 @@ export function UpdateControl({
     restartAcknowledged.current = false;
     const generation = clientGeneration.current;
     setRestarting({
+      startedAt: Date.now(),
       version: status?.currentVersion || currentVersion,
       url: window.location.href,
     });
