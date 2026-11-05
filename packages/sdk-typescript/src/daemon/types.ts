@@ -5039,6 +5039,13 @@ export interface DaemonChannelEvent {
   number?: number;
   actor?: string;
   sessionId?: string;
+  /**
+   * Workspace owning `sessionId`, when the Channel knew it at write time.
+   * Bound-session delivery can target a session in another workspace;
+   * clients need this to open it. Absent on older records, where the
+   * journal's own workspace is the fallback.
+   */
+  sessionWorkspaceCwd?: string;
   messageId?: string;
   durationMs?: number;
   error?: string;
