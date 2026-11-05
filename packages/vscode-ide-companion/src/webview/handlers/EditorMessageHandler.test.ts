@@ -28,8 +28,7 @@ describe('external browser host bridge', () => {
   });
 
   it('opens an authorization URL through VS Code instead of the daemon host', async () => {
-    const url =
-      'https://chat.qwen.ai/authorize?user_code=123&client=qwen-code';
+    const url = 'https://chat.qwen.ai/authorize?user_code=123&client=qwen-code';
     expect(handler.canHandle('openExternalUrl')).toBe(true);
     await handler.handle({ type: 'openExternalUrl', data: { url } });
     expect(openExternal).toHaveBeenCalledWith({ url });
