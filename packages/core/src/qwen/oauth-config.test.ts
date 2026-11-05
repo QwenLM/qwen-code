@@ -20,14 +20,14 @@ it('opens Code plans on the web home without device authorization parameters', (
   expect(url.hash).toBe('');
 });
 
-it('uses the preproduction configuration without environment setup', () => {
+it('uses the production configuration without environment setup', () => {
   vi.stubEnv('QWEN_OAUTH_BASE_URL', undefined);
   vi.stubEnv('QWEN_OAUTH_CLIENT_ID', undefined);
   vi.stubEnv('QWEN_HOME', undefined);
   expect(getQwenOAuthConfig()).toEqual({
-    baseUrl: 'https://pre-auth.qwen.ai',
+    baseUrl: 'https://auth.qwen.ai',
     clientId: 'qwen-code-cli',
-    webOrigin: 'https://pre-chat.qwen.ai',
+    webOrigin: 'https://chat.qwen.ai',
   });
 });
 

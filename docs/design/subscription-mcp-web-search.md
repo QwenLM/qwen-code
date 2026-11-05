@@ -4,11 +4,11 @@
 
 ## Problem and scope
 
-Subscription inference works, but built-in `web_search` only supports DashScope credentials. The staging subscription service exposes MCP at `https://pre-api.qwen.ai/api/v1/mcp/web_search`, authenticated with the existing device access token. Integrate this service through the shared Core tool so CLI, VS Code and Desktop use the same behavior.
+Subscription inference works, but built-in `web_search` only supports DashScope credentials. The subscription client sends MCP search requests to `https://api.qwen.ai/api/v1/mcp/web_search`, authenticated with the existing device access token. Integrate this service through the shared Core tool so CLI, VS Code and Desktop use the same behavior.
 
 ## Protocol evidence
 
-The real SDK probe completed `initialize` (200), `notifications/initialized` (204), `tools/list` (200), and `tools/call` (200) at the complete URL. Server `qwen-web-search` 0.1.0 exposes `web_search`: required `query` string, 1–500 characters; optional `num` (1–20, default 10), `country`, `locale`, and `location`. A public query returned text blocks containing numbered results, URLs and summaries; no structured sources or MCP session ID was returned. Evidence is in `.qwen/e2e-tests/subscription-mcp-protocol.json`.
+The staging SDK probe completed `initialize` (200), `notifications/initialized` (204), `tools/list` (200), and `tools/call` (200) at the staging MCP endpoint. Server `qwen-web-search` 0.1.0 exposes `web_search`: required `query` string, 1–500 characters; optional `num` (1–20, default 10), `country`, `locale`, and `location`. A public query returned text blocks containing numbered results, URLs and summaries; no structured sources or MCP session ID was returned. Evidence is in `.qwen/e2e-tests/subscription-mcp-protocol.json`.
 
 ## Proposed implementation
 

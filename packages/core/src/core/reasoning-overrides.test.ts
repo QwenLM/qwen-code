@@ -851,7 +851,7 @@ it('validates subscription declarations using the Chat wire without assuming cap
   const subscriptionRoute = {
     model: 'qwen3.8-max',
     authType: AuthType.QWEN_SUBSCRIPTION,
-    baseUrl: 'https://pre-api.qwen.ai/v1',
+    baseUrl: 'https://api.qwen.ai/v1',
   };
   expect(
     resolveReasoningCapabilities(subscriptionRoute, undefined),

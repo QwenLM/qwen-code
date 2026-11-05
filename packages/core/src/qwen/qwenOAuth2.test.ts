@@ -328,13 +328,10 @@ describe('Type Guards', () => {
 
   describe('isDeviceAuthorizationSuccess', () => {
     it('should return true for successful authorization response', () => {
-      const expectedBaseUrl = process.env['DEBUG']
-        ? 'https://pre-chat.qwen.ai'
-        : 'https://chat.qwen.ai';
       const successResponse = {
         ...deviceAuth(),
-        verification_uri: `${expectedBaseUrl}/device`,
-        verification_uri_complete: `${expectedBaseUrl}/device?code=TEST123`,
+        verification_uri: 'https://chat.qwen.ai/device',
+        verification_uri_complete: 'https://chat.qwen.ai/device?code=TEST123',
       };
       expect(isDeviceAuthorizationSuccess(successResponse)).toBe(true);
     });

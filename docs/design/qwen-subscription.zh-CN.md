@@ -6,7 +6,7 @@
 
 ## 范围与可用性
 
-CLI（Ink/OpenTUI）、桌面端和 VS Code 共用 Core 的会员凭证、会员查询及 OpenAI Chat 推理。订阅登录、激活、模型加载、推理、搜索和账号命令不再依赖 `DEV=true`，打包客户端也默认可用。保留固定预发地址；本次不切换生产服务、不改动旧 OAuth，项目其他 DEV 用途保持不变。移除产品模拟开关、模拟 transport、预览页面和原生调试启动器；保留回归测试替身。
+CLI（Ink/OpenTUI）、桌面端和 VS Code 共用 Core 的会员凭证、会员查询及 OpenAI Chat 推理。订阅登录、激活、模型加载、推理、搜索和账号命令不再依赖 `DEV=true`，打包客户端也默认可用。订阅客户端使用固定的生产地址。移除产品模拟开关、模拟 transport、预览页面和原生调试启动器；保留回归测试替身。
 
 桌面端在现有供应商弹窗增加 Qwen，不增加独立引导页或常驻订阅按钮。VS Code 保留原生供应商选择器，选择 Qwen 后进入共用侧栏会员流程；原生 QuickPick 账号操作只负责退出和升级。
 
@@ -66,11 +66,11 @@ VS Code 打开订阅授权时在 WebShellWithProviders 上设置 `viewHidden`，
 | 身份/会员       | `GET /api/oauth/userinfo`     |
 | 撤销            | `POST /api/oauth/revoke`      |
 
-预发认证域名为 `https://pre-auth.qwen.ai`，OAuth `client_id=qwen-code-cli`。浏览器授权链接为 `https://pre-chat.qwen.ai/authorize?user_code=<code>&client=qwen-code`；网页 client 与 OAuth client_id 不同。购买统一使用 `https://pre-chat.qwen.ai/?memberPlan=qwen_code`，不带设备码参数。这两个网页入口都需要登录网页账号。
+订阅认证域名为 `https://auth.qwen.ai`，OAuth `client_id=qwen-code-cli`。浏览器授权链接为 `https://chat.qwen.ai/authorize?user_code=<code>&client=qwen-code`；网页 client 与 OAuth client_id 不同。购买统一使用 `https://chat.qwen.ai/?memberPlan=qwen_code`，不带设备码参数。这两个网页入口都需要登录网页账号。
 
 Core 负责私有权限的原子存储、恢复、跨进程刷新锁和撤销。宿主只在有效 `QWEN_HOME` 相同时共享会话。会员与旧 OAuth 分开存储；刷新替换完整 Token 对；Token 和设备码不进入 GUI 响应。
 
-推理固定使用 `https://pre-api.qwen.ai/compatible-mode/v1` 和 OpenAI Chat Completions。配置仅保存鉴权选择、模型 ID、固定网关及凭证占位符。传输边界注入 Bearer Token，保留代理/取消，在发凭证前拒绝重定向或其他目标。HTTP 请求在凭证锁外运行；401 时刷新被拒 Token 并重试一次，在锁内比较当前/被拒 Token，避免重复轮换。403/404/429 不刷新，已开始交付的流不重放。缺失凭证直接失败，不隐式授权；退出清除后续请求缓存凭证。
+推理固定使用 `https://api.qwen.ai/compatible-mode/v1` 和 OpenAI Chat Completions。配置仅保存鉴权选择、模型 ID、固定网关及凭证占位符。传输边界注入 Bearer Token，保留代理/取消，在发凭证前拒绝重定向或其他目标。HTTP 请求在凭证锁外运行；401 时刷新被拒 Token 并重试一次，在锁内比较当前/被拒 Token，避免重复轮换。403/404/429 不刷新，已开始交付的流不重放。缺失凭证直接失败，不隐式授权；退出清除后续请求缓存凭证。
 
 ## 额度耗尽展示
 
@@ -112,7 +112,7 @@ CLI 监听模型和凭据文件变化；其他进程移除凭据时也清理缓�
 
 ## 开发与验证
 
-CLI 开发执行 `npm run dev`，构建后的 CLI 无需 DEV 即可使用订阅。GUI daemon 使用 Core oauth-config.ts 的固定预发配置，不再要求开发环境变量。构建/打包后用 `node packages/vscode-ide-companion/scripts/copy-bundled-cli.js` 同步 VS Code；桌面包在开发启动或构建安装包前执行 `npm run build:runtime`。已有 daemon 需重启加载代码。验证 DEV 未设置、false、true，以及 VS Code 正式模式激活和带鉴权的 daemon 能力查询。保留 daemon 鉴权、工作区信任与归属、会员校验、网关限制和显式搜索设置；正式服务开放前替换为确认的生产配置。
+CLI 开发执行 `npm run dev`，构建后的 CLI 无需 DEV 即可使用订阅。GUI daemon 使用 Core oauth-config.ts 的固定生产配置，不再要求开发环境变量。构建/打包后用 `node packages/vscode-ide-companion/scripts/copy-bundled-cli.js` 同步 VS Code；桌面包在开发启动或构建安装包前执行 `npm run build:runtime`。已有 daemon 需重启加载代码。验证 DEV 未设置、false、true，以及 VS Code 正式模式激活和带鉴权的 daemon 能力查询。保留 daemon 鉴权、工作区信任与归属、会员校验、网关限制和显式搜索设置。
 
 定向覆盖授权期限、无重新授权的恢复、Retry-After、轮换/撤销/清理、完整列表与下线模型、激活生命周期/归属、两种渲染器、默认供应商、本地化桌面导航、侧栏桥接、序列化思考参数、流式请求和其他供应商。使用可丢弃凭证与本地 HTTP fixture，不退出开发者真实账号；测试计划/结果放在忽略的 `.qwen/e2e-tests/`。交付前构建、类型检查、打包并审查完整 diff。
 

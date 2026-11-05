@@ -6,7 +6,7 @@ Related issue: [#15180](https://github.com/QwenLM/qwen-code/issues/15180).
 
 ## Scope and availability
 
-CLI (Ink/OpenTUI), Desktop and VS Code share Core subscription credentials, membership queries and OpenAI Chat inference. Subscription login, activation, model loading, inference, search and account commands are available without `DEV=true`, including packaged clients. Keep the fixed preproduction endpoints; this change does not switch to production services or change legacy OAuth. Other uses of DEV remain unchanged. Product simulation flags, mock transports, preview pages and native debug launchers are removed; regression-test doubles remain.
+CLI (Ink/OpenTUI), Desktop and VS Code share Core subscription credentials, membership queries and OpenAI Chat inference. Subscription login, activation, model loading, inference, search and account commands are available without `DEV=true`, including packaged clients. Subscription clients use fixed production endpoints. Product simulation flags, mock transports, preview pages and native debug launchers are removed; regression-test doubles remain.
 
 Desktop adds Qwen to the existing provider dialog, without a separate onboarding page or persistent subscription button. VS Code retains its native provider picker and opens the shared sidebar subscription flow after Qwen is selected. Native QuickPick account actions handle only logout and upgrade.
 
@@ -66,11 +66,11 @@ Logout/upgrade commands use native status rows and Done/Retry actions. Command r
 | Identity/membership    | `GET /api/oauth/userinfo`     |
 | Revocation             | `POST /api/oauth/revoke`      |
 
-Preproduction uses auth origin `https://pre-auth.qwen.ai` and OAuth `client_id=qwen-code-cli`. Browser authorization is `https://pre-chat.qwen.ai/authorize?user_code=<code>&client=qwen-code`; the browser client parameter is distinct from OAuth client_id. Plans use `https://pre-chat.qwen.ai/?memberPlan=qwen_code`, shared by upgrade and purchase actions, without device-code parameters. Both browser entries require a signed-in web account.
+The subscription auth origin is `https://auth.qwen.ai` and the OAuth client ID is `qwen-code-cli`. Browser authorization is `https://chat.qwen.ai/authorize?user_code=<code>&client=qwen-code`; the browser client parameter is distinct from OAuth client_id. Plans use `https://chat.qwen.ai/?memberPlan=qwen_code`, shared by upgrade and purchase actions, without device-code parameters. Both browser entries require a signed-in web account.
 
 Core owns private atomic storage, restoration, cross-process refresh locking and revocation. Hosts share sessions only with the same effective `QWEN_HOME`. Subscription storage is separate from legacy OAuth. Refresh replaces the complete token pair; tokens and device codes never enter GUI responses.
 
-Inference uses the fixed `https://pre-api.qwen.ai/compatible-mode/v1` gateway with OpenAI Chat Completions. Configuration stores the auth selector, model ID, fixed gateway and placeholder credential. Supply Bearer tokens at the transport boundary; preserve proxy/cancellation and reject redirects or other destinations before sending credentials. HTTP work runs outside credential locks. Retry a rejected token once on HTTP 401, comparing current/rejected tokens inside the lock to avoid double rotation. Do not refresh for 403/404/429 or replay a delivered stream. Missing credentials fail without implicit authorization; logout clears cached credentials for later requests.
+Inference uses the fixed `https://api.qwen.ai/compatible-mode/v1` gateway with OpenAI Chat Completions. Configuration stores the auth selector, model ID, fixed gateway and placeholder credential. Supply Bearer tokens at the transport boundary; preserve proxy/cancellation and reject redirects or other destinations before sending credentials. HTTP work runs outside credential locks. Retry a rejected token once on HTTP 401, comparing current/rejected tokens inside the lock to avoid double rotation. Do not refresh for 403/404/429 or replay a delivered stream. Missing credentials fail without implicit authorization; logout clears cached credentials for later requests.
 
 ## Quota exhaustion presentation
 
@@ -112,7 +112,7 @@ Verification covers fresh and existing credentials, both CLI renderers, native V
 
 ## Development and verification
 
-Run `npm run dev` for CLI development or use the built CLI without DEV. GUI daemons use the fixed preproduction configuration in Core oauth-config.ts without a development environment requirement. After build/bundle, stage VS Code with `node packages/vscode-ide-companion/scripts/copy-bundled-cli.js`; Desktop uses `npm run build:runtime` before development or installer builds. Restart an existing daemon to load new code. Verify unset, false and true DEV values, VS Code production activation and authenticated daemon capability discovery. Keep daemon authentication, workspace trust/ownership, membership checks, gateway restrictions and explicit search settings. Replace fixed origins with confirmed production configuration before production service rollout.
+Run `npm run dev` for CLI development or use the built CLI without DEV. GUI daemons use the fixed production configuration in Core oauth-config.ts without a development environment requirement. After build/bundle, stage VS Code with `node packages/vscode-ide-companion/scripts/copy-bundled-cli.js`; Desktop uses `npm run build:runtime` before development or installer builds. Restart an existing daemon to load new code. Verify unset, false and true DEV values, VS Code production activation and authenticated daemon capability discovery. Keep daemon authentication, workspace trust/ownership, membership checks, gateway restrictions and explicit search settings.
 
 Focused coverage includes authorization expiry, recovery without reauthorization, Retry-After, rotation/revoke/cleanup, complete catalogs and removed selections, activation lifetime/ownership, both renderers, default provider selection, localized desktop navigation, sidebar host integration, serialized thinking parameters, streaming and unchanged providers. Use disposable credentials/local HTTP fixtures, never the developer's real account. Keep test plans/results under ignored `.qwen/e2e-tests/`. Build, typecheck, bundle and audit the complete diff before delivery.
 

@@ -59,7 +59,7 @@ describe('subscription OAuth protocol', () => {
       await new QwenSubscriptionOAuthClient().requestDeviceAuthorization();
     expect(result).toEqual({ ...device, expiresAt: issuedAt + 600_000 });
     expect(fetchMock.mock.calls[0][0]).toBe(
-      'https://pre-auth.qwen.ai/api/oauth/device/code',
+      'https://auth.qwen.ai/api/oauth/device/code',
     );
     expect(fetchMock.mock.calls[0][1]?.method).toBe('POST');
     expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({
@@ -93,7 +93,7 @@ describe('subscription OAuth protocol', () => {
     await vi.advanceTimersByTimeAsync(5_000);
     expect(await result).toEqual(tokens);
     expect(fetchMock.mock.calls[1][0]).toBe(
-      'https://pre-auth.qwen.ai/api/oauth/token',
+      'https://auth.qwen.ai/api/oauth/token',
     );
     expect(bodyAt(1)).toEqual({
       grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
@@ -308,7 +308,7 @@ describe('subscription OAuth protocol', () => {
       token_type_hint: 'refresh_token',
     });
     expect(fetchMock.mock.calls[2][0]).toBe(
-      'https://pre-auth.qwen.ai/api/oauth/revoke',
+      'https://auth.qwen.ai/api/oauth/revoke',
     );
   });
 
@@ -337,7 +337,7 @@ describe('subscription OAuth protocol', () => {
     );
     expect(result).toEqual(identity);
     expect(fetchMock.mock.calls[0][0]).toBe(
-      'https://pre-auth.qwen.ai/api/oauth/userinfo',
+      'https://auth.qwen.ai/api/oauth/userinfo',
     );
     expect(fetchMock.mock.calls[0][1]).toMatchObject({
       method: 'GET',

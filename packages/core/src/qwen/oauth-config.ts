@@ -5,10 +5,10 @@
  */
 
 export const QWEN_SUBSCRIPTION_BASE_URL =
-  'https://pre-api.qwen.ai/compatible-mode/v1';
+  'https://api.qwen.ai/compatible-mode/v1';
 export const QWEN_SUBSCRIPTION_MODEL = 'qwen3.8-max';
 export const QWEN_SUBSCRIPTION_WEB_SEARCH_URL =
-  'https://pre-api.qwen.ai/api/v1/mcp/web_search';
+  'https://api.qwen.ai/api/v1/mcp/web_search';
 export const QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER =
   'QWEN_SUBSCRIPTION_DYNAMIC_TOKEN';
 
@@ -18,9 +18,9 @@ export function getQwenOAuthConfig(): {
   webOrigin: string;
 } {
   return {
-    baseUrl: 'https://pre-auth.qwen.ai',
+    baseUrl: 'https://auth.qwen.ai',
     clientId: 'qwen-code-cli',
-    webOrigin: 'https://pre-chat.qwen.ai',
+    webOrigin: 'https://chat.qwen.ai',
   };
 }
 

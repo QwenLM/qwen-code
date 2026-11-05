@@ -35999,7 +35999,7 @@ describe('sessionLanguage multi-session propagation', () => {
       security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
       model: {
         name: 'qwen3.8-max',
-        baseUrl: 'https://pre-api.qwen.ai/compatible-mode/v1',
+        baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
       },
     };
     vi.mocked(settings.reloadScopesFromDiskAtomically).mockImplementation(
@@ -36013,7 +36013,7 @@ describe('sessionLanguage multi-session propagation', () => {
       expect(bootConfig.syncModelSelection).toHaveBeenCalledWith(
         AuthType.QWEN_SUBSCRIPTION,
         'qwen3.8-max',
-        'https://pre-api.qwen.ai/compatible-mode/v1',
+        'https://api.qwen.ai/compatible-mode/v1',
       );
       expect(bootConfig.refreshAuth).toHaveBeenCalledWith(
         AuthType.QWEN_SUBSCRIPTION,

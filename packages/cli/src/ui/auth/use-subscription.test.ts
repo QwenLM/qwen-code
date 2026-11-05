@@ -65,7 +65,7 @@ beforeEach(() => {
   vi.stubEnv('DEV', false);
   delete process.env['DEV'];
   vi.stubEnv('QWEN_HOME', '/tmp/subscription-hook-test');
-  vi.stubEnv('QWEN_OAUTH_BASE_URL', 'https://pre-auth.qwen.ai');
+  vi.stubEnv('QWEN_OAUTH_BASE_URL', 'https://auth.qwen.ai');
   vi.stubEnv('QWEN_OAUTH_CLIENT_ID', 'qwen-code-cli');
   mocks.browser.mockResolvedValue(undefined);
   mocks.getUserInfo.mockResolvedValue(free);
@@ -94,15 +94,15 @@ it('starts OAuth without environment configuration', async () => {
   await flush();
   expect(mocks.signIn).toHaveBeenCalledOnce();
   expect(mocks.browser).toHaveBeenCalledWith(
-    'https://pre-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
   );
   expect(result.current.state.status).toBe('purchase-required');
   unmount();
 });
 
-it('uses the preproduction browser URL without exposing the device code', () => {
+it('uses the production browser URL without exposing the device code', () => {
   expect(subscriptionAuthorizationUrl(device)).toBe(
-    'https://pre-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
   );
 });
 
@@ -130,12 +130,12 @@ it.each([
     });
     expect(result.current.canCheckAgain).toBe(false);
     expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-      'https://pre-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+      'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
     ]);
     act(() => result.current.openPlans());
     expect(mocks.browser).toHaveBeenCalledTimes(2);
     expect(mocks.browser).toHaveBeenLastCalledWith(
-      'https://pre-chat.qwen.ai/?memberPlan=qwen_code',
+      'https://chat.qwen.ai/?memberPlan=qwen_code',
     );
     expect(mocks.signIn).toHaveBeenCalledOnce();
     await act(async () => {
@@ -185,7 +185,7 @@ it.each(['free', 'plus', 'pro'])(
     expect(mocks.signOut).not.toHaveBeenCalled();
     expect(onActivate).not.toHaveBeenCalled();
     expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-      'https://pre-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+      'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
     ]);
     await act(async () => finish({ ...free, member_type }));
     expect(result.current.state.status).toBe(
@@ -195,7 +195,7 @@ it.each(['free', 'plus', 'pro'])(
     if (member_type !== 'free') {
       expect(onActivate).toHaveBeenCalledWith(
         expect.any(AbortSignal),
-        'https://pre-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+        'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
       );
     }
     unmount();
@@ -221,8 +221,8 @@ it('opens a new device authorization on every explicit entry', async () => {
   expect(mocks.getUserInfo).not.toHaveBeenCalled();
   expect(mocks.signOut).not.toHaveBeenCalled();
   expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-    'https://pre-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
-    'https://pre-chat.qwen.ai/authorize?user_code=NEXT-CODE&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=NEXT-CODE&client=qwen-code',
   ]);
   second.unmount();
 });
@@ -277,8 +277,8 @@ it.each([false, true])(
     if (suppressBrowserLaunch) expect(mocks.browser).not.toHaveBeenCalled();
     else
       expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-        'https://pre-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
-        'https://pre-chat.qwen.ai/authorize?user_code=NEXT-CODE&client=qwen-code',
+        'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+        'https://chat.qwen.ai/authorize?user_code=NEXT-CODE&client=qwen-code',
       ]);
     await act(async () =>
       finishLogin({ ...free, email: 'next@example.test', member_type: 'pro' }),
@@ -540,7 +540,7 @@ it('does not let stale saved refresh credentials block explicit authorization', 
   expect(mocks.signIn).toHaveBeenCalledOnce();
   expect(mocks.getUserInfo).not.toHaveBeenCalled();
   expect(mocks.browser).toHaveBeenCalledWith(
-    'https://pre-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
   );
   unmount();
 });
@@ -652,7 +652,7 @@ it('does not reopen plans when the first membership query after authorization is
   });
   expect(mocks.getUserInfo).toHaveBeenCalledTimes(2);
   expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-    'https://pre-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
   ]);
   unmount();
 });
@@ -797,7 +797,7 @@ it.each(['plus', 'pro', 'PLUS', 'Pro', 'pLuS'] as const)(
     expect(onActivate).toHaveBeenCalledTimes(1);
     expect(onActivate).toHaveBeenCalledWith(
       expect.any(AbortSignal),
-      'https://pre-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+      'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
     );
     hook.rerender();
     await flush();
@@ -830,11 +830,11 @@ it('automatically activates a newly authorized paid account', async () => {
   expect(mocks.signIn).toHaveBeenCalledOnce();
   expect(onActivate).toHaveBeenCalledWith(
     expect.any(AbortSignal),
-    'https://pre-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
   );
   expect(onActivate).toHaveBeenCalledOnce();
   expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-    'https://pre-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
   ]);
   hook.unmount();
 });
@@ -857,7 +857,7 @@ it('automatically activates after a failed initial membership query is retried',
   expect(onActivate).toHaveBeenCalledOnce();
   expect(onActivate).toHaveBeenCalledWith(
     expect.any(AbortSignal),
-    'https://pre-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
   );
   expect(hook.result.current.connectionError).toBeUndefined();
   hook.unmount();

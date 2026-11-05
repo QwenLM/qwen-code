@@ -61,7 +61,7 @@ it('uses a token-free install plan and the common selection and refresh callback
     authType: 'qwen-subscription',
     modelSelection: {
       modelId: 'qwen3.8-max',
-      baseUrl: 'https://pre-api.qwen.ai/compatible-mode/v1',
+      baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
     },
   });
   expect(callbacks.settings).toBe(mocks.adapter);
@@ -78,7 +78,7 @@ it('uses a token-free install plan and the common selection and refresh callback
   expect(runtime.syncModelSelection).toHaveBeenCalledWith(
     'qwen-subscription',
     'qwen3.8-max',
-    'https://pre-api.qwen.ai/compatible-mode/v1',
+    'https://api.qwen.ai/compatible-mode/v1',
   );
   expect(runtime.refreshAuth).toHaveBeenCalledWith('qwen-subscription');
   expect(runtime.setSubscriptionPlan).toHaveBeenCalledWith('pro');

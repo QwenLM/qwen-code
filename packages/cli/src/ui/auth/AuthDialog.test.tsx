@@ -2346,7 +2346,7 @@ describe('subscription entry', () => {
   beforeEach(() => {
     originalEnv = { ...process.env };
     delete process.env['DEV'];
-    process.env['QWEN_OAUTH_BASE_URL'] = 'https://pre-auth.qwen.ai';
+    process.env['QWEN_OAUTH_BASE_URL'] = 'https://auth.qwen.ai';
     vi.clearAllMocks();
   });
   afterEach(() => {
@@ -2429,7 +2429,7 @@ describe('subscription entry', () => {
   );
 
   it('uses the real subscription view when an OAuth origin is configured', async () => {
-    process.env['QWEN_OAUTH_BASE_URL'] = 'https://pre-auth.qwen.ai';
+    process.env['QWEN_OAUTH_BASE_URL'] = 'https://auth.qwen.ai';
     const handleProviderSubmit = vi.fn();
     const ui = renderAuthDialog(settings(), {}, { handleProviderSubmit });
     try {

@@ -53,7 +53,7 @@ beforeEach(() => {
   mocks.isSignedIn.mockReturnValue(false);
   vi.stubEnv('DEV', false);
   delete process.env['DEV'];
-  vi.stubEnv('QWEN_OAUTH_BASE_URL', 'https://pre-auth.qwen.ai');
+  vi.stubEnv('QWEN_OAUTH_BASE_URL', 'https://auth.qwen.ai');
   mocks.userInfo.mockResolvedValue(null);
   mocks.signIn.mockImplementation(() => new Promise(() => {}));
 });
@@ -118,7 +118,7 @@ describe('process-global Subscription routes', () => {
       expect((await get(base)).body).toEqual({
         enabled: true,
         signedIn: false,
-        plansUrl: 'https://pre-chat.qwen.ai/?memberPlan=qwen_code',
+        plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
       });
       expect((await post(`${base}/flows`)).status).toBe(201);
     },
@@ -131,11 +131,11 @@ describe('process-global Subscription routes', () => {
     expect((await get(base)).body).toEqual({
       enabled: true,
       signedIn: false,
-      plansUrl: 'https://pre-chat.qwen.ai/?memberPlan=qwen_code',
+      plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
     });
     expect((await post(`${base}/flows`)).status).toBe(201);
   });
-  it('returns preproduction links and never exposes the device secret', async () => {
+  it('returns production links and never exposes the device secret', async () => {
     mocks.signIn.mockImplementation((onDevice) => {
       onDevice({
         user_code: 'ABCD-EFGH',
@@ -149,7 +149,7 @@ describe('process-global Subscription routes', () => {
     expect((await get(base)).body).toEqual({
       enabled: true,
       signedIn: false,
-      plansUrl: 'https://pre-chat.qwen.ai/?memberPlan=qwen_code',
+      plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
     });
     const started = await post(`${base}/flows`);
     const view = await get(`${base}/flows/${started.body.id}`);
@@ -157,7 +157,7 @@ describe('process-global Subscription routes', () => {
       id: started.body.id,
       status: 'waiting',
       authorizationUrl:
-        'https://pre-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+        'https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
     });
     expect(JSON.stringify(view.body)).not.toContain('secret');
   });
@@ -174,7 +174,7 @@ describe('process-global Subscription routes', () => {
       id: first.body.id,
       status: 'ready',
       authorizationUrl:
-        'https://pre-chat.qwen.ai/authorize?user_code=NEW-CODE&client=qwen-code',
+        'https://chat.qwen.ai/authorize?user_code=NEW-CODE&client=qwen-code',
       userInfo: user,
     });
     expect(mocks.userInfo).not.toHaveBeenCalled();
@@ -199,7 +199,7 @@ describe('process-global Subscription routes', () => {
         id: started.body.id,
         status: 'waiting',
         authorizationUrl:
-          'https://pre-chat.qwen.ai/authorize?user_code=NEW-CODE&client=qwen-code',
+          'https://chat.qwen.ai/authorize?user_code=NEW-CODE&client=qwen-code',
       });
       expect(mocks.userInfo).not.toHaveBeenCalled();
       expect(mocks.signOut).not.toHaveBeenCalled();

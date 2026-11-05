@@ -93,7 +93,7 @@ const subscription = vi.hoisted(() => ({
   email: 'real@example.com',
   deviceAuth: {
     verification_uri_complete:
-      'https://pre-chat.qwen.ai/authorize?user_code=REAL-CODE&client=qwen-code',
+      'https://chat.qwen.ai/authorize?user_code=REAL-CODE&client=qwen-code',
   },
   checking: false,
   connecting: false,
@@ -1674,7 +1674,7 @@ describe('real subscription entry', () => {
     vi.clearAllMocks();
     vi.stubEnv('DEV', false);
     delete process.env['DEV'];
-    vi.stubEnv('QWEN_OAUTH_BASE_URL', 'https://pre-auth.qwen.ai');
+    vi.stubEnv('QWEN_OAUTH_BASE_URL', 'https://auth.qwen.ai');
     subscription.state = { status: 'waiting' };
     subscription.canCheckAgain = false;
     subscription.checking = false;

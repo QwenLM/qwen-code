@@ -207,7 +207,7 @@ describe('<ModelDialog />', () => {
 
   it('confirms subscription model selection without exposing API configuration', async () => {
     const model = 'qwen3.8-max';
-    const baseUrl = 'https://pre-api.qwen.ai/compatible-mode/v1';
+    const baseUrl = 'https://api.qwen.ai/compatible-mode/v1';
     const { mockConfig, mockHistoryManager, recordSlashCommand, props } =
       renderComponent(
         {},

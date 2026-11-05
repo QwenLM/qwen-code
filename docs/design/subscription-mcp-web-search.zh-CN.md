@@ -4,11 +4,11 @@
 
 ## 问题与范围
 
-会员模型推理已可用，但内置 `web_search` 目前只支持 DashScope 凭证。预发会员搜索服务在 `https://pre-api.qwen.ai/api/v1/mcp/web_search` 提供 MCP，使用已有设备 Access Token 鉴权。通过共用 Core 工具接入，使 CLI、VS Code 和桌面端使用同一套行为。
+会员模型推理已可用，但内置 `web_search` 目前只支持 DashScope 凭证。订阅客户端向 `https://api.qwen.ai/api/v1/mcp/web_search` 发送 MCP 搜索请求，使用已有设备 Access Token 鉴权。通过共用 Core 工具接入，使 CLI、VS Code 和桌面端使用同一套行为。
 
 ## 协议证据
 
-真实 SDK 探测在完整 URL 上完成了 `initialize`（200）、`notifications/initialized`（204）、`tools/list`（200）和 `tools/call`（200）。服务端 `qwen-web-search` 0.1.0 提供 `web_search`：必填 `query` 字符串，长度 1–500；可选 `num`（1–20，默认 10）、`country`、`locale`、`location`。公开查询返回含编号结果、URL 和摘要的文本块，没有结构化来源字段，也未返回 MCP Session ID。证据位于 `.qwen/e2e-tests/subscription-mcp-protocol.json`。
+SDK 探测在预发 MCP 地址完成了 `initialize`（200）、`notifications/initialized`（204）、`tools/list`（200）和 `tools/call`（200）。服务端 `qwen-web-search` 0.1.0 提供 `web_search`：必填 `query` 字符串，长度 1–500；可选 `num`（1–20，默认 10）、`country`、`locale`、`location`。公开查询返回含编号结果、URL 和摘要的文本块，没有结构化来源字段，也未返回 MCP Session ID。证据位于 `.qwen/e2e-tests/subscription-mcp-protocol.json`。
 
 ## 实现方案
 

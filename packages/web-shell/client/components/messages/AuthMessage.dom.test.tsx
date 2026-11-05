@@ -865,13 +865,13 @@ describe('subscription development entry', () => {
       vi.stubEnv('DEV', true);
       actions.getSubscriptionConfig.mockResolvedValue({
         enabled: true,
-        plansUrl: 'https://pre-chat.qwen.ai/?memberPlan=qwen_code',
+        plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
       });
       actions.startSubscriptionLogin.mockResolvedValue({
         id: 'flow-1',
         status: 'waiting',
         authorizationUrl:
-          'https://pre-chat.qwen.ai/authorize?user_code=123&client=qwen-code',
+          'https://chat.qwen.ai/authorize?user_code=123&client=qwen-code',
       });
       actions.cancelSubscriptionLogin.mockResolvedValue(undefined);
       const open = vi.spyOn(window, 'open').mockReturnValue(null);
@@ -888,12 +888,12 @@ describe('subscription development entry', () => {
       expect(actions.startSubscriptionLogin).toHaveBeenCalledOnce();
       if (desktop) {
         expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
-          url: 'https://pre-chat.qwen.ai/authorize?user_code=123&client=qwen-code',
+          url: 'https://chat.qwen.ai/authorize?user_code=123&client=qwen-code',
         });
         expect(open).not.toHaveBeenCalled();
       } else {
         expect(open).toHaveBeenCalledWith(
-          'https://pre-chat.qwen.ai/authorize?user_code=123&client=qwen-code',
+          'https://chat.qwen.ai/authorize?user_code=123&client=qwen-code',
           '_blank',
           'noopener,noreferrer',
         );
@@ -926,7 +926,7 @@ describe('subscription development entry', () => {
       );
       actions.getSubscriptionConfig.mockResolvedValue({
         enabled: true,
-        plansUrl: 'https://pre-chat.qwen.ai/?memberPlan=qwen_code',
+        plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
       });
       actions.startSubscriptionLogin.mockResolvedValue({
         id: 'paid',
@@ -990,7 +990,7 @@ describe('subscription development entry', () => {
     async (memberType, language) => {
       actions.getSubscriptionConfig.mockResolvedValue({
         enabled: true,
-        plansUrl: 'https://pre-chat.qwen.ai/?memberPlan=qwen_code',
+        plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
       });
       actions.startSubscriptionLogin.mockResolvedValue({
         id: 'paid-welcome',
@@ -1072,7 +1072,7 @@ describe('subscription development entry', () => {
       sessionState.sessionId = hasSession ? 'current-session' : undefined;
       actions.getSubscriptionConfig.mockResolvedValue({
         enabled: true,
-        plansUrl: 'https://pre-chat.qwen.ai/?memberPlan=qwen_code',
+        plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
       });
       actions.startSubscriptionLogin.mockResolvedValue({
         id: 'paid',
@@ -1113,7 +1113,7 @@ describe('subscription development entry', () => {
     async (change) => {
       actions.getSubscriptionConfig.mockResolvedValue({
         enabled: true,
-        plansUrl: 'https://pre-chat.qwen.ai/?memberPlan=qwen_code',
+        plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
       });
       actions.startSubscriptionLogin.mockResolvedValue({
         id: 'paid',
@@ -1153,7 +1153,7 @@ describe('subscription development entry', () => {
   it('cancels an active login when the session owner changes', async () => {
     actions.getSubscriptionConfig.mockResolvedValue({
       enabled: true,
-      plansUrl: 'https://pre-chat.qwen.ai/?memberPlan=qwen_code',
+      plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
     });
     actions.startSubscriptionLogin.mockResolvedValue({
       id: 'flow-2',
