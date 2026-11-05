@@ -367,6 +367,17 @@ jobs:
           bundle="${extracted}/qwen-managed-agent-reference-${RELEASE_VERSION}"
           cd "${bundle}"
           sha256sum --check SHA256SUMS
+          # The upgrade command compares these scripts across releases, so it
+          # must find them where this archive's jar ships them.
+          node --input-type=module --eval "
+            import { readFile } from 'node:fs/promises';
+            import { migrationScripts } from '${bundle}/bin/qwen-managed-agent-upgrade.mjs';
+            const { components } = JSON.parse(await readFile('manifest.json', 'utf8'));
+            const jar = components.find((each) => each.role === 'control-plane').path;
+            const scripts = await migrationScripts(jar);
+            if (scripts.size === 0) throw new Error('no Flyway script found in ' + jar);
+            console.log('Flyway scripts in ' + jar + ': ' + [...scripts.keys()].join(', '));
+          "
           server_port="$(node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")"
           SERVER_PORT="${server_port}" \
           SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/qwen_managed_agent?allowPublicKeyRetrieval=true&useSSL=false" \

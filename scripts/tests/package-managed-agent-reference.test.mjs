@@ -1188,6 +1188,27 @@ test('verifies archives in fresh directories on a reused runner', async () => {
     const version = '0.1.0-alpha.1';
     const name = `qwen-managed-agent-reference-${version}`;
     await fixture(root);
+    // The archive probe reads migrations before Java starts.
+    const serverJar = Buffer.from(
+      'UEsDBBQAAAAAAAAAIQA5b9fWCQAAAAkAAAAzAAAAQk9PVC1JTkYvY2xhc3Nlcy9kYi9tYW5hZ2Vk' +
+        'LXNjaGVtYS9WMV9fYmFzZWxpbmUuc3Fsc2VsZWN0IDE7UEsBAhQDFAAAAAAAAAAhADlv19YJAAAA' +
+        'CQAAADMAAAAAAAAAAAAAAIABAAAAAEJPT1QtSU5GL2NsYXNzZXMvZGIvbWFuYWdlZC1zY2hlbWEv' +
+        'VjFfX2Jhc2VsaW5lLnNxbFBLBQYAAAAAAQABAGEAAABaAAAAAAA=',
+      'base64',
+    );
+    await writeFile(
+      path.join(
+        root,
+        'packages/managed-agent-server/server/target/qwen-managed-agent-server-0.4.0-alpha-exec.jar',
+      ),
+      serverJar,
+    );
+    const upgradeModule =
+      'packages/managed-agent-server/distribution/bin/qwen-managed-agent-upgrade.mjs';
+    await writeFile(
+      path.join(root, upgradeModule),
+      await readFile(new URL(`../../${upgradeModule}`, import.meta.url)),
+    );
     await createReferenceDistribution({
       repoRoot: root,
       outputDirectory: output,
