@@ -932,6 +932,7 @@ describe('AppContainer State Management', () => {
       await vi.waitFor(() =>
         expect(initialize).toHaveBeenCalledWith(['AbovePrompt'], {
           prompts: true,
+          runsPrompts: true,
         }),
       );
 

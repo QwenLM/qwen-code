@@ -106,6 +106,11 @@ import {
   MODS_FAILED_TO_INITIALIZE,
 } from '../../services/interactive-mod-session.js';
 import type { ModTurn } from '../../services/mod-session.js';
+import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
+import {
+  frameModPrompt,
+  modPromptRow,
+} from '../../services/mod-prompt-frame.js';
 import type {
   HistoryItem,
   HistoryItemWithoutId,
@@ -1598,6 +1603,9 @@ export const useLlmStream = (
     ) {
       return false;
     }
+    // The person stopped the session's work: the Mods' prompts still queued
+    // do not start once it is idle. A Mod that ends a turn keeps them.
+    if (!quiet) getInteractiveModSession(config)?.discardSubmittedPrompts();
     if (modTurnRef.current) {
       modTurnRef.current.ending = 'aborted';
       modTurnRef.current.cancel.abort();
@@ -1856,6 +1864,7 @@ export const useLlmStream = (
       pasteExpansions?: ReadonlyMap<string, string>,
       hasUnknownInput?: boolean,
       isCurrentSubmission?: () => boolean,
+      modPrompt?: ModQueuedPrompt,
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
@@ -1895,6 +1904,20 @@ export const useLlmStream = (
         if (submitType === SendMessageType.Notification) {
           onDebugMessage(
             `Received notification (${trimmedQuery.length} chars)`,
+          );
+          return { queryToSend: trimmedQuery, shouldProceed: true };
+        }
+
+        // A Mod's own prompt already passed the Mods' `prompt.submit` hooks,
+        // and the person did not type it: it is not recalled, reads no `@`
+        // reference and runs no command, and its row names the Mod.
+        if (modPrompt) {
+          addItem(
+            {
+              type: 'notification',
+              text: modPromptRow(modPrompt.plugin, modPrompt.text),
+            },
+            userMessageTimestamp,
           );
           return { queryToSend: trimmedQuery, shouldProceed: true };
         }
@@ -4130,10 +4153,17 @@ export const useLlmStream = (
         userAdmission?: DirectUserAdmission;
         goalBinding?: GoalTurnBinding;
         toolContinuationOwner?: ToolContinuationOwner;
+        /** A prompt a Mod submitted, which `query` frames. */
+        modPrompt?: ModQueuedPrompt;
       },
     ) => {
       const mods = getInteractiveModSession(config);
+      const modPrompt =
+        submitType === SendMessageType.UserQuery
+          ? metadata?.modPrompt
+          : undefined;
       const dispatchesSlashCommand =
+        !modPrompt &&
         (submitType === SendMessageType.UserQuery ||
           submitType === SendMessageType.Cron) &&
         typeof query === 'string' &&
@@ -4219,6 +4249,11 @@ export const useLlmStream = (
         metadata?.onDeliveryFailed?.();
         return;
       }
+
+      // The person's own prompt, a slash command too, lets the Mods' prompts
+      // start turns again.
+      if (submitType === SendMessageType.UserQuery && !modPrompt)
+        mods?.notePersonPrompt();
 
       // Set the flag to indicate we're now executing
       acquireSubmissionLease();
@@ -4449,6 +4484,7 @@ export const useLlmStream = (
                       submissionGeneration ===
                         submissionLeaseGenerationRef.current &&
                       activeModelStreamsRef.current === 0,
+                    modPrompt,
                   );
         } catch (error) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
@@ -4462,7 +4498,9 @@ export const useLlmStream = (
         // here on: what the transcript shows, what `turn.start` hears and
         // what workflow keywords are read from.
         const promptRewrite = preparedQuery.promptSubmitted?.rewritten;
-        const promptContext = preparedQuery.promptSubmitted?.context;
+        const promptContext =
+          preparedQuery.promptSubmitted?.context ??
+          (modPrompt?.context?.length ? modPrompt.context : undefined);
         const sentPrompt = promptRewrite?.display ?? submittedPrompt;
         const typedInput =
           promptRewrite === undefined || !metadata?.humanInput
@@ -4692,6 +4730,7 @@ export const useLlmStream = (
           const workflowSessionId = config.getSessionId();
           const workflowModeEligible =
             submitType === SendMessageType.UserQuery &&
+            !modPrompt &&
             !allowConcurrentBtwDuringResponse &&
             !isDetachedToolContinuation &&
             !(metadata?.shellMode ?? shellModeActive) &&
@@ -4747,6 +4786,14 @@ export const useLlmStream = (
               ? { submittedPrompt: sentPrompt }
               : {}),
             ...(promptContext ? { promptContext } : {}),
+            ...(modPrompt
+              ? {
+                  submittedByMod: modPrompt.plugin,
+                  ...(modPrompt.asUser && { submittedAsUser: true as const }),
+                  // Recall looks for what the Mod asked, not the frame.
+                  memoryRecallQuery: modPrompt.text,
+                }
+              : {}),
             ...(humanInput === undefined
               ? {}
               : {
@@ -7970,6 +8017,66 @@ export const useLlmStream = (
     addItem,
     config,
     claimSystemGoalTurn,
+    goalQueuePendingCount,
+  ]);
+
+  // ─── A Mod's own prompts (`$.prompt.submit`) ───────────────
+  // Each runs as a turn of its own once the session is idle, after the
+  // person's queued prompts and the notifications, and not while a Goal owns
+  // the session's turns: a Mod's prompt is neither the person's words nor a
+  // turn the Goal asked for.
+  const [modPromptTrigger, setModPromptTrigger] = useState(0);
+  useEffect(
+    () =>
+      getInteractiveModSession(config)?.subscribePrompts(() =>
+        setModPromptTrigger((n) => n + 1),
+      ),
+    [config],
+  );
+  useEffect(() => {
+    const mods = getInteractiveModSession(config);
+    if (
+      streamingState !== StreamingState.Idle ||
+      isSubmittingQueryRef.current ||
+      notificationQueueRef.current.length > 0 ||
+      !mods?.hasSubmittedPrompts ||
+      goalQueueRef?.current?.hasQueuedUserMessages?.() ||
+      goalQueuePendingCount > 0
+    ) {
+      return;
+    }
+    try {
+      if (goalRequiresExactPermit(config.getGoalRuntime().getSnapshot()))
+        return;
+    } catch {
+      // Goal runtime is optional during early initialization.
+    }
+    runOutsideAgentContext(() => {
+      const prompt = mods.takeSubmittedPrompt();
+      if (!prompt) return;
+      void submitQuery(
+        frameModPrompt(prompt),
+        SendMessageType.UserQuery,
+        undefined,
+        {
+          modPrompt: prompt,
+          submittedPrompt: prompt.text,
+          shellMode: false,
+          // Another submission won this idle moment; the prompt waits for
+          // the next one.
+          onAdmissionFailed: () => mods.returnSubmittedPrompt(prompt),
+        },
+      ).catch((error) => {
+        debugLogger.warn("Failed to start a Mod's prompt", error);
+      });
+    });
+  }, [
+    streamingState,
+    submitQuery,
+    modPromptTrigger,
+    notificationTrigger,
+    config,
+    goalQueueRef,
     goalQueuePendingCount,
   ]);
 

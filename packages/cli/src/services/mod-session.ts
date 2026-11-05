@@ -100,6 +100,13 @@ export interface ModTerminalHost {
   sites?(): readonly ModRenderSite[];
   /** Whether the terminal raises `prompt.submit`, read once at load. */
   prompts?(): boolean;
+  /**
+   * Whether the terminal runs the prompts the Mods submit with
+   * `$.prompt.submit`, read once at load.
+   */
+  runsPrompts?(): boolean;
+  /** A Mod's prompt was queued, for the terminal to run once idle. */
+  promptQueued?(): void;
   /** Draws the tree the band's hooks settled on, drawn by `owner`. */
   draw?(tree: ModRenderElement, owner: string): void;
 }
@@ -177,6 +184,8 @@ export class ModSession implements ICommandLoader {
     [];
   // Turns the Mods' prompts started since the person last sent one.
   private modTurns = 0;
+  // The session each prompt taken to run was queued for.
+  private readonly taken = new WeakMap<ModQueuedPrompt, string>();
   // Also runs on every API response, so a session that no hook saw still has
   // its figures when it ends. A subagent's response emits from inside its
   // agent frame, whose model would otherwise answer for the main session.
@@ -418,8 +427,10 @@ export class ModSession implements ICommandLoader {
             ? { sites, invalidate: () => this.requestRender() }
             : undefined,
           this.terminal ? this.terminal.prompts?.() === true : true,
-          // The terminals do not run a Mod's own prompts yet.
-          this.terminal ? undefined : (prompt) => this.queuePrompt(prompt),
+          // A terminal runs a Mod's own prompts only once it says so.
+          this.terminal && this.terminal.runsPrompts?.() !== true
+            ? undefined
+            : (prompt) => this.queuePrompt(prompt),
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({
@@ -736,6 +747,7 @@ export class ModSession implements ICommandLoader {
       return refused;
     }
     this.submitted.push({ ...prompt, sessionId: this.sessionId });
+    this.terminal?.promptQueued?.();
     return undefined;
   }
 
@@ -750,8 +762,28 @@ export class ModSession implements ICommandLoader {
     while (next && next.sessionId !== sessionId) next = this.submitted.shift();
     if (!next || this.closing) return undefined;
     this.modTurns++;
-    const { sessionId: _session, ...prompt } = next;
+    const { sessionId: queuedFor, ...prompt } = next;
+    this.taken.set(prompt, queuedFor);
     return prompt;
+  }
+
+  /**
+   * Puts back a prompt {@link takeSubmittedPrompt} took, at the front of the
+   * queue, when the turn it was taken for could not start. It no longer counts
+   * toward {@link MOD_PROMPT_TURN_LIMIT}.
+   */
+  returnSubmittedPrompt(prompt: ModQueuedPrompt): void {
+    const sessionId = this.taken.get(prompt);
+    this.taken.delete(prompt);
+    // A session that ended since takes nothing back.
+    if (
+      sessionId === undefined ||
+      this.closing ||
+      sessionId !== this.config.getSessionId()
+    )
+      return;
+    this.modTurns = Math.max(0, this.modTurns - 1);
+    this.submitted.unshift({ ...prompt, sessionId });
   }
 
   /** Whether a prompt a Mod submitted for the current session waits to run. */
@@ -769,8 +801,9 @@ export class ModSession implements ICommandLoader {
   }
 
   /**
-   * Drops the prompts the Mods submitted that have not started: a run that
-   * stopped early does not run them, and neither does the next one.
+   * Drops the prompts the Mods submitted that have not started: a headless
+   * run that stopped early does not run them, and neither does the next one;
+   * in a terminal, neither does a session whose turn the person cancelled.
    */
   discardSubmittedPrompts(): void {
     this.submitted.length = 0;

@@ -137,7 +137,7 @@ this recovery exception.
 | API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
 | Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
 | Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and, in headless runs, those a Mod submits, described in [Turn events](#turn-events)                  |
-| Prompts    | `prompt.submit` in headless runs and the Ink and OpenTUI terminals, and `$.prompt.submit` in headless runs, described in [Submitted prompts](#submitted-prompts)                        |
+| Prompts    | `prompt.submit` in headless runs and the Ink and OpenTUI terminals, and `$.prompt.submit` in headless runs and the Ink terminal, described in [Submitted prompts](#submitted-prompts)   |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
 | Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, described in [The band above the prompt](#the-band-above-the-prompt)                                        |
@@ -466,7 +466,7 @@ supports:
 }
 ```
 
-This is a headless run. In the Ink and OpenTUI terminals, `events` also lists `ui.render`, and `methods` does not list `prompt.submit` yet.
+This is a headless run. In the Ink and OpenTUI terminals, `events` also lists `ui.render`, and in OpenTUI `methods` does not list `prompt.submit` yet.
 `claudeCode` is the Claude Code release whose event names are recognized,
 `events` lists the events hooks can receive and `methods` the `$` methods a Mod can
 call. A Mod can use it to choose a fallback, such as a command reply where a
@@ -729,9 +729,9 @@ where transcript logs do.
 
 ### A Mod's own prompt
 
-In headless runs, `$.prompt.submit({ text })` submits a prompt of the Mod's own.
-It starts a turn once the run is idle, after the turn that is running, and
-never joins a running turn:
+In headless runs and the Ink terminal, `$.prompt.submit({ text })` submits a
+prompt of the Mod's own. It starts a turn once the session is idle, after the
+turn that is running, and never joins a running turn:
 
 ```javascript
 export function register(on) {
@@ -766,22 +766,29 @@ export function register(on) {
   `turn.complete` like any other. It counts toward the session turn limit.
 - `@` references in the text are not read.
 - A Mod command that submits a prompt hands work on to the model: its reply is
-  shown, and the prompt's turn follows in the same run. The command itself
-  starts no turn.
+  shown, and the prompt's turn follows, in a headless run in the same run. The
+  command itself starts no turn.
+- In the Ink terminal the prompt's turn starts after the prompts the person
+  queued and the background notifications, and waits while a Goal is running.
+  The transcript shows it as the line `Mod <name>: <text>`, live and when the
+  session is resumed, with `asUser` too, and it does not enter the input
+  history.
 - The Mods' prompts start at most 8 turns before the person sends a prompt
   again. Past that a call resolves to a drop, and the line
   `$.prompt.submit refused: …` appears where transcript logs do. In a headless
   run, the prompt the run was given is the person's, and in a stream-json
-  session each message the client sends is, a slash command too.
+  session each message the client sends is, a slash command too. In the Ink
+  terminal, each prompt or slash command the person sends is.
 - `/clear` and `/resume` start the new session with no prompts queued and the
   count at 0. A prompt submitted while the old session ends, from a
   `session.end` hook for instance, resolves to
   `{ drop: 'the session is ending' }`.
 - A prompt still queued when the run stops early, on an interrupt, a structured
-  result, a detected loop or a slash command that fails, does not run.
-- In the Ink and OpenTUI terminals the method is not listed in `methods` yet,
-  and a call resolves to
-  `{ drop: 'this host does not run prompts a Mod submits' }`.
+  result, a detected loop or a slash command that fails, does not run. In the
+  Ink terminal, neither does one still queued when the person cancels a turn
+  with Esc; a turn a Mod ends with `$.turn.abort` keeps them.
+- In the OpenTUI terminal the method is not listed in `methods` yet, and a
+  call resolves to `{ drop: 'this host does not run prompts a Mod submits' }`.
 
 These differ from Claude Code:
 

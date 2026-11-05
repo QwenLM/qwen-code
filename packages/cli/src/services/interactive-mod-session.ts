@@ -6,7 +6,10 @@
 
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
-import type { ModCommandPresentation } from '@qwen-code/qwen-code-core/mods/types.js';
+import type {
+  ModCommandPresentation,
+  ModQueuedPrompt,
+} from '@qwen-code/qwen-code-core/mods/types.js';
 import type {
   ModRenderElement,
   ModRenderInput,
@@ -82,6 +85,8 @@ export class InteractiveModSession implements ICommandLoader {
   };
   private sites: readonly ModRenderSite[] = [];
   private prompts = false;
+  private runsPrompts = false;
+  private readonly promptListeners = new Set<() => void>();
   // The band's last tree, kept until a new answer lands; none draws nothing.
   private band?: ModBand;
   private revision = 0;
@@ -98,6 +103,10 @@ export class InteractiveModSession implements ICommandLoader {
       presentation: () => this.presentation,
       sites: () => this.sites,
       prompts: () => this.prompts,
+      runsPrompts: () => this.runsPrompts,
+      promptQueued: () => {
+        for (const listener of this.promptListeners) listener();
+      },
       draw: (tree, owner) => {
         const band =
           tree.type === 'engine'
@@ -120,16 +129,21 @@ export class InteractiveModSession implements ICommandLoader {
   }
 
   /**
-   * Loads the Mods once; `sites` names the render sites the host draws, and
-   * `prompts` says whether it raises `prompt.submit`.
+   * Loads the Mods once; `sites` names the render sites the host draws,
+   * `prompts` says whether it raises `prompt.submit`, and `runsPrompts`
+   * whether it runs the prompts the Mods submit with `$.prompt.submit`.
    */
   initialize(
     sites: readonly ModRenderSite[] = [],
-    { prompts = false }: { prompts?: boolean } = {},
+    {
+      prompts = false,
+      runsPrompts = false,
+    }: { prompts?: boolean; runsPrompts?: boolean } = {},
   ): Promise<void> {
     if (!this.initialization) {
       this.sites = sites;
       this.prompts = prompts;
+      this.runsPrompts = runsPrompts;
     }
     this.initialization ??= this.session.initialize(this.lifetime.signal).then(
       () => {
@@ -255,6 +269,37 @@ export class InteractiveModSession implements ICommandLoader {
       : this.session.submitPrompt(text, signal);
   }
 
+  /** Hears each prompt a Mod queues with `$.prompt.submit`. */
+  readonly subscribePrompts = (listener: () => void): (() => void) => {
+    this.promptListeners.add(listener);
+    return () => this.promptListeners.delete(listener);
+  };
+
+  /** Whether a prompt a Mod submitted waits for the session to be idle. */
+  get hasSubmittedPrompts(): boolean {
+    return !this.closing && this.session.hasSubmittedPrompts;
+  }
+
+  /** The next prompt a Mod submitted, to run now as a turn of its own. */
+  takeSubmittedPrompt(): ModQueuedPrompt | undefined {
+    return this.closing ? undefined : this.session.takeSubmittedPrompt();
+  }
+
+  /** Puts back a prompt whose turn could not start. */
+  returnSubmittedPrompt(prompt: ModQueuedPrompt): void {
+    if (!this.closing) this.session.returnSubmittedPrompt(prompt);
+  }
+
+  /** The person sent a prompt, so the Mods' prompts may start turns again. */
+  notePersonPrompt(): void {
+    this.session.notePersonPrompt();
+  }
+
+  /** Drops the prompts the Mods submitted that have not started. */
+  discardSubmittedPrompts(): void {
+    this.session.discardSubmittedPrompts();
+  }
+
   startTurn(
     text: string,
     signal: AbortSignal,
@@ -278,6 +323,7 @@ export class InteractiveModSession implements ICommandLoader {
         this.logs.length = 0;
         this.band = undefined;
         for (const listener of this.bandListeners) listener();
+        this.promptListeners.clear();
         if (sessions.get(this.config) === this) sessions.delete(this.config);
       }
     })();
