@@ -396,6 +396,8 @@ class ExternalWorkspaceMaterializationTest {
             store.materialize("tenant", "workspace", "Name", "owner", "key");
             assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isTrue();
             String registered = jdbc.queryForObject("SELECT registration_json FROM ma_storage", String.class);
+            var sessions = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties,
+                    new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             for (String malformed : List.of("not-json", "{}",
                     registered.replace("\"registrationRevision\":1", "\"registrationRevision\":\"1\""))) {
                 jdbc.update("UPDATE ma_storage SET registration_json = ?", malformed);
@@ -406,6 +408,19 @@ class ExternalWorkspaceMaterializationTest {
                             assertThat(error.getCode()).isEqualTo("workspace_unavailable");
                             assertThat(error.isRetryable()).isFalse();
                         });
+                assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> sessions.insertWorkspaceSessionCommand(
+                        SessionCreationCommand.builder()
+                                .tenantId("tenant").actorId("owner")
+                                .idempotencyKey("malformed-" + malformed.hashCode()).requestDigest("digest")
+                                .agentId("qwen-code").title("Files")
+                                .input(List.of())
+                                .selection(new WorkspaceSelection("workspace", "."))
+                                .build())))
+                        .isInstanceOfSatisfying(
+                                com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class, error -> {
+                                    assertThat(error.getStatus()).isEqualTo(409);
+                                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                                });
             }
         }
     }
