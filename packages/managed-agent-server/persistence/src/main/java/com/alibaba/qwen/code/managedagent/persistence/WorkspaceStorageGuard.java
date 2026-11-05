@@ -2,13 +2,13 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader.Identity;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageMarkers.Marker;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -37,8 +37,6 @@ import java.util.stream.Collectors;
 
 @Component
 public class WorkspaceStorageGuard {
-    private static final String MARKER = ".qwen-managed-storage.json";
-
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
     private final Map<Storage, Path> roots;
@@ -47,6 +45,7 @@ public class WorkspaceStorageGuard {
     private final StorageIdentityReader identities;
     private SshWorkspaceStore ssh;
     private final ObjectMapper json = new ObjectMapper();
+    private final WorkspaceStorageMarkers markers = new WorkspaceStorageMarkers(json);
 
     @Autowired
     public WorkspaceStorageGuard(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
@@ -104,7 +103,7 @@ public class WorkspaceStorageGuard {
         }
         String markerStatus = "match";
         try {
-            if (!marker(row).equals(readMarker(markerRoot(marker(row), root, false)))) {
+            if (!marker(row).equals(markers.read(markerRoot(marker(row), root, false)))) {
                 markerStatus = "mismatch";
             }
         } catch (RuntimeException error) {
@@ -142,7 +141,7 @@ public class WorkspaceStorageGuard {
             requireFenced(saved, physical, revision, operationId);
             Path original = root(tenantId, storageId);
             requireMatching(saved, identity(original), tenantId, storageId);
-            if (!marker(saved).equals(readMarker(original))) {
+            if (!marker(saved).equals(markers.read(original))) {
                 throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
             }
             return new RecoveryRegistration(tenantId, storageId, saved.registrationId(), revision,
@@ -228,8 +227,26 @@ public class WorkspaceStorageGuard {
         return root(binding.getTenantId(), binding.getStorageId());
     }
 
+    Path verifiedRootForRead(ContextBinding binding) {
+        if (!enabled) {
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        }
+        String tenant = binding.getTenantId();
+        String storage = binding.getStorageId();
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenant, storage);
+        WorkspaceMigrationAdmission.requireOpenForRead(jdbc, tenant, storage);
+        return verify(tenant, storage, binding.getCwdRelative(), row(LocalStorageOwners.key(jdbc, tenant, storage, false), false));
+    }
+
     Map<String, String> fileRoot(ContextBinding binding) {
-        Path path = verifiedRoot(binding);
+        return fileRoot(verifiedRoot(binding));
+    }
+
+    Map<String, String> fileRootForRead(ContextBinding binding) {
+        return fileRoot(verifiedRootForRead(binding));
+    }
+
+    private Map<String, String> fileRoot(Path path) {
         Identity actual = identity(path);
         return Map.of("root", path.toString(), "device", actual.device(), "inode", actual.inode());
     }
@@ -307,11 +324,11 @@ public class WorkspaceStorageGuard {
         Path metadataRoot = markerRoot(marker, root, !"READY".equals(prepared.state()));
         if ("READY".equals(prepared.state())) {
             requireMatching(prepared, identity(root), tenantId, storageId);
-            if (!marker.equals(readMarker(metadataRoot))) {
+            if (!marker.equals(markers.read(metadataRoot))) {
                 throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
             }
         } else {
-            publishMarker(metadataRoot, marker);
+            markers.publish(metadataRoot, marker);
         }
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
@@ -324,7 +341,7 @@ public class WorkspaceStorageGuard {
                 throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
             }
             requireMatching(row, identity(root), tenantId, storageId);
-            if (!marker.equals(marker(row)) || !marker.equals(readMarker(metadataRoot))) {
+            if (!marker.equals(marker(row)) || !marker.equals(markers.read(metadataRoot))) {
                 throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
             }
             if ("READY".equals(row.state()) && row.operationId() == null && row.revision() > 0) {
@@ -430,7 +447,7 @@ public class WorkspaceStorageGuard {
                     && row.revision() == revision + 1 && row.operationId() == null
                     && operationId.equals(row.completedOperationId())) {
                 requireMatching(row, identity(root), tenantId, storageId);
-                if (!marker(row).equals(readMarker(root))) {
+                if (!marker(row).equals(markers.read(root))) {
                     throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
                 }
                 return;
@@ -443,7 +460,7 @@ public class WorkspaceStorageGuard {
                 throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
             }
             requireMatching(row, identity(root), tenantId, storageId);
-            if (!marker(row).equals(readMarker(root))) {
+            if (!marker(row).equals(markers.read(root))) {
                 throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
             }
             int changed = jdbc.update("UPDATE ma_storage_owner"
@@ -459,16 +476,19 @@ public class WorkspaceStorageGuard {
     }
 
     private void verify(String tenantId, String storageId, String cwd, boolean lock) {
+        verify(tenantId, storageId, cwd, row(key(tenantId, storageId), lock));
+    }
+
+    private Path verify(String tenantId, String storageId, String cwd, Registration row) {
         Path root = root(tenantId, storageId);
         Identity actual = identity(root);
-        Registration row = row(key(tenantId, storageId), lock);
         if (row == null || !"READY".equals(row.state()) || row.operationId() != null
                 || row.revision() <= 0) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
         requireMatching(row, actual, tenantId, storageId);
         verifyHistory(tenantId, storageId, false);
-        if (!marker(row).equals(readMarker(markerRoot(marker(row), root, false)))) {
+        if (!marker(row).equals(markers.read(markerRoot(marker(row), root, false)))) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
         Path directory = root.resolve(cwd).normalize();
@@ -481,6 +501,7 @@ public class WorkspaceStorageGuard {
         } catch (IOException | IllegalArgumentException error) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
+        return root;
     }
 
     private void requireNoExecutionMembers(String physical) {
@@ -569,7 +590,7 @@ public class WorkspaceStorageGuard {
         }
         requireMatching(row, actual, tenantId, storageId);
         verifyHistory(tenantId, storageId, true);
-        if (!marker(row).equals(readMarkerProbe(markerRoot(marker(row), root, false)))) {
+        if (!marker(row).equals(markers.readProbe(markerRoot(marker(row), root, false)))) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
         Path directory = root.resolve(cwd).normalize();
@@ -585,30 +606,6 @@ public class WorkspaceStorageGuard {
                     AccessMode.READ, AccessMode.EXECUTE);
         } catch (NoSuchFileException | AccessDeniedException
                 | SecurityException | IllegalArgumentException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-        } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailableTransient(error);
-        }
-    }
-
-    private Marker readMarkerProbe(Path root) {
-        Path file = root.resolve(MARKER);
-        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-        }
-        try (FileChannel channel = FileChannel.open(file,
-                StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
-            if (channel.size() > 4096) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-            }
-            ByteBuffer bytes = ByteBuffer.allocate((int) channel.size());
-            while (bytes.hasRemaining()) {
-                if (channel.read(bytes) <= 0) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-                }
-            }
-            return json.readValue(bytes.array(), Marker.class);
-        } catch (JsonProcessingException error) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         } catch (IOException error) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailableTransient(error);
@@ -653,7 +650,7 @@ public class WorkspaceStorageGuard {
                 throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
             }
             requireMatching(saved, identity(root(tenant, storage)), tenant, storage);
-            if (!marker(saved).equals(readMarker(root(tenant, storage)))) {
+            if (!marker(saved).equals(markers.read(root(tenant, storage)))) {
                 throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
             }
             return new RecoveryRegistration(tenant, storage, saved.registrationId(), revision, fence,
@@ -676,7 +673,7 @@ public class WorkspaceStorageGuard {
     }
 
     static Path migrationTemporary(Path root, String operation) {
-        return root.resolve(MARKER + "." + operation + ".tmp");
+        return root.resolve(WorkspaceStorageMarkers.FILE_NAME + "." + operation + ".tmp");
     }
 
     void discardMigrationTemporary(Path root, byte[] expected, String operation) {
@@ -713,7 +710,7 @@ public class WorkspaceStorageGuard {
                 throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
             }
             Marker old = marker(provenance);
-            Marker current = readMarker(root);
+            Marker current = markers.read(root);
             if (expected.equals(current)) {
                 return;
             }
@@ -737,13 +734,13 @@ public class WorkspaceStorageGuard {
                     }
                     channel.force(true);
                 }
-                Files.setPosixFilePermissions(temporary, Files.getPosixFilePermissions(root.resolve(MARKER),
+                Files.setPosixFilePermissions(temporary, Files.getPosixFilePermissions(root.resolve(WorkspaceStorageMarkers.FILE_NAME),
                         LinkOption.NOFOLLOW_LINKS));
             }
             try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
                 channel.force(true);
             }
-            Files.move(temporary, root.resolve(MARKER), java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+            Files.move(temporary, root.resolve(WorkspaceStorageMarkers.FILE_NAME), java.nio.file.StandardCopyOption.ATOMIC_MOVE,
                     java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             try (FileChannel directory = FileChannel.open(root, StandardOpenOption.READ)) {
                 directory.force(true);
@@ -751,7 +748,7 @@ public class WorkspaceStorageGuard {
             try (FileChannel directory = FileChannel.open(root.getParent(), StandardOpenOption.READ)) {
                 directory.force(true);
             }
-            if (!expected.equals(readMarker(root))) {
+            if (!expected.equals(markers.read(root))) {
                 throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
             }
         } catch (IOException error) {
@@ -789,7 +786,7 @@ public class WorkspaceStorageGuard {
 
     private String markerJson(Path root) {
         try {
-            return json.writeValueAsString(readMarker(root));
+            return json.writeValueAsString(markers.read(root));
         } catch (IOException error) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
@@ -857,65 +854,6 @@ public class WorkspaceStorageGuard {
                 ? createdRoots.importedMetadataDirectory(marker.storageId(), create) : root;
     }
 
-    private Marker readMarker(Path root) {
-        Path file = root.resolve(MARKER);
-        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-        }
-        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ,
-                LinkOption.NOFOLLOW_LINKS)) {
-            if (channel.size() > 4096) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-            }
-            ByteBuffer bytes = ByteBuffer.allocate((int) channel.size());
-            while (bytes.hasRemaining()) {
-                if (channel.read(bytes) <= 0) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-                }
-            }
-            return json.readValue(bytes.array(), Marker.class);
-        } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-        }
-    }
-
-    private void publishMarker(Path root, Marker expected) {
-        Path file = root.resolve(MARKER);
-        Path temporary = root.resolve(MARKER + "." + UUID.randomUUID() + ".tmp");
-        try {
-            byte[] bytes = json.writeValueAsBytes(expected);
-            try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.CREATE_NEW,
-                    StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
-                ByteBuffer content = ByteBuffer.wrap(bytes);
-                while (content.hasRemaining()) {
-                    channel.write(content);
-                }
-                channel.force(true);
-            }
-            try {
-                Files.createLink(file, temporary);
-            } catch (java.nio.file.FileAlreadyExistsException ignored) {
-                if (!expected.equals(readMarker(root))) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-                }
-            }
-            try (FileChannel directory = FileChannel.open(root, StandardOpenOption.READ)) {
-                directory.force(true);
-            }
-        } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-        } finally {
-            try {
-                Files.deleteIfExists(temporary);
-            } catch (IOException ignored) {
-                // A leftover temporary file cannot authorize a mount.
-            }
-        }
-        if (!expected.equals(readMarker(root))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-        }
-    }
-
     private static boolean validId(String value) {
         try {
             return value != null && UUID.fromString(value).toString().equals(value);
@@ -935,9 +873,5 @@ public class WorkspaceStorageGuard {
             String bindingId, Long runtimeGeneration, String runtimeSessionId,
             long revision, String state, String operationId, String root, String hostId,
             String device, String inode, String birthTime, String registrationId, String completedOperationId) {
-    }
-
-    private record Marker(int version, String tenantId, String storageId, String root,
-            String hostId, String device, String inode, String birthTime, String registrationId) {
     }
 }

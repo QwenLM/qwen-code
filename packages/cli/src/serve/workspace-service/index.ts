@@ -47,6 +47,10 @@ import {
 } from '@qwen-code/acp-bridge/bridgeErrors';
 
 import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeouts';
+import {
+  WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS,
+  WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS,
+} from '../workspace-skills-refresh-policy.js';
 
 import { loadSettings } from '../../config/settings.js';
 import {
@@ -135,11 +139,8 @@ export {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Start throttle for background revalidation, measured from task start.
-const WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS = 1_000;
 // Wire-visible age at which snapshot.stale becomes true.
 const WORKSPACE_SKILLS_STALE_AFTER_MS = 1_000;
-const WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS = 5_000;
 
 function createSkillToggleMutation(input: {
   skills: ReadonlyArray<{ name: string; enabled: boolean }>;

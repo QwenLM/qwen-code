@@ -18,19 +18,15 @@ class ManagedSchemaCatalogTest {
     private static final String BODY = "\n    CONSTRAINT ck_probe CHECK (state = 'OK')\n";
 
     @Test
-    void requiresStrictGlobalAndSessionSqlModes() throws Exception {
+    void requiresStrictSessionSqlModeWithoutReadingGlobalDefaults() throws Exception {
         for (String product : new String[] {"MySQL", "MariaDB"}) {
             try (var data = fixture(false)) {
                 ManagedSchemaCatalog.requireApplicationCatalog(adapted(data, product, "8.4.11", 1, 1,
-                        "NO_ENGINE_SUBSTITUTION,STRICT_TRANS_TABLES", "STRICT_ALL_TABLES"));
+                        "STRICT_ALL_TABLES"));
                 ManagedSchemaCatalog.requireApplicationCatalog(adapted(data, product, "8.4.11", 1, 1,
-                        "STRICT_ALL_TABLES", "NO_ENGINE_SUBSTITUTION,STRICT_TRANS_TABLES"));
-                for (String[] modes : new String[][] {
-                        {"", "STRICT_TRANS_TABLES"},
-                        {"STRICT_ALL_TABLES", ""},
-                        {"NO_STRICT_TRANS_TABLES", "STRICT_TRANS_TABLES"},
-                        {"STRICT_ALL_TABLES", "STRICT_ALL_TABLES_DISABLED"}}) {
-                    var connection = adapted(data, product, "8.4.11", 1, 1, modes[0], modes[1]);
+                        "NO_ENGINE_SUBSTITUTION,STRICT_TRANS_TABLES"));
+                for (String mode : new String[] {"", "NO_STRICT_TRANS_TABLES", "STRICT_ALL_TABLES_DISABLED"}) {
+                    var connection = adapted(data, product, "8.4.11", 1, 1, mode);
                     var error = assertThrows(SQLException.class,
                             () -> ManagedSchemaCatalog.requireApplicationCatalog(connection));
                     assertTrue(error.getMessage().contains("requires strict SQL mode"));
@@ -249,16 +245,16 @@ class ManagedSchemaCatalogTest {
             statement.execute("INSERT INTO catalog_fixture.check_constraints"
                     + " VALUES ('ck_probe','PUBLIC','(state = ''OK'')')");
         }
-        return adapted(data, "MySQL", "8.4.11", 1, 1, "STRICT_TRANS_TABLES", "STRICT_TRANS_TABLES");
+        return adapted(data, "MySQL", "8.4.11", 1, 1, "STRICT_TRANS_TABLES");
     }
 
     private static Connection mariaDb(Connection data, String product, int global, int session) {
         return adapted(data, product, "10.11.18-MariaDB", global, session,
-                "STRICT_TRANS_TABLES", "STRICT_TRANS_TABLES");
+                "STRICT_TRANS_TABLES");
     }
 
     private static Connection adapted(Connection data, String product, String version,
-            int global, int session, String globalMode, String sessionMode) {
+            int global, int session, String sessionMode) {
         DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
                 ManagedSchemaCatalogTest.class.getClassLoader(), new Class<?>[] {DatabaseMetaData.class},
                 (proxy, method, args) -> switch (method.getName()) {
@@ -274,7 +270,9 @@ class ManagedSchemaCatalogTest {
                     if ("prepareStatement".equals(method.getName())) {
                         String sql = (String) args[0];
                         if (sql.contains("@@GLOBAL.sql_mode")) {
-                            args[0] = "SELECT '" + globalMode + "', '" + sessionMode + "'";
+                            throw new AssertionError("Schema admission must not require global SQL defaults");
+                        } else if (sql.equals("SELECT @@SESSION.sql_mode")) {
+                            args[0] = "SELECT '" + sessionMode + "'";
                         } else {
                             args[0] = sql.contains("@@GLOBAL.check_constraint_checks")
                                     ? "SELECT " + global + ", " + session
