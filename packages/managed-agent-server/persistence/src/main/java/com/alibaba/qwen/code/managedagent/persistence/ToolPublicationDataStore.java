@@ -1102,7 +1102,7 @@ public final class ToolPublicationDataStore {
                 "Invalid admission outcome");
         byte[] bytes = outcome.toString().getBytes(StandardCharsets.UTF_8);
         require(bytes.length <= MAX_TERMINAL, "Admission outcome is too large");
-        grants.lockStagedPlacement(key, publicationId);
+        grants.lockStagedPlacement(key, publicationId, false);
         JsonNode original = finished(key, publicationId, writerToken);
         JsonNode envelope = original.path("result");
         String decision = "complete".equals(text(envelope.path("capture"), "captureStatus"))
@@ -1933,12 +1933,12 @@ public final class ToolPublicationDataStore {
         grants.requireStagedCall(key, publicationId);
     }
 
-    void lockStagedPlacement(JsonNode key, String publicationId) {
-        grants.lockStagedPlacement(key, publicationId);
+    void lockStagedPlacement(JsonNode key, String publicationId, boolean requirePlacement) {
+        grants.lockStagedPlacement(key, publicationId, requirePlacement);
     }
 
-    void lockPublicationPlacement(JsonNode key, String publicationId) {
-        grants.lockPublicationPlacement(key, publicationId);
+    boolean lockPublicationPlacement(JsonNode key, String publicationId, boolean requirePlacement) {
+        return grants.lockPublicationPlacement(key, publicationId, requirePlacement);
     }
 
     boolean lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {

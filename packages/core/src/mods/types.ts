@@ -106,7 +106,21 @@ export interface ModTurnStart {
 }
 
 /** Where a submitted prompt came from, in Claude Code's `PromptOrigin`. */
-export type ModPromptOrigin = { kind: 'composer' } | { kind: 'sdk' };
+export type ModPromptOrigin =
+  | { kind: 'composer' }
+  | { kind: 'sdk' }
+  | { kind: 'plugin'; name: string; asUser?: true };
+
+/**
+ * A prompt a Mod submitted with `$.prompt.submit`, as it arrived beneath the
+ * hooks: it waits for the session to be idle and then starts a turn.
+ */
+export interface ModQueuedPrompt {
+  plugin: string;
+  text: string;
+  context?: string[];
+  asUser?: true;
+}
 
 export interface ModPromptSubmit {
   text: string;
@@ -145,6 +159,8 @@ export type ModRequest =
       sites?: readonly ModRenderSite[];
       /** Whether the host raises `prompt.submit`; its hooks are skipped otherwise. */
       prompts?: boolean;
+      /** Whether the host runs the prompts `$.prompt.submit` submits. */
+      submits?: boolean;
     }
   | {
       type: 'command';
@@ -167,7 +183,8 @@ export type ModRequest =
   | { type: 'prompt-submit'; input: ModPromptSubmit }
   | { type: 'turn-complete'; input: ModTurnComplete }
   | { type: 'render'; input: ModRenderInput }
-  | { type: 'turn-abort-result'; id: number; error?: string };
+  | { type: 'turn-abort-result'; id: number; error?: string }
+  | { type: 'prompt-queue-result'; id: number; refused?: string };
 
 export type ModReply =
   | { type: 'result'; json: string }
@@ -182,6 +199,7 @@ export type ModReply =
       error?: string;
     }
   | { type: 'turn-abort'; id: number; turnId: string }
+  | { type: 'prompt-queue'; id: number; prompt: ModQueuedPrompt }
   | { type: 'invalidate'; plugin: string; event: string }
   | ({ type: 'log'; plugin: string } & ModLog);
 
