@@ -66,17 +66,21 @@ type OperatorSettingsScope = SandboxSettingsInput & {
   /** Settings format version, used to date the legacy usage-statistics key. */
   $version?: unknown;
   privacy?: { usageStatisticsEnabled?: unknown };
-  model?: { catalogRefresh?: unknown };
   /** Pre-v2 location, migrated to `privacy.*` by a normal settings load. */
   usageStatisticsEnabled?: unknown;
   /**
-   * Model controls bare mode keeps in force (issue #12805): the managed
-   * endpoint allowlist and the Qwen OAuth builtins disable. Values are read
-   * raw here; the same startup validation a normal load applies
-   * (non-array allowedBaseUrls is a FatalConfigError in config.ts) still
-   * runs, because bare-mode settings flow through the same config path.
+   * Model controls bare mode keeps in force (issue #12805): the models.dev
+   * catalog refresh choice, the managed endpoint allowlist and the Qwen
+   * OAuth builtins disable. Values are read raw here; the same startup
+   * validation a normal load applies (non-array allowedBaseUrls is a
+   * FatalConfigError in config.ts) still runs, because bare-mode settings
+   * flow through the same config path.
    */
-  model?: { allowedBaseUrls?: unknown; qwenOAuthBuiltinsDisabled?: unknown };
+  model?: {
+    catalogRefresh?: unknown;
+    allowedBaseUrls?: unknown;
+    qwenOAuthBuiltinsDisabled?: unknown;
+  };
 };
 
 /**
