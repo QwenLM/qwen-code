@@ -711,12 +711,21 @@ export async function start_sandbox(
   // A custom trust store is the folder-trust feature's only authority; the
   // container cannot see the host path, and its fallback (QWEN_HOME) may not
   // hold the decision either, so workspace hooks and settings stay withheld.
+  // Mount the file itself at its real path (the settings directory is mounted
+  // at its real path) and skip the mount when it does not exist yet, since a
+  // runtime creates a directory at the host path of a missing file mount.
   if (process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH']) {
+    const configuredTrustStore = process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    const trustStoreExists = fs.existsSync(configuredTrustStore);
+    const trustStore = trustStoreExists
+      ? fs.realpathSync(configuredTrustStore)
+      : configuredTrustStore;
+    if (trustStoreExists) {
+      args.push('--volume', `${trustStore}:${getContainerPath(trustStore)}:rw`);
+    }
     args.push(
       '--env',
-      `QWEN_CODE_TRUSTED_FOLDERS_PATH=${getContainerPath(
-        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
-      )}`,
+      `QWEN_CODE_TRUSTED_FOLDERS_PATH=${getContainerPath(trustStore)}`,
     );
   }
   if (process.env['QWEN_CODE_WARNINGS_FILE']) {
