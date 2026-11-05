@@ -14,9 +14,11 @@ import {
   hasLoadedEnvironmentValues,
   isFileSourcedEnvKey,
   loadEnvironment,
+  preResolveHomeEnvOverrides,
   readProjectEnvFiles,
   reloadEnvironment,
   resetEnvironmentTrackingForTesting,
+  resetHomeEnvBootstrapForTesting,
   SETTINGS_DIRECTORY_NAME,
 } from './environment.js';
 import {
@@ -121,6 +123,8 @@ const TRACKED_ENV = [
   'QWEN_CODE_PENDING_COMPILE_CACHE',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
   'QWEN_RUNTIME_DIR',
+  'QWEN_CONVERSATIONS_DIR',
+  'qwen_conversations_dir',
   'QWEN_SERVE_MAX_WORKSPACES',
   'QWEN_SERVER_TOKEN',
   'qwen_server_token',
@@ -774,6 +778,99 @@ describe('daemon registration capacity environment', () => {
       );
     },
   );
+});
+
+describe('Conversations root environment', () => {
+  beforeEach(() => {
+    resetHomeEnvBootstrapForTesting();
+    resetEnvironmentTrackingForTesting();
+  });
+
+  afterEach(() => {
+    resetHomeEnvBootstrapForTesting();
+    resetEnvironmentTrackingForTesting();
+  });
+
+  it.each(['.env', '.qwen/.env'])(
+    'rejects root selection from project %s and settings.env',
+    (file) => {
+      const workspace = makeWorkspace();
+      const envPath = path.join(workspace, file);
+      fs.mkdirSync(path.dirname(envPath), { recursive: true });
+      fs.writeFileSync(
+        envPath,
+        'QWEN_CONVERSATIONS_DIR=/project/root\nqwen_conversations_dir=/project/lowercase\nRUNTIME_DOTENV=loaded\n',
+      );
+      const settings = testSettings({
+        env: {
+          QWEN_CONVERSATIONS_DIR: '/settings/root',
+          qwen_conversations_dir: '/settings/lowercase',
+          RUNTIME_SETTINGS: 'loaded',
+        },
+      });
+      loadEnvironment(settings, workspace);
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBeUndefined();
+      expect(process.env['qwen_conversations_dir']).toBeUndefined();
+      expect(process.env['RUNTIME_DOTENV']).toBe('loaded');
+      expect(process.env['RUNTIME_SETTINGS']).toBe('loaded');
+      const snapshot = buildRuntimeEnvironment(settings, workspace, {});
+      expect(snapshot.effectiveEnv['QWEN_CONVERSATIONS_DIR']).toBeUndefined();
+      expect(snapshot.effectiveEnv['qwen_conversations_dir']).toBeUndefined();
+    },
+  );
+
+  it.each(['', '/persistent/Qwen Conversations '])(
+    'preserves a user .env root %j despite a project .env',
+    (root) => {
+      const workspace = makeWorkspace();
+      const qwenHome = path.join(os.homedir(), '.qwen');
+      fs.mkdirSync(qwenHome, { recursive: true });
+      fs.writeFileSync(
+        path.join(qwenHome, '.env'),
+        `QWEN_CONVERSATIONS_DIR=${JSON.stringify(root)}\n`,
+      );
+      fs.writeFileSync(
+        path.join(workspace, '.env'),
+        'QWEN_CONVERSATIONS_DIR=/project/root\nRUNTIME_DOTENV=loaded\n',
+      );
+      preResolveHomeEnvOverrides();
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
+      loadEnvironment(testSettings({}), workspace);
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
+      expect(process.env['RUNTIME_DOTENV']).toBe('loaded');
+    },
+  );
+
+  it('does not replace an explicit empty launch value with user .env', () => {
+    const workspace = makeWorkspace();
+    process.env['QWEN_CONVERSATIONS_DIR'] = '';
+    fs.writeFileSync(
+      path.join(os.homedir(), '.env'),
+      'QWEN_CONVERSATIONS_DIR=/home/root\n',
+    );
+    preResolveHomeEnvOverrides();
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe('');
+  });
+
+  it('keeps the initial root when user .env is reloaded', () => {
+    const workspace = makeWorkspace();
+    const envPath = path.join(os.homedir(), '.env');
+    fs.writeFileSync(envPath, 'QWEN_CONVERSATIONS_DIR=/initial/root\n');
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe('/initial/root');
+    fs.writeFileSync(envPath, 'QWEN_CONVERSATIONS_DIR=/changed/root\n');
+    const settings = testSettings({
+      env: { QWEN_CONVERSATIONS_DIR: '/settings/root' },
+    });
+    reloadEnvironment(settings, workspace);
+    expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe('/initial/root');
+    expect(
+      buildRuntimeEnvironment(settings, workspace, {
+        QWEN_CONVERSATIONS_DIR: '/initial/root',
+      }).effectiveEnv['QWEN_CONVERSATIONS_DIR'],
+    ).toBe('/initial/root');
+  });
 });
 
 describe('buildRuntimeEnvironment', () => {
