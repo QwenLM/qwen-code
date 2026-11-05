@@ -1229,12 +1229,25 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             history.rejectedPage = undefined;
             history.hasMore = true;
             history.capacityReached = false;
-            setTranscriptHistoryState({
+            const reopenedState = {
               hasMore: true,
               loading: false,
               capacityReached: false,
               paginationError: history.paginationError,
-            });
+            };
+            if (detail.evictedOldest === false) {
+              // A rewind drops the NEWEST blocks, and the rewind rebuild that
+              // follows replays the surviving prefix synchronously. Publishing
+              // the re-open synchronously would let a concurrently batched
+              // same-anchor page append land before the rebuild's prefix
+              // (observed as a block-order inversion under load, #16347).
+              // Deferring the publish one microtask keeps the latch ref
+              // consistent for any synchronous reader while the dispatch lands
+              // after the rewind rebuild has committed.
+              queueMicrotask(() => setTranscriptHistoryState(reopenedState));
+            } else {
+              setTranscriptHistoryState(reopenedState);
+            }
           }
         },
       }),
