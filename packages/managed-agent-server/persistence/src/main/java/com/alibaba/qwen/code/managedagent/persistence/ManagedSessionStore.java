@@ -157,10 +157,20 @@ public class ManagedSessionStore
         return writerLifecycle.lockPublicationWriter(tenant, workspace, session, writer, generation, token);
     }
 
+    /**
+     * As above; {@code placement} and {@code publicationGuard} false skip those tenant guards, for a lane
+     * that did not take them before the Session root (ordinary publication lanes).
+     */
+    PublicationWriter lockPublicationWriter(String tenant, String workspace, String session, String writer,
+            long generation, String token, boolean placement, boolean publicationGuard) {
+        return writerLifecycle.lockPublicationWriter(tenant, workspace, session, writer, generation, token,
+                placement, publicationGuard);
+    }
+
     @Transactional
     public WriterGrant acquireWriter(String tenantId, String sessionId,
             String writerToken, AcquireWriterRequest request) {
-        return writerLifecycle.acquireWriter(tenantId, sessionId, writerToken, request);
+        return writerLifecycle.acquireWriter(tenantId, sessionId, writerToken, request, null);
     }
 
     @Transactional
@@ -172,7 +182,7 @@ public class ManagedSessionStore
     @Transactional
     public WriterGrant renewWriter(String tenantId, String sessionId,
             String writerToken, RenewWriterRequest request) {
-        return writerLifecycle.renewWriter(tenantId, sessionId, writerToken, request);
+        return writerLifecycle.renewWriter(tenantId, sessionId, writerToken, request, null);
     }
 
     @Transactional
@@ -184,7 +194,7 @@ public class ManagedSessionStore
     @Transactional
     public SealReceipt sealWriter(String tenantId, String sessionId,
             String writerToken, SealWriterRequest request) {
-        return writerLifecycle.sealWriter(tenantId, sessionId, writerToken, request);
+        return writerLifecycle.sealWriter(tenantId, sessionId, writerToken, request, null);
     }
 
     @Transactional
@@ -215,7 +225,7 @@ public class ManagedSessionStore
     @Transactional
     public CommitReceipt commit(String tenantId, String sessionId,
             String writerToken, CommitTransactionRequest request) {
-        return commits.commit(tenantId, sessionId, writerToken, request);
+        return commits.commit(tenantId, sessionId, writerToken, request, null);
     }
 
     @Transactional
@@ -293,7 +303,7 @@ public class ManagedSessionStore
     @Transactional
     public ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
             String writerToken, PublishToolResultRequest request) {
-        return resourceWrites.publishToolResult(tenantId, sessionId, writerToken, request);
+        return resourceWrites.publishToolResult(tenantId, sessionId, writerToken, request, null);
     }
 
     @Transactional

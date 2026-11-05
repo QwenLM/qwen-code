@@ -107,8 +107,8 @@ final class JournalResourceReads {
         JournalStoreRows.validateStableId(resourceId, "resourceId");
         var guarded =
                 jdbc.queryForList(
-                        "SELECT csi_guard FROM ma_session"
-                                + " WHERE tenant_id = ? AND session_id = ? AND csi_guard = TRUE",
+                        "SELECT is_csi_guard FROM ma_session"
+                                + " WHERE tenant_id = ? AND session_id = ? AND is_csi_guard = TRUE",
                         tenantId,
                         sessionId);
         if (guarded.isEmpty()) {
@@ -132,7 +132,7 @@ final class JournalResourceReads {
                             } else {
                                 original.requireAdmission();
                             }
-                            JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenantId, sessionId);
+                            JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
                             storeRows.requireHeadScope(head, tenantId, workspaceId, sessionId);
                             JournalFencing.requireCsiWriter(original, head);
                             fencing.requireReadGrant(head, writerToken);
@@ -333,7 +333,7 @@ final class JournalResourceReads {
                     }
                     original.requireAdmission();
                     JournalStoreRows.HeadRow head =
-                            storeRows.requireHeadForUpdate(admittedHead.tenantId(), admittedHead.sessionId());
+                            fencing.requireHeadAfterCsiCheck(admittedHead.tenantId(), admittedHead.sessionId());
                     var persisted = nativeReadReceipt(admission.id(), true);
                     if (!persisted.equals(admission.persisted())) {
                         throw JournalFencing.nativeReadConflict();
@@ -448,10 +448,6 @@ final class JournalResourceReads {
             throw JournalStoreRows.resourceCorrupt();
         }
         return outputRetention.open(resource.objectKey(), publicationObjects, lease, () -> {});
-    }
-
-    byte[] readPublicationObject(JournalStoreRows.ResourceRow resource, ToolPublicationRetentionStore.ReadLease lease) {
-        return readPublicationObject(resource, lease, true);
     }
 
     byte[] readPublicationObject(JournalStoreRows.ResourceRow resource, ToolPublicationRetentionStore.ReadLease lease, boolean quarantine) {

@@ -2,6 +2,8 @@
 
 [English](2026-10-21-managed-workspace-concurrency.md) | [简体中文](2026-10-21-managed-workspace-concurrency.zh-CN.md)
 
+下述 rewind 排他行为已由[取消 rewind 的目录排他](2026-11-05-managed-rewind-concurrency.zh-CN.md)替代。共享执行成员资格和物理维护保护仍保留。
+
 ## 状态与范围
 
 本次允许普通 Managed Session 在 LOCAL、SSH_LOCAL 的同一目录并发执行，覆盖 Session 隔离和 Workspace 隔离的 worker。同一 Session 仍然一次执行一个 Turn。Resident 和私有 CSI profile 保留当前准入、预留和退役规则。现有 Agent/Workflow 子任务准入限制不在本次范围。
