@@ -121,7 +121,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 "SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?",
                 publicationScope, publicationId);
         scope(publication, key);
-        require("REFERENCED".equals(publication.get("producer_phase")) && !flag(publication, "quarantined"));
+        require("REFERENCED".equals(publication.get("producer_phase")) && !flag(publication, "is_quarantined"));
         JsonNode binding = ToolPublicationContract.parseBytes("binding",
                 text(publication, "binding_json").getBytes(StandardCharsets.UTF_8));
         require(binding.path("sessionKey").equals(key) && publicationId.equals(binding.path("publicationId").asText())
@@ -339,7 +339,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 "SELECT " + ManagedSchemaProjection.RUNTIME_SESSION.columns() + " FROM ma_runtime_session WHERE scope_key = ? AND runtime_session_id = ?",
                 scopeHash(runtime.getRequest().getScope()), ref.path("sessionId").asText());
         require(runtime.getRequest().getScope().equals(scope(session))
-                && session.get("execution_storage_key") == null && Boolean.FALSE.equals(session.get("execution_exclusive"))
+                && session.get("execution_storage_key") == null && !flag(session, "is_rewind_pending")
                 && runtime.getBindingId().equals(session.get("binding_id"))
                 && runtime.getGeneration() == rawNumber(session, "runtime_generation")
                 && binding.path("sessionKey").path("sessionId").asText().equals(session.get("harness_session_id")));

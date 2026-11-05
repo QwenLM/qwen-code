@@ -332,7 +332,7 @@ public final class ManagedEventEnvelopes {
     /**
      * ECMAScript Number::toString (radix 10) faithfully, so the digest matches
      * the TypeScript side byte-for-byte. The thresholds are the spec's:
-     * decimal form while 1e-6 ≤ |x| < 1e21, exponential outside it.
+     * decimal form while 1e-6 ≤ |x| &lt; 1e21, exponential outside it.
      */
     public static String jsNumberToString(double d) {
         if (d == 0) {

@@ -22,7 +22,6 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -40,6 +39,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 
 // FG11c slice 2 (issue #14446): the Spring-side crash gates for the
@@ -121,8 +121,8 @@ class HostedAutomationSpringCrashIT {
         temporary = temporary.toRealPath();
         String tenant = "hosted-automation-spring-" + UUID.randomUUID();
         startModel();
-        harnessPort = freePort();
-        brokerPort = freePort();
+        harnessPort = reservePort();
+        brokerPort = reservePort();
         Path root = Files.createDirectories(
                 temporary.resolve("fixture"));
         startFixture(root, tenant);
@@ -204,8 +204,8 @@ class HostedAutomationSpringCrashIT {
 
     private void startFixture(Path root, String tenant) throws Exception {
         if (fixtureInternalPort == 0) {
-            fixtureInternalPort = freePort();
-            fixturePublicPort = freePort();
+            fixtureInternalPort = reservePort();
+            fixturePublicPort = reservePort();
         }
         Child child = startChild(root, tenant, fixtureInternalPort,
                 fixturePublicPort, brokerPort, fixtureInternalPort);
@@ -216,13 +216,6 @@ class HostedAutomationSpringCrashIT {
                 Files.readString(root.resolve("ready.json")))
                 .path("internalUrl").asText();
         this.tenant = tenant;
-    }
-
-    private int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0, 0,
-                java.net.InetAddress.getLoopbackAddress())) {
-            return socket.getLocalPort();
-        }
     }
 
     private void startModel() throws IOException {
@@ -421,8 +414,8 @@ class HostedAutomationSpringCrashIT {
         temporary = temporary.toRealPath();
         String tenantName = "hosted-automation-fire-" + UUID.randomUUID();
         startModel();
-        harnessPort = freePort();
-        brokerPort = freePort();
+        harnessPort = reservePort();
+        brokerPort = reservePort();
         Path root = Files.createDirectories(temporary.resolve("fire"));
         startFixture(root, tenantName);
         startHarness();
@@ -494,8 +487,8 @@ class HostedAutomationSpringCrashIT {
         String tenantName = "hosted-automation-kill-watermark-"
                 + UUID.randomUUID();
         startModel();
-        harnessPort = freePort();
-        brokerPort = freePort();
+        harnessPort = reservePort();
+        brokerPort = reservePort();
         Path root = Files.createDirectories(
                 temporary.resolve("kill-watermark"));
         startFixture(root, tenantName);
@@ -569,8 +562,8 @@ class HostedAutomationSpringCrashIT {
         temporary = temporary.toRealPath();
         String tenantName = "hosted-automation-kill-answer-" + UUID.randomUUID();
         startModel();
-        harnessPort = freePort();
-        brokerPort = freePort();
+        harnessPort = reservePort();
+        brokerPort = reservePort();
         Path root = Files.createDirectories(temporary.resolve("kill-answer"));
         startFixture(root, tenantName);
         startHarness();
@@ -695,8 +688,8 @@ class HostedAutomationSpringCrashIT {
         temporary = temporary.toRealPath();
         String tenantName = "hosted-automation-race-" + UUID.randomUUID();
         startModel();
-        harnessPort = freePort();
-        brokerPort = freePort();
+        harnessPort = reservePort();
+        brokerPort = reservePort();
         Path rootA = Files.createDirectories(temporary.resolve("race-a"));
         Path rootB = Files.createDirectories(temporary.resolve("race-b"));
         startFixture(rootA, tenantName);
@@ -704,8 +697,8 @@ class HostedAutomationSpringCrashIT {
         // The store is the primary child's. The second child binds no
         // internal listener (port 0) and points its store base URL at the
         // primary, or the Harness rejects every load with a store mismatch.
-        Child second = startChild(rootB, tenantName, 0, freePort(),
-                freePort(), fixtureInternalPort);
+        Child second = startChild(rootB, tenantName, 0, reservePort(),
+                reservePort(), fixtureInternalPort);
         try {
             String session = createSession("race");
             String definition = apiRequest("POST", "/v1/agent-automations",

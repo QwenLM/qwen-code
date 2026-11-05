@@ -35,6 +35,11 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ApprovalMode, Storage, type Config } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import {
+  logoutCommand,
+  upgradeCommand,
+} from '../commands/subscription-commands.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
   VimModeProvider,
@@ -46,6 +51,7 @@ import { createVimBuffer } from './vim-buffer.js';
 import type {
   OpenTuiCancelSettled,
   OpenTuiComposerHandle,
+  OpenTuiComposerSlot,
 } from './input-submission.js';
 import { useOpenTuiLiveTurn, type OpenTuiLiveTurn } from './live-turn.js';
 import { cpLen, cpSlice, getCachedStringWidth } from '../utils/textUtils.js';
@@ -422,6 +428,13 @@ vi.mock('./theme.js', () => ({
 vi.mock('./slash-dispatch.js', () => ({
   loadInteractiveCommands: async () => mocks.state.slashCommands,
 }));
+const isSubscriptionSignedIn = vi.hoisted(() => vi.fn(() => false));
+vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
+  QwenSubscriptionSession: class {
+    isSignedIn = isSubscriptionSignedIn;
+    onChange = () => () => {};
+  },
+}));
 vi.mock('./live-session.js', () => ({
   nextLivePromptId: () => `source-test-${mocks.state.liveTurns.length}`,
   async *livePromptEvents(
@@ -448,6 +461,7 @@ vi.mock('../utils/clipboardUtils.js', () => ({
 }));
 
 beforeEach(() => {
+  isSubscriptionSignedIn.mockReturnValue(false);
   vi.mocked(execFile).mockReset();
   vi.mocked(execFileSync).mockReset().mockReturnValue('');
   mocks.state.shellHistory = [];
@@ -2074,6 +2088,41 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
     // Let loadInteractiveCommands resolve into commandsRef.
     await act(async () => {});
   }
+
+  it.each([logoutCommand, upgradeCommand])(
+    'updates /$name completion when switching connections',
+    async (command) => {
+      isSubscriptionSignedIn.mockReturnValue(true);
+      let authType = AuthType.QWEN_SUBSCRIPTION;
+      let notify: (model: string) => void = () => {};
+      const config = {
+        getTargetDir: () => '/tmp/project',
+        getAuthType: () => authType,
+        setSubscriptionPlan: () => {},
+        onModelChange: (listener: typeof notify) => {
+          notify = listener;
+          return () => {};
+        },
+      } as unknown as Config;
+      mocks.state.slashCommands = [command];
+      renderPrompt({ config });
+      await act(async () => {});
+      await typeText(`/${command.name.slice(0, 2)}`);
+      expect(screen.getByText(command.description)).toBeTruthy();
+
+      act(() => {
+        authType = AuthType.USE_OPENAI;
+        notify('same-model');
+      });
+      expect(screen.queryByText(command.description)).toBeNull();
+
+      act(() => {
+        authType = AuthType.QWEN_SUBSCRIPTION;
+        notify('same-model');
+      });
+      expect(screen.getByText(command.description)).toBeTruthy();
+    },
+  );
 
   it('publishes completion-list visibility so the shell can hide the footer', async () => {
     const seen: boolean[] = [];
@@ -3778,6 +3827,35 @@ describe('OpenTuiInputPrompt editing ownership and recall', () => {
       );
     },
   );
+
+  it('puts a prompt handed back through the mounted handle ahead of the draft', async () => {
+    const composerHandle: OpenTuiComposerSlot = { current: null };
+    renderPrompt({ composerHandle });
+    await waitFor(() => expect(composerHandle.current).not.toBeNull());
+    await typeText('typed since');
+    act(() =>
+      composerHandle.current!.restoreSubmission!({
+        text: 'dropped prompt',
+        displayText: 'dropped prompt',
+      }),
+    );
+    await waitFor(() =>
+      expect(currentEditor().plainText).toBe('dropped prompt\ntyped since'),
+    );
+  });
+
+  it('takes back a prompt handed back while no composer was mounted', async () => {
+    const composerHandle: OpenTuiComposerSlot = {
+      current: null,
+      returned: { text: 'dropped prompt', displayText: 'dropped prompt' },
+    };
+    renderPrompt({ composerHandle });
+    await waitFor(() =>
+      expect(currentEditor().plainText).toBe('dropped prompt'),
+    );
+    expect(composerHandle.returned).toBeUndefined();
+    expect(composerHandle.current).not.toBeNull();
+  });
 
   it.each(['return', 'tab'])(
     'same-text history %s discards restored source ownership',
