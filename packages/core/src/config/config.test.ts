@@ -1272,6 +1272,76 @@ describe('Server Config (config.ts)', () => {
       expect(config.isProjectHooksApprovalGated()).toBe(true);
     });
 
+    it('a stored approval authorizes the block inside a --yolo session with trust off', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksYoloExempt: true,
+        projectHooksApproved: true,
+        projectHooks,
+      });
+
+      expect(config.isProjectHooksApprovalGated()).toBe(false);
+      expect(config.getProjectHooks()).toBe(projectHooks);
+    });
+
+    it('replacing the block under --yolo drops the old approval authority', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksYoloExempt: true,
+        projectHooksApproved: true,
+        projectHooks,
+      });
+      const edited = {
+        SessionStart: [{ hooks: [{ type: 'command', command: 'echo new' }] }],
+      };
+
+      config.setHooksFromSettings({ projectHooks: edited });
+
+      // The exemption suppresses asking, not the authority check: the
+      // edited block never carries the previous block's approval.
+      expect(config.getProjectHooks()).toBeUndefined();
+
+      // The caller re-applies a genuine decision for the new block.
+      config.setProjectHooksPendingApproval(false);
+      expect(config.getProjectHooks()).toBe(edited);
+    });
+
+    it('a --yolo session without approval or trust still withholds the block', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksYoloExempt: true,
+        projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('the display-only block surfaces in diagnostics but never executes', () => {
+      const config = makeConfig({
+        folderTrust: true,
+        trustedFolder: false,
+        projectHooksDisplayOnly: projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toEqual(projectHooks);
+    });
+
+    it('the display-only block surfaces even when the empty execution block reads the gate as cleared', () => {
+      // Feature on + untrusted: the settings layer passes no execution
+      // block and pending=false ("nothing to approve"). The listing must
+      // still show the configured hooks as trust-withheld.
+      const config = makeConfig({
+        folderTrust: true,
+        trustedFolder: false,
+        projectHooksPendingApproval: false,
+        projectHooksDisplayOnly: projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toEqual(projectHooks);
+    });
+
     it('withholds the legacy merged hooks from both getters while pending', () => {
       const config = makeConfig({
         hooks: projectHooks,
@@ -1589,27 +1659,70 @@ describe('Server Config (config.ts)', () => {
     );
 
     it.each([
-      ['the trust feature is off', {}],
-      ['the feature is on but the folder is undecided', { folderTrust: true }],
+      [
+        'the feature is on but the folder is undecided',
+        { folderTrust: true },
+        false,
+      ],
       [
         'the folder is explicitly untrusted',
         { folderTrust: true, trustedFolder: false },
+        false,
       ],
-    ] as Array<[string, Partial<ConfigParameters>]>)(
-      'loads project hooks in non-interactive sessions when %s (implicit trust)',
-      (_label, trust) => {
+      ['the trust feature is off (default)', {}, false],
+      [
+        'the feature is off and a trust flag was passed without it',
+        { trustedFolder: true },
+        false,
+      ],
+      [
+        'the feature is on and the folder is explicitly trusted',
+        { folderTrust: true, trustedFolder: true },
+        true,
+      ],
+    ] as Array<[string, Partial<ConfigParameters>, boolean]>)(
+      'applies the same explicit-trust gate to non-interactive hooks when %s',
+      (_label, trust, loaded) => {
         const config = makeConfig({
           interactive: false,
           ...trust,
           projectHooks,
         });
 
-        expect(config.getProjectHooks()).toEqual(projectHooks);
-        expect(config.getTrustWithheldProjectHooks()).toBeUndefined();
+        expect(config.getProjectHooks()).toEqual(
+          loaded ? projectHooks : undefined,
+        );
       },
     );
 
-    it('still withholds project hooks in non-interactive safe and bare modes', () => {
+    it('exposes the withheld block to diagnostics only while trust withholds it', () => {
+      const withheld = makeConfig({ projectHooks });
+      expect(withheld.getProjectHooks()).toBeUndefined();
+      expect(withheld.getTrustWithheldProjectHooks()).toEqual(projectHooks);
+
+      const trusted = makeConfig({
+        folderTrust: true,
+        trustedFolder: true,
+        projectHooks,
+      });
+      expect(trusted.getProjectHooks()).toEqual(projectHooks);
+      expect(trusted.getTrustWithheldProjectHooks()).toBeUndefined();
+
+      expect(
+        makeConfig({
+          safeMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({
+          bareMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+    });
+
+    it('keeps safe and bare modes withholding in non-interactive sessions', () => {
       expect(
         makeConfig({ safeMode: true, projectHooks }).getProjectHooks(),
       ).toBeUndefined();

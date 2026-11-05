@@ -1563,6 +1563,31 @@ export interface ConfigParameters {
   projectHooksPendingApproval?: boolean;
   /** The withheld block was rejected, not just left undecided. */
   projectHooksRejected?: boolean;
+  /**
+   * The current project hooks block carries a stored approval. Unlike
+   * `projectHooksPendingApproval === false`, this never doubles as "nothing
+   * to approve": callers set it only for a genuine `approved` decision, so
+   * execution authority survives the YOLO exemption (where the pending flag
+   * is undefined) without mistaking an empty workspace for an approval.
+   */
+  projectHooksApproved?: boolean;
+  /**
+   * The raw workspace hooks block for display only, supplied when the
+   * settings layer withheld the workspace scope (feature on, folder
+   * untrusted). Never reaches the registry: `getProjectHooks()` reads
+   * `projectHooks`, this feeds only `getTrustWithheldProjectHooks()`.
+   */
+  projectHooksDisplayOnly?: Record<string, unknown>;
+  /**
+   * The exact hooks block this session's approval gate covers, with the
+   * workspace env that can change what those hooks do. Lets an embedder
+   * hash the reviewed subject itself (the approval store lives outside
+   * core) instead of trusting a block re-read later.
+   */
+  projectHooksApprovalSubject?: {
+    hooks: Record<string, unknown>;
+    env: { files: Record<string, unknown>; settings: unknown };
+  };
   /** Started with `--yolo`: the gate is off only while the mode stays YOLO. */
   projectHooksYoloExempt?: boolean;
   noBrowser?: boolean;
@@ -3053,6 +3078,9 @@ export class Config {
   private pendingMcpServers?: string[];
   private projectHooksPendingApproval?: boolean;
   private projectHooksRejected: boolean;
+  private projectHooksApproved: boolean;
+  private readonly projectHooksDisplayOnly?: Record<string, unknown>;
+  private readonly projectHooksApprovalSubject?: ConfigParameters['projectHooksApprovalSubject'];
   private readonly projectHooksYoloExempt: boolean;
   private readonly mcpToolIdleTimeoutMs: number;
   /**
@@ -3553,6 +3581,9 @@ export class Config {
     this.pendingMcpServers = params.pendingMcpServers;
     this.projectHooksPendingApproval = params.projectHooksPendingApproval;
     this.projectHooksRejected = params.projectHooksRejected ?? false;
+    this.projectHooksApproved = params.projectHooksApproved ?? false;
+    this.projectHooksDisplayOnly = params.projectHooksDisplayOnly;
+    this.projectHooksApprovalSubject = params.projectHooksApprovalSubject;
     this.projectHooksYoloExempt = params.projectHooksYoloExempt ?? false;
     const envTimeout = process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'];
     const parsedEnv = envTimeout !== undefined ? Number(envTimeout) : NaN;
@@ -9034,6 +9065,17 @@ export class Config {
     return this.projectHooksPendingApproval === true;
   }
 
+  /**
+   * The hooks block this session's approval gate covers, as loaded at
+   * startup. An approval decision carrying a hash must match this exact
+   * subject; a different hash names a block nobody here reviewed.
+   */
+  getProjectHooksApprovalSubject():
+    | ConfigParameters['projectHooksApprovalSubject']
+    | undefined {
+    return this.projectHooksApprovalSubject;
+  }
+
   isProjectHooksApprovalGated(): boolean {
     return (
       this.projectHooksPendingApproval !== undefined &&
@@ -9051,6 +9093,9 @@ export class Config {
   setProjectHooksPendingApproval(pending: boolean, rejected = false): void {
     this.projectHooksPendingApproval = pending;
     this.projectHooksRejected = rejected;
+    // A mid-session decision supersedes the startup approval state: clearing
+    // the gate here means the user just approved this exact block.
+    this.projectHooksApproved = !pending && !rejected;
   }
 
   isProjectHooksRejected(): boolean {
@@ -11882,15 +11927,30 @@ export class Config {
     if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
-    if (!this.isInteractive() || this.isExplicitlyTrustedFolder()) {
+    if (this.isExplicitlyTrustedFolder()) {
       return undefined;
     }
     // A cleared approval gate serves the block (approved, or nothing to
     // approve); the listing must not add a second, trust-disabled copy.
-    if (this.isProjectHooksApprovalCleared()) {
+    // Exception: when the settings layer withheld the whole workspace
+    // scope, the execution block is empty and the display-only copy is the
+    // only record of what is configured — it must surface even though the
+    // gate reads "cleared" for the empty block.
+    if (
+      this.isProjectHooksApprovalCleared() &&
+      this.readProjectHooksBlock() !== undefined
+    ) {
       return undefined;
     }
-    return this.readProjectHooksBlock();
+    // The settings layer drops the workspace scope entirely when the feature
+    // is on and the folder untrusted; the display-only copy keeps the listing
+    // able to show what is configured but withheld.
+    return (
+      this.readProjectHooksBlock() ??
+      (this.projectHooksDisplayOnly as
+        | { [K in HookEventName]?: HookDefinition[] }
+        | undefined)
+    );
   }
 
   /**
@@ -11903,12 +11963,15 @@ export class Config {
    * ask `getProjectHooks()` whether the hooks actually load.
    */
   private isProjectHooksApprovalCleared(): boolean {
-    // `isProjectHooksApprovalGated()` already accounts for the YOLO
-    // exemption: while exempt the session is ungated and the folder-trust
-    // rule applies on its own.
+    // A genuine stored approval is execution authority on its own — it
+    // survives the YOLO exemption (where the pending flag is undefined).
+    // The legacy cleared-gate reading stays for callers that only clear the
+    // pending flag, but the explicit approved flag never doubles as
+    // "nothing to approve".
     return (
-      this.isProjectHooksApprovalGated() &&
-      this.projectHooksPendingApproval === false
+      this.projectHooksApproved ||
+      (this.isProjectHooksApprovalGated() &&
+        this.projectHooksPendingApproval === false)
     );
   }
 
@@ -11921,11 +11984,13 @@ export class Config {
     // Repo-supplied hooks run with either authority: a cleared approval gate
     // (an approved block, or no approvable object — then the block is empty),
     // or explicit folder trust. Approval is the finer grant — it authorizes
-    // these hooks, not the folder's other executable settings — so the
-    // interactive trust gate must not swallow it.
+    // these hooks, not the folder's other executable settings — so the trust
+    // gate must not swallow it. Without an approval, explicit trust is
+    // required in EVERY mode: a disabled folder-trust feature never
+    // authorizes repo hooks, headless included. Embedders enable the feature
+    // and record their managed directories in the trust store, or approve.
     if (
       !this.isProjectHooksApprovalCleared() &&
-      this.isInteractive() &&
       !this.isExplicitlyTrustedFolder()
     ) {
       return undefined;
@@ -12004,6 +12069,18 @@ export class Config {
     projectHooks?: Record<string, unknown>;
     hooks?: Record<string, unknown>;
   }): void {
+    // Under command-line YOLO the gate is exempt and the `/hooks` reload
+    // does not re-derive the decision, so a replaced block must not keep
+    // the old block's approval authority. Fail-closed by design: an
+    // approval-only block stops until the session leaves YOLO (the
+    // mode-change listener re-applies the store) or restarts.
+    if (
+      this.projectHooksYoloExempt &&
+      this.getApprovalMode() === ApprovalMode.YOLO &&
+      hooks.projectHooks !== this.projectHooks
+    ) {
+      this.projectHooksApproved = false;
+    }
     this.systemHooks = hooks.systemHooks;
     this.userHooks = hooks.userHooks;
     this.projectHooks = hooks.projectHooks;
