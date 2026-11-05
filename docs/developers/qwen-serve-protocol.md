@@ -937,6 +937,7 @@ Response shape:
     "maxPendingPromptsPerSession": 5,
     "listenerMaxConnections": 256,
     "eventRingSize": 8000,
+    "eventRingMaxBytes": 8388608,
     "compactedReplayMaxBytes": 4194304,
     "promptDeadlineMs": null,
     "writerIdleTimeoutMs": null,
@@ -993,6 +994,8 @@ Multi-workspace responses also include top-level `workspaces[]` rows with
 `{ id, cwd, displayName?, primary, trusted }`. The optional display name is
 omitted when unset and remains presentation-only; status consumers must keep
 using `id` or `cwd` to correlate runtimes.
+
+Full session status includes `eventRingCount`, `eventRingBytes`, optional `eventRingEarliestEventId`, `eventRingEvictedEvents`, `eventRingEvictedBytes`, and `availableCommandsSnapshotBytes`. Current ring bytes conservatively include the latest full command snapshot; eviction counters accumulate over the bus lifetime. These fields are additive and older daemons may omit them.
 
 `runtime.perf` is optional. When present, it reports daemon-process event loop
 lag, prompt FIFO queue wait samples, and daemon-child pipe byte counters only;
@@ -4765,7 +4768,8 @@ The SSE-level `id:` / `event:` lines duplicate `envelope.id` / `envelope.type` f
 
 Reconnect semantics:
 
-- Send `Last-Event-ID: <n>` to replay events with `id > n` from the per-session ring (default depth **8000**, tunable via `qwen serve --event-ring-size <n>`).
+- Send `Last-Event-ID: <n>` to replay events with `id > n` from the per-session ring (default depth **8000**, tunable via `qwen serve --event-ring-size <n>`). Retention is also byte-capped by `--event-ring-max-bytes` (default **8 MiB**, positive safe integer up to **256 MiB**), including the latest full command snapshot. At least the newest ring event is retained even when one event or snapshot exceeds the cap.
+- Unchanged `available_commands_update` snapshots are not republished by the ACP child. Historical copies retain command metadata and skill names without full skill bodies; only the latest complete snapshot is restored at its original matching ID for ACP replay. Browser/SDK egress still omits skill bodies. These latest-state projections do not create ID gaps or replace the existing resync signals.
 - **Gap detection:** within the same epoch, if the first retained ring id is greater than `<n> + 1`, the daemon emits an id-less `state_resync_required` frame with `reason: 'ring_evicted'` before replaying the surviving suffix. The other reasons are `epoch_reset`, `seeded_replay_not_in_ring`, and `replay_budget_exceeded`; the budget signal follows the delivered replay prefix. See [resync reasons and ordering](./daemon/09-event-schema.md#resync-reasons-and-ordering) for their triggers, cursor fields, and recovery rules.
 - The SDK latches `awaitingResync`; clients should call `POST /session/:id/load` and rebuild from the current bounded replay snapshot window. That snapshot may itself start with `history_truncated` when older in-memory replay entries were dropped; this marker is informational and must not start another resync loop. Its optional pagination anchor is [frozen at replay-window eviction](./daemon/09-event-schema.md#history-truncation-anchor).
 - IDs are monotonic within a session's event-bus epoch, starting at 1. A rejected publish must not consume an id; see [event sequence invariants](./daemon/09-event-schema.md#state-and-forward-compatibility).

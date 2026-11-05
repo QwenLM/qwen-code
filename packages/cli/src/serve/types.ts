@@ -149,6 +149,12 @@ export interface ServeOptions {
    */
   eventRingSize?: number;
   /**
+   * Per-session retained SSE ring byte cap, including the latest full commands
+   * snapshot. Threaded into `BridgeOptions.eventRingMaxBytes`. Defaults to
+   * 8 MiB. Must be a positive safe integer up to 256 MiB, never unlimited.
+   */
+  eventRingMaxBytes?: number;
+  /**
    * Per-session in-memory compacted replay snapshot byte cap. Threaded into
    * `BridgeOptions.compactedReplayMaxBytes`. Defaults to 4 MiB. Must be a
    * positive safe integer; there is no unlimited sentinel.

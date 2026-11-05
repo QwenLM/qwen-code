@@ -68,6 +68,228 @@ describe('EventBus', () => {
     vi.restoreAllMocks();
   });
 
+  it('retains only the latest skill body while preserving live frames and replay IDs', async () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const bus = new EventBus(100, undefined, engine);
+    const live = bus.subscribe()[Symbol.asyncIterator]();
+    const makeUpdate = (body: string) => ({
+      type: 'session_update',
+      data: {
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [{ name: 'skill', description: 'A skill' }],
+          _meta: {
+            availableSkills: ['skill'],
+            availableSkillDetails: [{ name: 'skill', body }],
+          },
+        },
+      },
+    });
+    const first = bus.publish(makeUpdate('old body'))!;
+    expect((await live.next()).value).toBe(first);
+    const second = bus.publish(makeUpdate('new body'))!;
+    expect((await live.next()).value).toBe(second);
+    const retained = engine.snapshot().liveJournal;
+    expect(JSON.stringify(retained)).not.toContain('availableSkillDetails');
+    expect(retained.map((event) => event.id)).toEqual([1, 2]);
+    const replay = await collect(bus.subscribe({ lastEventId: 0 }), 3);
+    expect(replay.map((event) => event.id)).toEqual([1, 2, undefined]);
+    expect(JSON.stringify(replay[0])).not.toContain('old body');
+    expect(replay[1]).toBe(second);
+    expect(bus.snapshotReplay()?.liveJournal[1]).toBe(second);
+    expect(bus.liveJournalSnapshot()?.[1]).toBe(second);
+    expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(
+      Buffer.byteLength(JSON.stringify(second)),
+    );
+    expect(first.data).toEqual(makeUpdate('old body').data);
+    await live.return?.();
+    bus.close();
+    expect(bus.retentionSnapshot()).toMatchObject({
+      ringCount: 0,
+      ringBytes: 0,
+      availableCommandsSnapshotBytes: 0,
+    });
+  });
+
+  it('projects seeded flat command snapshots and clears the latest full snapshot on reset', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const bus = new EventBus(100, undefined, engine);
+    const seeded = bus.seedReplayEvents(
+      ['old', 'new'].map((body) => ({
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: { availableSkillDetails: [{ name: 'skill', body }] },
+        },
+      })),
+    );
+    expect(JSON.stringify(engine.snapshot())).not.toContain(
+      'availableSkillDetails',
+    );
+    expect(bus.snapshotReplay()?.compactedTurns[1]).toBe(seeded[1]);
+    expect(
+      JSON.stringify(bus.snapshotReplay()?.compactedTurns[0]),
+    ).not.toContain('old');
+    expect(bus.retentionSnapshot().ringCount).toBe(0);
+    bus.resetReplay();
+    expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(0);
+    expect(bus.snapshotReplay()?.compactedTurns).toEqual([]);
+    bus.close();
+  });
+
+  it('replaces full skill details with an empty command update', () => {
+    const bus = new EventBus(10, undefined, new TurnBoundaryCompactionEngine());
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: { availableSkillDetails: [{ body: 'private body' }] },
+        },
+      },
+    });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+        },
+      },
+    });
+    expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(0);
+    expect(JSON.stringify(bus.snapshotReplay())).not.toContain('private body');
+    bus.close();
+  });
+
+  it('bounds retained bytes and preserves eviction and replay watermarks', async () => {
+    const bus = new EventBus(100, undefined, undefined, { maxRingBytes: 500 });
+    const events = Array.from(
+      { length: 20 },
+      () => bus.publish({ type: 'text', data: { text: '你好'.repeat(20) } })!,
+    );
+    const state = bus.retentionSnapshot();
+    expect(state.ringBytes).toBeLessThanOrEqual(500);
+    expect(state.ringCount).toBeLessThan(20);
+    expect(state.evictedEvents).toBe(20 - state.ringCount);
+    expect(state.evictedBytes + state.ringBytes).toBe(
+      events.reduce(
+        (sum, event) => sum + Buffer.byteLength(JSON.stringify(event)),
+        0,
+      ),
+    );
+    const stale = await collect(bus.subscribe({ lastEventId: 0 }), 1);
+    expect(stale[0].data).toEqual({
+      reason: 'ring_evicted',
+      lastDeliveredId: 0,
+      earliestAvailableId: state.earliestEventId,
+    });
+    const current = await collect(
+      bus.subscribe({ lastEventId: state.earliestEventId! - 1 }),
+      state.ringCount + 1,
+    );
+    expect(current.slice(0, -1).map((event) => event.id)).toEqual(
+      events.slice(-state.ringCount).map((event) => event.id),
+    );
+    expect(current.at(-1)?.type).toBe('replay_complete');
+    bus.resetReplay();
+    expect(bus.retentionSnapshot().ringBytes).toBe(0);
+    bus.close();
+  });
+
+  it('retains a single oversized event until a newer event replaces it', () => {
+    const bus = new EventBus(100, undefined, undefined, { maxRingBytes: 100 });
+    bus.publish({ type: 'large', data: 'x'.repeat(1000) });
+    expect(bus.retentionSnapshot().ringCount).toBe(1);
+    expect(bus.retentionSnapshot().ringBytes).toBeGreaterThan(100);
+    bus.publish({ type: 'small', data: 1 });
+    expect(bus.retentionSnapshot()).toMatchObject({
+      ringCount: 1,
+      earliestEventId: 2,
+    });
+    expect(bus.retentionSnapshot().ringBytes).toBeLessThanOrEqual(100);
+    bus.close();
+  });
+
+  it('counts the latest full command snapshot against the ring budget', () => {
+    const bus = new EventBus(
+      1000,
+      undefined,
+      new TurnBoundaryCompactionEngine(),
+      { maxRingBytes: 2000 },
+    );
+    for (let i = 0; i < 100; i++) {
+      bus.publish({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [],
+            _meta: {
+              availableSkillDetails: [{ body: `body-${i}`.repeat(100) }],
+            },
+          },
+        },
+      });
+      expect(bus.retentionSnapshot().ringBytes).toBeLessThanOrEqual(2000);
+    }
+    expect(bus.retentionSnapshot().ringCount).toBeLessThan(100);
+    const replay = JSON.stringify(bus.snapshotReplay());
+    expect(replay.match(/availableSkillDetails/g)).toHaveLength(1);
+    expect(replay).toContain('body-99');
+    expect(replay).not.toContain('body-98');
+    bus.close();
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity, 256 * 1024 * 1024 + 1])(
+    'rejects invalid ring byte limit %s',
+    (maxRingBytes) => {
+      expect(
+        () => new EventBus(10, undefined, undefined, { maxRingBytes }),
+      ).toThrow('eventRingMaxBytes');
+    },
+  );
+
+  it('rejects projection failures without consuming IDs or changing retention', () => {
+    const bus = new EventBus(10, undefined, new TurnBoundaryCompactionEngine());
+    const first = bus.publish({ type: 'text', data: 'retained' });
+    const before = bus.retentionSnapshot();
+    const data = {};
+    Object.defineProperty(data, 'update', {
+      get: () => {
+        throw new Error('projection failed');
+      },
+    });
+    expect(JSON.stringify(data)).toBe('{}');
+    expect(bus.publish({ type: 'session_update', data })).toBeUndefined();
+    expect(bus.retentionSnapshot()).toEqual(before);
+    expect(bus.lastEventId).toBe(first?.id);
+    expect(bus.publish({ type: 'text', data: 'next' })?.id).toBe(2);
+    bus.close();
+  });
+
+  it('handles seeded projection failures as degraded replay without retaining partial full snapshots', () => {
+    const bus = new EventBus(10, undefined, new TurnBoundaryCompactionEngine());
+    const data = {};
+    Object.defineProperty(data, 'update', {
+      get: () => {
+        throw new Error('seed projection failed');
+      },
+    });
+    expect(() =>
+      bus.seedReplayEvents([{ type: 'session_update', data }]),
+    ).not.toThrow();
+    expect(bus.snapshotReplay()?.degraded).toBe(true);
+    expect(bus.retentionSnapshot()).toMatchObject({
+      ringCount: 0,
+      ringBytes: 0,
+    });
+    bus.close();
+  });
+
   it('assigns monotonic ids and the right schema version', () => {
     const bus = new EventBus();
     const a = bus.publish({ type: 'foo', data: 1 });

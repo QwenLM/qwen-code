@@ -63,6 +63,7 @@ import type { HarnessChannel } from './channel-lifecycle.js';
 import {
   EventBus,
   DEFAULT_RING_SIZE,
+  normalizeMaxRingBytes,
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
   type LiveReplayMode,
@@ -2706,6 +2707,7 @@ export function createSessionControlPlane(
         `Must be a positive integer in [1, ${MAX_EVENT_RING_SIZE}].`,
     );
   }
+  const eventRingMaxBytes = normalizeMaxRingBytes(opts.eventRingMaxBytes);
   const compactedReplayMaxBytes = normalizeCompactedReplayMaxBytes(
     opts.compactedReplayMaxBytes,
   );
@@ -7262,6 +7264,7 @@ export function createSessionControlPlane(
           : {}),
       }),
       {
+        maxRingBytes: eventRingMaxBytes,
         // Fired once, on the FIRST ingest/seed failure (the bus keeps the
         // degraded flag set silently afterwards). The bus doesn't know its
         // session, so the sessionId context is injected here.
@@ -10590,6 +10593,7 @@ export function createSessionControlPlane(
               ? null
               : maxPendingPromptsPerSession,
           eventRingSize,
+          eventRingMaxBytes,
           compactedReplayMaxBytes,
           maxJournalEvents,
           maxJournalBytes,
@@ -10610,6 +10614,7 @@ export function createSessionControlPlane(
         permissionPolicy: permissionMediator.policy,
         sessions: [...byId.values()].map((entry) => {
           const journalLimits = entry.events.journalLimits();
+          const retention = entry.events.retentionSnapshot();
           return {
             sessionId: entry.sessionId,
             workspaceCwd: entry.workspaceCwd,
@@ -10626,6 +10631,15 @@ export function createSessionControlPlane(
               ? { backgroundTurn: entry.backgroundTurn }
               : {}),
             lastEventId: entry.events.lastEventId,
+            eventRingCount: retention.ringCount,
+            eventRingBytes: retention.ringBytes,
+            ...(retention.earliestEventId !== undefined
+              ? { eventRingEarliestEventId: retention.earliestEventId }
+              : {}),
+            eventRingEvictedEvents: retention.evictedEvents,
+            eventRingEvictedBytes: retention.evictedBytes,
+            availableCommandsSnapshotBytes:
+              retention.availableCommandsSnapshotBytes,
             ...(entry.sessionLastSeenAt !== undefined
               ? { lastSeenAt: entry.sessionLastSeenAt }
               : {}),
