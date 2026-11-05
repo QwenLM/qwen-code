@@ -96,6 +96,14 @@
         "title": "Qwen Code: Auth"
       },
       {
+        "command": "qwen-code.logout",
+        "title": "Qwen Code: Logout"
+      },
+      {
+        "command": "qwen-code.upgrade",
+        "title": "Qwen Code: Upgrade"
+      },
+      {
         "command": "qwen-code.focusChat",
         "title": "Qwen Code: Focus Chat View"
       },
@@ -132,6 +140,14 @@
         },
         {
           "command": "qwen-code.auth"
+        },
+        {
+          "command": "qwen-code.logout",
+          "when": "qwen-code.subscriptionEnabled"
+        },
+        {
+          "command": "qwen-code.upgrade",
+          "when": "qwen-code.subscriptionEnabled"
         },
         {
           "command": "qwen-code.copyMessage",
