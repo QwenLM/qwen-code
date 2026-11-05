@@ -130,8 +130,11 @@ the variable list, `%%` escaping, and the empty-means-default rule.
   stay editable and removable so turning delivery off never strands keys.
 - **Placement.** `boundSessionActions` joins `BOUND_SESSION_FIELD_KEYS` so
   it renders inside the bound-sessions panel beside its prerequisite.
-- **Empty state.** With no rows, one muted line says no templates are
-  configured yet.
+- **Empty state.** With no rows, one muted line says no entries are
+  configured yet. The copy is generic because the renderer is shared with
+  non-template record fields (message routes); the GitHub and GitLab
+  template fields override it with template wording through their field
+  label key, as they do the add-picker placeholder.
 
 Description resolution for a row/picker item: translated
 `...optionDescription.<value>` key, else the descriptor
@@ -158,8 +161,10 @@ when the dialog opens, alongside the other per-open resets.
   keeping a single source of truth.
 - Group headers `...boundSessionActions.group.<any|review|verify|fix>`
   (EN + ZH), each naming the role's job.
-- Record editor chrome: add-picker placeholder, empty-state line, delete
-  button aria-label, delivery-gating hint (EN + ZH).
+- Record editor chrome: generic add-picker placeholder and empty-state
+  line (entry-worded, since the renderer is shared with non-template record
+  fields), template-worded overrides for the GitHub and GitLab fields,
+  delete button aria-label, delivery-gating hint (EN + ZH).
 
 ## Design decisions
 
@@ -212,8 +217,9 @@ when the dialog opens, alongside the other per-open resets.
   descriptor mirror/wire-shape tests.
 - E2E: Playwright `web-shell.channels.spec.ts` with the mock daemon —
   add/edit/delete a template through the picker and assert the upsert
-  payload; toggle fullscreen. Baseline run before implementation must
-  fail (feature absent).
+  payload; toggle fullscreen. The case is tagged `@smoke` so the CI smoke
+  job (`test:e2e:smoke`, `--grep @smoke`) actually runs it. Baseline run
+  before implementation must fail (feature absent).
 - `npm run build && npm run typecheck` from the repository root.
 
 ## Acceptance criteria

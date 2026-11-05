@@ -1521,6 +1521,10 @@ describe('ChannelEditorDialog', () => {
     // A fresh draft shows the add picker, not one row per descriptor option.
     expect(document.querySelectorAll('textarea')).toHaveLength(0);
     expect(fieldByLabel('Bound Session Actions')).not.toBeNull();
+    // This fixture is dingtalk-typed, where the field has no label-key
+    // registration, so the generic entry copy applies (the template-worded
+    // override is pinned in the github-typed cases below).
+    expect(document.body.textContent).toContain('No entries configured yet.');
 
     // Record row ids embed the option key (colons included), which is not a
     // valid CSS selector — resolve through getElementById, not #id.
@@ -1653,6 +1657,47 @@ describe('ChannelEditorDialog', () => {
     );
   });
 
+  it('uses generic copy and no picker for an options-less record field', async () => {
+    // messageRoutes is a record field with no options: the empty state must
+    // not call routes "templates", and there is nothing to add from.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: [
+        ...DINGTALK.fields,
+        { key: 'messageRoutes', label: 'Message Routes', kind: 'record' },
+      ],
+    };
+    await renderDialog({ descriptor });
+    await expandAdvancedSettings();
+
+    expect(document.body.textContent).toContain('No entries configured yet.');
+    expect(document.body.textContent).not.toContain(
+      'No templates configured yet.',
+    );
+    // No add picker: the field label targets no control.
+    expect(fieldByLabel('Message Routes')).toBeNull();
+
+    // Stored routes still render as editable rows without a picker.
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: {
+        ...INSTANCE.config,
+        messageRoutes: { '/qa': 'Answer questions' },
+      },
+    };
+    await renderDialog({ descriptor, instance });
+    await expandAdvancedSettings();
+    const label = Array.from(document.querySelectorAll('label')).find((item) =>
+      item.textContent?.includes('/qa'),
+    );
+    expect(label).toBeDefined();
+    const textarea = document.getElementById(
+      label!.htmlFor,
+    ) as HTMLTextAreaElement;
+    expect(textarea.value).toBe('Answer questions');
+    expect(fieldByLabel('Message Routes')).toBeNull();
+  });
+
   it('gates adding templates on bound delivery and names the prerequisite', async () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       type: 'github',
@@ -1685,6 +1730,10 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).toContain(
       'Enable "Deliver To PR-Bound Sessions" above to add templates.',
     );
+    // The github-typed field keeps the template-worded empty state and
+    // add-picker placeholder through its field label-key overrides.
+    expect(document.body.textContent).toContain('No templates configured yet.');
+    expect(document.body.textContent).toContain('Add template…');
 
     // Resolve the delivery switch by its label instead of guessing ids.
     const deliveryLabel = Array.from(document.querySelectorAll('label')).find(
@@ -1757,6 +1806,8 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).toContain(
       '投递给 PR 绑定会话的 operator 指令模板',
     );
+    // The template-worded empty state comes from the zh-CN field override.
+    expect(document.body.textContent).toContain('尚未配置模板。');
 
     // The picker group header and the per-key description must both come
     // from the zh-CN dictionary, not the English descriptor fallback.

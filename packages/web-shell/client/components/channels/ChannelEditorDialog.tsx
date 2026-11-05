@@ -1040,7 +1040,10 @@ export function ChannelEditorDialog({
           <div className={styles.recordFields}>
             {recordKeys.length === 0 ? (
               <p className={styles.recordEmpty}>
-                {t('channels.editor.record.empty')}
+                {translateWithFallback(
+                  'empty',
+                  t('channels.editor.record.empty'),
+                )}
               </p>
             ) : null}
             {recordKeys.map((key) => {
@@ -1088,7 +1091,10 @@ export function ChannelEditorDialog({
                   aria-describedby={gated ? `${id}-disabled-hint` : undefined}
                 >
                   <SelectValue
-                    placeholder={t('channels.editor.record.addPlaceholder')}
+                    placeholder={translateWithFallback(
+                      'addPlaceholder',
+                      t('channels.editor.record.addPlaceholder'),
+                    )}
                   />
                 </SelectTrigger>
                 <SelectContent>

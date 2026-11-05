@@ -108,7 +108,10 @@ Credentials 分区，而不是紧挨其前置条件 `deliverToBoundSessions` 的
   键困住。
 - **位置。** `boundSessionActions` 加入 `BOUND_SESSION_FIELD_KEYS`，渲染进
   绑定会话面板，紧挨其前置条件。
-- **空态。** 没有任何行时显示一行弱化文案：尚未配置模板。
+- **空态。** 没有任何行时显示一行弱化文案：尚未配置条目。文案用通用的
+  「条目」措辞，因为渲染器与非模板类 record 字段（消息路由）共享；GitHub
+  与 GitLab 的模板字段通过各自字段 label 键覆盖为「模板」措辞，添加选择器
+  占位符同理。
 
 行/选择器项的描述解析顺序：翻译键 `...optionDescription.<value>`，否则
 描述符 `option.description`，否则在与键名不同时取翻译后的选项 label
@@ -131,8 +134,9 @@ flex 纵向布局，body 解除 `min(66vh, 650px)` 上限并占满剩余高度�
   选项描述，保持单一事实源。
 - 分组标题 `...boundSessionActions.group.<any|review|verify|fix>`
   （EN + ZH），各注明角色职责。
-- record 编辑器界面文案：添加选择器占位、空态行、删除按钮 aria-label、
-  投递门控 hint（EN + ZH）。
+- record 编辑器界面文案：通用的添加选择器占位与空态行（用「条目」措辞，
+  因渲染器与非模板类 record 字段共享）、GitHub 与 GitLab 字段的「模板」
+  措辞覆盖、删除按钮 aria-label、投递门控 hint（EN + ZH）。
 
 ## 设计决策
 
@@ -176,8 +180,9 @@ flex 纵向布局，body 解除 `min(66vh, 650px)` 上限并占满剩余高度�
   添加/删除、保存过滤空值、未知已存键、门控 hint、全屏切换、zh-CN 文案），
   以及 cli 描述符镜像/wire-shape 测试。
 - E2E：Playwright `web-shell.channels.spec.ts` + mock daemon——通过选择器
-  添加/编辑/删除模板并断言 upsert 载荷；切换全屏。实现前的基线运行必须
-  失败（功能尚不存在）。
+  添加/编辑/删除模板并断言 upsert 载荷；切换全屏。用例带 `@smoke` 标记，
+  确保 CI smoke 任务（`test:e2e:smoke`，`--grep @smoke`）真的会跑它。
+  实现前的基线运行必须失败（功能尚不存在）。
 - 仓库根执行 `npm run build && npm run typecheck`。
 
 ## 验收标准

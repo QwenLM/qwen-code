@@ -659,7 +659,7 @@ test('shows Qwen Live sessions in Tasks and excludes them from Channels @smoke',
   ).toBeVisible();
 });
 
-test('edits GitHub bound-session action templates on demand and toggles fullscreen', async ({
+test('edits GitHub bound-session action templates on demand and toggles fullscreen @smoke', async ({
   page,
 }, testInfo) => {
   const workspaceCwd = '/tmp/qwen-web-shell-e2e';

@@ -4610,8 +4610,18 @@ const EN: Messages = {
     'verify — verification sessions',
   'channels.editor.field.github.boundSessionActions.group.fix':
     'fix — fix sessions',
-  'channels.editor.record.addPlaceholder': 'Add template…',
-  'channels.editor.record.empty': 'No templates configured yet.',
+  'channels.editor.field.github.boundSessionActions.empty':
+    'No templates configured yet.',
+  'channels.editor.field.github.boundSessionActions.addPlaceholder':
+    'Add template…',
+  'channels.editor.field.gitlab.action_prompt_template.empty':
+    'No templates configured yet.',
+  'channels.editor.field.gitlab.action_prompt_template.addPlaceholder':
+    'Add template…',
+  // Generic defaults for every record field; template-worded fields override
+  // them through their field label key (messageRoutes is routes, not templates).
+  'channels.editor.record.addPlaceholder': 'Add entry…',
+  'channels.editor.record.empty': 'No entries configured yet.',
   'channels.editor.record.remove': (v) => `Remove ${v?.key ?? ''}`,
   'channels.editor.field.gitlab.token': 'Personal Access Token',
   'channels.editor.field.gitlab.token.description':
@@ -9160,8 +9170,14 @@ const ZH: Messages = {
     'verify — 验证会话',
   'channels.editor.field.github.boundSessionActions.group.fix':
     'fix — 修复会话',
-  'channels.editor.record.addPlaceholder': '添加模板…',
-  'channels.editor.record.empty': '尚未配置模板。',
+  'channels.editor.field.github.boundSessionActions.empty': '尚未配置模板。',
+  'channels.editor.field.github.boundSessionActions.addPlaceholder':
+    '添加模板…',
+  'channels.editor.field.gitlab.action_prompt_template.empty': '尚未配置模板。',
+  'channels.editor.field.gitlab.action_prompt_template.addPlaceholder':
+    '添加模板…',
+  'channels.editor.record.addPlaceholder': '添加条目…',
+  'channels.editor.record.empty': '尚未配置条目。',
   'channels.editor.record.remove': (v) => `删除 ${v?.key ?? ''}`,
   ...githubBoundActionOptionDescriptionsZh(),
   'channels.editor.field.gitlab.token': '个人访问令牌',
