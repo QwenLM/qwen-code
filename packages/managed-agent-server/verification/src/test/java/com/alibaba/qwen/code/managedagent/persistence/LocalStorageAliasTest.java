@@ -271,7 +271,7 @@ class LocalStorageAliasTest {
         String session = "retired-private";
         session(tenant, "other-storage", session);
         var transactions = new TransactionTemplate(manager);
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "a".repeat(64);
         byte[] bytes = ("{\"subtype\":\"session_execution_engine\"}\n{\"subtype\":\"managed_session_header_v1\"}\n").getBytes(java.nio.charset.StandardCharsets.UTF_8);
         transactions.execute(status -> journal.acquireWriter(tenant, session, token,
@@ -296,7 +296,7 @@ class LocalStorageAliasTest {
         for (int page = 0; page < 20 && collector.runOnce(); page++) {
             // collector.runOnce() in the condition does the work; the body stays empty.
         }
-        assertThat(jdbc.queryForObject("SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT is_resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session)).isTrue();
         assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'", String.class)).isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Integer.class)).isZero();
         assertThat(jdbc.queryForMap("SELECT writer_generation, journal_revision, committed_sequence, activation_epoch, last_commit_digest"

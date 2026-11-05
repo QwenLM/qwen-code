@@ -5,6 +5,8 @@
  */
 
 import type React from 'react';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import process from 'node:process';
 import { useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
@@ -33,6 +35,11 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
+import {
+  filterModelEntriesForDisplay,
+  sortModelEntriesForDisplay,
+} from '../../utils/model-display-order.js';
+import { useSubscriptionSignedIn } from '../hooks/use-subscription-command-visibility.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -283,13 +290,15 @@ function handleModelSwitchSuccess({
   const feedbackItem = {
     type: 'info' as const,
     text:
-      `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
-      `\n` +
-      `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
-      `\n` +
-      `Base URL: ${baseUrl}` +
-      `\n` +
-      `API key: ${maskedKey}`,
+      effectiveAuthType === AuthType.QWEN_SUBSCRIPTION
+        ? t('Model: {{model}}', { model: effectiveModelId }) + scopeSuffix
+        : `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
+          `\n` +
+          `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
+          `\n` +
+          `Base URL: ${baseUrl}` +
+          `\n` +
+          `API key: ${maskedKey}`,
   };
   uiState?.historyManager.addItem(feedbackItem, Date.now());
   config.getChatRecordingService?.()?.recordSlashCommand({
@@ -337,6 +346,7 @@ export function ModelDialog({
   const config = useContext(ConfigContext);
   const uiState = useContext(UIStateContext);
   const settings = useSettings();
+  const subscriptionSignedIn = useSubscriptionSignedIn();
 
   // Local error state for displaying errors within the dialog
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -417,6 +427,7 @@ export function ModelDialog({
     // Fixed order: qwen-oauth first, then others in a stable order
     const authTypeOrder: AuthType[] = [
       AuthType.QWEN_OAUTH,
+      AuthType.QWEN_SUBSCRIPTION,
       AuthType.USE_OPENAI,
       AuthType.USE_OPENAI_RESPONSES,
       AuthType.USE_ANTHROPIC,
@@ -455,15 +466,28 @@ export function ModelDialog({
       }
     }
 
-    return result;
+    const visibleEntries = filterModelEntriesForDisplay(
+      result,
+      subscriptionSignedIn,
+    );
+    return isFastModelMode ||
+      isAdvisorModelMode ||
+      isVoiceModelMode ||
+      isVisionModelMode ||
+      isCompactionModelMode ||
+      isImageModelMode
+      ? visibleEntries
+      : sortModelEntriesForDisplay(visibleEntries);
   }, [
     authType,
+    subscriptionSignedIn,
     config,
     isFastModelMode,
     isAdvisorModelMode,
     isImageModelMode,
     isVoiceModelMode,
     isVisionModelMode,
+    isCompactionModelMode,
   ]);
 
   const MODEL_OPTIONS = useMemo(() => {
@@ -1209,6 +1233,10 @@ export function ModelDialog({
         effectiveAuthType = after?.authType ?? selectedAuthType ?? authType;
         effectiveModelId = after?.model ?? modelId;
       } catch (e) {
+        if (e instanceof SubscriptionOAuthError) {
+          setErrorMessage(t(subscriptionErrorMessage(e)));
+          return;
+        }
         const baseErrorMessage = e instanceof Error ? e.message : String(e);
         // Use parsed modelId for display to avoid showing raw selection key
         // (which contains invisible \0 separator between modelId and baseUrl)

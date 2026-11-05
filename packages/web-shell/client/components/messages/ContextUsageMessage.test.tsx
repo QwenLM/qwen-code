@@ -252,9 +252,8 @@ describe('ContextUsageMessage', () => {
     },
   );
 
-  it('shows the cached prefix, startup context and unattributed rows only when present (#12235)', () => {
+  it('shows cached prefix and startup context while ignoring legacy residuals', () => {
     const status = makeStatus(60, false);
-    // Rows still sum to the total: 20 + 10 + 5 + 5 + 12 + 8 = 60.
     Object.assign(status.usage.breakdown, {
       messages: 0,
       startupContext: 12,
@@ -264,13 +263,30 @@ describe('ContextUsageMessage', () => {
     const text = render(status).textContent;
     expect(text).toContain('Cached prefix 30 (30.0%)');
     expect(text).toContain('Startup context 12 (12.0%)');
-    expect(text).toContain('Unattributed 8 (8.0%)');
+    expect(text).not.toContain('Unattributed');
 
     const plain = render(makeStatus(60, false)).textContent;
     expect(plain).not.toContain('Cached prefix');
     expect(plain).not.toContain('Startup context');
     expect(plain).not.toContain('Unattributed');
   });
+
+  it.each(['en', 'zh-CN'] as const)(
+    'preserves category estimates above the total and hides legacy residuals (%s)',
+    (language) => {
+      const status = makeStatus(7, false);
+      Object.assign(status.usage.breakdown, { messages: 193, unattributed: 8 });
+      const container = render(status, false, undefined, language);
+      const text = container.textContent;
+      expect(text).toContain(language === 'en' ? 'Messages 193' : '消息 193');
+      expect(text).not.toContain('Unattributed');
+      expect(text).not.toContain('未归因');
+      expect(text).not.toContain('NaN');
+      expect(
+        parseContextUsageMessage(serializeContextUsageMessage(status)),
+      ).toEqual(status);
+    },
+  );
 
   it('shows an estimated history as messages when the provider total is gone (#12235)', () => {
     const status = makeStatus(0, true);

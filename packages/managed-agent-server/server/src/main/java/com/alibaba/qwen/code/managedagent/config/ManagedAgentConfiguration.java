@@ -91,17 +91,21 @@ public class ManagedAgentConfiguration {
     }
     @org.springframework.context.annotation.Bean
     public com.alibaba.qwen.code.managedagent.contracts.workspace.LocalWorkspaceFiles managedLocalWorkspaceFiles() {
-        return new com.alibaba.qwen.code.runtimebroker.provisioning.WorkspaceFileProcess();
+        return new com.alibaba.qwen.code.runtimebroker.host.WorkspaceFileProcess();
     }
     @org.springframework.context.annotation.Bean
     public com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy managedSessionReaderVersion() {
         return new ManagedSessionReaderVersion();
     }
-    @org.springframework.context.annotation.Bean(destroyMethod = "")
+    @org.springframework.context.annotation.Bean(destroyMethod = "close")
     public com.alibaba.qwen.code.runtimebroker.spi.SshConnections managedSshConnections(ManagedAgentProperties properties) {
-        return properties.getRuntimeBroker().getSsh().getNodes().isEmpty() ? null
-                : new com.alibaba.qwen.code.runtimebroker.provisioning.SshConnectionManager(
-                    java.net.URI.create(properties.getToolPublication().getServiceBaseUrl()));
+        if (!com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection.from(properties)
+                .includes(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS)) {
+            return null;
+        }
+        var registry = new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry();
+        registry.validateSelected(properties);
+        return registry.ssh().createConnections(java.net.URI.create(properties.getToolPublication().getServiceBaseUrl()));
     }
     @org.springframework.context.annotation.Bean
     public com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelRouteRepository managedChannelRoutes(
@@ -126,6 +130,7 @@ public class ManagedAgentConfiguration {
     }
 
     public ManagedAgentConfiguration(ManagedAgentProperties properties) {
+        properties.validateRuntimeProvider();
         BrokerSecurity.checkPublicationTransport(properties, new java.util.ArrayList<>());
     }
 

@@ -142,6 +142,7 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     auth: {
       authError: null,
       isAuthDialogOpen: false,
+      isAuthDialogDismissible: false,
       isAuthenticating: false,
       pendingAuthType: undefined,
       externalAuthState: null,

@@ -179,8 +179,8 @@ class ManagedSessionCreationSkillsTest {
         properties.getExtensions().setArtifactDirectory(archiveDirectory.toString());
         properties.getExtensions().setAllowedActors(List.of("actor"));
         Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
-        Object profiles = org.springframework.test.util.ReflectionTestUtils.getField(target, "definitionToolProfiles");
-        org.springframework.test.util.ReflectionTestUtils.setField(target, "definitionToolProfiles", List.of("hosted-workspace-mcp/1"));
+        Object profiles = com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", List.of("hosted-workspace-mcp/1"));
         try {
             var definition = json.createObjectNode();
             definition.putObject("model");
@@ -206,7 +206,7 @@ class ManagedSessionCreationSkillsTest {
             assertThat(store.requireSession(tenant, session).toolProfile()).isEqualTo("hosted-workspace-mcp/1");
             assertThat(snapshots.initialSelection(tenant, session).get("extensions")).isEqualTo(List.of());
         } finally {
-            org.springframework.test.util.ReflectionTestUtils.setField(target, "definitionToolProfiles", profiles);
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", profiles);
         }
     }
 
@@ -218,8 +218,8 @@ class ManagedSessionCreationSkillsTest {
                 "definitionToolProfiles", List.of("hosted-workspace-files/1", "hosted-workspace-shell/1"));
         Map<String, Object> previous = new java.util.LinkedHashMap<>();
         for (var entry : values.entrySet()) {
-            previous.put(entry.getKey(), org.springframework.test.util.ReflectionTestUtils.getField(target, entry.getKey()));
-            org.springframework.test.util.ReflectionTestUtils.setField(target, entry.getKey(), entry.getValue());
+            previous.put(entry.getKey(), com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, entry.getKey()));
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, entry.getKey(), entry.getValue());
         }
         boolean previousManaged = properties.getManagedExtensions().isEnabled();
         try {
@@ -240,7 +240,7 @@ class ManagedSessionCreationSkillsTest {
             properties.getManagedExtensions().setEnabled(true);
             properties.getExtensions().setArtifactDirectory(archiveDirectory.toString());
             properties.getExtensions().setAllowedActors(List.of("actor"));
-            org.springframework.test.util.ReflectionTestUtils.setField(target, "managedExtensionExecutionEnabled", true);
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "managedExtensionExecutionEnabled", true);
             var selection = request(agent, List.of());
             selection.putArray("extensionPins");
             String selected = create(selection, "extension-shell", false).required("id").asText();
@@ -257,7 +257,7 @@ class ManagedSessionCreationSkillsTest {
             assertThat(store.requireSession(tenant, filesSession).publicChildAgentsVersion()).isZero();
         } finally {
             for (var entry : previous.entrySet()) {
-                org.springframework.test.util.ReflectionTestUtils.setField(target, entry.getKey(), entry.getValue());
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, entry.getKey(), entry.getValue());
             }
             properties.getManagedExtensions().setEnabled(previousManaged);
             properties.getExtensions().setEnabled(false);
@@ -355,15 +355,15 @@ class ManagedSessionCreationSkillsTest {
 
     private void enableBuiltinShell() {
         Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
-        previousShellEnabled = (Boolean) org.springframework.test.util.ReflectionTestUtils.getField(target, "workspaceShellEnabled");
-        org.springframework.test.util.ReflectionTestUtils.setField(target, "workspaceShellEnabled", true);
+        previousShellEnabled = (Boolean) com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "workspaceShellEnabled");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "workspaceShellEnabled", true);
     }
 
     @AfterEach
     void restoreBuiltinShell() {
         if (previousShellEnabled != null) {
             Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
-            org.springframework.test.util.ReflectionTestUtils.setField(target, "workspaceShellEnabled", previousShellEnabled);
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "workspaceShellEnabled", previousShellEnabled);
             previousShellEnabled = null;
         }
     }
