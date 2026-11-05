@@ -18089,10 +18089,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         toolInvocationGuard: expect.any(Function),
       }),
       expect.any(Function),
-      // allowedBaseUrlsWorkspaceOnly (issue #12805): no workspace-only list.
-      false,
       // projectHooksApprovalProvider: live settings for the YOLO-exit re-gate
       expect.any(Function),
+      // allowedBaseUrlsWorkspaceOnly (issue #12805): no workspace-only list.
+      false,
     );
 
     mockConnectionState.resolve();

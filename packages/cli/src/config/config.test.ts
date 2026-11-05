@@ -2814,7 +2814,7 @@ describe('loadCliConfig', () => {
     });
 
     it('honors the workspace-only exemption handed to loadCliConfig (R5-11)', async () => {
-      // The 12th parameter must reach the resolver and the registry: with a
+      // The 13th parameter must reach the resolver and the registry: with a
       // workspace-only list, personal Qwen login resolves and the built-in
       // model registers; without it the same settings fail closed.
       process.argv = ['node', 'script.js'];
@@ -2827,6 +2827,7 @@ describe('loadCliConfig', () => {
       const config = await loadCliConfig(
         settings,
         argv,
+        undefined,
         undefined,
         undefined,
         undefined,
