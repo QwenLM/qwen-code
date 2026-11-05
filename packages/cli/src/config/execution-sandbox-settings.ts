@@ -66,6 +66,7 @@ type OperatorSettingsScope = SandboxSettingsInput & {
   /** Settings format version, used to date the legacy usage-statistics key. */
   $version?: unknown;
   privacy?: { usageStatisticsEnabled?: unknown };
+  model?: { catalogRefresh?: unknown };
   /** Pre-v2 location, migrated to `privacy.*` by a normal settings load. */
   usageStatisticsEnabled?: unknown;
   /**
@@ -105,6 +106,19 @@ export function selectOperatorExecutionSandbox(
   return selected;
 }
 
+/** Operator scopes resolve like a normal load: system over user over defaults. */
+export function selectOperatorCatalogRefresh(
+  ...scopes: OperatorSettingsScope[]
+): boolean | undefined {
+  let selected: boolean | undefined;
+  for (const scope of scopes) {
+    if (typeof scope.model?.catalogRefresh === 'boolean') {
+      selected = scope.model.catalogRefresh;
+    }
+  }
+  return selected;
+}
+
 /** Bare mode still honors operator confinement without loading project/env data. */
 export function readOperatorSandboxSettings(): SandboxSettingsInput {
   return sandboxSettingsFromScopes(readOperatorSettingsScopes());
@@ -117,10 +131,11 @@ export interface BareModeModelControls {
 }
 
 /**
- * The operator settings bare mode keeps: sandbox confinement, plus the
+ * The operator settings bare mode keeps: sandbox confinement, the
  * usage-statistics choice so `--bare` cannot turn a privacy opt-out back on,
- * plus the model controls (managed endpoint allowlist, Qwen OAuth builtins
- * disable) so `--bare` cannot escape an operator lockdown (issue #12805).
+ * the models.dev refresh choice, and the model controls (managed endpoint
+ * allowlist, Qwen OAuth builtins disable) so `--bare` cannot escape an
+ * operator lockdown (issue #12805).
  * Sandbox and privacy resolve here like a normal load (system over user over
  * system defaults). The model controls are returned PER SCOPE, unmerged:
  * the caller places each scope's controls in that scope's settings slot so
@@ -130,6 +145,7 @@ export interface BareModeModelControls {
  */
 export function readBareModeOperatorSettings(): SandboxSettingsInput & {
   privacy?: { usageStatisticsEnabled: boolean };
+  model?: { catalogRefresh: boolean };
   modelByScope: {
     systemDefaults?: BareModeModelControls;
     user?: BareModeModelControls;
@@ -177,11 +193,13 @@ export function readBareModeOperatorSettings(): SandboxSettingsInput & {
     };
   };
   const [systemDefaultsScope, userScope, systemScope] = scopes;
+  const catalogRefresh = selectOperatorCatalogRefresh(...scopes);
   return {
     ...sandboxSettingsFromScopes(scopes),
     ...(usageStatisticsEnabled === undefined
       ? {}
       : { privacy: { usageStatisticsEnabled } }),
+    ...(catalogRefresh === undefined ? {} : { model: { catalogRefresh } }),
     modelByScope: {
       systemDefaults: modelControls(systemDefaultsScope),
       user: modelControls(userScope),

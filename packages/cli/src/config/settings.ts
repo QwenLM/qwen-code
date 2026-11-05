@@ -25,6 +25,7 @@ import {
   parseExecutionSandboxSettings,
   readBareModeOperatorSettings,
   readOperatorSandboxSettings,
+  selectOperatorCatalogRefresh,
   selectOperatorExecutionSandbox,
   stripUtf8Bom,
 } from './execution-sandbox-settings.js';
@@ -824,6 +825,22 @@ function mergeSettings(
   } else if (merged.tools && typeof merged.tools === 'object') {
     delete merged.tools.executionSandbox;
   }
+  const operatorCatalogRefresh = selectOperatorCatalogRefresh(
+    systemDefaults,
+    user,
+    system,
+  );
+  // Same shape as the executionSandbox restore: a project that replaces the
+  // whole `model` section cannot reset the operator's refresh opt-out.
+  if (operatorCatalogRefresh !== undefined) {
+    const model = merged.model;
+    merged.model = {
+      ...(model && typeof model === 'object' && !Array.isArray(model)
+        ? model
+        : {}),
+      catalogRefresh: operatorCatalogRefresh,
+    } as Settings['model'];
+  }
   return merged;
 }
 
@@ -1101,9 +1118,10 @@ export function createMinimalSettings(): LoadedSettings {
       : {}),
     ...(operator.privacy ? { privacy: operator.privacy } : {}),
     // Bare mode must keep the operator's model controls in force — the
-    // managed allowlist and the Qwen OAuth builtins disable (issue #12805).
-    ...(operator.modelByScope.system
-      ? { model: operator.modelByScope.system }
+    // managed allowlist and the Qwen OAuth builtins disable (issue #12805) —
+    // together with the models.dev refresh choice.
+    ...(operator.model || operator.modelByScope.system
+      ? { model: { ...operator.model, ...operator.modelByScope.system } }
       : {}),
   };
   const emptySettingsFile: SettingsFile = {

@@ -5,6 +5,7 @@
  */
 
 import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
+import type { ContentGeneratorConfig } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { isInteractiveInvocation } from '../utils/interactive-mode.js';
 import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
 import {
@@ -120,7 +121,7 @@ import {
   validateExecutionSandboxSelection,
 } from './execution-sandbox-settings.js';
 import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
-import { appEvents } from '../utils/events.js';
+import { appEvents, AppEvent } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { memoryCommand } from '../commands/memory.js';
 import { channelCommand } from '../commands/channel.js';
@@ -141,6 +142,12 @@ export { isValidSessionId } from './session-id.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
 import { getPendingGatedMcpServers } from './mcpApprovals.js';
+import {
+  applyProjectHooksApproval,
+  getProjectHooksApprovalState,
+  summarizeProjectHooks,
+  type ProjectHooksApproval,
+} from './hook-approvals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
@@ -1798,6 +1805,8 @@ export async function loadCliConfig(
     systemHooks?: Record<string, unknown>;
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
+    /** What the project hooks approval covers, when there is anything to gate. */
+    projectHooksApproval?: ProjectHooksApproval;
   },
   /**
    * Live-read provider for the set of disabled skill names. Forwarded to
@@ -1843,6 +1852,7 @@ export async function loadCliConfig(
    * construction may install the executor-boundary callback.
    */
   hostPolicy?: {
+    modelConfiguration?: ContentGeneratorConfig & { authType: AuthType };
     toolInvocationGuard?: ToolInvocationGuard;
     workflowAncestorTrustProvider?: ConfigParameters['workflowAncestorTrustProvider'];
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
@@ -1874,7 +1884,31 @@ export async function loadCliConfig(
    * `isAllowedBaseUrlsWorkspaceOnly`.
    */
   allowedBaseUrlsWorkspaceOnly?: boolean,
+  /**
+   * Live-read provider for the project hooks block the approval gate covers.
+   * The YOLO-exit transition re-gates against what the settings hold NOW, not
+   * the startup snapshot: a `/hooks` reload while YOLO-exempt can replace the
+   * block without re-gating. Like `disabledSkillNamesProvider`, callers MUST
+   * close over the live `LoadedSettings` instance, not the merged snapshot.
+   * Callers without one never reload settings mid-session, so the startup
+   * approval stays accurate for them.
+   */
+  projectHooksApprovalProvider?: () => ProjectHooksApproval | undefined,
 ): Promise<Config> {
+  const modelConfiguration = hostPolicy?.modelConfiguration;
+  if (modelConfiguration) {
+    settings = {
+      ...settings,
+      modelProviders: {},
+      providerProtocol: {},
+      fastModel: undefined,
+      compactionModel: undefined,
+      advisorModel: undefined,
+      visionModel: undefined,
+      imageModel: undefined,
+      modelFallbacks: undefined,
+    };
+  }
   assertKnownOmniSettingKeys(settings);
   const agentHostReadOnly = hostPolicy?.agentHostReadOnly === true;
   const sshWorkspace = agentHostReadOnly ? undefined : readSshWorkspace(cwd);
@@ -2384,21 +2418,52 @@ export async function loadCliConfig(
   // up-front provider validation above is what classifies invalid configuration;
   // this call's own settings reads must not re-wrap a resolver
   // defect as a user config error, so it stays unwrapped.
-  const resolvedCliConfig = resolveCliGenerationConfig({
-    argv: {
-      model: argv.model,
-      openaiApiKey: argv.openaiApiKey,
-      openaiBaseUrl: argv.openaiBaseUrl,
-      openaiLogging: argv.openaiLogging,
-      openaiLoggingDir: argv.openaiLoggingDir,
-    },
-    settings,
-    selectedAuthType,
-    env: process.env as Record<string, string | undefined>,
-    allowedBaseUrls: allowedModelBaseUrls,
-    qwenOAuthBuiltinsDisabled,
-    allowedBaseUrlsWorkspaceOnly,
-  });
+  const resolvedCliConfig: ReturnType<typeof resolveCliGenerationConfig> =
+    modelConfiguration
+      ? {
+          authType: modelConfiguration.authType,
+          model: modelConfiguration.model,
+          apiKey: modelConfiguration.apiKey ?? '',
+          baseUrl: modelConfiguration.baseUrl ?? '',
+          generationConfig: {
+            ...resolveCliGenerationConfig({
+              argv: {
+                model: modelConfiguration.model,
+                openaiApiKey: modelConfiguration.apiKey ?? '',
+                openaiBaseUrl: modelConfiguration.baseUrl ?? '',
+                openaiLogging: argv.openaiLogging,
+                openaiLoggingDir: argv.openaiLoggingDir,
+              },
+              settings: {
+                model: {
+                  enableOpenAILogging: settings.model?.enableOpenAILogging,
+                  openAILoggingDir: settings.model?.openAILoggingDir,
+                  reasoningEffort: settings.model?.reasoningEffort,
+                },
+              },
+              selectedAuthType: modelConfiguration.authType,
+              env: {},
+            }).generationConfig,
+            ...modelConfiguration,
+          },
+          sources: {},
+          warnings: [],
+        }
+      : resolveCliGenerationConfig({
+          argv: {
+            model: argv.model,
+            openaiApiKey: argv.openaiApiKey,
+            openaiBaseUrl: argv.openaiBaseUrl,
+            openaiLogging: argv.openaiLogging,
+            openaiLoggingDir: argv.openaiLoggingDir,
+          },
+          settings,
+          selectedAuthType,
+          env: process.env as Record<string, string | undefined>,
+          allowedBaseUrls: allowedModelBaseUrls,
+          qwenOAuthBuiltinsDisabled,
+          allowedBaseUrlsWorkspaceOnly,
+        });
 
   const { model: resolvedModel } = resolvedCliConfig;
 
@@ -2648,6 +2713,33 @@ export async function loadCliConfig(
     bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
+  // Project hooks are gated like project MCP servers (#4615): a cloned
+  // repository's `.qwen/settings.json` must not run commands unreviewed. Only
+  // a YOLO asked for on the command line skips it — a workspace can set
+  // `tools.approvalMode` itself — and only while the session stays in YOLO.
+  const commandLineYolo =
+    approvalMode === ApprovalMode.YOLO &&
+    (argv.approvalMode !== undefined || argv.yolo === true);
+  // Core loads no hooks at all under a shell execution sandbox.
+  const gateHooks = !(
+    bareMode ||
+    safeMode ||
+    settings.disableAllHooks ||
+    shellExecutionSandbox
+  );
+  // The merged block cannot tell workspace hooks apart, so it can never be
+  // approved: callers that load workspace hooks pass separated scopes.
+  const projectHooksState =
+    gateHooks && !commandLineYolo
+      ? hooksConfig
+        ? getProjectHooksApprovalState(hooksConfig.projectHooksApproval)
+        : summarizeProjectHooks(settings.hooks ?? {}).length > 0
+          ? 'pending'
+          : undefined
+      : undefined;
+  const projectHooksPendingApproval = gateHooks
+    ? projectHooksState !== undefined && projectHooksState !== 'approved'
+    : undefined;
   const advisorModel =
     bareMode || safeMode ? undefined : resolveAdvisorModel(argv, settings);
 
@@ -2795,6 +2887,9 @@ export async function loadCliConfig(
         hostPolicy?.executionEngine !== 'managed',
     ),
     pendingMcpServers,
+    projectHooksPendingApproval,
+    projectHooksRejected: projectHooksState === 'rejected',
+    projectHooksYoloExempt: commandLineYolo,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
       : undefined,
@@ -2823,6 +2918,10 @@ export async function loadCliConfig(
     usageStatisticsEnabled: resolveUsageStatisticsEnabled(
       settings.privacy?.usageStatisticsEnabled,
     ),
+    modelCatalogRefreshEnabled:
+      typeof settings.model?.catalogRefresh === 'boolean'
+        ? settings.model.catalogRefresh
+        : undefined,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
     plansDirectory: settings.plansDirectory,
@@ -3026,10 +3125,9 @@ export async function loadCliConfig(
     compactionModel: settings.compactionModel || undefined,
     imageModel: settings.imageModel || undefined,
     visionBridgeTimeoutMs: settings.visionBridgeTimeoutMs,
-    modelFallbacks: resolveModelFallbacks(
-      argv.fallbackModel,
-      settings.modelFallbacks,
-    ),
+    modelFallbacks: modelConfiguration
+      ? []
+      : resolveModelFallbacks(argv.fallbackModel, settings.modelFallbacks),
     // Use separated hooks if provided, otherwise fall back to merged hooks
     ...resolveHookSettingsForConfig(
       settings.hooks,
@@ -3137,6 +3235,26 @@ export async function loadCliConfig(
   }
 
   const config = new Config(configParams);
+  if (gateHooks && commandLineYolo) {
+    // Leaving YOLO ends the exemption: gate the hooks now, not on the next
+    // `/hooks` reload. Re-gate against the live block: a `/hooks` reload while
+    // YOLO-exempt skips the gate, so the startup snapshot may be stale. Keep
+    // listening — re-entering and leaving YOLO again must re-gate too.
+    const approval = hooksConfig?.projectHooksApproval;
+    config.onApprovalModeChange((mode) => {
+      if (mode === ApprovalMode.YOLO) return;
+      const state = applyProjectHooksApproval(
+        config,
+        projectHooksApprovalProvider
+          ? projectHooksApprovalProvider()
+          : approval,
+      );
+      void config.getHookSystem()?.reload();
+      if (state === 'pending') {
+        appEvents.emit(AppEvent.ProjectHooksPendingApprovalChanged);
+      }
+    });
+  }
   if (advisorModel) {
     validateCliAdvisorModel(config, advisorModel, {
       fastModel: settings.fastModel,

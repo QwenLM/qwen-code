@@ -11,6 +11,7 @@ import {
   isAllowedBaseUrlsWorkspaceOnly,
   loadSettings,
 } from '../config/settings.js';
+import { getSeparatedHookSettings } from '../config/hook-approvals.js';
 import { getAuthTypeFromEnv } from '../utils/modelConfigUtils.js';
 import { MemoryImportService } from './service.js';
 
@@ -28,7 +29,7 @@ export async function createLocalMemoryImportService(): Promise<MemoryImportServ
     } as unknown as CliArgs,
     process.cwd(),
     undefined,
-    undefined,
+    getSeparatedHookSettings(settings),
     undefined,
     undefined,
     undefined,

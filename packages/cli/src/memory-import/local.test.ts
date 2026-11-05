@@ -19,7 +19,12 @@ const mocks = vi.hoisted(() => ({
   loadCliConfigArgs: [] as unknown[],
 }));
 vi.mock('../config/settings.js', () => ({
-  loadSettings: () => mocks.settings,
+  loadSettings: () => ({
+    getSystemHooks: () => undefined,
+    getUserHooks: () => undefined,
+    getProjectHooks: () => undefined,
+    ...mocks.settings,
+  }),
   isAllowedBaseUrlsWorkspaceOnly: () => mocks.workspaceOnly,
 }));
 vi.mock('../config/config.js', () => ({
