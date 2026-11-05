@@ -46,7 +46,11 @@ import {
   escapeXml,
   escapeXmlWithinBudget,
 } from '@qwen-code/qwen-code-core/utils/xml.js';
-import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  SessionLimitExceededError,
+  SessionNotFoundError,
+  TotalSessionLimitExceededError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import { ACTIVE_WORK_CLOSE_TIMEOUT_MS } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   AcpSessionBridge,
@@ -889,16 +893,31 @@ export function createSubSessionLauncher(
         lastEventId = created.initialPrompt.lastEventId;
         turn = created.initialPrompt.turn;
       } else {
-        sub = await bridge.spawnOrAttach({
-          workspaceCwd: boundWorkspace,
-          sessionScope: 'thread', // force a fresh top-level session, never attach
-          // Record the caller as the sub-session's parent so the UI can link it
-          // back. Persisted into the sub-session's transcript at spawn time.
-          parentSessionId: info.callerSessionId,
-          ...(info.sourceType ? { sourceType: info.sourceType } : {}),
-          ...(info.sourceId ? { sourceId: info.sourceId } : {}),
-          ...(info.model ? { modelServiceId: info.model } : {}),
-        });
+        try {
+          sub = await bridge.spawnOrAttach({
+            workspaceCwd: boundWorkspace,
+            sessionScope: 'thread', // force a fresh top-level session, never attach
+            // Record the caller as the sub-session's parent so the UI can link
+            // it back. Persisted into the sub-session's transcript at spawn.
+            parentSessionId: info.callerSessionId,
+            ...(info.sourceType ? { sourceType: info.sourceType } : {}),
+            ...(info.sourceId ? { sourceId: info.sourceId } : {}),
+            ...(info.model ? { modelServiceId: info.model } : {}),
+          });
+        } catch (error) {
+          // The bridge's ADMISSION refusals are raised before any session
+          // exists, so they belong to the same class as the gates above. Only
+          // these two are marked: any other failure from this call may have
+          // created a session and dispatched a prompt, and must stay
+          // unclassified so a write-ahead caller does not retry it.
+          if (
+            error instanceof SessionLimitExceededError ||
+            error instanceof TotalSessionLimitExceededError
+          ) {
+            throw markPreSpawnRefusal(error);
+          }
+          throw error;
+        }
       }
       spawnedSession = sub;
       const sessionId = sub.sessionId;

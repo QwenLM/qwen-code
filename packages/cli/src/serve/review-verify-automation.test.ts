@@ -228,9 +228,12 @@ describe('startReviewVerifyAutomation', () => {
     installSkill();
     emit();
     const key = reviewEventDedupeKey(target);
+    // Observed INSIDE the mock but asserted OUTSIDE it: `consumeFor` wraps the
+    // launch in a catch, so an expect() that throws in here is swallowed as a
+    // spawn failure and the test stays green on the very regression it names.
+    let keyDurableAtSpawn: boolean | undefined;
     launch = vi.fn(async () => {
-      // The write-ahead record must already be durable at spawn time.
-      expect(readSpawnedKeys(root).has(key)).toBe(true);
+      keyDurableAtSpawn = readSpawnedKeys(root).has(key);
       return { sessionId: 'child-1' };
     });
     notices = [];
@@ -244,6 +247,7 @@ describe('startReviewVerifyAutomation', () => {
     });
     await automation.tick();
     expect(launch).toHaveBeenCalledTimes(1);
+    expect(keyDurableAtSpawn).toBe(true);
   });
 
   it('does not retry a failed spawn, and keeps the head recorded', async () => {

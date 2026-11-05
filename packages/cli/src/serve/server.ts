@@ -4020,17 +4020,27 @@ export function createServeApp(
           ? startReviewVerifyAutomation({
               boundWorkspace: runtime.workspaceCwd,
               launch: runtime.subSessionLauncher.launch,
-              // The same two refusals the launcher itself makes before it
-              // spawns: a caller this runtime's bridge does not know, and a
-              // caller that is already a sub-session. Checked here so an
-              // ineligible owner never reaches the write-ahead dedupe record.
+              // Transcripts live under this runtime's base; without it the
+              // liveness probe reads the default location and prunes every
+              // owner in a workspace that configured a custom one.
+              runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+              // Only a POSITIVE answer of "already a sub-session" is permanent
+              // ineligibility. The bridge holds resident sessions only, so a
+              // miss also covers an idle-reaped owner, one owned by another
+              // process, and a client that has not reconnected after a restart
+              // — all of which still own their durable event. Reporting those
+              // as `false` deleted the event while the observer had already
+              // advanced its cursor, so the head was skipped for good. `null`
+              // leaves it pending, which is what the three-state contract is
+              // for.
               parentEligible: async (sessionId) => {
+                let summary;
                 try {
-                  const summary = runtime.bridge.getSessionSummary(sessionId);
-                  return summary.parentSessionId === undefined;
+                  summary = runtime.bridge.getSessionSummary(sessionId);
                 } catch {
-                  return false;
+                  return null;
                 }
+                return summary.parentSessionId === undefined;
               },
             })
           : undefined;

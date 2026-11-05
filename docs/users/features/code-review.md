@@ -311,8 +311,9 @@ manually invoked `/verify-pr`, so treat it as you would that command.
   is logged and not retried, so a report is never published twice by accident;
   run `/verify-pr` by hand if you want it again. A refusal raised before anything
   started — the workspace is already at its sub-session limit, for instance —
-  proves nothing was published, so that handoff is retried on a later pass
-  instead of being skipped for good.
+  proves nothing was published, so that handoff is retried on later passes
+  rather than skipped. The retry is bounded — ten passes, about ten minutes —
+  after which the event is dropped and the log names the same manual command.
 - **Only `github.com` targets start today.** The handoff records the platform,
   but `/verify-pr` has no Aone or GitLab backend and no `--host` flag yet, and
   the workspace must carry the project skill (`.qwen/skills/verify-pr`).

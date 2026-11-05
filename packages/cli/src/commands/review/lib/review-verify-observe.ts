@@ -248,6 +248,14 @@ export function judgeCleanApproval(
   if (!Array.isArray(reviewNodes)) {
     return { clean: false, reason: 'reviews-unreadable' };
   }
+  // A cut page is not an absence. On a long-lived PR the approval of the
+  // current head can be pushed past the last 20 reviews, and reporting that as
+  // `no-current-head-approval` is indistinguishable from "nobody approved yet"
+  // — the watch would never fire and nothing would say why. The threads
+  // connection already fails closed this way; this one now does too.
+  if (pr.reviews?.pageInfo?.hasPreviousPage === true) {
+    return { clean: false, reason: 'reviews-truncated' };
+  }
   const approvers = [
     ...new Set(
       reviewNodes
@@ -352,8 +360,16 @@ export type SessionLiveness = (sessionId: string) => Promise<boolean | null>;
  *  only deleting the session ends them. `readCreationMetadata` is deliberately
  *  NOT used here — it coalesces a missing session to `{}`, which cannot tell
  *  "gone" from "exists" and would prune live watches. */
-export function sessionLivenessFor(root: string): SessionLiveness {
-  const sessions = new SessionService(root);
+export function sessionLivenessFor(
+  root: string,
+  runtimeBaseDir?: string,
+): SessionLiveness {
+  // The runtime base is not optional in a daemon: transcripts live under it, so
+  // a workspace with a custom runtime-output directory would read every owner
+  // as gone here and prune its watches and events. The EVENT directory is a
+  // different question — it hangs off QWEN_HOME, never the runtime base — but
+  // this probe reads transcripts, so it has to be told where they are.
+  const sessions = new SessionService(root, { runtimeBaseDir });
   return async (sessionId) => {
     try {
       const location =

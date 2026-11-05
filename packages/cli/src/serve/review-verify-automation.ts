@@ -186,6 +186,12 @@ export interface ReviewVerifyAutomationOptions {
   /** Session existence probe, injectable for tests. Three states — alive,
    *  gone, unknown — and an unknown owner is neither served nor cleaned up. */
   sessionExists?: SessionLiveness;
+  /** This runtime's session runtime base. Transcripts live under it, so the
+   *  liveness probe needs it: a workspace with a custom runtime-output
+   *  directory would otherwise read every owner as gone and prune its watches
+   *  and events. The event directory does NOT use it — that hangs off
+   *  QWEN_HOME — which is why only the probe is told. */
+  runtimeBaseDir?: string;
   /** Whether this runtime can actually use the owner as a sub-session parent.
    *  Existence is not eligibility: a headless or standalone review exports a
    *  session id that this runtime's bridge has never heard of, and a session
@@ -232,8 +238,17 @@ export function startReviewVerifyAutomation(
         reportedSettingsDegrade = true;
         notice(`review-verify: ${message}`);
       }).autoVerify);
-  const observe = opts.observe ?? observeWatches;
-  const liveness = opts.sessionExists ?? sessionLivenessFor(boundWorkspace);
+  const liveness =
+    opts.sessionExists ??
+    sessionLivenessFor(boundWorkspace, opts.runtimeBaseDir);
+  // The observation pass builds its OWN liveness probe by default, which would
+  // silently use the default runtime base and disagree with the file pass about
+  // who is alive. Hand it the same probe so one pass cannot prune what the
+  // other serves.
+  const observe =
+    opts.observe ??
+    ((root: string, o: { sessionId: string }) =>
+      observeWatches(root, { ...o, sessionExists: liveness }));
   // The daemon always supplies the real probe; the permissive default keeps the
   // launcher as the only authority for a caller that does not.
   const parentEligible = opts.parentEligible ?? (async () => true);
@@ -351,7 +366,7 @@ export function startReviewVerifyAutomation(
         }
         deferrals.delete(decision.key);
         notice(
-          `review-verify: spawn failed for ${label} (${reason}); not retried — run /verify-pr ${event.target.number} --publish manually`,
+          `review-verify: spawn failed for ${label} (${reason}); not retried — run /verify-pr ${event.target.number} --publish --repo ${event.target.ownerRepo} --expect-head ${event.target.headSha} manually`,
         );
       }
       removePendingEvent(eventPath);

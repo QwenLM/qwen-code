@@ -23,6 +23,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
+import { isOwnerRepo } from './gh.js';
 import { reviewTrustStateDir } from './paths.js';
 
 export const REVIEW_EVENT_SCHEMA_VERSION = 1;
@@ -249,8 +250,16 @@ export function readPendingReviewEvents(repositoryRoot: string): {
   let names: string[];
   try {
     names = readdirSync(dir).filter((name) => name.endsWith('.json'));
-  } catch {
-    return { events: [], unreadable: [] };
+  } catch (error) {
+    // Only an absent directory means "nothing pending". Swallowing EACCES or
+    // EIO as an empty queue stalls the automation with no diagnostic at all:
+    // `pass()` finds no owner and returns before the ledger read, so neither
+    // the unreadable report nor the pass-failure notice ever fires and the
+    // handoffs sit on disk forever. Let it throw; the tick reports it.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { events: [], unreadable: [] };
+    }
+    throw error;
   }
   const events: PendingReviewEvent[] = [];
   const unreadable: Array<{ path: string; reason: string }> = [];
@@ -281,7 +290,10 @@ export function readPendingReviewEvents(repositoryRoot: string): {
  * version that wrote it and this directory is only as trustworthy as the
  * account that owns it.
  */
-const EVENT_OWNER_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+// `ownerRepo` is interpolated into `--repo`, so the reader applies the SAME
+// predicate the producer does rather than a second, drifting copy of it: a
+// leading dash reads as a flag and `.`/`..` are path traversal. `gh.ts` pulls
+// only node:child_process, so sharing the rule costs this module nothing.
 const EVENT_HOST_RE = /^[A-Za-z0-9.-]+(?::\d+)?$/;
 /** A FULL commit id. An abbreviation is a different spelling of one commit and
  *  would key a second verification for it, so the entrances refuse one and the
@@ -311,7 +323,7 @@ function validateEvent(value: unknown): ReviewCleanEventV1 | null {
     typeof t.host !== 'string' ||
     !EVENT_HOST_RE.test(t.host) ||
     typeof t.ownerRepo !== 'string' ||
-    !EVENT_OWNER_REPO_RE.test(t.ownerRepo) ||
+    !isOwnerRepo(t.ownerRepo) ||
     !Number.isInteger(t.number) ||
     (t.number as number) < 1 ||
     typeof t.headSha !== 'string' ||

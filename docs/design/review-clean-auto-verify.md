@@ -79,8 +79,9 @@ Verified against the tree this change is built on:
 - Adding a platform later must not change the event schema or the consumer's
   control flow.
 - Adding a producer later must not change the consumer at all: any agent, a
-  script, or a person can record the same event, and an event that names no
-  qwen-code session is still actionable.
+  script, or a person can record the same event. Every producer must name the
+  session that owns the round — the verification becomes that session's
+  sub-session — and a handoff naming none is refused at the entrance.
 
 ## Non-goals
 

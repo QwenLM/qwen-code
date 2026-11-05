@@ -694,20 +694,26 @@ function emitVerifyEvent(input: {
   if (!identity) {
     return `save-artifact: clean round, but no PR plan report at ${planPath}; no verify event written.`;
   }
-  const platform = detectPlatformKind({ host: identity.host ?? undefined });
-  // Off GitHub there is no default host: a null here would emit an Aone event
-  // labelled github.com, the contradiction `review meta` refuses to print.
-  const host = identity.host ?? (platform === 'github' ? 'github.com' : null);
+  // The plan's host is the ONLY instance signal. `fetch-pr` records null when
+  // invoked without --host, and a null hint makes `detectPlatformKind` fall
+  // through to the cwd clone's origin — so one clean round would write an event
+  // in a github.com clone and none in an Aone-mirror clone. Defaulting the null
+  // to github.com is worse: an Aone round records the same null, and the event
+  // would aim /verify-pr at the wrong instance. With no recorded host there is
+  // nothing to name, so refuse and say how to fix it.
+  const host = identity.host;
   if (!host) {
-    return `save-artifact: clean round on ${platform} with no recorded host; no verify event written.`;
+    return `save-artifact: clean round, but the fetch plan recorded no host; no verify event written. Re-run fetch-pr with --host so the handoff can name the instance.`;
   }
+  // An explicit host never reaches the cwd probe, so this is cwd-independent.
+  const platform = detectPlatformKind({ host });
   // A round nobody owns can never be spawned: the consumer drops a sessionless
   // event as `no-owner`. Writing one anyway would report a handoff that cannot
   // happen — the headless CI case — so refuse here, the same refusal the
   // `verify-event` entrance makes, and name the way to still get the round.
   const sessionId = process.env['QWEN_CODE_SESSION_ID']?.trim() || undefined;
   if (!sessionId) {
-    return `save-artifact: clean round, but no owning session (QWEN_CODE_SESSION_ID is unset); no verify event written. Run /verify-pr ${identity.number} --publish by hand, or hand off with "qwen review verify-event --session-id <session>".`;
+    return `save-artifact: clean round, but no owning session (QWEN_CODE_SESSION_ID is unset); no verify event written. Run /verify-pr ${identity.number} --publish --repo ${identity.ownerRepo} --expect-head ${headSha} by hand, or hand off with "qwen review verify-event --session-id <session>".`;
   }
   try {
     const emitted = emitReviewCleanEvent({

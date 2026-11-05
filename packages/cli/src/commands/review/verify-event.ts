@@ -92,11 +92,24 @@ export function resolvePrCoordinates(args: {
       `--host is not a hostname: ${JSON.stringify(args.host)}`,
     );
   }
-  const platform = detectPlatformKind({ host: hostFlag });
+  // `gh` itself routes by GH_HOST, so an Enterprise checkout configured that
+  // way must not be recorded as github.com — the one host the consumer accepts,
+  // which would aim /verify-pr at the public instance for an internal PR. The
+  // env is read, not the cwd origin: this entrance stays offline. A non-GitHub
+  // value is recorded as-is and the consumer declines it with a reason, which
+  // is the honest outcome; silently relabelling it github.com is not.
+  const envHost = process.env['GH_HOST']?.trim().toLowerCase() || undefined;
+  if (envHost !== undefined && !HOSTNAME_RE.test(envHost)) {
+    throw new TypeError(
+      `GH_HOST is not a hostname: ${JSON.stringify(envHost)}`,
+    );
+  }
+  const platform = detectPlatformKind({ host: hostFlag ?? envHost });
   // Off GitHub there is no default host. Emitting `platform: 'aone'` beside
   // `host: 'github.com'` would hand the consumer a contradiction — the same
   // refusal `review meta` makes.
-  const host = hostFlag ?? (platform === 'github' ? 'github.com' : undefined);
+  const host =
+    hostFlag ?? envHost ?? (platform === 'github' ? 'github.com' : undefined);
   if (!host) {
     throw new TypeError(
       `a ${platform} target needs --host — there is no default host off GitHub`,
