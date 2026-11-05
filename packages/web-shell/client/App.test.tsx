@@ -12809,6 +12809,28 @@ describe('App subscription logout command', () => {
     testState.prompt = '/logout';
   });
 
+  it('waits for a session to connect before checking account command availability', async () => {
+    mockConnection.status = 'connecting';
+    const { rerender } = renderApp();
+    await flush();
+
+    expect(mockSessionActions.getContext).not.toHaveBeenCalled();
+
+    mockConnection.status = 'connected';
+    rerender();
+    await flush();
+
+    expect(mockSessionActions.getContext).toHaveBeenCalledWith({
+      silent: true,
+    });
+    expect(testState.latestChatEditorProps?.commands).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'logout' }),
+        expect.objectContaining({ name: 'upgrade' }),
+      ]),
+    );
+  });
+
   it.each(['/logout', '/upgrade'])(
     'hides and rejects %s when signed out despite the retained model',
     async (command) => {
