@@ -515,6 +515,7 @@ export interface DaemonLoopStop {
 
 export interface DaemonUiErrorEvent extends DaemonUiEventBase {
   type: 'error';
+  data?: unknown;
   text: string;
   recoverable?: boolean;
   code?: string;
