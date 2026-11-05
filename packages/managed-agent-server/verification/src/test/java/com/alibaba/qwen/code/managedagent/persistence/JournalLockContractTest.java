@@ -76,6 +76,26 @@ class JournalLockContractTest {
     }
 
     @Test
+    void guardFreePublicationWriterTakesNoTenantGuard() {
+        // An ordinary publication lane took the Session root instead of the
+        // guards; the writer must not take either after it (design
+        // 2026-11-04-managed-publication-placement).
+        transactions.execute(status -> raw.lockPublicationWriter(TENANT, "workspace", SESSION, "writer", 1, TOKEN,
+                false, false));
+        assertThat(trace.events().stream().filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
+                .map(StoreLockTrace.Event::sql)).noneMatch(sql -> sql.contains("ma_tenant_guard"));
+        trace.assertRootBeforeHead(TENANT, SESSION);
+        trace.assertOneTransaction(TENANT, SESSION);
+
+        trace.clear();
+        transactions.execute(status -> raw.lockPublicationWriter(TENANT, "workspace", SESSION, "writer", 1, TOKEN,
+                true, false));
+        assertThat(trace.events().stream().filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
+                .map(StoreLockTrace.Event::sql)).anyMatch(sql -> sql.contains("runtime_placement"))
+                .noneMatch(sql -> sql.contains("output_publication"));
+    }
+
+    @Test
     void ordinaryReplayReturnsBeforeLockingTheHead() {
         proxy.commit(TENANT, SESSION, TOKEN, genesis());
         trace.clear();

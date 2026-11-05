@@ -48,7 +48,7 @@ import {
 import { compactToolResultDisplayForRecording } from '../utils/toolResultDisplayCompaction.js';
 import { stripRuntimeSnapshotPrefix } from '../utils/runtimeModelPrefix.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
-import { tryGenerateSessionTitle } from './sessionTitle.js';
+import { modPromptTitleKey, tryGenerateSessionTitle } from './sessionTitle.js';
 import {
   readSessionTitleSidecar,
   sessionTitleSidecarPath,
@@ -307,7 +307,9 @@ export type ChatRecordProvenance =
   | 'goal_runtime'
   | 'system'
   /** Written on behalf of a workspace agent (session multi-agent). */
-  | 'external_agent';
+  | 'external_agent'
+  /** A prompt a Mod submitted with `$.prompt.submit`, not the person's. */
+  | 'mod_prompt';
 
 export type RecordToolResultOptions = {
   subtype?: 'code_mode_tool_result';
@@ -321,6 +323,31 @@ export type RecordToolResultOptions = {
       provenance: 'goal_runtime' | 'execution_output';
     }
 );
+
+// A prompt a Mod submitted keeps its turn's place in the title projection but
+// offers the title nothing, since the user did not type it. It is `null`, not
+// `''`, so it does not switch the title to the projection on its own.
+function titleText(record: ChatRecord): string | null | undefined {
+  if (record.provenance === 'mod_prompt') return null;
+  return (record.systemPayload as UserPromptRecordPayload | undefined)
+    ?.displayText;
+}
+
+/**
+ * The label a transcript's first user turn supports. Unlike `titleText`, this
+ * falls back to the record's own text parts for transcripts whose prompts
+ * never carried a `displayText` projection.
+ */
+function firstPromptLabelText(record: ChatRecord): string | undefined {
+  const projected = titleText(record)?.trim();
+  if (projected) return projected;
+  if (record.provenance === 'mod_prompt') return undefined;
+  return (
+    record.message?.parts
+      ?.find((part): part is { text: string } => 'text' in part)
+      ?.text?.trim() || undefined
+  );
+}
 
 function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
   return {
@@ -618,6 +645,10 @@ export interface UserPromptRecordPayload {
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
+  /** The Mod that submitted the prompt; the record's provenance says so too. */
+  mod?: string;
+  /** The Mod sent the prompt as the person's own words, so it is unframed. */
+  asUser?: true;
   /** UI-only annotations; interpreted by transcript consumers, not the model. */
   inputAnnotations?: unknown[];
   /** Daemon-owned attachment references used to restore prompt previews. */
@@ -1281,7 +1312,11 @@ export class ChatRecordingService {
   private currentSessionApprovalMode:
     | SessionApprovalModeRecordPayload
     | undefined;
-  private readonly userDisplayTextsForTitle: Array<string | undefined> = [];
+  private readonly userDisplayTextsForTitle: Array<string | null | undefined> =
+    [];
+  // The Mods' prompts as the model read them, which a title drawn from the
+  // conversation leaves out, as the projection does.
+  private readonly modPromptKeysForTitle = new Set<string>();
   /**
    * How many auto-title attempts have been made this process.
    *
@@ -1482,8 +1517,10 @@ export class ChatRecordingService {
     if (this.managedSink) return;
     try {
       const sidecarPath = this.titleSidecarPath();
-      const existing = readSessionTitleSidecar(sidecarPath);
-      if (existing && existing.source !== 'prompt') return;
+      // Any persisted label wins: a later prompt must not replace the first
+      // prompt's label, a rename, or an auto title. This also lets an
+      // image-only first prompt leave the slot open for the next text prompt.
+      if (readSessionTitleSidecar(sidecarPath)) return;
       const preferred = displayText?.trim();
       const text =
         preferred ||
@@ -1513,24 +1550,27 @@ export class ChatRecordingService {
     try {
       const sidecarPath = this.titleSidecarPath();
       const existing = readSessionTitleSidecar(sidecarPath);
-      if (existing && existing.source !== 'prompt') return;
       const customTitle = this.currentCustomTitle?.trim();
       if (customTitle) {
-        writeSessionTitleSidecar(
-          sidecarPath,
-          customTitle,
-          this.currentTitleSource ?? 'manual',
-        );
+        const source = this.currentTitleSource ?? 'manual';
+        if (
+          existing?.source === source &&
+          existing.displayName === customTitle
+        ) {
+          return;
+        }
+        writeSessionTitleSidecar(sidecarPath, customTitle, source);
         return;
       }
+      // An explicit name already on disk outranks a prompt-derived guess.
+      if (existing && existing.source !== 'prompt') return;
       const prompt = promptDisplayText?.trim();
-      if (prompt) {
-        writeSessionTitleSidecar(
-          sidecarPath,
-          truncateTitleForList(prompt),
-          'prompt',
-        );
+      if (!prompt) return;
+      const label = truncateTitleForList(prompt);
+      if (existing?.source === 'prompt' && existing.displayName === label) {
+        return;
       }
+      writeSessionTitleSidecar(sidecarPath, label, 'prompt');
     } catch {
       // Best-effort: a missing sidecar is a label gap, not a resume failure.
     }
@@ -1558,14 +1598,18 @@ export class ChatRecordingService {
     this.activeBranchBaseUuid = null;
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
+    this.modPromptKeysForTitle.clear();
     if (!sessionData) return;
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
+    // Tracked separately from `userDisplayTextsForTitle`: that buffer keeps
+    // only the newest 20 prompts, so its head is not the session's first turn.
+    let firstPromptText: string | undefined;
     for (const record of sessionData.conversation.messages) {
       if (record.type === 'user' && record.subtype === undefined) {
-        this.trackUserDisplayTextForTitle(
-          (record.systemPayload as UserPromptRecordPayload | undefined)
-            ?.displayText,
-        );
+        this.trackTitleText(record);
+        if (firstPromptText === undefined) {
+          firstPromptText = firstPromptLabelText(record);
+        }
       }
       if (record.type !== 'system') continue;
       if (record.subtype === 'custom_title') {
@@ -1612,13 +1656,30 @@ export class ChatRecordingService {
     if (this.currentSourceType) {
       this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
-    this.seedTitleSidecar(this.userDisplayTextsForTitle[0]);
+    this.seedTitleSidecar(firstPromptText);
   }
 
-  private trackUserDisplayTextForTitle(displayText: string | undefined): void {
-    this.userDisplayTextsForTitle.push(displayText);
+  private trackTitleText(record: ChatRecord): void {
+    this.userDisplayTextsForTitle.push(titleText(record));
     if (this.userDisplayTextsForTitle.length > MAX_TITLE_USER_DISPLAY_TEXTS) {
       this.userDisplayTextsForTitle.shift();
+    }
+    // A prompt sent as the person's words reads as theirs to the model too,
+    // and its bare text would also match a prompt the person typed alike.
+    const key =
+      record.provenance === 'mod_prompt' &&
+      !(record.systemPayload as UserPromptRecordPayload | undefined)?.asUser
+        ? modPromptTitleKey(record.message?.parts ?? [])
+        : undefined;
+    if (key?.trim()) {
+      // A key submitted again is the newest, so it is evicted last.
+      this.modPromptKeysForTitle.delete(key);
+      this.modPromptKeysForTitle.add(key);
+      // Only recent messages reach a title.
+      if (this.modPromptKeysForTitle.size > MAX_TITLE_USER_DISPLAY_TEXTS) {
+        const [oldest] = this.modPromptKeysForTitle;
+        this.modPromptKeysForTitle.delete(oldest!);
+      }
     }
   }
 
@@ -2308,12 +2369,10 @@ export class ChatRecordingService {
           .records as ChatRecord[];
         this.rebuildTurnBoundaries(active);
         this.userDisplayTextsForTitle.length = 0;
+        this.modPromptKeysForTitle.clear();
         for (const record of active) {
           if (record.type === 'user' && record.subtype === undefined) {
-            this.trackUserDisplayTextForTitle(
-              (record.systemPayload as UserPromptRecordPayload | undefined)
-                ?.displayText,
-            );
+            this.trackTitleText(record);
           }
         }
         return result;
@@ -2642,6 +2701,9 @@ export class ChatRecordingService {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        ...(promptPayload?.mod !== undefined && {
+          provenance: 'mod_prompt' as const,
+        }),
         executionContext: this.getExecutionContext(),
         ...(daemonPromptId ? { daemonPromptId } : {}),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
@@ -2651,27 +2713,31 @@ export class ChatRecordingService {
       };
       // Advance rewind associations only after the record is built, so a
       // rejected message cannot skew the projection.
-      const firstPrompt = this.userDisplayTextsForTitle.length === 0;
-      this.trackUserDisplayTextForTitle(promptPayload?.displayText);
+      this.trackTitleText(record);
       this.turnParentUuids.push(record.parentUuid ?? null);
       this.turnPromptIds.push(getRecordRewindId(record));
       this.turnDaemonPromptIds.push(record.daemonPromptId);
       this.appendRecord(record);
       // The sidecar write is best-effort and runs after the transcript
-      // append, so an unwritable label path can never drop the message.
-      if (firstPrompt) {
-        this.persistPromptDerivedTitle(
-          record.message,
-          promptPayload?.displayText,
-        );
-      }
+      // append, so an unwritable label path can never drop the message. It
+      // only fills a missing label: a persisted prompt or custom title is
+      // never replaced by a later prompt.
+      this.persistPromptDerivedTitle(
+        record.message,
+        promptPayload?.displayText,
+      );
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
     }
   }
 
-  getUserDisplayTextsForTitle(): ReadonlyArray<string | undefined> {
+  getUserDisplayTextsForTitle(): ReadonlyArray<string | null | undefined> {
     return this.userDisplayTextsForTitle;
+  }
+
+  /** The keys of the messages the Mods submitted, which a title leaves out. */
+  getModPromptKeysForTitle(): ReadonlySet<string> {
+    return this.modPromptKeysForTitle;
   }
 
   /** User turns in the active transcript: the boundaries `/rewind` uses. */
@@ -3191,6 +3257,7 @@ export class ChatRecordingService {
           this.config,
           controller.signal,
           this.userDisplayTextsForTitle,
+          this.modPromptKeysForTitle,
         );
         if (!outcome.ok) return;
         if (controller.signal.aborted) return;
@@ -3473,6 +3540,7 @@ export class ChatRecordingService {
       this.turnPromptIds = [];
       this.turnDaemonPromptIds = [];
       this.userDisplayTextsForTitle.length = 0;
+      this.modPromptKeysForTitle.clear();
       for (const record of records) {
         if (
           record.type === 'user' &&
@@ -3491,10 +3559,7 @@ export class ChatRecordingService {
           this.turnDaemonPromptIds.push(record.daemonPromptId);
         }
         if (record.type === 'user' && record.subtype === undefined)
-          this.trackUserDisplayTextForTitle(
-            (record.systemPayload as UserPromptRecordPayload | undefined)
-              ?.displayText,
-          );
+          this.trackTitleText(record);
       }
     };
     let committed = false;

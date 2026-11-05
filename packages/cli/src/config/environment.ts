@@ -22,6 +22,7 @@ import {
   resetLoaderKeyRejectionReportingForTesting,
 } from './shared-env-keys.js';
 import { VERIFY_PR_COORDINATE_ENV } from './verify-pr-coordinates.js';
+import { isWithinRoot } from './path-comparison.js';
 import { publishPendingCompileCache } from './compile-cache.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
@@ -550,11 +551,41 @@ export interface EnvFileReadFailure {
 export function readProjectEnvFiles(
   settings: Settings,
   startDir: string,
+  workspaceTrusted?: boolean,
 ): Record<string, Record<string, string> | null> {
   const userLevelPaths = getUserLevelEnvPaths();
+  // `hashProjectHooks` hashes this map, and the sandbox mounts only the
+  // workspace: an ancestor `.env` the host can read does not exist inside the
+  // container, so hashing it made the container-side hash disagree and
+  // withheld hooks the host had approved. Keep the map to files the workspace
+  // itself owns; `findEnvFiles` still discovers ancestors for the runtime env.
+  let workspaceRoot = path.resolve(startDir);
+  try {
+    workspaceRoot = fs.realpathSync(workspaceRoot);
+  } catch {
+    // Match findEnvFiles(): use the resolved path when realpath is unavailable.
+  }
+  const isInsideWorkspace = (filePath: string): boolean => {
+    let resolved: string;
+    try {
+      // Resolve the candidate's link target too: a workspace `.env` symlinked
+      // outside the workspace is hashed on the host and dangles in the sandbox,
+      // which is the same host/container divergence this filter removes.
+      resolved = fs.realpathSync(filePath);
+    } catch {
+      return false;
+    }
+    return isWithinRoot(resolved, workspaceRoot);
+  };
   const files: Record<string, Record<string, string> | null> = {};
-  for (const file of findEnvFiles(settings, startDir, userLevelPaths)) {
+  for (const file of findEnvFiles(
+    settings,
+    startDir,
+    userLevelPaths,
+    workspaceTrusted,
+  )) {
     if (userLevelPaths.has(path.normalize(file))) continue;
+    if (!isInsideWorkspace(file)) continue;
     try {
       files[file] = dotenv.parse(fs.readFileSync(file, 'utf-8'));
     } catch {
