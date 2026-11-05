@@ -858,6 +858,61 @@ describe('handleGroup', () => {
     expect(String(env['text']).startsWith('/')).toBe(false);
   });
 
+  it('keeps a routed bot !command in the model context instead of the bang gate', async () => {
+    const ch = makeChannel({
+      forwardBotMessages: true,
+      messageRoutes: { '/proj': '/proj' },
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> !echo hi',
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+        author: {
+          member_openid: 'bot-1',
+          bot: true,
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe('[bot] !echo hi');
+  });
+
+  it('human routed messages keep their text unchanged (no [bot] tag)', async () => {
+    const ch = makeChannel({
+      messageRoutes: { '/proj': '/proj' },
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> !echo hi',
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+        author: {
+          member_openid: 'human-1',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe('!echo hi');
+  });
+
   it('人类消息在 forwardBotMessages 开启时被转发且不打 [bot] 标签', async () => {
     const ch = makeChannel({ forwardBotMessages: true });
     const pvt = ch as unknown as QQChannelRaw;
