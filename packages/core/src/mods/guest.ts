@@ -188,6 +188,8 @@ export const MOD_GUEST_FACTORY = String.raw`
           });
         }
       },
+      // Async, so an input too large for the bridge rejects like a wrong shape.
+      prompt: { submit: async input => invoke('prompt.submit', input) },
       turn: { abort: input => invoke('turn.abort', input) },
       ui: {
         log: (text, options = {}) => {

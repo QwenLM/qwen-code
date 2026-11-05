@@ -224,6 +224,15 @@ const EN: Messages = {
   'localControl.connectionRetry':
     'Connection interrupted. Retry to refresh the QR code.',
   'daemon.connection.retry': 'Retry connection',
+  'hooksApproval.title': 'This project wants to run hooks',
+  'hooksApproval.description':
+    'Hooks in this project\u2019s .qwen/settings.json run commands on your machine. They stay disabled until you approve this exact configuration. Any change to the hooks or the project .env asks again.',
+  'hooksApproval.scopeNote':
+    'Approving records a decision for this project only. If folder trust is enabled and this folder is not trusted, the hooks stay disabled until the folder is trusted.',
+  'hooksApproval.approve': 'Approve hooks',
+  'hooksApproval.reject': 'Keep disabled',
+  'hooksApproval.failed':
+    'The decision could not be saved. Nothing changed; please try again.',
   'daemon.capacity.exhausted':
     'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
   'managed.title': 'Managed Agents',
@@ -2379,6 +2388,8 @@ const EN: Messages = {
     `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'}`,
   'sidebar.overview.hooksDisabled': (v) =>
     `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'} (disabled)`,
+  'sidebar.overview.hooksUntrusted': (v) =>
+    `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'}, ${v?.untrusted ?? 0} not loaded (folder not trusted). Enable security.folderTrust.enabled and trust the folder, or run qwen interactively to review.`,
   'sidebar.forceRemoveWorkspace': 'Force remove',
   'sidebar.removeWorkspaceTitle': 'Remove workspace',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -2759,7 +2770,9 @@ const EN: Messages = {
   'language.invalid': `Invalid language. Available: ${WEB_SHELL_LANGUAGES.join(', ')}`,
   'language.options': 'Available options:',
   'language.set': 'Set UI language',
-  'language.usage': `Usage: /language ui [${WEB_SHELL_LANGUAGES.join('|')}] | output <language>`,
+  'language.refreshFailed':
+    'UI language saved, but it could not be fully applied.',
+  'language.usage': `Usage: /language ui [${WEB_SHELL_LANGUAGES.join('|')}] [--project|--global] | output <language>`,
   'localCommand.noSession':
     'No active session yet. Send your first message before using this command.',
   'localCommand.diffNoWorkspace':
@@ -4975,6 +4988,14 @@ const ZH: Messages = {
   'daemon.connection.unavailable': '无法连接服务。',
   'localControl.connectionRetry': '连接已中断，请点击重试刷新二维码。',
   'daemon.connection.retry': '重试连接',
+  'hooksApproval.title': '此项目想要运行 hooks',
+  'hooksApproval.description':
+    '此项目 .qwen/settings.json 中的 hooks 会在你的机器上执行命令。只有你批准这份确切配置后它们才会启用；hooks 或项目 .env 发生变化时会重新询问。',
+  'hooksApproval.scopeNote':
+    '批准只记录针对此项目的决定。若启用了文件夹信任且此文件夹未受信任，hooks 仍会保持禁用，直到文件夹受信任。',
+  'hooksApproval.approve': '批准 hooks',
+  'hooksApproval.reject': '保持禁用',
+  'hooksApproval.failed': '决策未能保存，一切保持原样，请重试。',
   'daemon.capacity.exhausted':
     '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
   'managed.title': '托管 Agent',
@@ -7051,6 +7072,8 @@ const ZH: Messages = {
     `${v?.files ?? 0} 个上下文文件，${v?.rules ?? 0} 条规则`,
   'sidebar.overview.hooksDetail': (v) => `${v?.count ?? 0} 个 hook`,
   'sidebar.overview.hooksDisabled': (v) => `${v?.count ?? 0} 个 hook（已禁用）`,
+  'sidebar.overview.hooksUntrusted': (v) =>
+    `${v?.count ?? 0} 个 hook，${v?.untrusted ?? 0} 个未加载（目录未受信任）。请启用 security.folderTrust.enabled 并信任该目录，或在交互式终端中运行 qwen 审查。`,
   'sidebar.forceRemoveWorkspace': '强制移除',
   'sidebar.removeWorkspaceTitle': '移除工作区',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -7400,7 +7423,8 @@ const ZH: Messages = {
   'language.invalid': `语言无效。可用值：${WEB_SHELL_LANGUAGES.join(', ')}`,
   'language.options': '可用选项：',
   'language.set': '设置 UI 语言',
-  'language.usage': `用法：/language ui [${WEB_SHELL_LANGUAGES.join('|')}] | output <language>`,
+  'language.refreshFailed': 'UI 语言已保存，但未能完全生效。',
+  'language.usage': `用法：/language ui [${WEB_SHELL_LANGUAGES.join('|')}] [--project|--global] | output <language>`,
   'localCommand.noSession':
     '当前还没有会话。请先发送第一条消息，再使用这个命令。',
   'localCommand.diffNoWorkspace': '当前还没有可用于查看变更的工作区。',
