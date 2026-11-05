@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
+import com.alibaba.qwen.code.runtimebroker.RuntimeRequestKeys;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
@@ -1166,8 +1167,8 @@ class WorkspaceRuntimeTest {
         authority.claim(session.workspace(), fixture.record());
         var closeProperties = new ManagedAgentProperties();
         closeProperties.getHarness().setWorkspaceFilesEnabled(true);
-        var closeStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), java.time.Clock.systemUTC(), ignored -> {},
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry(jdbc), closeProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var closeStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), java.time.Clock.systemUTC(), ignored -> {},
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry(jdbc), closeProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         new TransactionTemplate(new DataSourceTransactionManager(dataSource)).execute(status -> {
             var admittedClose = closeStore.beginWorkspaceClose(session.tenantId(), session.sessionId(), "actor", "actor", "close", "digest", true);
             return closeStore.claimOperation(session.tenantId(), session.sessionId(), admittedClose.operation().operationId(),
@@ -1393,6 +1394,36 @@ class WorkspaceRuntimeTest {
             assertThat(error.isRetryable()).isTrue();
             return false;
         }
+    }
+
+    @Test
+    void heldTenantGuardDoesNotBlockMembershipChanges() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        String storageKey = com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage.key(
+                session.tenantId(), session.workspace().getStorageId());
+        try (var connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try (var lock = connection.prepareStatement("SELECT tenant_id FROM ma_tenant_guard"
+                    + " WHERE tenant_key = ? AND guard_domain = 'runtime_placement' FOR UPDATE")) {
+                lock.setString(1, RuntimeRequestKeys.valueKey(session.tenantId()));
+                try (var rows = lock.executeQuery()) {
+                    assertThat(rows.next()).isTrue();
+                }
+            }
+            authority.claim(session.workspace(), fixture.record());
+            assertThat(memberCount(storageKey)).isEqualTo(1L);
+            assertThat(authority.beginRewind(session.workspace(), fixture.record())).isTrue();
+            authority.endRewind(session.workspace(), fixture.record());
+            authority.release(session.workspace(), fixture.record());
+            assertThat(memberCount(storageKey)).isZero();
+            connection.rollback();
+        }
+    }
+
+    private long memberCount(String storageKey) {
+        return jdbc.queryForObject("SELECT member_count FROM ma_storage_owner WHERE storage_key = ?",
+                Long.class, storageKey);
     }
 
     private SessionRecord createSession(String storage, String cwd) {

@@ -189,6 +189,80 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(scripts.bundle).toBeTruthy();
   });
 
+  it('gates every pool-capable Java job and calibrates its floor', () => {
+    const jobs = parse(workflow).jobs;
+    // Fail closed: only these two jobs are hosted by construction, so every
+    // other job — including one routed through a runs-on expression or a job
+    // output — must carry the gate. The allowlist is the thing a reviewer
+    // sees; rewording an expression can no longer walk a lane out of the
+    // corpus while the suite stays green.
+    const hostedOnly = new Set(['hosted-harness-mysql', 'hosted-failover-e2e']);
+    const gated = new Set();
+
+    for (const [name, definition] of Object.entries(jobs)) {
+      const steps = definition.steps ?? [];
+      const gateIndex = steps.findIndex(
+        (candidate) => candidate.name === 'Disk floor gate (self-hosted)',
+      );
+      if (hostedOnly.has(name)) {
+        // runner.environment is github-hosted there, so the step's `if:` is
+        // permanently false and a gate reads as protection without being any.
+        expect(gateIndex, name).toBe(-1);
+        continue;
+      }
+      expect(gateIndex, name).toBeGreaterThan(-1);
+      expect(steps[gateIndex - 1]?.uses, name).toMatch(/^actions\/checkout@/);
+      expect(steps[gateIndex].if, name).toBe(
+        "${{ runner.environment == 'self-hosted' }}",
+      );
+      expect(steps[gateIndex].run, name).toBe(
+        'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"',
+      );
+      // continue-on-error would neuter the gate while every other assertion
+      // stays true; the job must actually stop on a saturated host.
+      expect(steps[gateIndex]['continue-on-error'], name).toBeUndefined();
+      gated.add(name);
+    }
+
+    // A job that matches neither list fails here instead of shipping ungated.
+    expect(gated.size + hostedOnly.size).toBe(Object.keys(jobs).length);
+
+    // The shared 2 GiB default is a light-lane floor. These lanes install,
+    // build and fork JUnit, so they need the repo's build-sized figure; the
+    // broker lanes are refused by RocketMQ's own used-ratio rule long before
+    // free bytes run out, which no absolute floor can express (#16003).
+    const heavyFloors = {
+      test: 8388608,
+      'mysql-integration': 8388608,
+      'event-transport-broker': 8388608,
+      'event-transport-multi-node': 8388608,
+      'daemon-e2e': 8388608,
+    };
+    for (const [name, kib] of Object.entries(heavyFloors)) {
+      expect(
+        Number(jobs[name].env?.DISK_FLOOR_MIN_FREE_KB),
+        `${name}: DISK_FLOOR_MIN_FREE_KB`,
+      ).toBe(kib);
+    }
+    // Remaining on the shared default on purpose: its Maven run is a single
+    // migration pass, and raising the shared value would move every other
+    // lane's gate (run-release-docker-integration.sh depends on that split).
+    expect(
+      jobs['flyway-migrations'].env?.DISK_FLOOR_MIN_FREE_KB,
+    ).toBeUndefined();
+
+    for (const name of [
+      'event-transport-broker',
+      'event-transport-multi-node',
+    ]) {
+      expect(
+        Number(jobs[name].env?.DISK_FLOOR_MAX_USED_PCT),
+        `${name}: DISK_FLOOR_MAX_USED_PCT`,
+      ).toBe(90);
+    }
+    expect(jobs['test'].env?.DISK_FLOOR_MAX_USED_PCT).toBeUndefined();
+  });
+
   it('serializes the host-shared Maven cache write-back on each physical ECS host', () => {
     const block = job('test');
     expect(block).toContain(
@@ -393,6 +467,13 @@ describe('SDK Java self-hosted workflow guards', () => {
       'qwen-managed-agent-parent',
       'qwen-managed-agent-persistence',
       'qwen-managed-agent-runtime-broker',
+      'qwen-managed-agent-runtime-external',
+      'qwen-managed-agent-runtime-host',
+      'qwen-managed-agent-runtime-http',
+      'qwen-managed-agent-runtime-kubernetes',
+      'qwen-managed-agent-runtime-local',
+      'qwen-managed-agent-runtime-ssh',
+      'qwen-managed-agent-runtime-static',
       'qwen-managed-agent-server',
       'qwen-managed-agent-verification',
       'qwencode-sdk',
@@ -528,6 +609,13 @@ describe('SDK Java self-hosted workflow guards', () => {
             'qwen-managed-agent-contracts',
             'qwen-managed-agent-control-plane',
             'qwen-managed-agent-runtime-broker',
+            'qwen-managed-agent-runtime-external',
+            'qwen-managed-agent-runtime-host',
+            'qwen-managed-agent-runtime-http',
+            'qwen-managed-agent-runtime-kubernetes',
+            'qwen-managed-agent-runtime-local',
+            'qwen-managed-agent-runtime-ssh',
+            'qwen-managed-agent-runtime-static',
             'qwen-managed-agent-persistence',
             'qwen-managed-agent-adapters',
             'qwen-managed-agent-server',
@@ -584,6 +672,13 @@ describe('SDK Java self-hosted workflow guards', () => {
             'qwen-managed-agent-contracts',
             'qwen-managed-agent-control-plane',
             'qwen-managed-agent-runtime-broker',
+            'qwen-managed-agent-runtime-external',
+            'qwen-managed-agent-runtime-host',
+            'qwen-managed-agent-runtime-http',
+            'qwen-managed-agent-runtime-kubernetes',
+            'qwen-managed-agent-runtime-local',
+            'qwen-managed-agent-runtime-ssh',
+            'qwen-managed-agent-runtime-static',
             'qwen-managed-agent-persistence',
             'qwen-managed-agent-adapters',
             'qwen-managed-agent-server',
@@ -1764,6 +1859,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(mysql.strategy).toBeUndefined();
     expect(JSON.stringify(mysql)).not.toMatch(/mariadb|matrix\./i);
     expect(mysql.env).toEqual({
+      // The lane writes a database, two Maven runs and the JUnit forks into
+      // the same host volume, so it carries the heavy floor (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608',
       MYSQL_CONTAINER:
         'qwen-code-sdk-java-mysql-${{ github.run_id }}-${{ github.run_attempt }}',
     });
@@ -2177,7 +2275,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // artifact in the shared cache the next seed hardlinks from.
     expect(step.run).toContain('cd "${RUNNER_TEMP}/m2-repo"');
     expect(step.run).toContain(
-      "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \\) -prune -o -type f -links 1 -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?",
+      "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-runtime-external -o -path ./com/alibaba/qwen-managed-agent-runtime-host -o -path ./com/alibaba/qwen-managed-agent-runtime-http -o -path ./com/alibaba/qwen-managed-agent-runtime-local -o -path ./com/alibaba/qwen-managed-agent-runtime-kubernetes -o -path ./com/alibaba/qwen-managed-agent-runtime-ssh -o -path ./com/alibaba/qwen-managed-agent-runtime-static -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \\) -prune -o -type f -links 1 -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?",
     );
     expect(step.run).not.toMatch(/tar [^\n]*-xf/);
     expect(step.run).toContain(

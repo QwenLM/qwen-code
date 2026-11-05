@@ -302,9 +302,8 @@ class ManagedApprovalSelectionTest {
         properties.getHarness().setWorkspaceShellEnabled(shell);
         properties.getHarness().setApprovalMode(mode);
         var result =
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
-                        jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        result.setManagedAgentDefinitionStore(definitions);
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
+                        jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), definitions, null);
         return result;
     }
 
