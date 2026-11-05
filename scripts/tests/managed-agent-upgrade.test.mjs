@@ -321,10 +321,24 @@ test('refuses only the URLs fetch refuses', async () => {
     ],
     ['//svc:s3cret@cp.example.com:8443', '//***@cp.example.com:8443'],
     ['http://a:b@c@127.0.0.1:70000/x', 'http://***@127.0.0.1:70000/x'],
-    // An empty user name parses, and leaves nothing to hide.
-    ['http://@127.0.0.1:4170', 'http://@127.0.0.1:4170'],
+    // A password that starts with digits does parse, as a port, with the
+    // rest of it in the path, the query or the fragment.
+    [
+      'http://svc:2024#s3cret@harness.internal:4170',
+      'http://***@harness.internal:4170',
+    ],
+    [
+      'https://svc:12/s3cret@cp.example.com:8443',
+      'https://***@cp.example.com:8443',
+    ],
+    [
+      'http://svc:2024?s3cret@cp.example.com:8443/x',
+      'http://***@cp.example.com:8443/x',
+    ],
+    // So an @ anywhere hides all before it, an empty user name's too.
+    ['http://@127.0.0.1:4170', 'http://***@127.0.0.1:4170'],
+    ['http://127.0.0.1:8080/a@b?c=d@e', 'http://***@e'],
     ['http://127.0.0.1:6000', 'http://127.0.0.1:6000'],
-    ['http://127.0.0.1:8080/a@b?c=d@e', 'http://127.0.0.1:8080/a@b?c=d@e'],
     ['proxy.test:8443', 'proxy.test:8443'],
     ['http://[fe80::1%eth0]:8080', 'http://[fe80::1%eth0]:8080'],
   ]) {
@@ -984,6 +998,42 @@ test('reads the Flyway scripts out of the nested jar of a module', async (t) => 
   await assert.rejects(
     migrationScripts(jar),
     /^Error: .*server\.jar ships two different copies of db\/managed-schema\/V1__base\.sql, in BOOT-INF\/classes and in BOOT-INF\/lib\/qwen-managed-agent-persistence\.jar$/,
+  );
+  // The same holds for modules, and the error names the module that shipped
+  // the path first, past a matching copy in another.
+  const inModules = (text) =>
+    zip([
+      [
+        'BOOT-INF/lib/qwen-managed-agent-persistence.jar',
+        zip([['db/managed-schema/V1__base.sql', 'create table a;\n']]),
+        0,
+      ],
+      [
+        'BOOT-INF/lib/library.jar',
+        zip([
+          ['org/A.class', 'x'],
+          ['db/managed-schema/V1__base.sql', 'create table a;\n'],
+        ]),
+        0,
+      ],
+      [
+        'BOOT-INF/lib/qwen-managed-agent-adapters.jar',
+        zip([
+          ['db/managed-schema/V2__more.sql', 'create table b;\n'],
+          ['db/managed-schema/V1__base.sql', text, 8],
+        ]),
+        0,
+      ],
+    ]);
+  await writeFile(jar, inModules('create table a;\n'));
+  assert.deepEqual(Object.fromEntries(await migrationScripts(jar)), {
+    'db/managed-schema/V1__base.sql': sha256('create table a;\n'),
+    'db/managed-schema/V2__more.sql': sha256('create table b;\n'),
+  });
+  await writeFile(jar, inModules('create table c;\n'));
+  await assert.rejects(
+    migrationScripts(jar),
+    /^Error: .*server\.jar ships two different copies of db\/managed-schema\/V1__base\.sql, in BOOT-INF\/lib\/qwen-managed-agent-persistence\.jar and in BOOT-INF\/lib\/qwen-managed-agent-adapters\.jar$/,
   );
 
   // A nested jar that is none, or whose directory runs past its end, is a
@@ -2591,6 +2641,11 @@ test('start and verify use server.env when the configuration does not resolve', 
   for (const harnessUrl of [
     'http://127.0.0.1:4172/?tenant=acme',
     'http://svc:s3cret@127.0.0.1:4172',
+    // java.net.URI reads user information where the URL parser finds none.
+    'http://@127.0.0.1:4172',
+    'http://:@127.0.0.1:4172',
+    ' http:\\\\@127.0.0.1:4172',
+    'http://svc:2024#s3cret@127.0.0.1:4172',
   ]) {
     await writeFile(
       env,
@@ -2599,22 +2654,31 @@ test('start and verify use server.env when the configuration does not resolve', 
     assert.equal(await host.upgrade('start'), 1, harnessUrl);
     assert.match(
       host.output.at(-1),
-      /^start refused: The control plane reaches qwen-hosted-harness at .*, which carries (a query or a fragment|a user name or password); correct/,
+      /^start refused: The control plane reaches qwen-hosted-harness at "([^"]*\*\*\*@127\.0\.0\.1:4172\/?|http:\/\/127\.0\.0\.1:4172\/\?tenant=acme)", which carries (a query or a fragment|a user name or password|an @ before its host, which java\.net\.URI reads as user information); correct/,
     );
     assert.ok(!host.output.join('\n').includes('s3cret'), harnessUrl);
     assert.ok(!host.output.includes(`Starting ${HARNESS}`), harnessUrl);
   }
-  await writeFile(
-    env,
-    `${base}QWEN_MANAGED_AGENT_HARNESS_BASE_URL=http://qwen_harness:4172\n`,
-  );
+  // The rest goes to the preflight: a host with an underscore, and an @
+  // past a \, which ends the authority of an http(s) URL. systemd reads a
+  // backslash in an EnvironmentFile as an escape, so the file doubles it.
   host.preflightStatus = 1;
-  assert.equal(await host.upgrade('start'), 1);
-  assert.ok(host.output.includes(`Starting ${HARNESS}`));
-  assert.equal(
-    host.output.at(-1),
-    `start refused: The preflight failed, so ${SERVER} stays stopped; fix its FAIL rows and run start again.`,
-  );
+  for (const harnessUrl of [
+    'http://qwen_harness:4172',
+    'http://127.0.0.1:4172\\\\@x',
+  ]) {
+    await writeFile(
+      env,
+      `${base}QWEN_MANAGED_AGENT_HARNESS_BASE_URL=${harnessUrl}\n`,
+    );
+    assert.equal(await host.upgrade('start'), 1, harnessUrl);
+    assert.ok(host.output.includes(`Starting ${HARNESS}`), harnessUrl);
+    assert.equal(
+      host.output.at(-1),
+      `start refused: The preflight failed, so ${SERVER} stays stopped; fix its FAIL rows and run start again.`,
+    );
+    await host.stop();
+  }
   host.preflightStatus = 0;
   await writeFile(env, base);
 
@@ -2694,6 +2758,22 @@ test('start refuses listeners it cannot reach before it starts anything', async 
       'carries a user name or password',
     ],
     [
+      'http://@127.0.0.1:4170',
+      'http://***@127.0.0.1:4170',
+      'carries an @ before its host, which java.net.URI reads as user information',
+    ],
+    // The URL parser trims the padding before it reads the authority.
+    [
+      ' http://@127.0.0.1:4170',
+      '***@127.0.0.1:4170',
+      'carries an @ before its host, which java.net.URI reads as user information',
+    ],
+    [
+      'http://svc:2024#s3cret@127.0.0.1:4170',
+      'http://***@127.0.0.1:4170',
+      'carries a query or a fragment',
+    ],
+    [
       'ftp://deploy:s3cret@harness.internal:4170',
       'ftp://***@harness.internal:4170/',
       'is not an http or https URL',
@@ -2709,9 +2789,9 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     assert.ok(!host.output.join('\n').includes('s3cret'), harnessBaseUrl);
   }
   // Past those, the preflight's own verdict, which the resolver passes on:
-  // java.net.URI reads no host in a name with an underscore, and an empty
-  // user name or padding fails there too. A Harness an earlier start left
-  // running is not restarted for a URL the preflight would fail.
+  // java.net.URI reads no host in a name with an underscore, and padding
+  // fails there too. A Harness an earlier start left running is not
+  // restarted for a URL the preflight would fail.
   Object.assign(host.units[HARNESS], {
     ActiveState: 'active',
     SubState: 'running',
@@ -2719,7 +2799,6 @@ test('start refuses listeners it cannot reach before it starts anything', async 
   const entered = host.units[HARNESS].ActiveEnterTimestampMonotonic;
   for (const harnessBaseUrl of [
     'http://qwen_harness:4170',
-    'http://@127.0.0.1:4170',
     // The resolver prints the value as the server parses it, padding and all.
     ' http://127.0.0.1:4170 ',
   ]) {
@@ -2817,6 +2896,13 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     [
       'http://proxy.test:8443#ingress',
       'carries a query or a fragment, where the /actuator/health and API paths appended to it would land',
+    ],
+    // A password that starts with digits parses as a port, with the rest of
+    // it in the fragment.
+    [
+      'http://admin:2024#secret@127.0.0.1:18080',
+      'carries a query or a fragment, where the /actuator/health and API paths appended to it would land',
+      'http://***@127.0.0.1:18080',
     ],
   ]) {
     assert.equal(await host.upgrade('start', '--server-url', serverUrl), 1);
@@ -3036,6 +3122,77 @@ test('health reports neutralize terminal control bytes from the endpoint', async
     host.output.at(-1),
     /… \(100000 characters\)\) and keeps running/,
   );
+
+  // A status of 0, false or an empty string is a status all the same, which
+  // a test of its truth would drop; a null one, like none, names nothing.
+  for (const [status, shown] of [
+    [0, ', status 0'],
+    [false, ', status false'],
+    ['', ', status ""'],
+    [null, ''],
+  ]) {
+    host.responses['GET /actuator/health'] = { status };
+    assert.equal(await host.upgrade('verify'), 1);
+    assert.equal(
+      rowsOf(host.output).health,
+      `FAIL http://127.0.0.1:18080/actuator/health is not UP: HTTP 200${shown}`,
+      JSON.stringify(status),
+    );
+  }
+
+  // The health URL comes from the configuration or the command line, not
+  // the endpoint, but a control byte in it would split the row all the same.
+  assert.equal(
+    await host.upgrade(
+      'verify',
+      '--server-url',
+      'http://127.0.0.1:18080/x\u001b[2K\u0085y',
+    ),
+    1,
+  );
+  const shown = rowsOf(host.output).health;
+  assert.ok(
+    shown.startsWith(
+      'FAIL http://127.0.0.1:18080/x\uFFFD[2K\uFFFDy/actuator/health is not UP: ',
+    ),
+    shown,
+  );
+  // eslint-disable-next-line no-control-regex -- detecting surviving control bytes is the assertion
+  const control = /[\u0000-\u001F\u007F-\u009F]/;
+  assert.ok(
+    !host.output.some((line) => control.test(line)),
+    JSON.stringify(host.output),
+  );
+  // start prints it in each of its outcomes.
+  const steered = 'http://127.0.0.1:18080/x\u001b[2K\u0085y';
+  const flat = 'http:\\/\\/127\\.0\\.0\\.1:18080\\/x\uFFFD\\[2K\uFFFDy';
+  for (const [answer, outcome] of [
+    [
+      { status: 'UP' },
+      `is UP at ${flat}\\/actuator\\/health; its API is at ${flat}\\. Run verify`,
+    ],
+    [
+      { status: 'DOWN' },
+      `did not report UP at ${flat}\\/actuator\\/health within 2s`,
+    ],
+    [
+      () => {
+        host.units[SERVER].ActiveState = 'failed';
+        return { status: 'DOWN' };
+      },
+      `exited before it reported UP at ${flat}\\/actuator\\/health, and is stopped now`,
+    ],
+  ]) {
+    assert.equal(await host.upgrade('stop'), 0);
+    host.responses[`GET ${new URL(`${steered}/actuator/health`).pathname}`] =
+      answer;
+    await host.upgrade('start', '--server-url', steered, '--timeout', '2');
+    assert.match(host.output.at(-1), new RegExp(outcome));
+    assert.ok(
+      !host.output.some((line) => control.test(line)),
+      JSON.stringify(host.output),
+    );
+  }
 });
 
 test('verify sanitizes a malicious health body over a real socket', async (t) => {
@@ -3283,9 +3440,10 @@ test('verify says why an API read failed, in text the endpoint cannot steer', as
       `FAIL GET /v1/agents/sessions?limit=1 answered no data list (${shown})`,
     );
   }
-  // An id a route cannot carry as one segment: fetch resolves the dots, and
-  // an empty one would read the list.
-  for (const id of ['', '.', '..']) {
+  // An id a route cannot carry as one segment: fetch resolves the dots, an
+  // empty one would read the list, and a lone surrogate has no UTF-8 to
+  // percent-encode.
+  for (const id of ['', '.', '..', '\uD800', 's\uDFFF1']) {
     host.responses['GET /v1/agents/sessions'] = { data: [{ id }] };
     assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
     assert.equal(

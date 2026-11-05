@@ -537,23 +537,24 @@ export function fetchRefusal(url) {
  * token in the user-name position, shows as `***`.
  */
 export function withoutCredentials(url) {
+  let shown = url;
   if (URL.canParse(url)) {
     const parsed = new URL(url);
     if (parsed.username || parsed.password) {
       parsed.username = '***';
       parsed.password = '';
-      return parsed.href;
-    }
-    // An authority without user information: an @ after it is in the path.
-    if (parsed.host) {
-      return url;
+      shown = parsed.href;
     }
   }
-  // A value the parser rejects, or reads without an authority, may still
-  // spell user information before an @, and a password may hold a / ? or #
-  // that would end it: everything up to the last @ shows as ***, which only
+  // Past what the parser reads as user information, a value may still spell
+  // some before an @: one the parser rejects or reads without an authority,
+  // and one whose password holds a / ? or # that ends the authority early.
+  // Such a value does not parse, unless the password starts with digits, as
+  // in http://svc:2024#Secret@harness:4170, which the parser and
+  // java.net.URI both read as port 2024 with the rest of the password in
+  // the fragment. So everything up to the last @ shows as ***, which only
   // ever hides more of a value that is refused anyway.
-  return url.replace(
+  return shown.replace(
     /^([a-zA-Z][a-zA-Z0-9+.-]*:(?:\/\/)?|\/\/)?[\s\S]*@/,
     '$1***@',
   );
@@ -2652,11 +2653,12 @@ async function listeners(
   }
   // The paths are appended to --server-url, so a query or a fragment there
   // would take them in: http://proxy.test/?a probes /?a/actuator/health, and
-  // fetch drops a fragment with the path after it. Past fetchRefusal the URL
-  // carries no user information, so a ? or # can only start one of them.
+  // fetch drops a fragment with the path after it. Past fetchRefusal the
+  // parser reads no user information in the URL, so a ? or # starts one of
+  // them, but the rest of a password that starts with digits may sit there.
   if (options.serverUrl && /[?#]/.test(options.serverUrl)) {
     throw new Refusal(
-      `--server-url ${JSON.stringify(options.serverUrl)} carries a query or a fragment, where the /actuator/health and API paths appended to it would land.`,
+      `--server-url ${JSON.stringify(withoutCredentials(options.serverUrl))} carries a query or a fragment, where the /actuator/health and API paths appended to it would land.`,
     );
   }
   return urls;
@@ -2773,14 +2775,32 @@ async function health(system, url, budgetMs, capMs = PROBE_TIMEOUT_MS) {
       timedOut: error.name === 'TimeoutError',
     };
   }
-  return response.ok && body?.status === 'UP'
+  // Any status the body carries is shown, 0, false or an empty string too,
+  // which a test of its truth would drop; an empty one shows as its JSON, so
+  // the row does not end in a bare "status". A null one, like none, names
+  // nothing.
+  const answered = body?.status ?? undefined;
+  return response.ok && answered === 'UP'
     ? { up: true }
     : {
         up: false,
-        answer: body?.status
-          ? `${status}, status ${printable(body.status)}`
-          : status,
+        answer:
+          answered === undefined
+            ? status
+            : `${status}, status ${answered === '' ? '""' : printable(answered)}`,
       };
+}
+
+// Whether an http(s) URL holds an @ in its authority. java.net.URI reads user
+// information there even when it is empty, as in http://@host or
+// http://:@host, where the URL parser finds no user name or password. The
+// parser drops tabs and newlines and trims leading controls and spaces first,
+// and in an http(s) URL any run of / or \ starts the authority, which a /, \,
+// ? or # ends.
+function spellsUserInfo(url) {
+  // eslint-disable-next-line no-control-regex -- the parser trims these
+  const text = url.replace(/[\t\n\r]/g, '').replace(/^[\u0000-\u0020]+/, '');
+  return /^[a-zA-Z][a-zA-Z0-9+.-]*:[/\\]*[^/\\?#]*@/.test(text);
 }
 
 async function phaseStart(system, deployment, options) {
@@ -2819,11 +2839,11 @@ async function phaseStart(system, deployment, options) {
   // pool, whose row the preflight skips, drops each member over it. 'true'
   // and 'skip', for a disabled Harness that nothing reads, ask nothing more.
   // Without a verdict, as when the configuration did not resolve, start
-  // still refuses user information, a query or a fragment, which the server
-  // refuses wherever it reads the value: a disabled Harness's value may then
-  // be refused for nothing, which costs an edit, where letting it through
-  // could start a pool that accepts no Session. The preflight judges the
-  // rest.
+  // still refuses user information, an empty one before an @ included, a
+  // query or a fragment, which the server refuses wherever it reads the
+  // value: a disabled Harness's value may then be refused for nothing, which
+  // costs an edit, where letting it through could start a pool that accepts
+  // no Session. The preflight judges the rest.
   const unusable = !harnessUrl
     ? fetchRefusal(urls.harness)
     : !['http:', 'https:'].includes(harnessUrl.protocol)
@@ -2832,11 +2852,13 @@ async function phaseStart(system, deployment, options) {
         ? undefined
         : harnessUrl.username || harnessUrl.password
           ? 'carries a user name or password'
-          : urls.harness.includes('?') || urls.harness.includes('#')
-            ? 'carries a query or a fragment'
-            : urls.harnessOrigin === 'false'
-              ? 'the server does not take as an http or https base URL, reading it untrimmed as java.net.URI does'
-              : undefined;
+          : spellsUserInfo(urls.harness)
+            ? 'carries an @ before its host, which java.net.URI reads as user information'
+            : urls.harness.includes('?') || urls.harness.includes('#')
+              ? 'carries a query or a fragment'
+              : urls.harnessOrigin === 'false'
+                ? 'the server does not take as an http or https base URL, reading it untrimmed as java.net.URI does'
+                : undefined;
   if (unusable) {
     throw new Refusal(
       `The control plane reaches ${harness.name} at ${JSON.stringify(withoutCredentials(urls.harness))}, which ${unusable}; correct qwen.managed-agent.harness.base-url.`,
@@ -2919,17 +2941,17 @@ async function phaseStart(system, deployment, options) {
     // Ends the restarts systemd would go on with, so start can run again.
     runChecked(system, 'systemctl', ['stop', server.name]);
     throw new Refusal(
-      `${server.name} exited before it reported UP at ${urls.health}, and is stopped now; see journalctl -u ${server.name}, then run start again.`,
+      `${server.name} exited before it reported UP at ${printable(urls.health)}, and is stopped now; see journalctl -u ${server.name}, then run start again.`,
     );
   }
   if (!healthy) {
     // Left running: the journal may show a start that is merely slow.
     throw new Refusal(
-      `${server.name} did not report UP at ${urls.health} within ${options.timeout}s${answer ? ` (the last answer: ${answer})` : ''} and keeps running; see journalctl -u ${server.name}, then run verify, or run stop to start it again.`,
+      `${server.name} did not report UP at ${printable(urls.health)} within ${options.timeout}s${answer ? ` (the last answer: ${answer})` : ''} and keeps running; see journalctl -u ${server.name}, then run verify, or run stop to start it again.`,
     );
   }
   system.out(
-    `${server.name} is UP at ${urls.health}${urls.server ? `; its API is at ${urls.server}` : ''}. Run verify before reopening ingress.`,
+    `${server.name} is UP at ${printable(urls.health)}${urls.server ? `; its API is at ${printable(urls.server)}` : ''}. Run verify before reopening ingress.`,
   );
   return 0;
 }
@@ -3006,8 +3028,9 @@ function sessionRoute(session) {
     );
   }
   // fetch resolves a dot segment, so "." or ".." would read another route,
-  // and an empty id would read the list.
-  if (['', '.', '..'].includes(session.id)) {
+  // and an empty id would read the list. A lone surrogate has no UTF-8 to
+  // percent-encode, so encodeURIComponent() would throw "URI malformed".
+  if (['', '.', '..'].includes(session.id) || !session.id.isWellFormed()) {
     throw new Error(
       `the API answered a Session whose id ${JSON.stringify(session.id)} names no route`,
     );
@@ -3217,8 +3240,12 @@ async function phaseVerify(system, deployment, options) {
   const probe = await health(system, urls.health, budget, budget);
   rows.push(
     probe.up
-      ? row('health', 'PASS', `${urls.health} is UP`)
-      : row('health', 'FAIL', `${urls.health} is not UP: ${probe.answer}`),
+      ? row('health', 'PASS', `${printable(urls.health)} is UP`)
+      : row(
+          'health',
+          'FAIL',
+          `${printable(urls.health)} is not UP: ${probe.answer}`,
+        ),
   );
   if (unread) {
     rows.push(unread);
