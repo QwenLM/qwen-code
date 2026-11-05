@@ -175,6 +175,10 @@ import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import {
+  AUTO_MEMORY_SKILL_NAME,
+  MainSessionAutoMemoryPolicy,
+} from '../skills/auto-memory-skill.js';
+import {
   authoredSkillName,
   skillRestrictionNames,
   type SkillLevel,
@@ -3092,8 +3096,18 @@ export class Config {
   private promptToolSnapshot: ReadonlySet<string> | undefined;
   private promptAgentReachable = false;
 
-  /** Stable managed-memory policy, separate from the changing catalog. */
+  /**
+   * Stable managed-memory policy, separate from the changing catalog. Empty
+   * while the legacy main-session policy below is in effect.
+   */
   private autoMemoryPrompt = '';
+  /**
+   * The legacy main-session policy, resolved per reading Config: whether it
+   * points at the bundled `auto-memory` reference depends on the reader's
+   * route to the Skill tool (#16291). Set only by a legacy refresh, cleared by
+   * every path that sets `autoMemoryPrompt` instead.
+   */
+  private mainSessionAutoMemoryPolicy: MainSessionAutoMemoryPolicy | undefined;
   private autoMemoryContext = '';
   private memoryRecallMode: MemoryRecallMode = 'legacy';
   private memoryCorpusRevision = '';
@@ -5566,6 +5580,7 @@ export class Config {
     if (this.isSafeMode()) {
       this.setUserMemory('');
       this.autoMemoryPrompt = '';
+      this.mainSessionAutoMemoryPolicy = undefined;
       this.autoMemoryContext = '';
       this.setMemoryFileCount(0);
       this.setContextFilePaths([]);
@@ -5757,26 +5772,27 @@ export class Config {
           userSection.memoryDir,
           teamSection?.memoryDir,
         );
+        this.mainSessionAutoMemoryPolicy = undefined;
       } else {
-        const policy = this.memoryManager.buildAutoMemoryPrompt(
-          memoryDir,
-          managedAutoMemoryIndex,
-          userSection,
-          teamSection,
-          { includeIndexes: false },
-        );
         const catalog = buildAutoMemoryIndexContext(
           memoryDir,
           managedAutoMemoryIndex,
           userSection,
           teamSection,
         );
-        this.autoMemoryPrompt = policy;
+        this.autoMemoryPrompt = '';
+        this.mainSessionAutoMemoryPolicy = new MainSessionAutoMemoryPolicy({
+          memoryDir,
+          indexContent: managedAutoMemoryIndex,
+          userSection,
+          teamSection,
+        });
         this.autoMemoryContext = catalog;
       }
     } else {
       this.setUserMemory(memoryContent);
       this.autoMemoryPrompt = '';
+      this.mainSessionAutoMemoryPolicy = undefined;
       this.autoMemoryContext = '';
     }
     this.setMemoryFileCount(fileCount);
@@ -8189,6 +8205,7 @@ export class Config {
     // reassigns it, and the stale text keeps routing to search_memory while
     // the reset mode leaves that tool undeclared.
     this.autoMemoryPrompt = '';
+    this.mainSessionAutoMemoryPolicy = undefined;
     this.autoMemoryContext = '';
 
     let memoryRefreshError: unknown;
@@ -8647,6 +8664,18 @@ export class Config {
       skill.level === 'bundled' &&
       skill.name === 'generated-ui' &&
       !this.getBundledGeneratedUiStatus().enabled
+    ) {
+      return false;
+    }
+    // The auto-memory reference only serves the legacy managed auto-memory
+    // policy; without it, or under the structured protocol (`manage_memory`,
+    // no direct file access), the skill would be listed on every request for
+    // nothing.
+    if (
+      skill.level === 'bundled' &&
+      skill.name === AUTO_MEMORY_SKILL_NAME &&
+      (!this.getManagedAutoMemoryEnabled() ||
+        this.getMemoryRecallMode() !== 'legacy')
     ) {
       return false;
     }
@@ -9560,8 +9589,20 @@ export class Config {
     this.promptAgentReachable = reachable;
   }
 
-  /** Managed-memory policy for the system prompt, without legacy indexes. */
+  /**
+   * Managed-memory policy for the system prompt, without legacy indexes.
+   *
+   * In legacy mode the main-session policy is resolved for the Config it is
+   * read through, so a subagent's derived Config with no route to the Skill
+   * tool gets the full policy rather than the session's pointer (#16291).
+   */
   getAutoMemoryPrompt(): string {
+    if (
+      this.memoryRecallMode === 'legacy' &&
+      this.mainSessionAutoMemoryPolicy !== undefined
+    ) {
+      return this.mainSessionAutoMemoryPolicy.forConfig(this);
+    }
     return this.autoMemoryPrompt;
   }
 

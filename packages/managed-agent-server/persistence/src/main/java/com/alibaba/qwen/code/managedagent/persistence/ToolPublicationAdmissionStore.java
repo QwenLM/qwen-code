@@ -337,7 +337,9 @@ public final class ToolPublicationAdmissionStore {
                 && ("FINISHED".equals(candidate.get("producer_phase"))
                 || "REFERENCED".equals(candidate.get("producer_phase"))),
                 "Admission root is not verified");
-        data.lockStagedPlacement(key, publicationId);
+        // A lifecycle-authority commit takes placement in checkLifecycleWriter,
+        // so its lane keeps placement first (design 2026-11-04-managed-publication-placement).
+        data.lockStagedPlacement(key, publicationId, authority != null);
         String resourceId = (String) candidate.get("resource_id");
         byte[] admissionBytes = data.readResource(key, publicationId, resourceId);
         JsonNode outcome = ToolPublicationContract.readJson(admissionBytes);
@@ -367,7 +369,7 @@ public final class ToolPublicationAdmissionStore {
                     "Original manifest resource conflicts");
         }
         return transactions.execute(status -> {
-            data.lockPublicationPlacement(key, publicationId);
+            boolean placement = data.lockPublicationPlacement(key, publicationId, authority != null);
             sessions.lockCsiOriginal(text(key, "tenantId"), text(key, "sessionId"));
             boolean csi = data.lockOriginalSettledResult(key, publicationId, finished);
             // An ordinary receipt without lifecycle authority skips the tenant
@@ -381,7 +383,7 @@ public final class ToolPublicationAdmissionStore {
                 lockTenant(key);
             }
             sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
-                    text(key, "sessionId"), request.writerId(), request.writerGeneration(), writerToken, guard);
+                    text(key, "sessionId"), request.writerId(), request.writerGeneration(), writerToken, placement, guard);
             Map<String, Object> publication = jdbc.query("SELECT producer_phase, binding_json, binding_digest,"
                     + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined, admission_resource_id,"
                     + " receipt_sequence, receipt_revision, finish_digest, terminal_resource_id"
@@ -444,6 +446,9 @@ public final class ToolPublicationAdmissionStore {
                         && resource.bytesBase64() == null),
                 "Receipt does not reference its original admission resource");
         byte[] records = Base64.getDecoder().decode(request.recordBytesBase64());
+        // A cleanup commit takes placement in JournalCommit, after this lane's
+        // Session root when the lane skips placement; a receipt never carries one.
+        require(!HostedCleanupReferences.containsCleanup(records), "Receipt cannot carry hosted cleanup");
         JsonNode receiptEvent = null;
         for (String line : new String(records, StandardCharsets.UTF_8).split("\n")) {
             JsonNode record = ToolPublicationContract.readJson(line.getBytes(StandardCharsets.UTF_8));
