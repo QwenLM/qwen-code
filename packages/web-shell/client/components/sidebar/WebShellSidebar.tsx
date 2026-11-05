@@ -6149,19 +6149,22 @@ export function WebShellSidebar({
               className="w-full"
               aria-label={t('sidebar.archiveSessionSource')}
             >
-              <TabsTrigger value="default" className="min-w-0">
+              <TabsTrigger value="default" className="min-w-0 flex-initial">
                 <ListTodoIcon />
                 <span className="min-w-0 truncate">
                   {t('sidebar.sessionSource.tasks')}
                 </span>
               </TabsTrigger>
-              <TabsTrigger value="channel" className="min-w-0">
+              <TabsTrigger value="channel" className="min-w-0 flex-initial">
                 <MessageCircleIcon />
                 <span className="min-w-0 truncate">
                   {t('sidebar.sessionSource.channels')}
                 </span>
               </TabsTrigger>
-              <TabsTrigger value="scheduled_task" className="min-w-0">
+              <TabsTrigger
+                value="scheduled_task"
+                className="min-w-0 flex-initial"
+              >
                 <CalendarClockIcon />
                 <span className="min-w-0 truncate">
                   {t('sidebar.sessionSource.scheduledTasks')}
@@ -7351,19 +7354,28 @@ export function WebShellSidebar({
                       className="w-full"
                       aria-label={t('sidebar.sessionSource')}
                     >
-                      <TabsTrigger value="default" className="min-w-0">
+                      <TabsTrigger
+                        value="default"
+                        className="min-w-0 flex-initial"
+                      >
                         <ListTodoIcon />
                         <span className="min-w-0 truncate">
                           {t('sidebar.sessionSource.tasks')}
                         </span>
                       </TabsTrigger>
-                      <TabsTrigger value="channel" className="min-w-0">
+                      <TabsTrigger
+                        value="channel"
+                        className="min-w-0 flex-initial"
+                      >
                         <MessageCircleIcon />
                         <span className="min-w-0 truncate">
                           {t('sidebar.sessionSource.channels')}
                         </span>
                       </TabsTrigger>
-                      <TabsTrigger value="scheduled_task" className="min-w-0">
+                      <TabsTrigger
+                        value="scheduled_task"
+                        className="min-w-0 flex-initial"
+                      >
                         <CalendarClockIcon />
                         <span className="min-w-0 truncate">
                           {t('sidebar.sessionSource.scheduledTasks')}
@@ -8081,6 +8093,7 @@ export function WebShellSidebar({
                     workspaces={projectWorkspaces}
                     includeStandalone={standaloneSessionsVisible}
                     sourceMetadataEnabled={sourceMetadataEnabled}
+                    sessionSource={selectedSessionSource}
                     organizationEnabled={organizationEnabled}
                     currentSessionId={connection.sessionId}
                     refreshKey={

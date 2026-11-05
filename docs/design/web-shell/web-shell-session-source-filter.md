@@ -24,7 +24,10 @@ historical data.
   sessions use `sourceType: 'scheduled_task'` and stay outside the default catalog.
   The opt-in `scheduled_task` option in the Sidebar's Session source switch
   lists exactly those bound controller sessions (exact source filter); the
-  default `Tasks` tab is unchanged.
+  default `Tasks` tab is unchanged for daemons with session source metadata.
+  On a daemon without that metadata, the bound controller session stays
+  listed on the default `Tasks` tab, but is now grouped under its task
+  instead of standing as an independent row.
 - Support the source filter with organized session views so filtering does not
   disable grouping, pinning, or archived-session behavior.
 - Bind organized pagination cursors to the source filter that produced them.

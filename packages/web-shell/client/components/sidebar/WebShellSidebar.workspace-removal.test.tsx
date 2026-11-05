@@ -580,7 +580,7 @@ async function openArchiveSettings(): Promise<void> {
 }
 
 async function switchSessionSource(
-  label: 'Tasks' | 'Channels',
+  label: 'Tasks' | 'Channels' | 'Scheduled tasks',
 ): Promise<HTMLButtonElement> {
   const tab = Array.from(
     container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
