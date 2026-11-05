@@ -60,29 +60,46 @@ async function collect(
  * mutation that keeps the stream open after `replay_complete` would
  * block an unbounded `for await` forever, and a hung test file reads
  * as an infrastructure timeout instead of a deterministic failure.
+ *
+ * On the deadline, abort `signal` (the signal the generator was
+ * given) rather than calling `gen.return()`: a `return()` while a
+ * `next()` is still pending never settles in V8, which would deadlock
+ * the very deadline path it is meant to protect. The abort drives the
+ * stream's cancel, the parked read resolves, and the generator ends.
  */
 async function collectBounded(
   gen: AsyncGenerator<DaemonEvent>,
+  abort: () => void,
   deadlineMs = 1_500,
 ): Promise<DaemonEvent[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<'timeout'>((resolve) => {
-    const timer = setTimeout(() => resolve('timeout'), deadlineMs);
-    (timer as { unref?: () => void }).unref?.();
+    timer = setTimeout(() => resolve('timeout'), deadlineMs);
   });
   const out: DaemonEvent[] = [];
-  for (;;) {
-    const r = await Promise.race([gen.next(), deadline]);
-    if (r === 'timeout') {
-      await gen.return?.();
-      throw new Error(
-        `collectBounded: generator did not end within ${deadlineMs}ms ` +
-          '(stream kept open after replay_complete?)',
-      );
+  try {
+    for (;;) {
+      const r = await Promise.race([gen.next(), deadline]);
+      if (r === 'timeout') {
+        abort();
+        // Drain the now-unparking generator; bounded, so a mutant that
+        // also breaks the abort wiring still fails fast.
+        await Promise.race([
+          gen.next(),
+          new Promise((res) => setTimeout(res, 250)),
+        ]);
+        throw new Error(
+          `collectBounded: generator did not end within ${deadlineMs}ms ` +
+            '(stream kept open after replay_complete?)',
+        );
+      }
+      if (r.done) break;
+      out.push(r.value);
     }
-    if (r.done) break;
-    out.push(r.value);
+    return out;
+  } finally {
+    clearTimeout(timer);
   }
-  return out;
 }
 
 afterEach(() => {
@@ -308,14 +325,16 @@ describe('SseBudgetRegistry.catchUp', () => {
     // Bounded: the stream stays open after the boundary, so a mutant
     // that ignores `replay_complete` must fail the deadline instead of
     // hanging the runner.
+    const ctrl = new AbortController();
     const events = await collectBounded(
       reg.catchUp(
         fetchFn,
         'http://daemon/session/s1/events',
         { Accept: 'text/event-stream' },
-        new AbortController().signal,
+        ctrl.signal,
         cursor,
       ),
+      () => ctrl.abort(),
     );
 
     expect(seenLastEventId).toBe('10');
@@ -339,14 +358,16 @@ describe('SseBudgetRegistry.catchUp', () => {
 
     // Bounded: after the boundary the stream stays open; a mutant that
     // ignores `replay_complete` must fail the deadline, not hang.
+    const ctrl = new AbortController();
     await collectBounded(
       reg.catchUp(
         fetchFn,
         'http://daemon/session/s1/events',
         { Accept: 'text/event-stream' },
-        new AbortController().signal,
+        ctrl.signal,
         {},
       ),
+      () => ctrl.abort(),
     );
     expect(seenLastEventId).toBeNull();
   });
