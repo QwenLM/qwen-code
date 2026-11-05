@@ -149,7 +149,8 @@ const VOLATILE_KEYS = new Set([
 // Timings, such as the telemetry recorded with each response.
 const TIMING_KEY = /(_ms|Ms)$/;
 
-const DATE_REMINDER = '<system-reminder>\nThe current date is:';
+const DATE_REMINDER =
+  /^<system-reminder>\n(?:Today's date is |The date has changed since earlier in this conversation\. )/;
 
 const toolResults = (messages: JsonObject[]) =>
   messages.filter((message) => message['role'] === 'tool').length;
@@ -163,7 +164,7 @@ const userTurns = (messages: JsonObject[]) =>
 
 const isDateReminder = (part: unknown) =>
   typeof (part as JsonObject)?.['text'] === 'string' &&
-  ((part as JsonObject)['text'] as string).startsWith(DATE_REMINDER);
+  DATE_REMINDER.test((part as JsonObject)['text'] as string);
 
 /** `dir` is the workspace; `scratch`, which holds it, is the run's home. */
 function normalize(value: unknown, dir: string, scratch: string): unknown {

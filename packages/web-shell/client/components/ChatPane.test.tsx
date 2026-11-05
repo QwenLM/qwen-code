@@ -88,6 +88,8 @@ const readAttachment = vi.fn();
 const getContextUsage = vi.fn();
 const loadSession = vi.fn(async () => {});
 const daemonActions = {
+  getContext: vi.fn(),
+  refreshModels: vi.fn().mockResolvedValue(undefined),
   loadSession,
   sendPrompt,
   submitPermission,
@@ -122,6 +124,17 @@ const latestComposerCoreOptions = vi.hoisted(() => ({
 const paneSettings = vi.fn(async () => ({ v: 1, settings: [] }));
 const workspaceByCwd = vi.fn(() => ({ workspaceSettings: paneSettings }));
 const paneWorkspaceClient = { workspaceByCwd };
+const subscriptionActions = {
+  getSubscriptionConfig: vi.fn().mockResolvedValue({ enabled: false }),
+  loadProviders: vi.fn().mockResolvedValue({ current: null }),
+  signOutSubscription: vi.fn().mockResolvedValue(undefined),
+};
+const ownerGuard = {
+  capture: () => {
+    const captured = ownerVersion;
+    return { isCurrent: () => ownerVersion === captured };
+  },
+};
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
@@ -152,7 +165,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   }),
   usePromptStatus: () => 'idle',
   useOptionalWorkspace: () => undefined,
-  useWorkspaceActions: () => ({}),
+  useWorkspaceActions: () => subscriptionActions,
   useWorkspace: () => ({
     capabilities: connectionState.capabilities,
     client: paneWorkspaceClient,
@@ -160,12 +173,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
     workspaceCwd: '/primary',
   }),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
-  useDaemonSessionOwnerGuard: () => ({
-    capture: () => {
-      const captured = ownerVersion;
-      return { isCurrent: () => ownerVersion === captured };
-    },
-  }),
+  useDaemonSessionOwnerGuard: () => ownerGuard,
 }));
 
 vi.mock('../session-catalog/session-catalog-hooks', () => ({
@@ -435,6 +443,14 @@ let container: HTMLDivElement | null = null;
 const EMPTY_CUSTOMIZATION: WebShellCustomization = {};
 
 beforeEach(() => {
+  subscriptionActions.getSubscriptionConfig.mockReset();
+  subscriptionActions.getSubscriptionConfig.mockResolvedValue({
+    enabled: false,
+  });
+  subscriptionActions.loadProviders.mockReset();
+  subscriptionActions.loadProviders.mockResolvedValue({ current: null });
+  subscriptionActions.signOutSubscription.mockReset();
+  subscriptionActions.signOutSubscription.mockResolvedValue(undefined);
   paneSettings.mockReset();
   paneSettings.mockResolvedValue({ v: 1, settings: [] });
   workspaceByCwd.mockClear();
@@ -548,6 +564,61 @@ function rerender(
     ),
   );
 }
+
+describe('pane subscription logout', () => {
+  it('handles logout in the pane workspace without sending an ACP prompt', async () => {
+    daemonActions.getContext.mockResolvedValue({
+      state: { _meta: { authType: 'qwen-subscription' } },
+    });
+    subscriptionActions.getSubscriptionConfig.mockResolvedValue({
+      enabled: true,
+      signedIn: true,
+    });
+    subscriptionActions.loadProviders.mockResolvedValue({
+      current: { authType: 'qwen-subscription' },
+    });
+    render({ workspaceCwd: '/secondary' });
+    await act(async () => {
+      latestOnSubmit!('/logout');
+    });
+    expect(daemonActions.getContext).toHaveBeenCalled();
+    expect(subscriptionActions.signOutSubscription).toHaveBeenCalledOnce();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+    expect(daemonActions.refreshModels).toHaveBeenCalledWith(undefined, {
+      reloadProviders: false,
+    });
+    expect(transcriptDispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ type: 'status' }),
+    ]);
+  });
+
+  it('keeps a busy pane from signing out or queuing logout', async () => {
+    streamingStateValue = 'responding';
+    render();
+    await act(async () => {
+      expect(latestOnSubmit!('/logout')).toBe(false);
+    });
+    expect(subscriptionActions.signOutSubscription).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not treat a plan prompt as an account command', async () => {
+    subscriptionActions.getSubscriptionConfig.mockResolvedValue({
+      enabled: true,
+    });
+    subscriptionActions.loadProviders.mockResolvedValue({
+      current: { authType: 'qwen-subscription' },
+    });
+    render();
+    await act(async () => {
+      latestOnSubmit!('/plan /logout');
+    });
+    expect(subscriptionActions.signOutSubscription).not.toHaveBeenCalled();
+    expect(sendPrompt).toHaveBeenCalled();
+  });
+});
 
 function testid(id: string): HTMLElement | null {
   return container!.querySelector(`[data-testid="${id}"]`);
