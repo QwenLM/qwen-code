@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -68,7 +69,11 @@ class ToolPublicationLifecycleMySqlIT {
             var source = new ScheduledDataSource(new DriverManagerDataSource(
                     url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password));
             Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
-            var journal = PublicationJournalFixture.create(source);
+            // Ordinary receipts skip the tenant guard. This scenario specifically
+            // exercises contention on that guard, so keep the original on CSI.
+            var journal = PublicationJournalFixture.create(source, new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
+                    "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
+                    "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1));
             journal.reserve();
             var jdbc = journal.jdbc;
             var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
