@@ -2030,7 +2030,16 @@ export class HostedHookSession {
     // before releasing the Session's own owner: the Session stays attached
     // with it, so a later turn can still run and retry the fenced release.
     if (this.fencedOwners.size > 0) throw new HostedHookRecoveryRequiredError();
-    if (this.ownsBroker && this.mountHeld) {
+    // A DELETE must terminally release the deterministic owner even when this
+    // instance never acquired it (R15-4): a reload builds a fresh instance whose
+    // mountHeld stays false until a Hook turn acquires, so keying the terminal
+    // arm off the transient mount hold alone would orphan the owner on every
+    // load -> detach -> reload -> delete cycle. broker.release() resolves stored
+    // rows and needs no prior acquisition.
+    if (
+      this.ownsBroker &&
+      (this.mountHeld || (terminal && this.deterministicOwner))
+    ) {
       if (!terminal && this.deterministicOwner) {
         // R13-1: a detach hands the mount back but keeps the deterministic
         // config-scoped owner re-acquirable. A terminal release here would

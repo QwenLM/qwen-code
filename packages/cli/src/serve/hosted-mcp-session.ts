@@ -566,6 +566,20 @@ export class HostedMcpSession {
     signal?.throwIfAborted();
     let configuration: McpConfiguration;
     let operation: ManagedMcpOperationView;
+    if (previous?.releaseState === 'drained') {
+      // A non-terminal close drained this configuration but kept the owner
+      // re-acquirable (R14-1); 'drained' is a resting state nothing else
+      // consumes, and the journal cannot reopen it in place (R15-1). Advance it
+      // to released — its one valid exit — and re-initialize a FRESH
+      // configuration under the SAME runtimeSessionId below, so the server
+      // restarts and no drained row lingers to hold recoveryBlocked. The fresh
+      // active row keeps the owner id the reload derives unchanged; it is
+      // marking every row released with nothing active left that would strand
+      // the deterministic owner, not this paired advance-and-reinstall.
+      configRevision = previous.configRevision + 1;
+      await this.commitConfiguration({ ...previous, releaseState: 'released' });
+      previous = undefined;
+    }
     if (previous) {
       if (previous.releaseState !== 'active')
         throw new HostedMcpRecoveryRequiredError();

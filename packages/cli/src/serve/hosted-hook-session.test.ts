@@ -3985,6 +3985,81 @@ it.each([
   },
 );
 
+it('names a Broker-restart handback refusal as recovery-required, not a broken close (R15-2)', async () => {
+  // A Broker that restarted beside the Harness holds no resident Session
+  // Context, so releaseMount answers 503 runtime_reconciliation_required —
+  // proof nothing was handed back. It must be named recovery-required (the
+  // Session stays attached and retryable), exactly as the close's held-Runtime
+  // drain already tolerates it, never escape as a raw rejection that takes the
+  // whole close down, and never be read as a successful handback.
+  const deterministic = new HostedHookSession(
+    options,
+    session,
+    pin,
+    undefined,
+    () => false,
+    `extensions-components-${'e'.repeat(64)}`,
+  );
+  await deterministic.acquire();
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'det-claim',
+  );
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(503, 'runtime_reconciliation_required'),
+  );
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  release.mockClear();
+  await expect(deterministic.close()).rejects.toBeInstanceOf(
+    HostedHookRecoveryRequiredError,
+  );
+  expect(release).not.toHaveBeenCalled();
+});
+
+it('terminally releases the deterministic owner on DELETE of a reloaded, never-acquired instance (R15-4)', async () => {
+  const owner = `extensions-components-${'a'.repeat(64)}`;
+  const first = new HostedHookSession(
+    options,
+    session,
+    pin,
+    undefined,
+    () => false,
+    owner,
+  );
+  await first.acquire();
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'det-claim',
+  );
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockResolvedValue();
+  // Detach hands the mount back and keeps the owner re-acquirable.
+  await first.close();
+  const releasedIds: string[] = [];
+  vi.mocked(HostedWorkspaceBroker.prototype.release).mockImplementation(
+    async function (this: HostedWorkspaceBroker) {
+      releasedIds.push(this.runtimeSessionId);
+      Object.defineProperty(this, 'acquired', {
+        value: false,
+        configurable: true,
+      });
+    },
+  );
+  // Reload: a fresh instance carrying the same deterministic id, never
+  // acquired, so mountHeld is false. A DELETE must still terminally release the
+  // owner instead of orphaning it.
+  const reloaded = new HostedHookSession(
+    options,
+    session,
+    pin,
+    undefined,
+    () => false,
+    owner,
+  );
+  expect(reloaded.mountHeld).toBe(false);
+  await reloaded.close({ terminal: true });
+  // The close also retires the session's per-load hooks-activation-* earlier
+  // owner; pin the deterministic owner's terminal release specifically.
+  expect(releasedIds.filter((id) => id === owner)).toHaveLength(1);
+});
+
 it('keeps a shared Hook+MCP deterministic owner re-acquirable on a non-terminal close (R14-1)', async () => {
   // The load builds the MCP first and hands its broker to the Hook, so the
   // Hook borrows (ownsBroker=false) and the MCP owns the shared deterministic

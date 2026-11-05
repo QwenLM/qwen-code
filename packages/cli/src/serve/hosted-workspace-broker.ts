@@ -128,17 +128,23 @@ export function isTerminalUnknownRejection(
  * settles" fence (R14-2): an owner closing non-terminally names them as
  * recovery-required instead of letting a raw rejection escape as a generic
  * close failure. The codes are the documented release-mount refusals
- * (docs/design/workspace-execution-mount-recovery-block-release.md).
+ * (docs/design/workspace-execution-mount-recovery-block-release.md). The 503
+ * reconciliation answer joins them (R15-2): a Broker that restarted beside the
+ * Harness holds no resident Session Context, so it proves nothing was handed
+ * back — name it recovery-required (attached/retryable), exactly as the close's
+ * held-Runtime drain already tolerates it, never read it as a successful handback.
  */
 export function fencedMountHandback(
   cause: unknown,
 ): cause is HostedWorkspaceBrokerRejection {
   return (
     cause instanceof HostedWorkspaceBrokerRejection &&
-    cause.status === 409 &&
-    (cause.code === 'runtime_session_busy' ||
-      cause.code === 'runtime_session_conflict' ||
-      cause.code === 'workspace_writer_unproven')
+    ((cause.status === 409 &&
+      (cause.code === 'runtime_session_busy' ||
+        cause.code === 'runtime_session_conflict' ||
+        cause.code === 'workspace_writer_unproven')) ||
+      (cause.status === 503 &&
+        cause.code === 'runtime_reconciliation_required'))
   );
 }
 

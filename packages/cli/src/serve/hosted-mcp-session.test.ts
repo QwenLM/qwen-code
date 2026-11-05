@@ -895,6 +895,21 @@ it('hands the mount back without tombstoning the owner on a non-terminal close (
     [pin],
   );
   expect(reloaded.broker.runtimeSessionId).toBe(owner);
+  // R15-1: the reload must re-initialize the drained configuration, not strand
+  // it. ensureReady succeeds and no drained row lingers to hold recoveryBlocked;
+  // the owner id is unchanged because the row was restarted in place, not
+  // marked released.
+  await reloaded.ensureReady();
+  expect(reloaded.recoveryBlocked).toBe(false);
+  expect(reloaded.broker.runtimeSessionId).toBe(owner);
+  expect(
+    session.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .some(
+        (entry) =>
+          parseMcpConfiguration(entry.record).releaseState === 'drained',
+      ),
+  ).toBe(false);
 });
 
 it('restores the original owner before close and uses fresh identities after confirmed release', async () => {
