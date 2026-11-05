@@ -21,7 +21,6 @@ import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionSt
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -156,37 +155,24 @@ class ToolPublicationStoreTest {
     }
 
     @Test
-    void localReservationWaitsForLifecyclePlacementBeforeLockingBrokerRows() throws Exception {
+    void localReservationDoesNotWaitForLifecyclePlacementOrThePublicationGuard() throws Exception {
+        // An ordinary original publishes below its Session root, without either
+        // tenant guard (design 2026-11-04-managed-publication-placement).
         try (var pool = Executors.newSingleThreadExecutor()) {
-            var publisher = new TransactionTemplate(manager).execute(status -> {
+            new TransactionTemplate(manager).executeWithoutResult(status -> {
                 com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant-1");
                 String tenantKey = ToolPublicationContract.sha256("tenant-1".getBytes(StandardCharsets.UTF_8));
                 jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
                         + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, "tenant-1");
                 jdbc.queryForList("SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE",
                         tenantKey);
-                var entered = new CountDownLatch(1);
-                var pending = pool.submit(() -> {
-                    entered.countDown();
-                    return reserve();
-                });
                 try {
-                    assertThat(entered.await(3, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
-                    assertThatThrownBy(() -> pending.get(250, java.util.concurrent.TimeUnit.MILLISECONDS))
-                            .isInstanceOf(java.util.concurrent.TimeoutException.class);
-                } catch (InterruptedException error) {
-                    Thread.currentThread().interrupt();
-                    throw new IllegalStateException(error);
+                    assertThat(pool.submit(() -> reserve()).get(3, java.util.concurrent.TimeUnit.SECONDS)
+                            .path("publicationId").asText()).isEqualTo("pub-1");
+                } catch (Exception error) {
+                    throw new AssertionError("The reservation waited for a tenant guard", error);
                 }
-                RuntimeBindingRecord original = jdbc.execute(
-                        (org.springframework.jdbc.core.ConnectionCallback<RuntimeBindingRecord>) connection ->
-                                bindings.findByIdForUpdate(connection, "binding-1"));
-                assertThat(original.getBindingId()).isEqualTo("binding-1");
-                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture", Integer.class)).isZero();
-                return pending;
             });
-            assertThat(publisher.get(3, java.util.concurrent.TimeUnit.SECONDS).path("publicationId").asText())
-                    .isEqualTo("pub-1");
         }
     }
 
@@ -528,14 +514,15 @@ class ToolPublicationStoreTest {
     }
 
     @Test
-    void newReservationRecreatesOnlyItsQualifiedPlacementWhenPublicSessionIsMissing() {
+    void newOrdinaryReservationDoesNotRecreatePlacementWhenPublicSessionIsMissing() {
+        // An ordinary original publishes below its Session root, without
+        // placement (design 2026-11-04-managed-publication-placement).
         jdbc.update("DELETE FROM ma_tenant_guard WHERE guard_domain = 'runtime_placement'");
         assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session WHERE session_kind = 'PUBLIC'")).isEmpty();
         assertThat(reserve().path("state").asText()).isEqualTo("OPEN");
         assertThat(jdbc.queryForList(
                                 "SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain ="
-                                        + " 'runtime_placement'"))
-                .containsExactly(Map.of("tenant_id", "tenant-1"));
+                                        + " 'runtime_placement'")).isEmpty();
         assertThat(reserve().path("state").asText()).isEqualTo("OPEN");
     }
 
@@ -989,10 +976,9 @@ class ToolPublicationStoreTest {
                 : admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit);
         assertThat(receipt.path("decision").asText()).isEqualTo("blocked");
         if (ambient) {
-            // An ordinary receipt takes placement first and no tenant
-            // publication guard (design 2026-11-04-managed-publication-tenant-guards).
-            assertThat(lockOrder).doesNotContain("retention");
-            assertThat(lockOrder.getFirst()).isEqualTo("placement");
+            // An ordinary receipt takes neither tenant guard (designs
+            // 2026-11-04-managed-publication-tenant-guards and -placement).
+            assertThat(lockOrder).isEmpty();
         }
         var changedReplay = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
                 journal.revision, journal.sequence, "different-transaction", "recordToolResult", "execution-1",

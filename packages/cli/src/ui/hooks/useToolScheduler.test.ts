@@ -228,6 +228,111 @@ describe('useReactToolScheduler in YOLO Mode', () => {
     expect(confirmationCall).toBeUndefined();
   });
 
+  it("hands a batch's completion to its own callback instead of onComplete", async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockToolRequiresConfirmation);
+    (mockToolRequiresConfirmation.execute as Mock).mockResolvedValue({
+      llmContent: 'awaited output',
+      returnDisplay: 'awaited output',
+    } as ToolResult);
+    const onBatchComplete = vi.fn(async () => {});
+
+    const { result } = renderSchedulerInYoloMode();
+    const schedule = result.current[1];
+    const request: ToolCallRequestInfo = {
+      callId: 'awaitedCall',
+      name: 'mockToolRequiresConfirmation',
+      args: { data: 'any data' },
+    } as any;
+
+    act(() => {
+      schedule(
+        request,
+        new AbortController().signal,
+        undefined,
+        onBatchComplete,
+      );
+    });
+    for (let step = 0; step < 3; step++) {
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+    }
+
+    expect(onBatchComplete).toHaveBeenCalledWith([
+      expect.objectContaining({ status: 'success', request }),
+    ]);
+    expect(onComplete).not.toHaveBeenCalled();
+
+    // A later batch without its own callback goes back to onComplete.
+    act(() => {
+      schedule(
+        { ...request, callId: 'laterCall' },
+        new AbortController().signal,
+      );
+    });
+    for (let step = 0; step < 3; step++) {
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+    }
+    expect(onBatchComplete).toHaveBeenCalledOnce();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({
+        status: 'success',
+        request: expect.objectContaining({ callId: 'laterCall' }),
+      }),
+    ]);
+  });
+
+  it("releases a batch's callback when scheduling fails without completing it", async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    (mockTool.execute as Mock).mockResolvedValue({
+      llmContent: 'later output',
+      returnDisplay: 'later output',
+    } as ToolResult);
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValueOnce(new Error('already running'));
+    const onBatchComplete = vi.fn(async () => {});
+    const { result } = renderSchedulerInYoloMode();
+    const request = {
+      callId: 'reusedCall',
+      name: 'mockTool',
+      args: {},
+    } as ToolCallRequestInfo;
+
+    act(() => {
+      result.current[1](
+        request,
+        new AbortController().signal,
+        undefined,
+        onBatchComplete,
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    // The caller stops waiting, with no calls.
+    expect(onBatchComplete).toHaveBeenCalledOnce();
+    expect(onBatchComplete).toHaveBeenCalledWith([]);
+    scheduleSpy.mockRestore();
+
+    // A later batch reusing the call id goes to onComplete, not the old one.
+    act(() => {
+      result.current[1](request, new AbortController().signal);
+    });
+    for (let step = 0; step < 3; step++) {
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+    }
+    expect(onBatchComplete).toHaveBeenCalledOnce();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({ status: 'success', request }),
+    ]);
+  });
+
   it('keeps shell heartbeats out of liveOutput while retaining display chunks', async () => {
     let resolveExecute: (result: ToolResult) => void;
     let emitUpdate: ((output: unknown) => void) | undefined;
