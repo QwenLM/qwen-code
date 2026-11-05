@@ -88,6 +88,7 @@ import { LoopReason, LoopType } from '../telemetry/types.js';
 import * as loggers from '../telemetry/loggers.js';
 import { logMemoryRecallDelivery } from '../telemetry/index.js';
 import { formatOmniMemorySideQueryReminder } from '../omni/memory-side-query.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 import type { MediaMemoryRecallResult } from '../services/media-memory/index.js';
 
 type MockSessionStartProfiler = {
@@ -11099,6 +11100,39 @@ Other open files:
       );
     });
 
+    it.each([
+      { type: SendMessageType.Cron, record: 'recordCronPrompt' as const },
+      {
+        type: SendMessageType.Notification,
+        record: 'recordNotification' as const,
+      },
+    ])(
+      'leaves the record of a $type send to a host that records it',
+      async ({ type, record }) => {
+        const recorder = {
+          recordCronPrompt: vi.fn(),
+          recordNotification: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+          recordFileHistorySnapshot: vi.fn(),
+        };
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+          recorder as unknown as ReturnType<Config['getChatRecordingService']>,
+        );
+        mockTurnRunFn.mockReturnValue(textTurn('Hello'));
+        installChat();
+
+        await run([{ text: 'tick' }], `prompt-host-${type}`, {
+          type,
+          userTurnRecordedByHost: true,
+        });
+        expect(mockTurnRunFn).toHaveBeenCalledOnce();
+        expect(recorder[record]).not.toHaveBeenCalled();
+
+        await run([{ text: 'tick' }], `prompt-client-${type}`, { type });
+        expect(recorder[record]).toHaveBeenCalledOnce();
+      },
+    );
+
     /** A recall that never settles; returns a spy on its abort listener. */
     const recallAbortHandler = () => {
       const abortHandler = vi.fn();
@@ -13881,6 +13915,45 @@ Other open files:
           hookContext: 'extra hook context',
         });
         expect(promptId).toBe('prompt-hook-context-tag');
+      });
+
+      it("records a Mod's prompt under the Mod's name", async () => {
+        const recordUserMessage = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordCronPrompt: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+        const attribution = CommitAttributionService.getInstance();
+        const before = attribution.getPromptCount();
+
+        await run([{ text: 'framed prompt' }], 'prompt-from-mod', {
+          type: SendMessageType.UserQuery,
+          submittedPrompt: 'Run the linter',
+          submittedByMod: 'lint',
+        });
+        expect(recordUserMessage.mock.calls[0]![2]).toEqual({
+          displayText: 'Run the linter',
+          hookContext: expect.any(String),
+          mod: 'lint',
+        });
+        await run([{ text: 'Say done' }], 'prompt-as-user', {
+          type: SendMessageType.UserQuery,
+          submittedPrompt: 'Say done',
+          submittedByMod: 'lint',
+          submittedAsUser: true,
+        });
+        expect(recordUserMessage.mock.calls[1]![2]).toMatchObject({
+          mod: 'lint',
+          asUser: true,
+        });
+        // Nor does it count as a prompt the user typed.
+        expect(attribution.getPromptCount()).toBe(before);
+        await run([{ text: 'typed' }], 'prompt-typed', {
+          type: SendMessageType.UserQuery,
+        });
+        expect(attribution.getPromptCount()).toBe(before + 1);
       });
 
       it('puts the Mods prompt context ahead of the hook context, escaped', async () => {

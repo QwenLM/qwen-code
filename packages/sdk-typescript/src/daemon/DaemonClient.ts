@@ -202,6 +202,8 @@ import type {
   DaemonChannelPairingRequestsSnapshot,
   DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
+  DaemonChannelEventsQuery,
+  DaemonChannelEventsSnapshot,
   DaemonChannelsSnapshot,
   DaemonChannelStartupRequest,
   DaemonChannelTypeCatalog,
@@ -483,6 +485,21 @@ const MCP_RESTART_DEFAULT_TIMEOUT_MS =
   MCP_RESTART_SERVER_DEADLINE_MS + MCP_RESTART_CLIENT_HEADROOM_MS;
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
 const urlEncode = encodeURIComponent;
+
+function channelEventsQuerySuffix(
+  query: DaemonChannelEventsQuery | undefined,
+): string {
+  const params = new URLSearchParams();
+  if (query?.limit !== undefined) params.set('limit', String(query.limit));
+  if (query?.types?.length) params.set('type', query.types.join(','));
+  // One parameter per name: a Channel name may contain a comma, so a joined
+  // list could not be split back into the names the caller asked for.
+  for (const channel of query?.channels ?? [])
+    params.append('channel', channel);
+  if (query?.since !== undefined) params.set('since', query.since);
+  const encoded = params.toString();
+  return encoded ? `?${encoded}` : '';
+}
 
 function transcriptPageSuffix(
   opts: DaemonSessionTranscriptPageOptions,
@@ -1922,6 +1939,31 @@ export class DaemonClient {
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /workspace/hooks');
         return (await res.json()) as DaemonWorkspaceHooksStatus;
+      },
+    );
+  }
+
+  async approveWorkspaceHooks(
+    decision: 'approve' | 'reject',
+    hash?: string,
+  ): Promise<{ decision: 'approve' | 'reject'; reloaded: boolean }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/hooks/approve`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(
+          hash === undefined ? { decision } : { decision, hash },
+        ),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/hooks/approve');
+        }
+        return (await res.json()) as {
+          decision: 'approve' | 'reject';
+          reloaded: boolean;
+        };
       },
     );
   }
@@ -6254,6 +6296,17 @@ export class DaemonClient {
     );
   }
 
+  workspaceChannelEvents(
+    query?: DaemonChannelEventsQuery,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelEventsSnapshot> {
+    return this.jsonRequest<DaemonChannelEventsSnapshot>(
+      `/workspace/channels/events${channelEventsQuerySuffix(query)}`,
+      'GET /workspace/channels/events',
+      { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
   upsertWorkspaceChannel(
     name: string,
     request: DaemonChannelUpsertRequest,
@@ -7862,6 +7915,18 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  workspaceChannelEvents(
+    query?: DaemonChannelEventsQuery,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelEventsSnapshot> {
+    return this.channelRequest(
+      `/channels/events${channelEventsQuerySuffix(query)}`,
+      'GET /workspaces/:workspace/channels/events',
+      undefined,
+      opts,
+    );
+  }
+
   upsertWorkspaceChannel(
     name: string,
     request: DaemonChannelUpsertRequest,
@@ -8546,6 +8611,17 @@ export class WorkspaceDaemonClient {
 
   workspaceHooks(): Promise<DaemonWorkspaceHooksStatus> {
     return this.get('/hooks', 'GET /workspaces/:workspace/hooks');
+  }
+
+  approveWorkspaceHooks(
+    decision: 'approve' | 'reject',
+    hash?: string,
+  ): Promise<{ decision: 'approve' | 'reject'; reloaded: boolean }> {
+    return this.post(
+      '/hooks/approve',
+      'POST /workspaces/:workspace/hooks/approve',
+      hash === undefined ? { decision } : { decision, hash },
+    );
   }
 
   workspaceEnv(): Promise<DaemonWorkspaceEnvStatus> {

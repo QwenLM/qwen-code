@@ -4942,6 +4942,9 @@ export interface DaemonChannelConfigNumberFieldDescriptor
   envResolvable?: never;
   multiline?: never;
   exclusiveMinimum?: number;
+  /** Inclusive upper bound. A poll interval above Node's 32-bit timer range is
+   * clamped to 1ms, so an unbounded interval field can persist a hot loop. */
+  maximum?: number;
   properties?: never;
 }
 
@@ -5016,6 +5019,67 @@ export interface DaemonChannelInstanceSnapshot {
 export interface DaemonChannelsSnapshot {
   revision: string;
   instances: Record<string, DaemonChannelInstanceSnapshot>;
+}
+
+export type DaemonChannelEventType = 'inbound' | 'outbound' | 'task' | 'poll';
+
+/**
+ * One entry of a Channel's event journal: what the Channel did, not what a
+ * message said. Records never carry message text.
+ */
+export interface DaemonChannelEvent {
+  at: string;
+  channel: string;
+  type: DaemonChannelEventType;
+  outcome: string;
+  reason?: string;
+  triggerKind?: string;
+  repository?: string;
+  thread?: string;
+  number?: number;
+  actor?: string;
+  sessionId?: string;
+  messageId?: string;
+  durationMs?: number;
+  error?: string;
+  detail?: Record<string, string | number | boolean>;
+}
+
+export interface DaemonChannelEventsSnapshot {
+  events: DaemonChannelEvent[];
+  /**
+   * True when older events are missing: the record limit was reached, a
+   * journal was left out by the route's read bounds, or a journal was taller
+   * than the tail window the route reads.
+   */
+  truncated: boolean;
+  /**
+   * Non-secret link metadata (platform type, API base URL, and the resolved
+   * GitHub web origin) for the channels named in `events`, resolved from the
+   * merged system + user + workspace settings and filtered to channels owned
+   * by the queried workspace. Present only when at least one channel
+   * resolves; absent on older daemons. Lets a client link journal rows of
+   * channels configured outside the workspace's own settings scope.
+   */
+  channelLinkMeta?: Record<string, DaemonChannelLinkMeta>;
+}
+
+export interface DaemonChannelLinkMeta {
+  type?: string;
+  baseUrl?: string;
+  /**
+   * The resolved GitHub web origin (e.g. `https://github.com` or a GHE web
+   * host). Clients should concatenate it directly; `baseUrl` remains for
+   * daemons that predate this field.
+   */
+  webOrigin?: string;
+}
+
+export interface DaemonChannelEventsQuery {
+  limit?: number;
+  types?: readonly DaemonChannelEventType[];
+  channels?: readonly string[];
+  since?: string;
 }
 
 export type DaemonChannelSecretUpdate =
@@ -5621,6 +5685,8 @@ export interface DaemonHookEntry {
   matcher?: string;
   sequential?: boolean;
   enabled: boolean;
+  /** Why a disabled hook is off (e.g. 'untrusted'); absent when enabled. */
+  disabledReason?: string;
   hookId?: string;
   skillRoot?: string;
 }
@@ -5632,6 +5698,16 @@ export interface DaemonWorkspaceHooksStatus {
   disabled: boolean;
   hooks: DaemonHookEntry[];
   events: Record<string, DaemonHookEventMeta>;
+  /** Project hooks await the user's approval; see the hooks approve control. */
+  pendingApproval?: boolean;
+  /** Sanitized display lines of the withheld hooks, for the approval prompt. */
+  pendingApprovalHooks?: string[];
+  /**
+   * The hash of the block the prompt renders. Echo it back to
+   * `approveWorkspaceHooks` so the decision binds to the exact block the
+   * user reviewed; a block that changed since the render stays pending.
+   */
+  pendingApprovalHash?: string;
   errors?: DaemonStatusCell[];
 }
 

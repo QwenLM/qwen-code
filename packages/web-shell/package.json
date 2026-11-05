@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.26.6",
+  "version": "0.26.7",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git",
@@ -32,7 +32,8 @@
     "NOTICES.txt",
     "dist/*.js",
     "dist/types",
-    "!dist/types/components/artifacts/pierre-*.d.ts"
+    "!dist/types/components/artifacts/pierre-*.d.ts",
+    "!dist/types/managed-host.d.ts"
   ],
   "scripts": {
     "dev": "vite",
@@ -109,6 +110,7 @@
     "@pierre/trees": "1.0.0-beta.6",
     "@playwright/test": "1.61.1",
     "@qwen-code/acp-bridge": "file:../acp-bridge",
+    "@qwen-code/channel-github": "file:../channels/github",
     "@qwen-code/sdk": "file:../sdk-typescript",
     "@tailwindcss/vite": "^4.3.2",
     "@types/node": "^22.0.0",

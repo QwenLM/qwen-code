@@ -22,7 +22,13 @@ const extensionUpdate = `{
 test('installs a local extension, verifies a command, and updates it', async () => {
   const rig = new TestRig();
   await rig.setup('extension install test');
-  const testServerPath = join(rig.testDir!, 'qwen-extension.json');
+  // Install from a nested directory: the rig keeps QWEN_HOME inside the test
+  // directory, and an install copies its source tree into that store, so
+  // pointing it at the test root would copy the store into itself and fs.cp
+  // rejects that with EINVAL.
+  const extensionDir = join(rig.testDir!, 'local-extension');
+  mkdirSync(extensionDir, { recursive: true });
+  const testServerPath = join(extensionDir, 'qwen-extension.json');
   writeFileSync(testServerPath, extension);
   try {
     await rig.runCommand(['extensions', 'uninstall', 'test-extension']);
@@ -30,10 +36,9 @@ test('installs a local extension, verifies a command, and updates it', async () 
     /* empty */
   }
 
-  const result = await rig.runCommand(
-    ['extensions', 'install', `${rig.testDir!}`],
-    { stdin: 'y\n' },
-  );
+  const result = await rig.runCommand(['extensions', 'install', extensionDir], {
+    stdin: 'y\n',
+  });
   expect(result).toContain('test-extension');
 
   const listResult = await rig.runCommand(['extensions', 'list']);

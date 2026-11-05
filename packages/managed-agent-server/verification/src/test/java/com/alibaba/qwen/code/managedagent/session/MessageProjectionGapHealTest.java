@@ -360,7 +360,7 @@ class MessageProjectionGapHealTest {
         // the gap are still materialized, not merely skipped over.
         jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id,"
                         + " sequence_id, event_id, turn_id, event_type,"
-                        + " data_json, terminal, source_key, gmt_create,"
+                        + " data_json, is_terminal, source_key, gmt_create,"
                         + " schema_version, projection_version, item_id,"
                         + " content_part_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
                         + " ?, ?, ?, ?, ?, ?)",

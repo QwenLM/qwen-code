@@ -63,7 +63,7 @@ final class AgentStoreRows {
                         readInput(result.getString("input_json")),
                         result.getString("payload_digest"),
                         result.getString("status"),
-                        result.getBoolean("submission_attempted"),
+                        result.getBoolean("is_submission_attempted"),
                         result.getString("harness_event_epoch"),
                         nullableLong(result, "harness_last_event_id"),
                         result.getString("dispatch_owner"),
@@ -121,7 +121,8 @@ final class AgentStoreRows {
                 readBinding(result),
                 result.getString("approval_mode"),
                 result.getString("tool_profile"),
-                result.getString("agent_definition_digest"), result.getInt("public_child_agents_version"));
+                result.getString("agent_definition_digest"), result.getInt("public_child_agents_version"),
+                result.getString("model_config_digest"));
     }
 
     final RowMapper<TurnSummary> turnSummaryMapper;
@@ -207,7 +208,7 @@ final class AgentStoreRows {
                             + " ? AND ma_session.session_id = ? FOR UPDATE",
                     (rows, rowNumber) -> {
                         if (legacyMutation) {
-                            ManagedLegacySessionGuard.requireLegacyMutation(rows.getBoolean("csi_guard"));
+                            ManagedLegacySessionGuard.requireLegacyMutation(rows.getBoolean("is_csi_guard"));
                         }
                         // H2 can retain pre-wait outer-join values after locking the Session.
                         // Read its stream only after acquiring that lock.

@@ -168,13 +168,15 @@ type PmOpts = Partial<{
    * tool. Independent of the permission rules (#10075).
    */
   eagerTools: string[];
-  /** Live folder trust; absent reads as trusted. */
-  isTrustedFolder: () => boolean;
+  /** Live explicit folder trust; absent denies repository grants. */
+  isExplicitlyTrustedFolder: () => boolean;
 }>;
 
 function makeConfig(opts: PmOpts = {}): PermissionManagerConfig {
   return {
-    ...(opts.isTrustedFolder ? { isTrustedFolder: opts.isTrustedFolder } : {}),
+    ...(opts.isExplicitlyTrustedFolder
+      ? { isExplicitlyTrustedFolder: opts.isExplicitlyTrustedFolder }
+      : {}),
     getPermissionsAllow: () => opts.permissionsAllow,
     getPermissionsAsk: () => opts.permissionsAsk,
     getPermissionsDeny: () => opts.permissionsDeny,
@@ -2680,7 +2682,7 @@ describe('PermissionManager', () => {
       // so a mid-session revocation applies at the next call and a later
       // grant restores the rule (the second side of the gate on the way in).
       let trusted = true;
-      pm = makePm({ isTrustedFolder: () => trusted });
+      pm = makePm({ isExplicitlyTrustedFolder: () => trusted });
       const call = sh('git commit');
       pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
       pm.addSessionAllowRule('Bash(npm *)'); // the user's own grant
@@ -2704,7 +2706,7 @@ describe('PermissionManager', () => {
       // the user's, which no folder trust suspends. A gated re-arrival (skill
       // reload) stays a skip.
       let trusted = true;
-      pm = makePm({ isTrustedFolder: () => trusted });
+      pm = makePm({ isExplicitlyTrustedFolder: () => trusted });
       const call = sh('git commit');
       pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
       pm.addSessionAllowRule('Bash(git *)'); // the user-level skill's grant
@@ -2717,9 +2719,9 @@ describe('PermissionManager', () => {
       expect(sessionAllowRules(pm)).toHaveLength(1);
     });
 
-    it('a trust-gated rule stays in force when the config reports no trust probe', async () => {
+    it('a trust-gated rule is withheld when the config reports no trust probe', async () => {
       pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
-      expect(await pm.evaluate(sh('git commit'))).toBe('allow');
+      expect(await pm.evaluate(sh('git commit'))).toBe('ask');
     });
 
     it('clearSessionAllowRules drops live and AUTO-stashed session grants', async () => {
