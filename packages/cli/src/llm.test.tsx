@@ -1904,8 +1904,8 @@ describe('llm.tsx main function', () => {
     expect(loadCliConfig).toHaveBeenCalledWith(
       {},
       expect.objectContaining({ bare: true }),
+      process.cwd(),
       undefined,
-      [],
       {
         userHooks: undefined,
         projectHooks: undefined,
@@ -1917,10 +1917,10 @@ describe('llm.tsx main function', () => {
       undefined,
       { workflowAncestorTrustProvider: expect.any(Function) },
       expect.any(Function),
-      // projectHooksApprovalProvider: not installed on the bare path
-      undefined,
-      // allowedBaseUrlsWorkspaceOnly: the bare stub carries no allowlist
-      // (and no trust), so the workspace-only exemption is false
+      // projectHooksApprovalProvider: live settings for the YOLO-exit re-gate
+      expect.any(Function),
+      // allowedBaseUrlsWorkspaceOnly: the bare stub carries no workspace-scope
+      // allowlist, so the workspace-only exemption is false
       false,
     );
   });
