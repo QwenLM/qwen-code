@@ -4458,10 +4458,18 @@ const EN: Messages = {
   'channels.editor.section.credentials': 'Credentials',
   'channels.editor.section.connection': 'Connection',
   'channels.editor.section.routing': 'Notifications and routing',
+  'channels.editor.section.boundSessions': 'PR-bound sessions',
+  'channels.editor.section.boundSessions.description':
+    'Watch events apply to PRs bound to a live session. Enable delivery first, then choose the transitions to watch.',
   'channels.editor.section.session': 'Conversation management',
   'channels.editor.section.access': 'Access control',
   'channels.editor.section.access.description':
     'Configure direct-message and group access separately.',
+  'channels.editor.section.advanced': 'Advanced settings',
+  'channels.editor.section.advanced.description':
+    'Rarely changed tuning for connection, routing, and session behavior.',
+  'channels.editor.section.advanced.configuredCount': (v) =>
+    `${v?.count ?? 0} configured`,
   'channels.editor.session.isolation': 'Conversation isolation',
   'channels.editor.instanceName': 'Instance name',
   'channels.editor.instanceNamePlaceholder': 'e.g. release-bot',
@@ -4502,6 +4510,41 @@ const EN: Messages = {
   'channels.editor.field.github.baseUrl': 'API Base URL',
   'channels.editor.field.github.baseUrl.description':
     'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
+  'channels.editor.field.github.pollInterval': 'Poll Interval (ms)',
+  'channels.editor.field.github.pollInterval.description':
+    'How often to check GitHub for new notifications. Leave empty for 60000 (one minute).',
+  'channels.editor.field.github.repositorySettings': 'Per-repository settings',
+  'channels.editor.field.github.repositorySettings.description':
+    'Each allowlisted repository inherits the channel-wide settings below until you override it here.',
+  'channels.editor.field.github.requireMention': 'Require a mention',
+  'channels.editor.field.github.requireMention.inheritOn':
+    'Inherit (require a mention)',
+  'channels.editor.field.github.requireMention.inheritOff':
+    'Inherit (answer without a mention)',
+  'channels.editor.field.github.requireMention.on': 'Require a mention',
+  'channels.editor.field.github.requireMention.off': 'Answer without a mention',
+  'channels.editor.field.github.repositorySenders': 'Who may speak',
+  'channels.editor.field.github.repositorySenders.inheritOpen':
+    'Inherit (anyone)',
+  'channels.editor.field.github.repositorySenders.inheritAllowlist':
+    'Inherit (allowlist only)',
+  'channels.editor.field.github.repositorySenders.open': 'Anyone',
+  'channels.editor.field.github.repositorySenders.allowlist': 'Allowlist only',
+  'channels.editor.field.github.repositorySpeakers': 'Allowed speakers',
+  'channels.editor.field.github.repositorySpeakers.placeholder': 'alice, bob',
+  'channels.editor.field.github.repositorySpeakers.description':
+    'GitHub logins allowed to start tasks in this repository. Empty means nobody.',
+  'channels.editor.field.github.repositorySpeakers.inherited':
+    'GitHub logins allowed in this repository. Leave empty to use the channel-wide list.',
+  'channels.editor.field.github.retainedRepositorySettings.title':
+    'Repository settings still apply',
+  'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
+    `These repositories keep their own speaker and mention settings even though the group policy no longer uses an allowlist: ${v?.repositories ?? ''}. Switch the group policy back to Allowlist to edit them.`,
+  'channels.editor.field.github.retainedRepositorySettings.disabled.title':
+    'Repository settings are kept but not applied',
+  'channels.editor.field.github.retainedRepositorySettings.disabled.description':
+    (v) =>
+      `The group policy is Disabled, so no repository traffic is processed. These repositories keep their own speaker and mention settings, and they apply again once the policy admits group traffic: ${v?.repositories ?? ''}. Switch the group policy back to Allowlist to edit them.`,
   'channels.editor.field.github.groupPolicy': 'Group Policy',
   'channels.editor.field.github.groupPolicy.description':
     'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
@@ -4545,6 +4588,8 @@ const EN: Messages = {
   'channels.editor.field.github.prWatchEvents': 'PR Watch Events',
   'channels.editor.field.github.prWatchEvents.description':
     'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
+  'channels.editor.field.github.prWatchEvents.disabledHint':
+    'Enable "Deliver To PR-Bound Sessions" above to select watch events.',
   'channels.editor.field.github.prWatchEvents.option.ci_failure':
     'ci_failure — CI checks turn red on a head commit',
   'channels.editor.field.github.prWatchEvents.option.merge_conflict':
@@ -4553,6 +4598,9 @@ const EN: Messages = {
     'head_change — the PR’s head commit changes',
   'channels.editor.field.github.prWatchEvents.option.state_change':
     'state_change — the PR is merged or closed',
+  'channels.editor.field.github.boundSessionActions': 'Bound Session Actions',
+  'channels.editor.field.github.boundSessionActions.description':
+    'Optional. Operator instruction templates delivered to PR-bound sessions, keyed by event class (watch:<type> or a notification reason), optionally role-qualified (review:, verify:, fix:). Requires Deliver To PR-Bound Sessions. With templates configured, each role gets its own delivery (one winner per role); a role with no matching key skips the event. Template variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%. Use %% for a literal %. Leave empty for the default generic prompt.',
   'channels.editor.field.gitlab.token': 'Personal Access Token',
   'channels.editor.field.gitlab.token.description':
     'PAT with "read_api" + "api" scopes',
@@ -4732,11 +4780,19 @@ const EN: Messages = {
     'Enter each repository as owner/repo.',
   'channels.editor.validation.conflictingRepoAliases':
     'This channel lists one repository twice with different settings, spelled differently (for example Owner/repo and owner/repo). Remove one of the entries from settings.json before saving.',
+  'channels.editor.validation.invalidGroupEntry': (v) =>
+    `This channel stores a group entry that is not an object: ${v?.repositories ?? ''}. The daemon refuses every save while it is there, and the form has no row for it. Fix or remove that entry in settings.json, then reload the channel.`,
   'channels.editor.validation.invalidOption':
     "Remove values that aren't in the allowed list.",
+  'channels.editor.validation.requiresBoundDelivery':
+    'Enable "Deliver To PR-Bound Sessions" to save the selected watch events.',
   'channels.editor.validation.number': 'Enter a valid number.',
   'channels.editor.validation.outOfRange': (v) =>
-    `Enter a number greater than ${v?.min ?? 0}.`,
+    v?.min !== undefined && v?.max !== undefined
+      ? `Enter a number greater than ${v.min} and at most ${v.max}.`
+      : v?.max !== undefined
+        ? `Enter a number at most ${v.max}.`
+        : `Enter a number greater than ${v?.min ?? 0}.`,
   'channels.editor.validation.policy': 'Choose an access policy.',
   'channels.editor.saveError': 'Changes were not saved',
   'channels.editor.reloadLatest': 'Reload latest',
@@ -8901,10 +8957,18 @@ const ZH: Messages = {
   'channels.editor.section.credentials': '应用凭据',
   'channels.editor.section.connection': '连接',
   'channels.editor.section.routing': '通知与路由',
+  'channels.editor.section.boundSessions': 'PR 绑定会话',
+  'channels.editor.section.boundSessions.description':
+    '监视事件作用于已绑定到活跃会话的 PR。先开启投递，再选择要监视的状态转换。',
   'channels.editor.section.session': '会话管理',
   'channels.editor.section.access': '访问控制',
   'channels.editor.section.access.description':
     '分别设置谁可以私聊，以及哪些群聊可以使用此频道。',
+  'channels.editor.section.advanced': '高级设置',
+  'channels.editor.section.advanced.description':
+    '连接、路由与会话行为的少改调优项。',
+  'channels.editor.section.advanced.configuredCount': (v) =>
+    `已配置 ${v?.count ?? 0} 项`,
   'channels.editor.session.isolation': '会话隔离方式',
   'channels.editor.instanceName': '实例名称',
   'channels.editor.instanceNamePlaceholder': '例如 release-bot',
@@ -8944,6 +9008,40 @@ const ZH: Messages = {
   'channels.editor.field.github.baseUrl': 'API 基础 URL',
   'channels.editor.field.github.baseUrl.description':
     'GitHub Enterprise API 根地址（如 https://ghe.example.com/api/v3），github.com 留空',
+  'channels.editor.field.github.pollInterval': '轮询间隔（毫秒）',
+  'channels.editor.field.github.pollInterval.description':
+    '多久向 GitHub 查一次新通知。留空为 60000（一分钟）。',
+  'channels.editor.field.github.repositorySettings': '按仓库设置',
+  'channels.editor.field.github.repositorySettings.description':
+    '每个已允许的仓库都继承下面的渠道级设置，直到你在这里覆盖它。',
+  'channels.editor.field.github.requireMention': '需要 @',
+  'channels.editor.field.github.requireMention.inheritOn': '继承（需要 @）',
+  'channels.editor.field.github.requireMention.inheritOff':
+    '继承（无需 @ 也响应）',
+  'channels.editor.field.github.requireMention.on': '需要 @',
+  'channels.editor.field.github.requireMention.off': '无需 @ 也响应',
+  'channels.editor.field.github.repositorySenders': '谁可以发言',
+  'channels.editor.field.github.repositorySenders.inheritOpen':
+    '继承（任何人）',
+  'channels.editor.field.github.repositorySenders.inheritAllowlist':
+    '继承（仅允许列表）',
+  'channels.editor.field.github.repositorySenders.open': '任何人',
+  'channels.editor.field.github.repositorySenders.allowlist': '仅允许列表',
+  'channels.editor.field.github.repositorySpeakers': '允许的发言人',
+  'channels.editor.field.github.repositorySpeakers.placeholder': 'alice, bob',
+  'channels.editor.field.github.repositorySpeakers.description':
+    '可以在该仓库发起任务的 GitHub 登录名。留空表示没有人。',
+  'channels.editor.field.github.repositorySpeakers.inherited':
+    '可以在该仓库发言的 GitHub 登录名。留空则使用渠道级列表。',
+  'channels.editor.field.github.retainedRepositorySettings.title':
+    '按仓库设置仍然生效',
+  'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
+    `虽然群组策略已不再使用白名单，这些仓库仍保留自己的发言人与 @ 设置：${v?.repositories ?? ''}。把群组策略切回「白名单」即可编辑它们。`,
+  'channels.editor.field.github.retainedRepositorySettings.disabled.title':
+    '按仓库设置已保留，但当前不生效',
+  'channels.editor.field.github.retainedRepositorySettings.disabled.description':
+    (v) =>
+      `群组策略为「禁用」，因此不处理任何仓库流量。这些仓库保留自己的发言人与 @ 设置，待策略重新放行群组流量后再次生效：${v?.repositories ?? ''}。把群组策略切回「白名单」即可编辑它们。`,
   'channels.editor.field.github.groupPolicy': '群组策略',
   'channels.editor.field.github.groupPolicy.description':
     '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能接收通知',
@@ -8986,6 +9084,8 @@ const ZH: Messages = {
   'channels.editor.field.github.prWatchEvents': 'PR 状态监视事件',
   'channels.editor.field.github.prWatchEvents.description':
     '可选。为绑定 PR 监视的状态转换（需开启"投递到 PR 绑定会话"）。留空则禁用。',
+  'channels.editor.field.github.prWatchEvents.disabledHint':
+    '开启上方「投递到 PR 绑定会话」后即可选择监视事件。',
   'channels.editor.field.github.prWatchEvents.option.ci_failure':
     'ci_failure — CI 检查在 head 提交上变红',
   'channels.editor.field.github.prWatchEvents.option.merge_conflict':
@@ -8994,6 +9094,9 @@ const ZH: Messages = {
     'head_change — PR 的 head 提交变更',
   'channels.editor.field.github.prWatchEvents.option.state_change':
     'state_change — PR 被合并或关闭',
+  'channels.editor.field.github.boundSessionActions': '绑定会话动作模板',
+  'channels.editor.field.github.boundSessionActions.description':
+    '可选。投递给 PR 绑定会话的 operator 指令模板，键为事件类别（watch:<type> 或通知 reason），可加角色前缀（review:、verify:、fix:）。需开启"投递到 PR 绑定会话"。配置模板后每个角色各自投递（每角色一个 winner）；没有匹配键的角色跳过该事件。模板变量：%repo%、%pr%、%url%、%title%、%event%、%sender%、%role%。%% 表示字面 %。留空则使用默认通用 prompt。',
   'channels.editor.field.gitlab.token': '个人访问令牌',
   'channels.editor.field.gitlab.token.description':
     '需要 "read_api" + "api" 权限的 PAT',
@@ -9164,10 +9267,18 @@ const ZH: Messages = {
   'channels.editor.validation.invalidRepoId': '仓库需写成 owner/repo 形式。',
   'channels.editor.validation.conflictingRepoAliases':
     '该渠道把同一个仓库以不同大小写写了两次且设置不同（例如 Owner/repo 与 owner/repo）。请先在 settings.json 里删掉其中一条再保存。',
+  'channels.editor.validation.invalidGroupEntry': (v) =>
+    `该渠道把以下群组条目存成了非对象：${v?.repositories ?? ''}。只要它还在，daemon 就会拒绝每次保存，而表单里没有对应的行。请在 settings.json 里修正或删除该条目，然后重新加载渠道。`,
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
+  'channels.editor.validation.requiresBoundDelivery':
+    '需开启「投递到 PR 绑定会话」才能保存所选的监视事件。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>
-    `请输入大于 ${v?.min ?? 0} 的数字。`,
+    v?.min !== undefined && v?.max !== undefined
+      ? `请输入大于 ${v.min} 且不超过 ${v.max} 的数字。`
+      : v?.max !== undefined
+        ? `请输入不超过 ${v.max} 的数字。`
+        : `请输入大于 ${v?.min ?? 0} 的数字。`,
   'channels.editor.validation.policy': '请选择准入策略。',
   'channels.editor.saveError': '未能保存更改',
   'channels.editor.reloadLatest': '加载最新配置',

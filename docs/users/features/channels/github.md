@@ -80,23 +80,47 @@ Local `gh` authentication requires an HTTPS `baseUrl` so the daemon host credent
 
 ## Configuration Options
 
-| Option                    | Default                  | Description                                                                                                                                         |
-| ------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication                                                                |
-| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                                                                           |
-| `pollInterval`            | `60000`                  | Poll interval in ms                                                                                                                                 |
-| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                                                                              |
-| `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"` with the repo (`owner/repo`) listed in `groups`, or `"pairing"` with the repo approved for notifications to flow    |
-| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run                                                                    |
-| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                                                                        |
-| `deliverToBoundSessions`  | `false`                  | Deliver events for PRs bound to a live session into that session as a prompt instead of a channel-owned session (daemon-managed channels only)      |
-| `prWatchEvents`           | unset                    | Optional state transitions to watch for bound PRs: `ci_failure`, `merge_conflict`, `head_change`, `state_change`. Requires `deliverToBoundSessions` |
+| Option                    | Default                  | Description                                                                                                                                                                                                        |
+| ------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication                                                                                                                               |
+| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                                                                                                                                          |
+| `pollInterval`            | `60000`                  | Poll interval in ms                                                                                                                                                                                                |
+| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                                                                                                                                             |
+| `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"` with the repo (`owner/repo`) listed in `groups`, or `"pairing"` with the repo approved for notifications to flow                                                                   |
+| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run                                                                                                                                   |
+| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                                                                                                                                       |
+| `deliverToBoundSessions`  | `false`                  | Deliver events for PRs bound to a live session into that session as a prompt instead of a channel-owned session (daemon-managed channels only)                                                                     |
+| `prWatchEvents`           | unset                    | Optional state transitions to watch for bound PRs: `ci_failure`, `merge_conflict`, `head_change`, `state_change`. Requires `deliverToBoundSessions`                                                                |
+| `boundSessionActions`     | unset                    | Optional operator instruction templates for bound-session delivery, keyed by event class with optional role prefixes (`review:`, `verify:`, `fix:`). Enables role-aware fan-out. Requires `deliverToBoundSessions` |
 
 Use `reasonFilter` to drop noisy notification classes such as `ci_activity` or `state_change`. Do not use `reasonFilter: ["mention"]` as a replacement for `groups.*.requireMention`: GitHub's `mention` reason is sticky at the thread level, so real new @mentions can arrive later under `comment`, `subscribed`, `author`, or other reasons and would be skipped.
 
 Valid `reasonFilter` values are `mention`, `review_requested`, `assign`, `author`, `comment`, `ci_activity`, `manual`, `state_change`, `subscribed`, `team_mention`, `security_alert`, `approval_requested`, `invitation`, `member_feature_requested`, and `security_advisory_credit`.
 
 Filtered notifications are marked read only after all accepted work in the poll window completes. Removing the filter later will not replay notifications the channel already skipped.
+
+### Editing from the Web Shell
+
+Settings → Channels → GitHub exposes the poll interval under **Connection**, in milliseconds. It is kept between 1 and 86400000 (one day): a larger value is clamped to the ceiling and a smaller positive one is raised to 1, because Node rounds a sub-millisecond timeout to about 1 ms and clamps one above its 32-bit range to 1 ms as well — either would turn the poll loop into a hot loop. Leave it empty for the 60000 ms default. When `groupPolicy` is `"allowlist"`, the **Access control** section also shows one row per allowlisted repository, each with a require-mention control and a speaker control.
+
+A repository with no stored setting starts at **Inherit**, and the option label names the value it inherits — for example `Inherit (require a mention)`. A repository that already stores a value opens on that value instead, so a stored `requireMention: false` shows _Answer without a mention_. A row left at Inherit writes no key, so the repository keeps following `groups["*"]` and any later change to `"*"` still reaches it.
+
+Choosing an explicit value writes that repository's `groups` entry. Choosing Inherit again removes the **policy** key, and what happens to a speaker list you typed depends on the policy the row then inherits:
+
+- It inherits an allowlist from `groups["*"]`: the names stay in force, and the speaker box stays visible so you can keep editing them.
+- It inherits **Anyone**: the names stay in the file but are not applied, because an open policy admits every group member. They apply again if the channel-wide policy later becomes an allowlist. The speaker box is not shown in this case, so there is nothing to clear.
+
+The speaker box appears whenever the row's effective policy is an allowlist, whether the row set it or inherited it. What an **empty** box will do depends on the row's own policy, and the hint under the box says which case you are in:
+
+- The row is set to **Allowlist only**: saving an empty box writes `allowedUsers: []`, which means _nobody_. The repository admits no one and does not fall back to the channel-wide list.
+- The row inherits its policy: saving an empty box removes the per-repository list, so the channel-wide `groups["*"].allowedUsers` applies. This is also what happens when you clear a box that was showing stored names — the repository widens back to the channel-wide list rather than locking down.
+- A stored `"senders": "allowlist"` with no `allowedUsers` beside it inherits its members, so its empty box reads as _inherit_; a stored `allowedUsers: []` with no policy admits _nobody_. The hint distinguishes the two.
+
+Switching the group policy away from `"allowlist"` hides the rows but does not delete these entries. Under `"open"` and `"pairing"` the runtime keeps enforcing them, because per-repository senders and `requireMention` are resolved without consulting `groupPolicy`; under `"disabled"` the group gate drops every notification first, so the entries are kept but nothing is processed. The editor names the repositories whose settings this save keeps **and that can still take effect**, says which of those two cases applies, and tells you to switch back to Allowlist to edit them. A repository you typed during this visit is named too, even though it is not in the stored file yet. An entry is only announced when it can still change something: its own `senders` is `"allowlist"`, or its `requireMention` differs from the value it inherits. An `allowedUsers` list beside an inherited `"open"` policy restricts nobody — every group member is admitted regardless — so it is kept in the file but not announced as a setting that still applies. Row edits you made before switching are still written — including on a channel that was already `"open"`, and including a repository you added while the policy was `"allowlist"` — so the save cannot report success while restoring the old value. The one exception is a repository stored under two spellings that disagree, such as `Acme/Widgets` and `acme/widgets`: the editor cannot tell which spelling an edit was meant for, so an untouched save leaves both entries exactly as stored — including an empty one, which is what makes the exact spelling inherit `groups["*"]` rather than fall through to the other. If you edit that row and then switch the policy away from `"allowlist"`, the save is refused with a message under **Group policy** asking you to remove one of the two entries from `settings.json`, so the narrowing you just typed is never quietly dropped. Switching back to `"allowlist"` reports the same conflict.
+
+Per-repository settings the editor does not model, such as `dispatchMode` and `groupHistoryLimit`, are preserved when you save. An entry that is already empty is preserved as well when the channel never used an allowlist, so an unrelated edit does not rewrite the file.
+
+If `settings.json` holds a group entry whose value is not an object, the editor refuses the save and names the entry: the daemon rejects such an entry on every save, and no row in the form can represent it. Fix or remove it in `settings.json` and reload the channel. The editor does not delete it for you — removing the exact key would hand that repository to a differently spelled entry through the runtime's case-insensitive fallback.
 
 ## ⚠️ Security
 
@@ -125,7 +149,7 @@ The adapter uses GitHub's Notifications API as a wake-up signal:
 5. **Commit the poll window** only after accepted work completes: mark notifications read and advance the cursor
 6. **First-contact fallback**: a brand-new unread issue/PR body can be processed when no comment was dispatched; mention notifications still require an actual body mention
 
-The comment window is `(previousCursor, currentMaxUpdatedAt]`. Accepted, running, and failed tasks are stored under `~/.qwen/channels/<workspace-scope>/` with private file permissions. On restart, the channel recovers those tasks before polling GitHub again. Failed tasks are attempted up to three times, then become terminal; cancelled tasks are terminal and are not rerun. A task whose final reply was already posted, suppressed, or queued for definite no-write retry is not rerun.
+The comment window is `(previousCursor, currentMaxUpdatedAt]`. The notification cursor and the accepted, running, and failed tasks are stored under `~/.qwen/channels/<workspace-scope>/` with private file permissions, so two workspaces running a channel of the same name keep separate cursors. On restart, the channel recovers those tasks before polling GitHub again. Failed tasks are attempted up to three times, then become terminal; cancelled tasks are terminal and are not rerun. A task whose final reply was already posted, suppressed, or queued for definite no-write retry is not rerun.
 
 The notification cursor does not advance while recoverable tasks remain, or when inbound task state cannot be read or written. This prevents a crash or agent failure from losing an accepted comment and preserves the deduplication keys needed to avoid a second dispatch from the notification feed. There are two deliberate exceptions. **Bound-session backpressure** (see below): a deferred bound delivery has its own durable retry and a bounded deferral horizon, so it does not hold the shared cursor — its notification is marked read while the event stays recoverable in the task store. **Watch tasks while pending-event reconciliation is blocked** (for example an unreadable watch state file): they cannot make progress until a reconciliation succeeds, and watch events are detected from PR state rather than notifications, so they leave the cursor free as well — unrelated comments keep flowing, and the watch events deliver exactly once after the state file recovers.
 
@@ -160,7 +184,9 @@ so the session that follows the PR handles the event with its existing context.
   automatically, and the session may act on GitHub through its own tools.
 - Comment sender gates still apply before delivery. When several sessions are
   bound to the same PR, the most recently updated non-archived session wins;
-  channel-owned sessions are never candidates.
+  channel-owned sessions are never candidates. With `boundSessionActions`
+  configured, routing becomes role-aware instead: one winner per role,
+  fan-out across roles (see below).
 - When no bound session exists (or it cannot be restored), **comment** events
   fall back to the normal channel path and its public-reply contract — on a
   complete binding snapshot; while the snapshot is partial or its refresh is
@@ -183,8 +209,8 @@ so the session that follows the PR handles the event with its existing context.
 - **Two operator-visible states stop bound delivery from processing events.**
   (1) _Cold start_: with `deliverToBoundSessions` on, the comment lane waits
   for the first successful binding lookup. While the lookup has never
-  succeeded — or keeps answering an **empty partial** snapshot (a draining or
-  unreadable workspace) — `pollOnce` returns before fetching notifications, so
+  succeeded — or keeps answering an **empty partial** snapshot (a workspace whose
+  files the daemon cannot read) — `pollOnce` returns before fetching notifications, so
   no GitHub event is processed; a throttled stderr line names the
   state. The empty-partial deferral is bounded (30 consecutive polls): after
   that the lane opens, and events whose PR is still absent from the incomplete
@@ -192,14 +218,17 @@ so the session that follows the PR handles the event with its existing context.
   path — an incomplete scan never establishes that a PR is unbound. That
   per-event deferral is PR-scoped: bindings are PR-only, so once the lane is
   open an issue event is never deferred by it (its absence needs no snapshot)
-  and routes publicly even under a permanently partial scan. A permanently
-  partial snapshot has a steady-state cause besides a degraded workspace: the
-  binding scan reads at most 100 sessions per page and flags any multi-page
-  scan partial, so a workspace with more than 100 active sessions never
-  produces a complete snapshot. In that state a comment on a PR that no
-  session follows defers per-event until the dead-letter horizon (~4 hours at
-  the default poll) rather than falling back to the channel; issue events are
-  unaffected, since the per-event absence gate is PR-scoped. The lane-level
+  and routes publicly even under a permanently partial scan. A partial
+  snapshot only arises when part of the catalog could not be read (a chats
+  directory the daemon could not list, a PR sidecar, transcript or live
+  session list it could not read, or a workspace whose runtime is missing)
+  or when the channel worker had to drop a malformed binding row (check that
+  the worker and the daemon run the same version; the worker logs the
+  drop); the number of active sessions never makes it partial. While such a failure persists, a
+  comment on a PR that no session follows defers per-event until the
+  dead-letter horizon (~4 hours at the default poll) rather than falling back
+  to the channel; issue events are unaffected, since the per-event absence
+  gate is PR-scoped. The lane-level
   cold start above still holds every notification, issue events included,
   until the first successful binding lookup. Once a complete snapshot lands,
   deferred events are re-resolved: delivered privately to a follower, or
@@ -234,6 +263,78 @@ status (404/410/451) only skips that PR. A failing Checks endpoint never
 suppresses the other three detections: their data comes from `pulls.get`,
 and the last known CI aggregate stands until a fetch succeeds again.
 Transitions are persisted before delivery, so restarts do not re-fire them.
+
+### Role-Aware Action Templates
+
+With `boundSessionActions` configured, bound delivery becomes declarative and
+role-aware: the operator states what each kind of session should do when an
+event arrives, instead of relying on the session's own context to guess.
+
+**Roles.** A binding can carry a role — `review`, `verify`, or `fix`. The
+prompt-route backfill assigns `review` when a session runs `/review <N>` and
+`verify` for `/verify-pr <N>`; `fix` is bound explicitly through the session
+metadata API (`PATCH /session/:id/metadata` with `pr: { number, url, role:
+"fix" }`; `role: null` clears it, an omitted role preserves it). Bindings
+without a role are _untyped_. A later command re-offer never overwrites an
+existing role.
+
+**Keys and resolution.** Each key is an event class, optionally prefixed with
+a role: `watch:head_change`, `comment`, `review:watch:head_change`,
+`verify:default`, or the catch-all `default`. The `watch:` prefix matters:
+`state_change` is both a watch transition and a notification reason — bare
+`state_change` matches the notification, `watch:state_change` the transition.
+For each role group the chain resolves `<role>:<event>` → `<role>:comment`
+(for comment events) → `<role>:default` → `<event>` → `comment` → `default`;
+**no match skips that role for the event** — the map is a per-role
+subscription. Comment events carry the thread's notification reason
+(`mention`, `subscribed`, `author`, ...), so `fix:comment` catches a comment
+delivered under any of those reasons, while a reason-specific key such as
+`fix:mention` still wins when configured. Untyped bindings resolve only the
+bare chain.
+
+**Routing.** One winner per role (the most recently updated follower within
+the group), fan-out across matched roles — at most four deliveries per event
+(review, verify, fix, untyped), never one per session. Each delivery is its
+own durable task: a queue-full role defers independently without blocking
+the others, and a lost session falls back only within its own role. Once any
+role has accepted an event privately, it is never also answered publicly —
+a durable delivery history enforces this even if every follower later
+disappears. Comment events fall back to the channel path only when no role
+has a live follower on a complete snapshot and no role ever accepted the
+event.
+
+**Templates.** Values are operator instruction templates with `%repo%`,
+`%pr%`, `%url%`, `%title%`, `%event%`, `%sender%`, and `%role%` variables;
+`%%` renders a literal `%`, and an unknown `%foo%` stays literal so typos are
+visible. Substituted GitHub values are sanitized and capped at 200 code
+points with a visible marker. The rendered instruction appears in a labeled
+`[Operator instruction — trusted, from this channel's configuration]` block;
+the untrusted-data warning explicitly covers the substituted values. Example
+for a review / verify / fix split across three workspaces:
+
+```json
+{
+  "deliverToBoundSessions": true,
+  "prWatchEvents": ["head_change", "ci_failure", "merge_conflict"],
+  "boundSessionActions": {
+    "review:watch:head_change": "The PR head advanced. Run /review %pr% --resume and report the delta since your last review.",
+    "verify:watch:head_change": "The PR head advanced. Run /verify-pr %pr% --publish.",
+    "fix:watch:ci_failure": "CI failed on the current head. Diagnose the failed checks named below and fix them.",
+    "fix:watch:merge_conflict": "The PR has a merge conflict. Resolve it.",
+    "fix:comment": "New review comments arrived. Address the actionable ones."
+  }
+}
+```
+
+One head advance then produces two prompt turns (review + verify); the fix
+session is only disturbed by CI failures, conflicts, and comments.
+
+**Boundaries.** A template is an instruction, not an execution guarantee:
+the session's model keeps discretion and its approval mode governs actions.
+A template containing `--publish` is the operator's explicit publication
+consent for the rounds it triggers — configure it deliberately. With
+`boundSessionActions` absent, delivery keeps the legacy single-winner
+behavior and the generic prompt, byte for byte.
 
 ## Known Limitations
 

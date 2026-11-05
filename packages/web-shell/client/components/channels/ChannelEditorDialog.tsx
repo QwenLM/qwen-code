@@ -12,7 +12,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from 'react';
-import { CheckCircle2Icon, KeyRoundIcon } from 'lucide-react';
+import { CheckCircle2Icon, ChevronDownIcon, KeyRoundIcon } from 'lucide-react';
 import type {
   DaemonChannelConfigFieldDescriptor,
   DaemonChannelInstanceSnapshot,
@@ -30,6 +30,11 @@ import { extractErrorDetail } from '../../utils/errorDetail';
 import { workspaceLabel } from '../../utils/workspace';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { Button } from '../ui/button';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '../ui/collapsible';
 import {
   Dialog,
   DialogContent,
@@ -61,11 +66,17 @@ import {
   hasDescriptorPrivatePolicy,
   configuredPrivatePolicy,
   PRIVATE_ONLY_FIELD_KEYS,
+  invalidRepositoryGroupEntries,
+  projectRepositoryGroup,
+  recordHasRoute,
+  repositoryAllowlistIds,
+  retainedRepositorySettings,
   toList,
   validateChannelEditorDraft,
   type ChannelEditorDraft,
   type ChannelSecretDraft,
   type ChannelEditorValidationCode,
+  type ChannelGroupOverrideDraft,
   type ChannelGroupSenders,
 } from './channel-editor-state';
 import {
@@ -94,11 +105,13 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     token: 'channels.editor.field.github.token',
     useLocalGh: 'channels.editor.field.github.useLocalGh',
     baseUrl: 'channels.editor.field.github.baseUrl',
+    pollInterval: 'channels.editor.field.github.pollInterval',
     groupPolicy: 'channels.editor.field.github.groupPolicy',
     reasonFilter: 'channels.editor.field.github.reasonFilter',
     deliverToBoundSessions:
       'channels.editor.field.github.deliverToBoundSessions',
     prWatchEvents: 'channels.editor.field.github.prWatchEvents',
+    boundSessionActions: 'channels.editor.field.github.boundSessionActions',
   },
   gitlab: {
     token: 'channels.editor.field.gitlab.token',
@@ -122,6 +135,11 @@ const SHARED_SESSION_FIELD_KEYS = new Set([
   'multiSession',
   'instructions',
 ]);
+// One panel: watch events only mean something with bound delivery enabled.
+const BOUND_SESSION_FIELD_KEYS = new Set([
+  'deliverToBoundSessions',
+  'prWatchEvents',
+]);
 
 const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
   outputMode: 'channels.editor.field.shared.outputMode',
@@ -139,18 +157,37 @@ const FIELD_PLACEHOLDER_KEYS: Record<string, string> = {
   'github.baseUrl': 'https://ghe.example.com/api/v3',
 };
 
-const CONNECTION_FIELD_KEYS = new Set(['baseUrl', 'wsUrl']);
-const ROUTING_FIELD_KEYS = new Set([
+const CONNECTION_FIELD_KEYS = new Set(['baseUrl', 'wsUrl', 'pollInterval']);
+/**
+ * Rarely changed tuning, collapsed into one disclosure panel. Primary
+ * endpoints stay out: `wsUrl` (WeCom) and `baseUrl` (GitHub Enterprise /
+ * self-hosted GitLab) decide where a token is sent, so a fresh draft must
+ * show them. `operators` stays out too: it grants permissions, which belongs
+ * in Access control, not behind a tuning disclosure. Only non-enum keys
+ * belong here — `initialFieldValue` pre-fills enums from their default, so
+ * an enum key would count every fresh draft as configured and auto-open the
+ * panel, quietly undoing the slim default view.
+ */
+const ADVANCED_FIELD_KEYS = new Set([
+  'pollInterval',
   'reasonFilter',
   'messageRoutes',
   'defaultMessageRoute',
+  'multiSession',
+  'instructions',
 ]);
+
+/** Every repository starts fully inheriting; nothing is materialized. */
+const EMPTY_GROUP_OVERRIDE: ChannelGroupOverrideDraft = {
+  requireMention: '',
+  senders: '',
+  allowedUsers: '',
+};
 
 function fieldSectionKey(
   field: DaemonChannelConfigFieldDescriptor,
-): 'credentials' | 'connection' | 'routing' {
+): 'credentials' | 'connection' {
   if (CONNECTION_FIELD_KEYS.has(field.key)) return 'connection';
-  if (ROUTING_FIELD_KEYS.has(field.key)) return 'routing';
   return 'credentials';
 }
 
@@ -197,11 +234,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** Draft-value adapter over the shared record rule in channel-editor-state. */
+function draftHasRoute(value: string | boolean | undefined): boolean {
+  return typeof value === 'string' && recordHasRoute(value);
+}
+
+function isAdvancedFieldConfigured(
+  field: DaemonChannelConfigFieldDescriptor,
+  value: string | boolean | undefined,
+): boolean {
+  if (field.kind === 'boolean') return value === true;
+  if (field.kind === 'record') return draftHasRoute(value);
+  return typeof value === 'string' && value.trim() !== '';
+}
+
 function FieldShell({
   id,
   label,
   required,
   hint,
+  hintId,
   description,
   error,
   children,
@@ -210,6 +262,7 @@ function FieldShell({
   label: string;
   required?: boolean;
   hint?: string;
+  hintId?: string;
   description?: string;
   error?: string;
   children: ReactNode;
@@ -225,7 +278,17 @@ function FieldShell({
             </span>
           ) : null}
         </Label>
-        {hint ? <span className={styles.hint}>{hint}</span> : null}
+        {hint || hintId ? (
+          // A hintId keeps the live region mounted while the hint is empty,
+          // so screen readers announce the hint when it appears.
+          <span
+            id={hintId}
+            className={styles.hint}
+            aria-live={hintId ? 'polite' : undefined}
+          >
+            {hint}
+          </span>
+        ) : null}
       </div>
       {children}
       {description ? (
@@ -267,14 +330,23 @@ export function ChannelEditorDialog({
   const [submitError, setSubmitError] = useState<string>();
   const [saving, setSaving] = useState(false);
   const [reloading, setReloading] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [scrollToErrorKey, setScrollToErrorKey] = useState<string>();
   const dismissedRef = useRef(false);
   /** The token draft as it stood before local gh auth overrode it. */
   const tokenBeforeLocalGh = useRef<ChannelSecretDraft | undefined>(undefined);
-  const accessFields = descriptor.fields.filter((field) =>
-    SHARED_ACCESS_FIELD_KEYS.has(field.key),
+  const accessFields = descriptor.fields.filter(
+    (field) =>
+      SHARED_ACCESS_FIELD_KEYS.has(field.key) &&
+      !ADVANCED_FIELD_KEYS.has(field.key),
   );
-  const sessionFields = descriptor.fields.filter((field) =>
-    SHARED_SESSION_FIELD_KEYS.has(field.key),
+  const sessionFields = descriptor.fields.filter(
+    (field) =>
+      SHARED_SESSION_FIELD_KEYS.has(field.key) &&
+      !ADVANCED_FIELD_KEYS.has(field.key),
+  );
+  const advancedFields = descriptor.fields.filter((field) =>
+    ADVANCED_FIELD_KEYS.has(field.key),
   );
   const sessionScopeField = sessionFields.find(
     (field) => field.key === 'sessionScope' && field.kind === 'enum',
@@ -293,14 +365,28 @@ export function ChannelEditorDialog({
   const credentialFields = descriptor.fields.filter(
     (field) =>
       !SHARED_ACCESS_FIELD_KEYS.has(field.key) &&
-      !SHARED_SESSION_FIELD_KEYS.has(field.key),
+      !SHARED_SESSION_FIELD_KEYS.has(field.key) &&
+      !ADVANCED_FIELD_KEYS.has(field.key) &&
+      !BOUND_SESSION_FIELD_KEYS.has(field.key),
+  );
+  const boundSessionFields = descriptor.fields.filter((field) =>
+    BOUND_SESSION_FIELD_KEYS.has(field.key),
   );
 
   useEffect(() => {
     if (!open) return;
     dismissedRef.current = false;
     tokenBeforeLocalGh.current = undefined;
-    setDraft(createChannelEditorDraft(descriptor, instance));
+    const fresh = createChannelEditorDraft(descriptor, instance);
+    setDraft(fresh);
+    // Configured tuning must not hide behind a collapsed panel on open.
+    setAdvancedOpen(
+      descriptor.fields.some(
+        (field) =>
+          ADVANCED_FIELD_KEYS.has(field.key) &&
+          isAdvancedFieldConfigured(field, fresh.values[field.key]),
+      ),
+    );
     setErrors({});
     setSubmitError(undefined);
   }, [descriptor, instance, open]);
@@ -309,6 +395,32 @@ export function ChannelEditorDialog({
     setErrors({});
     setSubmitError(undefined);
   }, [workspaceCwd]);
+
+  useEffect(() => {
+    if (!scrollToErrorKey) return;
+    // Runs after the forced-open panel content mounts (submit sets both in
+    // one batch); the id is the same one FieldShell renders, so the scroll
+    // lands on the erroring control. The optional call keeps jsdom (no
+    // scrollIntoView) from throwing.
+    document
+      .getElementById(`${formId}-${scrollToErrorKey}`)
+      ?.scrollIntoView?.({ block: 'center' });
+    setScrollToErrorKey(undefined);
+  }, [advancedOpen, scrollToErrorKey, formId]);
+
+  const isFieldVisible = (field: DaemonChannelConfigFieldDescriptor) => {
+    // A stored default route must stay repairable even with no routes left.
+    if (field.key === 'defaultMessageRoute')
+      return (
+        draftHasRoute(draft.values['messageRoutes']) ||
+        String(draft.values['defaultMessageRoute'] ?? '').trim() !== ''
+      );
+    return true;
+  };
+
+  const advancedConfiguredCount = advancedFields.filter((field) =>
+    isAdvancedFieldConfigured(field, draft.values[field.key]),
+  ).length;
 
   const fieldLabel = (field: DaemonChannelConfigFieldDescriptor) => {
     const key =
@@ -362,11 +474,28 @@ export function ChannelEditorDialog({
       return t('channels.editor.validation.conflictingRepoAliases');
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
+    if (code === 'requiresBoundDelivery')
+      return t('channels.editor.validation.requiresBoundDelivery');
     if (code === 'number') return t('channels.editor.validation.number');
     if (code === 'outOfRange') {
+      const numberField = field && field.kind === 'number' ? field : undefined;
+      // Only name the bounds the descriptor actually declares: a field with a
+      // maximum and no exclusiveMinimum has no floor, and inventing "greater
+      // than 0" would state a constraint the validator does not enforce.
       return t('channels.editor.validation.outOfRange', {
-        min:
-          field && field.kind === 'number' ? (field.exclusiveMinimum ?? 0) : 0,
+        ...(numberField?.exclusiveMinimum !== undefined
+          ? { min: numberField.exclusiveMinimum }
+          : {}),
+        ...(numberField?.maximum !== undefined
+          ? { max: numberField.maximum }
+          : {}),
+      });
+    }
+    if (code === 'invalidGroupEntry') {
+      // Name the entries: the form has no row for them, so a generic refusal
+      // would leave the operator with nothing to act on.
+      return t('channels.editor.validation.invalidGroupEntry', {
+        repositories: invalidRepositoryGroupEntries(instance).join(', '),
       });
     }
     if (code === 'policy') return t('channels.editor.validation.policy');
@@ -374,6 +503,37 @@ export function ChannelEditorDialog({
       label: field ? fieldLabel(field) : t('channels.editor.instanceName'),
     });
   };
+
+  // Re-derive only the errors already on screen, so each remedy (switch in
+  // either direction, untick) retires exactly the instruction it satisfies —
+  // including invalidOption, whose remedy is unticking the offending value —
+  // without surfacing an error the operator never submitted. Submit stays the
+  // only population site; deriving through validateChannelEditorDraft keeps
+  // the daemon precedence that the parity table pins.
+  const refreshErrors = (values: ChannelEditorDraft['values']) =>
+    setErrors((current) => {
+      const shown = Object.keys(current);
+      if (shown.length === 0) return current;
+      const validation = validateChannelEditorDraft(
+        descriptor,
+        { ...draft, values },
+        existingNames,
+        instance,
+      );
+      const next = { ...current };
+      for (const key of shown) {
+        const code = validation[key];
+        if (code) {
+          next[key] = validationMessage(
+            descriptor.fields.find((field) => field.key === key),
+            code,
+          );
+        } else {
+          delete next[key];
+        }
+      }
+      return next;
+    });
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -384,6 +544,14 @@ export function ChannelEditorDialog({
       instance,
     );
     if (Object.keys(validation).length > 0) {
+      // An error below the fold or on a collapsed field would otherwise be
+      // invisible: open the advanced panel when needed and bring the first
+      // erroring field — advanced or not — into view.
+      const advancedErrorKey = Object.keys(validation).find((key) =>
+        ADVANCED_FIELD_KEYS.has(key),
+      );
+      if (advancedErrorKey) setAdvancedOpen(true);
+      setScrollToErrorKey(advancedErrorKey ?? Object.keys(validation)[0]);
       setErrors(
         Object.fromEntries(
           Object.entries(validation).map(([key, code]) => [
@@ -555,6 +723,14 @@ export function ChannelEditorDialog({
         field.key === 'useLocalGh' &&
         isRepositoryOnlyChannelType(descriptor.type);
       const updateSwitch = (checked: boolean) => {
+        if (field.key === 'deliverToBoundSessions') {
+          // Both directions re-derive shown errors: on retires the dependency
+          // instruction, off keeps a shown one instead of dropping it silently.
+          refreshErrors({
+            ...draft.values,
+            deliverToBoundSessions: checked,
+          });
+        }
         if (!isLocalGhSwitch) {
           update(checked);
           return;
@@ -640,6 +816,11 @@ export function ChannelEditorDialog({
     }
     if (field.kind === 'string-list' && field.options?.length) {
       const options = field.options;
+      // Same scope as the validation mirror in channel-editor-state.
+      const watchField =
+        field.key === 'prWatchEvents' && descriptor.type === 'github';
+      const gated =
+        watchField && draft.values['deliverToBoundSessions'] !== true;
       const selected = toList(String(value ?? ''));
       // The adapter matches these values case-insensitively, so a stored
       // `COMMENT` has to tick the canonical `comment` box instead of rendering
@@ -659,14 +840,18 @@ export function ChannelEditorDialog({
         const next = new Set(selectedKeys);
         if (checked) next.add(target.toLowerCase());
         else next.delete(target.toLowerCase());
-        update(
-          [
-            ...options
-              .map((option) => option.value)
-              .filter((entry) => next.has(entry.toLowerCase())),
-            ...stored.filter((entry) => next.has(entry.toLowerCase())),
-          ].join(', '),
-        );
+        const joined = [
+          ...options
+            .map((option) => option.value)
+            .filter((entry) => next.has(entry.toLowerCase())),
+          ...stored.filter((entry) => next.has(entry.toLowerCase())),
+        ].join(', ');
+        // Unticking is a remedy too: re-derive so a satisfied instruction
+        // retires without waiting for a second Save.
+        if (watchField) {
+          refreshErrors({ ...draft.values, [field.key]: joined });
+        }
+        update(joined);
       };
       return (
         <FieldShell
@@ -675,6 +860,12 @@ export function ChannelEditorDialog({
           label={fieldLabel(field)}
           required={field.required}
           description={fieldDescription(field)}
+          hint={
+            gated
+              ? t('channels.editor.field.github.prWatchEvents.disabledHint')
+              : undefined
+          }
+          hintId={watchField ? `${id}-disabled-hint` : undefined}
           error={error}
         >
           <div
@@ -682,12 +873,17 @@ export function ChannelEditorDialog({
             className={styles.optionGrid}
             role="group"
             aria-label={fieldLabel(field)}
+            aria-describedby={gated ? `${id}-disabled-hint` : undefined}
           >
             {[
               ...options,
               ...stored.map((entry) => ({ value: entry, label: entry })),
             ].map((option) => {
               const isSelected = selectedKeys.has(option.value.toLowerCase());
+              // A stored selection stays clearable while gated, so turning
+              // delivery off never strands the operator with events they
+              // cannot remove.
+              const optionDisabled = gated && !isSelected;
               const optionLabel = fieldOptionLabel(
                 field,
                 option.value,
@@ -698,11 +894,13 @@ export function ChannelEditorDialog({
                   key={option.value}
                   className={styles.optionRow}
                   data-selected={isSelected}
+                  data-disabled={optionDisabled}
                 >
                   <input
                     type="checkbox"
                     className={styles.optionCheckbox}
                     checked={isSelected}
+                    disabled={optionDisabled}
                     onChange={(event) =>
                       toggleValue(option.value, event.target.checked)
                     }
@@ -728,7 +926,17 @@ export function ChannelEditorDialog({
         }
       }
       const updateRecord = (key: string, val: string) => {
-        const next = { ...record, [key]: val };
+        // Clearing a row DELETES the key: the channel validators reject
+        // empty template values, and this renderer offers no other delete
+        // affordance, so a touched-then-cleared row would otherwise strand
+        // an unsavable "" entry (GitHub boundSessionActions, GitLab
+        // action_prompt_template).
+        const next = { ...record };
+        if (val.trim() === '') {
+          delete next[key];
+        } else {
+          next[key] = val;
+        }
         update(JSON.stringify(next));
       };
       return (
@@ -814,6 +1022,226 @@ export function ChannelEditorDialog({
           onChange={(event) => update(event.target.value)}
         />
       </FieldShell>
+    );
+  };
+
+  const updateGroupOverride = (
+    repositoryId: string,
+    patch: Partial<ChannelGroupOverrideDraft>,
+  ) => {
+    setDraft((current) => {
+      const existing =
+        current.groupOverrides[repositoryId] ?? EMPTY_GROUP_OVERRIDE;
+      return {
+        ...current,
+        groupOverrides: {
+          ...current.groupOverrides,
+          [repositoryId]: { ...existing, ...patch },
+        },
+      };
+    });
+  };
+
+  const renderRepositoryOverrides = () => {
+    const repositories = repositoryAllowlistIds(draft.allowedGroupIds);
+    if (repositories.length === 0) return null;
+    const groups = instance?.config['groups'];
+    // Fold the stored keys the same way the save path does, so a mixed-case
+    // stored repository still finds its own row.
+    const storedGroups = isRecord(groups)
+      ? Object.fromEntries(
+          Object.entries(groups).map(([key, value]) => [
+            key.toLowerCase(),
+            value,
+          ]),
+        )
+      : {};
+    const wildcard = isRecord(storedGroups['*']) ? storedGroups['*'] : {};
+    const inheritedRequireMention =
+      typeof wildcard['requireMention'] === 'boolean'
+        ? wildcard['requireMention']
+        : true;
+    const inheritedSenders = draft.groupSenders || defaultGroupSenders();
+    return (
+      <div className={styles.repositoryList}>
+        <p className={styles.repositoryListTitle}>
+          {t('channels.editor.field.github.repositorySettings')}
+        </p>
+        <p className={styles.fieldDescription}>
+          {t('channels.editor.field.github.repositorySettings.description')}
+        </p>
+        {repositories.map((repositoryId) => {
+          const override =
+            draft.groupOverrides[repositoryId] ?? EMPTY_GROUP_OVERRIDE;
+          const effectiveSenders = override.senders || inheritedSenders;
+          const storedGroup = isRecord(storedGroups[repositoryId])
+            ? storedGroups[repositoryId]
+            : {};
+          // The hint promises what an EMPTY box will do, so ask the projection
+          // about that hypothetical rather than about the current draft. A
+          // stored list under an inherited policy is deleted when the box is
+          // cleared, handing the repository back the channel-wide members —
+          // asking about the untouched draft would promise "nobody" instead.
+          const ownsSpeakerList = Array.isArray(
+            projectRepositoryGroup(storedGroup, {
+              ...override,
+              allowedUsers: '',
+            })['allowedUsers'],
+          );
+          const headingId = `${formId}-repo-${repositoryId}`;
+          const mentionId = `${formId}-mention-${repositoryId}`;
+          const sendersId = `${formId}-senders-${repositoryId}`;
+          const speakersId = `${formId}-speakers-${repositoryId}`;
+          return (
+            // Labelled by its own heading so the repeated control names are
+            // distinguishable once more than one repository is listed.
+            <div
+              key={repositoryId}
+              className={styles.repositoryRow}
+              role="group"
+              aria-labelledby={headingId}
+            >
+              <h4 id={headingId} className={styles.repositoryName}>
+                {repositoryId}
+              </h4>
+              <FieldShell
+                id={mentionId}
+                label={t('channels.editor.field.github.requireMention')}
+              >
+                <Select
+                  value={override.requireMention || 'inherit'}
+                  onValueChange={(value) =>
+                    updateGroupOverride(repositoryId, {
+                      requireMention:
+                        value === 'inherit'
+                          ? ''
+                          : (value as ChannelGroupOverrideDraft['requireMention']),
+                    })
+                  }
+                >
+                  <SelectTrigger id={mentionId} className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inherit">
+                      {t(
+                        inheritedRequireMention
+                          ? 'channels.editor.field.github.requireMention.inheritOn'
+                          : 'channels.editor.field.github.requireMention.inheritOff',
+                      )}
+                    </SelectItem>
+                    <SelectItem value="true">
+                      {t('channels.editor.field.github.requireMention.on')}
+                    </SelectItem>
+                    <SelectItem value="false">
+                      {t('channels.editor.field.github.requireMention.off')}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </FieldShell>
+              <FieldShell
+                id={sendersId}
+                label={t('channels.editor.field.github.repositorySenders')}
+              >
+                <Select
+                  value={override.senders || 'inherit'}
+                  onValueChange={(value) =>
+                    updateGroupOverride(repositoryId, {
+                      senders:
+                        value === 'inherit'
+                          ? ''
+                          : (value as ChannelGroupOverrideDraft['senders']),
+                    })
+                  }
+                >
+                  <SelectTrigger id={sendersId} className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inherit">
+                      {t(
+                        inheritedSenders === 'allowlist'
+                          ? 'channels.editor.field.github.repositorySenders.inheritAllowlist'
+                          : 'channels.editor.field.github.repositorySenders.inheritOpen',
+                      )}
+                    </SelectItem>
+                    <SelectItem value="open">
+                      {t('channels.editor.field.github.repositorySenders.open')}
+                    </SelectItem>
+                    <SelectItem value="allowlist">
+                      {t(
+                        'channels.editor.field.github.repositorySenders.allowlist',
+                      )}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </FieldShell>
+              {effectiveSenders === 'allowlist' ? (
+                <FieldShell
+                  id={speakersId}
+                  label={t('channels.editor.field.github.repositorySpeakers')}
+                  description={t(
+                    ownsSpeakerList
+                      ? 'channels.editor.field.github.repositorySpeakers.description'
+                      : 'channels.editor.field.github.repositorySpeakers.inherited',
+                  )}
+                >
+                  <Input
+                    id={speakersId}
+                    value={override.allowedUsers}
+                    placeholder={t(
+                      'channels.editor.field.github.repositorySpeakers.placeholder',
+                    )}
+                    onChange={(event) =>
+                      updateGroupOverride(repositoryId, {
+                        allowedUsers: event.target.value,
+                      })
+                    }
+                  />
+                </FieldShell>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderRetainedRepositoryOverrides = (policy: string) => {
+    // Read the list back from the request this save builds, not from storage:
+    // a repository typed during this visit is written by the save but absent
+    // from the stored groups, and announcing only stored entries would let the
+    // dialog report success without naming it.
+    const retained = retainedRepositorySettings(descriptor, draft, instance);
+    // Under open/pairing the runtime resolves per-repository senders and
+    // requireMention without consulting groupPolicy, so an entry that can still
+    // restrict someone keeps deciding who may drive the agent — but an
+    // `allowedUsers` array beside an inherited `open` policy restricts nobody,
+    // and naming it as "still applying" would be false. Under disabled the group
+    // gate drops every envelope before either lookup, so every retained entry is
+    // kept but inert. The policy is the caller's, so the copy cannot disagree
+    // with the gate that decided to show this alert.
+    const disabled = policy === 'disabled';
+    const named = disabled
+      ? retained.map((entry) => entry.repositoryId)
+      : retained.filter((entry) => entry.applies).map((e) => e.repositoryId);
+    if (named.length === 0) return null;
+    const variant = disabled ? '.disabled' : '';
+    return (
+      <Alert>
+        <KeyRoundIcon />
+        <AlertTitle>
+          {t(
+            `channels.editor.field.github.retainedRepositorySettings${variant}.title`,
+          )}
+        </AlertTitle>
+        <AlertDescription>
+          {t(
+            `channels.editor.field.github.retainedRepositorySettings${variant}.description`,
+            { repositories: named.join(', ') },
+          )}
+        </AlertDescription>
+      </Alert>
     );
   };
 
@@ -938,22 +1366,34 @@ export function ChannelEditorDialog({
               </FieldShell>
             </section>
 
-            {(['credentials', 'connection', 'routing'] as const).map(
-              (section) => {
-                const sectionFields = credentialFields.filter(
-                  (field) => fieldSectionKey(field) === section,
-                );
-                if (sectionFields.length === 0) return null;
-                return (
-                  <section key={section} className={styles.section}>
-                    <h3 className={styles.sectionHeading}>
-                      {t(`channels.editor.section.${section}`)}
-                    </h3>
-                    {sectionFields.map(renderField)}
-                  </section>
-                );
-              },
-            )}
+            {(['credentials', 'connection'] as const).map((section) => {
+              const sectionFields = credentialFields.filter(
+                (field) => fieldSectionKey(field) === section,
+              );
+              if (sectionFields.length === 0) return null;
+              return (
+                <section key={section} className={styles.section}>
+                  <h3 className={styles.sectionHeading}>
+                    {t(`channels.editor.section.${section}`)}
+                  </h3>
+                  {sectionFields.map(renderField)}
+                </section>
+              );
+            })}
+
+            {boundSessionFields.length > 0 ? (
+              <section className={styles.settingsPanel}>
+                <div className={styles.settingsPanelHeader}>
+                  <h3 className={styles.settingsPanelTitle}>
+                    {t('channels.editor.section.boundSessions')}
+                  </h3>
+                  <p className={styles.settingsPanelDescription}>
+                    {t('channels.editor.section.boundSessions.description')}
+                  </p>
+                </div>
+                {boundSessionFields.map(renderField)}
+              </section>
+            ) : null}
 
             {sessionFields.length > 0 ? (
               <section className={styles.settingsPanel}>
@@ -1163,6 +1603,12 @@ export function ChannelEditorDialog({
                       />
                     </FieldShell>
                   ) : null}
+                  {repositoryOnly && effectiveGroupPolicy === 'allowlist'
+                    ? renderRepositoryOverrides()
+                    : null}
+                  {repositoryOnly && effectiveGroupPolicy !== 'allowlist'
+                    ? renderRetainedRepositoryOverrides(effectiveGroupPolicy)
+                    : null}
                   {showGroupSenders ? (
                     <FieldShell
                       id={`${formId}-groupSenders`}
@@ -1254,6 +1700,41 @@ export function ChannelEditorDialog({
                 </section>
               );
             })()}
+
+            {advancedFields.length > 0 ? (
+              <Collapsible
+                open={advancedOpen}
+                onOpenChange={setAdvancedOpen}
+                className={styles.settingsPanel}
+              >
+                {/* Heading outside the trigger: ARIA makes a button's
+                    descendants presentational, so a span-in-button title
+                    would be invisible to heading navigation. */}
+                <h3 className={styles.settingsPanelTitle}>
+                  <CollapsibleTrigger className={styles.advancedTrigger}>
+                    <ChevronDownIcon
+                      size={15}
+                      className={styles.advancedChevron}
+                      aria-hidden="true"
+                    />
+                    <span>{t('channels.editor.section.advanced')}</span>
+                    {!advancedOpen && advancedConfiguredCount > 0 ? (
+                      <span className={styles.advancedBadge}>
+                        {t('channels.editor.section.advanced.configuredCount', {
+                          count: advancedConfiguredCount,
+                        })}
+                      </span>
+                    ) : null}
+                  </CollapsibleTrigger>
+                </h3>
+                <CollapsibleContent className={styles.advancedContent}>
+                  <p className={styles.settingsPanelDescription}>
+                    {t('channels.editor.section.advanced.description')}
+                  </p>
+                  {advancedFields.filter(isFieldVisible).map(renderField)}
+                </CollapsibleContent>
+              </Collapsible>
+            ) : null}
           </div>
           <DialogFooter className="mt-4">
             <Button
