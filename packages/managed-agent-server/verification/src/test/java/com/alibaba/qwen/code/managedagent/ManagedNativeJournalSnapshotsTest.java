@@ -51,7 +51,7 @@ class ManagedNativeJournalSnapshotsTest {
         ManagedSchema.initialize(source);
         jdbc = new FaultJdbc(source);
         tx = new TransactionTemplate(new DataSourceTransactionManager(source));
-        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         snapshots = new ManagedNativeJournalSnapshots(jdbc, sessions, JSON);
         journal = new ExtensionRecordJournal(sessions, TENANT, WORKSPACE, SESSION);
         tx.executeWithoutResult(status -> journal.open());
