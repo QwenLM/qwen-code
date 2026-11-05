@@ -1262,7 +1262,8 @@ message it accepted or skipped (with the machine reason: `reason_filter`,
 `mention_required`, `duplicate`, a sender-gate rejection, `github_api_error`),
 a GitHub thread whose handling failed and that it will read again (`failed`
 with `github_api_error`: a GitHub error, or a local error while the channel
-cannot persist its own state), a publication
+cannot read or write its own state or one of the thread's tasks is unfinished),
+a publication
 outcome, an inbound task transition, or a poll result — and never carries
 message text. A GitHub poll that filters more than 20 notifications journals
 the first 20 individually and one further `reason_filter` row whose

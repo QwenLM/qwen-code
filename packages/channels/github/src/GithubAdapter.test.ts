@@ -1547,9 +1547,8 @@ describe('GithubChannel', () => {
       const journalRows = () =>
         journal().filter((event) => event['reason'] === 'github_api_error');
 
-      /** `configOverrides` starts a fresh channel instance, as a restart does. */
-      async function initFailing(configOverrides?: Record<string, unknown>) {
-        await initWithoutLoop(configOverrides);
+      async function initFailing() {
+        await initWithoutLoop();
         (
           channel as unknown as {
             abortableSleep: (ms: number) => Promise<void>;
@@ -1776,10 +1775,25 @@ describe('GithubChannel', () => {
             ['failed', 20],
           ]);
 
-          // A fresh instance over the same channel state and held cursor.
-          mockOctokit.paginate.mockImplementation(async () => []);
-          await initFailing({});
-          mockOctokit.paginate.mockImplementation(failingThread);
+          // A restart: the poll loop saves the cursor after every poll, and a
+          // fresh instance loads it from disk with the rest of the state.
+          (channel as unknown as { saveCursor: () => void }).saveCursor();
+          channel = new TestableGithubChannel(
+            'test-github',
+            makeConfig(),
+            makeBridge(),
+          );
+          expect(channel.cursor.lastProcessedAt).toBe(
+            '2026-07-01T00:00:00.000Z',
+          );
+          mockOctokit.paginate.mockResolvedValueOnce([]);
+          await channel.connect();
+          channel.disconnect();
+          (
+            channel as unknown as {
+              abortableSleep: (ms: number) => Promise<void>;
+            }
+          ).abortableSleep = vi.fn().mockResolvedValue(undefined);
           for (let poll = 1; poll < 30; poll++) await pollOnce();
         } finally {
           stderr.mockRestore();
@@ -2745,6 +2759,10 @@ describe('GithubChannel', () => {
           expect(channel.inboundEnvelopes.map((e) => e.messageId)).toContain(
             '1002',
           );
+          // The claimed task held the window, so the thread was read again.
+          expect(journalRows()).toEqual([
+            expect.objectContaining({ outcome: 'failed', thread: 'issue:42' }),
+          ]);
         });
 
         it('still reads the comment lane after a failed direct dispatch', async () => {
@@ -2797,6 +2815,160 @@ describe('GithubChannel', () => {
           expect(channel.inboundEnvelopes.map((e) => e.messageId)).toContain(
             '1001',
           );
+          expect(journalRows()).toEqual([
+            expect.objectContaining({ outcome: 'failed', thread: 'pr:42' }),
+          ]);
+        });
+
+        it('reports the skip once the thread no longer holds the window', async () => {
+          await initFailing();
+          const pending = corruptPending();
+          let poll = 0;
+          mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return [makeNotification()];
+            }
+            if (poll === 1) return [makeComment({ id: 1001 })];
+            throw Object.assign(new Error('Not Found'), { status: 404 });
+          });
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockReturnValue(true);
+          try {
+            await pollOnce();
+            expect(
+              mockOctokit.rest.activity.markNotificationsAsRead,
+            ).not.toHaveBeenCalled();
+            // The claimed task settles at the start of the next poll; the
+            // thread then fails on its own and the window is marked read.
+            rmSync(pending, { force: true });
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+
+          expect(
+            journalRows().map((row) => [row['outcome'], row['thread']]),
+          ).toEqual([
+            ['failed', 'issue:42'],
+            ['skipped', 'issue:42'],
+          ]);
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).toHaveBeenCalledTimes(1);
+        });
+
+        it("reports another thread skipped while one thread's task holds the window", async () => {
+          await initFailing();
+          corruptPending();
+          mockOctokit.paginate.mockImplementation(
+            async (method: unknown, params: { issue_number?: number }) => {
+              if (isListNotifications(method)) {
+                return [issueNotification(1), issueNotification(2)];
+              }
+              if (params.issue_number === 1) {
+                return [
+                  makeComment({
+                    created_at: '2026-07-02T00:30:00.000Z',
+                    updated_at: '2026-07-02T00:30:00.000Z',
+                  }),
+                ];
+              }
+              throw Object.assign(new Error('Not Found'), { status: 404 });
+            },
+          );
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockReturnValue(true);
+          try {
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+
+          // Thread 1's task holds the window; thread 2 is given up on.
+          expect(
+            journalRows()
+              .map((row) => [row['thread'], row['outcome']])
+              .sort(),
+          ).toEqual([
+            ['issue:1', 'failed'],
+            ['issue:2', 'skipped'],
+          ]);
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).not.toHaveBeenCalled();
+        });
+
+        it('reports the thread skipped when its only task no longer holds the window', async () => {
+          // A task that used up its attempts no longer holds the cursor.
+          writeInboundTasks([
+            makeInboundTaskRecord({ state: 'failed', attempts: 3 }),
+          ]);
+          await initFailing();
+          mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+            if (isListNotifications(method)) return [makeNotification()];
+            throw Object.assign(new Error('Not Found'), { status: 404 });
+          });
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockReturnValue(true);
+          try {
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+
+          expect(journalRows()).toEqual([
+            expect.objectContaining({ outcome: 'skipped', thread: 'issue:42' }),
+          ]);
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).toHaveBeenCalledTimes(1);
+        });
+
+        it('reports the thread skipped when its task settled before the error', async () => {
+          await initFailing();
+          mockOctokit.rest.pulls.get.mockResolvedValue({
+            data: { title: 'PR', user: { login: 'alice' }, state: 'open' },
+          });
+          mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+            if (isListNotifications(method)) {
+              return [
+                makeNotification({
+                  reason: 'review_requested',
+                  subject: {
+                    title: 'PR',
+                    url: 'https://api.github.com/repos/owner/repo/pulls/42',
+                    type: 'PullRequest',
+                  },
+                }),
+              ];
+            }
+            if (method === mockOctokit.rest.issues.listEvents) {
+              return [makeIssueEvent()];
+            }
+            // The review request was answered; the comment lane then fails
+            // locally, with no task of the thread left to hold the window.
+            throw new TypeError('cannot read the comment lane');
+          });
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockReturnValue(true);
+          try {
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+
+          expect(channel.inboundEnvelopes).toHaveLength(1);
+          expect(journalRows()).toEqual([
+            expect.objectContaining({ outcome: 'skipped', thread: 'pr:42' }),
+          ]);
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).toHaveBeenCalledTimes(1);
         });
       });
 

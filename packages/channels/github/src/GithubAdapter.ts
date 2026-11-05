@@ -1250,6 +1250,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private prWatchStateLoaded = false;
   private inboundRecoveryPending = true;
   private recoverableInboundTasks = 0;
+  /**
+   * The inbound task store as this process last read or wrote it, for a check
+   * in the poll's error path that must not read the disk again.
+   */
+  private inboundTaskSnapshot: InboundTaskRecord[] = [];
   private activeInboundTaskIdsByMessage = new Map<string, string>();
   private cancelledInboundTaskIds = new Set<string>();
   private pendingCursorUpdatedAt: string | undefined;
@@ -2335,7 +2340,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           failure === 'permanent' &&
           typeof (err as { status?: unknown }).status !== 'number' &&
           (this.inboundPersistenceBlocked || this.publicationAuditBlocked);
-        const held = retry || storeHeld;
+        // A thread whose own task has not settled (an error inside its run
+        // leaves it running) holds the window as well: the cursor waits for
+        // that task, so the thread is read again.
+        const taskHeld =
+          !retry && !storeHeld && this.threadTaskHoldsCursor(chatId, threadId);
+        const held = retry || storeHeld || taskHeld;
         const milestone = (n: number) => n === 1 || n % 10 === 0;
         const report =
           failure === 'shared'
@@ -2345,7 +2355,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
                 ? milestone(failures)
                 : this.journalOncePerWindow(`failing\0${failureKey}`)
               : this.journalOncePerWindow(
-                  `${storeHeld ? 'held' : stale ? 'stale' : 'skip'}\0${failureKey}`,
+                  `${storeHeld || taskHeld ? 'held' : stale ? 'stale' : 'skip'}\0${failureKey}`,
                 );
         if (report) {
           const error = sanitizeLogText(
@@ -2359,7 +2369,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
                 ? `[Channel:${this.name}] API error processing ${threadId} (${heldPolls}/${MAX_TRANSIENT_FAILURE_POLLS}), keeping it unread for the next poll: ${error}\n`
                 : storeHeld
                   ? `[Channel:${this.name}] error processing ${threadId} while channel state cannot be persisted, keeping it unread for the next poll: ${error}\n`
-                  : `[Channel:${this.name}] API error processing ${threadId}, skipping: ${error}\n`,
+                  : taskHeld
+                    ? `[Channel:${this.name}] error processing ${threadId} while its task is unfinished, keeping it unread for the next poll: ${error}\n`
+                    : `[Channel:${this.name}] API error processing ${threadId}, skipping: ${error}\n`,
           );
           let detail: Record<string, number> | undefined;
           if (failure === 'transient' && !stale) {
@@ -3619,14 +3631,29 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * they settle instead of freezing the cursor forever.
    */
   private hasCursorBlockingTasks(): boolean {
-    return this.readInboundTasks().some(
+    return this.readInboundTasks().some((task) =>
+      this.isCursorBlockingTask(task),
+    );
+  }
+
+  private isCursorBlockingTask(task: InboundTaskRecord): boolean {
+    return (
+      this.isRecoverableInboundTask(task) &&
+      task.backpressure !== true &&
+      !(
+        this.watchReconcileBlocked &&
+        task.envelope?.messageId?.startsWith('watch:') === true
+      )
+    );
+  }
+
+  /** Whether one of the thread's own tasks holds the cursor, as last seen. */
+  private threadTaskHoldsCursor(chatId: string, threadId: string): boolean {
+    return this.inboundTaskSnapshot.some(
       (task) =>
-        this.isRecoverableInboundTask(task) &&
-        task.backpressure !== true &&
-        !(
-          this.watchReconcileBlocked &&
-          task.envelope?.messageId?.startsWith('watch:') === true
-        ),
+        task.source.chatId === chatId &&
+        task.source.threadId === threadId &&
+        this.isCursorBlockingTask(task),
     );
   }
 
@@ -3823,6 +3850,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     try {
       const records = update(this.readInboundTasks());
       this.writeInboundTasks(records);
+      this.inboundTaskSnapshot = records;
       this.recoverableInboundTasks = records.filter((record) =>
         this.isRecoverableInboundTask(record),
       ).length;
@@ -3843,9 +3871,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (!Array.isArray(parsed) || !parsed.every(isInboundTaskRecord)) {
         throw new Error('invalid GitHub inbound task state');
       }
+      this.inboundTaskSnapshot = parsed;
       return parsed;
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.inboundTaskSnapshot = [];
+        return [];
+      }
       this.inboundPersistenceBlocked = true;
       process.stderr.write(
         `[Channel:${this.name}] failed to read GitHub inbound tasks: ${sanitizeLogText(
