@@ -659,12 +659,31 @@ describe('workspace-qualified core REST', () => {
 
   it('serves the hooks trust decision on an untrusted workspace (#16387)', async () => {
     const h = await makeHarness({ secondaryTrusted: false });
+    const pendingApprovalHash = 'a'.repeat(64);
+    vi.mocked(
+      h.secondaryWorkspaceService.getWorkspaceHooksStatus,
+    ).mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: h.secondaryCwd,
+      initialized: true,
+      disabled: false,
+      hooks: [],
+      events: {},
+      pendingApproval: true,
+      pendingApprovalHooks: ['SessionStart: echo untrusted'],
+      pendingApprovalHash,
+    });
     try {
       const res = await request(h.app)
         .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/hooks`)
         .set('Host', host());
       expect(res.status).toBe(200);
-      expect(res.body.workspaceCwd).toBe(h.secondaryCwd);
+      expect(res.body).toMatchObject({
+        workspaceCwd: h.secondaryCwd,
+        pendingApproval: true,
+        pendingApprovalHooks: ['SessionStart: echo untrusted'],
+        pendingApprovalHash,
+      });
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
