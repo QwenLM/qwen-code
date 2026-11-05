@@ -1277,12 +1277,22 @@ user or system settings. The member is omitted entirely when no channel
 resolves, and older daemons never send it; a settings read failure degrades
 to its absence rather than failing the journal read. Each event records what a Channel did — an inbound
 message it accepted or skipped (with the machine reason: `reason_filter`,
-`mention_required`, `duplicate`, a sender-gate rejection), a publication
+`mention_required`, `duplicate`, a sender-gate rejection, `github_api_error`),
+a GitHub thread whose handling failed and that it will read again (`failed`
+with `github_api_error`: a GitHub error, or a local error while the channel
+cannot read or write its own state or one of the thread's tasks is unfinished),
+a publication
 outcome, an inbound task transition, or a poll result — and never carries
 message text. A GitHub poll that filters more than 20 notifications journals
 the first 20 individually and one further `reason_filter` row whose
 `detail.filtered` counts the rest, so a pinned poll cursor cannot flood the
-journal with repeats of the same batch. Query parameters: `limit` (1-500, default 100), `type`
+journal with repeats of the same batch. While the cursor is held, a comment the
+poll reads again is journaled as `duplicate` or `mention_required` once per
+window, and a failing thread as `github_api_error` on its first failing poll in
+the window and on every tenth failing poll (a rate limit or credential failure:
+its first and every tenth poll), and once when it is skipped. The once-per-window
+rows are tracked under up to 8,192 keys; a row whose key no longer fits is
+journaled on every poll. Query parameters: `limit` (1-500, default 100), `type`
 (comma-separated `inbound`, `outbound`, `task`, `poll`), `channel`
 (repeat the parameter once per instance name), and `since` (ISO 8601). The route needs no
 operator authority. Journal reads are asynchronous and bounded: the current journal plus one
@@ -4574,6 +4584,14 @@ Errors (non-2xx):
 - `500` — internal error (e.g. `ToolRegistry` not initialized).
 
 SSE events (workspace-scoped): `mcp_server_restarted` with `{serverName, durationMs, originatorClientId?}` on success; `mcp_server_restart_refused` with `{serverName, reason, originatorClientId?}` on soft skip.
+
+#### `POST /workspaces/:workspace/language`
+
+Sessionless workspace UI-language sync, registered when settings persistence is available. Ownership: selected-runtime. Resolves the workspace id or encoded absolute cwd, requires an active trusted runtime and validates client ownership against that runtime. Inactive generations return `503 workspace_runtime_unavailable`; unresolved selectors never fall back to the primary workspace.
+
+Request: `{ "language": "zh" }`. The language uses the same supported codes as `POST /language`. Persists only the selected workspace's `general.language`, then reads its effective merged setting and synchronizes already-live channels through `qwen/control/user/language` with `scope: "workspace"`. Cold channels are skipped without starting a process or creating a conversation. Output language and model settings remain unchanged; `syncOutputLanguage: true` is rejected.
+
+The response has the same shape as `POST /language`, with `outputLanguage: null`; `language` is the effective configured locale (including `auto`) and `refresh` counts the selected runtime only. A workspace `language_changed` event is emitted on success. The SDK exposes `client.workspaceByCwd(cwd).setUiLanguage(language)` over REST, independently of the session transport.
 
 #### `POST /language`
 

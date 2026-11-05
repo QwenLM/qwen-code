@@ -116,6 +116,7 @@ import type {
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
   DaemonRevisionRequest,
+  SetUserLanguageResult,
 } from '@qwen-code/sdk/daemon';
 
 // ── Resource Hook Types (shared by workspace hooks) ────────────────
@@ -520,6 +521,11 @@ export type DaemonWorkspaceDirectoryPickerResult =
     };
 
 export interface DaemonWorkspaceActions {
+  setUiLanguage(
+    language: string,
+    scope: 'user' | 'workspace',
+    workspaceCwd?: string,
+  ): Promise<SetUserLanguageResult>;
   // Sessions
   listSessions(
     options?: DaemonSessionListPageOptions,

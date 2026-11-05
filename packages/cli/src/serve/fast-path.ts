@@ -75,6 +75,7 @@ const STRING_OPTION_BY_FLAG = new Map<string, keyof ServeOptions>([
   ['hostname', 'hostname'],
   ['token', 'token'],
   ['workspace', 'workspace'],
+  ['conversations-dir', 'conversationsDir'],
   ['memory-project-scope', 'memoryProjectScope'],
   ['tls-cert', 'tlsCert'],
   ['tls-key', 'tlsKey'],
@@ -409,8 +410,8 @@ export function parseServeFastPathArgs(
       if (!read) return { kind: 'fallback' };
       i = read.nextIndex;
       if (
-        stringTarget === 'workspace' &&
-        (options.workspace !== undefined || read.value === '')
+        (stringTarget === 'workspace' || stringTarget === 'conversationsDir') &&
+        (options[stringTarget] !== undefined || read.value === '')
       ) {
         return { kind: 'fallback' };
       }

@@ -1080,7 +1080,54 @@ function versionOutput(system, command, args, searchPath) {
 
 // Flyway's versioned, undo and repeatable prefixes are case-sensitive; its
 // suffix is not.
-const MIGRATION_SCRIPT = /^BOOT-INF\/classes\/(db\/.+\/[VUR][^/]*__[^/]*)$/;
+const MIGRATION_SCRIPT = /^(db\/.+\/[VUR][^/]*__[^/]*)$/;
+// Flyway reads its location off the classpath: the server's own classes, and
+// the nested jars of its modules, since the module that owns the schema
+// ships it in one.
+const CLASSES = 'BOOT-INF/classes/';
+const NESTED_JAR = /^BOOT-INF\/lib\/[^/]+\.jar$/;
+
+/** The entries of the zip archive `read` reads, which is `size` bytes long. */
+async function zipEntries(read, size, label) {
+  const tailLength = Math.min(size, 22 + 0xffff);
+  const tail = await read(tailLength, size - tailLength);
+  const end = tail.lastIndexOf(Buffer.from('PK\x05\x06', 'latin1'));
+  if (end < 0) {
+    throw new Error(`${label} is not a zip archive`);
+  }
+  const count = tail.readUInt16LE(end + 10);
+  const offset = tail.readUInt32LE(end + 16);
+  if (count === 0xffff || offset === 0xffffffff) {
+    throw new Error(`${label} is a ZIP64 archive`);
+  }
+  const directory = await read(tail.readUInt32LE(end + 12), offset);
+  const entries = [];
+  for (let at = 0, index = 0; index < count; index += 1) {
+    if (directory.readUInt32LE(at) !== 0x02014b50) {
+      throw new Error(`${label} has a damaged central directory`);
+    }
+    const nameLength = directory.readUInt16LE(at + 28);
+    entries.push({
+      method: directory.readUInt16LE(at + 10),
+      length: directory.readUInt32LE(at + 20),
+      local: directory.readUInt32LE(at + 42),
+      name: directory.toString('utf8', at + 46, at + 46 + nameLength),
+    });
+    at +=
+      46 +
+      nameLength +
+      directory.readUInt16LE(at + 30) +
+      directory.readUInt16LE(at + 32);
+  }
+  return entries;
+}
+
+// Where an entry's data starts: past its local header, whose name and extra
+// field may differ in length from the central directory's.
+async function dataStart(read, entry) {
+  const header = await read(30, entry.local);
+  return entry.local + 30 + header.readUInt16LE(26) + header.readUInt16LE(28);
+}
 
 /** The Flyway scripts in a Spring Boot jar, by path, as SHA-256 digests. */
 export async function migrationScripts(jar) {
@@ -1093,49 +1140,61 @@ export async function migrationScripts(jar) {
     }
     return buffer;
   };
+  const scripts = new Map();
+  // Where each script was first found: BOOT-INF/classes or a nested jar.
+  const containers = new Map();
+  const add = async (from, entry, script, label, container) => {
+    if (!script || !script.toLowerCase().endsWith('.sql')) {
+      return;
+    }
+    const data = await from(entry.length, await dataStart(from, entry));
+    if (entry.method !== 0 && entry.method !== 8) {
+      throw new Error(
+        `${entry.name} in ${label} uses compression method ${entry.method}`,
+      );
+    }
+    const content = entry.method === 8 ? inflateRawSync(data) : data;
+    const digest = createHash('sha256').update(content).digest('hex');
+    // The same path in the classes and a module, or in two modules, is one
+    // script to Flyway only when the copies match; otherwise which one the
+    // database gets depends on the class loader, so the row cannot tell.
+    if (scripts.has(script) && scripts.get(script) !== digest) {
+      throw new Error(
+        `${jar} ships two different copies of ${script}, in ${containers.get(script)} and in ${container}`,
+      );
+    }
+    scripts.set(script, digest);
+    containers.set(script, containers.get(script) ?? container);
+  };
   try {
     const { size } = await handle.stat();
-    const tailLength = Math.min(size, 22 + 0xffff);
-    const tail = await read(tailLength, size - tailLength);
-    const end = tail.lastIndexOf(Buffer.from('PK\x05\x06', 'latin1'));
-    if (end < 0) {
-      throw new Error(`${jar} is not a zip archive`);
-    }
-    const count = tail.readUInt16LE(end + 10);
-    const offset = tail.readUInt32LE(end + 16);
-    if (count === 0xffff || offset === 0xffffffff) {
-      throw new Error(`${jar} is a ZIP64 archive`);
-    }
-    const directory = await read(tail.readUInt32LE(end + 12), offset);
-    const scripts = new Map();
-    for (let at = 0, index = 0; index < count; index += 1) {
-      if (directory.readUInt32LE(at) !== 0x02014b50) {
-        throw new Error(`${jar} has a damaged central directory`);
+    for (const entry of await zipEntries(read, size, jar)) {
+      if (entry.name.startsWith(CLASSES)) {
+        const script = MIGRATION_SCRIPT.exec(
+          entry.name.slice(CLASSES.length),
+        )?.[1];
+        await add(read, entry, script, jar, 'BOOT-INF/classes');
+      } else if (NESTED_JAR.test(entry.name) && entry.method === 0) {
+        // Spring Boot stores a nested jar as it is, so its own entries read
+        // in place, without reading the whole jar.
+        const label = `${entry.name} in ${jar}`;
+        const start = await dataStart(read, entry);
+        const nested = async (length, position) => {
+          if (position + length > entry.length) {
+            throw new Error(`${label} ends early`);
+          }
+          return read(length, start + position);
+        };
+        for (const inner of await zipEntries(nested, entry.length, label)) {
+          await add(
+            nested,
+            inner,
+            MIGRATION_SCRIPT.exec(inner.name)?.[1],
+            label,
+            entry.name,
+          );
+        }
       }
-      const method = directory.readUInt16LE(at + 10);
-      const length = directory.readUInt32LE(at + 20);
-      const nameLength = directory.readUInt16LE(at + 28);
-      const local = directory.readUInt32LE(at + 42);
-      const name = directory.toString('utf8', at + 46, at + 46 + nameLength);
-      at +=
-        46 +
-        nameLength +
-        directory.readUInt16LE(at + 30) +
-        directory.readUInt16LE(at + 32);
-      const script = MIGRATION_SCRIPT.exec(name)?.[1];
-      if (!script || !script.toLowerCase().endsWith('.sql')) {
-        continue;
-      }
-      const header = await read(30, local);
-      const data = await read(
-        length,
-        local + 30 + header.readUInt16LE(26) + header.readUInt16LE(28),
-      );
-      if (method !== 0 && method !== 8) {
-        throw new Error(`${name} in ${jar} uses compression method ${method}`);
-      }
-      const content = method === 8 ? inflateRawSync(data) : data;
-      scripts.set(script, createHash('sha256').update(content).digest('hex'));
     }
     return scripts;
   } finally {

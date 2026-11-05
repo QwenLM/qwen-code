@@ -202,6 +202,7 @@ describe('web-shell ru locale', () => {
       const t = getTranslator(language);
       expect(t('language.invalid')).toContain('en, zh-CN, ru');
       expect(t('language.usage')).toContain('en|zh-CN|ru');
+      expect(t('language.usage')).toContain('[--project|--global]');
     }
   });
 
