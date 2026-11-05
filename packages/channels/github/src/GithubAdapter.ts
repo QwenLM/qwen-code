@@ -2170,12 +2170,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (this.inboundRecoveryPending) {
       try {
         await this.recoverInboundTasks();
+        // Clear only on success: the re-arm below reads an in-memory count
+        // that a failed store read latched at 0, so clearing here would
+        // promise a retry that never runs once the store is readable again.
+        this.inboundRecoveryPending = false;
       } catch (err) {
         process.stderr.write(
           `[Channel:${this.name}] inbound task recovery failed, will retry next poll: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
         );
-      } finally {
-        this.inboundRecoveryPending = false;
       }
     }
 
