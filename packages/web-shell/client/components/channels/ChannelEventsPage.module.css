@@ -162,6 +162,20 @@
   white-space: nowrap;
 }
 
+.targetLink {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--agent-blue-500);
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.targetLink:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .actor {
   color: var(--muted-foreground);
 }

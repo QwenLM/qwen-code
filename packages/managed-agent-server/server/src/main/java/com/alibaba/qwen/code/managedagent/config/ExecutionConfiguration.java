@@ -16,6 +16,6 @@ public class ExecutionConfiguration {
 
     @Bean(defaultCandidate = false, destroyMethod = "close")
     public ExecutorService managedAgentExecutor() {
-        return Executors.newVirtualThreadPerTaskExecutor();
+        return Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("managed-agent-", 0).factory());
     }
 }

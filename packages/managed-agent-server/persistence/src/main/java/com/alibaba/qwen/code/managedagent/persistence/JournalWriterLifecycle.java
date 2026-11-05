@@ -91,22 +91,32 @@ final class JournalWriterLifecycle {
 
     ManagedSessionStore.PublicationWriter lockPublicationWriter(String tenant, String workspace,
             String session, String writer, long generation, String token) {
+        return lockPublicationWriter(tenant, workspace, session, writer, generation, token, true);
+    }
+
+    ManagedSessionStore.PublicationWriter lockPublicationWriter(String tenant, String workspace,
+            String session, String writer, long generation, String token, boolean publicationGuard) {
         JournalStoreRows.validateScope(tenant, workspace, session);
         fencing.requireCredential(tenant, workspace, session, token);
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenant, session);
-        fencing.requirePhysicalSessionOpen(tenant, workspace, session);
+        fencing.lockPlacementBounded(tenant);
         // Publication-lane writer: keeps the tenant CAS row before the
         // Session root the CSI check locks and before the head row, the
         // order retention reads take (CAS row, root, head) and the same as
-        // before #13800 decoupled ordinary traffic.
-        JournalFencing.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
-                JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        // before #13800 decoupled ordinary traffic. The ordinary apply lane
+        // skips the CAS row: it never takes it after the root, so it cannot
+        // close a cycle with retention, and the root serializes their writes.
+        if (publicationGuard) {
+            JournalFencing.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
+                    JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        }
         fencing.requirePlacement(tenant, workspace, session, token, writer, false);
         var continuation = fencing.lockCsiContinuation(tenant, session);
         var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
             csiOriginal.requireAdmission();
         }
+        fencing.requireSessionStorageOpen(tenant, workspace, session);
         JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenant, session);
         storeRows.requireHeadScope(head, tenant, workspace, session);
         Timestamp now = storeRows.databaseNow();

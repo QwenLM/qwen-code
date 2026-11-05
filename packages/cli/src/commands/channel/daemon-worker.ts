@@ -28,6 +28,7 @@ import {
   ChannelLoopStore,
   DaemonChannelBridge,
   isChannelProactiveDeliveryError,
+  PR_BINDING_ROLES,
   sanitizeLogText,
   SessionRouter,
 } from '@qwen-code/channel-base';
@@ -42,6 +43,7 @@ import type {
   DaemonChannelSessionClient,
   DaemonChannelSessionFactory,
   DaemonChannelSessionFactoryRequest,
+  PrBindingRole,
   PrBindingsSnapshot,
   PrBindingSummary,
 } from '@qwen-code/channel-base';
@@ -350,6 +352,11 @@ export function createBoundSessionsAccessor(
   promptAuthorization?: string,
 ): ChannelBoundSessions {
   const cwdBySession = new Map<string, string>();
+  // Consecutive answers the worker itself downgraded to partial (rows or PR
+  // entries that failed shape validation). Such an answer has no daemon
+  // I/O failure behind it, so without this line the cause would be logged
+  // nowhere; throttled because the route is polled every channel cycle.
+  let workerDowngradeStreak = 0;
   // requestRest's timer covers the connection through response headers
   // only; the signal also bounds body consumption so a half-open connection
   // cannot hang the poll loop indefinitely.
@@ -402,6 +409,7 @@ export function createBoundSessionsAccessor(
       partial?: unknown;
     };
     let partial = body.partial === true;
+    let dropped = 0;
     // A malformed 200 is not an authoritative empty snapshot: throwing
     // routes it into the adapter's fail-closed refresh handling (keep the
     // previous map, skip the watch pass) instead of wiping watch state.
@@ -417,6 +425,7 @@ export function createBoundSessionsAccessor(
         // A dropped session row is a degraded answer too: its bindings
         // are unknown, so the snapshot must not claim completeness.
         partial = true;
+        dropped += 1;
         continue;
       }
       const record = entry as Record<string, unknown>;
@@ -427,17 +436,26 @@ export function createBoundSessionsAccessor(
         !Array.isArray(prs)
       ) {
         partial = true;
+        dropped += 1;
         continue;
       }
       const entries: PrBindingSummary['prs'] = [];
       for (const pr of prs) {
         if (pr === null || typeof pr !== 'object') continue;
-        const { number, url, state } = pr as Record<string, unknown>;
+        const { number, url, state, role } = pr as Record<string, unknown>;
         if (
           typeof number !== 'number' ||
           !Number.isSafeInteger(number) ||
           number <= 0 ||
-          typeof url !== 'string'
+          typeof url !== 'string' ||
+          // An unknown role is a degraded entry, not a silently untyped
+          // one: dropping it to the untyped group could misroute delivery
+          // under a version skew. The count check below flags the answer
+          // partial so the adapter retains known bindings. The vocabulary
+          // is the shared constant so a later addition cannot silently
+          // degrade every snapshot here.
+          (role !== undefined &&
+            !(PR_BINDING_ROLES as readonly string[]).includes(role as string))
         ) {
           continue;
         }
@@ -447,6 +465,9 @@ export function createBoundSessionsAccessor(
           ...(state === 'open' || state === 'merged' || state === 'closed'
             ? { state }
             : {}),
+          // The vocabulary check above proved the value; includes() does
+          // not narrow unknown, so assert the validated type here.
+          ...(role !== undefined ? { role: role as PrBindingRole } : {}),
         });
       }
       if (entries.length < prs.length) {
@@ -454,6 +475,7 @@ export function createBoundSessionsAccessor(
         // projection must not masquerade as a complete one, or the adapter
         // would trust its absence semantics for the dropped PRs.
         partial = true;
+        dropped += prs.length - entries.length;
       }
       if (entries.length === 0 && prs.length > 0) {
         // A listed session whose PR entries ALL failed shape validation is
@@ -473,6 +495,16 @@ export function createBoundSessionsAccessor(
         ...(typeof updatedAt === 'string' ? { updatedAt } : {}),
         prs: entries,
       });
+    }
+    if (dropped > 0) {
+      workerDowngradeStreak += 1;
+      if (workerDowngradeStreak === 1 || workerDowngradeStreak % 60 === 0) {
+        process.stderr.write(
+          `[channel-worker] PR bindings answer downgraded to partial by the worker: ${dropped} binding row(s) or PR entries failed shape validation (${workerDowngradeStreak} consecutive answers); check that the worker and the daemon run the same version\n`,
+        );
+      }
+    } else {
+      workerDowngradeStreak = 0;
     }
     // Rebuild (not accumulate) on complete answers so sessions that left
     // the bindings drop out of the wake cache. On a partial answer keep
