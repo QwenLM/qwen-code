@@ -370,8 +370,12 @@ describe('pathRulesFor — the shell/CI-lane rule', () => {
 
   it('names the Mac lane and its command chain in the worked example', () => {
     // The worked example is the only place an agent learns which lane to cite,
-    // so renaming the job or the group runner has to fail here instead of
-    // quietly sending reviewers at a lane that no longer runs the script.
+    // so the lane name and the command chain are pinned here verbatim: an edit
+    // that points reviewers at a lane which no longer runs the script fails on
+    // these strings. This file does not read `ci.yml`, so it holds the text and
+    // not the workflow; `scripts/tests/ci-platform-lanes.test.js` is the suite
+    // that reads the workflow and fails if the job or the group runner is
+    // renamed.
     const out = pathRulesFor(['scripts/tests/qwen-pr-review-workflow.test.js']);
     expect(out).toContain(
       '`test_macos_shards` runs on `merge_group`/`schedule`/`workflow_dispatch`',
