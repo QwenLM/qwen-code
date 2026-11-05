@@ -1563,7 +1563,13 @@ describe('AppContainer State Management', () => {
     it.each([
       ['the folder is explicitly trusted', { trusted: true }],
       ['every hook is disabled', { trusted: false, disableAllHooks: true }],
-    ] as Array<[string, { trusted: boolean; disableAllHooks?: boolean }]>)(
+      ['the block is approved and served', { trusted: false, served: true }],
+    ] as Array<
+      [
+        string,
+        { trusted: boolean; disableAllHooks?: boolean; served?: boolean },
+      ]
+    >)(
       'does not warn about withheld project hooks when %s',
       async (_, state) => {
         const addItem = vi.fn();
@@ -1581,6 +1587,9 @@ describe('AppContainer State Management', () => {
         );
         vi.spyOn(mockConfig, 'getDisableAllHooks').mockReturnValue(
           state.disableAllHooks ?? false,
+        );
+        vi.spyOn(mockConfig, 'getProjectHooks').mockReturnValue(
+          state.served ? { SessionStart: [] } : undefined,
         );
         const settings = {
           ...mockSettings,
@@ -1608,6 +1617,62 @@ describe('AppContainer State Management', () => {
         unmount();
       },
     );
+
+    it('warns when an untrusted folder with the trust feature on leaves nothing to approve', async () => {
+      // pending === false here means "no approvable object" (the untrusted
+      // workspace contributes no settings), not "approved": the warning is
+      // the only signal that project hooks are absent, so it must survive.
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'isExplicitlyTrustedFolder').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'getDisableAllHooks').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'isProjectHooksApprovalGated').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'isProjectHooksPendingApproval').mockReturnValue(
+        false,
+      );
+      vi.spyOn(mockConfig, 'getProjectHooks').mockReturnValue(undefined);
+      const settings = {
+        ...mockSettings,
+        workspace: {
+          settings: {
+            hooks: {
+              SessionStart: [
+                { hooks: [{ type: 'command', command: 'echo x' }] },
+              ],
+            },
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      const { unmount } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await act(async () => {});
+
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.WARNING,
+          text: expect.stringContaining(
+            'Project hooks in .qwen/settings.json were not loaded',
+          ),
+        }),
+        expect.any(Number),
+      );
+      unmount();
+    });
 
     it('warns once when an untrusted interactive session withholds project hooks', async () => {
       const addItem = vi.fn();

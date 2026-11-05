@@ -49,6 +49,7 @@ import {
   SessionSourceError,
   validateSessionSourceInput,
   canonicalSessionPrUrl,
+  isSessionPrRole,
   toSessionPrInfo,
   normalizeTurnResultError,
   normalizeSnapshotPayload,
@@ -13285,11 +13286,13 @@ export function createSessionControlPlane(
           ((pr as SessionPrInfo).state !== undefined &&
             (pr as SessionPrInfo).state !== 'open' &&
             (pr as SessionPrInfo).state !== 'merged' &&
-            (pr as SessionPrInfo).state !== 'closed')
+            (pr as SessionPrInfo).state !== 'closed') ||
+          ((pr as SessionPrInfo).role !== undefined &&
+            !isSessionPrRole((pr as SessionPrInfo).role))
         ) {
           throw new InvalidSessionMetadataError(
             'pr',
-            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\``,
+            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\`, and an optional \`role\` that is one of \`review\`, \`verify\`, or \`fix\``,
           );
         }
       }
@@ -13398,7 +13401,8 @@ export function createSessionControlPlane(
           latest.url === bound.url &&
           // A re-bind carrying a new state is a change: the live entry,
           // the metadata event, and the catalog revision must all see it.
-          (bound.state === undefined || bound.state === latest.state)
+          (bound.state === undefined || bound.state === latest.state) &&
+          (bound.role === undefined || bound.role === latest.role)
         ) {
           // Same binding repeated — no change, no event.
         } else {
@@ -13420,6 +13424,11 @@ export function createSessionControlPlane(
                 ? {
                     state: (bound.state ??
                       known?.state) as SessionPrInfo['state'],
+                  }
+                : {}),
+              ...((bound.role ?? known?.role)
+                ? {
+                    role: (bound.role ?? known?.role) as SessionPrInfo['role'],
                   }
                 : {}),
               // The issue snapshot is daemon-derived, never client-bound.

@@ -461,6 +461,7 @@ export type {
   DaemonChannelsSnapshot,
   DaemonChannelEvent,
   DaemonChannelEventsSnapshot,
+  DaemonChannelLinkMeta,
   DaemonChannelEventsQuery,
   DaemonChannelEventType,
   DaemonChannelSecretUpdate,
