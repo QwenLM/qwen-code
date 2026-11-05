@@ -2,6 +2,8 @@
 
 [English](2026-11-03-managed-journal-commit-tenant-guard.md) | [简体中文](2026-11-03-managed-journal-commit-tenant-guard.zh-CN.md)
 
+The storage-lock ordering below is superseded for ordinary journal commits and inline/publication results by the [2026-11-05 design](2026-11-05-managed-publication-storage-sharing.md). Those paths use nonlocking physical-state checks under the existing offline-maintenance contract; other admission and lifecycle locks remain as described.
+
 ## Problem and current state
 
 `JournalCommit.commit` is the hottest write path in a Managed Session. Every

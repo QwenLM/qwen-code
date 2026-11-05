@@ -20,6 +20,7 @@ import {
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   isPrivateProvenanceEnvKey,
+  keepsEmptyHomeEnvValue,
   reportRejectedLoaderKeys,
 } from '../config/shared-env-keys.js';
 import {
@@ -115,7 +116,11 @@ function readHomeEnvIntoFastPath(file: string): void {
   try {
     const parsed = dotenv.parse(fs.readFileSync(file, 'utf8'));
     for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
-      if (parsed[key] && !Object.hasOwn(process.env, key)) {
+      if (
+        (parsed[key] ||
+          (keepsEmptyHomeEnvValue(key) && parsed[key] !== undefined)) &&
+        !Object.hasOwn(process.env, key)
+      ) {
         process.env[key] = parsed[key];
       }
     }

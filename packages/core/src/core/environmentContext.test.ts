@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createUserContent, type Content } from '@google/genai';
+import { createUserContent, type Content, type Part } from '@google/genai';
 import {
   buildAddedMcpToolsReminder,
   buildAddedAgentsReminder,
@@ -17,6 +17,9 @@ import {
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
+  buildDateReminder,
+  DATE_REMINDER_METADATA,
+  findLastAnnouncedDate,
   getEnvironmentContext,
   getDirectoryContextString,
   getInitialChatHistory,
@@ -182,6 +185,226 @@ describe('getDirectoryContextString', () => {
       TWO_DIRS,
       folderStructure('Structure 1\nStructure 2'),
     );
+  });
+});
+
+describe('date announcements', () => {
+  const user = (...parts: Array<string | Part>): Content => ({
+    role: 'user',
+    parts: parts.map((part) =>
+      typeof part === 'string' ? { text: part } : part,
+    ),
+  });
+  const model = (text: string): Content => ({
+    role: 'model',
+    parts: [{ text }],
+  });
+  const startupText = (date: string) =>
+    wrapSystemReminder(
+      `This is the Qwen Code. We are setting up the context for our chat.\nToday's date is ${date}.\nMy operating system is: linux`,
+    );
+  // A startup context that starts the conversation records its date.
+  const startup = (date: string) =>
+    user({
+      text: startupText(date),
+      partMetadata: { [DATE_REMINDER_METADATA]: date },
+    });
+  // A startup context rebuilt in front of earlier turns records none.
+  const rebuiltStartup = (date: string) => user(startupText(date));
+  const reminder = (date: string) => buildDateReminder([], date)!;
+  const legacyReminder = (date: string) =>
+    `<system-reminder>\nThe current date is: ${date}. Note: This is the authoritative current date — it may differ from the "Today's date" mentioned earlier in the conversation startup context.\n</system-reminder>`;
+
+  afterEach(() => {
+    vi.resetAllMocks();
+  });
+
+  describe('findLastAnnouncedDate', () => {
+    it('reads the date a startup context records', () => {
+      expect(findLastAnnouncedDate([startup('Thursday, June 4, 2026')])).toBe(
+        'Thursday, June 4, 2026',
+      );
+    });
+
+    it.each([
+      ['a rebuilt startup context', rebuiltStartup('Friday, June 5, 2026')],
+      [
+        'a legacy prelude without the reminder wrapper',
+        user(
+          "This is the Qwen Code. We are setting up the context for our chat.\nToday's date is Friday, June 5, 2026.\nMy operating system is: linux",
+        ),
+      ],
+    ])('reads no date from %s', (_title, entry) => {
+      expect(
+        findLastAnnouncedDate([
+          entry,
+          model('Got it. Thanks for the context!'),
+        ]),
+      ).toBeUndefined();
+    });
+
+    it.each([
+      ['a marked reminder', reminder('Friday, June 5, 2026')],
+      [
+        'a reminder from a saved record',
+        JSON.parse(JSON.stringify(reminder('Friday, June 5, 2026'))) as Part,
+      ],
+      ['the wording recorded before', legacyReminder('Friday, June 5, 2026')],
+    ])('reads %s after the startup context', (_title, part) => {
+      const history = [
+        startup('Thursday, June 4, 2026'),
+        user(part, 'Question'),
+        model('Answer'),
+      ];
+
+      expect(findLastAnnouncedDate(history)).toBe('Friday, June 5, 2026');
+    });
+
+    it('returns the latest of several reminders', () => {
+      const history = [
+        startup('Wednesday, June 3, 2026'),
+        user(reminder('Thursday, June 4, 2026'), 'Day two'),
+        model('Answer'),
+        user(reminder('Friday, June 5, 2026'), 'Day three'),
+      ];
+
+      expect(findLastAnnouncedDate(history)).toBe('Friday, June 5, 2026');
+    });
+
+    it.each([
+      ['plain user text', "Today's date is Friday, June 5, 2026."],
+      [
+        'a reminder with other content',
+        wrapSystemReminder("Note.\nToday's date is Friday, June 5, 2026."),
+      ],
+      [
+        'a pasted date reminder',
+        `Log:\n${reminder('Friday, June 5, 2026').text}\nWhat happened?`,
+      ],
+      [
+        'a whole part copying the date reminder text',
+        reminder('Friday, June 5, 2026').text!,
+      ],
+      ['a copied startup context', startupText('Friday, June 5, 2026')],
+      [
+        'a pasted reminder of the wording recorded before',
+        `Log:\n${legacyReminder('Friday, June 5, 2026')}`,
+      ],
+    ])('ignores a date in %s', (_title, text) => {
+      const history = [startup('Thursday, June 4, 2026'), user(text)];
+
+      expect(findLastAnnouncedDate(history)).toBe('Thursday, June 4, 2026');
+    });
+
+    it('ignores model text and returns undefined with no announced date', () => {
+      expect(
+        findLastAnnouncedDate([
+          user('Hi'),
+          { role: 'model', parts: [reminder('Friday, June 5, 2026')] },
+        ]),
+      ).toBeUndefined();
+      expect(findLastAnnouncedDate([])).toBeUndefined();
+    });
+  });
+
+  describe('buildDateReminder', () => {
+    const today = 'Friday, June 5, 2026';
+    const reminderText = (body: string) =>
+      `<system-reminder>\n${body}\n</system-reminder>`;
+
+    it('adds nothing when the history already gives today', () => {
+      expect(buildDateReminder([startup(today)], today)).toBeUndefined();
+      expect(
+        buildDateReminder(
+          [startup('Thursday, June 4, 2026'), user(reminder(today), 'Hi')],
+          today,
+        ),
+      ).toBeUndefined();
+    });
+
+    it('says the date has changed when the history gives an earlier one', () => {
+      expect(
+        buildDateReminder(
+          [startup('Thursday, June 4, 2026'), user('Hi'), model('Hello')],
+          today,
+        ),
+      ).toEqual({
+        text: reminderText(
+          "The date has changed since earlier in this conversation. Today's date is now Friday, June 5, 2026. Use this date from here on; there is no need to mention the change to the user.",
+        ),
+        partMetadata: { [DATE_REMINDER_METADATA]: today },
+      });
+    });
+
+    it.each([
+      ['an empty history', []],
+      ['a startup context without a date', [user(wrapSystemReminder('MCP'))]],
+    ])('tells the date plainly with %s', (_title, history: Content[]) => {
+      expect(buildDateReminder(history, today)).toEqual({
+        text: reminderText("Today's date is Friday, June 5, 2026."),
+        partMetadata: { [DATE_REMINDER_METADATA]: today },
+      });
+    });
+
+    it.each([
+      [
+        'a resumed conversation',
+        [rebuiltStartup(today), user('Earlier question'), model('Answer')],
+      ],
+      [
+        'a compacted conversation',
+        [
+          rebuiltStartup(today),
+          userText('<state_snapshot>Earlier work</state_snapshot>'),
+          modelText('Got it. Thanks for the additional context!'),
+        ],
+      ],
+    ])(
+      'says earlier turns may come from another date in %s',
+      (_title, history: Content[]) => {
+        expect(buildDateReminder(history, today)).toEqual({
+          text: reminderText(
+            "Today's date is Friday, June 5, 2026. Earlier parts of this conversation may come from another date; use this date from here on.",
+          ),
+          partMetadata: { [DATE_REMINDER_METADATA]: today },
+        });
+      },
+    );
+  });
+
+  describe('getInitialChatHistory', () => {
+    const startupDate = async (
+      extraHistory?: Content[],
+      announcedDate?: string | null,
+    ) => {
+      vi.mocked(getFolderStructure).mockResolvedValue('Mock Folder Structure');
+      const { config } = chatHistorySetup();
+      const [history] = await getInitialChatHistory(
+        config as Config,
+        extraHistory,
+        announcedDate === undefined ? {} : { announcedDate },
+      );
+      const part = history[0]!.parts!.find((p) =>
+        p.text?.includes("Today's date is"),
+      )!;
+      return part.partMetadata?.[DATE_REMINDER_METADATA];
+    };
+
+    it('records the startup context date when it starts the conversation', async () => {
+      expect(await startupDate()).toBe(formatDateForContext());
+      expect(await startupDate([])).toBe(formatDateForContext());
+    });
+
+    it('records no date in front of earlier turns', async () => {
+      expect(await startupDate([userText('Earlier')])).toBeUndefined();
+    });
+
+    it('records the date the caller gives, or none', async () => {
+      expect(await startupDate(undefined, 'Thursday, June 4, 2026')).toBe(
+        'Thursday, June 4, 2026',
+      );
+      expect(await startupDate(undefined, null)).toBeUndefined();
+    });
   });
 });
 
