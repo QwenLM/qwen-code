@@ -28,6 +28,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -343,6 +345,80 @@ class ManagedSessionGuardConvoyIT {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ? AND operation = 'commitMcpRecord'",
                 Integer.class, tenant, "victim")).isOne();
+    }
+
+    /**
+     * Workspace Session creation orders on the selected Workspace row, not
+     * the tenant guard, so creations in different Workspaces of one tenant
+     * run at once. Each inserts a Session, its stream, its command receipts
+     * and its creation-mode claim into indexes those Workspaces share; a
+     * locking probe of a missing key there would deadlock two of them
+     * (InnoDB 1213). H2 takes no gap locks, so only MySQL shows it.
+     */
+    @ParameterizedTest
+    @CsvSource({"false, false", "false, true", "true, false", "true, true"})
+    void concurrentWorkspaceSessionCreationsOfOneTenantDoNotDeadlock(
+            boolean defaultSelection, boolean sharedStorage) throws Exception {
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
+        String tenant = "tenant-create";
+        int writers = 4;
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        var mounts = new ArrayList<ManagedAgentProperties.RuntimeBroker.WorkspaceMount>();
+        for (int index = 0; index < writers; index++) {
+            String storage = sharedStorage ? "storage" : "storage-" + index;
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
+                    + " display_name, config_ref, policy_ref, state, is_default)"
+                    + " VALUES (?, ?, 1, ?, 'Workspace', ?, ?, 'ACTIVE', ?)",
+                    tenant, "ws-" + index, storage,
+                    com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONFIG_REF,
+                    com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF, index == 0);
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OWNER')",
+                    tenant, "ws-" + index, "actor".getBytes(StandardCharsets.UTF_8));
+            if (!sharedStorage || index == 0) {
+                mounts.add(new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, storage, "/tmp/create-" + storage));
+            }
+        }
+        properties.getRuntimeBroker().setWorkspaceMounts(mounts);
+        var registry = new ManagedWorkspaceRegistry(jdbc);
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        var service = new com.alibaba.qwen.code.managedagent.session.ManagedAgentService(store,
+                new com.alibaba.qwen.code.managedagent.model.RequestDigests(),
+                org.mockito.Mockito.mock(com.alibaba.qwen.code.managedagent.session.HarnessCoordinator.class),
+                org.mockito.Mockito.mock(com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.class),
+                registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        int perWriter = 10;
+        var start = new CountDownLatch(1);
+        try (var pool = Executors.newFixedThreadPool(writers)) {
+            List<Future<Integer>> runs = new ArrayList<>();
+            for (int writer = 0; writer < writers; writer++) {
+                String workspace = "ws-" + writer;
+                var selection = defaultSelection ? null
+                        : new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection(workspace, ".");
+                runs.add(pool.submit(() -> {
+                    start.await();
+                    for (int index = 0; index < perWriter; index++) {
+                        String key = workspace + "-create-" + index;
+                        transactions.execute(ignored -> service.createWorkspaceSession(tenant, "actor", key,
+                                "qwen-code", null, null, null, List.of(), selection));
+                    }
+                    return perWriter;
+                }));
+            }
+            start.countDown();
+            for (var run : runs) {
+                assertThat(run.get(120, TimeUnit.SECONDS)).isEqualTo(perWriter);
+            }
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_kind = 'PUBLIC'",
+                Integer.class, tenant)).isEqualTo(writers * perWriter);
+        if (defaultSelection) {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?"
+                            + " AND session_kind = 'PUBLIC' AND workspace_id = 'ws-0'",
+                    Integer.class, tenant)).isEqualTo(writers * perWriter);
+        }
     }
 
     /**
