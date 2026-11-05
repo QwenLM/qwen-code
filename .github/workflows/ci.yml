@@ -2081,12 +2081,14 @@ jobs:
           if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
           exit "$RC"
 
-  # Windows counterpart of test_macos_shards (see that job's note). ECS is
-  # the default with a windows-2022 kill-switch fallback; the check name stays unchanged so
-  # it matches the required-status-check context. The `!= 'pull_request'` arm
-  # of `runs-on` is inert while the pull-request trigger is off, and stays for
-  # when it returns: a pull_request run executes the workflow YAML from the
-  # PR's own merge commit, so any PR this lane admits could rewrite `runs-on`
+  # Windows counterpart of test_macos_shards (see that job's note). ECS is the
+  # default with a windows-2022 kill-switch fallback; the check name stays
+  # unchanged so it matches the required-status-check context. The
+  # `!= 'pull_request'` arm of `runs-on` is inert while this job's `if` filters
+  # `pull_request` out: those runs exist and report this job as skipped, not
+  # absent. It stays for when the lane is admitted again: a pull_request run
+  # executes the workflow YAML from the PR's own merge commit, so any PR this
+  # lane admits could rewrite `runs-on`
   # in the same diff that reaches it. A gate the gated tree controls is no
   # gate; the pool is reached only by triggers an unreviewed PR cannot open —
   # the post-approval merge queue, schedule and dispatch. ECS-only tuning is
