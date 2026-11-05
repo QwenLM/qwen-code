@@ -26,5 +26,6 @@ public interface SessionWorktreeOperations extends AutoCloseable {
 
     public void cleanup(Plan plan, String savedIdentity);
 
+    @Override
     public void close();
 }
