@@ -428,6 +428,13 @@ vi.mock('./theme.js', () => ({
 vi.mock('./slash-dispatch.js', () => ({
   loadInteractiveCommands: async () => mocks.state.slashCommands,
 }));
+const isSubscriptionSignedIn = vi.hoisted(() => vi.fn(() => false));
+vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
+  QwenSubscriptionSession: class {
+    isSignedIn = isSubscriptionSignedIn;
+    onChange = () => () => {};
+  },
+}));
 vi.mock('./live-session.js', () => ({
   nextLivePromptId: () => `source-test-${mocks.state.liveTurns.length}`,
   async *livePromptEvents(
@@ -454,6 +461,7 @@ vi.mock('../utils/clipboardUtils.js', () => ({
 }));
 
 beforeEach(() => {
+  isSubscriptionSignedIn.mockReturnValue(false);
   vi.mocked(execFile).mockReset();
   vi.mocked(execFileSync).mockReset().mockReturnValue('');
   mocks.state.shellHistory = [];
@@ -2084,16 +2092,18 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
   it.each([logoutCommand, upgradeCommand])(
     'updates /$name completion when switching connections',
     async (command) => {
+      isSubscriptionSignedIn.mockReturnValue(true);
       let authType = AuthType.QWEN_SUBSCRIPTION;
       let notify: (model: string) => void = () => {};
       const config = {
         getTargetDir: () => '/tmp/project',
         getAuthType: () => authType,
+        setSubscriptionPlan: () => {},
         onModelChange: (listener: typeof notify) => {
           notify = listener;
           return () => {};
         },
-      } as Config;
+      } as unknown as Config;
       mocks.state.slashCommands = [command];
       renderPrompt({ config });
       await act(async () => {});

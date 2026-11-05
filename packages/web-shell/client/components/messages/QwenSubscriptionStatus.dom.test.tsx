@@ -125,7 +125,9 @@ describe('QwenSubscriptionStatus', () => {
         email: 'builder@example.com',
       });
 
-      expect(container.textContent).toContain(`Qwen ${plan} is active`);
+      expect(container.textContent).toContain(
+        `Current plan: Qwen ${plan}. Qwen Code is ready.`,
+      );
       expect(container.querySelectorAll('button')).toHaveLength(0);
     },
   );

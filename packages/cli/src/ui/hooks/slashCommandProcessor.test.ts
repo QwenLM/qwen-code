@@ -65,6 +65,14 @@ const {
   },
 }));
 
+const isSubscriptionSignedIn = vi.hoisted(() => vi.fn(() => false));
+vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
+  QwenSubscriptionSession: class {
+    isSignedIn = isSubscriptionSignedIn;
+    onChange = () => () => {};
+  },
+}));
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -276,6 +284,7 @@ describe('useSlashCommandProcessor', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    isSubscriptionSignedIn.mockReturnValue(false);
     let nextHistoryItemId = 1;
     mockAddItem.mockImplementation(() => nextHistoryItemId++);
     vi.mocked(BuiltinCommandLoader).mockClear();
@@ -375,6 +384,7 @@ describe('useSlashCommandProcessor', () => {
   });
 
   it('updates subscription command dispatch when auth changes without changing the model', async () => {
+    isSubscriptionSignedIn.mockReturnValue(true);
     let authType = AuthType.QWEN_SUBSCRIPTION;
     let notify: (model: string) => void = () => {};
     const auth = vi

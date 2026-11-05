@@ -5916,10 +5916,18 @@ export class Config {
     return this.contextRuleExcludes;
   }
 
-  getContentGenerator(): ContentGenerator {
+  getContentGenerator(options: {
+    allowUninitialized: true;
+  }): ContentGenerator | undefined;
+  getContentGenerator(): ContentGenerator;
+  getContentGenerator(options?: {
+    allowUninitialized: true;
+  }): ContentGenerator | undefined {
     const generator =
       getRuntimeContentGenerator()?.contentGenerator ?? this.contentGenerator;
-    if (!generator) throw new Error('Not signed in. Run /auth to sign in.');
+    if (!generator && !options?.allowUninitialized) {
+      throw new Error('Not signed in. Run /auth to sign in.');
+    }
     return generator;
   }
 

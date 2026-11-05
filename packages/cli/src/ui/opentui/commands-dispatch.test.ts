@@ -21,6 +21,7 @@ import {
   makeFakeConfig,
 } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import {
   CommandKind,
   type SlashCommand,
@@ -276,6 +277,9 @@ describe('guards (ink handleSlashCommand parity)', () => {
   it('refreshes subscription command availability on auth changes and preserves custom and hidden commands', async () => {
     const config = makeFakeConfig({});
     const auth = vi.spyOn(config, 'getAuthType');
+    const signedIn = vi
+      .spyOn(QwenSubscriptionSession.prototype, 'isSignedIn')
+      .mockReturnValue(true);
     const action = vi.fn();
     const custom = stub({ name: 'logout', kind: CommandKind.FILE, action });
     const hidden = stub({ name: 'hidden', hidden: true, action });
@@ -318,6 +322,7 @@ describe('guards (ink handleSlashCommand parity)', () => {
       expect(action).toHaveBeenCalledTimes(2);
     } finally {
       auth.mockRestore();
+      signedIn.mockRestore();
       vi.mocked(config.getSkillManager).mockRestore();
       loadInteractiveCommandsMock.mockReset();
       dispatcher.dispose();

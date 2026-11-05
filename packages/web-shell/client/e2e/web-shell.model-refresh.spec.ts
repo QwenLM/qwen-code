@@ -88,7 +88,9 @@ test('shows Qwen models after authentication in an existing conversation @smoke'
     })
     .click();
   await expect(
-    page.getByText('Qwen Pro is active', { exact: false }),
+    page.getByText('Current plan: Qwen Pro. Qwen Code is ready.', {
+      exact: false,
+    }),
   ).toBeVisible();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.locator('[data-web-shell-model-button]').click();

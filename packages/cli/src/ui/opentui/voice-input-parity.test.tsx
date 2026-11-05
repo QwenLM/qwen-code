@@ -248,6 +248,12 @@ vi.mock('../hooks/extension-mention-ref.js', () => ({
 vi.mock('./slash-dispatch.js', () => ({
   loadInteractiveCommands: async () => [],
 }));
+vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
+  QwenSubscriptionSession: class {
+    isSignedIn = () => false;
+    onChange = () => () => {};
+  },
+}));
 vi.mock('./commands-dispatch.js', () => ({
   OpenTuiSlashDispatcher: class {
     commands = [];
@@ -322,6 +328,7 @@ const config = {
   getModel: () => 'owned-chat-model',
   getFastModel: mocks.fastModel,
   onModelChange: () => () => {},
+  setSubscriptionPlan: () => {},
 } as unknown as Config;
 const getSessionStats = () => ({}) as SessionStatsState;
 

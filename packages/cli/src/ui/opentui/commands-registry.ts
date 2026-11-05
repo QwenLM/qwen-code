@@ -203,7 +203,6 @@ export type SlashResultKind =
 
 /** Config-based gates mirrored from services/BuiltinCommandLoader.ts. */
 export type CommandGate =
-  | 'subscription'
   | 'workflows-or-mode'
   | 'managed-memory'
   | 'folder-trust'
@@ -227,12 +226,11 @@ export interface CommandRouteSpec {
  * command tree.
  */
 export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
-  { name: 'upgrade', results: ['message'], gatedBy: 'subscription' },
+  { name: 'upgrade', results: ['message'] },
   {
     name: 'logout',
     results: ['message', 'dialog'],
     dialogs: ['auth'],
-    gatedBy: 'subscription',
   },
   { name: 'status', altNames: ['about'], results: ['none', 'message'] },
   {

@@ -1353,6 +1353,9 @@ describe('Server Config (config.ts)', () => {
     expect(config.getSubscriptionPlan()).toBeUndefined();
     expect(worker.abortController.signal.aborted).toBe(true);
     expect(() => config.getContentGenerator()).toThrow('Run /auth');
+    expect(
+      config.getContentGenerator({ allowUninitialized: true }),
+    ).toBeUndefined();
     expect(() => config.getBaseLlmClient()).toThrow('not initialized');
     expect(
       config

@@ -1865,6 +1865,7 @@ describe('ModelsConfig', () => {
     });
 
     it('should handle reload with empty config', async () => {
+      const builtInModels = new ModelsConfig().getAllConfiguredModels();
       const modelsConfig = new ModelsConfig({
         initialAuthType: AuthType.USE_OPENAI,
         modelProvidersConfig: {
@@ -1873,17 +1874,12 @@ describe('ModelsConfig', () => {
         },
       });
 
-      expect(
-        modelsConfig
-          .getAllConfiguredModels()
-          .filter((m) => m.authType !== 'qwen-oauth').length,
-      ).toBeGreaterThan(0);
+      expect(hasModel(modelsConfig, 'gpt-4')).toBe(true);
+      expect(hasModel(modelsConfig, 'gemini-pro')).toBe(true);
 
       modelsConfig.reloadModelProvidersConfig({});
 
-      // Only qwen-oauth models should remain
-      const models = modelsConfig.getAllConfiguredModels();
-      expect(models.every((m) => m.authType === 'qwen-oauth')).toBe(true);
+      expect(modelsConfig.getAllConfiguredModels()).toEqual(builtInModels);
     });
 
     it('should preserve qwen-oauth models after reload', () => {

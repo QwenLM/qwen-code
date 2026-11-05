@@ -3246,10 +3246,11 @@ export async function runAcpAgent(
             const session = agentInstance
               ?.getActiveSessions()
               .find((candidate) => candidate.getId() === sessionId);
-            if (!session) return;
-            void preloadContentGenerator(
-              session.getConfig().getContentGenerator(),
-            ).catch((error: unknown) => {
+            const generator = session
+              ?.getConfig()
+              .getContentGenerator({ allowUninitialized: true });
+            if (!generator) return;
+            void preloadContentGenerator(generator).catch((error: unknown) => {
               debugLogger.debug(
                 `[ACP] Session provider preload failed for ${sessionId}: ${
                   error instanceof Error ? error.message : String(error)
