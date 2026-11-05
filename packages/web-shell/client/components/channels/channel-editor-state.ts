@@ -60,7 +60,8 @@ export type ChannelEditorValidationCode =
   | 'invalidGroupEntry'
   | 'number'
   | 'outOfRange'
-  | 'policy';
+  | 'policy'
+  | 'requiresBoundDelivery';
 
 export type ChannelEditorValidationErrors = Record<
   string,
@@ -422,6 +423,16 @@ export function validateChannelEditorDraft(
     const hasToken = tokenField ? !isMissingField(tokenField, draft) : false;
     if (!hasToken && draft.values['useLocalGh'] !== true) {
       errors['token'] = 'credential';
+    }
+    // Mirror validateBoundSessionConfig so the dependency is named at the
+    // field instead of surfacing as a raw daemon rejection after submit.
+    // invalidOption wins, the same order the runtime validates in.
+    if (
+      !errors['prWatchEvents'] &&
+      toList(String(draft.values['prWatchEvents'] ?? '')).length > 0 &&
+      draft.values['deliverToBoundSessions'] !== true
+    ) {
+      errors['prWatchEvents'] = 'requiresBoundDelivery';
     }
   }
   if (

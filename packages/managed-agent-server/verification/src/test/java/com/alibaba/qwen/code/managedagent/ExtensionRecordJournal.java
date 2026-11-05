@@ -28,7 +28,7 @@ import java.util.function.UnaryOperator;
 public final class ExtensionRecordJournal {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String WRITER = "writer-extension";
-    private static final String TOKEN = "extension-writer-token-0123456789";
+    static final String TOKEN = "extension-writer-token-0123456789";
     public static final String OPERATION = "commitMonitorRun";
     private final ManagedSessionStore store;
     private final String tenantId;

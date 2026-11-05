@@ -17,7 +17,10 @@ import {
   retainedRepositorySettings,
   validateChannelEditorDraft,
 } from './channel-editor-state';
-import type { ChannelGroupOverrideDraft } from './channel-editor-state';
+import type {
+  ChannelEditorDraft,
+  ChannelGroupOverrideDraft,
+} from './channel-editor-state';
 
 const DINGTALK: DaemonChannelTypeDescriptor = {
   type: 'dingtalk',
@@ -971,6 +974,61 @@ const GITHUB: DaemonChannelTypeDescriptor = {
     },
   ],
 };
+
+describe('GitHub watch events require bound delivery', () => {
+  const BOUND: DaemonChannelTypeDescriptor = {
+    ...GITHUB,
+    fields: [
+      ...GITHUB.fields,
+      {
+        key: 'deliverToBoundSessions',
+        label: 'Deliver To PR-Bound Sessions',
+        kind: 'boolean',
+      },
+      {
+        key: 'prWatchEvents',
+        label: 'PR Watch Events',
+        kind: 'string-list',
+        options: [
+          { value: 'ci_failure', label: 'ci_failure' },
+          { value: 'merge_conflict', label: 'merge_conflict' },
+        ],
+      },
+    ],
+  };
+
+  function draftWithEvents(events: string): ChannelEditorDraft {
+    const draft = createChannelEditorDraft(BOUND);
+    draft.name = 'my-bot';
+    draft.values.useLocalGh = true;
+    draft.values.prWatchEvents = events;
+    return draft;
+  }
+
+  it('refuses a watch selection while bound delivery is off', () => {
+    expect(
+      validateChannelEditorDraft(BOUND, draftWithEvents('ci_failure'), []),
+    ).toEqual({ prWatchEvents: 'requiresBoundDelivery' });
+  });
+
+  it('allows the selection once bound delivery is on', () => {
+    const draft = draftWithEvents('ci_failure');
+    draft.values.deliverToBoundSessions = true;
+    expect(validateChannelEditorDraft(BOUND, draft, [])).toEqual({});
+  });
+
+  it('leaves an empty selection alone with delivery off', () => {
+    expect(validateChannelEditorDraft(BOUND, draftWithEvents(''), [])).toEqual(
+      {},
+    );
+  });
+
+  it('reports invalidOption before the delivery dependency', () => {
+    expect(
+      validateChannelEditorDraft(BOUND, draftWithEvents('typo_event'), []),
+    ).toEqual({ prWatchEvents: 'invalidOption' });
+  });
+});
 
 describe('Descriptor-driven privatePolicy', () => {
   it('defaults enum fields to the first option for new channels', () => {

@@ -107,7 +107,7 @@ public class WorkspaceFileUploadStore {
         try {
             Operation saved = find(tenant, uploadId, false);
             if (saved == null) {
-                WorkspaceFileStore.Scope scope = files.scope(tenant, actor, locator);
+                WorkspaceFileStore.Scope scope = files.readScope(tenant, actor, locator);
                 if (!revision.equals(scope.revision())) {
                     throw changed();
                 }
