@@ -268,7 +268,7 @@ public class WorkspaceFileUploadStore {
                     || !Long.valueOf(mount.longValue()).equals(scope.mountRevision())) {
                 throw changed();
             }
-            if (owners.getFirst().get("holder_key") != null || owners.getFirst().get("maintenance_id") != null) {
+            if (!WorkspaceExecutionStore.membersAllowed(jdbc, physical)) {
                 throw busy();
             }
             Map<String, Object> request = null;
@@ -301,7 +301,7 @@ public class WorkspaceFileUploadStore {
                     JdbcRuntimeBindingRepository.storageAliasKey(tenant, scope.binding().getStorageId()), physical,
                     com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor), digest, encode(target));
             if (jdbc.update("UPDATE ma_storage_owner SET member_count = member_count + 1 WHERE storage_key = ?"
-                    + " AND mount_state = 'READY' AND mount_revision = ? AND holder_key IS NULL AND maintenance_id IS NULL",
+                    + " AND mount_state = 'READY' AND mount_revision = ?",
                     physical, scope.mountRevision()) != 1) {
                 throw busy();
             }
@@ -367,8 +367,9 @@ public class WorkspaceFileUploadStore {
             if (current.result() != null) {
                 return current.result();
             }
-            if (jdbc.update("UPDATE ma_storage_owner SET member_count = member_count - 1 WHERE storage_key = ?"
-                    + " AND member_count > 0 AND holder_key IS NULL AND maintenance_id IS NULL", target.physical()) != 1) {
+            if (!WorkspaceExecutionStore.membersAllowed(jdbc, target.physical())
+                    || jdbc.update("UPDATE ma_storage_owner SET member_count = member_count - 1 WHERE storage_key = ?"
+                    + " AND member_count > 0", target.physical()) != 1) {
                 throw pending();
             }
             if (jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, result_json = ?, completed_at = "

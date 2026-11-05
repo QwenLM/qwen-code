@@ -156,7 +156,7 @@ public final class JdbcRuntimeBindingRepository
             if (physical != null) {
                 try (var lock = connection.prepareStatement("SELECT physical_key FROM ma_storage_owner WHERE storage_key = ?"
                         + " AND storage_kind = (SELECT storage_kind FROM ma_storage WHERE alias_key = ?)"
-                        + " AND holder_key IS NULL AND maintenance_id IS NULL FOR UPDATE")) {
+                        + " FOR UPDATE")) {
                     lock.setString(1, physical);
                     lock.setString(2, storageAliasKey(claim.getRequest().getScope().getTenantId(), claim.getRequest().getStorageId()));
                     try (var rows = lock.executeQuery()) {
@@ -164,6 +164,9 @@ public final class JdbcRuntimeBindingRepository
                             throw unverifiedWorkspaceHolder();
                         }
                     }
+                }
+                if (!com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore.membersAllowed(connection, physical, true)) {
+                    throw unverifiedWorkspaceHolder();
                 }
             }
             var authority = claim.getRequest().getScope().getLifecycleAuthority();
