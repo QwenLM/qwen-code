@@ -1001,15 +1001,53 @@ function isNoReplySentinel(text: string): boolean {
   return NO_REPLY_SENTINEL_PATTERN.test((fenced?.[1] ?? trimmed).trim());
 }
 
-function isDefiniteNoWriteGithubError(err: unknown): boolean {
-  const e = err as {
-    status?: number;
-    response?: { headers?: Record<string, string | number> };
-  };
+/** GitHub's wording for a secondary (abuse) rate limit. */
+const SECONDARY_RATE_LIMIT_MESSAGE = /secondary rate limit|abuse detection/i;
+
+type GithubRequestError = {
+  status?: number;
+  message?: unknown;
+  response?: { headers?: Record<string, string | number> };
+};
+
+/** `x-ratelimit-remaining` as a count; absent or malformed is undefined. */
+function rateLimitRemaining(err: unknown): number | undefined {
+  const value = (err as GithubRequestError).response?.headers?.[
+    'x-ratelimit-remaining'
+  ];
+  if (typeof value === 'number') {
+    return Number.isInteger(value) && value >= 0 ? value : undefined;
+  }
+  return typeof value === 'string' && /^\d+$/.test(value)
+    ? Number(value)
+    : undefined;
+}
+
+/**
+ * A 403 or 429 carrying one of GitHub's rate-limit signals: an exhausted
+ * budget, `retry-after`, or the secondary-limit wording. GitHub sends a
+ * secondary limit with quota left and not always with `retry-after`, and its
+ * wording has changed before, so no single signal is required.
+ */
+function isRateLimitAnswer(err: unknown): boolean {
+  const e = err as GithubRequestError;
   return (
     (e.status === 403 || e.status === 429) &&
-    Number(e.response?.headers?.['x-ratelimit-remaining']) === 0
+    (rateLimitRemaining(err) === 0 ||
+      e.response?.headers?.['retry-after'] !== undefined ||
+      SECONDARY_RATE_LIMIT_MESSAGE.test(String(e.message)))
   );
+}
+
+/**
+ * GitHub's rate limiter rejected the write before creating anything: a rate
+ * limit answer that also carries `x-ratelimit-remaining`, which shows GitHub's
+ * API answered rather than, say, a bare 429 from a proxy in front of it. A
+ * component that copied GitHub's headers onto its own 403/429 could still be
+ * misread.
+ */
+function isDefiniteNoWriteGithubError(err: unknown): boolean {
+  return isRateLimitAnswer(err) && rateLimitRemaining(err) !== undefined;
 }
 
 /**
@@ -1036,9 +1074,6 @@ function isWatchFailFastError(err: unknown): boolean {
   );
 }
 
-/** GitHub's wording for a secondary (abuse) rate limit. */
-const SECONDARY_RATE_LIMIT_MESSAGE = /secondary rate limit|abuse detection/i;
-
 /**
  * Fail-fast statuses that condemn the WHOLE pass, not just one PR: a bad
  * credential or an exhausted rate budget is shared by every watched PR, so
@@ -1058,20 +1093,10 @@ function isWatchPassAbortError(err: unknown): boolean {
     response?: { headers?: Record<string, string | number> };
   };
   if (e.status === 401 || e.status === 429) return true;
-  if (e.status === 403) {
-    // GitHub sends a secondary/abuse limit with quota left and not always
-    // with retry-after, so an exhausted budget, retry-after or the limit's
-    // wording each mark a shared rate limit. A bare permission 403 (quota
-    // left, no retry-after, no limit wording) stays per-PR so it cannot
-    // starve the other watched PRs.
-    const headers = e.response?.headers;
-    return (
-      Number(headers?.['x-ratelimit-remaining']) === 0 ||
-      headers?.['retry-after'] !== undefined ||
-      SECONDARY_RATE_LIMIT_MESSAGE.test(String(e.message))
-    );
-  }
-  return false;
+  // A 403 aborts only as a rate limit; a bare permission 403 (quota left, no
+  // retry-after, no limit wording) stays per-PR so it cannot starve the other
+  // watched PRs.
+  return e.status === 403 && isRateLimitAnswer(err);
 }
 
 /**
@@ -1701,8 +1726,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     signal?: AbortSignal,
   ): Promise<void> {
     const pending = this.readPendingFinalDeliveries();
+    let rateLimited = false;
     for (const record of pending) {
-      if (signal?.aborted) return;
+      // A stop defers the abort while another write is in flight; start no
+      // new record meanwhile.
+      if (signal?.aborted || this.pendingFinalDeliveryRetryStopRequested) {
+        return;
+      }
       const auditBase = this.buildPublicationAuditBase({
         chatId: record.chatId,
         threadId: record.threadId,
@@ -1730,6 +1760,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }
         continue;
       }
+      // A rate limit answers every later record the same way: keep them for
+      // the next start instead of spending three more attempts on each. The
+      // already-posted check above needs no request, so it still runs.
+      if (rateLimited) continue;
       try {
         const comment = await this.createIssueComment(
           record.chatId,
@@ -1763,16 +1797,24 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }
         this.removeReplyPendingInboundTask(record);
       } catch (err) {
-        if (signal?.aborted) return;
+        // The abort waits for an in-flight write, so an answer that arrives
+        // with the signal aborted still decides the record; only an attempt
+        // that was never sent leaves it for the next start.
+        if ((err as { notSent?: boolean }).notSent) return;
         if (isDefiniteNoWriteGithubError(err)) {
+          rateLimited = true;
           continue;
         }
+        // A rate limit without GitHub's header is no proof the write was
+        // refused, so this record is dropped below, but it would answer the
+        // later records the same way: keep those for the next start.
+        if (isRateLimitAnswer(err)) rateLimited = true;
         this.recordPublicationAudit({
           ...auditBase,
           at: new Date().toISOString(),
           type: 'github_publication',
-          // Ambiguous by construction: the definite-no-write branch above
-          // already continued. Keep the key consumed (at-most-once).
+          // Ambiguous by construction: a definite no-write never reaches
+          // here. Keep the key consumed (at-most-once).
           outcome: 'failed_ambiguous',
           failurePhase: 'delivery',
           failureError: sanitizeLogText(
@@ -2128,12 +2170,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (this.inboundRecoveryPending) {
       try {
         await this.recoverInboundTasks();
+        // Clear only on success: the re-arm below reads an in-memory count
+        // that a failed store read latched at 0, so clearing here would
+        // promise a retry that never runs once the store is readable again.
+        this.inboundRecoveryPending = false;
       } catch (err) {
         process.stderr.write(
           `[Channel:${this.name}] inbound task recovery failed, will retry next poll: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
         );
-      } finally {
-        this.inboundRecoveryPending = false;
       }
     }
 
@@ -4070,7 +4114,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     signal?: AbortSignal,
   ): Promise<T> {
     for (let attempt = 1; attempt <= retries; attempt++) {
-      if (signal?.aborted) throw new Error(`${label} aborted`);
+      if (signal?.aborted) {
+        // Thrown before this attempt was sent: callers can tell it from the
+        // answer of a request that went out.
+        throw Object.assign(new Error(`${label} aborted`), { notSent: true });
+      }
       try {
         return await fn();
       } catch (err: unknown) {
@@ -4084,31 +4132,49 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         };
         const headers = e.response?.headers ?? {};
 
+        // A retry-after that is not a positive number of seconds (an HTTP
+        // date, "0") is ignored, so the budget reset or the rate-limit
+        // minimum below sets the wait instead.
+        const retryAfter = Number(headers['retry-after'] ?? NaN);
+        const usableRetryAfter = Number.isFinite(retryAfter) && retryAfter > 0;
+        const rateLimited = isRateLimitAnswer(err);
+        // GitHub answering with an exhausted budget means its window has not
+        // reset yet, so a reset that looks past is clock skew: the minimum
+        // below applies instead of a 1 s retry.
+        const untilReset =
+          Number(headers['x-ratelimit-reset']) * 1000 - Date.now();
         let cooldown: number;
-        if (headers['retry-after']) {
-          const retryAfter = Number(headers['retry-after']);
-          cooldown = Number.isFinite(retryAfter)
-            ? retryAfter * 1000
-            : 1000 * 2 ** (attempt - 1);
+        if (usableRetryAfter) {
+          cooldown = retryAfter * 1000;
         } else if (
-          (e.status === 403 || e.status === 429) &&
-          Number(headers['x-ratelimit-remaining']) === 0 &&
-          Number(headers['x-ratelimit-reset']) > 0
+          rateLimited &&
+          rateLimitRemaining(err) === 0 &&
+          untilReset > 0
         ) {
-          cooldown =
-            Math.max(
-              0,
-              Number(headers['x-ratelimit-reset']) * 1000 - Date.now(),
-            ) + 1000;
+          cooldown = untilReset + 1000;
+        } else if (rateLimited) {
+          // GitHub's guidance for a rate limit without a usable retry-after
+          // or reset: wait at least a minute, longer on each repeat.
+          cooldown = 60_000 * 2 ** (attempt - 1);
         } else {
           cooldown = 1000 * 2 ** (attempt - 1);
         }
         cooldown = Math.min(cooldown, MAX_TIMER_DELAY_MS);
+        // After disconnect() — which ends the wait early, skips it for a call
+        // that started after the stop, or lets it run out while an in-flight
+        // write defers the abort — give up with GitHub's last answer instead
+        // of retrying into the same limit. A definite no-write stays
+        // definite, so a final reply is kept as a pending delivery.
+        const stopped = () =>
+          (usableRetryAfter || rateLimited) &&
+          this.pendingFinalDeliveryRetryStopRequested;
+        if (stopped()) throw err;
 
         process.stderr.write(
           `[Channel:${this.name}] ${label} failed (attempt ${attempt}/${retries}, status=${e.status}), retrying in ${cooldown}ms: ${sanitizeLogText(e.message ?? String(err), 200)}\n`,
         );
         await this.sleepForRetry(cooldown, signal);
+        if (stopped()) throw err;
       }
     }
     throw new Error('unreachable');
