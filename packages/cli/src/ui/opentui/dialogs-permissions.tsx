@@ -20,14 +20,19 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as nodePath from 'node:path';
-import { useState } from 'react';
-import { useKeyboard, useTerminalDimensions } from '@opentui/react';
+import { useMemo, useState } from 'react';
+import { decodePasteBytes } from '@opentui/core';
+import { useKeyboard, usePaste, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
+import { Command, keyMatchers } from '../keyMatchers.js';
 import { parseRule } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
 import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
 import { toOriginalKey } from './key-map.js';
+import { useLineEdit, windowLineAtCaret } from './line-edit.js';
+import { isPrintableKeyInput } from './input-prompt-key.js';
+import { normalizePastedText } from './input-prompt-model.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 import {
   matchesSearchQuery,
@@ -50,6 +55,57 @@ import {
   sanitizeTerminalLine,
   truncateToWidth,
 } from '../utils/textUtils.js';
+
+function directoryCompletions(input: string): string[] {
+  const trimmed = input.trim();
+  if (!trimmed) return [];
+  const expanded = trimmed.startsWith('~')
+    ? trimmed.replace(/^~/, os.homedir())
+    : trimmed;
+  const endsWithSep = expanded.endsWith('/') || expanded.endsWith(nodePath.sep);
+  const searchDir = endsWithSep ? expanded : nodePath.dirname(expanded);
+  const prefix = endsWithSep ? '' : nodePath.basename(expanded);
+  try {
+    return fs
+      .readdirSync(searchDir, { withFileTypes: true })
+      .filter(
+        (entry) =>
+          entry.isDirectory() &&
+          entry.name.startsWith(prefix) &&
+          !entry.name.startsWith('.'),
+      )
+      .map((entry) => nodePath.join(searchDir, entry.name))
+      .slice(0, 6);
+  } catch {
+    return [];
+  }
+}
+
+function PermissionInput({
+  value,
+  caret,
+  placeholder,
+  width,
+}: {
+  value: string;
+  caret: number;
+  placeholder: string;
+  width: number;
+}) {
+  if (width < 1) return null;
+  const spans = windowLineAtCaret({ text: value, cursor: caret }, width);
+  const before = sanitizeTerminalLine(spans.before);
+  const after = value
+    ? sanitizeTerminalLine(spans.after)
+    : truncateToWidth(placeholder, Math.max(0, width - 1));
+  return (
+    <box flexDirection="row">
+      {before ? <text fg={C.text}>{before}</text> : null}
+      <text bg={C.accent}>{sanitizeTerminalLine(spans.at) || ' '}</text>
+      {after ? <text fg={value ? C.text : C.dim}>{after}</text> : null}
+    </box>
+  );
+}
 
 export type PermissionsTabId = 'allow' | 'ask' | 'deny' | 'workspace';
 
@@ -241,27 +297,53 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
     setCursor: setActiveTabIndex,
   } = useBatchSafeCursor();
   const activeTab = tabs[activeTabIndex]!;
-  const [view, setView] = useState<PermissionsView>('rule-list');
+  const {
+    value: view,
+    ref: viewRef,
+    setValue: setView,
+  } = useBatchSafeState<PermissionsView>('rule-list');
   const [searchQuery, setSearchQuery] = useState('');
   // Enter lands in the same burst as the characters typed into the field, so
   // the handler submits the ref rather than the pre-burst render value.
-  const {
-    value: newRuleInput,
-    ref: newRuleInputRef,
-    setValue: setNewRuleInput,
-  } = useBatchSafeState('');
+  const { value: newRuleInput, setValue: setNewRuleInput } =
+    useBatchSafeState('');
   const [ruleInputError, setRuleInputError] = useState('');
   const [pendingRuleText, setPendingRuleText] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<PermissionRuleEntry | null>(
     null,
   );
-  const {
-    value: newDirInput,
-    ref: newDirInputRef,
-    setValue: setNewDirInput,
-  } = useBatchSafeState('');
+  const { value: newDirInput, setValue: setNewDirInput } =
+    useBatchSafeState('');
   const [dirInputError, setDirInputError] = useState('');
   const [removeDirTarget, setRemoveDirTarget] = useState<string | null>(null);
+  const {
+    cursor: completionIndex,
+    cursorRef: completionIndexRef,
+    setCursor: setCompletionIndex,
+  } = useBatchSafeCursor();
+  const ruleLine = useLineEdit(
+    newRuleInput,
+    (text) => {
+      setNewRuleInput(text);
+      setRuleInputError('');
+    },
+    view === 'add-rule-input',
+  );
+  const [dirInputEpoch, setDirInputEpoch] = useState(0);
+  const dirLine = useLineEdit(
+    newDirInput,
+    (text) => {
+      setNewDirInput(text);
+      setDirInputError('');
+      setCompletionIndex(0);
+    },
+    `${view === 'ws-add-dir-input'}:${dirInputEpoch}`,
+  );
+  const completions = useMemo(
+    () =>
+      view === 'ws-add-dir-input' ? directoryCompletions(newDirInput) : [],
+    [newDirInput, view],
+  );
 
   const currentTabRules =
     activeTab.id === 'workspace'
@@ -301,6 +383,67 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
   );
   const ruleDescriptionRows = wrappedRows(activeTab.description, areaWidth);
   const workspaceDescriptionRows = wrappedRows(workspaceDescription, areaWidth);
+  const dirInputVisible =
+    areaWidth > 4 &&
+    (regionHeight === undefined ||
+      regionHeight >=
+        6 +
+          wrappedRows(t('Add directory to workspace'), areaWidth) +
+          wrappedRows(
+            t(
+              'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.',
+            ),
+            areaWidth,
+          ) +
+          wrappedRows(t('Enter the path to the directory:'), areaWidth));
+  const ruleInputVisible =
+    areaWidth > 8 &&
+    (regionHeight === undefined ||
+      regionHeight >=
+        7 +
+          wrappedRows(
+            t('Add {{type}} permission rule', { type: activeTab.id }),
+            areaWidth - 4,
+          ) +
+          wrappedRows(
+            t(
+              'Permission rules are a tool name, optionally followed by a specifier in parentheses.',
+            ),
+            areaWidth - 4,
+          ) +
+          wrappedRows(
+            `${t('e.g.,')} WebFetch ${t('or')} Bash(ls:*)`,
+            areaWidth - 4,
+          ));
+  const completionRows =
+    regionHeight === undefined
+      ? 6
+      : Math.max(
+          0,
+          Math.min(
+            6,
+            regionHeight -
+              8 -
+              wrappedRows(t('Add directory to workspace'), areaWidth) -
+              wrappedRows(
+                t(
+                  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.',
+                ),
+                areaWidth,
+              ) -
+              wrappedRows(t('Enter the path to the directory:'), areaWidth) -
+              wrappedRows(
+                t('Tab to complete · Enter to add · Esc to cancel'),
+                areaWidth,
+              ) -
+              (dirInputError ? wrappedRows(dirInputError, areaWidth) : 0),
+          ),
+        );
+  const visibleCompletions = completions.slice(0, completionRows);
+  const paintedCompletionIndex = Math.min(
+    completionIndex,
+    Math.max(0, visibleCompletions.length - 1),
+  );
   const maxRulesToShow =
     regionHeight === undefined
       ? 15
@@ -432,6 +575,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
   };
 
   useKeyboard((key) => {
+    if (viewRef.current !== view || key.eventType === 'release') return;
     const original = toOriginalKey(key);
     const { name, ctrl } = original;
 
@@ -465,12 +609,15 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
       }
     }
     if (view === 'add-rule-input') {
+      if (ruleLine.settled) return;
       if (name === 'escape') {
+        ruleLine.settle();
         setView('rule-list');
         return;
       }
+      if (!ruleInputVisible) return;
       if (name === 'return') {
-        const trimmed = newRuleInputRef.current.trim();
+        const trimmed = ruleLine.text.trim();
         if (!trimmed) return;
         const rule = parseRule(trimmed);
         if (rule.invalid) {
@@ -483,16 +630,16 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         }
         setRuleInputError('');
         setPendingRuleText(trimmed);
+        ruleLine.settle();
         setView('add-rule-scope');
         return;
       }
-      if (name === 'backspace') {
-        setNewRuleInput(newRuleInputRef.current.slice(0, -1));
+      if (keyMatchers[Command.CLEAR_INPUT](original)) {
+        ruleLine.clear();
         return;
       }
-      if (!ctrl && original.sequence.length === 1 && original.sequence >= ' ') {
-        setNewRuleInput(newRuleInputRef.current + original.sequence);
-        setRuleInputError('');
+      if (!ruleLine.handleKey(original) && isPrintableKeyInput(key)) {
+        ruleLine.insert(key.sequence);
       }
       return;
     }
@@ -530,37 +677,71 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
       return;
     }
     if (view === 'ws-add-dir-input') {
+      if (dirLine.settled) return;
       if (name === 'escape') {
+        dirLine.settle();
         setDirInputError('');
         setView('ws-dir-list');
         return;
       }
+      if (!dirInputVisible) return;
       if (name === 'return') {
         // ink's handleAddDirSubmit returns early on empty input — the user
         // stays in the form instead of silently dropping back to the list
         // (validateWorkspaceDirectory's empty-input sentinel is falsy).
-        if (!newDirInputRef.current.trim()) return;
-        const result = validateWorkspaceDirectory(
-          newDirInputRef.current,
-          directories,
-        );
+        if (!dirLine.text.trim()) return;
+        const result = validateWorkspaceDirectory(dirLine.text, directories);
         if (result.error) {
           setDirInputError(result.error);
           return;
         }
-        if (result.resolved) onAddDirectory(result.resolved);
+        if (result.resolved) {
+          onAddDirectory(result.resolved);
+          dirLine.settle();
+        }
         setDirInputError('');
         setNewDirInput('');
         setView('ws-dir-list');
         return;
       }
-      if (name === 'backspace') {
-        setNewDirInput(newDirInputRef.current.slice(0, -1));
+      if (
+        visibleCompletions.length > 0 &&
+        (name === 'tab' || name === 'up' || name === 'down')
+      ) {
+        // A same-read edit must not select suggestions from the preceding render.
+        if (dirLine.text !== newDirInput) return;
+        if (name === 'tab') {
+          const selected =
+            visibleCompletions[
+              Math.min(
+                completionIndexRef.current,
+                visibleCompletions.length - 1,
+              )
+            ];
+          dirLine.settle();
+          setNewDirInput(selected + '/');
+          setDirInputError('');
+          setDirInputEpoch((epoch) => epoch + 1);
+          setCompletionIndex(0);
+        } else {
+          setCompletionIndex(
+            (Math.min(
+              completionIndexRef.current,
+              visibleCompletions.length - 1,
+            ) +
+              (name === 'up' ? -1 : 1) +
+              visibleCompletions.length) %
+              visibleCompletions.length,
+          );
+        }
         return;
       }
-      if (!ctrl && original.sequence.length === 1 && original.sequence >= ' ') {
-        setNewDirInput(newDirInputRef.current + original.sequence);
-        if (dirInputError) setDirInputError('');
+      if (keyMatchers[Command.CLEAR_INPUT](original)) {
+        dirLine.clear();
+        return;
+      }
+      if (!dirLine.handleKey(original) && isPrintableKeyInput(key)) {
+        dirLine.insert(key.sequence);
       }
       return;
     }
@@ -576,6 +757,21 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         setView('ws-dir-list');
       }
     }
+  });
+
+  usePaste((event) => {
+    if (viewRef.current !== view) return;
+    const line =
+      view === 'add-rule-input' && ruleInputVisible
+        ? ruleLine
+        : view === 'ws-add-dir-input' && dirInputVisible
+          ? dirLine
+          : null;
+    if (!line || line.settled) return;
+    const text = normalizePastedText(decodePasteBytes(event.bytes));
+    if (!text) return;
+    event.preventDefault();
+    line.insert(text);
   });
 
   const footerText =
@@ -607,11 +803,29 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
           paddingX={1}
           marginTop={1}
         >
-          <text fg={newDirInput ? C.text : C.dim}>
-            {newDirInput || t('Enter directory path…')}
-          </text>
+          <PermissionInput
+            value={newDirInput}
+            caret={dirLine.caret}
+            placeholder={t('Enter directory path…')}
+            width={Math.max(0, areaWidth - 4)}
+          />
         </box>
         {dirInputError && <text fg={C.red}>{dirInputError}</text>}
+        {visibleCompletions.length > 0 && (
+          <box flexDirection="column" marginTop={1}>
+            {visibleCompletions.map((completion, index) => (
+              <text
+                key={completion}
+                fg={index === paintedCompletionIndex ? C.accent : C.dim}
+              >
+                {truncateToWidth(
+                  `${sanitizeTerminalLine(nodePath.basename(completion))}/    directory`,
+                  areaWidth,
+                )}
+              </text>
+            ))}
+          </box>
+        )}
         <FooterHint
           text={t('Tab to complete · Enter to add · Esc to cancel')}
         />
@@ -726,9 +940,12 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
           </box>
           <box height={1} />
           <box borderStyle="rounded" borderColor={C.dim} paddingX={1}>
-            <text fg={newRuleInput ? C.text : C.dim}>
-              {newRuleInput || t('Enter permission rule…')}
-            </text>
+            <PermissionInput
+              value={newRuleInput}
+              caret={ruleLine.caret}
+              placeholder={t('Enter permission rule…')}
+              width={Math.max(0, areaWidth - 8)}
+            />
           </box>
           {ruleInputError ? (
             <box marginTop={1}>

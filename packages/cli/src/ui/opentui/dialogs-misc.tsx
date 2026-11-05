@@ -136,7 +136,6 @@ export function shellBodyChromeRows(
   return 5 + wrappedRows(title, contentWidth);
 }
 const DIFF_BODY_ROWS = 14;
-const SUBAGENTS_BODY_ROWS = 12;
 
 const Row = ({ label, value }: { label: string; value: string }) => (
   <box flexDirection="row">
@@ -615,87 +614,6 @@ export function OpenTuiDiffDialog({
   );
 }
 
-export function OpenTuiSubagentCreateDialog({ onClose }: P) {
-  useEsc(onClose);
-  return (
-    <Shell title="Subagent Create" onClose={onClose} shrinkable>
-      <box flexDirection="column" marginTop={1}>
-        <text fg={C.dim}>{'Define a new subagent (name, tools, prompt).'}</text>
-      </box>
-    </Shell>
-  );
-}
+export { OpenTuiSubagentCreateDialog } from './SubagentCreateDialog.js';
 
-export function OpenTuiSubagentListDialog({
-  config,
-  onClose,
-  availableTerminalHeight,
-}: P) {
-  useEsc(onClose);
-  const regionHeight = clampDialogHeight(availableTerminalHeight);
-  const { width } = useTerminalDimensions();
-  const bodyLayout = scrollDialogLayout(
-    regionHeight,
-    shellBodyChromeRows('Subagents', dialogContentWidth(width)),
-    SUBAGENTS_BODY_ROWS,
-  );
-  const [rows, setRows] = useState<Array<{ name: string; desc: string }>>([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    let alive = true;
-    const mgr = (
-      config as unknown as {
-        getSubagentManager?: () => {
-          listSubagents: () => Promise<Array<Record<string, unknown>>>;
-        };
-      }
-    )?.getSubagentManager?.();
-    if (!mgr) {
-      setLoading(false);
-      return;
-    }
-    mgr
-      .listSubagents()
-      .then((list) => {
-        if (!alive) return;
-        setRows(
-          (list ?? []).map((s) => ({
-            name: String(s['name'] ?? '(unnamed)'),
-            desc: String(s['description'] ?? ''),
-          })),
-        );
-        setLoading(false);
-      })
-      .catch(() => {
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [config]);
-  return (
-    <Shell title="Subagents" onClose={onClose} bodyLayout={bodyLayout}>
-      <scrollbox
-        key={`body-${width}-${bodyLayout.bodyRows}-${bodyLayout.compact}`}
-        height={bodyLayout.bodyRows}
-        marginTop={bodyLayout.compact ? 0 : 1}
-        flexShrink={1}
-        stickyScroll={false}
-      >
-        {loading ? (
-          <text fg={C.dim}>{'loading subagents…'}</text>
-        ) : rows.length === 0 ? (
-          <text fg={C.dim}>{'no subagents configured'}</text>
-        ) : (
-          rows.map((r) => (
-            <box key={r.name} flexDirection="row">
-              <text fg={C.green}>{'• '}</text>
-              <text fg={C.text}>{r.name}</text>
-              <text fg={C.dim}>{`  ${r.desc}`}</text>
-            </box>
-          ))
-        )}
-      </scrollbox>
-    </Shell>
-  );
-}
+export { OpenTuiSubagentListDialog } from './SubagentListDialog.js';

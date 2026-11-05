@@ -15,6 +15,7 @@ import {
   OpenTuiDiffDialog,
   OpenTuiSubagentListDialog,
 } from '../src/ui/opentui/dialogs-misc.js';
+import { OpenTuiSubagentCreateDialog } from '../src/ui/opentui/SubagentCreateDialog.js';
 import { OpenTuiSkillsDialog } from '../src/ui/opentui/dialogs-stats-skills.js';
 import { OpenTuiSessionPicker } from '../src/ui/opentui/session-picker.js';
 import { dialogAreaWidth } from '../src/ui/opentui/dialogs-shared.js';
@@ -142,9 +143,32 @@ async function scrollAndResizeDialogs() {
       const setup = await render(<Responsive />, { width, height: 15 });
       try {
         setup.renderer.start();
-        await setup.waitFor(() => body(setup).scrollHeight >= 40, {
-          maxPasses: 100,
-        });
+        const windowed = Dialog === OpenTuiSubagentListDialog;
+        try {
+          await setup.waitFor(
+            () =>
+              windowed
+                ? setup.captureCharFrame().includes('row-0')
+                : body(setup).scrollHeight >= 40,
+            { maxPasses: 100 },
+          );
+        } catch (error) {
+          throw new Error(
+            `${Dialog.name} ${width} columns, 15 rows: scrollHeight=${body(setup).scrollHeight}\n${setup.captureCharFrame()}`,
+            { cause: error },
+          );
+        }
+        if (windowed) {
+          for (let index = 0; index < fixtureRows.length - 1; index++) {
+            await act(async () => setup.mockInput.pressKey('ARROW_DOWN'));
+            await act(async () => setup.waitForVisualIdle());
+          }
+          assert.match(
+            setup.captureCharFrame(),
+            /›\s+§/,
+            `${Dialog.name} ${width} columns: last agent is not visibly selected`,
+          );
+        }
         setup.renderer.pause();
         for (const height of [7, 20, 4, 12]) {
           const before = body(setup);
@@ -166,12 +190,20 @@ async function scrollAndResizeDialogs() {
               height,
             `${Dialog.name}: resize frame overflow`,
           );
-          after.scrollTo(after.scrollHeight);
-          await setup.renderOnce();
-          assert(
-            setup.captureCharFrame().includes(endMarker),
-            `${Dialog.name}: last content is unreachable after resize to ${height}`,
-          );
+          if (windowed) {
+            assert.match(
+              setup.captureCharFrame(),
+              /›\s+§/,
+              `${Dialog.name}: last agent is not visibly selected after resize to ${height}`,
+            );
+          } else {
+            after.scrollTo(after.scrollHeight);
+            await setup.renderOnce();
+            assert(
+              setup.captureCharFrame().includes(endMarker),
+              `${Dialog.name}: last content is unreachable after resize to ${height}`,
+            );
+          }
         }
       } finally {
         await destroy(setup);
@@ -238,6 +270,88 @@ async function pickerResize() {
   console.log('PASS: real session picker list/preview native resize');
 }
 
+async function creatorDialogs() {
+  const creatorConfig = {
+    getToolRegistry: () => ({ getAllTools: () => [] }),
+    getSubagentManager: () => ({ loadSubagent: async () => null }),
+  } as unknown as Config;
+  for (const [width, region] of [
+    [11, 12],
+    [100, 30],
+  ] as const) {
+    const setup = await render(
+      <box
+        height={region}
+        width={dialogAreaWidth(width)}
+        marginLeft={2}
+        overflow="hidden"
+        flexDirection="column"
+      >
+        <OpenTuiSubagentCreateDialog
+          config={creatorConfig}
+          onClose={() => {
+            throw new Error('unexpected creator close');
+          }}
+          availableTerminalHeight={region}
+        />
+      </box>,
+      { width, height: 50 },
+    );
+    try {
+      for (const [index, title] of [
+        'Choose Location',
+        'Choose Generation Method',
+        'Enter Subagent Name',
+      ].entries()) {
+        if (index > 0)
+          await act(async () => setup.mockInput.pressKey('RETURN'));
+        if (index === 2) await act(async () => setup.mockInput.pressKey('Z'));
+        await act(async () => setup.waitForVisualIdle());
+        const frame = setup.renderer.root.getChildren()[0]?.getChildren()[0];
+        assert(
+          frame && frame.height <= region,
+          `${width}x${region}: ${title} frame overflows`,
+        );
+        const rows = setup.captureCharFrame().split('\n');
+        const visible = rows.slice(0, region).join('\n');
+        assert(
+          rows.slice(region).every((row) => row.trim() === ''),
+          `${title}: paint outside creator region`,
+        );
+        if (index < 2) {
+          assert.equal(
+            rows.slice(0, region).filter((row) => row.includes('›')).length,
+            1,
+            `${title}: missing singular visible choice`,
+          );
+          const label =
+            width === 11
+              ? index === 0
+                ? 'Pr…'
+                : 'Ma…'
+              : index === 0
+                ? 'Project Level'
+                : 'Manual Creation';
+          assert(visible.includes(label), `${title}: choice label clipped`);
+        }
+        if (width === 100)
+          assert(
+            visible.includes(`Step ${index + 1}: ${title}`),
+            `${title}: wrong manual step`,
+          );
+        if (index === 2)
+          assert(
+            visible.includes('Z'),
+            'manual name field did not receive input',
+          );
+      }
+    } finally {
+      await destroy(setup);
+    }
+  }
+  console.log('PASS: six real manual creator screen geometry checks');
+}
+
 async function main() {
   const originalDirectory = process.cwd();
   const fixture = mkdtempSync(join(tmpdir(), 'qwen-dialog-layout-'));
@@ -250,9 +364,27 @@ async function main() {
       'diff-fixture.txt',
       fixtureRows.map((row) => row.name).join('\n') + '\n',
     );
+    const fixtureDiff = execFileSync(
+      'git',
+      ['diff', '--no-ext-diff', '--no-textconv', '--color=never'],
+      { encoding: 'utf8' },
+    );
+    assert(
+      fixtureDiff.includes(`+${endMarker}`),
+      'missing diff fixture last row',
+    );
+    assert.equal(
+      fixtureDiff
+        .split('\n')
+        .filter((line) => line.startsWith('+') && !line.startsWith('+++'))
+        .length,
+      fixtureRows.length,
+      'diff fixture must contain all added rows',
+    );
     await boundedDialogs();
     await scrollAndResizeDialogs();
     await pickerResize();
+    await creatorDialogs();
   } finally {
     process.chdir(originalDirectory);
     rmSync(fixture, { recursive: true, force: true });

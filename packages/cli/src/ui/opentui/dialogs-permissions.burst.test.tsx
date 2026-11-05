@@ -16,6 +16,7 @@
 import { act, render, screen } from '@testing-library/react';
 import * as fs from 'node:fs';
 import * as nodePath from 'node:path';
+import { tmpdir } from 'node:os';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SettingScope } from '../../config/settings.js';
 
@@ -33,6 +34,9 @@ interface RawKey {
 const mocks = vi.hoisted(() => {
   const state = {
     keyboardHandlers: [] as Array<(key: RawKey) => void>,
+    pasteHandlers: [] as Array<
+      (event: { bytes: Uint8Array; preventDefault: () => void }) => void
+    >,
     width: 100,
   };
   async function buildJsxRuntime() {
@@ -91,9 +95,28 @@ vi.mock('@opentui/react', async () => {
         undefined,
       );
       if (!stable.current) {
-        stable.current = (key: RawKey) => latest.current(key);
+        stable.current = (key: RawKey) =>
+          latest.current({ ...key, sequence: key.sequence ?? '' });
         mocks.state.keyboardHandlers.push(stable.current);
       }
+    },
+    usePaste: (
+      handler: (event: {
+        bytes: Uint8Array;
+        preventDefault: () => void;
+      }) => void,
+    ) => {
+      const latest = React.useRef(handler);
+      latest.current = handler;
+      React.useEffect(() => {
+        const fn = (event: { bytes: Uint8Array; preventDefault: () => void }) =>
+          latest.current(event);
+        mocks.state.pasteHandlers.push(fn);
+        return () => {
+          const index = mocks.state.pasteHandlers.indexOf(fn);
+          if (index >= 0) mocks.state.pasteHandlers.splice(index, 1);
+        };
+      }, []);
     },
     useTerminalDimensions: () => ({ width: mocks.state.width, height: 40 }),
   };
@@ -101,6 +124,7 @@ vi.mock('@opentui/react', async () => {
 vi.mock('@opentui/core', () => ({
   SyntaxStyle: { fromStyles: () => ({}) },
   MouseButton: { LEFT: 0 },
+  decodePasteBytes: (bytes: Uint8Array) => Buffer.from(bytes).toString('utf8'),
 }));
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
@@ -152,11 +176,12 @@ function text(char: string): RawKey {
 const ENTER: RawKey = { name: 'return', sequence: '\r' };
 const TAB: RawKey = { name: 'tab', sequence: '\t' };
 
-function renderDialog() {
+function renderDialog(availableTerminalHeight?: number) {
   const onAddRule = vi.fn();
   const onAddDirectory = vi.fn();
   render(
     <OpenTuiPermissionsDialog
+      availableTerminalHeight={availableTerminalHeight}
       rules={[]}
       directories={[]}
       initialDirectories={[]}
@@ -187,6 +212,7 @@ function openDirInput() {
 
 beforeEach(() => {
   mocks.state.keyboardHandlers.length = 0;
+  mocks.state.pasteHandlers.length = 0;
   mocks.state.width = 100;
   document.body.innerHTML = '';
 });
@@ -352,4 +378,306 @@ describe('OpenTuiPermissionsDialog text-field bursts', () => {
     );
     expect(screen.queryByText('Enter directory path…')).toBeNull();
   });
+});
+
+function readWithTrailingPaste(keys: RawKey[], value: string) {
+  act(() => {
+    for (const key of keys)
+      for (const handler of [...mocks.state.keyboardHandlers]) handler(key);
+    for (const handler of [...mocks.state.pasteHandlers]) {
+      handler({ bytes: Buffer.from(value), preventDefault: vi.fn() });
+    }
+  });
+}
+
+describe('Permissions field ownership across reads', () => {
+  it('keeps a submitted rule unchanged by trailing keys and paste in the same read', () => {
+    const { onAddRule } = renderDialog();
+    openRuleInput();
+    readWithTrailingPaste(
+      [...'WebFetch'.split('').map(text), ENTER, text('X')],
+      'PASTE',
+    );
+    expect(screen.getByText('Where should this rule be saved?')).toBeTruthy();
+    expect(onAddRule).not.toHaveBeenCalled();
+    press(ENTER);
+    expect(onAddRule).toHaveBeenCalledExactlyOnceWith(
+      'WebFetch',
+      'allow',
+      SettingScope.Workspace,
+    );
+  });
+
+  it('does not reopen or edit a cancelled form from trailing input in one read', () => {
+    const { onAddRule } = renderDialog();
+    openRuleInput();
+    readWithTrailingPaste([{ name: 'escape' }, ENTER, text('X')], 'PASTE');
+    expect(screen.queryByText('Where should this rule be saved?')).toBeNull();
+    expect(screen.queryByText('Enter permission rule…')).toBeNull();
+    expect(onAddRule).not.toHaveBeenCalled();
+    press(ENTER);
+    expect(screen.getByText('Enter permission rule…')).toBeTruthy();
+  });
+
+  it('does not submit the old path when Tab and Enter share a read', () => {
+    const parent = fs.mkdtempSync(nodePath.join(tmpdir(), 'permission-tab-'));
+    fs.mkdirSync(nodePath.join(parent, 'alpha'));
+    try {
+      const { onAddDirectory } = renderDialog();
+      openDirInput();
+      burst((parent + '/').split('').map(text));
+      expect(screen.getByText(/^alpha\/\s+directory$/)).toBeTruthy();
+      burst([TAB, ENTER]);
+      expect(onAddDirectory).not.toHaveBeenCalled();
+      expect(screen.getByText('Add directory to workspace')).toBeTruthy();
+      press(ENTER);
+      expect(onAddDirectory).toHaveBeenCalledExactlyOnceWith(
+        fs.realpathSync(nodePath.join(parent, 'alpha')),
+      );
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps an invalid rule editable so it can be repaired', () => {
+    const { onAddRule } = renderDialog();
+    openRuleInput();
+    readWithTrailingPaste([], 'Bash(');
+    press(ENTER);
+    expect(
+      screen.getByText(/Malformed rule: unbalanced parentheses/),
+    ).toBeTruthy();
+    expect(onAddRule).not.toHaveBeenCalled();
+    burst([...'ls)'.split('').map(text), ENTER]);
+    expect(screen.getByText('Bash(ls)')).toBeTruthy();
+    press(ENTER);
+    expect(onAddRule).toHaveBeenCalledExactlyOnceWith(
+      'Bash(ls)',
+      'allow',
+      SettingScope.Workspace,
+    );
+  });
+
+  it('clears a prior directory error when Tab accepts a real completion', () => {
+    const parent = fs.mkdtempSync(
+      nodePath.join(tmpdir(), 'permission-error-tab-'),
+    );
+    fs.mkdirSync(nodePath.join(parent, 'alpha'));
+    try {
+      const { onAddDirectory } = renderDialog();
+      openDirInput();
+      burst([...(parent + '/alph').split('').map(text), ENTER]);
+      expect(screen.getByText('Directory does not exist.')).toBeTruthy();
+      expect(screen.getByText(/^alpha\/\s+directory$/)).toBeTruthy();
+      burst([TAB, ENTER]);
+      expect(screen.queryByText('Directory does not exist.')).toBeNull();
+      expect(onAddDirectory).not.toHaveBeenCalled();
+      press(ENTER);
+      expect(onAddDirectory).toHaveBeenCalledExactlyOnceWith(
+        fs.realpathSync(nodePath.join(parent, 'alpha')),
+      );
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps an invalid directory editable so it can be repaired', () => {
+    const parent = fs.mkdtempSync(
+      nodePath.join(tmpdir(), 'permission-repair-'),
+    );
+    try {
+      const { onAddDirectory } = renderDialog();
+      openDirInput();
+      burst([...(parent + '-missing').split('').map(text), ENTER]);
+      expect(onAddDirectory).not.toHaveBeenCalled();
+      expect(screen.getByText('Add directory to workspace')).toBeTruthy();
+      burst([
+        { name: 'a', ctrl: true },
+        { name: 'k', ctrl: true },
+        ...parent.split('').map(text),
+        ENTER,
+      ]);
+      expect(onAddDirectory).toHaveBeenCalledExactlyOnceWith(
+        fs.realpathSync(parent),
+      );
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('does not Tab-select a candidate hidden by the region height', () => {
+    const parent = fs.mkdtempSync(
+      nodePath.join(tmpdir(), 'permission-height-'),
+    );
+    fs.mkdirSync(nodePath.join(parent, 'alpha'));
+    try {
+      const { onAddDirectory } = renderDialog(12);
+      openDirInput();
+      burst((parent + '/').split('').map(text));
+      expect(screen.queryByText(/^alpha\/\s+directory$/)).toBeNull();
+      press({ name: 'down' });
+      press(TAB);
+      press(ENTER);
+      // Explicit Enter still adds the typed parent; it must not select hidden alpha.
+      expect(onAddDirectory).toHaveBeenCalledExactlyOnceWith(
+        fs.realpathSync(parent),
+      );
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Permissions input resize ownership', () => {
+  it('ignores hidden directory input and restores its accepted value when widened', () => {
+    const parent = fs.mkdtempSync(
+      nodePath.join(tmpdir(), 'permission-narrow-'),
+    );
+    fs.mkdirSync(nodePath.join(parent, 'alpha'));
+    try {
+      mocks.state.width = 100;
+      const onAddDirectory = vi.fn();
+      const props = {
+        rules: [],
+        directories: [],
+        initialDirectories: [],
+        onAddRule: vi.fn(),
+        onDeleteRule: vi.fn(),
+        onAddDirectory,
+        onRemoveDirectory: vi.fn(),
+        onExit: vi.fn(),
+      };
+      const view = render(<OpenTuiPermissionsDialog {...props} />);
+      openDirInput();
+      burst((parent + '/').split('').map(text));
+      expect(view.container.textContent).toContain(nodePath.basename(parent));
+      expect(screen.getByText(/^alpha\/\s+directory$/)).toBeTruthy();
+      mocks.state.width = 4;
+      view.rerender(<OpenTuiPermissionsDialog {...props} />);
+      expect(view.container.textContent).not.toContain(
+        nodePath.basename(parent),
+      );
+      expect(screen.queryByText(/^alpha\/\s+directory$/)).toBeNull();
+      readWithTrailingPaste(
+        [{ name: 'down' }, TAB, ENTER, ...'TAINT'.split('').map(text)],
+        'PASTE_TAINT',
+      );
+      expect(onAddDirectory).not.toHaveBeenCalled();
+      mocks.state.width = 100;
+      view.rerender(<OpenTuiPermissionsDialog {...props} />);
+      expect(view.container.textContent).toContain(nodePath.basename(parent));
+      expect(view.container.textContent).not.toContain('TAINT');
+      press(ENTER);
+      expect(onAddDirectory).toHaveBeenCalledExactlyOnceWith(
+        fs.realpathSync(parent),
+      );
+    } finally {
+      mocks.state.width = 100;
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+});
+
+it('keeps directory editing and Escape available after its save callback throws', () => {
+  const parent = fs.mkdtempSync(
+    nodePath.join(tmpdir(), 'permission-save-error-'),
+  );
+  fs.mkdirSync(nodePath.join(parent, 'alpha'));
+  try {
+    const { onAddDirectory } = renderDialog();
+    const error = new Error('owned directory save failure');
+    onAddDirectory.mockImplementation(() => {
+      throw error;
+    });
+    openDirInput();
+    burst(parent.split('').map(text));
+    expect(() => press(ENTER)).toThrow(error);
+    expect(onAddDirectory).toHaveBeenNthCalledWith(1, fs.realpathSync(parent));
+    expect(screen.getByText('Enter the path to the directory:')).toBeTruthy();
+    burst('/alpha'.split('').map(text));
+    expect(() => press(ENTER)).toThrow(error);
+    expect(onAddDirectory).toHaveBeenCalledTimes(2);
+    expect(onAddDirectory).toHaveBeenNthCalledWith(
+      2,
+      fs.realpathSync(nodePath.join(parent, 'alpha')),
+    );
+    press({ name: 'escape', sequence: '\x1b' });
+    expect(screen.queryByText('Enter the path to the directory:')).toBeNull();
+    expect(screen.getByText('Add directory…')).toBeTruthy();
+    expect(onAddDirectory).toHaveBeenCalledTimes(2);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+describe('Permissions TextInput Ctrl+C ownership', () => {
+  it('submits only replacement rule text after a same-read clear', () => {
+    const { onAddRule } = renderDialog();
+    openRuleInput();
+    burst([
+      ...'WebFetch'.split('').map(text),
+      { name: 'c', ctrl: true, sequence: '\x03' },
+      ...'Read'.split('').map(text),
+      ENTER,
+    ]);
+    press(ENTER);
+    expect(onAddRule).toHaveBeenCalledExactlyOnceWith(
+      'Read',
+      'allow',
+      SettingScope.Workspace,
+    );
+  });
+
+  it('undoes a clear as one edit before a same-read submit', () => {
+    const { onAddRule } = renderDialog();
+    openRuleInput();
+    burst([
+      ...'WebFetch'.split('').map(text),
+      { name: 'c', ctrl: true, sequence: '\x03' },
+      { name: 'z', ctrl: true, sequence: '\x1a' },
+      ENTER,
+    ]);
+    press(ENTER);
+    expect(onAddRule).toHaveBeenCalledExactlyOnceWith(
+      'WebFetch',
+      'allow',
+      SettingScope.Workspace,
+    );
+  });
+
+  it('validates the replacement directory after a same-read clear', () => {
+    const { onAddDirectory } = renderDialog();
+    openDirInput();
+    burst([
+      ...'definitely-missing-directory'.split('').map(text),
+      { name: 'c', ctrl: true, sequence: '\x03' },
+      text('.'),
+      ENTER,
+    ]);
+    expect(onAddDirectory).toHaveBeenCalledExactlyOnceWith(
+      fs.realpathSync(nodePath.resolve('.')),
+    );
+  });
+});
+
+it('witnesses accepted, empty and settled rule paste consumption', () => {
+  const { onAddRule } = renderDialog();
+  openRuleInput();
+  const emit = (value: string) => {
+    const event = { bytes: Buffer.from(value), preventDefault: vi.fn() };
+    act(() => {
+      for (const handler of [...mocks.state.pasteHandlers]) handler(event);
+    });
+    return event;
+  };
+  expect(emit('').preventDefault).not.toHaveBeenCalled();
+  expect(emit('WebFetch').preventDefault).toHaveBeenCalledTimes(1);
+  press(ENTER);
+  expect(emit('TAIL').preventDefault).not.toHaveBeenCalled();
+  press(ENTER);
+  expect(onAddRule).toHaveBeenCalledExactlyOnceWith(
+    'WebFetch',
+    'allow',
+    SettingScope.Workspace,
+  );
 });
