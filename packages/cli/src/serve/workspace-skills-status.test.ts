@@ -458,6 +458,41 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     }
   });
 
+  // The bundled `auto-memory` reference is listed only where the child session
+  // runs managed auto-memory. SkillManager asks the shim about it, so a shim
+  // without `isSkillEnabled` would fail the whole catalog.
+  it.each([
+    [{}, true],
+    [{ memory: { enableManagedAutoMemory: false } }, false],
+  ])(
+    'lists the bundled auto-memory skill only with managed auto-memory (settings %j)',
+    async (settings, listed) => {
+      const workspace = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-skills-auto-memory-'),
+      );
+      await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+      await fsp.writeFile(
+        path.join(workspace, '.qwen', 'settings.json'),
+        JSON.stringify(settings),
+      );
+      try {
+        const provider = createWorkspaceSkillsStatusProvider();
+
+        const status = await provider(workspace);
+
+        expect(status.initialized).toBe(true);
+        expect(status.skills.find((s) => s.name === 'review')).toBeDefined();
+        expect(
+          status.skills.some(
+            (s) => s.name === 'auto-memory' && s.level === 'bundled',
+          ),
+        ).toBe(listed);
+      } finally {
+        await fsp.rm(workspace, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('ignores disabledLevels in safe mode (matches CLI child session)', async () => {
     const workspace = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-skills-safe-levels-'),
