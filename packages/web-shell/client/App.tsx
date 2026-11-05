@@ -449,6 +449,7 @@ import {
 } from './hooks/useMessages';
 import { useSessionSources } from './hooks/useSessionSources';
 import { useContextCompressionReconcile } from './hooks/useContextCompressionReconcile';
+import { useSubscriptionLogout } from './hooks/useSubscriptionLogout';
 import type { SessionSource } from '@qwen-code/sdk/daemon';
 import { useSessionArtifacts } from './hooks/useSessionArtifacts';
 import { useSessionArtifactsChange } from './hooks/useSessionArtifactsChange';
@@ -1377,6 +1378,7 @@ export type SessionChangeEvent =
   | { type: 'turn_complete'; sessionId: string; error?: Error };
 
 export interface WebShellApi {
+  refreshModels: () => Promise<void>;
   /** 按持久化记录 ID 定位当前会话消息，包含尚未渲染的历史。宿主先切换会话。 */
   navigateToMessage: (
     request: WebShellMessageNavigationRequest,
@@ -1442,6 +1444,11 @@ export interface WebShellProps {
     sessionId?: string;
     sessionName?: string;
   }) => void;
+  /** Called when the active model connection changes. */
+  onModelChange?: (
+    modelId: string | undefined,
+    authType: string | undefined,
+  ) => void;
   /** Called after a new session is created. Session setup waits up to 30 seconds. */
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
   /** Explicit Managed Agent backend. Omit to keep the daemon provider unchanged. */
@@ -1871,6 +1878,7 @@ const NON_WORKSPACE_BLOCKED_COMMANDS = new Set([
   'extensions',
   'goal',
   'log',
+  'logout',
   'memory',
   'mcp',
   'prs',
@@ -3479,6 +3487,7 @@ export function App({
   askUserFreeTextLabel,
   onSessionIdChange,
   onSessionInfoChange,
+  onModelChange,
   onSessionCreated,
   managedAgentProvider,
   theme: providedTheme,
@@ -11758,6 +11767,15 @@ export function App({
       sessionName: sessionDisplayName,
     });
   }, [connection.sessionId, onSessionInfoChange, sessionDisplayName]);
+  const currentModelAuthType = connection.context?.state._meta?.['authType'];
+  useEffect(() => {
+    onModelChange?.(
+      connection.currentModel,
+      typeof currentModelAuthType === 'string'
+        ? currentModelAuthType
+        : undefined,
+    );
+  }, [connection.currentModel, currentModelAuthType, onModelChange]);
   const [currentMode, setCurrentMode] = useState('default');
   const [planExecutionMode, setPlanExecutionMode] = useState('default');
   const executionMode =
@@ -13932,6 +13950,24 @@ export function App({
   // stable — pull it out so callbacks can depend on the function alone without
   // re-creating on every render (and without an exhaustive-deps warning).
   const reloadProviders = providersState.reload;
+  const {
+    available: subscriptionAvailable,
+    handleCommand: handleSubscriptionLogout,
+  } = useSubscriptionLogout({
+    t,
+    onCommand: (text) =>
+      invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError),
+    workspaceCwd: workspaceContextActive
+      ? getComposerWorkspaceCwd()
+      : undefined,
+    isBlocked: () =>
+      streamingStateRef.current !== 'idle' ||
+      sessionHasActivePromptRef.current ||
+      isGoalGateBlocked(),
+    onBlocked: blockCommand,
+    onNotice: pushToast,
+    onError: reportError,
+  });
   const [modelActionBusy, setModelActionBusy] = useState(false);
   const modelActionTokenRef = useRef(0);
   useLayoutEffect(() => {
@@ -16838,6 +16874,8 @@ export function App({
 
   const shellApi = useMemo<WebShellApi>(
     () => ({
+      refreshModels: () =>
+        sessionActions.refreshModels(undefined, { reloadProviders: false }),
       navigateToMessage,
       openSplitView: () => {
         closeMobileDrawer();
@@ -16854,6 +16892,7 @@ export function App({
       respondToPendingPermission,
     }),
     [
+      sessionActions,
       navigateToMessage,
       closeMobileDrawer,
       createNewSession,
@@ -18358,9 +18397,9 @@ export function App({
       ) {
         return false;
       }
-      // The host's documented slash-command override runs first; only when
-      // it declines does the policy consume a model-setup command — still
-      // ahead of daemon dispatch through the hidden-command forward below.
+      // Account commands must pass login and model checks before host overrides.
+      const subscriptionHandled = handleSubscriptionLogout(text);
+      if (subscriptionHandled !== undefined) return subscriptionHandled;
       if (
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
@@ -19463,7 +19502,9 @@ export function App({
 
                 let formattedAuth = '';
                 if (authSource) {
-                  if (
+                  if (authSource === 'qwen-subscription') {
+                    formattedAuth = 'Qwen Subscription';
+                  } else if (
                     authSource.startsWith('oauth') ||
                     authSource === 'qwen-oauth'
                   ) {
@@ -19728,6 +19769,7 @@ export function App({
       sessionWorktree,
       gitHubPrsSupported,
       handleGoalSlashCommand,
+      handleSubscriptionLogout,
       handleThemeChange,
       handleSetMode,
       setComposerMode,
@@ -21181,11 +21223,20 @@ export function App({
       mergeCommands(
         retainedCommands,
         refreshedSkillCommands,
-        getLocalCommands(t, { sideTaskAvailable: sideTasksAvailable }),
+        getLocalCommands(t, {
+          sideTaskAvailable: sideTasksAvailable,
+          subscriptionAvailable,
+        }),
         [...additionalSlashCommands],
       ),
       t,
     )
+      .filter(
+        (command) =>
+          subscriptionAvailable ||
+          !['logout', 'upgrade'].includes(command.name) ||
+          Boolean(command.source && command.source !== 'builtin-command'),
+      )
       .filter(
         (command) =>
           workspaceContextActive ||
@@ -21213,6 +21264,7 @@ export function App({
       });
   }, [
     additionalSlashCommands,
+    subscriptionAvailable,
     modelManagementPolicy.allowAdd,
     connection.commands,
     connection.sessionId,
@@ -22405,23 +22457,19 @@ export function App({
             />
           )}
           {modelManagementPolicy.allowAdd && showAuthDialog && (
-            <DialogShell
-              title={t('auth.title')}
-              size="lg"
+            <AuthMessage
+              dialog
+              allowAdd={modelManagementPolicy.allowAdd}
+              onModelActivated={selectWelcomeModel}
+              onMessage={(text, type = 'status') => {
+                store.dispatch([
+                  type === 'error'
+                    ? { type: 'error', text }
+                    : { type: 'status', promptId: `local-command:${crypto.randomUUID()}`, text },
+                ]);
+              }}
               onClose={handleCloseAuthDialog}
-            >
-              <AuthMessage
-                allowAdd={modelManagementPolicy.allowAdd}
-                onMessage={(text, type = 'status') => {
-                  store.dispatch([
-                    type === 'error'
-                      ? { type: 'error', text }
-                      : { type: 'status', promptId: `local-command:${crypto.randomUUID()}`, text },
-                  ]);
-                }}
-                onClose={handleCloseAuthDialog}
-              />
-            </DialogShell>
+            />
           )}
           {projectFeaturesAvailable && showFallbacksDialog && (
             <DialogShell

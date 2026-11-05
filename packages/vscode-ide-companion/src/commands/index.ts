@@ -122,6 +122,19 @@ export function registerNewCommands(
     }),
   );
 
+  for (const action of ['logout', 'upgrade'] as const) {
+    disposables.push(
+      vscode.commands.registerCommand(`qwen-code.${action}`, async () => {
+        const providers = getWebViewProviders();
+        const provider = providers.length
+          ? providers[providers.length - 1]
+          : createWebViewProvider();
+        await provider.show();
+        await provider.startSubscriptionAction(action);
+      }),
+    );
+  }
+
   // Focus Chat: bring the Activity Bar chat view to front.
   disposables.push(
     vscode.commands.registerCommand(focusChatCommand, async () => {

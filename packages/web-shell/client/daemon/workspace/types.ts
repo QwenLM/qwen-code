@@ -12,6 +12,7 @@ import type {
   DaemonAuthProviderInstallRequest,
   DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
+  DaemonSubscriptionActivation,
   DaemonCapabilities,
   DaemonChannelEvent,
   DaemonChannelEventsQuery,
@@ -570,7 +571,19 @@ export type DaemonWorkspaceDirectoryPickerResult =
       selected: false;
     };
 
-export interface DaemonWorkspaceActions {
+export interface DaemonWorkspaceActions
+  extends Pick<
+    DaemonClient,
+    | 'getSubscriptionConfig'
+    | 'startSubscriptionLogin'
+    | 'getSubscriptionLogin'
+    | 'cancelSubscriptionLogin'
+    | 'getSubscriptionUserInfo'
+    | 'signOutSubscription'
+  > {
+  activateSubscription(options?: {
+    signal?: AbortSignal;
+  }): Promise<DaemonSubscriptionActivation>;
   setUiLanguage(
     language: string,
     scope: 'user' | 'workspace',

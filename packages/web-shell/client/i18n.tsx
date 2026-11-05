@@ -109,6 +109,94 @@ function ruPlural(
 }
 
 const EN: Messages = {
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    (v) =>
+      `You've used up your weekly credits.${v?.['reset'] ?? ''} You can wait or run /upgrade to get more credits.`,
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    (v) =>
+      `You've used up your weekly credits.${v?.['reset'] ?? ''} Please try again after the reset.`,
+  "You've used up your credits.{{reset}} Please try again after the reset.": (
+    v,
+  ) =>
+    `You've used up your credits.${v?.['reset'] ?? ''} Please try again after the reset.`,
+  ' Your credits are expected to reset in {{time}}.': (v) =>
+    ` Your credits are expected to reset in ${v?.['time'] ?? ''}.`,
+  '{{days}} and {{hours}}': (v) =>
+    `${v?.['days'] ?? ''} and ${v?.['hours'] ?? ''}`,
+  '1 day': '1 day',
+  '{{count}} days': (v) => `${v?.['count'] ?? ''} days`,
+  '1 hour': '1 hour',
+  '{{count}} hours': (v) => `${v?.['count'] ?? ''} hours`,
+  'subscription.entryTitle': 'Qwen Account with Subscription',
+  'subscription.entryDescription':
+    'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
+  'subscription.new': 'New',
+  'subscription.openPlansDescription':
+    'Opens the Qwen Code plans page in your browser',
+  'subscription.switchProviderDescription': 'Choose another model provider',
+  'subscription.upgradeDescription': 'Open Qwen subscription plans',
+  'subscription.commandUnavailable':
+    'Sign in to Qwen and select a Qwen subscription model to use this command.',
+  'subscription.upgradeFailed':
+    'Could not open Qwen subscription plans. Please try again.',
+  'subscription.signOutDescription':
+    'Disconnect this device from your Qwen account',
+  'subscription.title': 'Qwen Subscription',
+  'subscription.waiting':
+    'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.',
+  'subscription.browserFallback': "If the browser didn't open, visit:",
+  'subscription.pending': 'Waiting for sign-in…',
+  'subscription.checking': 'Checking your subscription…',
+  'subscription.waitingForPurchase':
+    'Waiting for your subscription to become active…',
+  'subscription.included': 'Qwen Code is included with Qwen Plus and Pro',
+  'subscription.openAuthorization': 'Open authorization page',
+  'subscription.openPlans': 'View Plans',
+  'subscription.checkAgain': 'Retry Connection',
+  'subscription.switchProvider': 'Switch Provider',
+  'subscription.useAnotherAccount': 'Use another account',
+  'subscription.successTitle': 'Signed in successfully',
+  'subscription.successDescription': 'You can now use Qwen Code.',
+  'subscription.accountLabel': 'Account',
+  'subscription.planLabel': 'Plan',
+  'subscription.modelLabel': 'Model',
+  'subscription.startUsing': 'Start Using',
+  'subscription.signOut': 'Sign out',
+  'subscription.signedOut': 'Signed out of Qwen. Use /auth to sign in again.',
+  'subscription.signedOutLocally':
+    'You are signed out locally, but the remote session could not be revoked.',
+  'subscription.signOutFailed': 'Could not sign out of Qwen. Please try again.',
+  'subscription.logoutNotRequired':
+    'This connection does not require /logout. Use /auth to switch model providers.',
+  'subscription.unavailable':
+    'Qwen subscription is not available in this build.',
+  'subscription.cancel': 'Cancel',
+  'subscription.connecting': 'Loading models from provider…',
+  'subscription.refreshFailed':
+    'Could not refresh your Qwen session. Please try again.',
+  'subscription.credentialsFailed':
+    'Could not read or save Qwen credentials. Check local file permissions and disk space.',
+  'subscription.rateLimited': 'Too many requests. Please try again later.',
+  'subscription.networkFailed': 'The network request failed or timed out.',
+  'subscription.modelsUnavailable':
+    'Could not load models. Your account is still signed in. Please try again.',
+  'subscription.connectFailed':
+    'Could not connect Qwen Subscription. Please try again.',
+  'subscription.connected': (v) =>
+    `✓ Signed in successfully · ${v?.email ?? ''}  \n✓ Current plan: Qwen ${v?.plan ?? ''}. Qwen Code is ready.${v?.model ? `  \nModel: ${v.model}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.` : ''}${v?.url ? `  \nIf the browser didn't open, visit:  \n${v.url}` : ''}  \nCommon commands: /usage   /upgrade   /model   /status   /logout`,
+  'subscription.signedIn': (v) => `Signed in successfully · ${v?.email ?? ''}`,
+  'subscription.modelSummary': (v) =>
+    `Model: ${v?.model ?? ''}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.`,
+  'subscription.commonCommands':
+    'Common commands: /usage   /upgrade   /model   /status   /logout',
+  'subscription.loginRequired':
+    'Your login credentials are no longer valid. Run /auth to sign in again.',
+  'subscription.signedInWithPlan': (v) =>
+    `Signed in as ${v?.email ?? ''} (Qwen ${v?.plan ?? ''})`,
+  'subscription.ready': (v) =>
+    `Current plan: Qwen ${v?.plan ?? ''}. Qwen Code is ready.`,
+  'subscription.purchase-required': (v) =>
+    `You're signed in with a ${v?.plan ?? ''} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; Qwen Code continues automatically after you subscribe.`,
   'remoteAccess.title': 'Allow remote connections',
   'remoteAccess.description':
     'Enable access to this server without restarting it. Local sessions and tasks keep running.',
@@ -2877,6 +2965,7 @@ const EN: Messages = {
   'local.auth': 'Connect an LLM provider',
   'auth.title': 'Connect a Provider',
   'auth.step.group': 'Type',
+  'auth.step.authorization': 'Authorization',
   'auth.step.provider': 'Provider',
   'auth.step.protocol': 'Protocol',
   'auth.step.api': 'API',
@@ -4984,6 +5073,91 @@ function githubBoundActionOptionDescriptionsZh(): Record<string, string> {
 
 const ZH: Messages = {
   ...EN,
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    (v) =>
+      `周额度已用完${v?.['reset'] ?? ''}。您可以等待额度恢复，或运行 /upgrade 升级套餐以获取更多额度。`,
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    (v) => `周额度已用完${v?.['reset'] ?? ''}，请在额度恢复后重试。`,
+  "You've used up your credits.{{reset}} Please try again after the reset.": (
+    v,
+  ) => `额度已用完${v?.['reset'] ?? ''}，请在额度恢复后重试。`,
+  ' Your credits are expected to reset in {{time}}.': (v) =>
+    `，预计将于${v?.['time'] ?? ''}后恢复`,
+  '{{days}} and {{hours}}': (v) => `${v?.['days'] ?? ''} ${v?.['hours'] ?? ''}`,
+  '1 day': '1天',
+  '{{count}} days': (v) => `${v?.['count'] ?? ''}天`,
+  '1 hour': '1小时',
+  '{{count}} hours': (v) => `${v?.['count'] ?? ''}小时`,
+  'Third-party Providers': '第三方供应商',
+  'Custom Provider': '自定义供应商',
+  'Official recommended setup: Token Plan or Standard API Key':
+    '官方推荐配置：Token Plan 或标准 API Key',
+  'Official recommended setup: Coding Plan, Token Plan, or Standard API Key':
+    '官方推荐配置：Coding Plan、Token Plan 或标准 API Key',
+  'Choose a built-in provider and connect with an API key':
+    '选择内置供应商并使用 API Key 连接',
+  'Manually connect a local server, proxy, or unsupported provider':
+    '手动连接本地服务、代理或其他供应商',
+  'subscription.entryTitle': 'Qwen 会员账号',
+  'subscription.entryDescription':
+    '在 chat.qwen.ai 订阅 Plus/Pro，解锁 Qwen Code 和 Agent 能力',
+  'subscription.new': '新',
+  'subscription.openPlansDescription': '在浏览器中打开 Qwen Code 套餐页',
+  'subscription.switchProviderDescription': '选择其他模型供应商',
+  'subscription.upgradeDescription': '打开 Qwen 订阅套餐页面',
+  'subscription.commandUnavailable':
+    '请先登录 Qwen 并选择 Qwen 订阅模型，再使用此命令。',
+  'subscription.upgradeFailed': '无法打开 Qwen 订阅套餐页面，请重试。',
+  'subscription.signOutDescription': '断开此设备与你的 Qwen 账号的连接',
+  'subscription.title': 'Qwen 订阅',
+  'subscription.waiting':
+    '正在浏览器中打开 chat.qwen.ai… 请在那里登录以连接 Qwen Code。',
+  'subscription.browserFallback': '如果浏览器未打开，请访问：',
+  'subscription.pending': '正在等待登录…',
+  'subscription.checking': '正在检查你的订阅…',
+  'subscription.waitingForPurchase': '正在等待你的订阅生效…',
+  'subscription.included': 'Qwen Plus 和 Pro 包含 Qwen Code',
+  'subscription.openAuthorization': '打开授权页',
+  'subscription.openPlans': '查看套餐',
+  'subscription.checkAgain': '重试',
+  'subscription.switchProvider': '切换供应商',
+  'subscription.useAnotherAccount': '使用其他账号',
+  'subscription.successTitle': '登录成功',
+  'subscription.successDescription': '已成功登录，现在可以使用 Qwen Code。',
+  'subscription.accountLabel': '账号',
+  'subscription.planLabel': '套餐',
+  'subscription.modelLabel': '模型',
+  'subscription.startUsing': '开始使用',
+  'subscription.signOut': '退出登录',
+  'subscription.signedOut': '已退出 Qwen 登录。使用 /auth 重新登录。',
+  'subscription.signedOutLocally': '已在本地退出登录，但未能撤销远端会话。',
+  'subscription.signOutFailed': '无法退出 Qwen 登录，请重试。',
+  'subscription.logoutNotRequired':
+    '当前连接无需通过 /logout 退出。如需切换模型服务，请使用 /auth。',
+  'subscription.unavailable': '当前版本暂不支持 Qwen 订阅。',
+  'subscription.cancel': '取消',
+  'subscription.connecting': '正在加载模型…',
+  'subscription.refreshFailed': '无法刷新 Qwen 登录凭证，请重试。',
+  'subscription.credentialsFailed':
+    '无法读取或保存 Qwen 凭证，请检查本地文件权限和磁盘空间。',
+  'subscription.rateLimited': '请求过多，请稍后重试。',
+  'subscription.networkFailed': '网络请求失败或超时。',
+  'subscription.modelsUnavailable': '无法加载模型。已保留登录态，请重试。',
+  'subscription.connectFailed': '无法连接 Qwen 订阅，请重试。',
+  'subscription.connected': (v) =>
+    `✓ 登录成功 · ${v?.email ?? ''}  \n✓ 当前套餐：Qwen ${v?.plan ?? ''}，已可使用 Qwen Code${v?.model ? `  \n模型：${v.model}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。` : ''}${v?.url ? `  \n如果浏览器未打开，请访问：  \n${v.url}` : ''}  \n常用命令：/usage   /upgrade   /model   /status   /logout`,
+  'subscription.signedIn': (v) => `登录成功 · ${v?.email ?? ''}`,
+  'subscription.modelSummary': (v) =>
+    `模型：${v?.model ?? ''}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。`,
+  'subscription.commonCommands':
+    '常用命令：/usage   /upgrade   /model   /status   /logout',
+  'subscription.loginRequired': '登录凭证已失效，请运行 /auth 重新登录。',
+  'subscription.signedInWithPlan': (v) =>
+    `已登录为 ${v?.email ?? ''}（Qwen ${v?.plan ?? ''}）`,
+  'subscription.ready': (v) =>
+    `当前套餐：Qwen ${v?.plan ?? ''}，已可使用 Qwen Code`,
+  'subscription.purchase-required': (v) =>
+    `你已使用 ${v?.plan ?? ''} 账号登录，该账号不包含 Qwen Code。请在浏览器中选择 Plus 或 Pro；订阅后 Qwen Code 将自动继续。`,
   'remoteAccess.title': '允许远程连接',
   'remoteAccess.description':
     '无需重启即可开放当前服务器，本地会话和任务继续运行。',
@@ -7608,9 +7782,10 @@ const ZH: Messages = {
   'skilldesc.tmuxRealUserTesting': '用 tmux 做真实用户测试并保存日志',
   'skilldesc.triage': '把关和审查 Qwen Code 的 issue 与 PR',
   'local.approvalMode': '切换审批模式',
-  'local.auth': '连接 LLM provider',
-  'auth.title': '连接 Provider',
+  'local.auth': '连接模型供应商',
+  'auth.title': '连接供应商',
   'auth.step.group': '类型',
+  'auth.step.authorization': '授权',
   'auth.step.provider': '供应商',
   'auth.step.protocol': '协议',
   'auth.step.api': 'API',

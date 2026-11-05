@@ -19135,8 +19135,9 @@ describe('useLlmStream', () => {
       // 3. Assertion
       await waitFor(() => {
         expect(mockParseAndFormatApiError).toHaveBeenCalledWith(
-          'Rate limit exceeded',
+          mockError,
           mockAuthType,
+          expect.any(Function),
         );
       });
     });
@@ -22561,6 +22562,7 @@ describe('useLlmStream', () => {
       expect(mockParseAndFormatApiError).toHaveBeenCalledWith(
         { message: 'Test error' },
         expect.any(String),
+        expect.any(Function),
       );
     });
 

@@ -504,6 +504,7 @@ describe('AppContainer State Management', () => {
       authError: null,
       onAuthError: vi.fn(),
       isAuthDialogOpen: false,
+      isAuthDialogDismissible: false,
       isAuthenticating: false,
       pendingAuthType: undefined,
       externalAuthState: null,
@@ -515,6 +516,7 @@ describe('AppContainer State Management', () => {
       state: {
         authError: null,
         isAuthDialogOpen: false,
+        isAuthDialogDismissible: false,
         isAuthenticating: false,
         pendingAuthType: undefined,
         externalAuthState: null,
@@ -8313,6 +8315,7 @@ describe('AppContainer State Management', () => {
         authError: null,
         onAuthError: vi.fn(),
         isAuthDialogOpen: false,
+        isAuthDialogDismissible: false,
         isAuthenticating: true,
         pendingAuthType: undefined,
         externalAuthState: null,
@@ -8324,6 +8327,7 @@ describe('AppContainer State Management', () => {
         state: {
           authError: null,
           isAuthDialogOpen: false,
+          isAuthDialogDismissible: false,
           isAuthenticating: true,
           pendingAuthType: undefined,
           externalAuthState: null,
@@ -8943,6 +8947,51 @@ describe('AppContainer State Management', () => {
 
       expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
     });
+
+    it.each(['qwen3.8-max', 'another-provider-model'])(
+      'updates the displayed model on auth completion without a model notification (%s)',
+      async (model) => {
+        const getModel = vi
+          .spyOn(mockConfig, 'getModel')
+          .mockReturnValue('coder-model');
+        const trigger = captureModelChangeListener(mockConfig);
+        const view = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        await act(async () => {
+          await flushEffects();
+        });
+        const baselineRemountKey = capturedUIState.historyRemountKey;
+        expect(capturedUIState.currentModel).toBe('coder-model');
+        const onAuthChange = mockedUseAuthCommand.mock.lastCall?.[3] as
+          | (() => void)
+          | undefined;
+        expect(onAuthChange).toBeTypeOf('function');
+        getModel.mockReturnValue(model);
+        mockStdout.write.mockClear();
+        await act(async () => {
+          onAuthChange!();
+        });
+        expect(capturedUIState.currentModel).toBe(model);
+        expect(capturedUIState.historyRemountKey).toBeGreaterThan(
+          baselineRemountKey,
+        );
+        expect(mockStdout.write).toHaveBeenCalledWith(
+          ansiEscapes.clearTerminal,
+        );
+        mockStdout.write.mockClear();
+        trigger.notify(model);
+        expect(mockStdout.write).not.toHaveBeenCalledWith(
+          ansiEscapes.clearTerminal,
+        );
+        view.unmount();
+      },
+    );
 
     it('skips refreshStatic when the notified model matches the current one', async () => {
       vi.spyOn(mockConfig, 'getModel').mockReturnValue('model-a');
