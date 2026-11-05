@@ -637,7 +637,6 @@ describe('workspace-qualified core REST', () => {
         'providers',
         'env',
         'preflight',
-        'hooks',
         'tools',
         'settings',
         'permissions',
@@ -653,6 +652,19 @@ describe('workspace-qualified core REST', () => {
         expect(res.body).not.toHaveProperty('workspaceCwd');
         expect(res.body).not.toHaveProperty('workspaceId');
       }
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('serves the hooks trust decision on an untrusted workspace (#16387)', async () => {
+    const h = await makeHarness({ secondaryTrusted: false });
+    try {
+      const res = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/hooks`)
+        .set('Host', host());
+      expect(res.status).toBe(200);
+      expect(res.body.workspaceCwd).toBe(h.secondaryCwd);
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
