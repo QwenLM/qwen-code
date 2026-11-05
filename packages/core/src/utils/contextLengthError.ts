@@ -28,8 +28,9 @@ export interface ContextLengthExceededInfo {
   promptTokens?: number;
   /**
    * A "you requested N tokens" total with no breakdown: the prompt plus the
-   * output budget the request asked for. A caller that knows that budget can
-   * subtract it.
+   * output budget the request asked for, which can be more than the
+   * transport sent. Read it as an upper bound on the prompt; subtracting the
+   * requested budget can undercount the prompt.
    */
   requestedTokens?: number;
 }
@@ -50,8 +51,9 @@ const PROMPT_TOKEN_PATTERNS = [
   /\bprompt contains\s+(\d[\d,]*)\s+(?:input\s+)?tokens?\b/i,
   // vLLM: "your request has 10000 input tokens"
   /\brequest has\s+(\d[\d,]*)\s+input tokens?\b/i,
-  // Gemini: "The input token count (1196265) exceeds ..."
-  /\binput token count\s*\(\s*(\d[\d,]*)\s*\)/i,
+  // Gemini: "The input token count (1196265) exceeds ...", also seen with
+  // "length", which the limit parse below reads too
+  /\binput token (?:count|length)\s*\(\s*(\d[\d,]*)\s*\)/i,
   // llama.cpp: "request (279935 tokens) exceeds the available context size"
   /\brequest\s*\(\s*(\d[\d,]*)\s*tokens?\s*\)\s*exceeds\b/i,
   // SGLang: "36000 tokens from the input messages"

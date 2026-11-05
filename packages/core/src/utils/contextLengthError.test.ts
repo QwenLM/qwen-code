@@ -430,6 +430,11 @@ describe('contextLengthError', () => {
         1_196_265,
       ],
       [
+        'the same wording with "length"',
+        'The input token length (127234) exceeds the maximum number of tokens allowed (100000).',
+        127_234,
+      ],
+      [
         'llama.cpp',
         'request (279935 tokens) exceeds the available context size (262144 tokens), try increasing it',
         279_935,
