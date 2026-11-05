@@ -51,15 +51,26 @@ describe('managed host build lane', () => {
   it('triggers on the entry, its build wiring and itself', () => {
     // A path filter that misses the config or the entry would report "skipped"
     // on the very changes that can break the mode — agreement without a run.
+    // The set is exact rather than `arrayContaining`: this lane builds core,
+    // acp-bridge and the SDK from source and reads `WEB_SHELL_BUILD_TARGET`
+    // from `vite.config.ts`, so a filter that omits any of them reports
+    // "skipped" on the change that breaks it. An exact set also means an entry
+    // cannot be dropped from the workflow with this suite still green.
+    const expectedPaths = [
+      '.github/workflows/web-shell-managed-host.yml',
+      'packages/acp-bridge/src/**',
+      'packages/core/src/**',
+      'packages/sdk-typescript/src/**',
+      'packages/web-shell/client/**',
+      'packages/web-shell/package.json',
+      'packages/web-shell/pierre-build.ts',
+      'packages/web-shell/vite.config.ts',
+      'packages/web-shell/vite.lib.config.ts',
+      'pnpm-lock.yaml',
+    ];
     for (const trigger of [triggers.pull_request, triggers.push]) {
-      expect(trigger.paths).toEqual(
-        expect.arrayContaining([
-          'packages/web-shell/client/**',
-          'packages/web-shell/package.json',
-          'packages/web-shell/vite.lib.config.ts',
-          '.github/workflows/web-shell-managed-host.yml',
-        ]),
-      );
+      expect(trigger.paths).toHaveLength(expectedPaths.length);
+      expect([...trigger.paths].sort()).toEqual(expectedPaths);
     }
   });
 

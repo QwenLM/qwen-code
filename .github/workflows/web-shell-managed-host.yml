@@ -17,8 +17,12 @@ on:
     paths:
       - 'packages/web-shell/client/**'
       - 'packages/web-shell/package.json'
+      - 'packages/web-shell/vite.config.ts'
       - 'packages/web-shell/vite.lib.config.ts'
       - 'packages/web-shell/pierre-build.ts'
+      - 'packages/core/src/**'
+      - 'packages/acp-bridge/src/**'
+      - 'packages/sdk-typescript/src/**'
       - 'pnpm-lock.yaml'
       - '.github/workflows/web-shell-managed-host.yml'
   push:
@@ -27,8 +31,12 @@ on:
     paths:
       - 'packages/web-shell/client/**'
       - 'packages/web-shell/package.json'
+      - 'packages/web-shell/vite.config.ts'
       - 'packages/web-shell/vite.lib.config.ts'
       - 'packages/web-shell/pierre-build.ts'
+      - 'packages/core/src/**'
+      - 'packages/acp-bridge/src/**'
+      - 'packages/sdk-typescript/src/**'
       - 'pnpm-lock.yaml'
       - '.github/workflows/web-shell-managed-host.yml'
   workflow_dispatch:
