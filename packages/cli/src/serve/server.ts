@@ -2939,6 +2939,7 @@ export function createServeApp(
   });
   registerWorkspaceQualifiedStatusRoutes(app, {
     workspaceRegistry,
+    mutate,
     sendBridgeError,
   });
   registerWorkspaceRuntimeStopRoutes(app, {

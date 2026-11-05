@@ -166,6 +166,22 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
   ): Promise<ServeWorkspaceHooksStatus>;
 
+  /**
+   * Record the user's decision on the workspace's pending project hooks.
+   * Daemon-local: works without a live ACP child (the decision is needed on
+   * a cold, possibly untrusted workspace), writes the same hash-bound
+   * record the TUI dialog writes, and never grants folder trust.
+   *
+   * `expectedHash` is the hash the approving client rendered; when present
+   * the decision binds to that exact block and a block that changed since
+   * the render stays pending instead of being persisted unseen.
+   */
+  approveProjectHooks(
+    ctx: WorkspaceRequestContext,
+    decision: 'approve' | 'reject',
+    expectedHash?: string,
+  ): Promise<{ decision: 'approve' | 'reject'; reloaded: boolean }>;
+
   /** Installed extension status for the bound workspace. */
   getWorkspaceExtensionsStatus(
     ctx: WorkspaceRequestContext,
@@ -393,6 +409,29 @@ export class WorkspaceTrustGrantIneffectiveError extends Error {
         'Check the workspace trust status and trust policy before retrying.',
     );
     this.name = 'WorkspaceTrustGrantIneffectiveError';
+  }
+}
+
+export class WorkspaceProjectHooksNotPendingError extends Error {
+  constructor() {
+    super('No project hooks await approval in this workspace.');
+    this.name = 'WorkspaceProjectHooksNotPendingError';
+  }
+}
+
+/**
+ * The decision named the hash of a block that no longer matches the
+ * workspace file: the hooks changed since the client rendered them, so the
+ * decision must not be persisted against a block the user never saw. The
+ * client re-renders and asks again.
+ */
+export class WorkspaceProjectHooksChangedError extends Error {
+  constructor() {
+    super(
+      'The project hooks changed since they were shown for review; ' +
+        'review the current block and decide again.',
+    );
+    this.name = 'WorkspaceProjectHooksChangedError';
   }
 }
 

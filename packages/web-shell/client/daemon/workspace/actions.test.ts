@@ -120,6 +120,40 @@ describe('workspace actions', () => {
     ).toBe('Bearer token-a');
     replacement.dispose();
   });
+
+  it('changes UI language without a session and targets the requested workspace', async () => {
+    const result = {
+      language: 'en',
+      outputLanguage: null,
+      refresh: { runtimes: 1, sessions: 1, failed: 1 },
+    };
+    const setUserLanguage = vi.fn().mockResolvedValue(result);
+    const setUiLanguage = vi.fn().mockResolvedValue(result);
+    const workspaceByCwd = vi.fn(() => ({ setUiLanguage }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ setUserLanguage, workspaceByCwd }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/primary',
+      baseUrl: '',
+    });
+    await expect(actions.setUiLanguage('ru', 'user')).resolves.toEqual(result);
+    expect(setUserLanguage).toHaveBeenCalledWith('ru');
+    await expect(
+      actions.setUiLanguage('ru', 'user', '/secondary'),
+    ).resolves.toEqual(result);
+    expect(setUserLanguage).toHaveBeenCalledTimes(2);
+    expect(workspaceByCwd).not.toHaveBeenCalled();
+    await expect(
+      actions.setUiLanguage('ru', 'workspace', '/secondary'),
+    ).resolves.toEqual(result);
+    expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
+    expect(setUiLanguage).toHaveBeenCalledWith('ru');
+    await expect(actions.setUiLanguage('ru', 'workspace')).rejects.toThrow(
+      'unavailable',
+    );
+    expect(setUserLanguage).toHaveBeenCalledTimes(2);
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.useRealTimers();

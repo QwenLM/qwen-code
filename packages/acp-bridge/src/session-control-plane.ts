@@ -6951,17 +6951,22 @@ export function createSessionControlPlane(
   // re-reads the persisted settings when it starts; a Managed channel that
   // starts later is sent this before its first session request instead.
   let rememberedUserLanguage:
-    | { language: string; syncOutputLanguage: boolean }
+    | { language: string; syncOutputLanguage: boolean; scope?: 'workspace' }
     | undefined;
   const sendUserLanguage = (
     info: ChannelInfo,
-    params: { language: string; syncOutputLanguage: boolean },
+    params: {
+      language: string;
+      syncOutputLanguage: boolean;
+      scope?: 'workspace';
+    },
   ): Promise<{ language: string; sessions: number; failed: number }> => {
     const response = withTimeout(
       raceLongLived(
         info.connection.extMethod(SERVE_CONTROL_EXT_METHODS.userLanguage, {
           language: params.language,
           syncOutputLanguage: params.syncOutputLanguage,
+          ...(params.scope ? { scope: params.scope } : {}),
         }),
         getChannelClosedReject(info),
       ),
@@ -14887,9 +14892,16 @@ export function createSessionControlPlane(
 
     async setUserLanguage(params) {
       if (executionEngines) {
+        // A user write cannot clear a persisted workspace language override.
+        const workspaceOverride =
+          params.scope !== 'workspace' &&
+          rememberedUserLanguage?.scope === 'workspace'
+            ? rememberedUserLanguage
+            : undefined;
         rememberedUserLanguage = {
-          language: params.language,
+          language: workspaceOverride?.language ?? params.language,
           syncOutputLanguage: params.syncOutputLanguage,
+          ...(params.scope || workspaceOverride ? { scope: 'workspace' } : {}),
         };
       }
       // Sessionless: runs on every channel that is already live — one per
