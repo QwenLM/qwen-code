@@ -569,6 +569,20 @@ function trimBashEdgeSeparators(command: string): string {
   return command.slice(start, end);
 }
 
+/**
+ * The word a token denotes once the shell removes its quoting, so an option
+ * terminator written `'--'`, `"--"`, `\--` or `$'--'` is the same word as `--`
+ * (#16075 review, R6-1).
+ */
+function shellWordAfterQuoteRemoval(token: string): string {
+  const { value, quote } = stripSymmetricQuotes(token);
+  if (quote !== '') return value;
+  if (value.startsWith("$'") && value.endsWith("'")) {
+    return value.slice(2, -1);
+  }
+  return value.replace(/\\(.)/g, '$1');
+}
+
 export function stripShellWrapper(command: string): string {
   const trimmed = trimBashEdgeSeparators(command);
   let rest = trimmed;
@@ -596,10 +610,12 @@ export function stripShellWrapper(command: string): string {
 
     if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
       // `sh -c -- '…'` puts an option terminator before the command string;
-      // reading it as the program handed the guard a lone `--`.
+      // reading it as the program handed the guard a lone `--`. Every quoting
+      // of the same word (`'--'`, `"--"`, `\--`, `$'--'`) is still the
+      // terminator to the shell (#16075 review, R6-1).
       let markerRest = token.rest;
       const terminator = takeLeadingToken(markerRest);
-      if (terminator && terminator.token === '--') {
+      if (terminator && shellWordAfterQuoteRemoval(terminator.token) === '--') {
         markerRest = terminator.rest;
       }
       const commandToken = takeLeadingToken(markerRest);
