@@ -369,10 +369,19 @@ public final class ToolPublicationAdmissionStore {
         return transactions.execute(status -> {
             data.lockPublicationPlacement(key, publicationId);
             sessions.lockCsiOriginal(text(key, "tenantId"), text(key, "sessionId"));
-            data.lockOriginalSettledResult(key, publicationId, finished);
-            lockTenant(key);
+            boolean csi = data.lockOriginalSettledResult(key, publicationId, finished);
+            // An ordinary receipt without lifecycle authority skips the tenant
+            // publication guard: the journal commit below takes none, and the
+            // lane locks root, head, publication row, as collection does. A CSI
+            // original or a lifecycle-authority commit (which takes the guard
+            // in checkLifecycleWriter) keeps it where it was (design
+            // 2026-11-04-managed-publication-tenant-guards, C2).
+            boolean guard = csi || authority != null;
+            if (guard) {
+                lockTenant(key);
+            }
             sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
-                    text(key, "sessionId"), request.writerId(), request.writerGeneration(), writerToken);
+                    text(key, "sessionId"), request.writerId(), request.writerGeneration(), writerToken, guard);
             Map<String, Object> publication = jdbc.query("SELECT producer_phase, binding_json, binding_digest,"
                     + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined, admission_resource_id,"
                     + " receipt_sequence, receipt_revision, finish_digest, terminal_resource_id"
