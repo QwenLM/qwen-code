@@ -332,7 +332,9 @@ describe('session history projection', () => {
 
   it('returns a valid first page before a later oversized record', async () => {
     const first = await append('user', [{ text: 'small record' }]);
-    await append('tool_result', [{ text: 'x'.repeat(16 * 1024 * 1024) }]);
+    const oversized = await append('tool_result', [
+      { text: 'x'.repeat(16 * 1024 * 1024) },
+    ]);
     const page = await reader.readContextHistory(sessionId, { limit: 2 });
     expect(page.records.map((record) => record.uuid)).toEqual([first]);
     expect(page.nextOffset).toBe(1);
@@ -341,6 +343,13 @@ describe('session history projection', () => {
         snapshot: page.snapshot,
         offset: 1,
       }),
+    ).resolves.toMatchObject({
+      records: [],
+      omittedOversizedRecords: 1,
+      startOffset: 2,
+    });
+    await expect(
+      reader.readContextHistory(sessionId, { recordId: oversized }),
     ).rejects.toThrow('exceeds');
   });
 

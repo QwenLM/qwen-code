@@ -63,6 +63,15 @@ describe('local session notes', () => {
       getResumedSessionData: () => undefined,
       getSessionService: () => sessions,
       getChatCompression: () => ({ strategy: 'notes' }),
+      getToolRegistry: () => ({
+        getFunctionDeclarations: () =>
+          [
+            'session_notes',
+            'session_history',
+            'get_context_remaining',
+            'new_context',
+          ].map((name) => ({ name })),
+      }),
       getContentGeneratorConfig: () => ({ contextWindowSize: 128000 }),
     } as unknown as Config;
     recorder = new ChatRecordingService(config, undefined, false);
@@ -342,7 +351,7 @@ describe('local session notes', () => {
       respond(ToolNames.NEW_CONTEXT, ''),
       signal,
     );
-    expect(notes.takePendingReset()).toBe(revision.revision);
+    expect(notes.peekPendingReset()).toBe(revision.revision);
   });
 
   it('reuses saved notes after ordinary assistant progress without changing their coverage', async () => {
@@ -361,7 +370,7 @@ describe('local session notes', () => {
       respond(ToolNames.NEW_CONTEXT, ''),
       signal,
     );
-    expect(notes.takePendingReset()).toBe(revision.revision);
+    expect(notes.peekPendingReset()).toBe(revision.revision);
   });
 
   it('requires all pending input in the actual checkpoint without consuming it or duplicating the latest user', async () => {
@@ -456,6 +465,22 @@ describe('local session notes', () => {
     ).rejects.toThrow('missing or changed');
   });
 
+  it('retains a pending reset until its matching revision is completed', async () => {
+    recorder.recordUserMessage('keep the constraint');
+    const revision = await write();
+    await notes.requestReset(
+      revision.revision,
+      respond(ToolNames.NEW_CONTEXT, ''),
+      signal,
+    );
+    expect(notes.peekPendingReset()).toBe(revision.revision);
+    expect(notes.peekPendingReset()).toBe(revision.revision);
+    notes.completePendingReset('a different revision');
+    expect(notes.peekPendingReset()).toBe(revision.revision);
+    notes.completePendingReset(revision.revision);
+    expect(notes.peekPendingReset()).toBeUndefined();
+  });
+
   it('rechecks the reset observation after reading notes', async () => {
     recorder.recordUserMessage('keep the constraint');
     const revision = await write();
@@ -470,7 +495,7 @@ describe('local session notes', () => {
     await expect(
       notes.requestReset(revision.revision, response, signal),
     ).rejects.toThrow('observation is stale');
-    expect(notes.takePendingReset()).toBeUndefined();
+    expect(notes.peekPendingReset()).toBeUndefined();
   });
 
   it('rejects oversized ASCII and CJK notes, and cancels a pending reset on new input or abort', async () => {
@@ -488,7 +513,7 @@ describe('local session notes', () => {
       signal,
     );
     recorder.recordUserMessage('steering');
-    expect(notes.takePendingReset()).toBeUndefined();
+    expect(notes.peekPendingReset()).toBeUndefined();
     await notes.write(
       'new task',
       respond(ToolNames.SESSION_NOTES, 'steering'),
@@ -502,7 +527,7 @@ describe('local session notes', () => {
       controller.signal,
     );
     controller.abort();
-    expect(notes.takePendingReset()).toBeUndefined();
+    expect(notes.peekPendingReset()).toBeUndefined();
   });
 
   it('keeps notes readable after switching to a smaller model but requires shortening before reset', async () => {
@@ -525,7 +550,7 @@ describe('local session notes', () => {
         signal,
       ),
     ).rejects.toThrow('819 estimated tokens');
-    expect(notes.takePendingReset()).toBeUndefined();
+    expect(notes.peekPendingReset()).toBeUndefined();
 
     const shortened = await write(
       'Keep the constraint. Next: inspect evidence.',
@@ -536,7 +561,7 @@ describe('local session notes', () => {
       respond(ToolNames.NEW_CONTEXT, ''),
       signal,
     );
-    expect(notes.takePendingReset()).toBe(shortened.revision);
+    expect(notes.peekPendingReset()).toBe(shortened.revision);
   });
 
   it('does not authorize a failed canonical write and repairs a failed Markdown projection', async () => {
@@ -547,7 +572,7 @@ describe('local session notes', () => {
     await fs.mkdir(projection);
     await expect(
       notes.write('durable note', response, signal),
-    ).rejects.toThrow();
+    ).resolves.toMatchObject({ text: 'durable note' });
     await fs.rm(projection, { recursive: true });
     const recovered = await notes.read();
     expect(recovered?.text).toBe('durable note');
@@ -682,7 +707,7 @@ describe('local session notes', () => {
       respond(ToolNames.NEW_CONTEXT, ''),
       signal,
     );
-    expect(notes.takePendingReset()).toBe(revision.revision);
+    expect(notes.peekPendingReset()).toBe(revision.revision);
     const payload = makeCheckpoint([createUserContent('checkpoint')]);
     const next = await recorder.recordChatCompressionStrict(
       payload,
@@ -691,14 +716,8 @@ describe('local session notes', () => {
       recorder.getSessionNotesState(),
     );
     const records = await jsonl.read<ChatRecord>(transcriptPath);
-    expect(records.at(-1)?.systemPayload).toMatchObject({
-      notes: {
-        revision: revision.revision,
-        sourceLeafUuid: revision.sourceLeafUuid,
-        previousWindowId: window,
-        windowId: next,
-      },
-    });
+    expect(records.at(-1)?.uuid).toBe(next);
+    expect(recorder.getSessionNotesState().windowId).toBe(next);
     expect((await notes.getNotesForHandoff())?.notes).toEqual(revision);
   });
 

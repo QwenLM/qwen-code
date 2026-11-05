@@ -177,8 +177,8 @@ ACP 的内置 `/compress` 使用现有 slash-command 元信息记录，不作为
 笔记原始 window 和 covered leaf 保持不变；它们描述覆盖位置，不作为失效条件。
 
 先通过 recorder 的严格方法写入权威记录，再用同目录临时文件和 rename
-原子生成 Markdown sidecar。两步都成功后工具才返回成功。
-物化失败时可以留下可恢复的 canonical revision，但它不能授权换窗口。
+原子生成 Markdown sidecar。Canonical revision 持久化成功后工具返回成功。
+物化失败会记录日志并在后续读取时重试，不影响有效 canonical notes 的使用。
 Resume 从当前有效链重新生成 sidecar。直接编辑这个生成文件不会自动导入；
 未来可以增加显式 import，以免形成两份权威状态。
 
@@ -272,9 +272,9 @@ Cursor 绑定冻结的源快照和有效分支；rewind 或 transcript 替换使
 3. 构建候选历史，确认其比原历史小、低于 automatic 目标且有可用输出空间，
    并符合 provider 消息顺序。所有可能拒绝候选的大小/协议检查都在写 checkpoint 前完成。
 4. 严格追加一条 `system/chat_compression`，保存完整 `compressedHistory`、
-   既有 completion metadata，以及新增 notes metadata：`strategy: notes`、
-   新/旧窗口 ID、notes revision 和已覆盖 leaf。
-   旧窗口指本次实际替换的窗口；covered leaf 仍为笔记原始覆盖位置。
+   既有 completion metadata 和 `info.strategy: notes`。
+   Checkpoint UUID 标识新窗口；canonical notes record 保留 revision、
+   原始写入窗口和已覆盖 leaf。
    再次检查本次尝试的边界和有效分支上的最新 revision，确认所有未观察输入
    都包含在候选末尾实际追加的 pending message 中。预检查不将输入标记为已消费。
    必须确认本次具体 append；`recordChatCompression(); await flush()` 不足以证明成功，
@@ -342,17 +342,18 @@ Notes 和 summary 候选都必须包含该 pending 内容一次，为待发送�
 
 ### 4.6 失败、恢复、fork 和清理
 
-| 条件                                                   | 必须得到的结果                                                                                                                                         |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Notes 缺失、被替代、属于废弃分支、超限，或物化修复失败 | 显式 reset 失败且不改变历史；recorder 健康时，自动/手动压缩走 summary。                                                                                |
-| Session 启动时关闭了 recording                         | 使用现有 summary，不绕过用户设置创建 notes/history 存储。                                                                                              |
-| Notes 模式启动后 writer 丢失、inactive 或失败          | 保留当前历史，沿既有 session 写入失败语义停止切换；不能用 summary reset 绕过坏掉的 writer。                                                            |
-| Notes 和 summary 都无法构造可发送的请求                | 报告既有可恢复 compression failure，保留历史和 notes；不回退到空窗口，也不无限重试。                                                                   |
-| Commit 或 Markdown rename 期间进程退出                 | 回放最后完整有效的 canonical record，修复物化文件，并沿用既有 partial-tail/integrity 处理；不能优先采用更新的孤立 sidecar。                            |
-| Resume                                                 | 恢复压缩历史、窗口 metadata，以及有效分支上最新的有效 notes。ACP/daemon 的选择性冷恢复也必须读取 notes，不能只改全文件 loader。                        |
-| Fork                                                   | 沿既有规则复制 canonical records，保留稳定引用，在目标 session 物化独立 sidecar；写入不能影响父会话。                                                  |
-| Rewind                                                 | 使用现有支持的 target，清空 pending reset，使 cursor 失效，并从结果分支重新生成 notes；不能复活 target 之后的笔记，也不放宽现有 compressed-turn 限制。 |
-| Archive/delete/retention                               | 通过既有 session maintenance 所有权，与 transcript 一起移动或删除 Markdown sidecar，清理内存 cursor/cache；可重建文件不另设一套 retention 系统。       |
+| 条件                                          | 必须得到的结果                                                                                                                                         |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Notes 缺失、被替代、属于废弃分支或超限        | 显式 reset 失败且不改变历史；recorder 健康时，自动/手动压缩走 summary。                                                                                |
+| Markdown 物化修复失败                         | 保持有效 canonical notes 可用，记录修复失败，并在后续读取时重试物化。                                                                                  |
+| Session 启动时关闭了 recording                | 使用现有 summary，不绕过用户设置创建 notes/history 存储。                                                                                              |
+| Notes 模式启动后 writer 丢失、inactive 或失败 | 保留当前历史，沿既有 session 写入失败语义停止切换；不能用 summary reset 绕过坏掉的 writer。                                                            |
+| Notes 和 summary 都无法构造可发送的请求       | 报告既有可恢复 compression failure，保留历史和 notes；不回退到空窗口，也不无限重试。                                                                   |
+| Commit 或 Markdown rename 期间进程退出        | 回放最后完整有效的 canonical record，修复物化文件，并沿用既有 partial-tail/integrity 处理；不能优先采用更新的孤立 sidecar。                            |
+| Resume                                        | 恢复压缩历史、窗口 metadata，以及有效分支上最新的有效 notes。ACP/daemon 的选择性冷恢复也必须读取 notes，不能只改全文件 loader。                        |
+| Fork                                          | 沿既有规则复制 canonical records，保留稳定引用，在目标 session 物化独立 sidecar；写入不能影响父会话。                                                  |
+| Rewind                                        | 使用现有支持的 target，清空 pending reset，使 cursor 失效，并从结果分支重新生成 notes；不能复活 target 之后的笔记，也不放宽现有 compressed-turn 限制。 |
+| Archive/delete/retention                      | 通过既有 session maintenance 所有权，与 transcript 一起移动或删除 Markdown sidecar，清理内存 cursor/cache；可重建文件不另设一套 retention 系统。       |
 
 旧 transcript 不含 notes metadata，继续按现有方式回放。
 新增 checkpoint 仍包含普通 `Content[]`，较旧 reader 即使不提供 notes 工具，
@@ -414,11 +415,12 @@ Strategy 字段缺失时沿用已有 summary/fast marker 行为，
 
 ## 8. 验证与验收标准
 
-E2E 计划和结果位于 `.qwen/e2e-tests/local-notes-compaction.md`，
-notes 复用回归计划见 `.qwen/e2e-tests/notes-reuse-after-progress.md`；
-确定性的本地模型测试脚本位于 `.qwen/scripts/local-notes-compaction-e2e.mjs`。
-实现前已验证全局 CLI 基线；实现后使用本地构建、定向 package 测试、
-build 和 typecheck 验证协议与持久化。这些检查不代表模型质量或总成本有改善。
+实现前已验证全局 CLI 基线。可重跑的本地测试与实现一起纳入版本控制：
+在 `packages/core` 运行
+`npx vitest run src/services/session-notes-service.test.ts src/services/session-history-service.test.ts src/core/llm-chat-notes.test.ts src/tools/session-context.test.ts`；
+在 `packages/cli` 运行 `npx vitest run src/acp-integration/session/Session.test.ts`。
+先在仓库根目录运行 `npm run build && npm run typecheck`。
+这些检查验证协议与持久化行为；下述模型质量和成本比较仍是独立的验收项。
 
 本地检查覆盖连续多次不调用 summarizer 的 notes 换窗口、历史回查、
 重启与物化修复、无效 revision 和混合工具响应、设置切换、分支生命周期、

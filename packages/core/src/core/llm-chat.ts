@@ -3276,6 +3276,7 @@ export class LlmChat {
           info.newTokenCount >= auto ||
           info.newTokenCount >= originalTokenCount
         ) {
+          if (!force) this.consecutiveFailures++;
           return {
             ...info,
             compressionStatus:
@@ -3309,6 +3310,8 @@ export class LlmChat {
         });
       }
       this.setHistory(newHistory, this.completedToolCallIds);
+      if (options?.notesRevision)
+        notesService?.completePendingReset(options.notesRevision);
       if (info.strategy === 'notes') {
         this.config
           .getMemoryManager?.()
@@ -3655,6 +3658,7 @@ export class LlmChat {
     let requestContents: Content[];
     let userContentAdded = false;
     let manualPlanExitNoticeVersion: number | undefined;
+    const previousNotesWarningWindow = this.notesWarningWindow;
     let manualPlanExitNoticeText: string | undefined;
 
     // Determine the ceiling for this turn's output request. The clamp below
@@ -3728,7 +3732,7 @@ export class LlmChat {
         // see only the stale prior-turn count (0).
         let userContent = createUserContent(params.message);
         const notesService = this.getSessionNotesService();
-        const pendingNotesRevision = notesService?.takePendingReset();
+        const pendingNotesRevision = notesService?.peekPendingReset();
         // Restored responses have no original-size provenance. Never infer it from a preview.
         userContent = {
           ...userContent,
@@ -4428,6 +4432,7 @@ export class LlmChat {
         // The push above was rolled back, so undo its count too.
         this.userContentPushCount--;
       }
+      this.notesWarningWindow = previousNotesWarningWindow;
       if (manualPlanExitNoticeVersion !== undefined) {
         this.config.restorePendingManualPlanExitNotice(
           manualPlanExitNoticeVersion,

@@ -13,10 +13,13 @@ import type { ChatRecordingService } from './chatRecordingService.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { estimateContextTextTokens } from './tokenEstimation.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
   SessionNotesRevision,
   SessionNotesState,
 } from './session-notes-state.js';
+
+const debugLogger = createDebugLogger('SESSION_NOTES');
 
 export interface NotesModelResponse {
   settled?: boolean;
@@ -147,23 +150,29 @@ export class SessionNotesService {
     await this.recorder.flush();
     await this.recorder.refreshSessionNotesState();
     return this.recorder.runWithWriteBarrier(async () => {
-      this.assertAvailable();
       const notes = this.recorder.getSessionNotesState().notes;
       if (notes) this.validateText(notes.text, false);
       if (
         !this.projectionInitialized ||
         notes?.revision !== this.projectedRevision
       ) {
-        await writeNotesProjection(
-          path.join(
-            this.config.storage.getProjectDir(),
-            'chats',
-            `${this.sessionId}.jsonl`,
-          ),
-          notes,
-        );
-        this.projectedRevision = notes?.revision;
-        this.projectionInitialized = true;
+        try {
+          await writeNotesProjection(
+            path.join(
+              this.config.storage.getProjectDir(),
+              'chats',
+              `${this.sessionId}.jsonl`,
+            ),
+            notes,
+          );
+          this.projectedRevision = notes?.revision;
+          this.projectionInitialized = true;
+        } catch (error) {
+          debugLogger.warn(
+            'Unable to refresh the notes Markdown projection',
+            error,
+          );
+        }
       }
       return notes;
     });
@@ -235,17 +244,26 @@ export class SessionNotesService {
     this.pendingReset = { revision, signal, observed };
   }
 
-  takePendingReset(): string | undefined {
+  completePendingReset(revision: string): void {
+    if (this.pendingReset?.revision === revision) this.pendingReset = undefined;
+  }
+
+  peekPendingReset(): string | undefined {
     const reset = this.pendingReset;
-    this.pendingReset = undefined;
-    if (!reset || reset.signal.aborted) return undefined;
+    if (!reset || reset.signal.aborted) {
+      this.pendingReset = undefined;
+      return undefined;
+    }
     const state = this.recorder.getSessionNotesState();
     try {
-      if (!state.notes || state.notes.revision !== reset.revision)
+      if (!state.notes || state.notes.revision !== reset.revision) {
+        this.pendingReset = undefined;
         return undefined;
+      }
       this.recorder.assertNotesObservationCurrent(reset.observed);
       return reset.revision;
     } catch {
+      this.pendingReset = undefined;
       this.assertAvailable();
       return undefined;
     }

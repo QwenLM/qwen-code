@@ -1082,6 +1082,43 @@ describe('Gemini Client (client.ts)', () => {
     return reg;
   };
 
+  it('Nov5 R2-4 releases the failed ToolResult batch without claiming pending steering', async () => {
+    vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+      strategy: 'notes',
+    });
+    const releaseNotesInput = vi.fn();
+    const releaseNotesInputs = vi.fn();
+    const recorder = {
+      getSessionNotesState: () => ({ sourceLeafUuid: 'unprocessed-steering' }),
+      releaseNotesInput,
+      releaseNotesInputs,
+      recordAttributionSnapshot: vi.fn(),
+    };
+    vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+      recorder as unknown as ReturnType<Config['getChatRecordingService']>,
+    );
+    const failure = new UnauthorizedError('reproduction pre-yield failure');
+    mockTurnRunFn.mockImplementation(async function* () {
+      await Promise.reject(failure);
+      yield undefined;
+    });
+    const request: Part[] = ['read-a', 'read-b'].map((id) => ({
+      functionResponse: { id, name: 'read_file', response: { output: id } },
+    }));
+    await run(request, 'nov5-tool-result', {
+      type: SendMessageType.ToolResult,
+    }).then(
+      (value) => value,
+      (error) => error,
+    );
+    expect(mockTurnRunFn).toHaveBeenCalled();
+    expect(releaseNotesInputs).toHaveBeenCalledWith({
+      role: 'user',
+      parts: request,
+    });
+    expect(releaseNotesInput).not.toHaveBeenCalled();
+  });
+
   describe('initialize', () => {
     const restoreFromRuntime = (runtime: object) =>
       vi

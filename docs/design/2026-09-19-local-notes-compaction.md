@@ -200,8 +200,8 @@ an expiry condition.
 
 Write the canonical record through a strict recorder method, then atomically
 materialize the Markdown sidecar using a temporary sibling and rename. The tool
-reports success only after both operations succeed. A projection failure can
-leave a recoverable canonical revision, but it cannot authorize a rollover.
+reports success once the canonical revision is durable. Projection failures are
+logged and retried on a later read; they do not disable valid canonical notes.
 Resume reconstructs the sidecar from the current active chain. Direct edits to
 this generated file are not automatically imported; a future explicit import
 can add that capability without creating two authorities.
@@ -305,10 +305,10 @@ The common transition follows this order:
    target with usable output room, and has valid provider message ordering.
    Perform every rejectable size/protocol guard before recording the checkpoint.
 4. Strictly append one `system/chat_compression` checkpoint with the complete
-   `compressedHistory`, existing completion metadata, and additive notes metadata:
-   `strategy: notes`, new/previous window IDs, notes revision, and covered leaf.
-   The previous window is the actual window being replaced; the covered leaf
-   remains the note’s original coverage. Recheck the attempt frontier and latest
+   `compressedHistory`, existing completion metadata, and `info.strategy: notes`.
+   The checkpoint UUID identifies the new window; the canonical notes record
+   retains the revision, original writing window, and covered leaf.
+   Recheck the attempt frontier and latest
    active-branch revision, and ensure all unobserved input is included in the
    actual pending message appended to the candidate. Previewing that coverage
    does not mark the input consumed.
@@ -390,17 +390,18 @@ constraint or a note silently to report a successful transition.
 
 ### 4.6 Failure, resume, fork, and cleanup
 
-| Condition                                                                      | Required outcome                                                                                                                                                                                             |
-| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Notes are missing, superseded, abandoned, oversize, or projection repair fails | Explicit reset fails without changing history; automatic/manual compression uses summary while the recorder is healthy.                                                                                      |
-| Recording is disabled from session start                                       | Use existing summary mode. Do not create notes/history storage against the user's setting.                                                                                                                   |
-| Writer is lost, inactive, or has failed after notes mode starts                | Preserve the active history and stop the transition under existing session-write failure semantics. Do not bypass the failed writer with a summary reset.                                                    |
-| Neither notes nor summary can produce an admissible request                    | Surface the existing recoverable compression failure; retain history and notes. No empty-window fallback or unbounded retry.                                                                                 |
-| Process dies during commit or Markdown rename                                  | Replay the last complete valid canonical record, repair the projection, and use existing partial-tail/integrity handling. Never prefer a newer orphan sidecar.                                               |
-| Resume                                                                         | Restore compressed history, window metadata, and latest valid notes on the active branch. Include notes in selective cold restore used by ACP/daemon, not only the full-file loader.                         |
-| Fork                                                                           | Copy canonical records using existing fork rules, retain stable record references, and materialize an independent sidecar in the destination session. No writes flow back to the parent.                     |
-| Rewind                                                                         | Use existing supported targets, clear pending resets, invalidate cursors, and regenerate notes from the resulting branch. Do not resurrect post-target notes or relax current compressed-turn restrictions.  |
-| Archive/delete/retention                                                       | Move or delete the Markdown sidecar with its transcript through existing session maintenance ownership. Clear in-memory cursors/caches. Rebuildable sidecars do not justify an independent retention system. |
+| Condition                                                       | Required outcome                                                                                                                                                                                             |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Notes are missing, superseded, abandoned, or oversize           | Explicit reset fails without changing history; automatic/manual compression uses summary while the recorder is healthy.                                                                                      |
+| Markdown projection repair fails                                | Keep valid canonical notes available, log the repair failure, and retry projection on a later read.                                                                                                          |
+| Recording is disabled from session start                        | Use existing summary mode. Do not create notes/history storage against the user's setting.                                                                                                                   |
+| Writer is lost, inactive, or has failed after notes mode starts | Preserve the active history and stop the transition under existing session-write failure semantics. Do not bypass the failed writer with a summary reset.                                                    |
+| Neither notes nor summary can produce an admissible request     | Surface the existing recoverable compression failure; retain history and notes. No empty-window fallback or unbounded retry.                                                                                 |
+| Process dies during commit or Markdown rename                   | Replay the last complete valid canonical record, repair the projection, and use existing partial-tail/integrity handling. Never prefer a newer orphan sidecar.                                               |
+| Resume                                                          | Restore compressed history, window metadata, and latest valid notes on the active branch. Include notes in selective cold restore used by ACP/daemon, not only the full-file loader.                         |
+| Fork                                                            | Copy canonical records using existing fork rules, retain stable record references, and materialize an independent sidecar in the destination session. No writes flow back to the parent.                     |
+| Rewind                                                          | Use existing supported targets, clear pending resets, invalidate cursors, and regenerate notes from the resulting branch. Do not resurrect post-target notes or relax current compressed-turn restrictions.  |
+| Archive/delete/retention                                        | Move or delete the Markdown sidecar with its transcript through existing session maintenance ownership. Clear in-memory cursors/caches. Rebuildable sidecars do not justify an independent retention system. |
 
 Old transcripts have no notes metadata and retain existing replay behavior.
 The additive checkpoint still carries ordinary `Content[]`, allowing an older
@@ -468,13 +469,13 @@ only registers tools on the normal path does not meet this contract.
 
 ## 8. Validation and acceptance criteria
 
-The E2E plan and results are in `.qwen/e2e-tests/local-notes-compaction.md`;
-the notes-reuse regression plan is `.qwen/e2e-tests/notes-reuse-after-progress.md`;
-the deterministic localhost-model fixture is
-`.qwen/scripts/local-notes-compaction-e2e.mjs`. The global CLI baseline was
-verified before implementation. Runtime verification uses the local build,
-focused package tests, build and typecheck. These checks verify the protocol
-and persistence; they do not establish a model-quality or cost advantage.
+The global CLI baseline was verified before implementation. Reproducible local
+checks are tracked beside the implementation: from `packages/core`, run
+`npx vitest run src/services/session-notes-service.test.ts src/services/session-history-service.test.ts src/core/llm-chat-notes.test.ts src/tools/session-context.test.ts`;
+from `packages/cli`, run `npx vitest run src/acp-integration/session/Session.test.ts`.
+Run `npm run build && npm run typecheck` from the repository root first.
+These checks verify protocol and persistence behavior. The model-quality and
+cost comparison below remains a separate acceptance criterion.
 
 Local checks cover repeated notes rollover without a summarizer, history
 retrieval, restart/projection repair, invalid revisions and mixed tool responses,

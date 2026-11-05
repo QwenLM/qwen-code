@@ -59,6 +59,18 @@ function fixture(sessionId = 'session') {
 }
 
 describe('session context tools', () => {
+  it('Nov5 R2-14 identifies the accepted history continuation request fields', () => {
+    const { config } = fixture();
+    const tool = new SessionContextTool(config, ToolNames.SESSION_HISTORY);
+    expect(() =>
+      tool.build({ action: 'read', ref: 'uuid:0', nextStart: 4096 } as never),
+    ).toThrow('additional properties');
+    expect(() =>
+      tool.build({ action: 'read', ref: 'uuid:0', start: 4096 }),
+    ).not.toThrow();
+    expect(tool.description).toMatch(/\bstart\b/u);
+    expect(tool.description).toMatch(/\bcursor\b/u);
+  });
   it('captures the response at invocation time and returns a durable write revision', async () => {
     const { config, notes, response } = fixture();
     const tool = new SessionContextTool(config, ToolNames.SESSION_NOTES);

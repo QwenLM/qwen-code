@@ -145,6 +145,7 @@ import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { SESSION_CONTEXT_TOOL_NAMES } from '../services/session-notes-state.js';
 import { forgetAutofixPrSession } from '../tools/autofix-pr-grants.js';
 import {
   ToolMode,
@@ -13179,12 +13180,7 @@ export class Config {
       this.chatRecordingEnabled &&
       !options?.forSubAgent
     ) {
-      const names = [
-        ToolNames.SESSION_NOTES,
-        ToolNames.SESSION_HISTORY,
-        ToolNames.GET_CONTEXT_REMAINING,
-        ToolNames.NEW_CONTEXT,
-      ] as const;
+      const names = SESSION_CONTEXT_TOOL_NAMES;
       try {
         const statuses = await Promise.all(
           names.map(

@@ -36590,6 +36590,42 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
       });
 
+      it('Nov5 R2-1 notes summarize alias preserves the checkpoint', async () => {
+        mockConfig.getChatCompression = vi
+          .fn()
+          .mockReturnValue({ strategy: 'notes' });
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(async () => {
+          expect(
+            mockChatRecordingService.recordUserMessage,
+          ).not.toHaveBeenCalled();
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: 'New context started.',
+            resolvedCommand: { name: 'compress', kind: CommandKind.BUILT_IN },
+          };
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/summarize' }],
+        });
+
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).not.toHaveBeenCalled();
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith({
+          phase: 'invocation',
+          rawCommand: '/summarize',
+          sentToModel: false,
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
       it('binds a custom compress prompt and attachments to notes observation before sending', async () => {
         mockConfig.getChatCompression = vi
           .fn()

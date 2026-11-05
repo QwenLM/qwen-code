@@ -3019,7 +3019,15 @@ export class SessionTranscriptReader {
       fileIdentity: fileIdentityFromStats(stats),
       snapshotSize: stats.size,
       lastUpdated: new Date(stats.mtimeMs).toISOString(),
+    }).catch((error: unknown) => {
+      if (error instanceof EmptySessionTranscriptError) return undefined;
+      throw error;
     });
+    if (!index) {
+      if (leafUuid)
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      return {};
+    }
     const end = leafUuid
       ? index.runtimeUuids.indexOf(leafUuid)
       : index.runtimeUuids.length - 1;
@@ -3045,6 +3053,8 @@ export class SessionTranscriptReader {
   ): Promise<{
     records: ChatRecord[];
     snapshot: string;
+    startOffset?: number;
+    omittedOversizedRecords?: number;
     nextOffset?: number;
     gaps: HistoryGap[];
   }> {
@@ -3057,6 +3067,9 @@ export class SessionTranscriptReader {
       fileIdentity,
       snapshotSize: stats.size,
       lastUpdated: new Date(stats.mtimeMs).toISOString(),
+    }).catch((error: unknown) => {
+      if (error instanceof EmptySessionTranscriptError) return undefined;
+      throw error;
     });
     const frozen = options.snapshot
       ? this.decodeSnapshot(options.snapshot)
@@ -3066,15 +3079,42 @@ export class SessionTranscriptReader {
       (frozen.sessionId !== sessionId ||
         !sameFileIdentity(frozen.fileIdentity, fileIdentity) ||
         frozen.snapshotSize > stats.size ||
-        !current.runtimeUuids.includes(frozen.leafUuid))
+        (frozen.leafUuid !== '' &&
+          !current?.runtimeUuids.includes(frozen.leafUuid)))
     ) {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
     const index = frozen
-      ? await getCachedIndex({ filePath, ...frozen })
+      ? await getCachedIndex({ filePath, ...frozen }).catch(
+          (error: unknown) => {
+            if (error instanceof EmptySessionTranscriptError) return undefined;
+            throw error;
+          },
+        )
       : current;
-    if (frozen && frozen.leafUuid !== index.leafUuid) {
+    if (frozen && frozen.leafUuid !== (index?.leafUuid ?? '')) {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+    }
+    if (!index) {
+      if (options.recordId || (options.offset ?? 0) !== 0)
+        throw new InvalidSessionTranscriptCursorError();
+      signal?.throwIfAborted();
+      return {
+        records: [],
+        gaps: [],
+        snapshot:
+          options.snapshot ??
+          this.encodeSnapshot({
+            v: SESSION_TRANSCRIPT_TURN_INDEX_VERSION,
+            kind: 'turn_index',
+            sessionId,
+            fileIdentity,
+            snapshotSize: stats.size,
+            leafUuid: '',
+            startTime: new Date(stats.mtimeMs).toISOString(),
+            lastUpdated: new Date(stats.mtimeMs).toISOString(),
+          }),
+      };
     }
     const snapshot =
       options.snapshot ??
@@ -3103,17 +3143,24 @@ export class SessionTranscriptReader {
       : Math.min(normalizeLimit(options.limit), 100);
     const uuids: string[] = [];
     let bytes = 0;
+    let startOffset = offset;
+    let omittedOversizedRecords = 0;
     for (const uuid of index.runtimeUuids.slice(offset, offset + limit)) {
       const size = recordSegmentBytes(index, uuid);
       if (
         uuids.length === 0 &&
         size > SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES
       ) {
-        throw new SessionTranscriptPageTooLargeError(
-          sessionId,
-          size,
-          SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
-        );
+        if (options.recordId) {
+          throw new SessionTranscriptPageTooLargeError(
+            sessionId,
+            size,
+            SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
+          );
+        }
+        startOffset++;
+        omittedOversizedRecords++;
+        continue;
       }
       if (uuids.length > 0 && bytes + size > SESSION_TRANSCRIPT_MAX_PAGE_BYTES)
         break;
@@ -3123,11 +3170,13 @@ export class SessionTranscriptReader {
     signal?.throwIfAborted();
     const records = await readAggregatedRecords(index, uuids);
     signal?.throwIfAborted();
-    await assertIndexSnapshotUnchanged(current, sessionId);
-    const nextOffset = offset + uuids.length;
+    await assertIndexSnapshotUnchanged(current ?? index, sessionId);
+    const nextOffset = startOffset + uuids.length;
     return {
       records,
       snapshot,
+      startOffset,
+      ...(omittedOversizedRecords ? { omittedOversizedRecords } : {}),
       ...(nextOffset < index.runtimeUuids.length ? { nextOffset } : {}),
       gaps: index.gaps,
     };

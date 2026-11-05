@@ -11,6 +11,7 @@ import { isSessionContextPart } from './session-notes-state.js';
 import {
   InvalidSessionTranscriptCursorError,
   SessionTranscriptSnapshotUnavailableError,
+  SessionTranscriptPageTooLargeError,
   type SessionTranscriptReader,
 } from './session-transcript-reader.js';
 import { estimateContextTextTokens } from './tokenEstimation.js';
@@ -59,9 +60,23 @@ function historyJson(value: unknown): string {
       entry &&
       typeof entry === 'object' &&
       'type' in entry &&
-      ['image', 'audio', 'image_url', 'input_audio'].includes(
-        String(entry.type),
-      )
+      [
+        'image',
+        'audio',
+        'video',
+        'image_url',
+        'video_url',
+        'input_audio',
+      ].includes(String(entry.type))
+    )
+      return '[Recorded media omitted]';
+    if (
+      entry &&
+      typeof entry === 'object' &&
+      'data' in entry &&
+      ('mimeType' in entry ||
+        'media_type' in entry ||
+        ('type' in entry && entry.type === 'base64'))
     )
       return '[Recorded media omitted]';
     if (typeof entry === 'string' && /^data:[^;,]+;base64,/u.test(entry))
@@ -169,6 +184,7 @@ export class SessionHistoryService {
               },
             ],
             nextCursor: 'x'.repeat(36),
+            partial: true,
             notice: 'x'.repeat(160),
           })
         )
@@ -192,6 +208,12 @@ export class SessionHistoryService {
       const page = await this.reader
         .readContextHistory(this.sessionId, { recordId: match[1] }, signal)
         .catch((error: unknown) => {
+          if (error instanceof SessionTranscriptPageTooLargeError) {
+            throw new Error(
+              'This recorded entry is too large for history retrieval. Use its original file or artifact if available; list and search can continue past it.',
+              { cause: error },
+            );
+          }
           if (
             error instanceof InvalidSessionTranscriptCursorError ||
             error instanceof SessionTranscriptSnapshotUnavailableError
@@ -279,7 +301,13 @@ export class SessionHistoryService {
           (request.action === 'search' && !entry.text.includes(query!))
         )
           continue;
-        const preview = clip(entry, 0, true);
+        const preview = clip(
+          entry,
+          request.action === 'search'
+            ? Math.max(0, entry.text.indexOf(query!) - 40)
+            : 0,
+          true,
+        );
         if (
           entries.length >= limit ||
           !fits({
@@ -291,7 +319,7 @@ export class SessionHistoryService {
         ) {
           next = {
             snapshot: page.snapshot,
-            offset: offset + i,
+            offset: (page.startOffset ?? offset) + i,
             part,
             action: request.action,
             query,
@@ -322,8 +350,9 @@ export class SessionHistoryService {
     return JSON.stringify({
       entries,
       ...(nextCursor ? { nextCursor, partial: true } : {}),
-      notice:
-        page.gaps.length > 0
+      notice: page.omittedOversizedRecords
+        ? 'Oversized recorded entries were omitted. Results are incomplete; use the original file or artifact if available.'
+        : page.gaps.length > 0
           ? 'The recorded branch has gaps. Results are incomplete; original artifacts may be unavailable.'
           : 'Recorded content only; original tool output may already be truncated and artifacts may be unavailable.',
     });

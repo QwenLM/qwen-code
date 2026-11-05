@@ -1456,6 +1456,45 @@ describe('LlmChat', async () => {
     });
   });
 
+  it('Nov5 R2-17 retries the notes warning after a failed pre-send compression', async () => {
+    const { SessionNotesService } = await import(
+      '../services/session-notes-service.js'
+    );
+    const recorder = {
+      getSessionId: () => mockConfig.getSessionId(),
+      getSessionNotesState: () => ({
+        windowId: 'window',
+        sourceLeafUuid: 'source',
+      }),
+      assertNotesWriterReady: vi.fn(),
+    };
+    chat = newChat({ recorder });
+    const notes = new SessionNotesService(
+      mockConfig,
+      recorder as unknown as ConstructorParameters<
+        typeof SessionNotesService
+      >[1],
+    );
+    vi.spyOn(chat, 'getSessionNotesService').mockReturnValue(notes);
+    mockGeneratorConfig({ contextWindowSize: 128000 });
+    chat.setLastPromptTokenCount(115000, false);
+    const compression = vi
+      .spyOn(chat, 'tryCompress')
+      .mockRejectedValue(new Error('pre-send compression rejected'));
+    for (const id of ['first', 'second'])
+      await expect(send('continue', id)).rejects.toThrow(
+        'pre-send compression rejected',
+      );
+    expect(compression).toHaveBeenCalledTimes(2);
+    expect(
+      compression.mock.calls.map((call) =>
+        JSON.stringify(call[3]?.pendingUserMessage).includes(
+          'Context is filling up.',
+        ),
+      ),
+    ).toEqual([true, true]);
+  });
+
   describe('sendMessageStream', () => {
     type Message = Parameters<LlmChat['sendMessageStream']>[1]['message'];
 
@@ -7576,6 +7615,69 @@ describe('LlmChat', async () => {
         { disableModelFallbacks: true },
       );
       expect(tryCompress).toHaveBeenCalled();
+    });
+
+    it('Nov5 R2-2 retains an accepted notes reset through an exact-route NOOP send', async () => {
+      const { SessionNotesService } = await import(
+        '../services/session-notes-service.js'
+      );
+      const revision = {
+        version: 1 as const,
+        revision: 'note-1',
+        windowId: 'window',
+        sourceLeafUuid: 'source',
+        text: 'checkpoint',
+      };
+      const state = {
+        windowId: 'window',
+        sourceLeafUuid: 'source',
+        notes: revision,
+      };
+      const recorder = {
+        getSessionId: () => mockConfig.getSessionId(),
+        getSessionNotesState: () => structuredClone(state),
+        getNotesHandoffState: () => structuredClone(state),
+        assertNotesWriterReady: vi.fn(),
+        assertNotesObservationCurrent: vi.fn(),
+        refreshSessionNotesState: vi.fn(),
+      };
+      const notes = new SessionNotesService(
+        mockConfig,
+        recorder as unknown as ConstructorParameters<
+          typeof SessionNotesService
+        >[1],
+      );
+      vi.spyOn(notes, 'read').mockResolvedValue(revision);
+      notes.beginResponse(state);
+      notes.finishResponse([
+        {
+          functionCall: {
+            name: 'new_context',
+            args: { notes_revision: revision.revision },
+          },
+        },
+      ]);
+      await notes.requestReset(
+        revision.revision,
+        notes.captureResponse(),
+        new AbortController().signal,
+      );
+      vi.spyOn(chat, 'getSessionNotesService').mockReturnValue(notes);
+      const routeStream = vi
+        .fn()
+        .mockResolvedValue(textStream('exact route answer'));
+      mockVisionRoute(routeStream, 0);
+      const compression = vi.spyOn(chat, 'tryCompress');
+      await drain(
+        await chat.sendMessageStream(
+          'openai:vision-agent\0https://vision.example.com/v1\0',
+          { message: 'continue' },
+          'nov5-exact-route',
+        ),
+      );
+      expect(routeStream).toHaveBeenCalled();
+      expect(compression).not.toHaveBeenCalled();
+      expect(notes.peekPendingReset()).toBe(revision.revision);
     });
 
     it('uses one exact image route across retries and filters history for the next target', async () => {

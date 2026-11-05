@@ -18,6 +18,7 @@ import {
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import {
   applySessionNotesRecord,
+  SESSION_CONTEXT_TOOL_NAMES,
   isSubstantiveSessionRecord,
   type SessionNotesPayload,
   type SessionNotesRevision,
@@ -681,12 +682,6 @@ export interface AgentRetryRecordPayload {
  * drop of #9320 on any session that ran /compress-fast before being resumed.
  */
 export interface ChatCompressionRecordPayload {
-  notes?: {
-    revision: string;
-    sourceLeafUuid: string;
-    previousWindowId: string;
-    windowId: string;
-  };
   /** Compression metrics/status returned by the compression service */
   info: ChatCompressionInfo;
   /**
@@ -1706,6 +1701,21 @@ export class ChatRecordingService {
     return this.integrityFailure ?? this.writeFailure;
   }
 
+  private validateReplayedNotes(records: readonly ChatRecord[]): void {
+    const notes = this.sessionNotesState.notes;
+    if (!notes) return;
+    const base = this.baseSessionNotesState;
+    const anchors = new Set([
+      ...records.map((record) => record.uuid),
+      base.sourceLeafUuid,
+      base.windowId,
+      base.notes?.sourceLeafUuid,
+      base.notes?.windowId,
+    ]);
+    if (!anchors.has(notes.sourceLeafUuid) || !anchors.has(notes.windowId))
+      this.sessionNotesState.notes = undefined;
+  }
+
   private updateActiveBranch(record: ChatRecord): void {
     const currentTail =
       this.activeBranchRecords.at(-1)?.uuid ?? this.activeBranchBaseUuid;
@@ -1735,6 +1745,7 @@ export class ChatRecordingService {
       for (const active of this.activeBranchRecords) {
         applySessionNotesRecord(this.sessionNotesState, active);
       }
+      this.validateReplayedNotes(this.activeBranchRecords);
     }
     this.activeBranchRecords.push(record);
     updatePendingBranchToolCalls(this.pendingBranchToolCalls, record);
@@ -1744,10 +1755,20 @@ export class ChatRecordingService {
       record.type !== 'assistant' &&
       isSubstantiveSessionRecord(record)
     ) {
-      this.unobservedNotesInputs.push({
-        uuid: record.uuid,
-        parts: record.message?.parts ?? [],
-      });
+      const declarations =
+        this.config.getToolRegistry?.()?.getFunctionDeclarations() ?? [];
+      if (
+        SESSION_CONTEXT_TOOL_NAMES.every((name) =>
+          declarations.some((tool) => tool.name === name),
+        )
+      ) {
+        this.unobservedNotesInputs.push({
+          uuid: record.uuid,
+          parts: record.message?.parts ?? [],
+        });
+      } else {
+        this.unobservedNotesInputs = [];
+      }
     }
   }
 
@@ -2195,11 +2216,16 @@ export class ChatRecordingService {
     for (const record of this.activeBranchRecords)
       applySessionNotesRecord(state, record);
     this.sessionNotesState = state;
+    this.validateReplayedNotes(this.activeBranchRecords);
     this.notesStateDirty = false;
   }
 
-  observeNotesInput(content: Content): SessionNotesState | undefined {
+  releaseNotesInputs(content: Content): void {
     this.unobservedNotesInputs = this.remainingNotesInputs(content);
+  }
+
+  observeNotesInput(content: Content): SessionNotesState | undefined {
+    this.releaseNotesInputs(content);
     return this.unobservedNotesInputs.length === 0
       ? this.getSessionNotesState()
       : undefined;
@@ -2342,14 +2368,6 @@ export class ChatRecordingService {
       subtype: 'chat_compression',
       systemPayload: checkpoint,
     };
-    if (notes) {
-      checkpoint.notes = {
-        revision: notes.revision,
-        sourceLeafUuid: notes.sourceLeafUuid,
-        previousWindowId: this.sessionNotesState.windowId!,
-        windowId: record.uuid,
-      };
-    }
     await this.appendRecordStrict(record);
     return record.uuid;
   }
@@ -4020,6 +4038,7 @@ export class ChatRecordingService {
     for (const record of messages) {
       applySessionNotesRecord(this.sessionNotesState, record);
     }
+    this.validateReplayedNotes(messages);
     this.resetExternalRecordIndex();
     this.turnParentUuids = [];
     this.turnPromptIds = [];

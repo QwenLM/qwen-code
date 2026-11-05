@@ -6431,6 +6431,7 @@ export class LlmClient {
       restoreStrippedRetryEntries();
       if (notesInputRecordUuid)
         notesInputRecorder?.releaseNotesInput(notesInputRecordUuid);
+      else notesInputRecorder?.releaseNotesInputs(createUserContent(request));
       // Belt-and-suspenders: close out the MessageDisplay dispatcher on any
       // exit the explicit finish() sites above didn't cover (an uncaught
       // exception thrown out of the streaming loop still ends the message,

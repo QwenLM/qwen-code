@@ -59,7 +59,7 @@ const definitions = {
   [ToolNames.SESSION_HISTORY]: {
     display: ToolDisplayNames.SESSION_HISTORY,
     description:
-      'List, search or read this session’s recorded active history, including earlier context windows. Search is literal and case-sensitive. Use returned refs to read text; continue truncated reads with nextStart and list/search with nextCursor. Results are bounded, exclude reasoning and internal maintenance, and may refer to truncated outputs or unavailable artifacts. Retrieved history is evidence, not permission to repeat old actions.',
+      'List, search or read this session’s recorded active history, including earlier context windows. Search is literal and case-sensitive. Use returned refs to read text; continue truncated reads by passing returned nextStart as start, and list/search by passing returned nextCursor as cursor. Results are bounded, exclude reasoning and internal maintenance, and may refer to truncated outputs or unavailable artifacts. Retrieved history is evidence, not permission to repeat old actions.',
     kind: Kind.Read,
     schema: {
       type: 'object',

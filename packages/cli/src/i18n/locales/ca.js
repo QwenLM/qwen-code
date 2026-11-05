@@ -1194,6 +1194,8 @@ export default {
   'Failed to compress chat history: {{error}}':
     "Error en comprimir l'historial del xat: {{error}}",
   'Compressing chat history': "Comprimint l'historial del xat",
+  'Started a new context from local notes: {{originalTokens}} to {{newTokens}} tokens.':
+    'S’ha iniciat un context nou a partir de les notes locals: de {{originalTokens}} a {{newTokens}} tokens.',
   'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.':
     "L'historial del xat s'ha comprimit de {{originalTokens}} a {{newTokens}} tokens.",
   'Compression was not beneficial for this history size.':

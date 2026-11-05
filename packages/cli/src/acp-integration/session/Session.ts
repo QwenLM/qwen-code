@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { compressCommand } from '../../ui/commands/compressCommand.js';
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -7174,6 +7175,10 @@ export class Session implements SessionContext {
               !isRestoreAskUserQuestion &&
               isSlashCommand(inputText);
             const slashCommandName = getSlashCommandFirstToken(inputText);
+            const notesCompressionCommand =
+              this.config.getChatCompression?.()?.strategy === 'notes' &&
+              (slashCommandName === compressCommand.name ||
+                compressCommand.altNames?.includes(slashCommandName) === true);
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
@@ -7250,11 +7255,7 @@ export class Session implements SessionContext {
                   .stripOrphanedUserEntriesFromHistory() ?? [];
             } else if (
               !isSlashInput ||
-              (slashCommandName !== 'advisor' &&
-                !(
-                  slashCommandName === 'compress' &&
-                  this.config.getChatCompression?.()?.strategy === 'notes'
-                ))
+              (slashCommandName !== 'advisor' && !notesCompressionCommand)
             ) {
               // `/advisor` and notes-mode `/compress` defer recording until
               // command resolution below — a
@@ -7358,9 +7359,6 @@ export class Session implements SessionContext {
               // also defers recording so the built-in command does not
               // invalidate the checkpoint it is about to consume.
               const resolvedCommandInfo = slashCommandResult.resolvedCommand;
-              const notesCompressionCommand =
-                this.config.getChatCompression?.()?.strategy === 'notes' &&
-                slashCommandName === 'compress';
               const builtInNotesCompression =
                 notesCompressionCommand &&
                 resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&

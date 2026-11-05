@@ -118,6 +118,30 @@ describe('notes compaction commit boundary', () => {
     };
   }
 
+  it('Nov5 R2-16 counts an inflated notes fallback as a compression failure', async () => {
+    const { chat } = fixture();
+    chat.setLastPromptTokenCount(115000, false);
+    const compression = vi
+      .spyOn(ChatCompressionService.prototype, 'compress')
+      .mockResolvedValue({
+        info: {
+          originalTokenCount: 115000,
+          newTokenCount: 114000,
+          compressionStatus: CompressionStatus.COMPRESSED,
+          strategy: 'summary',
+        },
+        newHistory: [
+          { role: 'user', parts: [{ text: 'inflated summary' }] },
+          { role: 'model', parts: [{ text: 'ack' }] },
+        ],
+      });
+    for (let i = 0; i < 2; i++)
+      expect(
+        (await chat.tryCompress('nov5-' + i, false)).compressionStatus,
+      ).toBe(CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT);
+    expect(compression.mock.calls[1][1].consecutiveFailures).toBe(1);
+  });
+
   it('uses literal notes with hooks and paired pending input, with no summarization call', async () => {
     const { chat, recorder, pre, post } = fixture();
     const summary = vi.spyOn(sideQuery, 'runSideQuery');
@@ -178,15 +202,23 @@ describe('notes compaction commit boundary', () => {
           accept = resolve;
         }),
     );
-    const transition = chat.tryCompress('prompt', true);
+    const completeReset = vi.spyOn(
+      SessionNotesService.prototype,
+      'completePendingReset',
+    );
+    const transition = chat.tryCompress('prompt', true, undefined, {
+      notesRevision: 'note',
+    });
     await vi.waitFor(() =>
       expect(recorder.recordChatCompressionStrict).toHaveBeenCalledOnce(),
     );
     expect(chat.getHistory()).toEqual(original);
     expect(post).not.toHaveBeenCalled();
     expect(invalidatePendingExtract).not.toHaveBeenCalled();
+    expect(completeReset).not.toHaveBeenCalled();
     accept('committed-window');
     expect((await transition).strategy).toBe('notes');
+    expect(completeReset).toHaveBeenCalledExactlyOnceWith('note');
     expect(chat.getHistory()).not.toEqual(original);
     expect(invalidatePendingExtract).toHaveBeenCalledExactlyOnceWith(
       'session',
@@ -200,9 +232,14 @@ describe('notes compaction commit boundary', () => {
     vi.mocked(recorder.recordChatCompressionStrict).mockRejectedValueOnce(
       new Error('writer lost'),
     );
-    await expect(chat.tryCompress('prompt', true)).rejects.toThrow(
-      'writer lost',
+    const completeReset = vi.spyOn(
+      SessionNotesService.prototype,
+      'completePendingReset',
     );
+    await expect(
+      chat.tryCompress('prompt', true, undefined, { notesRevision: 'note' }),
+    ).rejects.toThrow('writer lost');
+    expect(completeReset).not.toHaveBeenCalled();
     expect(chat.getHistory()).toEqual(original);
     expect(post).not.toHaveBeenCalled();
     await expect(
