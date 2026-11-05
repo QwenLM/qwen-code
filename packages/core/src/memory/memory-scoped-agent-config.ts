@@ -30,6 +30,7 @@ type MemoryScopedPermissionManager = Pick<
   | 'evaluate'
   | 'findMatchingDenyRule'
   | 'getToolRegistrationStatus'
+  | 'hasDenyRules'
   | 'hasMatchingAskRule'
   | 'hasRelevantRules'
   | 'isToolDisabledByCoreToolsAllowList'
@@ -421,6 +422,13 @@ export function createMemoryScopedAgentConfig(
     : [];
   const basePm = config.getPermissionManager?.();
   const scopedPm: MemoryScopedPermissionManager = {
+    hasDenyRules(): boolean {
+      return (
+        opts.restrictReadsToMemoryPaths ||
+        opts.protectPinnedMemory ||
+        (basePm?.hasDenyRules() ?? false)
+      );
+    },
     hasRelevantRules(ctx: PermissionCheckContext): boolean {
       return (
         isScopedTool(ctx.toolName, opts) || !!basePm?.hasRelevantRules(ctx)

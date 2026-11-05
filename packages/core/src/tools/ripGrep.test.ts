@@ -307,17 +307,17 @@ describe('RipGrepTool', () => {
       );
     });
 
-    it('keeps files matched only by ask rules visible', async () => {
+    it('keeps ask-matched files visible while omitting denied files', async () => {
       const result = await searchWith(
-        hit('fileA.txt', 1, 'hello world'),
+        hit('fileA.txt', 1, 'hello world') + hit('fileB.js', 1, 'hello'),
         { pattern: 'hello' },
-        toolWithRules([], ['Read(./fileA.txt)']),
+        toolWithRules(['Read(./fileB.js)'], ['Read(./fileA.txt)']),
       );
 
       expectLlm(
         result,
-        ['fileA.txt', 'hello world'],
-        ['omitted by permission rules'],
+        ['fileA.txt', 'hello world', '1 file omitted by permission rules'],
+        ['fileB.js'],
       );
     });
   });

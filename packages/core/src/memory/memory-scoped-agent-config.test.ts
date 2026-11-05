@@ -323,6 +323,18 @@ describe('createMemoryScopedAgentConfig', () => {
   });
 
   describe('registration-gate shim delegation (#10075)', () => {
+    it('reports scoped and base deny rules', () => {
+      expect(scopedPm().hasDenyRules()).toBe(false);
+      expect(
+        scopedPm({ restrictReadsToMemoryPaths: true }).hasDenyRules(),
+      ).toBe(true);
+      expect(scopedPm({ protectPinnedMemory: true }).hasDenyRules()).toBe(true);
+
+      const hasDenyRules = vi.fn().mockReturnValue(true);
+      expect(scopedPm(undefined, { hasDenyRules }).hasDenyRules()).toBe(true);
+      expect(hasDenyRules).toHaveBeenCalledOnce();
+    });
+
     it('isToolDisabledByCoreToolsAllowList delegates when present, defaults to false otherwise', () => {
       const gate = vi.fn().mockReturnValue(true);
       const delegated = scopedPm(undefined, {

@@ -53,6 +53,7 @@ type SkillScopedPermissionManager = Pick<
   | 'evaluate'
   | 'findMatchingDenyRule'
   | 'getToolRegistrationStatus'
+  | 'hasDenyRules'
   | 'hasMatchingAskRule'
   | 'hasRelevantRules'
   | 'isToolDisabledByCoreToolsAllowList'
@@ -235,6 +236,9 @@ export function createSkillScopedAgentConfig(
 ): Config {
   const basePm = config.getPermissionManager?.();
   const scopedPm: SkillScopedPermissionManager = {
+    hasDenyRules(): boolean {
+      return basePm?.hasDenyRules() ?? false;
+    },
     hasRelevantRules(ctx: PermissionCheckContext): boolean {
       return isScopedTool(ctx.toolName) || !!basePm?.hasRelevantRules(ctx);
     },

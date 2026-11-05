@@ -67,6 +67,27 @@ describe('selectPathsDeniedByPermissionRules', () => {
     },
   );
 
+  it('keeps matcher cache entries separate across deny specifiers', async () => {
+    const pm = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => ['Read(./a/**)', 'Read(./b/**)'],
+      getProjectRoot: () => process.cwd(),
+      getCwd: () => process.cwd(),
+    });
+    pm.initialize();
+    const paths = [path.resolve('a/one.txt'), path.resolve('b/two.txt')];
+
+    expect(
+      await selectPathsDeniedByPermissionRules(
+        pm,
+        ToolNames.GREP,
+        process.cwd(),
+        paths,
+      ),
+    ).toEqual(new Set(paths));
+  });
+
   it('skips evaluation when only an allow rule matches the result', async () => {
     const pm = new PermissionManager({
       getPermissionsAllow: () => ['Read(./file.txt)'],

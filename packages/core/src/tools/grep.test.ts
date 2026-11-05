@@ -21,6 +21,7 @@ import type { ToolResult } from './tools.js';
 import * as glob from 'glob';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
+import { createMemoryScopedAgentConfig } from '../memory/memory-scoped-agent-config.js';
 
 vi.mock('glob', { spy: true });
 
@@ -854,11 +855,11 @@ describe('GrepTool', () => {
       ).toBe('fresh');
     });
 
-    it('keeps files matched only by ask rules visible', async () => {
+    it('keeps ask-matched files visible while omitting denied files', async () => {
       const pm = new PermissionManager({
         getPermissionsAllow: () => [],
         getPermissionsAsk: () => ['Read(./fileA.txt)'],
-        getPermissionsDeny: () => [],
+        getPermissionsDeny: () => ['Read(./fileB.js)'],
         getProjectRoot: () => tempRootDir,
         getCwd: () => tempRootDir,
       });
@@ -868,7 +869,23 @@ describe('GrepTool', () => {
 
       expect(result.llmContent).toContain('File: fileA.txt');
       expect(result.llmContent).toContain('hello world');
-      expect(result.llmContent).not.toContain('omitted by permission rules');
+      expect(result.llmContent).not.toContain('fileB.js');
+      expect(result.llmContent).toContain('1 file omitted by permission rules');
+    });
+
+    it('keeps search working with a memory-scoped permission manager', async () => {
+      const scopedConfig = createMemoryScopedAgentConfig(
+        mockConfig,
+        tempRootDir,
+      );
+
+      const result = await run(
+        { pattern: 'hello' },
+        new GrepTool(scopedConfig),
+      );
+
+      expect(result.llmContent).toContain('Found 2 matches');
+      expect(result.llmContent).not.toContain('hasDenyRules is not a function');
     });
 
     it('keeps results unchanged without a permission manager', async () => {

@@ -1075,7 +1075,7 @@ describe('GlobTool', () => {
         { pattern: '*.streamlimit' },
         toolWith({
           getWorkspaceContext: () => createMockWorkspaceContext(wsA, [wsB]),
-          getPermissionManager: () => denyPm([`Read(/${wsA}/**)`]),
+          getPermissionManager: () => denyPm(['Read(./wsA/**)']),
         }),
       );
 
@@ -1087,11 +1087,11 @@ describe('GlobTool', () => {
       );
     });
 
-    it('keeps files matched only by ask rules visible', async () => {
+    it('keeps ask-matched files visible while omitting denied files', async () => {
       const pm = new PermissionManager({
         getPermissionsAllow: () => [],
         getPermissionsAsk: () => ['Read(./older.sortme)'],
-        getPermissionsDeny: () => [],
+        getPermissionsDeny: () => ['Read(./newer.sortme)'],
         getProjectRoot: () => tempRootDir,
         getCwd: () => tempRootDir,
       });
@@ -1101,8 +1101,9 @@ describe('GlobTool', () => {
         toolWith({ getPermissionManager: () => pm }),
       );
 
-      expectFound(result, 2, 'older.sortme', 'newer.sortme');
-      expect(result.llmContent).not.toContain('omitted by permission rules');
+      expectFound(result, 1, 'older.sortme');
+      expect(result.llmContent).not.toContain('newer.sortme');
+      expect(result.llmContent).toContain('1 file omitted by permission rules');
     });
 
     it('keeps results unchanged without a permission manager', async () => {
