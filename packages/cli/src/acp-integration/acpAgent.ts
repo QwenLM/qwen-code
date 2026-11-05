@@ -276,9 +276,8 @@ import {
   getProjectHooksForApprovalFromRawWorkspace,
   getProjectHooksApprovalState,
   getSeparatedHookSettings,
-  loadHookApprovals,
+  hashProjectHooks,
   summarizeProjectHooks,
-  type ProjectHooksApproval,
 } from '../config/hook-approvals.js';
 import { assembleMcpServers } from '../config/mcpServers.js';
 import { recomputeMcpGating } from '../config/hot-reload.js';
@@ -9805,30 +9804,21 @@ class QwenAgent implements Agent {
   }
 
   /**
-   * The exact block the user is shown and asked to decide on. The status cell
-   * and the approve control both read it here so the decision is persisted
-   * against the very block that was rendered, not a later re-read of disk.
-   * Falls back to the raw workspace block when the trust gate withheld the
-   * whole workspace scope; approving there does not bypass folder trust.
-   */
-  private projectHooksApprovalSubject(): ProjectHooksApproval | undefined {
-    return (
-      getProjectHooksForApproval(this.settings) ??
-      getProjectHooksForApprovalFromRawWorkspace(this.settings)
-    );
-  }
-
-  /**
    * The pending project-hooks decision for daemon clients. Reads the stored
    * decision fresh so a cold ACP child (or one whose in-memory flag predates
    * a decision made elsewhere) reports the same truth the gate will apply.
+   * Falls back to the raw workspace block when the trust gate withheld the
+   * whole workspace scope; approving there does not bypass folder trust.
    */
   private projectHooksApprovalCell(): {
     pendingApproval?: boolean;
     pendingApprovalHooks?: string[];
+    pendingApprovalHash?: string;
   } {
     try {
-      const approval = this.projectHooksApprovalSubject();
+      const approval =
+        getProjectHooksForApproval(this.settings) ??
+        getProjectHooksForApprovalFromRawWorkspace(this.settings);
       if (!approval || getProjectHooksApprovalState(approval) !== 'pending') {
         return {};
       }
@@ -9838,6 +9828,7 @@ class QwenAgent implements Agent {
           approval.resolved,
           approval.hooks,
         ),
+        pendingApprovalHash: hashProjectHooks(approval),
       };
     } catch {
       // A settings read failure must not take the whole status cell down.
@@ -11020,7 +11011,12 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.projectHooksApprove: {
         // Dedicated approval route, NOT session/request_permission: permission
         // requests are auto-answered by automation clients, a trust decision
-        // must be an explicit user act.
+        // must be an explicit user act. The daemon already persisted the
+        // hash-bound decision for the exact block the user reviewed; this
+        // child only applies it, and only to the block the daemon persisted:
+        // a workspace file that changed since the decision keeps its
+        // in-memory hooks pending instead of running a block nobody
+        // reviewed.
         const decision = params['decision'];
         if (decision !== 'approve' && decision !== 'reject') {
           throw RequestError.invalidParams(
@@ -11028,14 +11024,11 @@ class QwenAgent implements Agent {
             'decision must be approve or reject.',
           );
         }
-        // Persist here, against the same read the status cell rendered. A
-        // daemon-side re-read at click time would hash a block the user never
-        // saw: the daemon's route only takes over when no child answered.
-        const approval = this.projectHooksApprovalSubject();
-        if (approval) {
-          await loadHookApprovals().setState(
-            approval,
-            decision === 'approve' ? 'approved' : 'rejected',
+        const decisionHash = params['hash'];
+        if (decisionHash !== undefined && typeof decisionHash !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'hash must be the hash string from the approval status.',
           );
         }
         // Apply to every live config, not just the bootstrap one: each
@@ -11055,7 +11048,22 @@ class QwenAgent implements Agent {
               decisionRoot,
           ),
         );
+        // Fail closed when the persisted hash names a different block than
+        // the one this child holds: the decision was made for hooks that are
+        // no longer current, so the card stays up for the new block.
         for (const config of configs) {
+          const subject = config.getProjectHooksApprovalSubject();
+          if (decisionHash !== undefined) {
+            // A hash-bound decision applies only to a config holding the
+            // exact block it names; anything else stays pending for the
+            // block it actually has.
+            if (
+              subject === undefined ||
+              hashProjectHooks(subject) !== decisionHash
+            ) {
+              continue;
+            }
+          }
           config.setProjectHooksPendingApproval(
             decision !== 'approve',
             decision === 'reject',

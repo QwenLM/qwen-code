@@ -2798,6 +2798,15 @@ export async function loadCliConfig(
     // The stored approval is authority even while command-line YOLO exempts
     // the gate; only a genuine approved decision sets this.
     projectHooksApproved,
+    // The exact block the gate covers: mid-session decisions hash this
+    // startup subject, so a decision persisted for a block that changed
+    // since does not apply here.
+    projectHooksApprovalSubject: hooksConfig?.projectHooksApproval
+      ? {
+          hooks: hooksConfig.projectHooksApproval.hooks,
+          env: hooksConfig.projectHooksApproval.env,
+        }
+      : undefined,
     projectHooksYoloExempt: commandLineYolo,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)

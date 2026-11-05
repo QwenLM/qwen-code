@@ -12,7 +12,10 @@ import {
   MAX_SERVER_NAME_LENGTH,
 } from '../server/request-helpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
-import { WorkspaceProjectHooksNotPendingError } from '../workspace-service/types.js';
+import {
+  WorkspaceProjectHooksChangedError,
+  WorkspaceProjectHooksNotPendingError,
+} from '../workspace-service/types.js';
 import {
   resolveTrustedRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -254,9 +257,8 @@ export function registerWorkspaceQualifiedStatusRoutes(
         res,
       );
       if (!runtime) return;
-      const decision = (req.body as Record<string, unknown> | undefined)?.[
-        'decision'
-      ];
+      const body = req.body as Record<string, unknown> | undefined;
+      const decision = body?.['decision'];
       if (decision !== 'approve' && decision !== 'reject') {
         res.status(400).json({
           error: '`decision` must be "approve" or "reject"',
@@ -264,11 +266,19 @@ export function registerWorkspaceQualifiedStatusRoutes(
         });
         return;
       }
+      const hash = body?.['hash'];
+      if (hash !== undefined && typeof hash !== 'string') {
+        res.status(400).json({
+          error: '`hash` must be the hash string from the hooks status',
+          code: 'invalid_hooks_hash',
+        });
+        return;
+      }
       const route = 'POST /workspaces/:workspace/hooks/approve';
       try {
         const ctx = createBuildWorkspaceCtx(runtime.workspaceCwd)(route);
         const result = await runInRuntimeGeneration(runtime, () =>
-          runtime.workspaceService.approveProjectHooks(ctx, decision),
+          runtime.workspaceService.approveProjectHooks(ctx, decision, hash),
         );
         res.status(200).json(result);
       } catch (err) {
@@ -276,6 +286,13 @@ export function registerWorkspaceQualifiedStatusRoutes(
           res.status(400).json({
             error: err.message,
             code: 'project_hooks_not_pending',
+          });
+          return;
+        }
+        if (err instanceof WorkspaceProjectHooksChangedError) {
+          res.status(409).json({
+            error: err.message,
+            code: 'project_hooks_changed',
           });
           return;
         }
@@ -499,11 +516,19 @@ export function registerWorkspaceDiagnosticStatusRoutes(
         });
         return;
       }
+      const hash = (req.body as Record<string, unknown> | undefined)?.['hash'];
+      if (hash !== undefined && typeof hash !== 'string') {
+        res.status(400).json({
+          error: '`hash` must be the hash string from the hooks status',
+          code: 'invalid_hooks_hash',
+        });
+        return;
+      }
       try {
         const ctx = buildWorkspaceCtx('POST /workspace/hooks/approve');
         const result = await runInCapturedGeneration(
           deps.captureGenerationAssertion,
-          () => workspace.approveProjectHooks(ctx, decision),
+          () => workspace.approveProjectHooks(ctx, decision, hash),
         );
         res.status(200).json(result);
       } catch (err) {
@@ -511,6 +536,13 @@ export function registerWorkspaceDiagnosticStatusRoutes(
           res.status(400).json({
             error: err.message,
             code: 'project_hooks_not_pending',
+          });
+          return;
+        }
+        if (err instanceof WorkspaceProjectHooksChangedError) {
+          res.status(409).json({
+            error: err.message,
+            code: 'project_hooks_changed',
           });
           return;
         }

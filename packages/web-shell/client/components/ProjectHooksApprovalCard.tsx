@@ -76,13 +76,19 @@ export function ProjectHooksApprovalCard() {
         const handle = workspaceCwd
           ? client.workspaceByCwd(workspaceCwd)
           : client;
-        await handle.approveWorkspaceHooks(decision);
+        // Echo the hash of the block this card rendered: the decision binds
+        // to that exact block, and a workspace file that changed since the
+        // render stays pending instead of being approved unseen.
+        await handle.approveWorkspaceHooks(
+          decision,
+          status?.pendingApprovalHash,
+        );
       } finally {
         await refresh();
         setBusy(false);
       }
     },
-    [client, workspaceCwd, busy, refresh],
+    [client, workspaceCwd, busy, refresh, status?.pendingApprovalHash],
   );
 
   const request = useMemo<PermissionRequest | undefined>(() => {

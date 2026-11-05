@@ -35326,6 +35326,7 @@ describe('QwenAgent projectHooksApprove control', () => {
       storage: { getProjectRoot: () => workspaceRoot },
       getTargetDir: () => workspaceRoot,
       setProjectHooksPendingApproval: vi.fn(),
+      getProjectHooksApprovalSubject: () => undefined,
       getHookSystem: () => ({ reload: vi.fn().mockResolvedValue(undefined) }),
       getExecutionEnvironment: () => undefined,
       getToolRegistry: () => ({
@@ -35403,6 +35404,35 @@ describe('QwenAgent projectHooksApprove control', () => {
         decision: 'maybe',
       }),
     ).rejects.toThrow('decision must be approve or reject');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('leaves the block pending when the decision hash names another block', async () => {
+    const bootstrap = makeConfig('/work/repo');
+    const agentPromise = runAcpAgent(bootstrap, mockSettings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      closed: mockConnectionState.promise,
+    });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.projectHooksApprove, {
+        cwd: '/work/repo',
+        decision: 'approve',
+        hash: 'a-stale-block-hash',
+      }),
+    ).resolves.toEqual({ decision: 'approve', reloaded: true });
+    expect(bootstrap.setProjectHooksPendingApproval).not.toHaveBeenCalled();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.projectHooksApprove, {
+        cwd: '/work/repo',
+        decision: 'approve',
+        hash: 42,
+      }),
+    ).rejects.toThrow('hash must be the hash string');
 
     mockConnectionState.resolve();
     await agentPromise;

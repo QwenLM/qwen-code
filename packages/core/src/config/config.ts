@@ -1574,6 +1574,16 @@ export interface ConfigParameters {
    * `projectHooks`, this feeds only `getTrustWithheldProjectHooks()`.
    */
   projectHooksDisplayOnly?: Record<string, unknown>;
+  /**
+   * The exact hooks block this session's approval gate covers, with the
+   * workspace env that can change what those hooks do. Lets an embedder
+   * hash the reviewed subject itself (the approval store lives outside
+   * core) instead of trusting a block re-read later.
+   */
+  projectHooksApprovalSubject?: {
+    hooks: Record<string, unknown>;
+    env: { files: Record<string, unknown>; settings: unknown };
+  };
   /** Started with `--yolo`: the gate is off only while the mode stays YOLO. */
   projectHooksYoloExempt?: boolean;
   noBrowser?: boolean;
@@ -3066,6 +3076,7 @@ export class Config {
   private projectHooksRejected: boolean;
   private projectHooksApproved: boolean;
   private readonly projectHooksDisplayOnly?: Record<string, unknown>;
+  private readonly projectHooksApprovalSubject?: ConfigParameters['projectHooksApprovalSubject'];
   private readonly projectHooksYoloExempt: boolean;
   private readonly mcpToolIdleTimeoutMs: number;
   /**
@@ -3558,6 +3569,7 @@ export class Config {
     this.projectHooksRejected = params.projectHooksRejected ?? false;
     this.projectHooksApproved = params.projectHooksApproved ?? false;
     this.projectHooksDisplayOnly = params.projectHooksDisplayOnly;
+    this.projectHooksApprovalSubject = params.projectHooksApprovalSubject;
     this.projectHooksYoloExempt = params.projectHooksYoloExempt ?? false;
     const envTimeout = process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'];
     const parsedEnv = envTimeout !== undefined ? Number(envTimeout) : NaN;
@@ -9022,6 +9034,17 @@ export class Config {
 
   isProjectHooksPendingApproval(): boolean {
     return this.projectHooksPendingApproval === true;
+  }
+
+  /**
+   * The hooks block this session's approval gate covers, as loaded at
+   * startup. An approval decision carrying a hash must match this exact
+   * subject; a different hash names a block nobody here reviewed.
+   */
+  getProjectHooksApprovalSubject():
+    | ConfigParameters['projectHooksApprovalSubject']
+    | undefined {
+    return this.projectHooksApprovalSubject;
   }
 
   isProjectHooksApprovalGated(): boolean {

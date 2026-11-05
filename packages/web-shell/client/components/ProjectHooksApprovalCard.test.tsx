@@ -70,7 +70,7 @@ describe('ProjectHooksApprovalCard', () => {
       .querySelector<HTMLButtonElement>('[data-option-id="hooks_approve"]')!
       .click();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(approveWorkspaceHooks).toHaveBeenCalledWith('approve');
+    expect(approveWorkspaceHooks).toHaveBeenCalledWith('approve', undefined);
   });
 
   it('reject records the keep-disabled decision', async () => {
@@ -84,7 +84,28 @@ describe('ProjectHooksApprovalCard', () => {
       .querySelector<HTMLButtonElement>('[data-option-id="hooks_reject"]')!
       .click();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(approveWorkspaceHooks).toHaveBeenCalledWith('reject');
+    expect(approveWorkspaceHooks).toHaveBeenCalledWith('reject', undefined);
+  });
+
+  it('echoes the rendered block hash with the decision', async () => {
+    workspaceHooks.mockResolvedValue({
+      pendingApproval: true,
+      pendingApprovalHash: 'rendered-hash',
+      hooks: [],
+    });
+    approveWorkspaceHooks.mockResolvedValue({
+      decision: 'approve',
+      reloaded: true,
+    });
+    const element = await mount();
+    element
+      .querySelector<HTMLButtonElement>('[data-option-id="hooks_approve"]')!
+      .click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(approveWorkspaceHooks).toHaveBeenCalledWith(
+      'approve',
+      'rendered-hash',
+    );
   });
 
   it('stays hidden when nothing awaits approval', async () => {

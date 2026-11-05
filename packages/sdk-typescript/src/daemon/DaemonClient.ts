@@ -1945,13 +1945,16 @@ export class DaemonClient {
 
   async approveWorkspaceHooks(
     decision: 'approve' | 'reject',
+    hash?: string,
   ): Promise<{ decision: 'approve' | 'reject'; reloaded: boolean }> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/hooks/approve`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ decision }),
+        body: JSON.stringify(
+          hash === undefined ? { decision } : { decision, hash },
+        ),
       },
       async (res) => {
         if (!res.ok) {
@@ -8612,11 +8615,12 @@ export class WorkspaceDaemonClient {
 
   approveWorkspaceHooks(
     decision: 'approve' | 'reject',
+    hash?: string,
   ): Promise<{ decision: 'approve' | 'reject'; reloaded: boolean }> {
     return this.post(
       '/hooks/approve',
       'POST /workspaces/:workspace/hooks/approve',
-      { decision },
+      hash === undefined ? { decision } : { decision, hash },
     );
   }
 

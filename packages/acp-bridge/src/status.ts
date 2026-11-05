@@ -1601,6 +1601,13 @@ export interface ServeWorkspaceHooksStatus {
   pendingApproval?: boolean;
   /** Sanitized display lines of the withheld hooks, for the approval prompt. */
   pendingApprovalHooks?: string[];
+  /**
+   * The canonical hash of the block this prompt renders. The client echoes
+   * it back with the decision so the daemon binds that decision to the
+   * exact block the user reviewed; a block that changed since the render
+   * stays pending instead of being approved unseen.
+   */
+  pendingApprovalHash?: string;
   errors?: ServeStatusCell[];
 }
 

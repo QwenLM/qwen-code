@@ -56,6 +56,7 @@ import { loadSettings } from '../../config/settings.js';
 import {
   getProjectHooksApprovalState,
   getProjectHooksForApprovalFromRawWorkspace,
+  hashProjectHooks,
   loadHookApprovals,
   summarizeProjectHooks,
 } from '../../config/hook-approvals.js';
@@ -93,6 +94,7 @@ import {
   WorkspaceSettingsPartialPersistError,
   WorkspaceTrustGrantIneffectiveError,
   WorkspaceProjectHooksNotPendingError,
+  WorkspaceProjectHooksChangedError,
 } from './types.js';
 import type {
   DaemonWorkspaceService,
@@ -810,6 +812,7 @@ export function createDaemonWorkspaceService(
             approval.resolved,
             approval.hooks,
           ),
+          pendingApprovalHash: hashProjectHooks(approval),
         };
       } catch {
         return status;
@@ -826,24 +829,11 @@ export function createDaemonWorkspaceService(
     async approveProjectHooks(
       _ctx: WorkspaceRequestContext,
       decision: 'approve' | 'reject',
+      expectedHash?: string,
     ) {
       assertActiveGeneration();
-      // The live child rendered the card, so it persists the decision against
-      // that exact read. A re-read here could bind approval to a block the
-      // user never saw.
-      try {
-        const applied = await invokeWorkspaceCommand<{ reloaded?: boolean }>(
-          SERVE_CONTROL_EXT_METHODS.projectHooksApprove,
-          { decision },
-        );
-        if (applied?.reloaded) {
-          return { decision, reloaded: true };
-        }
-      } catch {
-        // No live channel, or the child predates the control method.
-      }
-      // Cold daemon: no child rendered a card, so this read is the subject
-      // the client was shown.
+      // Load the workspace file for review only; this never trusts the
+      // folder or feeds the execution accessors.
       const settings = loadSettings(boundWorkspace, {
         skipLoadEnvironment: true,
         skipWorkspaceSettings: false,
@@ -854,14 +844,32 @@ export function createDaemonWorkspaceService(
       if (!approval) {
         throw new WorkspaceProjectHooksNotPendingError();
       }
+      const approvalHash = hashProjectHooks(approval);
+      // The client echoes the hash it rendered; a block that changed since
+      // then must not be persisted as approved unseen — the user reviews the
+      // new block and decides again.
+      if (expectedHash !== undefined && expectedHash !== approvalHash) {
+        throw new WorkspaceProjectHooksChangedError();
+      }
       await loadHookApprovals().setState(
         approval,
         decision === 'approve' ? 'approved' : 'rejected',
       );
       assertActiveGeneration();
-      // The persisted decision is authoritative; every config re-reads the
-      // store on reload, so a cold daemon applies it on next start.
-      return { decision, reloaded: false };
+      // Best-effort live propagation: the persisted decision is
+      // authoritative, and every config re-reads the store on reload. A
+      // cold daemon (no ACP child) simply applies it on next start.
+      let reloaded = false;
+      try {
+        await invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.projectHooksApprove,
+          { decision, hash: approvalHash },
+        );
+        reloaded = true;
+      } catch {
+        // No live channel, or the child predates the control method.
+      }
+      return { decision, reloaded };
     },
 
     async getWorkspaceTrustStatus(_ctx: WorkspaceRequestContext) {
