@@ -74,9 +74,13 @@ final class LocalStorageOwners {
     }
 
     static String key(JdbcTemplate jdbc, String tenant, String storage) {
-        String lock = TransactionSynchronizationManager.isActualTransactionActive() ? " FOR UPDATE" : "";
-        var alias = alias(jdbc, tenant, storage, lock);
-        requireOwner(jdbc, alias, lock);
+        return key(jdbc, tenant, storage, TransactionSynchronizationManager.isActualTransactionActive());
+    }
+
+    static String key(JdbcTemplate jdbc, String tenant, String storage, boolean lock) {
+        String clause = lock ? " FOR UPDATE" : "";
+        var alias = alias(jdbc, tenant, storage, clause);
+        requireOwner(jdbc, alias, clause);
         return (String) alias.get("physical_key");
     }
 
