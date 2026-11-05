@@ -426,6 +426,30 @@ describe('daemon update routes', () => {
     expect(mocks.standalone).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ['2.0.0-nightly.1', 'a prerelease below the prepared release'],
+    ['1.9.0', 'a registry rollback'],
+    ['2.0.0+build.9', 'build metadata that does not change precedence'],
+    ['not-a-version', 'a malformed registry value'],
+  ])('never restages to %s (%s)', async (latest) => {
+    const activated: string[] = [];
+    mocks.standalone.mockImplementation(
+      async (_dir: string, version: string) => ({
+        activate: async () => {
+          activated.push(version);
+        },
+        cleanup: async () => {},
+      }),
+    );
+    const app = await makeApp();
+    await ready(app);
+    mocks.check.mockResolvedValue(release(latest));
+    await request(app).post('/daemon/update/restart').send({}).expect(202);
+    await vi.waitFor(() => expect(mocks.restart).toHaveBeenCalledTimes(1));
+    expect(activated).toEqual(['2.0.0']);
+    expect(mocks.standalone).toHaveBeenCalledTimes(1);
+  });
+
   it('applies the prepared release when staging the newer one fails', async () => {
     const events: string[] = [];
     mocks.standalone.mockImplementation(
@@ -498,6 +522,77 @@ describe('daemon update routes', () => {
     );
     expect(mocks.restart).not.toHaveBeenCalled();
     expect(cleaned).toEqual(['2.0.0', '3.0.0']);
+  });
+
+  it('still activates the newer release when discarding the old payload fails', async () => {
+    const events: string[] = [];
+    mocks.standalone.mockImplementation(
+      async (_dir: string, version: string) => ({
+        activate: async () => {
+          events.push(`activate:${version}`);
+        },
+        cleanup: async () => {
+          events.push(`cleanup:${version}`);
+          if (version === '2.0.0') throw new Error('rm failed');
+        },
+      }),
+    );
+    const app = await makeApp();
+    await ready(app);
+    mocks.check.mockResolvedValue(release('3.0.0'));
+    await request(app).post('/daemon/update/restart').send({}).expect(202);
+    await vi.waitFor(() => expect(mocks.restart).toHaveBeenCalledTimes(1));
+    // Committing to the newer payload must not depend on discarding the old
+    // one: a failed discard leaks disk, but must not orphan the new payload
+    // and fall back to a possibly half-removed old one.
+    expect(events).toContain('activate:3.0.0');
+    expect(events).not.toContain('activate:2.0.0');
+  });
+
+  it('keeps a restart in flight when the operator disables automatic updates', async () => {
+    const activation = deferred<void>();
+    const events: string[] = [];
+    mocks.standalone.mockImplementation(
+      async (_dir: string, version: string) => ({
+        activate: async () => {
+          events.push(`activate:${version}`);
+          await activation.promise;
+        },
+        cleanup: async () => {
+          events.push(`cleanup:${version}`);
+        },
+      }),
+    );
+    const app = await makeApp();
+    await ready(app);
+    mocks.check.mockResolvedValue(release('3.0.0'));
+    await request(app).post('/daemon/update/restart').send({}).expect(202);
+    await vi.waitFor(() => expect(events).toContain('activate:3.0.0'));
+    expect(events).toEqual(['cleanup:2.0.0', 'activate:3.0.0']);
+    // Restaging widened the window between the authority check and process
+    // replacement to minutes. The operator turning updates off mid-flight,
+    // other clients polling and retrying, and an ordinary shutdown must none
+    // of them disturb the restart that was already authorized.
+    mocks.settings.mockReturnValue({
+      merged: { general: { enableAutoUpdate: false } },
+    });
+    expect((await request(app).get('/daemon/update')).body.state).toBe(
+      'restarting',
+    );
+    expect(
+      (await request(app).get('/daemon/update?refresh=true')).body.state,
+    ).toBe('restarting');
+    await request(app).post('/daemon/update/prepare').send({}).expect(202);
+    await request(app).post('/daemon/update/restart').send({}).expect(202);
+    await (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)();
+    expect(events).toEqual(['cleanup:2.0.0', 'activate:3.0.0']);
+    activation.resolve();
+    await vi.waitFor(() => expect(mocks.restart).toHaveBeenCalledTimes(1));
+    expect(events).toEqual([
+      'cleanup:2.0.0',
+      'activate:3.0.0',
+      'cleanup:3.0.0',
+    ]);
   });
 
   it('restarts a launcher-less standalone install through its PATH wrapper', async () => {

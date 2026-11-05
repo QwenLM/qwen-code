@@ -830,7 +830,10 @@ launcher; clients cannot supply a version or command.
   the daemon re-resolves the current release once: if it is newer than the
   prepared one and one-click covers it, the newer release is staged and the
   prepared payload is discarded, so a long-lived daemon lands on the current
-  latest rather than on whatever was latest when it first prepared. `latestVersion`
+  latest rather than on whatever was latest when it first prepared. The newer
+  payload is committed to before the superseded one is discarded, and that
+  discard is best-effort: a failed discard leaks disk but never orphans the
+  newer payload or falls back to one that may be half removed. `latestVersion`
   then reports the newer target while `state` stays `restarting`. A failed
   re-resolve or staging applies the prepared release instead; the click is never
   stranded on the running version by a registry failure. The replacement
@@ -840,7 +843,11 @@ launcher; clients cannot supply a version or command.
   captured when the update was requested. Because staging runs after the `202`
   and can take minutes, the client measures its restart deadline from continuous
   unreachability, not from the click: a daemon that keeps answering is still
-  working. Standalone launcher validation runs before closing
+  working. Once the restart is acknowledged, `restarting` is sticky until the
+  process is replaced, so a reachable daemon that reports any other state with an
+  unchanged `currentVersion` means the replacement did not land on the new build;
+  the client stops waiting, publishes that settled state, and reports a failure
+  rather than waiting forever for a version change. Standalone launcher validation runs before closing
   services; a failed check leaves the daemon running. Failures after shutdown
   begins or during process replacement are not guaranteed to recover.
 
@@ -857,6 +864,10 @@ Ordinary daemon shutdown discards the prepared download. Activation
 failures keep the daemon running and report `error`; the next check after the
 one-minute error cache can prepare a new download for retry. Disabling automatic
 updates removes readiness and cleans the download before a restart can begin.
+Once a restart is in flight it is undisturbed: while the state is `restarting`
+the status, prepare and restart routes all return without consulting the
+operator setting, and shutdown cleanup is a no-op, so a restage that takes
+minutes cannot have its payload pulled out from under it.
 Clicking the button in the ready state explicitly restarts the entire daemon
 and interrupts its active sessions.
 

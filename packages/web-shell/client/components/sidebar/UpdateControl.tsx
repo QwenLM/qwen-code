@@ -45,6 +45,10 @@ export function UpdateControl({
     url: string;
   } | null>(null);
   const restartRequested = useRef(false);
+  // Polling starts when the click sets `restarting`, before the restart POST
+  // resolves, so the first poll can still observe the pre-click state. Only
+  // an acknowledged restart makes a settled state meaningful.
+  const restartAcknowledged = useRef(false);
   const clientGeneration = useRef(0);
   const callbacks = useRef({ onError, onRestarted, t });
   callbacks.current = { onError, onRestarted, t };
@@ -53,6 +57,7 @@ export function UpdateControl({
     setStatus(null);
     setRestarting(null);
     restartRequested.current = false;
+    restartAcknowledged.current = false;
     return () => {
       clientGeneration.current += 1;
     };
@@ -86,6 +91,23 @@ export function UpdateControl({
             setRestarting(null);
             callbacks.current.onError(
               new Error(next.message),
+              callbacks.current.t('update.failed'),
+            );
+            return;
+          }
+          if (restartAcknowledged.current && next.state !== 'restarting') {
+            // The daemon settled without changing version, so the process
+            // replacement did not land on the new build. Nothing further will
+            // arrive; waiting for a version change would hang the control.
+            restartRequested.current = false;
+            restartAcknowledged.current = false;
+            // Publish the settled state: leaving the last `restarting` status
+            // in place would hide the control entirely instead of handing the
+            // user back whatever the daemon now offers.
+            setStatus(next);
+            setRestarting(null);
+            callbacks.current.onError(
+              new Error(callbacks.current.t('update.failed')),
               callbacks.current.t('update.failed'),
             );
             return;
@@ -126,6 +148,7 @@ export function UpdateControl({
   const restart = async () => {
     if (restartRequested.current) return;
     restartRequested.current = true;
+    restartAcknowledged.current = false;
     const generation = clientGeneration.current;
     setRestarting({
       version: status?.currentVersion || currentVersion,
@@ -133,6 +156,8 @@ export function UpdateControl({
     });
     try {
       await client.restartDaemonForUpdate();
+      if (generation !== clientGeneration.current) return;
+      restartAcknowledged.current = true;
     } catch (error) {
       if (generation !== clientGeneration.current) return;
       restartRequested.current = false;

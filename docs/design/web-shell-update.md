@@ -32,8 +32,16 @@ existing graceful shutdown path; it does not resume an interrupted model turn.
   every process start. Readiness itself stays pinned — polling never
   re-downloads — so the re-resolve belongs to the click, not to the check. A
   failed re-resolve or staging applies the prepared release: a registry failure
-  must not strand an explicit update request on the running version. Staging runs
-  after the acknowledgement because it can take minutes. Then close daemon
+  must not strand an explicit update request on the running version. Commit to
+  the newer payload before discarding the superseded one, and treat that discard
+  as best-effort — a failed discard leaks disk, but must not orphan the payload
+  just staged or fall back to one that may already be half removed. Staging runs
+  after the acknowledgement because it can take minutes, and that window must be
+  undisturbed: while the state is restarting, the status, prepare and restart
+  routes return without consulting the operator setting and shutdown cleanup is
+  a no-op, so neither disabling automatic updates nor concurrent clients nor an
+  ordinary shutdown can pull the payload out from under an authorized restart.
+  Then close daemon
   services and replace the process with `process.execve`. Preserve PID, startup
   directory, bound primary port, authentication token, and CLI arguments; discard
   managed version pins and browser-opening flags so the new launcher selects the
@@ -77,7 +85,14 @@ existing graceful shutdown path; it does not resume an interrupted model turn.
   click: the daemon keeps answering while it re-resolves and stages, which can
   outlast any fixed click-time budget, and a reachable daemon is still working.
   If it has been unreachable for 60 seconds, show an error on the first completed
-  poll.
+  poll. Unreachability is not the only terminal condition. Restarting is sticky
+  until the process is replaced, so once the restart is acknowledged a reachable
+  daemon reporting any other state with an unchanged running version means the
+  replacement did not land on the new build: stop waiting, publish that settled
+  state so the control offers whatever the daemon now reports, and report a
+  failure. Dropping the click-time budget must not leave the control waiting
+  forever for a version change that will never arrive, nor hide the control by
+  leaving a stale restarting status rendered.
   Unmounting cancels browser polling, not daemon work.
 - Hide the control for older daemons and the desktop shell. Custom footer items
   can omit `update`; this also disables the browser's preparation requests.
@@ -113,13 +128,23 @@ paths: a newer release replaces the prepared payload and the old one is cleaned;
 polling alone never re-downloads; and an unreachable registry, a release with
 nothing newer, a newer release without a one-click path, and a failed restage
 each apply the prepared payload, with the failed restage leaving it intact until
-after activation.
+after activation. Pin the comparison direction against a prerelease below the
+prepared release, a registry rollback, build metadata that does not change
+precedence, and a malformed registry value — none may restage. Pin that a failed
+discard of the superseded payload still activates the newer one, and that an
+in-flight restart survives the operator disabling automatic updates, concurrent
+polls and retries, and ordinary shutdown.
 
 Test hidden/up-to-date/downloading/ready/restarting/error states, explicit-only
 activation, disconnection/recovery, timeout, collapsed controls, narrow layouts,
 and bilingual labels. The timeout coverage must distinguish a reachable daemon
 that is still staging from an unreachable one: only continuous downtime trips the
-deadline, and a successful poll restarts it. Build, typecheck, bundle, run focused package tests, and
+deadline, and a successful poll restarts it. A daemon that comes back settled on
+the same version must also terminate the wait, report a failure, and hand back an
+actionable control instead of hanging or disappearing. Browser fixtures must
+model the daemon's own contract — restarting from the acknowledged restart until
+the process is replaced — because a fixture that keeps reporting a prepared state
+after the click cannot exercise that distinction. Build, typecheck, bundle, run focused package tests, and
 verify the packaged daemon plus browser flow. Record limitations separately.
 The browser regression must drive a restart-time session 404, observe the shell's
 own navigation, then verify recovery restores the original task URL.

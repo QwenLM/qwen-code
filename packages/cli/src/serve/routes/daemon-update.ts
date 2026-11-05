@@ -285,9 +285,14 @@ function createUpdateController(deps: UpdateRouteDeps) {
       const target = await resolveInstallTarget(latestVersion);
       if (!target.prepare) return candidate;
       const staged = await target.prepare();
-      await candidate.cleanup();
       prepared = staged;
       if (status) status = { ...status, latestVersion };
+      // Commit to the newer payload before discarding the old one. A failed
+      // discard leaks disk, but must not orphan the payload just staged and
+      // fall back to one that may already be half removed.
+      await Promise.resolve()
+        .then(() => candidate.cleanup())
+        .catch(() => undefined);
       return staged;
     } catch (error) {
       writeStderrLine(
