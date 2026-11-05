@@ -121,6 +121,27 @@ export function isTerminalUnknownRejection(
   );
 }
 
+/**
+ * The release-mount handback sweeps nothing (unlike the drain release), so it
+ * refuses while any work is still live or unproven — background processes
+ * included. Those refusals are the handback's "keep it attached, retry once it
+ * settles" fence (R14-2): an owner closing non-terminally names them as
+ * recovery-required instead of letting a raw rejection escape as a generic
+ * close failure. The codes are the documented release-mount refusals
+ * (docs/design/workspace-execution-mount-recovery-block-release.md).
+ */
+export function fencedMountHandback(
+  cause: unknown,
+): cause is HostedWorkspaceBrokerRejection {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    cause.status === 409 &&
+    (cause.code === 'runtime_session_busy' ||
+      cause.code === 'runtime_session_conflict' ||
+      cause.code === 'workspace_writer_unproven')
+  );
+}
+
 /** A recovery read asked the original Runtime once and still could not prove
  * whether the command committed. The caller reports the execution as unknown
  * and re-checks later; it must never dispatch the command again. */

@@ -303,7 +303,7 @@ it('pins discovery, commits raw resource results and replays without another eff
   await expect(
     mcp.invoke(operationId, 'demo', { kind: 'resource_read', uri: 'other' }),
   ).rejects.toThrow('conflicts');
-  await mcp.close();
+  await mcp.close({ terminal: true });
   expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
 });
 
@@ -450,7 +450,7 @@ it('resumes an unsent operation after a failed dispatch commit and a status quer
       .map((entry) => entry.operationId),
   ).toEqual([operationId]);
   expect(reloaded.hasPendingOperations()).toBe(false);
-  await reloaded.close();
+  await reloaded.close({ terminal: true });
 });
 
 it('cancels an unsent operation durably without invoking it on a later retry', async () => {
@@ -486,7 +486,7 @@ it('cancels an unsent operation durably without invoking it on a later retry', a
     ),
   ).toHaveLength(0);
   expect(reloaded.hasPendingOperations()).toBe(false);
-  await reloaded.close();
+  await reloaded.close({ terminal: true });
 });
 
 it.each([false, true])(
@@ -495,7 +495,7 @@ it.each([false, true])(
     const operationId = randomUUID();
     const request = { kind: 'resource_read' as const, uri: 'memory://blob' };
     const response = await mcp.invoke(operationId, 'demo', request);
-    if (released) await mcp.close();
+    if (released) await mcp.close({ terminal: true });
     const reloaded = new HostedMcpSession(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       session,
@@ -524,7 +524,7 @@ it('commits its owner identity before acquiring and resumes a never-dispatched i
     new Error('store unavailable'),
   );
   await expect(mcp.ensureReady()).rejects.toThrow('store unavailable');
-  await mcp.close();
+  await mcp.close({ terminal: true });
   expect(HostedWorkspaceBroker.prototype.acquire).not.toHaveBeenCalled();
   expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
   vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockRejectedValueOnce(
@@ -543,7 +543,7 @@ it('commits its owner identity before acquiring and resumes a never-dispatched i
       .filter((entry) => entry.kind === 'mcp-configure')
       .map((entry) => entry.operationId),
   ).toEqual([intent.configurationId]);
-  await mcp.close();
+  await mcp.close({ terminal: true });
 });
 
 it('reconciles a temporarily unknown configuration without repeating its effect', async () => {
@@ -569,7 +569,7 @@ it('reconciles a temporarily unknown configuration without repeating its effect'
     requests.filter((entry) => entry.kind === 'mcp-configure'),
   ).toHaveLength(1);
   expect(mcp.getCatalogs()).toHaveLength(1);
-  await mcp.close();
+  await mcp.close({ terminal: true });
 });
 
 it.each(['settled', 'failed'] as const)(
@@ -591,10 +591,12 @@ it.each(['settled', 'failed'] as const)(
     const initialId = requests[0].operationId;
     const original = replies.get(initialId)!;
     replies.set(initialId, { operationId: initialId, state: 'running' });
-    await expect(mcp.close()).rejects.toThrow('reconciliation');
+    await expect(mcp.close({ terminal: true })).rejects.toThrow(
+      'reconciliation',
+    );
     expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
     replies.set(initialId, original);
-    await mcp.close();
+    await mcp.close({ terminal: true });
     expect(
       requests.filter((entry) => entry.kind === 'mcp-configure'),
     ).toHaveLength(1);
@@ -638,7 +640,7 @@ it('reconciles an older unknown configuration during close after a legacy writer
     session,
     [pin],
   );
-  await reloaded.close();
+  await reloaded.close({ terminal: true });
   expect(
     requests.filter((entry) => entry.kind === 'mcp-configure'),
   ).toHaveLength(2);
@@ -679,7 +681,9 @@ it.each([false, true])(
             throw new Error('drain commit interrupted');
           return commit(...args);
         });
-      await expect(mcp.close()).rejects.toThrow('drain commit interrupted');
+      await expect(mcp.close({ terminal: true })).rejects.toThrow(
+        'drain commit interrupted',
+      );
       save.mockRestore();
       mcp = new HostedMcpSession(
         { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -687,7 +691,7 @@ it.each([false, true])(
         [pin],
       );
     }
-    await mcp.close();
+    await mcp.close({ terminal: true });
     const configuration = parseMcpConfiguration(
       session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
     );
@@ -827,7 +831,7 @@ it('separates effect reconciliation from H1 release and restores the exact v2 ow
   );
   expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
   vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockClear();
-  await restored.closeResources();
+  await restored.closeResources({ terminal: true });
   expect(restored.broker.runtimeSessionId).toBe(owner);
   expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalledWith({
     runtimeBindingId: 'binding',
@@ -858,6 +862,41 @@ it('does not release a v2 owner while a dispatched business result is unknown', 
   expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
 });
 
+it('hands the mount back without tombstoning the owner on a non-terminal close (R14-1)', async () => {
+  await mcp.ensureReady();
+  const owner = mcp.broker.runtimeSessionId;
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'mcp-detach-claim',
+  );
+  const releaseMount = vi
+    .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+    .mockResolvedValue();
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  release.mockClear();
+  // A bare closeResources is a detach: it hands the mount back but must not
+  // terminally release the owner a reload recomputes.
+  await mcp.closeResources();
+  expect(releaseMount).toHaveBeenCalledWith('mcp-detach-claim');
+  expect(release).not.toHaveBeenCalled();
+  // The drained configurations stay short of `released` on purpose: the reload
+  // derives the owner id from the configurations that are not `released`, so
+  // marking them released would recompute a different id and strand this one.
+  expect(
+    session.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .every(
+        (entry) =>
+          parseMcpConfiguration(entry.record).releaseState !== 'released',
+      ),
+  ).toBe(true);
+  const reloaded = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin],
+  );
+  expect(reloaded.broker.runtimeSessionId).toBe(owner);
+});
+
 it('restores the original owner before close and uses fresh identities after confirmed release', async () => {
   await mcp.ensureReady();
   const original = mcp.broker.runtimeSessionId;
@@ -867,7 +906,7 @@ it('restores the original owner before close and uses fresh identities after con
     [pin],
   );
   expect(reloaded.broker.runtimeSessionId).toBe(original);
-  await reloaded.close();
+  await reloaded.close({ terminal: true });
   expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
     1,
   );
@@ -881,7 +920,7 @@ it('restores the original owner before close and uses fresh identities after con
     expect(identities.has(next.broker.runtimeSessionId)).toBe(false);
     identities.add(next.broker.runtimeSessionId);
     await next.ensureReady();
-    await next.close();
+    await next.close({ terminal: true });
   }
   for (const runtimeSessionId of identities) {
     expect(() =>
@@ -911,7 +950,9 @@ it('does not bypass durable pending work when a newly loaded Session is closed',
     session,
     [pin],
   );
-  await expect(reloaded.close()).rejects.toThrow('reconciliation');
+  await expect(reloaded.close({ terminal: true })).rejects.toThrow(
+    'reconciliation',
+  );
   expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
 });
 
@@ -920,7 +961,7 @@ it('confirms a lost Broker release acknowledgement before marking connections re
   vi.mocked(HostedWorkspaceBroker.prototype.release).mockRejectedValueOnce(
     new Error('lost ack'),
   );
-  await expect(mcp.close()).rejects.toThrow('lost ack');
+  await expect(mcp.close({ terminal: true })).rejects.toThrow('lost ack');
   expect(
     parseMcpConfiguration(
       session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
@@ -939,7 +980,7 @@ it('confirms a lost Broker release acknowledgement before marking connections re
   vi.mocked(HostedWorkspaceBroker.prototype.control)
     .mockClear()
     .mockRejectedValue(new Error('runtime_session_not_ready'));
-  await reloaded.close();
+  await reloaded.close({ terminal: true });
   expect(HostedWorkspaceBroker.prototype.acquire).not.toHaveBeenCalled();
   expect(HostedWorkspaceBroker.prototype.control).not.toHaveBeenCalled();
   expect(
@@ -967,7 +1008,9 @@ it('does not release the owner until the physical drain receipt is durably commi
         throw new Error('drain receipt commit failed');
       return commit(...args);
     });
-  await expect(mcp.close()).rejects.toThrow('drain receipt commit failed');
+  await expect(mcp.close({ terminal: true })).rejects.toThrow(
+    'drain receipt commit failed',
+  );
   expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
   save.mockRestore();
   const owner = mcp.broker.runtimeSessionId;
@@ -976,7 +1019,7 @@ it('does not release the owner until the physical drain receipt is durably commi
     session,
     [pin],
   );
-  await mcp.close();
+  await mcp.close({ terminal: true });
   expect(mcp.broker.runtimeSessionId).toBe(owner);
   expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
     1,
@@ -1028,7 +1071,9 @@ it.each([
       failure,
     );
     const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
-    await expect(mcp.close()).rejects.toThrow(failure.message);
+    await expect(mcp.close({ terminal: true })).rejects.toThrow(
+      failure.message,
+    );
     expect(mcp.broker.runtimeSessionId).toBe(owner);
     expect(release).not.toHaveBeenCalled();
     expect(
@@ -1067,7 +1112,7 @@ it('keeps advertised calls on their original catalog when a newer definition is 
   await expect(mcp.configure(randomUUID(), pin, 1)).rejects.toThrow(
     'revision conflicts',
   );
-  await mcp.close();
+  await mcp.close({ terminal: true });
   expect(
     requests.filter((request) => request.kind === 'mcp-release'),
   ).toHaveLength(2);
@@ -1110,7 +1155,7 @@ it('advances past a failed replacement revision while retaining the published ca
   );
   await mcp.configure(randomUUID(), pin, 2);
   expect(mcp.getCatalogs()[0].configRevision).toBe(3);
-  await mcp.close();
+  await mcp.close({ terminal: true });
 });
 
 it('keeps unknown effects blocked, records cancellation, and accepts a known late result', async () => {
@@ -1122,7 +1167,7 @@ it('keeps unknown effects blocked, records cancellation, and accepts a known lat
     arguments: {},
   });
   expect(response.state).toBe('outcome_unknown');
-  await expect(mcp.close()).rejects.toThrow('reconciliation');
+  await expect(mcp.close({ terminal: true })).rejects.toThrow('reconciliation');
   await mcp.cancel(operationId);
   const committed = parseMcpOperation(
     session.authority.extensionRecord('mcp_operation', operationId)!.record,
@@ -1150,7 +1195,7 @@ it('keeps unknown effects blocked, records cancellation, and accepts a known lat
   expect(
     requests.filter((request) => request.kind === 'mcp-invoke'),
   ).toHaveLength(1);
-  await mcp.close();
+  await mcp.close({ terminal: true });
 });
 
 it('hands its mount back after a recovery block only once its MCP work settles, then claims it again (#13800)', async () => {
@@ -1190,7 +1235,7 @@ it('hands its mount back after a recovery block only once its MCP work settles, 
     uri: 'memory://blob',
   });
   expect(acquire).toHaveBeenCalled();
-  await mcp.close();
+  await mcp.close({ terminal: true });
 });
 
 it('refuses duplicate servers, unpinned definitions and credentials in Hosted input', () => {
@@ -1295,7 +1340,7 @@ it('does not let a stale cancel intent claim not-started after invocation dispat
   expect(requests.filter((entry) => entry.kind === 'mcp-cancel')).toHaveLength(
     1,
   );
-  await mcp.close();
+  await mcp.close({ terminal: true });
 });
 
 it('stops refresh after cancellation without configuring a changed catalog or polling again', async () => {
@@ -1331,7 +1376,7 @@ it('stops refresh after cancellation without configuring a changed catalog or po
   expect(await refresh).toBe(reason);
   expect(control.mock.calls).toHaveLength(count);
   expect(mcp.getCatalogs()).toEqual([original]);
-  await mcp.close();
+  await mcp.close({ terminal: true });
 });
 
 it.each([
@@ -1375,7 +1420,7 @@ it.each([
       if (drained.size !== count)
         throw new Error('connection still holds its owner');
     });
-    await expect(mcp.close()).rejects.toBeInstanceOf(
+    await expect(mcp.close({ terminal: true })).rejects.toBeInstanceOf(
       HostedMcpRecoveryRequiredError,
     );
     expect(release).not.toHaveBeenCalled();
@@ -1385,7 +1430,7 @@ it.each([
         session,
         pins,
       );
-    await mcp.close();
+    await mcp.close({ terminal: true });
     expect(release).toHaveBeenCalledOnce();
     expect(releases).toHaveLength(count + 1);
     const identities = releases.map((operation) => {
@@ -1441,7 +1486,7 @@ it('discards discovery from a configuration superseded while the request was pen
     expect(
       requests.filter((entry) => entry.kind === 'mcp-configure'),
     ).toHaveLength(2);
-    await mcp.close();
+    await mcp.close({ terminal: true });
   } finally {
     reply({ operationId: operationId!, state: 'outcome_unknown' });
     await refreshing;
@@ -1509,7 +1554,7 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
         timeout: 10_000,
       });
       abort.abort(reason);
-      await expect(mcp.close()).rejects.toBeInstanceOf(
+      await expect(mcp.close({ terminal: true })).rejects.toBeInstanceOf(
         HostedMcpRecoveryRequiredError,
       );
       expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
@@ -1518,7 +1563,7 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       expect(
         requests.filter((entry) => entry.kind === 'mcp-configure'),
       ).toHaveLength(phase === 'dispatch_started' ? 2 : 1);
-      await mcp.close();
+      await mcp.close({ terminal: true });
       expect(
         requests.filter((entry) => entry.kind === 'mcp-configure'),
       ).toHaveLength(phase === 'dispatch_started' ? 2 : 1);
@@ -1582,7 +1627,7 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
         session.authority.extensionRecordsInDomain('mcp_configuration')[0];
       abort.abort(reason);
       expect(await initializing).toBe(reason);
-      await expect(mcp.close()).rejects.toBeInstanceOf(
+      await expect(mcp.close({ terminal: true })).rejects.toBeInstanceOf(
         HostedMcpRecoveryRequiredError,
       );
       expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
@@ -1614,7 +1659,7 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       expect(parseMcpConfiguration(after.record).runtimeSessionId).toBe(
         parseMcpConfiguration(before.record).runtimeSessionId,
       );
-      await mcp.close();
+      await mcp.close({ terminal: true });
       if (phase !== 'dispatch_started') expect(requests).toHaveLength(0);
     } finally {
       finish();
@@ -1699,7 +1744,7 @@ it('manages all published selections without changing admission, releasing the s
   }
   await mcp.ensureReady();
   expect(mcp.tools()).toHaveLength(2);
-  await mcp.closeResources();
+  await mcp.closeResources({ terminal: true });
   expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledTimes(1);
 });
 
@@ -1755,7 +1800,7 @@ it('persists removal across cold load and Session rename without reviving a serv
   expect(
     requests.filter((entry) => entry.kind === 'mcp-configure'),
   ).toHaveLength(starts);
-  await restored.closeResources();
+  await restored.closeResources({ terminal: true });
   expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledTimes(1);
 });
 

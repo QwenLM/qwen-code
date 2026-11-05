@@ -2904,6 +2904,14 @@ describe('Hosted Harness no-tool session', () => {
     expect(
       requests.filter((request) => request.kind === 'mcp-release'),
     ).toHaveLength(0);
+    // R14-1: kind:'close' is a detach — the owner hands its mount back through
+    // releaseMount but stays re-acquirable; only a delete terminally releases.
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'v2-close-claim',
+    );
+    const releaseMount = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+      .mockResolvedValue();
     for (const phase of ['prepare_resources', 'settle_resources']) {
       await authorize(
         supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
@@ -2914,7 +2922,8 @@ describe('Hosted Harness no-tool session', () => {
     expect(
       requests.filter((request) => request.kind === 'mcp-release'),
     ).toHaveLength(1);
-    expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalled();
+    expect(releaseMount).toHaveBeenCalledWith('v2-close-claim');
+    expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
     expect(state.model).not.toHaveBeenCalled();
     await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .send({ authority: operation.authority })
@@ -23973,6 +23982,34 @@ describe('Hosted Harness tool approvals', () => {
       ],
     };
     const hookOwners: string[] = [];
+    // R14-1: track terminal releases as durable RELEASED tombstones. The
+    // enable() owner swap closes the previous owner; a post-swap apply failure
+    // leaves the durable active naming the previous revision, so a reload
+    // recomputes that same id and must still re-acquire it.
+    const releasedOwners = new Set<string>();
+    vi.mocked(HostedWorkspaceBroker.prototype.release).mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        releasedOwners.add(this.runtimeSessionId);
+      },
+    );
+    vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        if (releasedOwners.has(this.runtimeSessionId))
+          throw new HostedWorkspaceBrokerRejection(
+            409,
+            'runtime_session_not_acquirable',
+          );
+        this.runtime = {
+          bindingId: 'original-binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'releaseMount',
+    ).mockResolvedValue();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
       async function (this: HostedWorkspaceBroker, operation) {
         if (operation.kind === 'hook-catalog')
@@ -24104,6 +24141,10 @@ describe('Hosted Harness tool approvals', () => {
         .update(JSON.stringify([sessionKey, revision]))
         .digest('hex')}`;
     expect(hookOwners[0]).toBe(ownerFor(1));
+    // R14-1: the swap handed the old owner's mount back non-terminally. Its id
+    // must stay re-acquirable — a post-swap apply failure leaves the durable
+    // active naming revision 1, and the reload recomputes exactly this id.
+    expect(releasedOwners.has(ownerFor(1))).toBe(false);
     await authorize(
       supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
     )
@@ -26119,7 +26160,7 @@ describe('Hosted Harness tool approvals', () => {
     expect(acquire.mock.contexts).toEqual([mcp.broker]);
     expect(mcp.mountHeld).toBe(true);
     expect(release).not.toHaveBeenCalled();
-    await mcp.closeResources();
+    await mcp.closeResources({ terminal: true });
     expect(release).toHaveBeenCalledOnce();
     expect(mcp.mountHeld).toBe(false);
   });

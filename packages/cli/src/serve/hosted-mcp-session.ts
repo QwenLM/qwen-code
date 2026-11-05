@@ -24,6 +24,7 @@ import {
   type ManagedMcpOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import {
+  fencedMountHandback,
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
   type HostedWorkspaceBrokerOptions,
@@ -993,9 +994,9 @@ export class HostedMcpSession {
     );
   }
 
-  async close(): Promise<void> {
+  async close(opts: { terminal?: boolean } = {}): Promise<void> {
     await this.reconcileEffects();
-    await this.closeResources();
+    await this.closeResources(opts);
   }
 
   async reconcileEffects(): Promise<void> {
@@ -1051,7 +1052,11 @@ export class HostedMcpSession {
     }
   }
 
-  async closeResources(): Promise<void> {
+  async closeResources(opts: { terminal?: boolean } = {}): Promise<void> {
+    // The rule lives on the owner, not the call site (R14-1): every non-delete
+    // close defaults to non-terminal, and only DELETE opts into the terminal
+    // release that persists a RELEASED tombstone.
+    const terminal = opts.terminal ?? false;
     if (
       this.hasPendingOperations() ||
       this.configurations().some(
@@ -1092,6 +1097,29 @@ export class HostedMcpSession {
       await this.acquireOwner();
     }
     await this.drainConfigurations(configurations);
+    if (!terminal) {
+      // A detach hands the mount back but keeps the owner re-acquirable
+      // (R14-1): a terminal release would persist a RELEASED tombstone under
+      // the id the next load recomputes, wedging every later acquire. The
+      // drained configurations stay short of `released` on purpose — the
+      // reload derives this owner's id from the configurations that are not
+      // `released`, so marking them released would recompute a different id
+      // and strand the deterministic owner. The handback sweeps nothing, so
+      // live or unproven work refuses it; name that as recovery-required the
+      // way the pending-operation check above does (R14-2).
+      const claim = this.broker.mountClaim();
+      if (claim !== undefined) {
+        try {
+          await this.broker.releaseMount(claim);
+        } catch (cause) {
+          if (!fencedMountHandback(cause)) throw cause;
+          throw new HostedMcpRecoveryRequiredError();
+        }
+      }
+      this.acquired = false;
+      this.ownerReady = false;
+      return;
+    }
     await this.broker.release();
     await this.markReleased(configurations);
   }

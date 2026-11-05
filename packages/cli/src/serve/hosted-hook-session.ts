@@ -53,6 +53,7 @@ import type {
   ManagedHookResult,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import {
+  fencedMountHandback,
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
@@ -1997,8 +1998,10 @@ export class HostedHookSession {
     // A detach keeps the Session reloadable; only a delete is terminal. The
     // deterministic config-scoped owner must survive a detach re-acquirable
     // (R13-1): a terminal release would persist a RELEASED tombstone under the
-    // very id the next load recomputes, wedging every later acquire.
-    const terminal = opts.terminal ?? true;
+    // very id the next load recomputes, wedging every later acquire. The rule
+    // lives on the owner, not the call site (R14-1): every non-delete close
+    // defaults to non-terminal, and only DELETE opts into the terminal release.
+    const terminal = opts.terminal ?? false;
     await this.drain();
     // The close is the drain arm. A Hook-configured Shell turn shares this
     // broker and its `finish()` skips the release, so a background run that
@@ -2037,7 +2040,27 @@ export class HostedHookSession {
         // mount is the scarce shared resource; releasing it lets other
         // Sessions acquire while this owner's row stays re-acquirable.
         const claim = this.broker.mountClaim();
-        if (claim !== undefined) await this.broker.releaseMount(claim);
+        if (claim !== undefined) {
+          try {
+            await this.broker.releaseMount(claim);
+          } catch (cause) {
+            // The handback sweeps nothing, so live or unproven work refuses
+            // it (R14-2). Name that condition the way the terminal arm names
+            // its hold fence: the Session stays attached and retryable rather
+            // than letting a bare Broker rejection escape as a close failure.
+            if (!fencedMountHandback(cause)) throw cause;
+            writeStderrLineSafe(
+              `qwen serve: Hook owner mount handback held by unfinished work: ${
+                this.broker.runtimeSessionId
+              } ${
+                cause instanceof HostedWorkspaceBrokerRejection
+                  ? `${cause.status} ${cause.code}`
+                  : String(cause)
+              }`,
+            );
+            throw new HostedHookRecoveryRequiredError();
+          }
+        }
         this.acquired = false;
         return;
       }

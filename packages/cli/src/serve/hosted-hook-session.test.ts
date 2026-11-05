@@ -3943,7 +3943,115 @@ it('retains historical Hook ownership for cleanup without claiming a live MCP mo
   ).toHaveLength(0);
   const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
   release.mockClear();
-  await restored.closeResources();
+  await restored.closeResources({ terminal: true });
   expect(release).toHaveBeenCalledOnce();
   expect(restored.mountHeld).toBe(false);
+});
+
+it.each([
+  'runtime_session_busy',
+  'runtime_session_conflict',
+  'workspace_writer_unproven',
+])(
+  'names a refused non-terminal mount handback as recovery-required (R14-2: %s)',
+  async (code) => {
+    // A deterministic config-scoped owner closing non-terminally hands its
+    // mount back; the handback sweeps nothing, so live or unproven work
+    // refuses it. The refusal must be named as recovery-required (the Session
+    // stays attached and retryable), never escape as a raw Broker rejection,
+    // and never fall back to a terminal release that would tombstone the id.
+    const deterministic = new HostedHookSession(
+      options,
+      session,
+      pin,
+      undefined,
+      () => false,
+      `extensions-components-${'e'.repeat(64)}`,
+    );
+    await deterministic.acquire();
+    expect(deterministic.mountHeld).toBe(true);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'det-claim',
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(409, code),
+    );
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    release.mockClear();
+    await expect(deterministic.close()).rejects.toBeInstanceOf(
+      HostedHookRecoveryRequiredError,
+    );
+    expect(release).not.toHaveBeenCalled();
+  },
+);
+
+it('keeps a shared Hook+MCP deterministic owner re-acquirable on a non-terminal close (R14-1)', async () => {
+  // The load builds the MCP first and hands its broker to the Hook, so the
+  // Hook borrows (ownsBroker=false) and the MCP owns the shared deterministic
+  // owner. A detach closes the Hook (which must not release a broker it does
+  // not own) then the MCP (which must hand the mount back, not tombstone).
+  const owner = `extensions-components-${'f'.repeat(64)}`;
+  const shared = new HostedWorkspaceBroker(
+    options,
+    session.authority.sessionHeader.sessionKey,
+    owner,
+  );
+  const mcpShared = new HostedMcpSession(
+    options,
+    session,
+    [],
+    undefined,
+    shared,
+    true,
+  );
+  const hooksShared = new HostedHookSession(options, session, pin, shared);
+  // Fire a Hook so the shared owner acquires and holds the mount.
+  await hooksShared.fire(
+    HookEventName.PreToolUse,
+    'shared-hook',
+    { tool_name: 'read_file' },
+    signal(),
+  );
+  expect(hooksShared.mountHeld).toBe(true);
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'shared-claim',
+  );
+  const releaseMount = vi
+    .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+    .mockResolvedValue();
+  const releasedOwners = new Set<string>();
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  release.mockImplementation(async function (this: HostedWorkspaceBroker) {
+    releasedOwners.add(this.runtimeSessionId);
+  });
+  await hooksShared.close();
+  await mcpShared.closeResources();
+  // Neither owner may terminally release the shared deterministic id a reload
+  // recomputes; the mount goes back through releaseMount instead.
+  expect(release).not.toHaveBeenCalled();
+  expect(releaseMount).toHaveBeenCalledWith('shared-claim');
+  expect(releasedOwners.has(owner)).toBe(false);
+  // The reload recomputes the identical deterministic id and must re-acquire
+  // it: refuse any re-acquire of a terminally released owner, exactly as
+  // acquireNewSession refuses a non-ACQUIRING row.
+  vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockImplementation(
+    async function (this: HostedWorkspaceBroker) {
+      if (releasedOwners.has(this.runtimeSessionId))
+        throw new HostedWorkspaceBrokerRejection(
+          409,
+          'runtime_session_not_acquirable',
+        );
+      this.runtime = {
+        bindingId: 'binding',
+        generation: '1',
+        workspaceGeneration: '1',
+      };
+    },
+  );
+  const reloaded = new HostedWorkspaceBroker(
+    options,
+    session.authority.sessionHeader.sessionKey,
+    owner,
+  );
+  await reloaded.acquire();
 });
