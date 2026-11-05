@@ -13938,6 +13938,16 @@ Other open files:
           hookContext: expect.any(String),
           mod: 'lint',
         });
+        await run([{ text: 'Say done' }], 'prompt-as-user', {
+          type: SendMessageType.UserQuery,
+          submittedPrompt: 'Say done',
+          submittedByMod: 'lint',
+          submittedAsUser: true,
+        });
+        expect(recordUserMessage.mock.calls[1]![2]).toMatchObject({
+          mod: 'lint',
+          asUser: true,
+        });
         // Nor does it count as a prompt the user typed.
         expect(attribution.getPromptCount()).toBe(before);
         await run([{ text: 'typed' }], 'prompt-typed', {

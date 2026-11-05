@@ -339,6 +339,8 @@ export interface SendMessageOptions {
    * The transcript records it as the Mod's prompt, not the person's.
    */
   submittedByMod?: string;
+  /** The Mod sent its prompt as the person's own words, unframed. */
+  submittedAsUser?: true;
   /** A UserQuery running beside an active turn, without replacing its state. */
   isConcurrentSideQuery?: boolean;
   /**
@@ -4754,6 +4756,7 @@ export class LlmClient {
                   hookContext: '',
                   ...userPromptRecordPayload,
                   mod: options.submittedByMod,
+                  ...(options.submittedAsUser && { asUser: true }),
                 },
             prompt_id,
           );

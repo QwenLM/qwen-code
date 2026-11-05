@@ -136,7 +136,7 @@ this recovery exception.
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
 | API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
 | Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
-| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits, described in [Turn events](#turn-events)                                                             |
+| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and, in headless runs, those a Mod submits, described in [Turn events](#turn-events)                  |
 | Prompts    | `prompt.submit` in headless runs and the Ink and OpenTUI terminals, and `$.prompt.submit` in headless runs, described in [Submitted prompts](#submitted-prompts)                        |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
@@ -473,8 +473,10 @@ call. A Mod can use it to choose a fallback, such as a command reply where a
 drawing hook would not run.
 
 A normal plugin layer has 10 seconds of its own time, excluding time waiting for
-cross-plugin `next` or API calls other than `$.clock.sleep`. Pending void `ui.log` notifications do not pause
-the caller's budget. Catch recovery uses a one-second budget.
+cross-plugin `next` or API calls other than `$.clock.sleep` and `$.prompt.submit`. Pending void `ui.log` notifications do not pause
+the caller's budget. Neither does `$.prompt.submit`, whose call can outlive the
+hook that made it: the time the other Mods' `prompt.submit` hooks take while a
+hook awaits it counts as the hook's own. Catch recovery uses a one-second budget.
 Qwen additionally caps each root dispatch at 60 seconds of charged time and each
 uninterrupted guest execution slice at 10 seconds. Only tool roots exclude the
 trusted native waits described above; load and command roots retain continuous
@@ -627,13 +629,14 @@ back in the composer. Queued prompts then run. The call rejects when no turn is
 running, when `turnId` is not the running turn's id, or when the turn is already
 ending. In a headless run the turn ends with the error result
 `A Mod ended the turn.` and exit code 130, and a stream-json session goes on to
-its next message. Qwen Code has no `$.prompt.submit` yet, so a Mod cannot send a
-prompt after it ends a turn.
+its next message. In a headless run a Mod can send a prompt of its own after it
+ends a turn, with [`$.prompt.submit`](#a-mods-own-prompt).
 
 ## Submitted prompts
 
 In headless runs and in the Ink and OpenTUI terminals, `prompt.submit` fires for
-each prompt a person submits, before UserPromptSubmit hooks and before `@` references are read. A hook can rewrite the
+each prompt a person submits, and in headless runs for each prompt a Mod submits
+([A Mod's own prompt](#a-mods-own-prompt)), before UserPromptSubmit hooks and before `@` references are read. A hook can rewrite the
 prompt, attach context the model reads beside it, or drop it:
 
 ```javascript
@@ -652,12 +655,12 @@ export function register(on) {
 
 The hook receives:
 
-| Field     | Value                                                                                          |
-| --------- | ---------------------------------------------------------------------------------------------- |
-| `text`    | the prompt as submitted, with pasted text expanded; for a stream-json message, its text blocks |
-| `context` | absent; each hook that attaches context passes the list on with its own entries added          |
-| `wait`    | `false`                                                                                        |
-| `origin`  | `{kind: 'sdk'}` in headless runs, `{kind: 'composer'}` in the terminals                        |
+| Field     | Value                                                                                                                                   |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `text`    | the prompt as submitted, with pasted text expanded; for a stream-json message, its text blocks                                          |
+| `context` | absent; each hook that attaches context passes the list on with its own entries added                                                   |
+| `wait`    | `false`                                                                                                                                 |
+| `origin`  | `{kind: 'sdk'}` in headless runs, `{kind: 'composer'}` in the terminals; `{kind: 'plugin', name, asUser?}` for a prompt a Mod submitted |
 
 `origin`, `wait` and `turnId` are pinned. The prompt that enters is the one that
 arrives beneath the hooks: `next(e)` resolves to `{text, context?, origin}`, and
@@ -749,8 +752,9 @@ export function register(on) {
   or Qwen Code refused it. A call the hook does not await, as above, still
   queues after the hook returns.
 - What last arrives beneath the hooks is queued, once, even when a hook calls
-  `next(e)` more than once. A text that is empty or only whitespace, from the
-  call or from a hook's rewrite, is not queued: the call resolves to a drop.
+  `next(e)` more than once. A text that is empty or only whitespace, or longer
+  than 128 KiB as JSON, from the call or from a hook's rewrite, is not queued:
+  the call resolves to a drop. An input too large for any Mod call rejects.
 - The model is told the prompt came from the Mod and that the person did not
   type it. With `asUser: true` the model reads the text as the person's own
   words; `origin` still names the Mod.

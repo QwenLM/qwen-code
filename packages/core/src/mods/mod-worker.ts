@@ -682,6 +682,8 @@ async function hostCall(
     return { drop: 'this host does not run prompts a Mod submits' };
   else if (!String((input as ModInput)['text']).trim())
     return { drop: 'the prompt is empty' };
+  else if (overPromptBudget(input as ModInput))
+    return { drop: 'the prompt is too long for a Mod payload' };
   const detached = notice(method) || submits;
   let arrived: ModInput | undefined;
   const invoke = async () => {
@@ -816,6 +818,11 @@ function abortTurn(turnId: string): Promise<void> {
 
 // A hook that passed the prompt on more than once queues it once, as it last
 // arrived, and the call resolves to that.
+// A prompt is held to half a Mod payload, as a typed one is, so what the call
+// resolves to, which echoes it, always fits: it is never refused once queued.
+const overPromptBudget = (prompt: ModInput) =>
+  Buffer.byteLength(JSON.stringify(prompt)) > MOD_MAX_BYTES / 2;
+
 async function queueArrived(
   result: ModInput,
   arrived: ModInput | undefined,
@@ -826,6 +833,8 @@ async function queueArrived(
     return { drop: 'a hook answered without passing the prompt on' };
   if (!String(arrived['text']).trim())
     return { drop: 'a hook left the prompt empty' };
+  if (overPromptBudget(arrived))
+    return { drop: 'a hook made the prompt too long for a Mod payload' };
   const context = arrived['context'] as string[] | undefined;
   const origin = arrived['origin'] as ModInput;
   const refused = await queuePrompt({

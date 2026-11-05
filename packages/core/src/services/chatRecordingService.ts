@@ -625,6 +625,8 @@ export interface UserPromptRecordPayload {
   hookContext: string;
   /** The Mod that submitted the prompt; the record's provenance says so too. */
   mod?: string;
+  /** The Mod sent the prompt as the person's own words, so it is unframed. */
+  asUser?: true;
   /** UI-only annotations; interpreted by transcript consumers, not the model. */
   inputAnnotations?: unknown[];
   /** Daemon-owned attachment references used to restore prompt previews. */
@@ -1545,11 +1547,16 @@ export class ChatRecordingService {
     if (this.userDisplayTextsForTitle.length > MAX_TITLE_USER_DISPLAY_TEXTS) {
       this.userDisplayTextsForTitle.shift();
     }
+    // A prompt sent as the person's words reads as theirs to the model too,
+    // and its bare text would also match a prompt the person typed alike.
     const key =
-      record.provenance === 'mod_prompt'
+      record.provenance === 'mod_prompt' &&
+      !(record.systemPayload as UserPromptRecordPayload | undefined)?.asUser
         ? modPromptTitleKey(record.message?.parts ?? [])
         : undefined;
     if (key?.trim()) {
+      // A key submitted again is the newest, so it is evicted last.
+      this.modPromptKeysForTitle.delete(key);
       this.modPromptKeysForTitle.add(key);
       // Only recent messages reach a title.
       if (this.modPromptKeysForTitle.size > MAX_TITLE_USER_DISPLAY_TEXTS) {

@@ -6867,6 +6867,7 @@ describe('runNonInteractive', () => {
       expect(calls[1][3]).not.toHaveProperty('notificationDisplayText');
       // Submitted as the person's own words, the model reads it bare.
       expect(calls[2][0]).toEqual([{ text: 'Say done' }]);
+      expect(calls[2][3]).toMatchObject({ submittedAsUser: true });
       expect(calls[2][3]).not.toHaveProperty('promptContext');
       // The Mods hear each of those turns too.
       expect(startTurn.mock.calls.map(([text, , , id]) => [text, id])).toEqual([
@@ -7030,6 +7031,99 @@ describe('runNonInteractive', () => {
       ).toEqual([
         expect.stringContaining('Fix it'),
         expect.stringContaining('Next'),
+      ]);
+    });
+
+    it('prints a Mod command reply in text output before the turn it hands on', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.TEXT);
+      setupMetricsMock();
+      const { submitted } = installModTurn();
+      mockGetCommands.mockReturnValue([
+        {
+          name: 'review',
+          description: 'review',
+          kind: CommandKind.FILE,
+          action: vi.fn(async () => {
+            submitted.push({ plugin: 'lint', text: 'Review the diff' });
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: 'Review queued.',
+            };
+          }),
+        },
+      ]);
+      admitting(() =>
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Reviewed.' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/review',
+        'mod-command-text',
+      );
+
+      expect(exitCode).toBe(0);
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      expect(stdout).toContain('Review queued.\n');
+      expect(stdout.indexOf('Review queued.')).toBeLessThan(
+        stdout.indexOf('Reviewed.'),
+      );
+    });
+
+    it('gives the worktree notice a Mod command reply held to the turn it hands on', async () => {
+      setupMetricsMock();
+      const { submitted } = installModTurn();
+      vi.mocked(mockConfig.consumePendingStartupWorktreeNotice).mockReturnValue(
+        'Working in worktree wt-1.',
+      );
+      mockGetCommands.mockReturnValue([
+        {
+          name: 'review',
+          description: 'review',
+          kind: CommandKind.FILE,
+          action: vi.fn(async () => {
+            submitted.push({ plugin: 'lint', text: 'Review the diff' });
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: 'Review queued.',
+            };
+          }),
+        },
+      ]);
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/review',
+        'mod-command-worktree',
+      );
+
+      const calls = mockLlmClient.sendMessageStream.mock.calls;
+      expect(calls).toHaveLength(1);
+      expect(calls[0][0]).toEqual([
+        {
+          text: '<system-reminder>\nWorking in worktree wt-1.\n</system-reminder>\n\n',
+        },
+        { text: frameModPrompt({ plugin: 'lint', text: 'Review the diff' }) },
       ]);
     });
 
@@ -7229,7 +7323,7 @@ describe('runNonInteractive', () => {
 
     it('raises no prompt.submit for a message no person typed or without text', async () => {
       setupMetricsMock();
-      const { submitPrompt } = installModTurn();
+      const { submitPrompt, notePersonPrompt } = installModTurn();
       mockLlmClient.sendMessageStream.mockImplementation(() =>
         createStreamFromEvents([]),
       );
@@ -7249,6 +7343,9 @@ describe('runNonInteractive', () => {
           fromTool: true,
         },
       );
+      // A client's tool results are not the person's prompts, so they leave
+      // the Mods' turn count as it is.
+      expect(notePersonPrompt).not.toHaveBeenCalled();
       const image = '{"type":"image"}';
       await runNonInteractive(mockConfig, mockSettings, image, 'image', {
         promptParts: { text: '', blocks: [image] },

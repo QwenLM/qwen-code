@@ -754,7 +754,11 @@ describe('Mod session ownership', () => {
         if (i % 2) session.takeSubmittedPrompt();
       }
       const refused = queue(prompt('one more'));
-      expect(refused).toContain(`${MOD_PROMPT_TURN_LIMIT} turns`);
+      // The guide and the design doc promise 8.
+      expect(MOD_PROMPT_TURN_LIMIT).toBe(8);
+      expect(refused).toBe(
+        'the Mods have started 8 turns since the last prompt from the person',
+      );
       expect(adapter.emitSystemMessage).toHaveBeenCalledWith(
         'ui_log',
         expect.objectContaining({

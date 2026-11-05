@@ -1503,6 +1503,42 @@ describe('ModRuntime with the real QuickJS worker', () => {
       expect(queued).toEqual([{ plugin: 'mod-0', text: 'later' }]);
     });
 
+    it('refuses a prompt too long for a Mod payload before it is queued', async () => {
+      const { queued, queue } = queueing();
+      const runtime = await createTurns(
+        [
+          `export function register(on) {
+            on('prompt.submit', ($, e, next) =>
+              next(e.text === 'grow' ? {...e, text: 'y'.repeat(140000)} : e));
+          }`,
+          `export function register(on) {
+            on('turn.start', async ($, e, next) => {
+              // Past half a payload, and in the band where the answer, which
+              // echoes the origin, would no longer fit one.
+              for (const text of ['x'.repeat(140000), 'x'.repeat(262100), 'grow'])
+                $.ui.log(JSON.stringify(await $.prompt.submit({text})));
+              // Too large for the bridge, the call rejects rather than throws.
+              const huge = $.prompt.submit({text: 'x'.repeat(300000)});
+              $.ui.log(await huge.then(() => 'resolved', (error) => 'rejected:' + error));
+              return next(e);
+            });
+          }`,
+        ],
+        undefined,
+        queue,
+      );
+      await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      expect(queued).toEqual([]);
+      expect(logs.map((log) => log.text)).toEqual([
+        JSON.stringify({ drop: 'the prompt is too long for a Mod payload' }),
+        JSON.stringify({ drop: 'the prompt is too long for a Mod payload' }),
+        JSON.stringify({
+          drop: 'a hook made the prompt too long for a Mod payload',
+        }),
+        expect.stringMatching(/^rejected:.*too large/),
+      ]);
+    });
+
     it('lists the method only for a host that runs such prompts', async () => {
       const reporting = `export function register(on) {
         on('turn.start', async ($, e, next) => {

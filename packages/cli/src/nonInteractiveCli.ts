@@ -1240,6 +1240,9 @@ export async function runNonInteractive(
       // A slash command answered with a message while a Mod's prompt waits:
       // the run starts no turn of its own and goes on to run that prompt.
       let commandReplied = false;
+      // The worktree notice a command's reply could not carry; the first
+      // request the run sends takes it instead.
+      let deferredReminder: string | undefined;
 
       if (options.continueInterrupted) {
         // Read the full history, not a bounded tail: the Retry send path in
@@ -1428,10 +1431,15 @@ export async function runNonInteractive(
                 slashCommandResult.messageType !== 'error' &&
                 modSession?.hasSubmittedPrompts
               ) {
-                emitNonInteractiveAssistantText(
-                  adapter,
-                  slashCommandResult.content,
-                );
+                // Text output prints only the run's last answer, which is
+                // the Mod turn's, so the reply is written as it comes.
+                if (outputFormat === OutputFormat.TEXT)
+                  process.stdout.write(`${slashCommandResult.content}\n`);
+                else
+                  emitNonInteractiveAssistantText(
+                    adapter,
+                    slashCommandResult.content,
+                  );
                 commandReplied = true;
                 slashHandled = true;
                 break;
@@ -1559,21 +1567,21 @@ export async function runNonInteractive(
       // Continuation turns must not prepend reminder text: a ToolResult
       // payload's functionResponse parts have to stay at the HEAD of the
       // user message or Anthropic-compatible backends reject the pairing.
-      // A command's reply sends the model nothing, so the notices wait.
-      const startupNotice =
-        options.continueInterrupted || commandReplied
-          ? null
-          : config.consumePendingStartupWorktreeNotice();
+      // A command's reply sends the model nothing, so its notice waits for
+      // the first request the run sends.
+      const remind = (text: string) => {
+        if (commandReplied) deferredReminder = text;
+        else initialPartList = withReminder(initialPartList ?? [], text);
+      };
+      const startupNotice = options.continueInterrupted
+        ? null
+        : config.consumePendingStartupWorktreeNotice();
       if (startupNotice) {
-        initialPartList = withReminder(initialPartList, startupNotice);
+        remind(startupNotice);
         adapter.emitSystemMessage('worktree_started', {
           notice: startupNotice,
         });
-      } else if (
-        !options.continueInterrupted &&
-        !commandReplied &&
-        resumedSessionData
-      ) {
+      } else if (!options.continueInterrupted && resumedSessionData) {
         try {
           const sessionPath = config
             .getSessionService()
@@ -1584,10 +1592,7 @@ export async function runNonInteractive(
             sessionId,
           );
           if (restored.contextMessage) {
-            initialPartList = withReminder(
-              initialPartList,
-              restored.contextMessage,
-            );
+            remind(restored.contextMessage);
             // Surface the notice in the JSON stream so SDK consumers
             // can react to it (logging, UI hints, etc.).
             adapter.emitSystemMessage('worktree_restored', {
@@ -3523,9 +3528,14 @@ export async function runNonInteractive(
             turnCount++;
             await enforceSessionTurnLimit(false);
 
-            let itemMessages: Content[] = [
-              { role: 'user', parts: [{ text: item.modelText }] },
-            ];
+            const itemParts = deferredReminder
+              ? (withReminder(
+                  [{ text: item.modelText }],
+                  deferredReminder,
+                ) as Part[])
+              : [{ text: item.modelText }];
+            deferredReminder = undefined;
+            let itemMessages: Content[] = [{ role: 'user', parts: itemParts }];
             let itemIsFirstTurn = true;
             let itemModelOverride: string | undefined;
             const itemPromptId = `${prompt_id}/automatic/${turnCount}`;
@@ -3538,6 +3548,7 @@ export async function runNonInteractive(
                   modelOverride: itemModelOverride,
                   submittedPrompt: modPrompt.text,
                   submittedByMod: modPrompt.plugin,
+                  ...(modPrompt.asUser && { submittedAsUser: true }),
                   // Recall looks for what the Mod asked, not the frame.
                   memoryRecallQuery: modPrompt.text,
                   ...(modPrompt.context?.length && {

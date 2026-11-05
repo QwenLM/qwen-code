@@ -449,8 +449,29 @@ describe('ChatRecordingService', () => {
         displayText: 'Run the linter',
         hookContext: '',
         mod: 'lint',
-      }); // A title drawn from the conversation knows the message to leave out.
+      });
+      // A title drawn from the conversation knows the message to leave out.
       expect([...svc.getModPromptKeysForTitle()]).toEqual(['framed']);
+    });
+
+    it('keeps the newest Mod prompts as title keys, and none sent as the person', async () => {
+      const mod = (text: string, asUser?: true) =>
+        svc.recordUserMessage([{ text }], undefined, {
+          displayText: text,
+          hookContext: '',
+          mod: 'lint',
+          ...(asUser && { asUser }),
+        });
+      for (let index = 0; index < 20; index++) mod(`k${index}`);
+      // Submitted again, k0 is the newest and outlives the next one in.
+      mod('k0');
+      mod('k20');
+      expect(svc.getModPromptKeysForTitle().has('k0')).toBe(true);
+      expect(svc.getModPromptKeysForTitle().has('k1')).toBe(false);
+      // Unframed, its text is what the person might type themselves.
+      mod('Continue', true);
+      expect(svc.getModPromptKeysForTitle().has('Continue')).toBe(false);
+      await svc.flush();
     });
 
     it('should record a user message immediately', async () => {
