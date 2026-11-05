@@ -24745,6 +24745,136 @@ describe('useLlmStream', () => {
       expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
     });
 
+    const completeBatchesWith = (
+      response: (request: ToolCallRequestInfo) => Record<string, unknown>,
+    ) =>
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          void onBatchComplete?.(
+            requests.map((request) => {
+              const call = completedCall(request);
+              return {
+                ...call,
+                response: { ...call.response, ...response(request) },
+              };
+            }),
+          );
+        },
+      );
+
+    it('ends the turn on a tool that ends it, outside a Goal turn too, with its results in history', async () => {
+      completeBatchesWith(() => ({ terminateTurn: true }));
+      rounds([toolRequest('read_a')]);
+      const client = mockConfig.getLlmClient();
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      await waitFor(() => {
+        expect(client.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: 'read_a' }),
+            }),
+          ],
+        });
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['read_a']);
+    });
+
+    it('stops without a continuation when the model was switched after a quota error', async () => {
+      completeBatches();
+      rounds([toolRequest('read_a')]);
+      const client = mockConfig.getLlmClient();
+      const { result } = renderTestHook(
+        [],
+        client,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      await waitFor(() => {
+        expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['read_a']);
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops without a continuation when a background agent took the last background slot', async () => {
+      mockBackgroundTaskRegistry.getMaxConcurrentBackgroundAgents.mockReturnValue(
+        1,
+      );
+      mockBackgroundTaskRegistry.canStartBackgroundAgent.mockReturnValue(false);
+      completeBatchesWith(() => ({
+        resultDisplay: { type: 'task_execution', status: 'background' },
+      }));
+      rounds([
+        {
+          ...toolRequest('agent_a'),
+          value: { ...toolRequest('agent_a').value, name: 'agent' },
+        },
+      ]);
+      const client = mockConfig.getLlmClient();
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Start the agent.');
+      });
+
+      await waitFor(() => {
+        expect(client.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: 'agent_a' }),
+            }),
+          ],
+        });
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('continues past a background agent launch while background slots remain', async () => {
+      completeBatchesWith(() => ({
+        resultDisplay: { type: 'task_execution', status: 'background' },
+      }));
+      rounds(
+        [
+          {
+            ...toolRequest('agent_a'),
+            value: { ...toolRequest('agent_a').value, name: 'agent' },
+          },
+        ],
+        [{ type: ServerLlmEventType.Content, value: 'Started.' }],
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Start the agent.');
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(sentIds(1)).toEqual(['agent_a']);
+    });
+
     it('answers a replayed call in the batch and runs only the others', async () => {
       completeBatches();
       const replayed = {
@@ -24978,6 +25108,92 @@ describe('useLlmStream', () => {
       });
       expect(recorded()).toEqual(['read_a']);
       // The placeholder took the result: no continuation sends it again.
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+
+    it('decides its stops when no model stream is active, as the session is then', async () => {
+      let completeBatch: (() => Promise<void>) | undefined;
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          completeBatch = () =>
+            onBatchComplete?.(
+              requests.map((request) => {
+                const call = completedCall(request);
+                return {
+                  ...call,
+                  response: {
+                    ...call.response,
+                    resultDisplay: {
+                      type: 'task_execution',
+                      status: 'background',
+                    },
+                  },
+                };
+              }),
+            ) ?? Promise.resolve();
+        },
+      );
+      let endSecondStream!: () => void;
+      const secondStreamHeld = new Promise<void>((resolve) => {
+        endSecondStream = resolve;
+      });
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              ...toolRequest('agent_a'),
+              value: { ...toolRequest('agent_a').value, name: 'agent' },
+            };
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'Thinking.' };
+            await secondStreamHeld;
+          })(),
+        );
+      const client = mockConfig.getLlmClient();
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Start the agent.');
+      });
+      let secondSubmission!: Promise<void>;
+      await act(async () => {
+        secondSubmission = result.current.submitQuery('Something else.');
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      await act(async () => {
+        await completeBatch!();
+      });
+      // The last background slot is taken before the other stream ends.
+      mockBackgroundTaskRegistry.getMaxConcurrentBackgroundAgents.mockReturnValue(
+        1,
+      );
+      mockBackgroundTaskRegistry.canStartBackgroundAgent.mockReturnValue(false);
+
+      await act(async () => {
+        endSecondStream();
+        await secondSubmission;
+      });
+
+      await waitFor(() => {
+        expect(client.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: 'agent_a' }),
+            }),
+          ],
+        });
+      });
       expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
     });
 

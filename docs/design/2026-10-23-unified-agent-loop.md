@@ -370,14 +370,15 @@ The core change of this step: `userTurnRecordedByHost` also covers a `Cron` and 
 
 The Ink TUI already sends every model round through `LlmClient.sendMessageStream`, from one function, `submitQuery`, for every kind of turn. Its loop is split by React instead: a response that requested tools hands them to the scheduler and returns, and the scheduler's completion callback sends the results as a new `ToolResult` turn. Moving the TUI means awaiting that batch, so it moves in these steps:
 
-| Step | Content                                                                                                                                                                                                                                                                                                                    |
-| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 3a   | every model round on the loop's `runModelRound`; the TUI keeps its tool step; the Ink parity suite                                                                                                                                                                                                                         |
-| 3b-1 | a model round's tool calls run as one shared batch over the TUI's `InteractiveModToolScheduler`, with the display, approvals and Mod tool middleware unchanged; duplicates and finalizing are the loop's, and the TUI records the results it sends with the loop's recording; the TUI's completion step continues the turn |
-| 3b-2 | the TUI's own steps (its history repair, the tool-use summary, the stops for a quota model switch and for spent background-agent capacity, the split by interaction owner) become host hooks; the batch is awaited by the turn, and a tool that ends the turn ends it                                                      |
-| 3c-1 | input taken at a tool boundary through the loop's next round; a retry                                                                                                                                                                                                                                                      |
-| 3c-2 | cron, background-notification, teammate and Goal turns                                                                                                                                                                                                                                                                     |
-| 3d   | default on, then remove the current loop                                                                                                                                                                                                                                                                                   |
+| Step  | Content                                                                                                                                                                                                                                                                                                                    |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 3a    | every model round on the loop's `runModelRound`; the TUI keeps its tool step; the Ink parity suite                                                                                                                                                                                                                         |
+| 3b-1  | a model round's tool calls run as one shared batch over the TUI's `InteractiveModToolScheduler`, with the display, approvals and Mod tool middleware unchanged; duplicates and finalizing are the loop's, and the TUI records the results it sends with the loop's recording; the TUI's completion step continues the turn |
+| 3b-2a | the batch ends when no model stream is active, when the TUI could send; the stops for a quota model switch and for spent background-agent capacity end the batch; a tool that ends the turn ends it                                                                                                                        |
+| 3b-2b | the batch is awaited by the turn, which sends the next round; the steps that check what the next round sends (the history repair, the split by interaction owner, the tool-use summary) become the step before it                                                                                                          |
+| 3c-1  | input taken at a tool boundary through the loop's next round; a retry                                                                                                                                                                                                                                                      |
+| 3c-2  | cron, background-notification, teammate and Goal turns                                                                                                                                                                                                                                                                     |
+| 3d    | default on, then remove the current loop                                                                                                                                                                                                                                                                                   |
 
 PR 3a puts every model round of the TUI on `runModelRound`. The round sends the same request with the same options, so the TUI's stream processor keeps handling every event as today. What moves is the part of the round the loop already owns:
 
@@ -401,31 +402,41 @@ PR 3b-1 runs a shared round's tool calls as one batch of the shared loop, `runTo
 
 A response made only of provider replays keeps the current path, since it runs nothing.
 
+PR 3b-2a moves the TUI's stops into the batch. The batch ends only when no model stream is active, as the TUI holds a batch that completes during a stream today, so the batch sees the session as the continuation will:
+
+| The TUI today                                                                                                                                 | With the setting on                                                                         |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| the completion step stops without a continuation after a quota model switch, or when a background agent launch spent the last background slot | the batch's result callback ends the batch on either, and the completion step stops on that |
+| a tool that ends the turn ends a Goal turn; outside one the turn continues                                                                    | it ends the turn either way, with its results in history                                    |
+
+The history repair, the split by interaction owner and the tool-use summary check what the next round sends, so they stay in the completion step for now. PR 3b-2b has the turn await the batch, and they run right before the next round.
+
 ## Migration
 
-| PR   | Content                                                                                                                                             |
-| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | this design                                                                                                                                         |
-| 1    | the shared loop, `beforeToolLaunch`, the setting, headless (`-p` and stream-json), the parity suite                                                 |
-| 1d   | headless: default on                                                                                                                                |
-| 1r   | headless: remove its current loop                                                                                                                   |
-| 2a   | ACP: the model round of a fresh user prompt moves to `LlmClient`; ACP's re-implementations stay out of the shared path, and ACP keeps its tool step |
-| 2b   | ACP: the tool batch of those turns on the scheduler; the daemon tool-loop guards become the client's guards plus a surface policy                   |
-| 2c-1 | ACP: the stop point of those turns on the client's chain, with the Todo Stop Guard as a stop policy; `stopHookRunByHost` is removed                 |
-| 2c-2 | ACP: channel, Goal-proposal, retry, continue and restore turns                                                                                      |
-| 2c-3 | ACP: Goal turns                                                                                                                                     |
-| 2c-4 | ACP: cron and background-notification turns                                                                                                         |
-| 2d   | ACP: default on, then remove its current loop                                                                                                       |
-| 3a   | Ink TUI: every model round on the loop's round; the TUI keeps its tool step; the Ink parity suite                                                   |
-| 3b-1 | Ink TUI: a round's tool calls as one shared batch; the TUI's completion step continues the turn                                                     |
-| 3b-2 | Ink TUI: the TUI's own steps as host hooks; the batch awaited by the turn                                                                           |
-| 3c-1 | Ink TUI: input at a tool boundary through the loop's next round; a retry                                                                            |
-| 3c-2 | Ink TUI: cron, background-notification, teammate and Goal turns                                                                                     |
-| 3d   | Ink TUI: default on, then remove its current loop                                                                                                   |
-| 4    | OpenTUI                                                                                                                                             |
-| 5    | AgentCore on a `Turn` round (subagents, background and forked agents, workflows)                                                                    |
-| 6    | speculation                                                                                                                                         |
-| —    | Hosted Harness: separate evaluation                                                                                                                 |
+| PR    | Content                                                                                                                                             |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0     | this design                                                                                                                                         |
+| 1     | the shared loop, `beforeToolLaunch`, the setting, headless (`-p` and stream-json), the parity suite                                                 |
+| 1d    | headless: default on                                                                                                                                |
+| 1r    | headless: remove its current loop                                                                                                                   |
+| 2a    | ACP: the model round of a fresh user prompt moves to `LlmClient`; ACP's re-implementations stay out of the shared path, and ACP keeps its tool step |
+| 2b    | ACP: the tool batch of those turns on the scheduler; the daemon tool-loop guards become the client's guards plus a surface policy                   |
+| 2c-1  | ACP: the stop point of those turns on the client's chain, with the Todo Stop Guard as a stop policy; `stopHookRunByHost` is removed                 |
+| 2c-2  | ACP: channel, Goal-proposal, retry, continue and restore turns                                                                                      |
+| 2c-3  | ACP: Goal turns                                                                                                                                     |
+| 2c-4  | ACP: cron and background-notification turns                                                                                                         |
+| 2d    | ACP: default on, then remove its current loop                                                                                                       |
+| 3a    | Ink TUI: every model round on the loop's round; the TUI keeps its tool step; the Ink parity suite                                                   |
+| 3b-1  | Ink TUI: a round's tool calls as one shared batch; the TUI's completion step continues the turn                                                     |
+| 3b-2a | Ink TUI: the TUI's stops end the batch; a tool that ends the turn ends it                                                                           |
+| 3b-2b | Ink TUI: the batch awaited by the turn                                                                                                              |
+| 3c-1  | Ink TUI: input at a tool boundary through the loop's next round; a retry                                                                            |
+| 3c-2  | Ink TUI: cron, background-notification, teammate and Goal turns                                                                                     |
+| 3d    | Ink TUI: default on, then remove its current loop                                                                                                   |
+| 4     | OpenTUI                                                                                                                                             |
+| 5     | AgentCore on a `Turn` round (subagents, background and forked agents, workflows)                                                                    |
+| 6     | speculation                                                                                                                                         |
+| —     | Hosted Harness: separate evaluation                                                                                                                 |
 
 Each of PRs 4–6 is followed by its own default-on and removal steps.
 
@@ -551,7 +562,9 @@ The suite runs in the integration job. The nightly E2E run, and one started by h
 
   The ACP parity suite covers the common cases unchanged and asserts the date reminder, UserPromptSubmit on tool results, cancelling while that hook runs, that a batch's approvals come before its calls run, and the plan-mode notice.
 
-- With the setting on, the Ink TUI differs from today in this intended way: from PR 3b-1, the skipped siblings of a plan-mode entry no longer count toward the session's completed tool calls, as on the other surfaces.
+- With the setting on, the Ink TUI differs from today in these intended ways, as on the other surfaces:
+  - from PR 3b-1, the skipped siblings of a plan-mode entry no longer count toward the session's completed tool calls;
+  - from PR 3b-2a, a tool that ends the turn ends it outside a Goal turn too.
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 
