@@ -153,7 +153,7 @@ const STRING_SHAPES: Readonly<Partial<Record<OptionName, RegExp>>> = {
 export const AUTOFIX_PR_TIMEOUT_MS = 600_000;
 
 const OUTPUT_CAP_BYTES = 8 * 1024 * 1024;
-const STDERR_CAP_CHARS = 16 * 1024;
+export const STDERR_CAP_CHARS = 16 * 1024;
 
 /**
  * The reply plan the skill writes beside the PR's worktree, and nothing in
@@ -431,6 +431,10 @@ export async function runAutofixPrHelper(
         QWEN_CODE: '1',
         ...sessionIdContext.run(sessionId, getShellContextEnvVars),
         QWEN_CODE_SESSION_ID: sessionId,
+        // A refusal's coded line is the last on stderr, and only the
+        // helper's own output may follow it for `codedRefusal`: a warning
+        // Node flushes after the line, in whatever shape, would hide it.
+        NODE_NO_WARNINGS: '1',
       }).filter(
         (entry): entry is [string, string] => typeof entry[1] === 'string',
       ),
@@ -766,11 +770,53 @@ interface PreparedLike {
 /** How long `cleanup` waits for a stopped fix agent to end. */
 const FIX_STOP_WAIT_MS = 15_000;
 
-/** A helper's refusal in one line: its last line on stderr, or why it did
- * not finish. */
+/** A warning Node prints on stderr: its line, the hint it adds, and the
+ * frames `--trace-warnings` adds. The helpers this tool runs print none
+ * (`NODE_NO_WARNINGS`); this covers one started otherwise. */
+const NODE_WARNING = /^\(node:\d+\) |^\(Use `node --trace-|^at /;
+
+/**
+ * A helper's coded refusal: the JSON line it prints last on stderr —
+ * `{"refused":"<code>","next":"<step>","message":"…"}` — verbatim, and what
+ * it printed before (what git or `gh` said). Null for a helper that did not
+ * get as far: an older CLI, or arguments yargs refused.
+ */
+export function codedRefusal(
+  stderr: string,
+): { line: string; before: string } | null {
+  const lines = stderr.trimEnd().split('\n');
+  // The last coded line, followed by nothing but a warning Node printed as
+  // the process exited: a line a hook or git printed earlier is not the
+  // helper's refusal, even when the helper then died without one.
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i].trim();
+    if (!line.startsWith('{')) {
+      if (line === '' || NODE_WARNING.test(line)) continue;
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      if (
+        typeof parsed?.['refused'] === 'string' &&
+        typeof parsed['next'] === 'string'
+      ) {
+        const others = [...lines.slice(0, i), ...lines.slice(i + 1)];
+        return { line, before: others.join('\n').trim() };
+      }
+    } catch {
+      // Not a coded refusal.
+    }
+  }
+  return null;
+}
+
+/** A helper's refusal in one line: its coded refusal, else its last line on
+ * stderr, or why it did not finish. */
 function helperRefusal(command: string, run: AutofixPrRun): string {
-  // The CLI prints a helper's error with its stack: the reason is the line
-  // that names the error — the last such, as what `gh` or git printed
+  const coded = run.exitCode === 1 ? codedRefusal(run.stderr) : null;
+  if (coded) return `autofix-pr ${command} refused: ${coded.line}`;
+  // An older CLI prints a helper's error with its stack: the reason is the
+  // line that names the error — the last such, as what `gh` or git printed
   // before the helper threw comes first.
   const lines = run.stderr.split('\n').map((line) => line.trim());
   const named = lines
@@ -1136,9 +1182,16 @@ class AutofixPrInvocation extends BaseToolInvocation<
       const why =
         run.failure ??
         (run.exitCode === null ? 'killed' : `exit ${run.exitCode}`);
+      // The skill acts on the coded line's `next`: it comes first.
+      // Only a helper that refused exits 1 with the line: a crash or a
+      // signal is reported as it was.
+      const coded =
+        !run.failure && run.exitCode === 1 ? codedRefusal(run.stderr) : null;
       const message = [
-        `autofix-pr ${this.params.command} refused (${why}).`,
-        run.stderr.trim(),
+        coded
+          ? `autofix-pr ${this.params.command} refused: ${coded.line}`
+          : `autofix-pr ${this.params.command} refused (${why}).`,
+        coded ? coded.before : run.stderr.trim(),
         out,
       ]
         .filter(Boolean)
@@ -1431,7 +1484,7 @@ export class AutofixPrTool extends BaseDeclarativeTool<
       ToolDisplayNames.AUTOFIX_PR,
       [
         'Runs one `qwen autofix-pr` helper of the /autofix-pr skill and returns the JSON line it prints. Use it only as that skill says; outside it, never.',
-        'A failed call is the helper refusing, with its message: report it, do not work around it. Run calls one at a time.',
+        'A failed call is the helper refusing. Its result starts with `autofix-pr <command> refused: ` and then the helper\'s coded line {"refused","next","message"}: act on its `next` as the skill says, never work around it. A refusal without that line is a refusal still: handle it as the skill says. Run calls one at a time.',
         '`command: "unattended"` asks the user whether the fix agent of a watch this session runs may run its commands without asking; `command: "attended"` takes that back, asking nothing.',
       ].join(' '),
       Kind.Execute,

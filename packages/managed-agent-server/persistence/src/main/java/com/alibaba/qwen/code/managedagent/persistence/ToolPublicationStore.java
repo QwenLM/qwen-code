@@ -72,7 +72,7 @@ public final class ToolPublicationStore {
     record ProducerBinding(JsonNode binding, ToolExecutionRecord execution) {
     }
 
-    private record PublicationTarget(Row row, JsonNode binding, RuntimeBindingRecord runtime) {
+    private record PublicationTarget(Row row, JsonNode binding, RuntimeBindingRecord runtime, boolean placement) {
     }
 
     private record Original(RuntimeBindingRecord runtime, ToolExecutionRecord execution,
@@ -320,7 +320,7 @@ public final class ToolPublicationStore {
         String scope = hash(JSON.createArrayNode().add(tenant).add(workspace).add(session).toString());
         JsonNode candidate = request.get("binding");
         String id = candidate == null ? text(request, "publicationId") : text(candidate, "publicationId");
-        PublicationTarget target = lockPublicationPlacement(key, id, candidate);
+        PublicationTarget target = lockPublicationPlacement(key, id, candidate, false);
         lockOriginal(target.binding(), false, target.runtime());
         // Every mutation uses this order, including no-start capacity release:
         // Session root and head, then the publication row, as collection does.
@@ -342,7 +342,7 @@ public final class ToolPublicationStore {
         }
         JsonNode owner = request.get("owner");
         var writer = sessions.lockPublicationWriter(tenant, workspace, session,
-                text(owner, "writerId"), owner.get("writerGeneration").longValue(), writerToken, csi);
+                text(owner, "writerId"), owner.get("writerGeneration").longValue(), writerToken, target.placement(), csi);
         String operation = text(request, "operation");
         List<Row> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture"
                         + " WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
@@ -654,14 +654,13 @@ public final class ToolPublicationStore {
                     && nativeExecutions.usesDataSource(jdbc.getDataSource())
                     && transactionSource == jdbc.getDataSource(),
                     "Local publication requires native repositories on the original DataSource");
-            String tenantId = runtime.getRequest().getScope().getTenantId();
+            RuntimeBindingRecord hint = runtime;
             Original locked = jdbc.execute((ConnectionCallback<Original>) connection -> {
                 var target = DataSourceUtils.getTargetConnection(connection);
                 require(DataSourceUtils.isConnectionTransactional(target, jdbc.getDataSource()),
                         "Local publication requires the original transaction connection");
-                ManagedSessionStore.lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc,
-                        tenantId, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-                var originalBinding = nativeBindings.findByIdForUpdate(target, text(b, "runtimeBindingId"));
+                var originalBinding = ToolPublicationPlacement.lockOriginal(jdbc, nativeBindings, target, hint,
+                        text(b.path("sessionKey"), "sessionId"));
                 require(originalBinding != null, "Original Runtime binding is missing");
                 var originalExecution = nativeExecutions.findByExecutionCallIdForUpdate(
                         target, text(b, "executionCallId"));
@@ -729,17 +728,18 @@ public final class ToolPublicationStore {
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
-    void lockStagedPlacement(JsonNode key, String publicationId) {
+    void lockStagedPlacement(JsonNode key, String publicationId, boolean requirePlacement) {
         if (TransactionSynchronizationManager.isActualTransactionActive()) {
-            transactions.executeWithoutResult(status -> lockPublicationPlacement(key, publicationId));
+            transactions.executeWithoutResult(status -> lockPublicationPlacement(key, publicationId, requirePlacement));
         }
     }
 
-    void lockPublicationPlacement(JsonNode key, String publicationId) {
-        lockPublicationPlacement(key, publicationId, null);
+    boolean lockPublicationPlacement(JsonNode key, String publicationId, boolean requirePlacement) {
+        return lockPublicationPlacement(key, publicationId, null, requirePlacement).placement();
     }
 
-    private PublicationTarget lockPublicationPlacement(JsonNode key, String publicationId, JsonNode candidate) {
+    private PublicationTarget lockPublicationPlacement(JsonNode key, String publicationId, JsonNode candidate,
+            boolean requirePlacement) {
         String scope = hash(JSON.createArrayNode().add(text(key, "tenantId"))
                 .add(text(key, "workspaceId")).add(text(key, "sessionId")).toString());
         Row row = findPublicationRow(scope, publicationId);
@@ -755,13 +755,10 @@ public final class ToolPublicationStore {
         require(binding.path("sessionKey").equals(key) && publicationId.equals(text(binding, "publicationId")),
                 "Publication scope conflicts");
         RuntimeBindingRecord runtime = publicationRuntime(binding);
-        // Placement is this lane's first tenant-wide acquisition; it stays
-        // bounded with the shared named-failure mapping: a held guard
-        // answers tenant_guard_contended instead of out-waiting the caller
-        // (#13800). Placement-before-retention order is unchanged.
-        ManagedSessionStore.lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc,
-                text(key, "tenantId"), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-        return new PublicationTarget(row, binding, runtime);
+        // The lane's first lock: placement, or the Session root for an ordinary original
+        // (design 2026-11-04-managed-publication-placement). Later locks follow it.
+        return new PublicationTarget(row, binding, runtime, ToolPublicationPlacement.lockEntry(jdbc, bindings,
+                runtime, text(key, "tenantId"), text(key, "sessionId"), requirePlacement));
     }
 
     private RuntimeBindingRecord publicationRuntime(JsonNode binding) {
@@ -823,7 +820,7 @@ public final class ToolPublicationStore {
             JsonNode finished, boolean acknowledgement) {
         String scope = hash(JSON.createArrayNode().add(text(key, "tenantId"))
                 .add(text(key, "workspaceId")).add(text(key, "sessionId")).toString());
-        PublicationTarget target = lockPublicationPlacement(key, publicationId, null);
+        PublicationTarget target = lockPublicationPlacement(key, publicationId, null, false);
         Row row = target.row();
         JsonNode binding = target.binding();
         require(binding.equals(finished.path("binding")), "Original finished binding conflicts");
@@ -891,19 +888,19 @@ public final class ToolPublicationStore {
         return original.execution();
     }
 
-    // The admission lanes' entry: placement and, for a CSI original, its
-    // settled result and the tenant publication guard; then the Session root
-    // and head. An ordinary publication skips the guard: below it, the lane
-    // and collection share the order root, head, publication row (design
-    // 2026-11-04-managed-publication-tenant-guards, C2).
+    // The admission lanes' entry: placement or, for an ordinary original, the
+    // Session root; for a CSI original its settled result and the tenant
+    // publication guard; then root and head, as collection does (designs
+    // 2026-11-04-managed-publication-tenant-guards C2, -placement).
     void lockAdmissionLane(JsonNode key, String publicationId, JsonNode original,
             String writerId, long writerGeneration, String writerToken) {
+        boolean placement = lockPublicationPlacement(key, publicationId, false);
         boolean csi = lockOriginalSettledResult(key, publicationId, original);
         if (csi) {
             lockTenant(text(key, "tenantId"));
         }
         sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
-                text(key, "sessionId"), writerId, writerGeneration, writerToken, csi);
+                text(key, "sessionId"), writerId, writerGeneration, writerToken, placement, csi);
     }
 
     void requireStagedCall(JsonNode key, String publicationId) {

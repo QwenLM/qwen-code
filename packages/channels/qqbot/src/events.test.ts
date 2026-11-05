@@ -112,6 +112,12 @@ vi.mock('@qwen-code/channel-base', () => ({
     protected getResponseMessageId(_sessionId: string): string | undefined {
       return undefined;
     }
+    protected isProactivePromptTurn(_sessionId: string): boolean {
+      return false;
+    }
+    protected disableLoopJobsForChat(_chatId: string): Promise<number> {
+      return Promise.resolve(0);
+    }
     protected getResponseSenderId(_sessionId: string): string | undefined {
       return undefined;
     }
@@ -461,6 +467,41 @@ describe('handleC2C', () => {
     expect(env.text).toContain('你好，帮我查一下天气');
   });
 
+  it('forwards a routed bot !command to the model instead of the shell', async () => {
+    const ch = makeChannel({
+      forwardBotMessages: true,
+      messageRoutes: { '/proj': '/proj' },
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '!echo hi',
+        author: { bot: true, user_openid: 'bot-1' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.text).toBe('[bot] !echo hi');
+  });
+
+  it('forwards a bot slash command to the model instead of running it', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '/clear',
+        author: { bot: true, user_openid: 'bot-1' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.text).toContain('[bot] ');
+    expect(env.text).toContain('/clear');
+    expect(env.text.startsWith('/')).toBe(false);
+  });
+
   it('drops bot C2C messages unless forwardBotMessages is on', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
@@ -795,6 +836,26 @@ describe('handleGroup', () => {
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env['text']).toContain('[bot] ');
     expect(env['text']).toContain('auto reply');
+  });
+
+  it('forwarded bot slash messages in a group reach the model, not the command table', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> /clear',
+        author: {
+          member_openid: 'bot-1',
+          bot: true,
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('[bot] ');
+    expect(env['text']).toContain('/clear');
+    expect(String(env['text']).startsWith('/')).toBe(false);
   });
 
   it('人类消息在 forwardBotMessages 开启时被转发且不打 [bot] 标签', async () => {

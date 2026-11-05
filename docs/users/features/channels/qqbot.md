@@ -115,6 +115,12 @@ QQ Bot API V2 only delivers group messages that @mention the bot — the bot doe
 
 Messages authored by another bot are dropped by default. Set `forwardBotMessages: true` to deliver them instead: such a message reaches the model with a `[bot]` prefix on the sender line, and the model decides whether replying makes sense. Bot-to-bot conversation is a feature, not a defect, and the switch is its whole boundary — QQ delivers message events for user-authored messages only (a bot's own sends come back in the send API's response, not as events), so the enabled path can only ever carry another bot's message; there is deliberately no automatic rate cap on the enabled path; the group's human members and the model's own silence rules (`<noreply>`) are the guard, so enabling it is an explicit operator tradeoff.
 
+### Scheduled Loops and Proactive Delivery
+
+Loop, webhook-task, and background or named-task results are delivered back to the chat that created them as **active messages** — QQ posts them without a reply anchor, so they do not depend on a recent inbound message. In a group, each such delivery spends the group's platform active-message quota.
+
+If a group's admin has disabled active messages, these deliveries fail instead of silently falling back to an anchored passive reply: loop and webhook target checks refuse the run before the agent turn, background and named-task results are rejected at delivery with `ACTIVE_MSG_DISABLED`, and the loop scheduler counts consecutive failures and auto-disables the loop after 5. Proactive delivery also requires the chat type to be already learned: a loop or webhook target in a group the bot has never received a message from is rejected instead of sent.
+
 ### Session Isolation
 
 The QQ channel defaults to `sessionScope: "thread"`: members of the same group share a single conversation context keyed by `<channel>:<group_openid>`, while different groups are isolated from each other. Each direct message gets its own context keyed by `<channel>:<user_openid>`.
