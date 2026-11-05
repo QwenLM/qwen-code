@@ -211,6 +211,7 @@ import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalProgress } from './hooks/useTerminalProgress.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useMcpApproval } from './hooks/useMcpApproval.js';
+import { useProjectHooksApproval } from './hooks/use-project-hooks-approval.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from './CommandFormatMigrationNudge.js';
@@ -1269,7 +1270,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Restore the transcript before Mod diagnostics, without making input
       // or Mod startup wait for asynchronous session recovery.
       void getInteractiveModSession(config)
-        ?.initialize(['AbovePrompt'], { prompts: true })
+        ?.initialize(['AbovePrompt'], { prompts: true, runsPrompts: true })
         .catch(() => {});
 
       if (resumedSessionData) {
@@ -1845,11 +1846,18 @@ export const AppContainer = (props: AppContainerProps) => {
     handleOutputStyleSelect,
   } = useOutputStyleCommand(settings, config, historyManager.addItem);
 
+  const handleAuthChange = useCallback(() => {
+    const model = config.getModel();
+    lastNotifiedModelRef.current = model;
+    refreshStatic();
+    setCurrentModel(model);
+  }, [config, refreshStatic]);
+
   const auth = useAuthCommand(
     settings,
     config,
     historyManager.addItem,
-    refreshStatic,
+    handleAuthChange,
   );
   const { state: authState, actions: authActions } = auth;
   const { onAuthError, openAuthDialog, closeAuthDialog } = authActions;
@@ -1986,7 +1994,13 @@ export const AppContainer = (props: AppContainerProps) => {
       config.getBareMode() ||
       config.isSafeMode() ||
       // With every hook disabled the trust gate is not why they are absent.
-      config.getDisableAllHooks()
+      config.getDisableAllHooks() ||
+      // Warn only when the hooks really are withheld: the execution accessor
+      // serves an approved block despite the trust gate. `pending === false`
+      // alone is not "approved" — it also means "nothing to approve" (an
+      // untrusted folder with the trust feature on), the case this warning
+      // exists for.
+      config.getProjectHooks() !== undefined
     ) {
       return;
     }
@@ -2001,9 +2015,15 @@ export const AppContainer = (props: AppContainerProps) => {
     addHistoryItem(
       {
         type: MessageType.WARNING,
-        text: t(
-          'Project hooks in .qwen/settings.json were not loaded: this folder is not explicitly trusted. Enable security.folderTrust.enabled and trust the folder to run them.',
-        ),
+        text:
+          config.isProjectHooksApprovalGated() &&
+          config.isProjectHooksPendingApproval()
+            ? t(
+                'Project hooks in .qwen/settings.json were not loaded. Approve them in the dialog, or enable security.folderTrust.enabled and trust the folder.',
+              )
+            : t(
+                'Project hooks in .qwen/settings.json were not loaded: this folder is not explicitly trusted. Enable security.folderTrust.enabled and trust the folder to run them.',
+              ),
       },
       Date.now(),
     );
@@ -3777,10 +3797,12 @@ export const AppContainer = (props: AppContainerProps) => {
       // so the auto-restore branch below bails out before its orphan strip
       // runs. Strip the orphaned prompt here; otherwise appendCuratedContent
       // merges the user's NEXT real message into the "no new real user input"
-      // preamble. Safe even if the turn already produced a model response:
-      // the strip only pops trailing user entries, and a responded prompt is
-      // not trailing.
-      if (info?.wasGoalTurn) {
+      // preamble. A Mod's own prompt is stripped the same way: the person
+      // stopped it, so the next prompt must not reach the model behind it.
+      // Safe even if the turn already produced a model response: the strip
+      // only pops trailing user entries, and a responded prompt is not
+      // trailing.
+      if (info?.wasGoalTurn || info?.wasModPromptTurn) {
         llmClient?.stripOrphanedUserEntriesFromHistory?.(true);
       }
 
@@ -4337,6 +4359,13 @@ export const AppContainer = (props: AppContainerProps) => {
     handleMcpApprovalSelect,
   } = useMcpApproval(config);
   const {
+    isProjectHooksApprovalDialogOpen,
+    pendingProjectHooks,
+    handleProjectHooksApprovalSelect,
+  } = useProjectHooksApproval(config, settings, (text) =>
+    addHistoryItem({ type: MessageType.INFO, text }, Date.now()),
+  );
+  const {
     needsRestart: ideNeedsRestart,
     restartReason: ideTrustRestartReason,
   } = useIdeTrustListener(!config.getShellExecutionSandbox?.());
@@ -4359,6 +4388,7 @@ export const AppContainer = (props: AppContainerProps) => {
     shouldShowCommandMigrationNudge ||
     isFolderTrustDialogOpen ||
     isMcpApprovalDialogOpen ||
+    isProjectHooksApprovalDialogOpen ||
     !!shellConfirmationRequest ||
     !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
@@ -5380,6 +5410,8 @@ export const AppContainer = (props: AppContainerProps) => {
       currentMcpApproval,
       pendingMcpApprovals,
       mcpApprovalRemaining,
+      isProjectHooksApprovalDialogOpen,
+      pendingProjectHooks,
       isTrustedFolder,
       constrainHeight,
       ideContextState,
@@ -5530,6 +5562,8 @@ export const AppContainer = (props: AppContainerProps) => {
       currentMcpApproval,
       pendingMcpApprovals,
       mcpApprovalRemaining,
+      isProjectHooksApprovalDialogOpen,
+      pendingProjectHooks,
       isTrustedFolder,
       constrainHeight,
       ideContextState,
@@ -5649,6 +5683,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
       handleMcpApprovalSelect,
+      handleProjectHooksApprovalSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
       onTabConsumerChange: setHasTabConsumer,
@@ -5743,6 +5778,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
       handleMcpApprovalSelect,
+      handleProjectHooksApprovalSelect,
       setConstrainHeight,
       handleEscapePromptChange,
       refreshStatic,

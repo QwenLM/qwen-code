@@ -70,6 +70,7 @@ import { AppEvent } from '../../utils/events.js';
 import { t } from '../../i18n/index.js';
 import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
 import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
+import { filterSubscriptionCommands } from '../commands/subscription-commands.js';
 import {
   appendUserPromptExpansionAdditionalContext,
   formatUserPromptExpansionBlockedMessage,
@@ -395,6 +396,13 @@ export class OpenTuiSlashDispatcher {
     return this.commandList;
   }
 
+  private get availableCommands(): readonly SlashCommand[] {
+    return filterSubscriptionCommands(
+      this.commandList,
+      this.services.config?.getAuthType?.(),
+    );
+  }
+
   /** Parity of the processor's `reloadCommands` result swap. */
   setCommands(commands: readonly SlashCommand[]): void {
     this.commandList = commands;
@@ -473,7 +481,10 @@ export class OpenTuiSlashDispatcher {
     if (!this.takesAsSlashCommand(trimmed) || isBtwCommand(trimmed)) {
       return false;
     }
-    const { commandToExecute } = parseSlashCommand(trimmed, this.commandList);
+    const { commandToExecute } = parseSlashCommand(
+      trimmed,
+      this.availableCommands,
+    );
     // Matched on the resolved command, so `/exit` is covered as an altName.
     if (commandToExecute?.name === 'quit') return false;
     return commandToExecute?.canRunDuringStreaming !== true;
@@ -699,7 +710,7 @@ export class OpenTuiSlashDispatcher {
       commandToExecute,
       args,
       canonicalPath: resolvedCommandPath,
-    } = parseSlashCommand(trimmed, this.commandList);
+    } = parseSlashCommand(trimmed, this.availableCommands);
     if (!commandToExecute) {
       const config = this.services.config;
       const session = config?.getSessionId();
@@ -720,7 +731,7 @@ export class OpenTuiSlashDispatcher {
           commandToExecute,
           args,
           canonicalPath: resolvedCommandPath,
-        } = parseSlashCommand(trimmed, this.commandList));
+        } = parseSlashCommand(trimmed, this.availableCommands));
       }
     }
     let hideInvocation =
@@ -792,7 +803,7 @@ export class OpenTuiSlashDispatcher {
       }
       const stackedResult = parseStackedSlashCommands(
         trimmed,
-        this.commandList,
+        this.availableCommands,
       );
       if (stackedResult.skills.length >= 2) {
         const combinedContent: PartListUnion[] = [];

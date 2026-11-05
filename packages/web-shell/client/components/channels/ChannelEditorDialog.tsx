@@ -12,7 +12,14 @@ import {
   type FormEvent,
   type ReactNode,
 } from 'react';
-import { CheckCircle2Icon, ChevronDownIcon, KeyRoundIcon } from 'lucide-react';
+import {
+  CheckCircle2Icon,
+  ChevronDownIcon,
+  ExpandIcon,
+  KeyRoundIcon,
+  ShrinkIcon,
+  Trash2Icon,
+} from 'lucide-react';
 import type {
   DaemonChannelConfigFieldDescriptor,
   DaemonChannelInstanceSnapshot,
@@ -50,7 +57,9 @@ import { RadioGroup, RadioGroupItem } from '../ui/radio-group';
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from '../ui/select';
@@ -111,6 +120,7 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     deliverToBoundSessions:
       'channels.editor.field.github.deliverToBoundSessions',
     prWatchEvents: 'channels.editor.field.github.prWatchEvents',
+    boundSessionActions: 'channels.editor.field.github.boundSessionActions',
   },
   gitlab: {
     token: 'channels.editor.field.gitlab.token',
@@ -133,6 +143,13 @@ const SHARED_SESSION_FIELD_KEYS = new Set([
   'sessionScope',
   'multiSession',
   'instructions',
+]);
+// One panel: watch events and action templates only mean something with
+// bound delivery enabled.
+const BOUND_SESSION_FIELD_KEYS = new Set([
+  'deliverToBoundSessions',
+  'prWatchEvents',
+  'boundSessionActions',
 ]);
 
 const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
@@ -247,6 +264,7 @@ function FieldShell({
   label,
   required,
   hint,
+  hintId,
   description,
   error,
   children,
@@ -255,6 +273,7 @@ function FieldShell({
   label: string;
   required?: boolean;
   hint?: string;
+  hintId?: string;
   description?: string;
   error?: string;
   children: ReactNode;
@@ -270,7 +289,17 @@ function FieldShell({
             </span>
           ) : null}
         </Label>
-        {hint ? <span className={styles.hint}>{hint}</span> : null}
+        {hint || hintId ? (
+          // A hintId keeps the live region mounted while the hint is empty,
+          // so screen readers announce the hint when it appears.
+          <span
+            id={hintId}
+            className={styles.hint}
+            aria-live={hintId ? 'polite' : undefined}
+          >
+            {hint}
+          </span>
+        ) : null}
       </div>
       {children}
       {description ? (
@@ -313,6 +342,7 @@ export function ChannelEditorDialog({
   const [saving, setSaving] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
   const [scrollToErrorKey, setScrollToErrorKey] = useState<string>();
   const dismissedRef = useRef(false);
   /** The token draft as it stood before local gh auth overrode it. */
@@ -348,7 +378,11 @@ export function ChannelEditorDialog({
     (field) =>
       !SHARED_ACCESS_FIELD_KEYS.has(field.key) &&
       !SHARED_SESSION_FIELD_KEYS.has(field.key) &&
-      !ADVANCED_FIELD_KEYS.has(field.key),
+      !ADVANCED_FIELD_KEYS.has(field.key) &&
+      !BOUND_SESSION_FIELD_KEYS.has(field.key),
+  );
+  const boundSessionFields = descriptor.fields.filter((field) =>
+    BOUND_SESSION_FIELD_KEYS.has(field.key),
   );
 
   useEffect(() => {
@@ -367,6 +401,7 @@ export function ChannelEditorDialog({
     );
     setErrors({});
     setSubmitError(undefined);
+    setFullscreen(false);
   }, [descriptor, instance, open]);
 
   useEffect(() => {
@@ -375,10 +410,11 @@ export function ChannelEditorDialog({
   }, [workspaceCwd]);
 
   useEffect(() => {
-    if (!advancedOpen || !scrollToErrorKey) return;
-    // Runs after the forced-open panel content mounts; the id is the same one
-    // FieldShell renders, so the scroll lands on the erroring control. The
-    // optional call keeps jsdom (no scrollIntoView) from throwing.
+    if (!scrollToErrorKey) return;
+    // Runs after the forced-open panel content mounts (submit sets both in
+    // one batch); the id is the same one FieldShell renders, so the scroll
+    // lands on the erroring control. The optional call keeps jsdom (no
+    // scrollIntoView) from throwing.
     document
       .getElementById(`${formId}-${scrollToErrorKey}`)
       ?.scrollIntoView?.({ block: 'center' });
@@ -451,6 +487,8 @@ export function ChannelEditorDialog({
       return t('channels.editor.validation.conflictingRepoAliases');
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
+    if (code === 'requiresBoundDelivery')
+      return t('channels.editor.validation.requiresBoundDelivery');
     if (code === 'number') return t('channels.editor.validation.number');
     if (code === 'outOfRange') {
       const numberField = field && field.kind === 'number' ? field : undefined;
@@ -479,6 +517,37 @@ export function ChannelEditorDialog({
     });
   };
 
+  // Re-derive only the errors already on screen, so each remedy (switch in
+  // either direction, untick) retires exactly the instruction it satisfies —
+  // including invalidOption, whose remedy is unticking the offending value —
+  // without surfacing an error the operator never submitted. Submit stays the
+  // only population site; deriving through validateChannelEditorDraft keeps
+  // the daemon precedence that the parity table pins.
+  const refreshErrors = (values: ChannelEditorDraft['values']) =>
+    setErrors((current) => {
+      const shown = Object.keys(current);
+      if (shown.length === 0) return current;
+      const validation = validateChannelEditorDraft(
+        descriptor,
+        { ...draft, values },
+        existingNames,
+        instance,
+      );
+      const next = { ...current };
+      for (const key of shown) {
+        const code = validation[key];
+        if (code) {
+          next[key] = validationMessage(
+            descriptor.fields.find((field) => field.key === key),
+            code,
+          );
+        } else {
+          delete next[key];
+        }
+      }
+      return next;
+    });
+
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const validation = validateChannelEditorDraft(
@@ -488,15 +557,14 @@ export function ChannelEditorDialog({
       instance,
     );
     if (Object.keys(validation).length > 0) {
-      // An error on a collapsed field would otherwise be invisible: open the
-      // panel and bring the first erroring advanced field into view.
+      // An error below the fold or on a collapsed field would otherwise be
+      // invisible: open the advanced panel when needed and bring the first
+      // erroring field — advanced or not — into view.
       const advancedErrorKey = Object.keys(validation).find((key) =>
         ADVANCED_FIELD_KEYS.has(key),
       );
-      if (advancedErrorKey) {
-        setAdvancedOpen(true);
-        setScrollToErrorKey(advancedErrorKey);
-      }
+      if (advancedErrorKey) setAdvancedOpen(true);
+      setScrollToErrorKey(advancedErrorKey ?? Object.keys(validation)[0]);
       setErrors(
         Object.fromEntries(
           Object.entries(validation).map(([key, code]) => [
@@ -668,6 +736,14 @@ export function ChannelEditorDialog({
         field.key === 'useLocalGh' &&
         isRepositoryOnlyChannelType(descriptor.type);
       const updateSwitch = (checked: boolean) => {
+        if (field.key === 'deliverToBoundSessions') {
+          // Both directions re-derive shown errors: on retires the dependency
+          // instruction, off keeps a shown one instead of dropping it silently.
+          refreshErrors({
+            ...draft.values,
+            deliverToBoundSessions: checked,
+          });
+        }
         if (!isLocalGhSwitch) {
           update(checked);
           return;
@@ -753,6 +829,11 @@ export function ChannelEditorDialog({
     }
     if (field.kind === 'string-list' && field.options?.length) {
       const options = field.options;
+      // Same scope as the validation mirror in channel-editor-state.
+      const watchField =
+        field.key === 'prWatchEvents' && descriptor.type === 'github';
+      const gated =
+        watchField && draft.values['deliverToBoundSessions'] !== true;
       const selected = toList(String(value ?? ''));
       // The adapter matches these values case-insensitively, so a stored
       // `COMMENT` has to tick the canonical `comment` box instead of rendering
@@ -772,14 +853,18 @@ export function ChannelEditorDialog({
         const next = new Set(selectedKeys);
         if (checked) next.add(target.toLowerCase());
         else next.delete(target.toLowerCase());
-        update(
-          [
-            ...options
-              .map((option) => option.value)
-              .filter((entry) => next.has(entry.toLowerCase())),
-            ...stored.filter((entry) => next.has(entry.toLowerCase())),
-          ].join(', '),
-        );
+        const joined = [
+          ...options
+            .map((option) => option.value)
+            .filter((entry) => next.has(entry.toLowerCase())),
+          ...stored.filter((entry) => next.has(entry.toLowerCase())),
+        ].join(', ');
+        // Unticking is a remedy too: re-derive so a satisfied instruction
+        // retires without waiting for a second Save.
+        if (watchField) {
+          refreshErrors({ ...draft.values, [field.key]: joined });
+        }
+        update(joined);
       };
       return (
         <FieldShell
@@ -788,6 +873,12 @@ export function ChannelEditorDialog({
           label={fieldLabel(field)}
           required={field.required}
           description={fieldDescription(field)}
+          hint={
+            gated
+              ? t('channels.editor.field.github.prWatchEvents.disabledHint')
+              : undefined
+          }
+          hintId={watchField ? `${id}-disabled-hint` : undefined}
           error={error}
         >
           <div
@@ -795,12 +886,17 @@ export function ChannelEditorDialog({
             className={styles.optionGrid}
             role="group"
             aria-label={fieldLabel(field)}
+            aria-describedby={gated ? `${id}-disabled-hint` : undefined}
           >
             {[
               ...options,
               ...stored.map((entry) => ({ value: entry, label: entry })),
             ].map((option) => {
               const isSelected = selectedKeys.has(option.value.toLowerCase());
+              // A stored selection stays clearable while gated, so turning
+              // delivery off never strands the operator with events they
+              // cannot remove.
+              const optionDisabled = gated && !isSelected;
               const optionLabel = fieldOptionLabel(
                 field,
                 option.value,
@@ -811,11 +907,13 @@ export function ChannelEditorDialog({
                   key={option.value}
                   className={styles.optionRow}
                   data-selected={isSelected}
+                  data-disabled={optionDisabled}
                 >
                   <input
                     type="checkbox"
                     className={styles.optionCheckbox}
                     checked={isSelected}
+                    disabled={optionDisabled}
                     onChange={(event) =>
                       toggleValue(option.value, event.target.checked)
                     }
@@ -834,16 +932,94 @@ export function ChannelEditorDialog({
         try {
           const parsed: unknown = JSON.parse(value);
           if (isRecord(parsed)) {
-            record = parsed as Record<string, string>;
+            record = Object.fromEntries(
+              Object.entries(parsed).filter(
+                (entry): entry is [string, string] =>
+                  typeof entry[1] === 'string',
+              ),
+            );
           }
         } catch {
           /* malformed — render empty */
         }
       }
-      const updateRecord = (key: string, val: string) => {
-        const next = { ...record, [key]: val };
+      const options = field.options ?? [];
+      const optionByKey = new Map(
+        options.map((option) => [option.value, option]),
+      );
+      const labelKey =
+        FIELD_LABEL_KEYS[descriptor.type]?.[field.key] ??
+        SHARED_FIELD_LABEL_KEYS[field.key];
+      const translateWithFallback = (suffix: string, fallback: string) => {
+        if (!labelKey) return fallback;
+        const key = `${labelKey}.${suffix}`;
+        const translated = t(key);
+        return translated !== key ? translated : fallback;
+      };
+      // Translated description, else the descriptor's own, else a
+      // descriptive option label (GitLab spells the meaning into the label).
+      const optionDescription = (key: string): string => {
+        const option = optionByKey.get(key);
+        const translated = translateWithFallback(
+          `optionDescription.${key}`,
+          '',
+        );
+        if (translated) return translated;
+        if (option?.description) return option.description;
+        const optionLabel = option
+          ? fieldOptionLabel(field, option.value, option.label)
+          : '';
+        return optionLabel !== key ? optionLabel : '';
+      };
+      // Empty values stay in the draft while editing so a freshly added or
+      // cleared row keeps its place; the explicit remove button deletes the
+      // key, and the save serializer (parseRouteRecord) filters empty values
+      // regardless, so no empty entry can reach the channel validators.
+      const writeRecord = (next: Record<string, string>) => {
         update(JSON.stringify(next));
       };
+      const setEntry = (key: string, val: string) => {
+        writeRecord({ ...record, [key]: val });
+      };
+      const removeEntry = (key: string) => {
+        const next = { ...record };
+        delete next[key];
+        writeRecord(next);
+      };
+      // Same gate as prWatchEvents: name the prerequisite at the field
+      // instead of surfacing a raw daemon rejection after submit. Stored
+      // rows stay editable and removable while gated.
+      const gated =
+        field.key === 'boundSessionActions' &&
+        descriptor.type === 'github' &&
+        draft.values['deliverToBoundSessions'] !== true;
+      const available = options.filter((option) => !(option.value in record));
+      const groups: Array<{
+        name: string | undefined;
+        options: typeof available;
+      }> = [];
+      for (const option of available) {
+        const last = groups[groups.length - 1];
+        if (last && last.name === option.group) last.options.push(option);
+        else groups.push({ name: option.group, options: [option] });
+      }
+      const renderOption = (option: (typeof available)[number]) => {
+        const label = fieldOptionLabel(field, option.value, option.label);
+        const description = optionDescription(option.value);
+        return (
+          <SelectItem key={option.value} value={option.value}>
+            <span className={styles.recordOption}>
+              <span>{label}</span>
+              {description && description !== label ? (
+                <span className={styles.recordOptionDescription}>
+                  {description}
+                </span>
+              ) : null}
+            </span>
+          </SelectItem>
+        );
+      };
+      const recordKeys = Object.keys(record);
       return (
         <FieldShell
           key={field.key}
@@ -851,32 +1027,95 @@ export function ChannelEditorDialog({
           label={fieldLabel(field)}
           required={field.required}
           description={fieldDescription(field)}
+          hint={
+            gated
+              ? t(
+                  'channels.editor.field.github.boundSessionActions.disabledHint',
+                )
+              : undefined
+          }
+          hintId={gated ? `${id}-disabled-hint` : undefined}
           error={error}
         >
           <div className={styles.recordFields}>
-            {field.options?.map((option) => {
-              const optKey = `${FIELD_LABEL_KEYS[descriptor.type]?.[field.key] ?? ''}.option.${option.value}`;
-              const translated = t(optKey);
-              const displayLabel =
-                translated !== optKey ? translated : option.label;
+            {recordKeys.length === 0 ? (
+              <p className={styles.recordEmpty}>
+                {translateWithFallback(
+                  'empty',
+                  t('channels.editor.record.empty'),
+                )}
+              </p>
+            ) : null}
+            {recordKeys.map((key) => {
+              const description = optionDescription(key);
               return (
-                <div key={option.value} className={styles.recordRow}>
-                  <Label
-                    htmlFor={`${id}-${option.value}`}
-                    className={styles.recordLabel}
-                  >
-                    {displayLabel}
-                  </Label>
-                  <Input
-                    id={`${id}-${option.value}`}
-                    value={record[option.value] ?? ''}
-                    onChange={(event) =>
-                      updateRecord(option.value, event.target.value)
-                    }
+                <div key={key} className={styles.recordRow}>
+                  <div className={styles.recordRowHeader}>
+                    <Label
+                      htmlFor={`${id}-${key}`}
+                      className={styles.recordLabel}
+                    >
+                      {key}
+                    </Label>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={t('channels.editor.record.remove', { key })}
+                      title={t('channels.editor.record.remove', { key })}
+                      onClick={() => removeEntry(key)}
+                    >
+                      <Trash2Icon />
+                    </Button>
+                  </div>
+                  {description ? (
+                    <p className={styles.recordDescription}>{description}</p>
+                  ) : null}
+                  <Textarea
+                    id={`${id}-${key}`}
+                    value={record[key] ?? ''}
+                    onChange={(event) => setEntry(key, event.target.value)}
                   />
                 </div>
               );
             })}
+            {options.length > 0 ? (
+              <Select
+                value=""
+                disabled={gated || available.length === 0}
+                onValueChange={(key) => setEntry(key, '')}
+              >
+                <SelectTrigger
+                  id={id}
+                  className="w-full"
+                  aria-describedby={gated ? `${id}-disabled-hint` : undefined}
+                >
+                  <SelectValue
+                    placeholder={translateWithFallback(
+                      'addPlaceholder',
+                      t('channels.editor.record.addPlaceholder'),
+                    )}
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {groups.map((group) =>
+                    group.name === undefined ? (
+                      group.options.map(renderOption)
+                    ) : (
+                      <SelectGroup key={group.name}>
+                        <SelectLabel>
+                          {translateWithFallback(
+                            `group.${group.name}`,
+                            group.name,
+                          )}
+                        </SelectLabel>
+                        {group.options.map(renderOption)}
+                      </SelectGroup>
+                    ),
+                  )}
+                </SelectContent>
+              </Select>
+            ) : null}
           </div>
         </FieldShell>
       );
@@ -1158,7 +1397,13 @@ export function ChannelEditorDialog({
         onOpenChange(nextOpen);
       }}
     >
-      <DialogContent className="max-w-[calc(100%-2rem)] p-5 sm:max-w-xl">
+      <DialogContent
+        className={
+          fullscreen
+            ? 'flex h-[calc(100vh-2rem)] max-w-[calc(100vw-2rem)] flex-col p-5 sm:max-w-[calc(100vw-2rem)]'
+            : 'max-w-[calc(100%-2rem)] p-5 sm:max-w-xl'
+        }
+      >
         <DialogHeader>
           <div className={styles.platformHeader}>
             <span className={styles.platformMark} aria-hidden="true">
@@ -1166,7 +1411,7 @@ export function ChannelEditorDialog({
                 descriptor.displayName[0]?.toUpperCase() ??
                 '?'}
             </span>
-            <div>
+            <div className={styles.platformHeaderText}>
               <DialogTitle>
                 {t(
                   instance
@@ -1183,10 +1428,37 @@ export function ChannelEditorDialog({
                 )}
               </DialogDescription>
             </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className={styles.fullscreenToggle}
+              onClick={() => setFullscreen((value) => !value)}
+              aria-label={t(
+                fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+              )}
+              aria-pressed={fullscreen}
+              title={t(
+                fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+              )}
+            >
+              {fullscreen ? <ShrinkIcon /> : <ExpandIcon />}
+            </Button>
           </div>
         </DialogHeader>
-        <form className={styles.form} onSubmit={submit}>
-          <div className={styles.body}>
+        <form
+          className={
+            fullscreen ? `${styles.form} ${styles.formFullscreen}` : styles.form
+          }
+          onSubmit={submit}
+        >
+          <div
+            className={
+              fullscreen
+                ? `${styles.body} ${styles.bodyFullscreen}`
+                : styles.body
+            }
+          >
             {submitError ? (
               <Alert variant="destructive">
                 <KeyRoundIcon />
@@ -1285,6 +1557,20 @@ export function ChannelEditorDialog({
                 </section>
               );
             })}
+
+            {boundSessionFields.length > 0 ? (
+              <section className={styles.settingsPanel}>
+                <div className={styles.settingsPanelHeader}>
+                  <h3 className={styles.settingsPanelTitle}>
+                    {t('channels.editor.section.boundSessions')}
+                  </h3>
+                  <p className={styles.settingsPanelDescription}>
+                    {t('channels.editor.section.boundSessions.description')}
+                  </p>
+                </div>
+                {boundSessionFields.map(renderField)}
+              </section>
+            ) : null}
 
             {sessionFields.length > 0 ? (
               <section className={styles.settingsPanel}>

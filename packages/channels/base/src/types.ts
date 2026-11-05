@@ -187,11 +187,27 @@ export interface SessionTarget {
   isGroup?: boolean;
 }
 
+/**
+ * The closed role vocabulary of role-aware bound delivery. Core owns the
+ * sidecar copy (`PR_BINDING_ROLES` in session-pr-service); the channel
+ * packages cannot depend on core, so this mirror is the channel-side
+ * source. A cross-package pin test (cli's session-pr-bindings.test.ts,
+ * which imports the real core) keeps the two lists identical.
+ */
+export const PR_BINDING_ROLES = ['review', 'verify', 'fix'] as const;
+
+export type PrBindingRole = (typeof PR_BINDING_ROLES)[number];
+
 /** One PR binding mirrored from a daemon session's PR sidecar. */
 export interface PrBindingEntry {
   number: number;
   url: string;
   state?: 'open' | 'merged' | 'closed';
+  /**
+   * The job the bound session does for the PR (role-aware delivery).
+   * Absent means untyped; the adapter groups untyped followers separately.
+   */
+  role?: PrBindingRole;
 }
 
 /**
@@ -208,10 +224,14 @@ export interface PrBindingSummary {
 
 /**
  * Result of a PR-binding reverse lookup. `partial` means the daemon could
- * not enumerate every binding (a workspace failed to list or is not active,
- * a scan needed more than one page, or a scan cap was hit); consumers must
- * not treat a missing entry as an authoritative absence — in particular they
- * must not destroy state keyed by bindings.
+ * not read part of the catalog — a registry entry with no runtime, a chats
+ * directory it could not list, a sidecar or transcript it could not read,
+ * or a live session list it could not fetch — or that the channel worker
+ * dropped a malformed binding row from the daemon's answer. A
+ * directory-listing snapshot is complete regardless of session count;
+ * consumers must not treat a
+ * missing entry in a partial answer as an authoritative absence — in
+ * particular they must not destroy state keyed by bindings.
  */
 export interface PrBindingsSnapshot {
   bindings: PrBindingSummary[];
@@ -519,10 +539,23 @@ export type ChannelConfigFieldKind =
   | 'record'
   | 'object';
 
+/**
+ * One selectable value of a config field. `description` explains the value
+ * in management UIs; `group` buckets related values under one picker
+ * section. Both are optional display metadata — validators only ever read
+ * `value`.
+ */
+export interface ChannelConfigFieldOption {
+  value: string;
+  label: string;
+  description?: string;
+  group?: string;
+}
+
 interface ChannelConfigFieldDescriptorBase {
   key: string;
   label: string;
-  options?: ReadonlyArray<{ value: string; label: string }>;
+  options?: readonly ChannelConfigFieldOption[];
   default?: string;
   description?: string;
 }
@@ -552,7 +585,7 @@ export interface ChannelConfigEnumFieldDescriptor
   required?: boolean;
   envResolvable?: never;
   multiline?: never;
-  options: ReadonlyArray<{ value: string; label: string }>;
+  options: readonly ChannelConfigFieldOption[];
   properties?: never;
 }
 

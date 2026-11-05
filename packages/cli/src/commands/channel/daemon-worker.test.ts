@@ -4666,6 +4666,41 @@ describe('createBoundSessionsAccessor', () => {
     expect(snapshot.bindings).toHaveLength(1);
   });
 
+  it('projects binding roles and degrades an unknown role to partial', async () => {
+    const requestRest = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        bindings: [
+          {
+            sessionId: 'session-1',
+            workspaceCwd: '/ws/a',
+            prs: [
+              {
+                number: 1,
+                url: 'https://github.com/o/r/pull/1',
+                role: 'review',
+              },
+              {
+                number: 2,
+                url: 'https://github.com/o/r/pull/2',
+                role: 'triage',
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const snapshot = await accessor.listPrBindings();
+
+    // The unknown role must not silently untype the entry: the dropped
+    // entry degrades the whole answer so the adapter retains known bindings.
+    expect(snapshot.partial).toBe(true);
+    expect(snapshot.bindings[0]!.prs).toEqual([
+      { number: 1, url: 'https://github.com/o/r/pull/1', role: 'review' },
+    ]);
+  });
+
   it('flags a partially malformed PR projection as partial (R4-B2)', async () => {
     const requestRest = vi.fn().mockResolvedValue(
       jsonResponse(200, {
@@ -4694,6 +4729,41 @@ describe('createBoundSessionsAccessor', () => {
     expect(snapshot.bindings[0]!.prs).toEqual([
       { number: 1, url: 'https://github.com/o/r/pull/1' },
     ]);
+  });
+
+  it('logs one throttled line when the worker itself downgrades an answer to partial', async () => {
+    const requestRest = vi.fn().mockImplementation(async () =>
+      jsonResponse(200, {
+        bindings: [
+          {
+            sessionId: 'session-1',
+            workspaceCwd: '/ws/a',
+            prs: [
+              { number: 1, url: 'https://github.com/o/r/pull/1' },
+              { number: 'two', url: 'https://github.com/o/r/pull/2' },
+            ],
+          },
+          { workspaceCwd: '/ws/a', prs: [] },
+        ],
+        partial: false,
+      }),
+    );
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      await accessor.listPrBindings();
+      await accessor.listPrBindings();
+      const lines = stderr.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes('downgraded to partial by the worker'));
+      // The daemon answered complete; the only cause is worker-side shape
+      // rejection, so it must be named — once, not on every poll.
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('2 binding row(s) or PR entries');
+      expect(lines[0]).toContain('same version');
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it('flags a dropped session row as partial (R5-C3)', async () => {

@@ -4898,10 +4898,23 @@ export type DaemonChannelConfigFieldKind =
   | 'record'
   | 'object';
 
+/**
+ * One selectable value of a config field. `description` explains the value
+ * in management UIs; `group` buckets related values under one picker
+ * section. Both are optional display metadata — validators only ever read
+ * `value`.
+ */
+interface DaemonChannelConfigFieldOption {
+  value: string;
+  label: string;
+  description?: string;
+  group?: string;
+}
+
 interface DaemonChannelConfigFieldDescriptorBase {
   key: string;
   label: string;
-  options?: ReadonlyArray<{ value: string; label: string }>;
+  options?: readonly DaemonChannelConfigFieldOption[];
   default?: string;
   description?: string;
 }
@@ -4931,7 +4944,7 @@ export interface DaemonChannelConfigEnumFieldDescriptor
   required?: boolean;
   envResolvable?: never;
   multiline?: never;
-  options: ReadonlyArray<{ value: string; label: string }>;
+  options: readonly DaemonChannelConfigFieldOption[];
   properties?: never;
 }
 
@@ -5039,6 +5052,13 @@ export interface DaemonChannelEvent {
   number?: number;
   actor?: string;
   sessionId?: string;
+  /**
+   * Workspace owning `sessionId`, when the Channel knew it at write time.
+   * Bound-session delivery can target a session in another workspace;
+   * clients need this to open it. Absent on older records, where the
+   * journal's own workspace is the fallback.
+   */
+  sessionWorkspaceCwd?: string;
   messageId?: string;
   durationMs?: number;
   error?: string;
@@ -5053,6 +5073,26 @@ export interface DaemonChannelEventsSnapshot {
    * than the tail window the route reads.
    */
   truncated: boolean;
+  /**
+   * Non-secret link metadata (platform type, API base URL, and the resolved
+   * GitHub web origin) for the channels named in `events`, resolved from the
+   * merged system + user + workspace settings and filtered to channels owned
+   * by the queried workspace. Present only when at least one channel
+   * resolves; absent on older daemons. Lets a client link journal rows of
+   * channels configured outside the workspace's own settings scope.
+   */
+  channelLinkMeta?: Record<string, DaemonChannelLinkMeta>;
+}
+
+export interface DaemonChannelLinkMeta {
+  type?: string;
+  baseUrl?: string;
+  /**
+   * The resolved GitHub web origin (e.g. `https://github.com` or a GHE web
+   * host). Clients should concatenate it directly; `baseUrl` remains for
+   * daemons that predate this field.
+   */
+  webOrigin?: string;
 }
 
 export interface DaemonChannelEventsQuery {
@@ -5665,6 +5705,8 @@ export interface DaemonHookEntry {
   matcher?: string;
   sequential?: boolean;
   enabled: boolean;
+  /** Why a disabled hook is off (e.g. 'untrusted'); absent when enabled. */
+  disabledReason?: string;
   hookId?: string;
   skillRoot?: string;
 }
@@ -5676,6 +5718,16 @@ export interface DaemonWorkspaceHooksStatus {
   disabled: boolean;
   hooks: DaemonHookEntry[];
   events: Record<string, DaemonHookEventMeta>;
+  /** Project hooks await the user's approval; see the hooks approve control. */
+  pendingApproval?: boolean;
+  /** Sanitized display lines of the withheld hooks, for the approval prompt. */
+  pendingApprovalHooks?: string[];
+  /**
+   * The hash of the block the prompt renders. Echo it back to
+   * `approveWorkspaceHooks` so the decision binds to the exact block the
+   * user reviewed; a block that changed since the render stays pending.
+   */
+  pendingApprovalHash?: string;
   errors?: DaemonStatusCell[];
 }
 
@@ -6022,4 +6074,41 @@ export interface DaemonMcpAppToolResult {
   isError?: boolean;
   structuredContent?: unknown;
   [key: string]: unknown;
+}
+
+export interface DaemonSubscriptionConfig {
+  enabled: boolean;
+  signedIn?: boolean;
+  plansUrl?: string;
+}
+
+export interface DaemonSubscriptionUserInfo {
+  sub: string;
+  name: string;
+  email: string;
+  member_type: string;
+}
+
+export interface DaemonSubscriptionFlow {
+  id: string;
+  status: 'waiting' | 'ready' | 'error' | 'cancelled';
+  authorizationUrl?: string;
+  userInfo?: DaemonSubscriptionUserInfo;
+  errorCode?: string;
+  errorStage?:
+    | 'device'
+    | 'exchange'
+    | 'credentials'
+    | 'userinfo'
+    | 'refresh'
+    | 'revoke'
+    | 'cleanup';
+  errorStatus?: number;
+  retryAfterMs?: number;
+}
+
+export interface DaemonSubscriptionActivation {
+  authType: 'qwen-subscription';
+  modelId: string;
+  runtimeSync: DaemonModelProviderRuntimeSyncResult;
 }

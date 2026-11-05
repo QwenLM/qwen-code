@@ -4,7 +4,7 @@ Qwen Code allows you to configure multiple model providers through the `modelPro
 
 ## Overview
 
-Use `modelProviders` to declare models per provider id that the `/model` picker can switch between. Each key is a provider id and its value is **an array of model definitions** (`ModelConfig[]`). For built-in providers the key must be a valid auth type (`openai`, `anthropic`, `gemini`, `vertex-ai`); a custom provider id (e.g. `idealab`) is allowed as long as you map it to a protocol via the top-level [`providerProtocol`](#custom-provider-ids-providerprotocol) setting. Each model entry requires an `id`; `envKey` is **optional and recommended** (when omitted, it falls back to the auth type's default env key, e.g. `OPENAI_API_KEY` for `openai`), with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
+Use `modelProviders` to declare models per provider id that the `/model` picker can switch between. Each key is a provider id and its value is **an array of model definitions** (`ModelConfig[]`). For built-in providers the key must be a valid auth type (`openai`, `anthropic`, `gemini`, `vertex-ai`); a custom provider id (e.g. `idealab`) is allowed as long as you map it to a protocol via the top-level [`providerProtocol`](#custom-provider-ids-providerprotocol) setting. Each model entry requires an `id`; `envKey` is **optional and recommended** (when omitted, it falls back to the auth type's default env key, e.g. `OPENAI_API_KEY` for `openai`), with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Legacy free Qwen OAuth models remain hard-coded and cannot be overridden.
 
 > [!note]
 >
@@ -12,7 +12,7 @@ Use `modelProviders` to declare models per provider id that the `/model` picker 
 
 > [!note]
 >
-> Only the `/model` command exposes non-default auth types. Anthropic, Gemini, etc., must be defined via `modelProviders`. The `/auth` command lists four top-level options: **QwenCloud** (with Token Plan and Standard API Key in its sub-menu), **Alibaba ModelStudio** (with Coding Plan, Token Plan, and Standard API Key in its sub-menu), **Third-party Providers**, and **Custom Provider**. (Qwen OAuth is no longer a selectable dialog entry; its free tier was discontinued on 2026-04-15.)
+> Configure API-key providers through `modelProviders`, then select them with `/model`. For Qwen account sign-in, choose [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code) in `/auth`; no API key or manual `modelProviders` configuration is needed. Use `/model` to choose from the models available with your subscription. See [Authentication](./auth.md) for sign-in instructions.
 
 > [!note]
 >
@@ -186,7 +186,6 @@ Use one of the built-in provider ids below, or map a custom id with `providerPro
 | `openai`           | OpenAI-compatible APIs. Defaults to Chat Completions; set a model's `wireApi` to `responses` for the Responses API.                             |
 | `anthropic`        | Anthropic Claude API                                                                                                                            |
 | `gemini`           | Google Gemini API                                                                                                                               |
-| `qwen-oauth`       | Qwen OAuth (hard-coded, cannot be overridden in `modelProviders`)                                                                               |
 | `vertex-ai`        | Google Vertex AI (uses the `gemini` protocol and the `@google/genai` SDK in Vertex AI mode; selecting it sets `GOOGLE_GENAI_USE_VERTEXAI=true`) |
 
 > [!note]
@@ -588,6 +587,36 @@ export VLLM_API_KEY="not-needed"
 >
 > Each provider example includes an `env` field to illustrate how the API key should be configured.
 
+#### Qwen3.x served under a custom model name
+
+Thinking control and the context window are inferred from the model id. If a
+vLLM or SGLang server exposes a Qwen3.x model under an id that does not start
+with `qwen` (for example `--served-model-name chat`), neither applies: side
+requests such as the auto-mode permission classifier keep thinking on, and the
+context window falls back to the 200K default. Declare both on the model entry,
+as described in [Override reasoning capabilities](#override-reasoning-capabilities):
+
+```json
+{
+  "id": "chat",
+  "name": "Qwen3.6 35B A3B (vLLM)",
+  "envKey": "VLLM_API_KEY",
+  "baseUrl": "http://localhost:8000/v1",
+  "capabilities": { "reasoning": { "profile": "qwen-chat-template" } },
+  "generationConfig": { "contextWindowSize": 262144 }
+}
+```
+
+`qwen-chat-template` sends `chat_template_kwargs.enable_thinking`, which these
+servers pass to the Qwen chat template; a top-level `enable_thinking` field is
+not read by them. Set `contextWindowSize` to the server's maximum model length
+(vLLM reports it as `max_model_len` in `/v1/models`). Qwen Code sends tool
+definitions on every request, so the server also needs tool calling and a
+reasoning parser enabled; on vLLM that is `--enable-auto-tool-choice`, a
+`--tool-call-parser` for the model (for example `qwen3_xml`) and
+`--reasoning-parser qwen3`. Parser names change between server releases, so
+check your server's documentation.
+
 ## Alibaba Cloud Coding Plan
 
 Alibaba Cloud Coding Plan provides a pre-configured set of Qwen models optimized for coding tasks. This feature is available for users with Alibaba Cloud Coding Plan API access and offers a simplified setup experience with automatic model configuration updates.
@@ -704,7 +733,7 @@ The effective auth/model/credential values are chosen per field using the follow
 | Settings (`settings.json`) | `security.auth.selectedType`        | `model.name`                                    | `security.auth.apiKey`                            | `security.auth.baseUrl`                            | —                      | —                                 |
 | Default / computed         | Falls back to `AuthType.QWEN_OAUTH` | Built-in default (OpenAI ⇒ `qwen3.5-plus`)      | —                                                 | —                                                  | —                      | `Config.getProxy()` if configured |
 
-\*When present, CLI auth flags override settings. Otherwise, `security.auth.selectedType` or the implicit default determine the auth type. Qwen OAuth and OpenAI are the only auth types surfaced without extra configuration.
+\*When present, CLI auth flags override settings. Otherwise, `security.auth.selectedType` or the implicit default determine the auth type. See [Authentication](./auth.md) for sign-in options. The legacy free Qwen OAuth provider is separate from [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code).
 
 > [!note]
 >
