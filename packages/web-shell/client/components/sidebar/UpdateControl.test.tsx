@@ -250,10 +250,12 @@ describe('UpdateControl', () => {
     client.daemonUpdateStatus.mockResolvedValue(ready);
     const container = render();
     await flushReact();
+    // Unreachable from the click onward, so the continuous-downtime deadline
+    // starts at the click itself.
+    client.daemonUpdateStatus.mockRejectedValue(new Error('offline'));
     await act(async () =>
       getByRole(container, 'button', { name: 'Update' }).click(),
     );
-    client.daemonUpdateStatus.mockRejectedValue(new Error('offline'));
     await act(async () => vi.advanceTimersByTimeAsync(60_000));
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onRestarted).not.toHaveBeenCalled();
@@ -262,6 +264,59 @@ describe('UpdateControl', () => {
         'disabled',
       ),
     ).toBe(false);
+  });
+
+  it('keeps waiting while a reachable daemon stages a newer release', async () => {
+    client.daemonUpdateStatus.mockResolvedValue(ready);
+    const container = render();
+    await flushReact();
+    await act(async () =>
+      getByRole(container, 'button', { name: 'Update' }).click(),
+    );
+    client.daemonUpdateStatus.mockResolvedValue({
+      ...ready,
+      state: 'restarting',
+      latestVersion: '0.24.9',
+    });
+    // Re-resolving and staging the current latest happens after the 202 and
+    // can outlast a deadline measured from the click.
+    await act(async () => vi.advanceTimersByTimeAsync(180_000));
+    expect(onError).not.toHaveBeenCalled();
+    expect(onRestarted).not.toHaveBeenCalled();
+    expect(
+      getByRole(container, 'button', { name: 'Restarting…' }).hasAttribute(
+        'disabled',
+      ),
+    ).toBe(true);
+    client.daemonUpdateStatus.mockResolvedValue({
+      state: 'up-to-date',
+      currentVersion: '0.24.9',
+      canInstall: false,
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    expect(onRestarted).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('measures the restart deadline from continuous downtime, not the click', async () => {
+    client.daemonUpdateStatus.mockResolvedValue(ready);
+    const container = render();
+    await flushReact();
+    await act(async () =>
+      getByRole(container, 'button', { name: 'Update' }).click(),
+    );
+    client.daemonUpdateStatus.mockRejectedValue(new Error('offline'));
+    await act(async () => vi.advanceTimersByTimeAsync(50_000));
+    expect(onError).not.toHaveBeenCalled();
+    client.daemonUpdateStatus.mockResolvedValue({
+      ...ready,
+      state: 'restarting',
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    client.daemonUpdateStatus.mockRejectedValue(new Error('offline'));
+    await act(async () => vi.advanceTimersByTimeAsync(50_000));
+    expect(onError).not.toHaveBeenCalled();
+    expect(onRestarted).not.toHaveBeenCalled();
   });
 
   it('keeps the collapsed button accessible in Chinese', async () => {

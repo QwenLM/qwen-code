@@ -826,11 +826,21 @@ launcher; clients cannot supply a version or command.
 - `POST /daemon/update/restart` requires a prepared update, otherwise it returns
   `409 update_not_ready`. It responds with `202` and `state: "restarting"` before
   activating the update, gracefully closing the daemon, and replacing the process
-  with the updated launcher. Repeated clicks share one restart. The replacement
+  with the updated launcher. Repeated clicks share one restart. After responding,
+  the daemon re-resolves the current release once: if it is newer than the
+  prepared one and one-click covers it, the newer release is staged and the
+  prepared payload is discarded, so a long-lived daemon lands on the current
+  latest rather than on whatever was latest when it first prepared. `latestVersion`
+  then reports the newer target while `state` stays `restarting`. A failed
+  re-resolve or staging applies the prepared release instead; the click is never
+  stranded on the running version by a registry failure. The replacement
   preserves PID, working directory, CLI options, bound port, and effective daemon
   token, clears old version pins, and does not reopen a browser. The client polls
   GET until `currentVersion` changes, then reloads the document at the URL
-  captured when the update was requested. Standalone launcher validation runs before closing
+  captured when the update was requested. Because staging runs after the `202`
+  and can take minutes, the client measures its restart deadline from continuous
+  unreachability, not from the click: a daemon that keeps answering is still
+  working. Standalone launcher validation runs before closing
   services; a failed check leaves the daemon running. Failures after shutdown
   begins or during process replacement are not guaranteed to recover.
 
@@ -839,7 +849,11 @@ background, and displays its version-adjacent update button when a prepared
 update is ready or when an available update carries manual instructions. In the
 manual-instructions state the button opens a popover with the instructions from
 the check and never prepares or restarts. Preparation and readiness survive workspace runtime
-reloads. Ordinary daemon shutdown discards the prepared download. Activation
+reloads. A prepared update pins its target: polling GET, including
+`?refresh=true`, keeps reporting the prepared `latestVersion` and never
+re-downloads, so a daemon that stays alive across several releases does not
+churn downloads in the background. Only the restart re-resolves the target.
+Ordinary daemon shutdown discards the prepared download. Activation
 failures keep the daemon running and report `error`; the next check after the
 one-minute error cache can prepare a new download for retry. Disabling automatic
 updates removes readiness and cleans the download before a restart can begin.

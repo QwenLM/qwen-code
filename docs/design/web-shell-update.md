@@ -24,15 +24,25 @@ existing graceful shutdown path; it does not resume an interrupted model turn.
   hold the installation lock while waiting for the user. At activation, recheck
   the installation under its lock and preserve an already equal or newer version.
 - `POST /daemon/update/restart` acknowledges before applying the prepared payload.
-  Only this explicit action activates the update. Then close daemon services and
-  replace the process with `process.execve`. Preserve PID, startup directory,
-  bound primary port, authentication token, and CLI arguments; discard managed
-  version pins and browser-opening flags so the new launcher selects the update.
-  Before closing services, require the standalone launcher's official shell
-  header and run its `--version` with the restart environment, a 10-second timeout,
-  and a valid semver result. A failed check leaves the current daemon serving.
-  This checks the actual interpreter/runtime chain; it cannot guarantee recovery
-  if files change after checking or if process replacement or serve startup fails.
+  Only this explicit action activates the update. After acknowledging, re-resolve
+  the current release once and, when it is newer than the prepared one and
+  one-click covers it, stage the newer release and discard the prepared payload.
+  A daemon that stays alive across several releases therefore lands on the
+  current latest in one click, matching the CLI, which resolves and installs at
+  every process start. Readiness itself stays pinned — polling never
+  re-downloads — so the re-resolve belongs to the click, not to the check. A
+  failed re-resolve or staging applies the prepared release: a registry failure
+  must not strand an explicit update request on the running version. Staging runs
+  after the acknowledgement because it can take minutes. Then close daemon
+  services and replace the process with `process.execve`. Preserve PID, startup
+  directory, bound primary port, authentication token, and CLI arguments; discard
+  managed version pins and browser-opening flags so the new launcher selects the
+  update. Before closing services, require the standalone launcher's official
+  shell header and run its `--version` with the restart environment, a 10-second
+  timeout, and a valid semver result. A failed check leaves the current daemon
+  serving. This checks the actual interpreter/runtime chain; it cannot guarantee
+  recovery if files change after checking or if process replacement or serve
+  startup fails.
 - Restrict preparation/restart to primary connections using the daemon token
   or trusted tokenless loopback, actual CLI entry points with a restart callback, POSIX platforms with `process.execve`, supported
   standalone installs and global npm/pnpm/yarn/bun installs (including
@@ -63,8 +73,11 @@ existing graceful shutdown path; it does not resume an interrupted model turn.
   restore that URL in the current history entry and reload the document,
   including when the URL has an unchanged fragment. Session requests may return 404 and
   navigate the shell home during restart; that must not change the return target.
-  If recovery has not completed, show an error on the first completed poll after
-  60 seconds.
+  Measure the give-up deadline from continuous unreachability, not from the
+  click: the daemon keeps answering while it re-resolves and stages, which can
+  outlast any fixed click-time budget, and a reachable daemon is still working.
+  If it has been unreachable for 60 seconds, show an error on the first completed
+  poll.
   Unmounting cancels browser polling, not daemon work.
 - Hide the control for older daemons and the desktop shell. Custom footer items
   can omit `update`; this also disables the browser's preparation requests.
@@ -95,18 +108,28 @@ response-before-restart ordering, and preserved restart arguments/environment.
 Exercise an unusable launcher in a disposable process with real `execve`, and
 verify that the startup check rejects before closing a working listener. Pin
 cleanup during a failed restart so a refreshed check can prepare another update.
+Cover the activation-time re-resolve on both the standalone and managed npm
+paths: a newer release replaces the prepared payload and the old one is cleaned;
+polling alone never re-downloads; and an unreachable registry, a release with
+nothing newer, a newer release without a one-click path, and a failed restage
+each apply the prepared payload, with the failed restage leaving it intact until
+after activation.
 
 Test hidden/up-to-date/downloading/ready/restarting/error states, explicit-only
 activation, disconnection/recovery, timeout, collapsed controls, narrow layouts,
-and bilingual labels. Build, typecheck, bundle, run focused package tests, and
+and bilingual labels. The timeout coverage must distinguish a reachable daemon
+that is still staging from an unreachable one: only continuous downtime trips the
+deadline, and a successful poll restarts it. Build, typecheck, bundle, run focused package tests, and
 verify the packaged daemon plus browser flow. Record limitations separately.
 The browser regression must drive a restart-time session 404, observe the shell's
 own navigation, then verify recovery restores the original task URL.
 
 Acceptance: no update control appears until preparation completes; the version
 and update button sit together without overlapping footer actions; clicking once
-applies/restarts once and returns to the same task after recovery. Unsupported or
-disabled installations remain usable without a misleading restart button.
+applies/restarts once into the current latest — not into the release that happened
+to be latest when the daemon prepared — and returns to the same task after
+recovery. Unsupported or disabled installations remain usable without a
+misleading restart button.
 
 ## Open questions
 

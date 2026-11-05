@@ -12,6 +12,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { access, readFile, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import semver from 'semver';
 
 const CHECK_CACHE_MS = 15 * 60_000;
 const ERROR_CACHE_MS = 60_000;
@@ -131,6 +132,67 @@ function createUpdateController(deps: UpdateRouteDeps) {
     };
     return status;
   };
+  // Resolves how a given release can be staged. Shared by the periodic check
+  // and the pre-activation re-resolve so both agree on what one-click covers.
+  const resolveInstallTarget = async (
+    latestVersion: string,
+  ): Promise<{
+    prepare?: () => Promise<PreparedUpdate>;
+    instructions?: string[];
+  }> => {
+    const { getInstallationInfo, formatUpdateInstructions, PackageManager } =
+      await import('../../utils/installationInfo.js');
+    const installation = getInstallationInfo(startupDirectory, false);
+    let prepare: (() => Promise<PreparedUpdate>) | undefined;
+    if (installation.isStandalone && installation.standaloneDir) {
+      const standaloneDir = installation.standaloneDir;
+      const launcher = await standaloneUpdateLauncher(standaloneDir);
+      if (launcher) {
+        prepare = async () => {
+          const { prepareStandaloneUpdate } = await import(
+            '../../ui/standalone-update.js'
+          );
+          return {
+            ...(await prepareStandaloneUpdate(standaloneDir, latestVersion)),
+            launcher,
+          };
+        };
+      }
+    } else if (
+      installation.isGlobal &&
+      (installation.packageManager === PackageManager.NPM ||
+        installation.packageManager === PackageManager.PNPM ||
+        installation.packageManager === PackageManager.YARN ||
+        installation.packageManager === PackageManager.BUN)
+    ) {
+      // Staging installs into a user-scoped isolated prefix and the
+      // shared cli-entry.js launcher resolves the pointer, so neither
+      // the installing package manager nor a root-owned global prefix
+      // bars one-click; the launcher identity check below is the gate.
+      const launcher = await managedNpmLauncher(bootstrap, launcherStamp);
+      if (launcher) {
+        prepare = async () => {
+          const {
+            stageManagedNpmUpdate,
+            activateManagedNpmUpdate,
+            cleanupManagedNpmUpdate,
+          } = await import('../../utils/managed-npm-update.js');
+          const staged = await stageManagedNpmUpdate(latestVersion, launcher);
+          return {
+            launcher,
+            activate: () =>
+              activateManagedNpmUpdate(staged, latestVersion, launcher),
+            cleanup: () => cleanupManagedNpmUpdate(staged),
+          };
+        };
+      }
+    }
+    return prepare
+      ? { prepare }
+      : {
+          instructions: formatUpdateInstructions(installation, latestVersion),
+        };
+  };
   const check = async (refresh = false): Promise<DaemonUpdateStatus> => {
     if (closed) return unavailable();
     const current = status;
@@ -179,75 +241,15 @@ function createUpdateController(deps: UpdateRouteDeps) {
           };
           return status;
         }
-        const {
-          getInstallationInfo,
-          formatUpdateInstructions,
-          PackageManager,
-        } = await import('../../utils/installationInfo.js');
-        const installation = getInstallationInfo(startupDirectory, false);
         const latestVersion = result.info.update.latest;
-        if (installation.isStandalone && installation.standaloneDir) {
-          const standaloneDir = installation.standaloneDir;
-          const launcher = await standaloneUpdateLauncher(standaloneDir);
-          if (launcher) {
-            prepare = async () => {
-              const { prepareStandaloneUpdate } = await import(
-                '../../ui/standalone-update.js'
-              );
-              return {
-                ...(await prepareStandaloneUpdate(
-                  standaloneDir,
-                  latestVersion,
-                )),
-                launcher,
-              };
-            };
-          }
-        } else if (
-          installation.isGlobal &&
-          (installation.packageManager === PackageManager.NPM ||
-            installation.packageManager === PackageManager.PNPM ||
-            installation.packageManager === PackageManager.YARN ||
-            installation.packageManager === PackageManager.BUN)
-        ) {
-          // Staging installs into a user-scoped isolated prefix and the
-          // shared cli-entry.js launcher resolves the pointer, so neither
-          // the installing package manager nor a root-owned global prefix
-          // bars one-click; the launcher identity check below is the gate.
-          const launcher = await managedNpmLauncher(bootstrap, launcherStamp);
-          if (launcher) {
-            prepare = async () => {
-              const {
-                stageManagedNpmUpdate,
-                activateManagedNpmUpdate,
-                cleanupManagedNpmUpdate,
-              } = await import('../../utils/managed-npm-update.js');
-              const staged = await stageManagedNpmUpdate(
-                latestVersion,
-                launcher,
-              );
-              return {
-                launcher,
-                activate: () =>
-                  activateManagedNpmUpdate(staged, latestVersion, launcher),
-                cleanup: () => cleanupManagedNpmUpdate(staged),
-              };
-            };
-          }
-        }
+        const target = await resolveInstallTarget(latestVersion);
+        prepare = target.prepare;
         status = {
           state: 'available',
           currentVersion,
           latestVersion,
           canInstall: prepare !== undefined,
-          ...(!prepare
-            ? {
-                instructions: formatUpdateInstructions(
-                  installation,
-                  latestVersion,
-                ),
-              }
-            : {}),
+          ...(target.instructions ? { instructions: target.instructions } : {}),
         };
       } catch (error) {
         return fail(error);
@@ -259,6 +261,41 @@ function createUpdateController(deps: UpdateRouteDeps) {
       checking = undefined;
     });
     return checking;
+  };
+  // `ready` pins the check so polling never re-downloads, which leaves a
+  // long-lived daemon restarting into whatever was latest when it first
+  // prepared. Re-resolve once at activation so a click lands on the current
+  // latest, matching the CLI's install-at-startup. Runs after the 202 response
+  // because staging can take minutes. Any failure keeps the prepared payload:
+  // the user asked to update, and a registry hiccup must not strand them on
+  // the running version.
+  const restageIfNewer = async (
+    candidate: PreparedUpdate,
+    preparedVersion: string | undefined,
+  ): Promise<PreparedUpdate> => {
+    if (!preparedVersion) return candidate;
+    try {
+      const { checkForUpdatesDetailed } = await import(
+        '../../ui/utils/updateCheck.js'
+      );
+      const result = await checkForUpdatesDetailed();
+      if (result.status !== 'update') return candidate;
+      const latestVersion = result.info.update.latest;
+      if (!semver.gt(latestVersion, preparedVersion)) return candidate;
+      const target = await resolveInstallTarget(latestVersion);
+      if (!target.prepare) return candidate;
+      const staged = await target.prepare();
+      await candidate.cleanup();
+      prepared = staged;
+      if (status) status = { ...status, latestVersion };
+      return staged;
+    } catch (error) {
+      writeStderrLine(
+        'qwen serve: update re-resolve failed, applying the prepared release: ' +
+          (error instanceof Error ? error.message : String(error)),
+      );
+      return candidate;
+    }
   };
 
   return {
@@ -317,16 +354,18 @@ function createUpdateController(deps: UpdateRouteDeps) {
         },
         run: async () => {
           restartStarted = true;
+          let target = candidate;
           try {
-            await candidate.activate();
-            await candidate.cleanup();
+            target = await restageIfNewer(candidate, current.latestVersion);
+            await target.activate();
+            await target.cleanup();
             prepared = undefined;
-            await restart(candidate.launcher);
+            await restart(target.launcher);
           } catch (error) {
             restartStarted = false;
             prepared = undefined;
             await Promise.resolve()
-              .then(() => candidate.cleanup())
+              .then(() => target.cleanup())
               .catch(() => undefined);
             fail(error);
             writeStderrLine(

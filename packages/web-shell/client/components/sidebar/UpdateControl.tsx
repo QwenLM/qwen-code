@@ -41,7 +41,6 @@ export function UpdateControl({
   const { t } = useI18n();
   const [status, setStatus] = useState<DaemonUpdateStatus | null>(null);
   const [restarting, setRestarting] = useState<{
-    startedAt: number;
     version: string;
     url: string;
   } | null>(null);
@@ -62,12 +61,18 @@ export function UpdateControl({
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
+    // The daemon answers while it re-resolves and stages the current latest,
+    // which can outlast any fixed deadline measured from the click. Time how
+    // long it has been unreachable instead — a daemon that died and never came
+    // back is the failure this timeout exists to detect.
+    let unreachableSince: number | undefined;
     const check = async () => {
       let delay = restarting !== null ? 2000 : 60_000;
       let failure: unknown;
       try {
         let next = await client.daemonUpdateStatus();
         if (cancelled) return;
+        unreachableSince = undefined;
         if (restarting !== null) {
           if (
             next.currentVersion &&
@@ -93,9 +98,14 @@ export function UpdateControl({
         if (next.state === 'installing' || restarting !== null) delay = 2000;
       } catch (error) {
         failure = error;
+        unreachableSince ??= Date.now();
       }
       if (cancelled) return;
-      if (restarting !== null && Date.now() - restarting.startedAt >= 60_000) {
+      if (
+        restarting !== null &&
+        unreachableSince !== undefined &&
+        Date.now() - unreachableSince >= 60_000
+      ) {
         restartRequested.current = false;
         setRestarting(null);
         callbacks.current.onError(
@@ -118,7 +128,6 @@ export function UpdateControl({
     restartRequested.current = true;
     const generation = clientGeneration.current;
     setRestarting({
-      startedAt: Date.now(),
       version: status?.currentVersion || currentVersion,
       url: window.location.href,
     });

@@ -59,6 +59,13 @@ const available = {
     },
   },
 };
+const release = (latest: string) => ({
+  ...available,
+  info: {
+    ...available.info,
+    update: { ...available.info.update, latest },
+  },
+});
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: Error) => void;
@@ -307,6 +314,190 @@ describe('daemon update routes', () => {
     expect(events.slice(-2)).toEqual(['cleanup', 'restart']);
     await (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)();
     expect(mocks.cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('activates the current latest, not the release pinned when it prepared', async () => {
+    const activated: string[] = [];
+    const cleaned: string[] = [];
+    mocks.standalone.mockImplementation(
+      async (_dir: string, version: string) => ({
+        activate: async () => {
+          activated.push(version);
+        },
+        cleanup: async () => {
+          cleaned.push(version);
+        },
+      }),
+    );
+    const app = await makeApp();
+    await ready(app);
+    expect(mocks.standalone).toHaveBeenCalledWith(standaloneDir, '2.0.0');
+    // Another release ships while the daemon sits in `ready`.
+    mocks.check.mockResolvedValue(release('3.0.0'));
+    await request(app).post('/daemon/update/restart').send({}).expect(202);
+    await vi.waitFor(() => expect(mocks.restart).toHaveBeenCalledTimes(1));
+    expect(mocks.standalone).toHaveBeenCalledWith(standaloneDir, '3.0.0');
+    expect(activated).toEqual(['3.0.0']);
+    expect(cleaned).toEqual(['2.0.0', '3.0.0']);
+    expect((await request(app).get('/daemon/update')).body).toMatchObject({
+      state: 'restarting',
+      latestVersion: '3.0.0',
+    });
+  });
+
+  it('re-resolves a newer release for managed npm installs too', async () => {
+    const launcher = await stubManagedLauncher();
+    mocks.installation.mockReturnValue({
+      isGlobal: true,
+      packageManager: 'npm',
+      updateCommand: 'npm install -g @qwen-code/qwen-code@latest',
+    });
+    mocks.npm.mockImplementation(async (version: string) => ({
+      stagingDir: `/staged-${version}`,
+    }));
+    const app = await makeApp();
+    await ready(app);
+    expect(mocks.npm).toHaveBeenCalledWith('2.0.0', launcher);
+    mocks.check.mockResolvedValue(release('3.0.0'));
+    await request(app).post('/daemon/update/restart').send({}).expect(202);
+    await vi.waitFor(() =>
+      expect(mocks.activateNpm).toHaveBeenCalledWith(
+        { stagingDir: '/staged-3.0.0' },
+        '3.0.0',
+        launcher,
+      ),
+    );
+    expect(mocks.cleanupNpm).toHaveBeenCalledWith({
+      stagingDir: '/staged-2.0.0',
+    });
+  });
+
+  it('keeps the prepared release pinned while polling, and only re-resolves on click', async () => {
+    const app = await makeApp();
+    await ready(app);
+    mocks.check.mockResolvedValue(release('3.0.0'));
+    await request(app).get('/daemon/update').expect(200);
+    await request(app).get('/daemon/update?refresh=true').expect(200);
+    expect(mocks.standalone).toHaveBeenCalledTimes(1);
+    expect((await request(app).get('/daemon/update')).body).toMatchObject({
+      state: 'ready',
+      latestVersion: '2.0.0',
+    });
+  });
+
+  it('applies the prepared release when the activation-time re-resolve fails', async () => {
+    const activated: string[] = [];
+    mocks.standalone.mockImplementation(
+      async (_dir: string, version: string) => ({
+        activate: async () => {
+          activated.push(version);
+        },
+        cleanup: async () => {},
+      }),
+    );
+    const app = await makeApp();
+    await ready(app);
+    mocks.check.mockRejectedValue(new Error('offline'));
+    await request(app).post('/daemon/update/restart').send({}).expect(202);
+    await vi.waitFor(() => expect(mocks.restart).toHaveBeenCalledTimes(1));
+    expect(activated).toEqual(['2.0.0']);
+    expect(mocks.standalone).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies the prepared release when the registry reports nothing newer', async () => {
+    const activated: string[] = [];
+    mocks.standalone.mockImplementation(
+      async (_dir: string, version: string) => ({
+        activate: async () => {
+          activated.push(version);
+        },
+        cleanup: async () => {},
+      }),
+    );
+    const app = await makeApp();
+    await ready(app);
+    mocks.check.mockResolvedValue({
+      status: 'up-to-date',
+      currentVersion: '1.0.0',
+    });
+    await request(app).post('/daemon/update/restart').send({}).expect(202);
+    await vi.waitFor(() => expect(mocks.restart).toHaveBeenCalledTimes(1));
+    expect(activated).toEqual(['2.0.0']);
+    expect(mocks.standalone).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies the prepared release when staging the newer one fails', async () => {
+    const events: string[] = [];
+    mocks.standalone.mockImplementation(
+      async (_dir: string, version: string) => {
+        if (version === '3.0.0') throw new Error('Download failed');
+        return {
+          activate: async () => {
+            events.push(`activate:${version}`);
+          },
+          cleanup: async () => {
+            events.push(`cleanup:${version}`);
+          },
+        };
+      },
+    );
+    const app = await makeApp();
+    await ready(app);
+    mocks.check.mockResolvedValue(release('3.0.0'));
+    await request(app).post('/daemon/update/restart').send({}).expect(202);
+    await vi.waitFor(() => expect(mocks.restart).toHaveBeenCalledTimes(1));
+    // The prepared payload must survive the failed restage and be activated
+    // before anything cleans it.
+    expect(events).toEqual(['activate:2.0.0', 'cleanup:2.0.0']);
+  });
+
+  it('applies the prepared release when the newer one has no one-click path', async () => {
+    const activated: string[] = [];
+    mocks.standalone.mockImplementation(
+      async (_dir: string, version: string) => ({
+        activate: async () => {
+          activated.push(version);
+        },
+        cleanup: async () => {},
+      }),
+    );
+    const app = await makeApp();
+    await ready(app);
+    mocks.check.mockResolvedValue(release('3.0.0'));
+    mocks.installation.mockReturnValue({
+      isGlobal: false,
+      isStandalone: false,
+    });
+    await request(app).post('/daemon/update/restart').send({}).expect(202);
+    await vi.waitFor(() => expect(mocks.restart).toHaveBeenCalledTimes(1));
+    expect(activated).toEqual(['2.0.0']);
+    expect(mocks.standalone).toHaveBeenCalledTimes(1);
+  });
+
+  it('cleans the restaged payload when activation of the newer release fails', async () => {
+    const cleaned: string[] = [];
+    mocks.standalone.mockImplementation(
+      async (_dir: string, version: string) => ({
+        activate: async () => {
+          if (version === '3.0.0') throw new Error('Activation failed');
+        },
+        cleanup: async () => {
+          cleaned.push(version);
+        },
+      }),
+    );
+    const app = await makeApp();
+    await ready(app);
+    mocks.check.mockResolvedValue(release('3.0.0'));
+    await request(app).post('/daemon/update/restart').send({}).expect(202);
+    await vi.waitFor(async () =>
+      expect((await request(app).get('/daemon/update')).body).toMatchObject({
+        state: 'error',
+        message: 'Activation failed',
+      }),
+    );
+    expect(mocks.restart).not.toHaveBeenCalled();
+    expect(cleaned).toEqual(['2.0.0', '3.0.0']);
   });
 
   it('restarts a launcher-less standalone install through its PATH wrapper', async () => {
