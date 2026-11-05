@@ -195,6 +195,7 @@ describe('start_sandbox', () => {
     'QWEN_CODE_WARNINGS_FILE',
     'QWEN_CODE_MCP_APPROVALS_PATH',
     'QWEN_CODE_HOOK_APPROVALS_PATH',
+    'QWEN_CODE_TRUSTED_FOLDERS_PATH',
   ])('translates %s before forwarding it on Windows', async (name) => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
     vi.stubEnv(name, 'C:\\Users\\test\\Temp\\qwen-code-test.txt');
