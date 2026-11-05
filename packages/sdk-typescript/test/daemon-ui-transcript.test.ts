@@ -1354,7 +1354,7 @@ describe('tool name carried only by the lifecycle metadata', () => {
     },
   });
 
-  it('names a block created after the lifecycle frame (mid-run attach)', () => {
+  it('a name-only frame for an unseen call id creates no card and a later create frame still builds one', () => {
     const attached = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
       normalizeDaemonEvent(lifecycleFrame('started')),
@@ -1405,5 +1405,46 @@ describe('tool name carried only by the lifecycle metadata', () => {
       title: 'read_file',
       status: 'completed',
     });
+  });
+
+  it('bounds the parked names and evicts the oldest first', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    for (let i = 0; i < 257; i += 1) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        normalizeDaemonEvent({
+          v: 1 as const,
+          id: 100 + i,
+          type: 'session_update' as const,
+          data: {
+            update: {
+              sessionUpdate: 'tool_call_update' as const,
+              toolCallId: `call-${i}`,
+              _meta: {
+                toolLifecycle: {
+                  v: 1,
+                  kind: 'tool',
+                  sessionId: 'session',
+                  executionId: `exec-${i}`,
+                  callId: `call-${i}`,
+                  toolName: 'read_file',
+                  phase: 'started',
+                  executionStatus: 'running',
+                  startedAt: 100,
+                },
+              },
+            },
+          },
+        }),
+        { now: 2 },
+      );
+    }
+    const parked = Object.keys(state.pendingToolNameByCallId);
+    expect(parked).toHaveLength(256);
+    // Oldest first: `call-0` is evicted, the newest entry survives.
+    expect(state.pendingToolNameByCallId['call-0']).toBeUndefined();
+    expect(state.pendingToolNameByCallId['call-256']).toBe('read_file');
+    // Parking a name must never create a card on its own.
+    expect(state.blocks).toHaveLength(0);
   });
 });
