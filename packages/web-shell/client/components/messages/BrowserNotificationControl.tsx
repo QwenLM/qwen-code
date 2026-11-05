@@ -53,6 +53,10 @@ export function BrowserNotificationControl() {
     : settings.permission === 'default'
       ? Bell
       : BellOff;
+  const platform =
+    typeof navigator === 'undefined' ? '' : (navigator.platform ?? '');
+  const showMacHelp = !/^Win/i.test(platform);
+  const showWindowsHelp = !/Mac|iPhone|iPad|iPod/i.test(platform);
   const cancelClose = () => clearTimeout(timer.current);
   const show = () => {
     cancelClose();
@@ -207,30 +211,34 @@ export function BrowserNotificationControl() {
           <p className="text-muted-foreground">
             {t('browserNotifications.helpSystem')}
           </p>
-          <details className="group shrink-0">
-            <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
-              macOS
-              <ChevronDownIcon
-                aria-hidden="true"
-                className="size-3.5 transition-transform group-open:rotate-180"
-              />
-            </summary>
-            <p className="mt-1 text-muted-foreground">
-              {t('browserNotifications.helpMac')}
-            </p>
-          </details>
-          <details className="group shrink-0">
-            <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
-              Windows
-              <ChevronDownIcon
-                aria-hidden="true"
-                className="size-3.5 transition-transform group-open:rotate-180"
-              />
-            </summary>
-            <p className="mt-1 text-muted-foreground">
-              {t('browserNotifications.helpWindows')}
-            </p>
-          </details>
+          {showMacHelp && (
+            <details className="group shrink-0">
+              <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
+                macOS
+                <ChevronDownIcon
+                  aria-hidden="true"
+                  className="size-3.5 transition-transform group-open:rotate-180"
+                />
+              </summary>
+              <p className="mt-1 text-muted-foreground">
+                {t('browserNotifications.helpMac')}
+              </p>
+            </details>
+          )}
+          {showWindowsHelp && (
+            <details className="group shrink-0">
+              <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
+                Windows
+                <ChevronDownIcon
+                  aria-hidden="true"
+                  className="size-3.5 transition-transform group-open:rotate-180"
+                />
+              </summary>
+              <p className="mt-1 text-muted-foreground">
+                {t('browserNotifications.helpWindows')}
+              </p>
+            </details>
+          )}
         </PopoverContent>
       </Popover>
     </span>

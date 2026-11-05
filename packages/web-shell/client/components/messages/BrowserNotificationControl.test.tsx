@@ -227,6 +227,25 @@ it('preserves global shortcuts from the trigger with help open and closed', () =
   }
 });
 
+function operatingSystemGuides(platform: string): string[] {
+  vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue(platform);
+  render();
+  hover();
+  return Array.from(
+    document.querySelector(popup)!.querySelectorAll('details'),
+  ).map((details) => details.querySelector('summary')!.textContent!.trim());
+}
+
+it.each([
+  ['Win32', ['Windows']],
+  ['MacIntel', ['macOS']],
+  ['iPhone', ['macOS']],
+  ['Linux x86_64', ['macOS', 'Windows']],
+  ['', ['macOS', 'Windows']],
+])('lists only the guides for %s', (platform, guides) => {
+  expect(operatingSystemGuides(platform)).toEqual(guides);
+});
+
 it('keeps unrelated input focus when Escape closes hover-opened help', () => {
   render();
   const input = document.createElement('textarea');
