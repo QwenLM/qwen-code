@@ -14,6 +14,11 @@ import type { RequestLifecycleEvent } from '../telemetry/request-lifecycle.js';
 import { getInvocationContext } from '../utils/invocation-context.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
+import {
+  SUBSCRIPTION_MODELS_CACHED,
+  subscriptionModelUnavailable,
+} from '../qwen/subscription-models.js';
+import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
 import {
   captureReasoningSnapshot,
@@ -2985,7 +2990,9 @@ export class Config {
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
-  private contentGenerator!: ContentGenerator;
+  private contentGenerator?: ContentGenerator;
+  private subscriptionPlan?: 'plus' | 'pro';
+  private subscriptionModelIdentity?: string;
   private readonly initialAuthType?: AuthType;
   private initialResolvedAuthType?: AuthType;
   private readonly embeddingModel: string;
@@ -3164,7 +3171,7 @@ export class Config {
   private activeTodoReminderTurns = new Map<string, number>();
   private activeTodoPlanWriterOwner: string | undefined;
   private llmClient!: LlmClient;
-  private baseLlmClient!: BaseLlmClient;
+  private baseLlmClient?: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
   private readonly fileFiltering: {
     respectGitIgnore: boolean;
@@ -5909,10 +5916,46 @@ export class Config {
     return this.contextRuleExcludes;
   }
 
-  getContentGenerator(): ContentGenerator {
-    return (
-      getRuntimeContentGenerator()?.contentGenerator ?? this.contentGenerator
-    );
+  getContentGenerator(options: {
+    allowUninitialized: true;
+  }): ContentGenerator | undefined;
+  getContentGenerator(): ContentGenerator;
+  getContentGenerator(options?: {
+    allowUninitialized: true;
+  }): ContentGenerator | undefined {
+    const generator =
+      getRuntimeContentGenerator()?.contentGenerator ?? this.contentGenerator;
+    if (!generator && !options?.allowUninitialized) {
+      throw new Error('Not signed in. Run /auth to sign in.');
+    }
+    return generator;
+  }
+
+  getSubscriptionPlan(): 'plus' | 'pro' | undefined {
+    return this.subscriptionPlan;
+  }
+
+  setSubscriptionPlan(plan: 'plus' | 'pro' | undefined): void {
+    this.subscriptionPlan = plan;
+  }
+
+  clearAuth(): void {
+    this.backgroundTaskRegistry.abortAll({
+      notify: false,
+      persistedStatus: 'cancelled',
+    });
+    resetPreloadedContentGenerator(this.contentGenerator);
+    this.baseLlmClient?.clearPerModelGeneratorCache();
+    this.contentGenerator = undefined;
+    this.baseLlmClient = undefined;
+    this.contentGeneratorConfig = { model: '' };
+    this.contentGeneratorConfigSources = {};
+    this.initialResolvedAuthType = undefined;
+    this.subscriptionPlan = undefined;
+    this.subscriptionModelIdentity = undefined;
+    this.modelsConfig.clearAuth();
+    this.toolRegistry?.unregisterTool(ToolNames.WEB_SEARCH);
+    this.notifyModelChangeListeners();
   }
 
   /**
@@ -6078,10 +6121,33 @@ export class Config {
     this.initialResolvedAuthType = undefined;
   }
 
+  async refreshSubscriptionModels(signal?: AbortSignal) {
+    const session = new QwenSubscriptionSession();
+    const identity = session.getIdentity();
+    this.subscriptionModelIdentity = undefined;
+    const result = await this.modelsConfig.refreshSubscriptionModels(signal);
+    if (identity && session.getIdentity() === identity) {
+      this.subscriptionModelIdentity = identity;
+    }
+    const previous = this.warnings.indexOf(SUBSCRIPTION_MODELS_CACHED);
+    if (previous !== -1) this.warnings.splice(previous, 1);
+    if (result.cached) this.warnings.push(SUBSCRIPTION_MODELS_CACHED);
+    this.notifyModelChangeListeners();
+    return result;
+  }
+
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
+    return this.rebuildContentGenerator(authMethod, isInitialAuth, true);
+  }
+
+  private async rebuildContentGenerator(
+    authMethod: AuthType,
+    isInitialAuth: boolean | undefined,
+    refreshSubscriptionModels: boolean,
+  ) {
     const hookOwner = captureHookExecutionOwner(this, null);
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
       authMethod = this.initialResolvedAuthType ?? authMethod;
@@ -6105,6 +6171,20 @@ export class Config {
     const priorReasoningEffort = priorReasoning
       ? priorReasoning.effort
       : undefined;
+
+    if (authMethod === AuthType.QWEN_SUBSCRIPTION) {
+      const { models } = refreshSubscriptionModels
+        ? await this.refreshSubscriptionModels()
+        : {
+            models: this.modelsConfig
+              .getAvailableModelsForAuthType(authMethod)
+              .map((model) => model.id),
+          };
+      const selected = this.modelsConfig.getModel();
+      if (selected && !models.includes(selected)) {
+        throw new Error(subscriptionModelUnavailable(selected));
+      }
+    }
 
     // Sync modelsConfig state for this auth refresh.
     const modelId = this.modelsConfig.getModel();
@@ -6184,6 +6264,16 @@ export class Config {
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
+
+    if (
+      this.initialized &&
+      this.toolRegistry &&
+      !this.shellExecutionSandbox &&
+      this.sessionExecutionEngine !== 'managed'
+    ) {
+      await this.syncWebSearchToolRegistration(this.toolRegistry);
+      await this.llmClient?.setTools();
+    }
 
     // Fire auth_success notification hook (supports both interactive & non-interactive)
     const messageBus = this.getMessageBus();
@@ -7665,6 +7755,8 @@ export class Config {
   ): Promise<void> {
     this.initialResolvedAuthType = undefined;
     if (!this.contentGeneratorConfig) {
+      if (authType === AuthType.QWEN_SUBSCRIPTION)
+        await this.refreshAuth(authType);
       return;
     }
 
@@ -7787,7 +7879,17 @@ export class Config {
     // we captured off the still-intact live contentGeneratorConfig above. This is
     // a no-op when the new model disables thinking (`reasoning: false`), since
     // setReasoningEffort() skips that case and never silently re-enables it.
-    await this.refreshAuth(authType);
+    const reuseSubscriptionModels =
+      authType === AuthType.QWEN_SUBSCRIPTION &&
+      this.contentGeneratorConfig.authType === authType &&
+      this.subscriptionModelIdentity !== undefined &&
+      new QwenSubscriptionSession().getIdentity() ===
+        this.subscriptionModelIdentity;
+    if (reuseSubscriptionModels) {
+      await this.rebuildContentGenerator(authType, undefined, false);
+    } else {
+      await this.refreshAuth(authType);
+    }
     if (priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }
@@ -13322,6 +13424,36 @@ export class Config {
     }
   }
 
+  private async syncWebSearchToolRegistration(
+    registry: ToolRegistry,
+    forSubAgent = false,
+  ): Promise<void> {
+    registry.unregisterTool(ToolNames.WEB_SEARCH);
+    const hasExplicitBackend =
+      !!this.webSearchSettings?.model?.trim() ||
+      !!this.webSearchSettings?.baseUrl;
+    if (
+      this.getBareMode() ||
+      this.isSafeMode() ||
+      this.getDisabledTools().has(ToolNames.WEB_SEARCH) ||
+      this.webSearchSettings?.enabled === false ||
+      (hasExplicitBackend && this.webSearchSettings?.enabled !== true)
+    )
+      return;
+    const { evaluateWebSearchGate } = await import('../tools/web-search.js');
+    const gate = evaluateWebSearchGate(this);
+    if (gate.ok) {
+      await this.registerLazyTool(registry, ToolNames.WEB_SEARCH, async () => {
+        const { WebSearchTool } = await import('../tools/web-search.js');
+        return new WebSearchTool(this);
+      });
+      await registry.ensureTool(ToolNames.WEB_SEARCH);
+    } else if (!gate.silent && !this.webSearchNoticeEmitted && !forSubAgent) {
+      this.webSearchNoticeEmitted = true;
+      this.warnings.push(gate.notice);
+    }
+  }
+
   private async syncAdvisorToolRegistration(
     registry: ToolRegistry,
   ): Promise<void> {
@@ -13484,34 +13616,7 @@ export class Config {
       // only when the tool was actually asked for; a provider with no search
       // backend fails silently (`gate.silent`), since warning about a feature
       // the user never configured is noise.
-      const hasExplicitWebSearchBackend =
-        !!this.webSearchSettings?.model?.trim() ||
-        !!this.webSearchSettings?.baseUrl;
-      if (
-        !this.getBareMode() &&
-        !this.isSafeMode() &&
-        this.webSearchSettings?.enabled !== false &&
-        (this.webSearchSettings?.enabled === true ||
-          !hasExplicitWebSearchBackend)
-      ) {
-        const { evaluateWebSearchGate } = await import(
-          '../tools/web-search.js'
-        );
-        const gate = evaluateWebSearchGate(this);
-        if (gate.ok) {
-          await registerLazy(ToolNames.WEB_SEARCH, async () => {
-            const { WebSearchTool } = await import('../tools/web-search.js');
-            return new WebSearchTool(this);
-          });
-        } else if (
-          !gate.silent &&
-          !this.webSearchNoticeEmitted &&
-          !options?.forSubAgent
-        ) {
-          this.webSearchNoticeEmitted = true;
-          this.warnings.push(gate.notice);
-        }
-      }
+      await this.syncWebSearchToolRegistration(registry, options?.forSubAgent);
     };
 
     const environment = this.getExecutionEnvironment();

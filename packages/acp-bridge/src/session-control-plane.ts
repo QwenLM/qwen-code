@@ -1759,6 +1759,7 @@ function broadcastTurnError(
 ): void {
   const message = extractErrorMessage(err);
   const structuredErrorKind = extractJsonRpcErrorField(err, 'errorKind');
+  const subscriptionQuota = getJsonRpcErrorDataField(err, 'subscriptionQuota');
   const errorKind = structuredErrorKind ?? classifyTurnErrorKind(message);
   const code =
     structuredErrorKind !== undefined
@@ -1798,6 +1799,7 @@ function broadcastTurnError(
       data: {
         sessionId,
         message,
+        ...(subscriptionQuota !== undefined ? { subscriptionQuota } : {}),
         ...(code ? { code } : {}),
         ...(errorKind ? { errorKind } : {}),
         ...(loopType ? { loopType } : {}),
@@ -4128,9 +4130,12 @@ export function createSessionControlPlane(
       case SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload:
         return {
           kind: 'modelProviders',
-          tightening: false,
+          tightening: params?.['subscriptionSignedOut'] === true,
           persistedByControl: false,
-          payload: {},
+          payload:
+            params?.['subscriptionSignedOut'] === true
+              ? { subscriptionSignedOut: true }
+              : {},
         };
       case SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh:
         return {
@@ -4840,8 +4845,13 @@ export function createSessionControlPlane(
       opts.fileSystem,
       // §2.3: centralised model_switched publish — keeps cache + generation
       // update atomic. BridgeClient calls this instead of inlining publish.
-      (entry, modelId, originator) =>
-        publishModelSwitched(entry as SessionEntry, modelId, originator),
+      (entry, modelId, originator, subscriptionSignedOut) =>
+        publishModelSwitched(
+          entry as SessionEntry,
+          modelId,
+          originator,
+          subscriptionSignedOut,
+        ),
       // A2: centralised approval_mode_changed publish on in-session mode
       // promotion. `previous` is read from the bridge state cache.
       (entry, modeId, originator, planExecutionMode) => {
@@ -7247,6 +7257,7 @@ export function createSessionControlPlane(
     entry: SessionEntry,
     modelId: string,
     originatorClientId: string | undefined,
+    subscriptionSignedOut?: boolean,
   ): void => {
     entry.currentModelId = modelId;
     entry.modelPublishGeneration++;
@@ -7257,7 +7268,11 @@ export function createSessionControlPlane(
     entry.events.publish({
       type: 'model_switched',
       ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
-      data: { sessionId: entry.sessionId, modelId },
+      data: {
+        sessionId: entry.sessionId,
+        modelId,
+        ...(subscriptionSignedOut ? { subscriptionSignedOut: true } : {}),
+      },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
   };

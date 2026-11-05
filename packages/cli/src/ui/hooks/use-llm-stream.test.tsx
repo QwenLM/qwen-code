@@ -69,6 +69,11 @@ import type { DirectUserAdmission, QueuedGoalTurn } from './useMessageQueue.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
 import {
+  frameModPrompt,
+  modPromptRow,
+} from '../../services/mod-prompt-frame.js';
+import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
+import {
   framePasteExpansion,
   REWRITE_CHANGED_PASTE,
 } from '../utils/paste-placeholders.js';
@@ -168,6 +173,7 @@ const mockDualOutput = vi.hoisted(() => ({
   finalizeAssistantMessage: vi.fn(),
   emitToolResult: vi.fn(),
   emitUserMessage: vi.fn(),
+  emitSystemMessage: vi.fn(),
 }));
 
 vi.mock('../../services/review-worktree-lease.js', () => ({
@@ -202,6 +208,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 const mockUseReactToolScheduler = useReactToolScheduler as Mock;
+// What a Mod session offers for the prompts the Mods submit, with none queued.
+const modQueue = () => ({
+  subscribePrompts: () => () => {},
+  hasSubmittedPrompts: false,
+  takeSubmittedPrompt: vi.fn(),
+  returnSubmittedPrompt: vi.fn(),
+  notePersonPrompt: vi.fn(),
+  stopSubmittedPrompts: vi.fn(),
+});
 const mockRunModelRound = vi.hoisted(() => vi.fn());
 vi.mock(
   '@qwen-code/qwen-code-core/core/agent-loop.js',
@@ -645,7 +660,10 @@ describe('useLlmStream', () => {
         void ready.catch(() => {});
         const owner = vi
           .spyOn(interactiveMods, 'getInteractiveModSession')
-          .mockReturnValue({ ready } as interactiveMods.InteractiveModSession);
+          .mockReturnValue({
+            ready,
+            ...modQueue(),
+          } as unknown as interactiveMods.InteractiveModSession);
         try {
           const { result } = renderTestHook();
           await act(async () => {
@@ -677,7 +695,10 @@ describe('useLlmStream', () => {
         void ready.catch(() => {});
         const owner = vi
           .spyOn(interactiveMods, 'getInteractiveModSession')
-          .mockReturnValue({ ready } as interactiveMods.InteractiveModSession);
+          .mockReturnValue({
+            ready,
+            ...modQueue(),
+          } as unknown as interactiveMods.InteractiveModSession);
         mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
         try {
           const { result } = renderTestHook();
@@ -715,6 +736,7 @@ describe('useLlmStream', () => {
           .mockReturnValue({
             ready,
             startTurn: vi.fn(),
+            ...modQueue(),
           } as unknown as interactiveMods.InteractiveModSession);
         mockHandleSlashCommand.mockResolvedValue({
           type: 'submit_prompt',
@@ -5406,6 +5428,45 @@ describe('useLlmStream', () => {
     expect(mockSendMessageStream).not.toHaveBeenCalled();
   });
 
+  it('leaves history alone when a quota switch stops a turn outside a Goal turn', async () => {
+    const completedTool = {
+      request: {
+        callId: 'quota-tool',
+        name: 'testTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-quota-switch',
+      },
+      status: 'success',
+      responseSubmittedToLlm: false,
+      response: {
+        callId: 'quota-tool',
+        responseParts: [{ text: 'quota-tool response' }],
+        errorType: undefined,
+      },
+      tool: { displayName: 'MockTool' },
+      invocation: {
+        getDescription: () => 'quota-tool',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+    const client = new MockedLlmClientClass(mockConfig);
+    const { completeToolRound } = renderTestHook(
+      [],
+      client,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+    await completeToolRound([completedTool]);
+
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['quota-tool']);
+    expect(client.addHistory).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
   it('ignores a deduplicated tool without Goal context when forwarding a fresh Goal result', async () => {
     const permit: GoalTurnPermit = {
       goalId: 'goal-dedup',
@@ -9613,6 +9674,7 @@ describe('useLlmStream', () => {
           ready: Promise.resolve(),
           invalidateTools: vi.fn(),
           submitPrompt: vi.fn(async (text: string) => ({ text })),
+          ...modQueue(),
           syncSession: vi.fn(() =>
             transition === 'session before chat'
               ? sessionSync
@@ -14318,6 +14380,7 @@ describe('useLlmStream', () => {
           ready: Promise.resolve(),
           startTurn,
           submitPrompt,
+          ...modQueue(),
         } as unknown as ReturnType<
           typeof interactiveMods.getInteractiveModSession
         >);
@@ -14378,6 +14441,558 @@ describe('useLlmStream', () => {
             await Promise.all([main, side]);
           });
         }
+      });
+
+      describe("a Mod's own prompt", () => {
+        const finished = async function* () {
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        };
+        const installQueue = (...queued: ModQueuedPrompt[]) => {
+          const listeners = new Set<() => void>();
+          const turn = { id: 'turn-1', saw: vi.fn(), complete: vi.fn() };
+          const mods = {
+            ready: Promise.resolve() as Promise<void>,
+            startTurn: vi.fn(
+              (
+                _text: string,
+                _signal: AbortSignal,
+                _abort: () => boolean,
+                _promptId?: string,
+              ) => turn,
+            ),
+            submitPrompt: vi.fn(async (text: string) => ({ text })),
+            subscribePrompts: vi.fn((listener: () => void) => {
+              listeners.add(listener);
+              return () => listeners.delete(listener);
+            }),
+            get hasSubmittedPrompts() {
+              return queued.length > 0;
+            },
+            takeSubmittedPrompt: vi.fn(() => queued.shift()),
+            returnSubmittedPrompt: vi.fn((prompt: ModQueuedPrompt) => {
+              queued.unshift(prompt);
+            }),
+            notePersonPrompt: vi.fn(),
+            stopSubmittedPrompts: vi.fn(() => {
+              queued.length = 0;
+            }),
+          };
+          vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue(
+            mods as unknown as ReturnType<
+              typeof interactiveMods.getInteractiveModSession
+            >,
+          );
+          // A hook queues a prompt, or the session says one waits.
+          const queue = (...prompts: ModQueuedPrompt[]) =>
+            act(() => {
+              queued.push(...prompts);
+              for (const listener of listeners) listener();
+            });
+          return { mods, turn, queued, queue };
+        };
+        const options = (call = 0) =>
+          mockSendMessageStream.mock.calls[call][3] as Record<string, unknown>;
+        const rows = () => mockAddItem.mock.calls.map(([item]) => item);
+
+        it('runs as a turn of its own once idle, framed, under a row naming the Mod', async () => {
+          const { mods, turn, queue } = installQueue();
+          admitted(finished);
+          const logMessage = vi.fn().mockResolvedValue(undefined);
+          renderTestHook([], undefined, undefined, undefined, {
+            logMessage,
+          } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+          const prompt = {
+            plugin: 'lint',
+            text: 'List the TODOs @a.txt',
+            context: ['From a Mod'],
+          };
+
+          await queue(prompt);
+
+          await waitFor(() => expect(turn.complete).toHaveBeenCalledOnce());
+          expect(mockSendMessageStream).toHaveBeenCalledOnce();
+          expect(mockSendMessageStream.mock.calls[0][0]).toBe(
+            frameModPrompt(prompt),
+          );
+          expect(options()).toEqual(
+            expect.objectContaining({
+              type: SendMessageType.UserQuery,
+              submittedPrompt: 'List the TODOs @a.txt',
+              submittedByMod: 'lint',
+              memoryRecallQuery: 'List the TODOs @a.txt',
+              promptContext: ['From a Mod'],
+            }),
+          );
+          expect(options()).not.toHaveProperty('submittedAsUser');
+          expect(options()).not.toHaveProperty('workflowModeEligible');
+          expect(options()).not.toHaveProperty('humanInput');
+          expect(mods.startTurn.mock.calls[0][0]).toBe('List the TODOs @a.txt');
+          // The row is the Mod's; nothing reads it as the person's prompt.
+          expect(rows()).toContainEqual({
+            type: 'notification',
+            text: modPromptRow('lint', 'List the TODOs @a.txt'),
+          });
+          expect(rows().some((item) => item.type === MessageType.USER)).toBe(
+            false,
+          );
+          expect(mods.submitPrompt).not.toHaveBeenCalled();
+          expect(logMessage).not.toHaveBeenCalled();
+          expect(handleAtCommandSpy).not.toHaveBeenCalled();
+          expect(mods.notePersonPrompt).not.toHaveBeenCalled();
+        });
+
+        it('sends a prompt submitted as the person’s words bare, and runs no command from it', async () => {
+          const { queue } = installQueue();
+          admitted(finished);
+          renderTestHook();
+
+          await queue({ plugin: 'lint', text: '/clear', asUser: true });
+
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledOnce(),
+          );
+          expect(mockSendMessageStream.mock.calls[0][0]).toBe('/clear');
+          expect(options()).toEqual(
+            expect.objectContaining({
+              submittedByMod: 'lint',
+              submittedAsUser: true,
+            }),
+          );
+          expect(mockHandleSlashCommand).not.toHaveBeenCalled();
+          expect(rows()).toContainEqual({
+            type: 'notification',
+            text: modPromptRow('lint', '/clear'),
+          });
+        });
+
+        it('runs those queued one turn after another', async () => {
+          const { mods } = installQueue(
+            { plugin: 'lint', text: 'one' },
+            { plugin: 'lint', text: 'two' },
+          );
+          admitted(finished);
+          renderTestHook();
+
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+          );
+          expect(options(0)['submittedPrompt']).toBe('one');
+          expect(options(1)['submittedPrompt']).toBe('two');
+          expect(mods.returnSubmittedPrompt).not.toHaveBeenCalled();
+        });
+
+        it('waits for the person’s queued prompts and for a Goal that owns the turns', async () => {
+          const { queue } = installQueue();
+          admitted(finished);
+          let queuedUserMessages = true;
+          const goalQueueRef = {
+            current: {
+              hasQueuedUserMessages: vi.fn(() => queuedUserMessages),
+              getPendingSubmissionCount: vi.fn(() => 0),
+            },
+          };
+          let snapshot: unknown = { goal: null, activity: 'idle' };
+          const goalListeners = new Set<() => void>();
+          mockConfig.getGoalRuntime = vi.fn(() => ({
+            getSnapshot: () => snapshot,
+            subscribe: (listener: () => void) => {
+              goalListeners.add(listener);
+              return () => goalListeners.delete(listener);
+            },
+          })) as unknown as Config['getGoalRuntime'];
+          // The Goal changes with nothing queued since, as when its verifier
+          // accepts after the session went idle.
+          const broadcast = () =>
+            act(() => {
+              for (const listener of goalListeners) listener();
+            });
+          renderTestHook(
+            [],
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            goalQueueRef as never,
+          );
+
+          const settle = () =>
+            act(async () => {
+              await new Promise((resolve) => setImmediate(resolve));
+            });
+          await queue({ plugin: 'lint', text: 'later' });
+          await settle();
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          queuedUserMessages = false;
+          snapshot = { goal: { status: 'active' }, activity: 'idle' };
+          broadcast();
+          await settle();
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          snapshot = { goal: null, activity: 'idle' };
+          broadcast();
+
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledOnce(),
+          );
+          expect(options()['submittedPrompt']).toBe('later');
+        });
+
+        it('lets the person’s prompt, not a Mod’s, reset the Mods’ turn count', async () => {
+          const { mods } = installQueue({ plugin: 'lint', text: 'one' });
+          admitted(finished);
+          const { result } = renderTestHook();
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledOnce(),
+          );
+          expect(mods.notePersonPrompt).not.toHaveBeenCalled();
+
+          await act(async () => {
+            await result.current.submitQuery('/help');
+          });
+
+          expect(mods.notePersonPrompt).toHaveBeenCalledOnce();
+        });
+
+        it('drops the queued prompts when the person cancels, not when a Mod ends the turn', async () => {
+          const { mods, queue, queued } = installQueue();
+          let release!: () => void;
+          admitted(async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'Working' };
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+          });
+          const { result } = renderTestHook();
+          let running!: Promise<void>;
+          await act(async () => {
+            running = result.current.submitQuery('Fix it');
+          });
+          await waitFor(() => expect(mods.startTurn).toHaveBeenCalledOnce());
+          await queue({ plugin: 'lint', text: 'next' });
+
+          // `$.turn.abort` keeps them.
+          act(() => expect(mods.startTurn.mock.calls[0][2]()).toBe(true));
+          expect(mods.stopSubmittedPrompts).not.toHaveBeenCalled();
+          release();
+          await act(async () => {
+            await running;
+          });
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+          );
+          await waitFor(() => expect(mods.startTurn).toHaveBeenCalledTimes(2));
+
+          await queue({ plugin: 'lint', text: 'after' });
+          act(() => {
+            result.current.cancelOngoingRequest();
+          });
+          expect(mods.stopSubmittedPrompts).toHaveBeenCalledOnce();
+          expect(queued).toEqual([]);
+          release();
+        });
+
+        it('drops the queued prompts when the person declines every tool the turn asked for', async () => {
+          const { mods, queue, queued } = installQueue();
+          admitted(async function* () {
+            yield {
+              type: ServerLlmEventType.ToolCallRequest,
+              value: {
+                callId: 'declined',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-declined',
+              },
+            };
+          });
+          const { result, rerenderWithToolCalls, completeToolRound } =
+            renderTestHook();
+          await act(async () => {
+            await result.current.submitQuery(
+              'run the tool',
+              SendMessageType.UserQuery,
+              'prompt-declined',
+            );
+          });
+          await waitFor(() =>
+            expect(mockScheduleToolCalls).toHaveBeenCalledOnce(),
+          );
+          const request = {
+            callId: 'declined',
+            name: 'testTool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-declined',
+          };
+          const invocation = {
+            getDescription: () => 'Mock description',
+          } as unknown as AnyToolInvocation;
+          rerenderWithToolCalls([
+            {
+              request,
+              status: 'awaiting_approval',
+              responseSubmittedToLlm: false,
+              confirmationDetails: {
+                onConfirm: vi.fn(),
+                onCancel: vi.fn(),
+                message: 'Run it?',
+              },
+              tool: { name: 'testTool', displayName: 'testTool' },
+              invocation,
+            } as unknown as TrackedWaitingToolCall,
+          ]);
+          await queue({ plugin: 'lint', text: 'next' });
+          expect(mods.takeSubmittedPrompt).not.toHaveBeenCalled();
+
+          // The dialog takes the Esc, so no cancel runs: the declined batch
+          // ends the turn.
+          await completeToolRound([
+            {
+              request,
+              status: 'cancelled',
+              response: {
+                callId: 'declined',
+                responseParts: [{ text: 'cancelled' }],
+                errorType: undefined,
+              },
+              responseSubmittedToLlm: false,
+              tool: { displayName: 'testTool' },
+              invocation,
+            } as TrackedCancelledToolCall,
+          ]);
+
+          expect(mods.stopSubmittedPrompts).toHaveBeenCalledOnce();
+          expect(queued).toEqual([]);
+          rerenderWithToolCalls([]);
+          await act(async () => {
+            await new Promise((resolve) => setImmediate(resolve));
+          });
+          expect(mockSendMessageStream).toHaveBeenCalledOnce();
+        });
+
+        it('runs while a monitor update waits out its interval', async () => {
+          const { queue } = installQueue();
+          admitted(finished);
+          vi.useFakeTimers();
+          renderTestHook();
+          const pulse = mockMonitorRegistry.setNotificationCallback.mock
+            .calls[0][0] as (
+            displayText: string,
+            modelText: string,
+            meta: { monitorId: string; status: string },
+          ) => void;
+          const settle = () =>
+            act(async () => {
+              await vi.advanceTimersByTimeAsync(100);
+            });
+          await act(async () => {
+            pulse('Monitor event #1', '<n>pulse-1</n>', {
+              monitorId: 'mon_1',
+              status: 'running',
+            });
+          });
+          await settle();
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          await act(async () => {
+            pulse('Monitor event #2', '<n>pulse-2</n>', {
+              monitorId: 'mon_1',
+              status: 'running',
+            });
+          });
+          await settle();
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+          // The held pulse does not hold the Mod's prompt: a monitor that
+          // prints within every interval would hold it for good.
+          await queue({ plugin: 'lint', text: 'later' });
+          await settle();
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+          expect(options(1)['submittedByMod']).toBe('lint');
+
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(
+              INTERIM_MONITOR_MIN_TURN_INTERVAL_MS,
+            );
+          });
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+          expect(
+            JSON.stringify(mockSendMessageStream.mock.calls[2][0]),
+          ).toContain('pulse-2');
+        });
+
+        it('waits for a notification that can run now', async () => {
+          const { mods, queue } = installQueue();
+          let release!: () => void;
+          admitted(async function* () {
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            yield* finished();
+          });
+          const { result } = renderTestHook();
+          let running!: Promise<void>;
+          await act(async () => {
+            running = result.current.submitQuery('Fix it');
+          });
+          const pulse = mockMonitorRegistry.setNotificationCallback.mock
+            .calls[0][0] as (
+            displayText: string,
+            modelText: string,
+            meta: { monitorId: string; status: string },
+          ) => void;
+          await act(async () => {
+            pulse('Monitor done', '<n>done</n>', {
+              monitorId: 'mon_1',
+              status: 'completed',
+            });
+          });
+          await queue({ plugin: 'lint', text: 'later' });
+          admitted(finished);
+          release();
+          await act(async () => {
+            await running;
+          });
+
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(3),
+          );
+          expect(options(1)['type']).toBe(SendMessageType.Notification);
+          expect(options(2)['submittedByMod']).toBe('lint');
+          // It lost the idle moment to the notification and waited for it.
+          expect(mods.returnSubmittedPrompt).toHaveBeenCalledOnce();
+        });
+
+        it('runs a prompt queued while a submission that starts no turn held the session', async () => {
+          const { queue } = installQueue();
+          admitted(finished);
+          let finishCommand!: (result: unknown) => void;
+          mockHandleSlashCommand.mockImplementation(
+            () =>
+              new Promise((resolve) => {
+                finishCommand = resolve;
+              }),
+          );
+          const { result } = renderTestHook();
+          let running!: Promise<void>;
+          await act(async () => {
+            running = result.current.submitQuery(
+              '/lint-mod',
+              SendMessageType.Cron,
+            );
+          });
+          await waitFor(() =>
+            expect(mockHandleSlashCommand).toHaveBeenCalled(),
+          );
+          // A cron's Mod command submits; the session stays idle throughout.
+          await queue({ plugin: 'lint', text: 'from the command' });
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          await act(async () => {
+            finishCommand({ type: 'handled' });
+            await running;
+          });
+
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledOnce(),
+          );
+          expect(options()['submittedByMod']).toBe('lint');
+        });
+
+        it('tells the cancel handler the person stopped a Mod’s prompt, not their own', async () => {
+          const { mods, queue } = installQueue();
+          // A stream that never ends until the person stops it.
+          admitted(async function* () {
+            await new Promise(() => {});
+            yield* finished();
+          });
+          const onCancelSubmit = vi.fn();
+          const { result } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            onCancelSubmit,
+          );
+          await queue({ plugin: 'lint', text: 'next' });
+          await waitFor(() => expect(mods.startTurn).toHaveBeenCalledOnce());
+
+          act(() => {
+            result.current.cancelOngoingRequest();
+          });
+
+          expect(onCancelSubmit).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              lastTurnUserItem: null,
+              wasModPromptTurn: true,
+            }),
+          );
+        });
+
+        it('does not mark the person’s own cancelled turn as a Mod’s', async () => {
+          installQueue();
+          // A stream that never ends until the person stops it.
+          admitted(async function* () {
+            await new Promise(() => {});
+            yield* finished();
+          });
+          const onCancelSubmit = vi.fn();
+          const { result } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            onCancelSubmit,
+          );
+          await act(async () => {
+            void result.current.submitQuery('Fix it');
+          });
+          await waitFor(() =>
+            expect(result.current.streamingState).toBe(
+              StreamingState.Responding,
+            ),
+          );
+
+          act(() => {
+            result.current.cancelOngoingRequest();
+          });
+
+          expect(onCancelSubmit).toHaveBeenLastCalledWith(
+            expect.objectContaining({ wasModPromptTurn: false }),
+          );
+        });
+
+        it('sends the sidecar the Mod’s text and its name, not the frame', async () => {
+          const { queue } = installQueue();
+          admitted(finished);
+          mockUseDualOutput.mockReturnValue(mockDualOutput);
+          renderTestHook();
+
+          await queue({ plugin: 'lint', text: 'List the TODOs' });
+
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledOnce(),
+          );
+          expect(
+            mockDualOutput.emitUserMessage,
+          ).toHaveBeenCalledExactlyOnceWith([{ text: 'List the TODOs' }]);
+          expect(
+            mockDualOutput.emitSystemMessage,
+          ).toHaveBeenCalledExactlyOnceWith('mod_prompt', { mod: 'lint' });
+        });
+
+        it('puts the prompt back when its turn cannot start', async () => {
+          const { mods } = installQueue({ plugin: 'lint', text: 'one' });
+          mods.ready = Promise.reject(new Error('no Mods'));
+          mods.ready.catch(() => {});
+          renderTestHook();
+
+          await waitFor(() =>
+            expect(mods.returnSubmittedPrompt).toHaveBeenCalledExactlyOnceWith({
+              plugin: 'lint',
+              text: 'one',
+            }),
+          );
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+        });
       });
 
       describe('prompt.submit', () => {
@@ -18520,8 +19135,9 @@ describe('useLlmStream', () => {
       // 3. Assertion
       await waitFor(() => {
         expect(mockParseAndFormatApiError).toHaveBeenCalledWith(
-          'Rate limit exceeded',
+          mockError,
           mockAuthType,
+          expect.any(Function),
         );
       });
     });
@@ -21946,6 +22562,7 @@ describe('useLlmStream', () => {
       expect(mockParseAndFormatApiError).toHaveBeenCalledWith(
         { message: 'Test error' },
         expect.any(String),
+        expect.any(Function),
       );
     });
 
@@ -24745,6 +25362,180 @@ describe('useLlmStream', () => {
       expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
     });
 
+    const completeBatchesWith = (
+      response: (request: ToolCallRequestInfo) => Record<string, unknown>,
+    ) =>
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          void onBatchComplete?.(
+            requests.map((request) => {
+              const call = completedCall(request);
+              return {
+                ...call,
+                response: { ...call.response, ...response(request) },
+              };
+            }),
+          );
+        },
+      );
+
+    it('ends the turn on a tool that ends it, outside a Goal turn too, with its results in history', async () => {
+      completeBatchesWith(() => ({ terminateTurn: true }));
+      rounds([toolRequest('read_a')]);
+      const client = mockConfig.getLlmClient();
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      await waitFor(() => {
+        expect(client.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: 'read_a' }),
+            }),
+          ],
+        });
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['read_a']);
+    });
+
+    it('stops without a continuation when the model was switched after a quota error', async () => {
+      completeBatches();
+      rounds([toolRequest('read_a')]);
+      const client = mockConfig.getLlmClient();
+      const { result } = renderTestHook(
+        [],
+        client,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      await waitFor(() => {
+        expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['read_a']);
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+      // The results answer the calls in history, outside a Goal turn too.
+      expect(client.addHistory).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({ id: 'read_a' }),
+          }),
+        ],
+      });
+    });
+
+    it('stops without a continuation when a background agent took the last background slot', async () => {
+      mockBackgroundTaskRegistry.getMaxConcurrentBackgroundAgents.mockReturnValue(
+        1,
+      );
+      mockBackgroundTaskRegistry.canStartBackgroundAgent.mockReturnValue(false);
+      completeBatchesWith(() => ({
+        resultDisplay: { type: 'task_execution', status: 'background' },
+      }));
+      rounds([
+        {
+          ...toolRequest('agent_a'),
+          value: { ...toolRequest('agent_a').value, name: 'agent' },
+        },
+      ]);
+      const client = mockConfig.getLlmClient();
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Start the agent.');
+      });
+
+      await waitFor(() => {
+        expect(client.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: 'agent_a' }),
+            }),
+          ],
+        });
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('continues when the last background slot is free again by the time it sends', async () => {
+      mockBackgroundTaskRegistry.getMaxConcurrentBackgroundAgents.mockReturnValue(
+        1,
+      );
+      // Spent when the batch ends, free when the completion step sends.
+      mockBackgroundTaskRegistry.canStartBackgroundAgent
+        .mockReturnValueOnce(false)
+        .mockReturnValue(true);
+      completeBatchesWith(() => ({
+        resultDisplay: { type: 'task_execution', status: 'background' },
+      }));
+      rounds(
+        [
+          {
+            ...toolRequest('agent_a'),
+            value: { ...toolRequest('agent_a').value, name: 'agent' },
+          },
+        ],
+        [{ type: ServerLlmEventType.Content, value: 'Started.' }],
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Start the agent.');
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(sentIds(1)).toEqual(['agent_a']);
+      expect(
+        mockBackgroundTaskRegistry.canStartBackgroundAgent,
+      ).toHaveBeenCalledTimes(2);
+    });
+
+    it('continues past a background agent launch while background slots remain', async () => {
+      completeBatchesWith(() => ({
+        resultDisplay: { type: 'task_execution', status: 'background' },
+      }));
+      rounds(
+        [
+          {
+            ...toolRequest('agent_a'),
+            value: { ...toolRequest('agent_a').value, name: 'agent' },
+          },
+        ],
+        [{ type: ServerLlmEventType.Content, value: 'Started.' }],
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Start the agent.');
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(sentIds(1)).toEqual(['agent_a']);
+    });
+
     it('answers a replayed call in the batch and runs only the others', async () => {
       completeBatches();
       const replayed = {
@@ -24981,6 +25772,158 @@ describe('useLlmStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
     });
 
+    it('sends the results of batches that settled during one stream in one continuation', async () => {
+      const completions: Array<() => Promise<void>> = [];
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          completions.push(
+            () =>
+              onBatchComplete?.(
+                requests.map((request) => completedCall(request)),
+              ) ?? Promise.resolve(),
+          );
+        },
+      );
+      let endThirdStream!: () => void;
+      const thirdStreamHeld = new Promise<void>((resolve) => {
+        endThirdStream = resolve;
+      });
+      rounds([toolRequest('read_a')], [toolRequest('read_b')]);
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'Thinking.' };
+          await thirdStreamHeld;
+        })(),
+      );
+      rounds([{ type: ServerLlmEventType.Content, value: 'Both read.' }]);
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read a.');
+      });
+      await act(async () => {
+        await result.current.submitQuery('Read b.');
+      });
+      let thirdSubmission!: Promise<void>;
+      await act(async () => {
+        thirdSubmission = result.current.submitQuery('Something else.');
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      expect(completions).toHaveLength(2);
+      // Both batches settle while the third stream is active.
+      await act(async () => {
+        await Promise.all(completions.map((complete) => complete()));
+      });
+
+      await act(async () => {
+        endThirdStream();
+        await thirdSubmission;
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(4);
+      });
+      // In the order the batches settled.
+      expect(sentIds(3)).toEqual(['read_a', 'read_b']);
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(4);
+    });
+
+    it('decides its stops when no model stream is active, as the session is then', async () => {
+      let completeBatch: (() => Promise<void>) | undefined;
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          completeBatch = () =>
+            onBatchComplete?.(
+              requests.map((request) => {
+                const call = completedCall(request);
+                return {
+                  ...call,
+                  response: {
+                    ...call.response,
+                    resultDisplay: {
+                      type: 'task_execution',
+                      status: 'background',
+                    },
+                  },
+                };
+              }),
+            ) ?? Promise.resolve();
+        },
+      );
+      let endSecondStream!: () => void;
+      const secondStreamHeld = new Promise<void>((resolve) => {
+        endSecondStream = resolve;
+      });
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              ...toolRequest('agent_a'),
+              value: { ...toolRequest('agent_a').value, name: 'agent' },
+            };
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'Thinking.' };
+            await secondStreamHeld;
+          })(),
+        );
+      const client = mockConfig.getLlmClient();
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Start the agent.');
+      });
+      let secondSubmission!: Promise<void>;
+      await act(async () => {
+        secondSubmission = result.current.submitQuery('Something else.');
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      await act(async () => {
+        await completeBatch!();
+      });
+      // The last background slot is taken before the other stream ends.
+      mockBackgroundTaskRegistry.getMaxConcurrentBackgroundAgents.mockReturnValue(
+        1,
+      );
+      mockBackgroundTaskRegistry.canStartBackgroundAgent.mockReturnValue(false);
+
+      await act(async () => {
+        endSecondStream();
+        await secondSubmission;
+      });
+
+      await waitFor(() => {
+        expect(client.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: 'agent_a' }),
+            }),
+          ],
+        });
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+
     const cancelBatches = () =>
       mockScheduleToolCalls.mockImplementation(
         (
@@ -25073,8 +26016,11 @@ describe('useLlmStream', () => {
             ([item]) => (item as { type?: string }).type === 'tool_group',
           );
 
+        // The submission drains the batch that settled during its stream,
+        // so it ends once the batch does.
+        let submission!: Promise<void>;
         await act(async () => {
-          await result.current.submitQuery('Read the file.');
+          submission = result.current.submitQuery('Read the file.');
         });
         await waitFor(() => expect(persistenceEntered).toHaveBeenCalled());
         // The finalize persists the result; the group is already in history.
@@ -25088,6 +26034,7 @@ describe('useLlmStream', () => {
         client.getChat = vi.fn(() => ({ addHistory: vi.fn() }));
         await act(async () => {
           releaseFinalizer();
+          await submission;
         });
 
         await act(async () => {
