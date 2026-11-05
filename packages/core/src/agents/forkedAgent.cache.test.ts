@@ -681,4 +681,124 @@ describe('runForkedAgent (cache path)', () => {
     // suggestionGenerator), which check getCacheSafeParams() first.
     expect(getCacheSafeParams()).toBeNull();
   });
+
+  it('keeps tools but disables function calls when asked to', async () => {
+    saveCacheSafeParams(
+      { tools: parentTools('edit') },
+      [userText('hello')],
+      'test-model',
+    );
+    const send = mockForkStream([modelChunk([{ text: 'answer' }])]);
+
+    await runFork({ preserveTools: true, disableFunctionCalls: true });
+
+    const config = sentConfig(send);
+    expect(config.tools).toBeUndefined();
+    expect(config.toolConfig).toEqual({
+      functionCallingConfig: { mode: 'NONE' },
+    });
+  });
+
+  it('drops text from an attempt that a restarting retry replaced', async () => {
+    saveCacheSafeParams({}, [userText('hello')], 'test-model');
+    vi.mocked(LlmChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: vi.fn(async () =>
+            streamOf(
+              {
+                type: StreamEventType.CHUNK,
+                value: modelChunk([{ text: 'partial' }]),
+              },
+              {
+                type: StreamEventType.RETRY,
+                retryInfo: {
+                  attempt: 1,
+                  maxRetries: 3,
+                  delayMs: 1000,
+                  skipDelay: () => {},
+                },
+              },
+              {
+                type: StreamEventType.CHUNK,
+                value: modelChunk([{ text: 'final' }]),
+              },
+            ),
+          ),
+        }) as unknown as LlmChat,
+    );
+    const onRetry = vi.fn();
+    const onText = vi.fn();
+
+    const result = await runFork({ onRetry, onText });
+
+    expect(result.text).toBe('final');
+    expect(onText.mock.calls.map(([text]) => text)).toEqual([
+      'partial',
+      'final',
+    ]);
+    expect(onRetry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        restart: true,
+        retryInfo: expect.objectContaining({ attempt: 1, maxRetries: 3 }),
+      }),
+    );
+  });
+
+  it('keeps text across a continuation retry', async () => {
+    saveCacheSafeParams({}, [userText('hello')], 'test-model');
+    vi.mocked(LlmChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: vi.fn(async () =>
+            streamOf(
+              {
+                type: StreamEventType.CHUNK,
+                value: modelChunk([{ text: 'first ' }]),
+              },
+              { type: StreamEventType.RETRY, isContinuation: true },
+              {
+                type: StreamEventType.CHUNK,
+                value: modelChunk([{ text: 'second' }]),
+              },
+            ),
+          ),
+        }) as unknown as LlmChat,
+    );
+    const onRetry = vi.fn();
+
+    const result = await runFork({ onRetry });
+
+    expect(result.text).toBe('first second');
+    expect(onRetry).toHaveBeenCalledWith({
+      restart: false,
+      retryInfo: undefined,
+    });
+  });
+
+  it('reports the tool a preserved-tools fork tried to call', async () => {
+    saveCacheSafeParams(
+      { tools: parentTools('shell') },
+      [userText('hello')],
+      'test-model',
+    );
+    mockForkStream([modelChunk([fnCall('shell', { command: 'ls' })])]);
+
+    const result = await runFork({ preserveTools: true });
+
+    expect(result.text).toBeNull();
+    expect(result.toolCallName).toBe('shell');
+  });
+
+  it('keeps the whole parent history when fullHistory is set', async () => {
+    const history = Array.from({ length: 50 }, (_, index) =>
+      index % 2 === 0 ? userText(`q${index}`) : modelText(`a${index}`),
+    );
+    saveCacheSafeParams({}, history, 'test-model');
+    mockForkStream([modelChunk([{ text: 'ok' }])]);
+
+    await runFork({ fullHistory: true });
+
+    expect(vi.mocked(LlmChat).mock.calls[0][2]).toHaveLength(50);
+  });
 });

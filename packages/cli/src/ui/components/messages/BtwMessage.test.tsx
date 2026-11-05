@@ -146,4 +146,76 @@ describe('BtwMessage', () => {
     expect(output).toContain('line-0');
     expect(output).toContain('line-39');
   });
+
+  it('shows streamed text and retry status while pending', () => {
+    const { lastFrame } = renderWithProviders(
+      <BtwMessage
+        btw={{
+          question: 'q',
+          answer: 'partial answer',
+          isPending: true,
+          retryStatus: 'Rate limited · retrying in 3s · attempt 1/5',
+        }}
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('partial answer');
+    expect(output).toContain('retrying in 3s');
+    expect(output).not.toContain('Answering...');
+  });
+
+  it('shows browse, copy and clear hints when earlier answers exist', () => {
+    const { lastFrame } = renderWithProviders(
+      <BtwMessage
+        btw={{
+          question: 'older question',
+          answer: 'older answer',
+          isPending: false,
+          historyCount: 2,
+          browsePosition: 1,
+          notice: 'Copied to clipboard',
+        }}
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('(1/2)');
+    expect(output).toContain('browse earlier answers');
+    expect(output).toContain('c copy');
+    expect(output).toContain('x clear history');
+    expect(output).toContain('Copied to clipboard');
+  });
+
+  it('renders an error answer without the copy hint', () => {
+    const { lastFrame } = renderWithProviders(
+      <BtwMessage
+        btw={{
+          question: 'q',
+          answer: '(API error: boom)',
+          isPending: false,
+          isError: true,
+        }}
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('(API error: boom)');
+    expect(output).not.toContain('c copy');
+    expect(output).not.toContain('browse earlier answers');
+  });
+
+  it('shows only the tail of a long streaming answer', () => {
+    const { lastFrame } = renderWithProviders(
+      <BtwMessage
+        btw={{ question: 'q', answer: longAnswer(30), isPending: true }}
+        maxAnswerRows={5}
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('line-29');
+    expect(output).toContain('line-25');
+    expect(output).not.toContain('line-24');
+  });
 });

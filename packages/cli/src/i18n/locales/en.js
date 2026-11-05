@@ -3074,4 +3074,15 @@ export default {
     'Signed out of Qwen. Use /auth to sign in with another account.',
   'Tip: Run /usage to see your plan usage.':
     'Tip: Run /usage to see your plan usage.',
+  'Copied to clipboard': 'Copied to clipboard',
+  'Copy failed': 'Copy failed',
+  '(API error: {{error}})': '(API error: {{error}})',
+  'API error': 'API error',
+  '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}':
+    '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}',
+  '←/→ browse earlier answers': '←/→ browse earlier answers',
+  'c copy': 'c copy',
+  'x clear history': 'x clear history',
+  'Tip: Use /btw to ask a quick side question without interrupting the current work':
+    'Tip: Use /btw to ask a quick side question without interrupting the current work',
 };

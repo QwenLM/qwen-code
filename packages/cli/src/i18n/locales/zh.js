@@ -2845,4 +2845,15 @@ export default {
   'Signed out of Qwen. Use /auth to sign in with another account.':
     '已退出 Qwen，请使用 /auth 登录其他账号。',
   'Tip: Run /usage to see your plan usage.': '提示：运行 /usage 查看套餐用量。',
+  'Copied to clipboard': '已复制到剪贴板',
+  'Copy failed': '复制失败',
+  '(API error: {{error}})': '（API 错误：{{error}}）',
+  'API error': 'API 错误',
+  '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}':
+    '{{reason}} · {{seconds}} 秒后重试 · 第 {{attempt}}/{{max}} 次',
+  '←/→ browse earlier answers': '←/→ 浏览之前的回答',
+  'c copy': 'c 复制',
+  'x clear history': 'x 清空历史',
+  'Tip: Use /btw to ask a quick side question without interrupting the current work':
+    '提示：用 /btw 顺带问一个旁路问题，不打断当前工作',
 };

@@ -5,11 +5,7 @@
  */
 
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import {
-  buildBtwCacheSafeParams,
-  buildBtwPrompt,
-} from '@qwen-code/qwen-code-core/utils/btwUtils.js';
-import { runForkedAgent } from '@qwen-code/qwen-code-core/agents/forkedAgent.js';
+import { getBtwSession } from '@qwen-code/qwen-code-core/agents/btw-session.js';
 import type { GenerationEvent, GenerationResult } from './generation.js';
 
 export const BTW_STREAM_TIMEOUT_MS = 305_000;
@@ -20,26 +16,34 @@ export async function executeBtwGeneration(
   signal: AbortSignal,
   emit: (event: GenerationEvent) => Promise<void>,
 ): Promise<GenerationResult> {
-  const cacheSafeParams = buildBtwCacheSafeParams(config);
-  const model = cacheSafeParams?.model ?? config.getModel() ?? '';
+  const model = config.getModel() ?? '';
   await emit({ type: 'started', model, modelSource: 'main' });
-  if (!cacheSafeParams) return { model, modelSource: 'main' };
   let seq = 0;
-  const result = await runForkedAgent({
-    config,
-    userMessage: buildBtwPrompt(question.trim()),
-    cacheSafeParams,
-    abortSignal: signal,
+  const { done } = getBtwSession(config).ask(question.trim(), {
+    signal,
     onText: async (text) => {
       signal.throwIfAborted();
       await emit({ type: 'delta', seq: seq++, text });
     },
+    onReset: async () => {
+      signal.throwIfAborted();
+      await emit({ type: 'reset' });
+    },
   });
+  const result = await done;
   signal.throwIfAborted();
+  if (result.kind === 'failed') throw result.cause;
+  if (result.kind === 'synthetic' && seq === 0) {
+    await emit({ type: 'delta', seq: seq++, text: result.response });
+  }
   return {
-    model: result.model,
+    model: result.usage?.model ?? model,
     modelSource: 'main',
-    inputTokens: result.usage.inputTokens,
-    outputTokens: result.usage.outputTokens,
+    ...(result.usage
+      ? {
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens,
+        }
+      : {}),
   };
 }

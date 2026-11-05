@@ -2642,4 +2642,15 @@ export default {
   'Signed out of Qwen. Use /auth to sign in with another account.':
     '已登出 Qwen，請使用 /auth 登入其他帳號。',
   'Tip: Run /usage to see your plan usage.': '提示：執行 /usage 查看方案用量。',
+  'Copied to clipboard': '已複製到剪貼簿',
+  'Copy failed': '複製失敗',
+  '(API error: {{error}})': '（API 錯誤：{{error}}）',
+  'API error': 'API 錯誤',
+  '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}':
+    '{{reason}} · {{seconds}} 秒後重試 · 第 {{attempt}}/{{max}} 次',
+  '←/→ browse earlier answers': '←/→ 瀏覽先前的回答',
+  'c copy': 'c 複製',
+  'x clear history': 'x 清除歷史',
+  'Tip: Use /btw to ask a quick side question without interrupting the current work':
+    '提示：用 /btw 順帶問一個旁路問題，不打斷目前的工作',
 };
