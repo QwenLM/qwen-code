@@ -1539,10 +1539,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 && store.findChildLineage(session.tenantId(), session.sessionId()) == null;
     }
 
-    private Boolean foregroundShell(SessionRecord session) {
-        return foregroundShell(session, store.findSessionWorktree(session.tenantId(), session.sessionId()));
-    }
-
     private Boolean foregroundShell(SessionRecord session, SessionWorktreeStore.Descriptor worktree) {
         if (session.workspace() == null || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())) {
             return null;
