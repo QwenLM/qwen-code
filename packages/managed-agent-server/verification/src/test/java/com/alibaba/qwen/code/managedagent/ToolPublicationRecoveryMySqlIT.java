@@ -70,8 +70,8 @@ class ToolPublicationRecoveryMySqlIT {
     }
 
     @Test
-    void localReservationWaitsForLifecyclePlacementBeforeLockingBrokerRows() throws Exception {
-        fixture.localReservationWaitsForLifecyclePlacementBeforeLockingBrokerRows();
+    void localReservationDoesNotWaitForLifecyclePlacementOrThePublicationGuard() throws Exception {
+        fixture.localReservationDoesNotWaitForLifecyclePlacementOrThePublicationGuard();
     }
 
     @Test

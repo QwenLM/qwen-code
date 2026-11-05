@@ -128,7 +128,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         });
     }
 
-    private static PreparedStatementSetter boundedParameters(
+    static PreparedStatementSetter boundedParameters(
             JdbcTemplate jdbc, int timeoutSeconds, Object... parameters) {
         PreparedStatementSetter arguments = jdbc instanceof ManagedSchemaJdbcTemplate managed
                 ? managed.newArgPreparedStatementSetter(parameters)
@@ -150,12 +150,19 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
 
     private static Map<String, Object> lockSessionHead(
             JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation) {
+        return lockSessionHead(jdbc, tenant, session, legacyMutation, true);
+    }
+
+    private static Map<String, Object> lockSessionHead(
+            JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation, boolean tenantGuard) {
         // Bound the root and head waits as well: holding the tenant guard
         // behind one Session's writer must not convoy unrelated Sessions
         // until the database's default lock timeout (#14393 A.2).
         return ManagedSessionStore.lockBoundedResult(() -> {
             int timeoutSeconds = ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS;
-            lockTenant(jdbc, tenant, timeoutSeconds);
+            if (tenantGuard) {
+                lockTenant(jdbc, tenant, timeoutSeconds);
+            }
             lockSessionRoot(jdbc, tenant, session, legacyMutation, timeoutSeconds);
             var heads = jdbc.query(
                     "SELECT state FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND"
@@ -249,12 +256,25 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 session);
     }
 
+    /**
+     * The Session's root and head without the tenant publication guard, for a
+     * lane that never takes the guard after them: root, head, then its own
+     * rows is the order collection takes below the guard.
+     */
+    static Map<String, Object> lockSessionHeadWithoutGuard(JdbcTemplate jdbc, String tenant, String session) {
+        return lockSessionHead(jdbc, tenant, session, false, false);
+    }
+
     static Map<String, Object> lockGenericSession(
             JdbcTemplate jdbc, String tenant, String session) {
         return lockSessionHead(jdbc, tenant, session, true);
     }
 
     void lockRetainedPublication(String scope, String publication) {
+        lockRetainedPublication(scope, publication, true);
+    }
+
+    private void lockRetainedPublication(String scope, String publication, boolean tenantGuard) {
         var row =
                 jdbc.query(
                                 "SELECT tenant_id, session_id FROM ma_output_capture"
@@ -263,7 +283,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                                 scope,
                                 publication)
                         .getFirst();
-        lockGenericSession(jdbc, (String) row.get("tenant_id"), (String) row.get("session_id"));
+        lockSessionHead(jdbc, (String) row.get("tenant_id"), (String) row.get("session_id"), true, tenantGuard);
         String state =
                 jdbc.queryForObject(
                         "SELECT retention_state FROM ma_output_capture"
@@ -290,7 +310,9 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                                             objectKey)
                                     .getFirst();
                     String publication = (String) row.get("publication_id");
-                    lockRetainedPublication(scope, publication);
+                    // Quarantine is Session-local: root, head and publication suffice,
+                    // including when a reader already holds the root in this transaction.
+                    lockRetainedPublication(scope, publication, false);
                     jdbc.update(
                             "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", is_quarantined = TRUE WHERE scope_key = ?"
                                     + " AND publication_id = ?",
@@ -376,10 +398,18 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         return read(key.path("tenantId").asText(), key.path("sessionId").asText());
     }
 
+    /**
+     * Takes a read lease under the Session's root and head only. Retirement
+     * and collection check leases while holding that root and head, so they
+     * and a new lease exclude each other without the tenant publication
+     * guard; a caller that already holds the root and head (a publication
+     * writer) relocks them re-entrantly, and never takes the guard after its
+     * root (design 2026-11-04-managed-publication-tenant-guards).
+     */
     public ReadLease read(String tenant, String session) {
         return transactions.execute(
                 status -> {
-                    lockGenericSession(jdbc, tenant, session);
+                    lockSessionHead(jdbc, tenant, session, true, false);
                     requireLive(jdbc, tenant, session);
                     long generation =
                             jdbc.queryForObject(
@@ -461,7 +491,6 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                     && number(row, "expires_at") - number(row, "db_now")
                             <= READ_BUDGET_MILLIS * 3 / 4) {
                 Boolean renewed = transactions.execute(status -> {
-                    lockTenant(jdbc, tenant);
                     var roots = jdbc.query(
                                                     "SELECT retirement_generation, retired_at FROM"
                                                             + " ma_session WHERE tenant_id = ? AND"
