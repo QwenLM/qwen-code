@@ -21,22 +21,37 @@ created. Operators discover the deployment's state one failure at a time.
 preflight and exits. It uses the existing server artifact, so the reference
 distribution needs no additional component.
 
-The command binds the same inputs Spring would load:
+The command reads the configuration the server reads, prepared as
+`SpringApplication` prepares it before it creates a context, so every input
+keeps Spring's precedence:
 
-- the classpath `application.yml` that maps `QWEN_MANAGED_AGENT_*` variables;
-- the command line (`--server.address=...`, `--qwen.managed-agent.*`), which
-  keeps Spring's precedence;
-- the external YAML named by `--spring.config.additional-location` (which an
-  operator can pass) or by `SPRING_CONFIG_ADDITIONAL_LOCATION` (which the
-  launcher sets when `config/application.yml` exists);
-- the process environment, which keeps precedence over both files.
+- the command line (`--server.address=...`, `--qwen.managed-agent.*`);
+- the process environment, `SPRING_APPLICATION_JSON` included;
+- the configuration files Spring Boot reads: those named by
+  `spring.config.location`, `spring.config.additional-location` or
+  `spring.config.import`, as an argument or a `SPRING_CONFIG_*` variable (the
+  launcher sets `SPRING_CONFIG_ADDITIONAL_LOCATION` when
+  `config/application.yml` exists, and the systemd unit's `server.env` names
+  `/etc/qwen-managed-agent/application.yml`); those at its default locations
+  `./`, `./config/` and `./config/*/`, unless `spring.config.location`
+  replaces them; as `.yml`, `.yaml` or `.properties`, under
+  `spring.config.name`; their profile variants, the files they import and
+  config trees;
+- the classpath `application.yml` that maps `QWEN_MANAGED_AGENT_*` variables.
+
+Relative locations, the default ones among them, are read in the working
+directory, as the server reads them, so the command runs in the server's
+working directory: the distribution root, or the unit's `WorkingDirectory`.
+Before [#16057](https://github.com/QwenLM/qwen-code/issues/16057) it read only
+the file the launcher or `server.env` named, and missed a `server.port` the
+server read from `config/application.yml` in its working directory.
 
 ## Checks
 
 | Check        | Passing condition                                                                                                                                                                                                                                                                                    |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `java`       | Runtime feature version is 21 or later.                                                                                                                                                                                                                                                              |
-| `config`     | The external YAML exists and is readable; a file containing secrets is not group- or world-readable.                                                                                                                                                                                                 |
+| `config`     | One row per file the server reads: readable by the service account, not group- or world-readable when it holds a secret; WARN for none. FAIL where Spring would not start: a named file that does not exist, a file this process cannot read, or a YAML error, with its file and line.               |
 | `key-ring`   | At least an active key ID is configured; previous key IDs are reported.                                                                                                                                                                                                                              |
 | `validation` | The startup property validations accept the bound configuration.                                                                                                                                                                                                                                     |
 | `auth`       | A non-loopback bind does not use `auto`; signed mode has a signing key; insecure bind is reported.                                                                                                                                                                                                   |
@@ -68,10 +83,22 @@ describes the Harness negotiation, the `workers` row and `--online`.
 
 `ManagedAgentServerApplication` intercepts `--check` before
 `SpringApplication.run`, so no listener, scheduler, datasource pool or worker
-starts. A `StandardEnvironment` receives the external and packaged YAML
-property sources, `Binder` produces `ManagedAgentProperties`, the Harness probe
-uses the JDK HTTP client, and the database probe uses JDBC with a five-second
-connect and socket timeout.
+starts. `ServerEnvironment` prepares a servlet environment as
+`SpringApplication` does: the arguments, the process environment, then every
+environment post-processor on the class path through
+`EnvironmentPostProcessorApplicationListener`, and relaxed binding. It starts
+no context, and `ResolvedConfiguration`, which the upgrade command reads its
+settings through, prepares the same environment. The `config` rows name the
+files the prepared property sources came from, then the files Spring read at a
+location without finding a setting. When the preparation throws, the row
+names what Spring refused: the file, read as missing or unreadable, or the
+YAML error's file and line, found among the files Spring looks for, since
+Spring's error names neither; a file this process cannot read names the
+service account when that cannot read it either, and otherwise says to run the
+check as that account. The other rows then read the arguments, the process
+environment and the packaged defaults. `Binder` produces
+`ManagedAgentProperties`, the Harness probe uses the JDK HTTP client, and the
+database probe uses JDBC with a five-second connect and socket timeout.
 
 ## Acceptance
 

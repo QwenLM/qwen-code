@@ -117,8 +117,8 @@ also reads `application.yml` and `config/application.yml` in its working
 directory beside the file `SPRING_CONFIG_ADDITIONAL_LOCATION` names, so
 `--working-directory` must match the unit's `WorkingDirectory`. It prints a
 `config` row for each file it read, and fails that row where the server would
-not start: a named file that does not exist, or a YAML error, with the file
-and line.
+not start: a named file that does not exist, a file the service account cannot
+read, or a YAML error, with the file and line.
 
 `--check` binds the configured ports, and its `workers` row warns about Runtime
 workers still running from an earlier start, so run it while the service is

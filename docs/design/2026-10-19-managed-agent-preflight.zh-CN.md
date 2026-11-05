@@ -13,19 +13,21 @@
 `bin/qwen-managed-agent-server --check`（等价于
 `java -jar qwen-managed-agent-server-<version>.jar --check`）运行预检后退出。它复用现有 server 产物，参考分发不新增组件。
 
-命令绑定与 Spring 相同的输入：
+命令读取服务端读取的配置，按 `SpringApplication` 在创建 context 之前准备环境的方式准备，因此每项输入都保持 Spring 的优先级：
 
-- classpath 中把 `QWEN_MANAGED_AGENT_*` 变量映射为属性的 `application.yml`；
-- 命令行参数（`--server.address=...`、`--qwen.managed-agent.*`），保持 Spring 的优先级；
-- `--spring.config.additional-location` 指定的外部 YAML（运维可显式传入），或 `SPRING_CONFIG_ADDITIONAL_LOCATION`（启动脚本在 `config/application.yml` 存在时会设置）；
-- 进程环境变量，其优先级高于前两者。
+- 命令行参数（`--server.address=...`、`--qwen.managed-agent.*`）；
+- 进程环境变量，包括 `SPRING_APPLICATION_JSON`；
+- Spring Boot 读取的配置文件：由 `spring.config.location`、`spring.config.additional-location` 或 `spring.config.import` 指定的文件，以参数或 `SPRING_CONFIG_*` 变量给出（启动脚本在 `config/application.yml` 存在时设置 `SPRING_CONFIG_ADDITIONAL_LOCATION`，systemd unit 的 `server.env` 指定 `/etc/qwen-managed-agent/application.yml`）；默认位置 `./`、`./config/` 和 `./config/*/` 下的文件，除非 `spring.config.location` 替换了它们；`.yml`、`.yaml` 或 `.properties` 格式，文件名取 `spring.config.name`；以及它们的 profile 变体、它们 import 的文件和 config tree；
+- classpath 中把 `QWEN_MANAGED_AGENT_*` 变量映射为属性的 `application.yml`。
+
+相对位置（包括默认位置）与服务端一样在工作目录中解析，因此命令要在服务端的工作目录中运行：分发包根目录，或 unit 的 `WorkingDirectory`。在 [#16057](https://github.com/QwenLM/qwen-code/issues/16057) 之前，它只读取启动脚本或 `server.env` 指定的那个文件，漏掉了服务端从工作目录 `config/application.yml` 读到的 `server.port`。
 
 ## 检查项
 
 | 检查         | 通过条件                                                                                                                                                                                                                                       |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `java`       | Runtime feature version 不低于 21。                                                                                                                                                                                                            |
-| `config`     | 外部 YAML 存在且可读；含 secret 的文件不得对 group 或 others 可读。                                                                                                                                                                            |
+| `config`     | 服务端读取的每个文件一行：service account 可读；含 secret 时不得对 group 或 others 可读；一个文件都不读时为 WARN。Spring 会拒绝启动时为 FAIL：指定的文件不存在、本进程读不了某个文件，或 YAML 错误（给出所在文件和行号）。                     |
 | `key-ring`   | 至少配置了 active key ID；同时输出 previous key ID。                                                                                                                                                                                           |
 | `validation` | 绑定后的配置通过启动期属性校验。                                                                                                                                                                                                               |
 | `auth`       | 非 loopback 绑定不使用 `auto`；signed 模式配置了签名密钥；insecure bind 会给出告警。                                                                                                                                                           |
@@ -47,7 +49,7 @@
 
 ## 实现
 
-`ManagedAgentServerApplication` 在 `SpringApplication.run` 之前拦截 `--check`，因此不会启动监听、调度器、数据源连接池或 worker。`StandardEnvironment` 依次加载外部与打包内的 YAML 属性源，`Binder` 生成 `ManagedAgentProperties`，Harness 探测使用 JDK HTTP client，数据库探测使用 JDBC，连接与 socket 超时均为 5 秒。
+`ManagedAgentServerApplication` 在 `SpringApplication.run` 之前拦截 `--check`，因此不会启动监听、调度器、数据源连接池或 worker。`ServerEnvironment` 按 `SpringApplication` 的方式准备 servlet 环境：参数、进程环境，然后经 `EnvironmentPostProcessorApplicationListener` 运行 classpath 上的所有 environment post-processor，并启用宽松绑定。它不创建 context；升级命令读取设置所用的 `ResolvedConfiguration` 也准备同一个环境。`config` 行先列出准备好的属性源来自的文件，再列出 Spring 在某个位置读到但其中没有任何设置的文件。准备过程抛出异常时，该行写明 Spring 拒绝的原因：被当作不存在或不可读的文件，或 YAML 错误所在的文件和行号。由于 Spring 的错误信息不包含这两者，需要在 Spring 会查找的文件中定位。本进程读不了的文件，若 service account 也读不了，就写 service account；否则提示以该账号运行检查。此时其余各行读取参数、进程环境和打包默认值。`Binder` 生成 `ManagedAgentProperties`，Harness 探测使用 JDK HTTP client，数据库探测使用 JDBC，连接与 socket 超时均为 5 秒。
 
 ## 验收
 

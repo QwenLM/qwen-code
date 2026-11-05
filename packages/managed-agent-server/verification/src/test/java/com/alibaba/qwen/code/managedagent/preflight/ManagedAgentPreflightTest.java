@@ -1971,16 +1971,6 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
-    void commandLineArgumentsOverrideTheEnvironment() {
-        var environment = ManagedAgentPreflight.baseEnvironment(new String[] {
-                "--server.address=0.0.0.0",
-                "--qwen.managed-agent.auth.mode=open"});
-        assertEquals("0.0.0.0", environment.getProperty("server.address"));
-        assertEquals("open",
-                environment.getProperty("qwen.managed-agent.auth.mode"));
-    }
-
-    @Test
     void rejectsAMissingPerformanceSchemaGrant() {
         MockEnvironment environment = new MockEnvironment();
         environment.setProperty("spring.datasource.url",

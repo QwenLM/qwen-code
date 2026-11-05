@@ -11,12 +11,13 @@ import org.springframework.boot.context.event.ApplicationEnvironmentPreparedEven
 import org.springframework.boot.context.properties.source.ConfigurationPropertySources;
 import org.springframework.boot.convert.ApplicationConversionService;
 import org.springframework.boot.env.EnvironmentPostProcessorApplicationListener;
-import org.springframework.boot.env.OriginTrackedMapPropertySource;
 import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.boot.origin.Origin;
+import org.springframework.boot.origin.OriginLookup;
 import org.springframework.boot.origin.OriginTrackedResource;
 import org.springframework.boot.origin.TextResourceOrigin;
 import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.env.EnumerablePropertySource;
 import org.springframework.core.env.PropertySource;
 import org.springframework.core.env.SimpleCommandLinePropertySource;
 import org.springframework.core.io.ClassPathResource;
@@ -32,6 +33,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Predicate;
 
@@ -49,9 +51,8 @@ import java.util.function.Predicate;
 final class ServerEnvironment {
     // Where Spring Boot looks without being told, relative to the working
     // directory; config/*/ is a wildcard.
-    private static final List<String> DEFAULT_DIRECTORIES = List.of("", "config");
-    private static final List<String> CONFIG_FILES = List.of("application.yml",
-            "application.yaml", "application.properties");
+    private static final List<String> DEFAULT_DIRECTORIES = List.of("", "config", "config/*");
+    private static final List<String> EXTENSIONS = List.of("yml", "yaml", "properties");
 
     private ServerEnvironment() {
     }
@@ -87,27 +88,37 @@ final class ServerEnvironment {
 
     /**
      * The configuration files the server reads from the file system, highest
-     * precedence first, each once, absolute and normalized. The packaged
-     * defaults and other class path resources are left out. A file that holds
-     * no setting adds no property source, so one named outright, such as a
-     * copy of the example with every line commented out, follows the others.
+     * precedence first, each once, absolute and normalized: those that hold
+     * a setting, each value file of a config tree among them, then those
+     * Spring reads at a location without finding a setting, such as a copy
+     * of the example with every line commented out. The packaged defaults
+     * and other class path resources are left out, and so is a file without
+     * a setting that an import names from inside another.
      */
     static List<Path> files(ConfigurableEnvironment environment) {
+        return files(environment, Path.of(""));
+    }
+
+    /** As above, with the working directory the default locations are in. */
+    static List<Path> files(ConfigurableEnvironment environment, Path workingDirectory) {
         Set<Path> files = new LinkedHashSet<>();
         for (PropertySource<?> source : environment.getPropertySources()) {
-            if (!(source instanceof OriginTrackedMapPropertySource tracked)
-                    || tracked.getSource().isEmpty()) {
+            if (!(source instanceof EnumerablePropertySource<?> enumerable)) {
                 continue;
             }
-            Path file = file(resource(tracked.getOrigin(
-                    tracked.getSource().keySet().iterator().next())));
-            if (file != null) {
-                files.add(file);
+            for (String name : enumerable.getPropertyNames()) {
+                Path file = file(resource(OriginLookup.getOrigin(source, name)));
+                if (file != null) {
+                    files.add(file);
+                }
             }
         }
-        for (Location named : named(environment)) {
-            if (!named.directory() && Files.isRegularFile(named.path())) {
-                files.add(named.path().toAbsolutePath().normalize());
+        String[] active = environment.getActiveProfiles();
+        List<String> profiles = List.of(active.length > 0 ? active
+                : environment.getDefaultProfiles());
+        for (Path file : locationFiles(environment, workingDirectory, profiles)) {
+            if (Files.isRegularFile(file)) {
+                files.add(file.toAbsolutePath().normalize());
             }
         }
         return new ArrayList<>(files);
@@ -120,9 +131,10 @@ final class ServerEnvironment {
     /**
      * The file system locations named at the top level, by the arguments or
      * the process environment. Locations of another kind, such as
-     * classpath:, are left out.
+     * classpath: or configtree:, are left out.
      */
-    private static List<Location> named(ConfigurableEnvironment environment) {
+    private static List<Location> named(ConfigurableEnvironment environment,
+            Path workingDirectory) {
         List<Location> named = new ArrayList<>();
         for (String property : List.of("spring.config.import",
                 "spring.config.additional-location", "spring.config.location")) {
@@ -134,11 +146,106 @@ final class ServerEnvironment {
                 String path = location.strip().replaceFirst("^optional:", "")
                         .replaceFirst("^file:", "");
                 if (!path.isEmpty() && !path.contains(":")) {
-                    named.add(new Location(Path.of(path), path.endsWith("/")));
+                    named.add(new Location(workingDirectory.resolve(path),
+                            path.endsWith("/")));
                 }
             }
         }
         return named;
+    }
+
+    /**
+     * The files Spring looks for at the locations named at the top level
+     * and, unless spring.config.location replaces them, at its default ones
+     * in the working directory: each location's files, then their variants
+     * for these profiles, or for any profile when profiles is null. A file
+     * an import names from inside another is not among them.
+     */
+    private static Set<Path> locationFiles(ConfigurableEnvironment environment,
+            Path workingDirectory, List<String> profiles) {
+        List<String> names = new ArrayList<>();
+        for (String name : environment.getProperty("spring.config.name",
+                "application").split(",")) {
+            if (!name.isBlank()) {
+                names.add(name.strip());
+            }
+        }
+        List<Path> directories = new ArrayList<>();
+        Set<Path> files = new LinkedHashSet<>();
+        for (Location named : named(environment, workingDirectory)) {
+            if (named.directory()) {
+                directories.add(named.path());
+            } else {
+                files.add(named.path());
+            }
+        }
+        if (environment.getProperty("spring.config.location") == null) {
+            for (String directory : DEFAULT_DIRECTORIES) {
+                directories.add(workingDirectory.resolve(directory));
+            }
+        }
+        for (Path location : directories) {
+            for (Path directory : expand(location)) {
+                for (String name : names) {
+                    for (String extension : EXTENSIONS) {
+                        files.add(directory.resolve(name + "." + extension));
+                    }
+                }
+            }
+        }
+        Set<Path> variants = new LinkedHashSet<>();
+        for (Path file : files) {
+            variants.addAll(variants(file, profiles));
+        }
+        files.addAll(variants);
+        return files;
+    }
+
+    /** The directory, or for a last name of *, each directory in its parent. */
+    private static List<Path> expand(Path location) {
+        Path name = location.getFileName();
+        if (name == null || !name.toString().equals("*")) {
+            return List.of(location);
+        }
+        List<Path> directories = new ArrayList<>();
+        Path parent = location.getParent() == null ? Path.of("") : location.getParent();
+        try (DirectoryStream<Path> nested = Files.newDirectoryStream(parent, Files::isDirectory)) {
+            nested.forEach(directories::add);
+        } catch (IOException error) {
+            // No such directory, or none to read.
+        }
+        directories.sort(null);
+        return directories;
+    }
+
+    /** The profile variants of a file, as application-edge.yml is of application.yml. */
+    private static List<Path> variants(Path file, List<String> profiles) {
+        String name = file.getFileName().toString();
+        int dot = name.lastIndexOf('.');
+        if (dot <= 0) {
+            return List.of();
+        }
+        String stem = name.substring(0, dot) + "-";
+        String extension = name.substring(dot);
+        Path directory = file.getParent() == null ? Path.of("") : file.getParent();
+        List<Path> variants = new ArrayList<>();
+        if (profiles != null) {
+            for (String profile : profiles) {
+                variants.add(directory.resolve(stem + profile + extension));
+            }
+            return variants;
+        }
+        try (DirectoryStream<Path> each = Files.newDirectoryStream(directory, path -> {
+            String other = path.getFileName().toString();
+            return other.startsWith(stem) && other.endsWith(extension)
+                    && other.length() > stem.length() + extension.length();
+        })) {
+            each.forEach(variants::add);
+        } catch (IOException error) {
+            // No such directory, or none to read.
+        }
+        variants.sort(null);
+        return variants;
     }
 
     private static Resource resource(Origin origin) {
@@ -167,8 +274,15 @@ final class ServerEnvironment {
         }
     }
 
-    /** What a config row says of a failure of {@link #prepare}, and its fix. */
-    record Failure(String detail, String fix) {
+    /**
+     * What a config row says of a failure of {@link #prepare}, and its fix;
+     * the file this process cannot read when that is the failure, which the
+     * server may read as another account.
+     */
+    record Failure(String detail, String fix, Path unreadable) {
+        Failure(String detail, String fix) {
+            this(detail, fix, null);
+        }
     }
 
     /**
@@ -180,38 +294,47 @@ final class ServerEnvironment {
      * the arguments and the process environment.
      */
     static Failure failure(RuntimeException error, ConfigurableEnvironment environment) {
-        return failure(error, environment, Files::isReadable, Path.of(""));
+        return failure(error, environment, Files::isReadable, Files::notExists, Path.of(""));
     }
 
     /**
-     * As above, with whether this process reads a file and the working
-     * directory the default locations are in, which a test may decide.
+     * As above, with whether this process reads a file, whether it can tell
+     * that a file does not exist, and the working directory the default
+     * locations are in, which a test may decide.
      */
     static Failure failure(RuntimeException error, ConfigurableEnvironment environment,
-            Predicate<Path> readable, Path workingDirectory) {
-        if (error instanceof ConfigDataNotFoundException missing) {
-            Path file = missing instanceof ConfigDataResourceNotFoundException resource
+            Predicate<Path> readable, Predicate<Path> missing, Path workingDirectory) {
+        String user = System.getProperty("user.name", "");
+        if (error instanceof ConfigDataNotFoundException notFound) {
+            Path file = notFound instanceof ConfigDataResourceNotFoundException resource
                     && resource.getResource() instanceof StandardConfigDataResource standard
                     ? file(standard.getResource()) : null;
-            return new Failure((file == null ? missing.getReferenceDescription() : file)
+            // Spring cannot tell a file from none behind a directory it may not enter.
+            if (file != null && !missing.test(file)) {
+                return unreadable(file, user);
+            }
+            return new Failure((file == null ? notFound.getReferenceDescription() : file)
                     + " does not exist", "create it, or correct the location that names it");
         }
-        String user = System.getProperty("user.name", "");
-        for (Path candidate : candidates(environment, workingDirectory)) {
-            if (!Files.isRegularFile(candidate)) {
-                continue;
-            }
-            Path file = candidate.toAbsolutePath().normalize();
-            if (!readable.test(candidate)) {
-                return new Failure(file + " is not readable by " + user,
-                        "chown " + user + " " + file + ", chmod 600 " + file
-                                + ", and let " + user + " enter every directory on its path");
-            }
-            if (yamlError(candidate) instanceof MarkedYAMLException marked) {
-                return yamlFailure(file.toString(), marked);
+        Set<Path> candidates = locationFiles(environment, workingDirectory, null);
+        if (cause(error, IOException.class) != null) {
+            for (Path candidate : candidates) {
+                if (Files.isRegularFile(candidate) && !readable.test(candidate)) {
+                    return unreadable(candidate.toAbsolutePath().normalize(), user);
+                }
             }
         }
-        if (error instanceof MarkedYAMLException marked) {
+        MarkedYAMLException marked = cause(error, MarkedYAMLException.class);
+        if (marked != null) {
+            for (Path candidate : candidates) {
+                // The same problem at the same place, as a profile variant
+                // no profile activates may hold another error.
+                if (Files.isRegularFile(candidate)
+                        && sameProblem(yamlError(candidate), marked)) {
+                    return yamlFailure(candidate.toAbsolutePath().normalize().toString(),
+                            marked);
+                }
+            }
             // In a file an import names from inside another.
             return yamlFailure("a configuration file", marked);
         }
@@ -220,6 +343,32 @@ final class ServerEnvironment {
         // A wrapper's message often repeats its cause.
         return new Failure(message.isEmpty() || message.contains(cause) ? cause
                 : message + ": " + cause, "correct the configuration Spring names");
+    }
+
+    private static Failure unreadable(Path file, String user) {
+        return new Failure(file + " is not readable by " + user,
+                ManagedAgentPreflight.unreadableFix(user, file.toString()), file);
+    }
+
+    private static <T extends Throwable> T cause(Throwable error, Class<T> type) {
+        Throwable each = error;
+        // A cause chain may loop.
+        for (int depth = 0; each != null && depth < 32; depth++, each = each.getCause()) {
+            if (type.isInstance(each)) {
+                return type.cast(each);
+            }
+        }
+        return null;
+    }
+
+    private static boolean sameProblem(MarkedYAMLException candidate, MarkedYAMLException thrown) {
+        if (candidate == null || !Objects.equals(candidate.getProblem(), thrown.getProblem())) {
+            return false;
+        }
+        Mark one = candidate.getProblemMark();
+        Mark other = thrown.getProblemMark();
+        return one == null ? other == null : other != null
+                && one.getLine() == other.getLine() && one.getColumn() == other.getColumn();
     }
 
     private static Failure yamlFailure(String where, MarkedYAMLException error) {
@@ -234,7 +383,7 @@ final class ServerEnvironment {
     }
 
     /** The YAML error a file holds, or null for a file that parses or is no YAML. */
-    private static RuntimeException yamlError(Path file) {
+    private static MarkedYAMLException yamlError(Path file) {
         String name = file.getFileName().toString();
         if (!name.endsWith(".yml") && !name.endsWith(".yaml")) {
             return null;
@@ -243,45 +392,9 @@ final class ServerEnvironment {
             new YamlPropertySourceLoader().load("candidate", new FileSystemResource(file));
             return null;
         } catch (RuntimeException error) {
-            return error;
+            return cause(error, MarkedYAMLException.class);
         } catch (IOException error) {
             return null;
-        }
-    }
-
-    /**
-     * The files Spring may have failed on, in the order it reads them: those
-     * named at the top level, by the arguments or the process environment,
-     * then those at Spring Boot's default locations in the working directory.
-     * A file an import names from inside another is not among them.
-     */
-    private static Set<Path> candidates(ConfigurableEnvironment environment,
-            Path workingDirectory) {
-        Set<Path> candidates = new LinkedHashSet<>();
-        for (Location named : named(environment)) {
-            if (named.directory()) {
-                filesIn(named.path(), candidates);
-            } else {
-                candidates.add(named.path());
-            }
-        }
-        for (String directory : DEFAULT_DIRECTORIES) {
-            filesIn(workingDirectory.resolve(directory), candidates);
-        }
-        try (DirectoryStream<Path> nested = Files.newDirectoryStream(
-                workingDirectory.resolve("config"), Files::isDirectory)) {
-            for (Path directory : nested) {
-                filesIn(directory, candidates);
-            }
-        } catch (IOException error) {
-            // No config/ directory, or none to read.
-        }
-        return candidates;
-    }
-
-    private static void filesIn(Path directory, Set<Path> candidates) {
-        for (String name : CONFIG_FILES) {
-            candidates.add(directory.resolve(name));
         }
     }
 }

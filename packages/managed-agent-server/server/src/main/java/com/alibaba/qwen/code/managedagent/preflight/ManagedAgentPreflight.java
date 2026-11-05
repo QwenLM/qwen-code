@@ -27,8 +27,6 @@ import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.PropertySource;
-import org.springframework.core.env.SimpleCommandLinePropertySource;
-import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
 
@@ -98,6 +96,8 @@ public final class ManagedAgentPreflight {
     private static final int KEY_BYTES = 32;
     private static final int MIN_JAVA_FEATURE = 21;
     private static final int DEFAULT_SERVER_PORT = 8080;
+    private static final List<String> SECRET_MARKERS =
+            List.of("credential-key", "signing-key", "password");
 
     private ManagedAgentPreflight() {
     }
@@ -153,10 +153,11 @@ public final class ManagedAgentPreflight {
         ConfigurableEnvironment environment = prepared.environment();
         ManagedAgentProperties properties = bind(environment, checks);
         checks.add(javaCheck());
-        AccessCheck access = serviceUserCheck(properties.getServiceUser(),
-                System.getProperty("user.name", ""), ServiceAccount::lookup);
+        String runner = System.getProperty("user.name", "");
+        AccessCheck access = serviceUserCheck(properties.getServiceUser(), runner,
+                ServiceAccount::lookup);
         checks.add(access.check());
-        checks.addAll(configFileChecks(prepared.files(), access.account()));
+        checks.addAll(configChecks(prepared, access.account(), runner));
         checks.add(startupValidationCheck(properties));
         checks.add(keyRingCheck(properties));
         checks.add(authCheck(environment, properties));
@@ -189,17 +190,19 @@ public final class ManagedAgentPreflight {
     }
 
     /**
-     * The environment the checks read, and the configuration files it holds
-     * from the file system; no files when it could not be prepared.
+     * The environment the checks read, and either the configuration files it
+     * holds from the file system or why Spring would refuse to start.
      */
-    record Prepared(ConfigurableEnvironment environment, List<Path> files) {
+    record Prepared(ConfigurableEnvironment environment, List<Path> files,
+            ServerEnvironment.Failure failure) {
     }
 
     /**
      * The environment as the server prepares it. When Spring would refuse to
      * start, as for a named location that does not exist or a file it cannot
-     * read, a config row says why, and the other rows read the packaged
-     * defaults, the arguments and the process environment.
+     * read, the failure is kept for the config row, which names an account
+     * once the service-user row has found it, and the other rows read the
+     * arguments, the process environment and the packaged defaults.
      */
     static Prepared prepare(String[] args, ConfigurableEnvironment base,
             List<Check> checks) {
@@ -207,23 +210,54 @@ public final class ManagedAgentPreflight {
             ConfigurableEnvironment environment =
                     ServerEnvironment.prepare(args, base);
             return new Prepared(environment,
-                    ServerEnvironment.files(environment));
+                    ServerEnvironment.files(environment), null);
         } catch (RuntimeException error) {
             ServerEnvironment.Failure failure = ServerEnvironment.failure(error, base);
-            checks.add(new Check("config", Status.FAIL, failure.detail(), failure.fix()));
-            ConfigurableEnvironment environment = baseEnvironment(args);
-            loadDefaults(environment, checks);
-            return new Prepared(environment, null);
+            // Spring adds the files' sources once it has read them all, so
+            // base holds what the arguments and the process environment set.
+            loadDefaults(base, checks);
+            return new Prepared(base, List.of(), failure);
         }
     }
 
-    static ConfigurableEnvironment baseEnvironment(String[] args) {
-        StandardEnvironment environment = new StandardEnvironment();
-        if (args.length > 0) {
-            environment.getPropertySources().addFirst(
-                    new SimpleCommandLinePropertySource(args));
+    /**
+     * The config rows: why the server would not start with its
+     * configuration, or one row for each file it reads.
+     */
+    static List<Check> configChecks(Prepared prepared, ServiceAccount account,
+            String runner) {
+        return prepared.failure() == null
+                ? configFileChecks(prepared.files(), account)
+                : List.of(configFailureCheck(prepared.failure(), account, runner));
+    }
+
+    /**
+     * The row for a configuration Spring refused. A file this process cannot
+     * read is named with the account that must read it: the service account,
+     * when that cannot read it either, and otherwise this process, which
+     * then cannot check what the server reads.
+     */
+    static Check configFailureCheck(ServerEnvironment.Failure failure,
+            ServiceAccount account, String runner) {
+        Path file = failure.unreadable();
+        if (file == null || account == null) {
+            return new Check("config", Status.FAIL, failure.detail(), failure.fix());
         }
-        return environment;
+        String path = file.toString();
+        boolean serverReads;
+        try {
+            serverReads = account.canRead(file);
+        } catch (IOException | UnsupportedOperationException error) {
+            // This process cannot look along the path; the account may.
+            serverReads = true;
+        }
+        return serverReads
+                ? new Check("config", Status.FAIL,
+                        path + " is not readable by " + runner + ", which runs this check",
+                        "run --check as " + account.name() + " or as root")
+                : new Check("config", Status.FAIL,
+                        path + " is not readable by " + account.name(),
+                        unreadableFix(account.name(), path));
     }
 
     /** Adds the packaged defaults, below what the environment holds. */
@@ -341,14 +375,10 @@ public final class ManagedAgentPreflight {
     /**
      * One row for each configuration file the server reads, which Spring
      * found at a location named or at one of its defaults, such as
-     * ./config/application.yml in the working directory. None when the
-     * environment could not be prepared, which a row has said already.
+     * ./config/application.yml in the working directory.
      */
     static List<Check> configFileChecks(List<Path> files,
             ServiceAccount account) {
-        if (files == null) {
-            return List.of();
-        }
         if (files.isEmpty()) {
             return List.of(new Check("config", Status.WARN,
                     "no configuration file; packaged defaults and the"
@@ -370,25 +400,36 @@ public final class ManagedAgentPreflight {
                             path + " is not readable", "chmod 600 " + path)
                     : new Check("config", Status.FAIL,
                             path + " is not readable by " + account.name(),
-                            unreadableFix(account, path));
+                            unreadableFix(account.name(), path));
         }
         String content;
         try {
-            content = Files.readString(file, StandardCharsets.UTF_8);
+            content = text(Files.readAllBytes(file));
         } catch (IOException error) {
             return new Check("config", Status.WARN,
                     path + ": cannot inspect permissions", null);
         }
-        boolean secrets = content.contains("credential-key")
-                || content.contains("signing-key")
-                || content.contains("password");
+        // A config tree's file is named for its property and holds the value.
+        String name = file.getFileName().toString();
+        boolean secrets = SECRET_MARKERS.stream().anyMatch(marker ->
+                content.contains(marker) || name.contains(marker));
         return secrets ? sharedSecretFileCheck("config", file, path)
                 : new Check("config", Status.PASS, path, null);
     }
 
-    private static String unreadableFix(ServiceAccount account, String path) {
-        return "chown " + account.name() + " " + path + ", chmod 600 " + path
-                + ", and let " + account.name()
+    // Spring reads YAML as UTF-8, or UTF-16 after a byte order mark, and
+    // .properties as ISO-8859-1. The markers are ASCII, which ISO-8859-1,
+    // decoding any byte, reads in all but UTF-16.
+    private static String text(byte[] bytes) {
+        boolean utf16 = bytes.length >= 2
+                && ((bytes[0] & 0xff) == 0xfe && (bytes[1] & 0xff) == 0xff
+                        || (bytes[0] & 0xff) == 0xff && (bytes[1] & 0xff) == 0xfe);
+        return new String(bytes, utf16 ? StandardCharsets.UTF_16 : StandardCharsets.ISO_8859_1);
+    }
+
+    static String unreadableFix(String account, String path) {
+        return "chown " + account + " " + path + ", chmod 600 " + path
+                + ", and let " + account
                 + " enter every directory on its path, following symbolic links";
     }
 
@@ -522,7 +563,7 @@ public final class ManagedAgentPreflight {
                                     + file)
                     : new Check("credentials", Status.FAIL,
                             file + " is not readable by " + account.name(),
-                            unreadableFix(account, file));
+                            unreadableFix(account.name(), file));
         }
         return sharedSecretFileCheck("credentials", path, file);
     }
