@@ -2880,7 +2880,7 @@ describe('useComposerCore tags', () => {
       id: 'quote:test-1',
       kind: 'quote',
       value: 'fragment',
-      serialized: '> fragment',
+      serialized: '<quoted-message>fragment</quoted-message>',
     };
 
     it('puts the quote where the next keystroke follows it', async () => {
@@ -2894,7 +2894,9 @@ describe('useComposerCore tags', () => {
       });
 
       expect(inserted).toBe(true);
-      expect(view.state.doc.toString()).toBe('> fragment ');
+      expect(view.state.doc.toString()).toBe(
+        '<quoted-message>fragment</quoted-message>\n',
+      );
       expect(view.state.selection.main.from).toBe(view.state.doc.length);
       expect(dispatch).toHaveBeenCalledWith(
         expect.objectContaining({ scrollIntoView: true }),
@@ -2903,7 +2905,9 @@ describe('useComposerCore tags', () => {
       act(() => {
         view.dispatch(view.state.replaceSelection('explain this'));
       });
-      expect(view.state.doc.toString()).toBe('> fragment explain this');
+      expect(view.state.doc.toString()).toBe(
+        '<quoted-message>fragment</quoted-message>\nexplain this',
+      );
     });
 
     it('starts the quote on its own line after an existing draft', async () => {
@@ -2921,7 +2925,7 @@ describe('useComposerCore tags', () => {
       });
 
       expect(view.state.doc.toString()).toBe(
-        'What does this mean?\n> fragment ',
+        'What does this mean?\n<quoted-message>fragment</quoted-message>\n',
       );
       expect(view.state.selection.main.from).toBe(view.state.doc.length);
     });

@@ -27219,7 +27219,7 @@ describe('App session callbacks', () => {
     expect(editorInsertQuote).toHaveBeenCalledTimes(1);
     expect(editorInsertQuote.mock.calls[0]![0]).toMatchObject({
       kind: 'quote',
-      serialized: '> quoted text',
+      serialized: '<quoted-message>quoted text</quoted-message>',
     });
   });
 

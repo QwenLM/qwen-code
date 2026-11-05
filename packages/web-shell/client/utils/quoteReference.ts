@@ -19,7 +19,7 @@ const BIDI_CONTROL_RE = /\p{Bidi_Control}/gu;
  * newlines) to a single space, trims, and caps the length. Newlines are
  * flattened on purpose: an inline chip is a single editor range, and a
  * multi-line serialized form would leave ghost lines behind the chip, so
- * a quote is always one blockquote line.
+ * a quote is always one line.
  */
 export function flattenQuoteText(raw: string): string {
   const cleaned = raw.replace(BIDI_CONTROL_RE, '').replace(/\s+/g, ' ').trim();
@@ -39,12 +39,12 @@ export function isQuotableText(raw: string): boolean {
 
 /**
  * Builds the composer insert text for a quoted fragment, e.g.
- * `> quoted fragment text`. The markdown blockquote prefix keeps the
- * quote visibly a quote inside the sent prompt without a new protocol
- * construct.
+ * `<quoted-message>quoted fragment text</quoted-message>`. The semantic
+ * fence marks the fragment as a quote inside the sent prompt instead of
+ * markdown blockquote styling.
  */
 export function quoteReferenceInsertText(flattened: string): string {
-  return `> ${flattened}`;
+  return `<quoted-message>${flattened}</quoted-message>`;
 }
 
 function hashQuoteText(text: string): string {
@@ -63,10 +63,11 @@ let quoteSequence = 0;
 /**
  * Builds the composer tag for a quoted message fragment, or `null` when
  * the selection carries no quotable text. The tag renders as an inline
- * chip (kind `quote`) whose serialized form is a blockquote line, so it
- * survives send/reload through the standard reference annotations. Every
- * call gets its own id: quoting the same fragment twice yields two
- * independent chips (removing one must not remove the other).
+ * chip (kind `quote`) whose serialized form is a `<quoted-message>`
+ * fence, so it survives send/reload through the standard reference
+ * annotations. Every call gets its own id: quoting the same fragment
+ * twice yields two independent chips (removing one must not remove the
+ * other).
  */
 export function buildQuoteReferenceTag(
   raw: string,

@@ -58,8 +58,10 @@ describe('isQuotableText', () => {
 });
 
 describe('quoteReferenceInsertText', () => {
-  it('prefixes the markdown blockquote marker', () => {
-    expect(quoteReferenceInsertText('quoted text')).toBe('> quoted text');
+  it('wraps the fragment in a semantic fence', () => {
+    expect(quoteReferenceInsertText('quoted text')).toBe(
+      '<quoted-message>quoted text</quoted-message>',
+    );
   });
 });
 
@@ -75,7 +77,7 @@ describe('buildQuoteReferenceTag', () => {
       expect(tag).toMatchObject({
         kind: 'quote',
         value: 'same text',
-        serialized: '> same text',
+        serialized: '<quoted-message>same text</quoted-message>',
       });
       expect(tag?.id).toMatch(/^quote:[0-9a-f]{8}-[0-9a-z]+$/);
     }
@@ -100,7 +102,7 @@ describe('insertQuoteIntoComposer', () => {
     expect(insertQuote).toHaveBeenCalledTimes(1);
     expect(insertQuote.mock.calls[0]![0]).toMatchObject({
       kind: 'quote',
-      serialized: '> quoted text',
+      serialized: '<quoted-message>quoted text</quoted-message>',
     });
   });
 
@@ -140,7 +142,7 @@ describe('quote tag through the composer annotations', () => {
         id: tag.id,
         kind: 'quote',
         value: 'first line second line',
-        serialized: '> first line second line',
+        serialized: '<quoted-message>first line second line</quoted-message>',
       },
     });
   });

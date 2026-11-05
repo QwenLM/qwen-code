@@ -934,7 +934,7 @@ describe('UserMessage', () => {
             id: 'quote:12345678-1',
             kind: 'quote',
             value: quoted,
-            serialized: `> ${quoted}`,
+            serialized: `<quoted-message>${quoted}</quoted-message>`,
           }),
         ]}
       />,

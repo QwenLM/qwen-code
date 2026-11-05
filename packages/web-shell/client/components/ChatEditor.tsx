@@ -4023,8 +4023,8 @@ export const ChatEditor = memo(
                             error,
                           );
                         }
-                        // A quote chip shows its full fragment on hover: the
-                        // serialized form carries a blockquote prefix.
+                        // A quote chip shows its full fragment on hover:
+                        // the chip display truncates the value.
                         if (
                           tooltip === undefined &&
                           tag.kind === 'quote' &&

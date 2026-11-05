@@ -1686,7 +1686,7 @@ describe('ChatPane', () => {
     expect(insertQuote).toHaveBeenCalledTimes(1);
     expect(insertQuote.mock.calls[0]![0]).toMatchObject({
       kind: 'quote',
-      serialized: '> quoted text',
+      serialized: '<quoted-message>quoted text</quoted-message>',
     });
     expect(mainQuote).not.toHaveBeenCalled();
   });

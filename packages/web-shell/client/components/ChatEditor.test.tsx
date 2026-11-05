@@ -2524,7 +2524,7 @@ describe('ChatEditor top composer tag tooltip', () => {
         id: 'quote:12345678-1',
         kind: 'quote',
         value: 'the full quoted fragment',
-        serialized: '> the full quoted fragment',
+        serialized: '<quoted-message>the full quoted fragment</quoted-message>',
       },
     ];
     const container = renderChatEditor({ visibleToolbarActions: [] });
@@ -2550,7 +2550,7 @@ describe('ChatEditor top composer tag tooltip', () => {
         id: 'quote:12345678-1',
         kind: 'quote',
         value: 'the full quoted fragment',
-        serialized: '> the full quoted fragment',
+        serialized: '<quoted-message>the full quoted fragment</quoted-message>',
       },
     ];
     const container = renderChatEditor({
