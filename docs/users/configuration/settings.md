@@ -496,13 +496,13 @@ The first matching rule wins. Rules use the format `"ToolName"` or `"ToolName(sp
 
 Some rule names automatically cover multiple tools:
 
-| Rule name | Tools covered                                        |
-| --------- | ---------------------------------------------------- |
-| `Read`    | `read_file`, `grep_search`, `glob`, `list_directory` |
-| `Edit`    | `edit`, `write_file`, `notebook_edit`                |
+| Rule name | Tools covered                                                      |
+| --------- | ------------------------------------------------------------------ |
+| `Read`    | `read_file`, `zoom_image`, `grep_search`, `glob`, `list_directory` |
+| `Edit`    | `edit`, `write_file`, `notebook_edit`                              |
 
 > [!important]
-> `Read(/path/**)`, `ReadFile(/path/**)`, and `read_file(/path/**)` are equivalent aliases. Each matches all four read tools: file read, grep, glob, and directory listing. No alias limits matching to file reads alone.
+> `Read(/path/**)`, `ReadFile(/path/**)`, and `read_file(/path/**)` are equivalent aliases. Each matches all five read tools: file read, image zoom, grep, glob, and directory listing. No alias limits matching to file reads alone.
 > Tool-call rules are checked against the requested path. In local sessions backed by a permission manager, search results are also filtered by `deny` rules for both content search backends and glob. Per-result `ask` rules do not pause a search for confirmation. Hosted managed rules, the container execution backend, and SSH workspaces currently check only the requested path, so individual result entries are not filtered there. Directory listing does not yet filter individual entries.
 
 **Rule syntax examples:**
