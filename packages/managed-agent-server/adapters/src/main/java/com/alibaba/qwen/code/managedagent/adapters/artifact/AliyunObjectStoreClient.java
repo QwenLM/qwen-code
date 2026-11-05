@@ -25,6 +25,7 @@ public final class AliyunObjectStoreClient implements AutoCloseable {
     }
     public AliyunToolPublicationObjectStore objects(String bucket) { return new AliyunToolPublicationObjectStore(client, bucket); }
     public void shutdown() { client.shutdown(); }
+    @Override
     public void close() { shutdown(); }
     public static OSS buildOss(com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties, CredentialsProvider credentials) {
         var settings = properties.getToolPublication();
