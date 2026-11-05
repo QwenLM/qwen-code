@@ -52,7 +52,9 @@ import {
   readSessionPrs,
   toSessionPrInfo,
   upsertSessionPr,
+  isSessionPrRole,
   SESSION_PR_URL_MAX_LENGTH,
+  type SessionPrRole,
   type SessionSourceInput,
   type ApprovalMode,
   type SessionGroupColor,
@@ -2813,7 +2815,12 @@ export function registerSessionRoutes(
     req: Request,
     res: Response,
   ):
-    | { number: number; url: string; state?: 'open' | 'merged' | 'closed' }
+    | {
+        number: number;
+        url: string;
+        state?: 'open' | 'merged' | 'closed';
+        role?: SessionPrRole | null;
+      }
     | null
     | undefined => {
     const raw: unknown = safeBody(req)['pr'];
@@ -2822,6 +2829,7 @@ export function registerSessionRoutes(
     const number = candidate?.['number'];
     const url = candidate?.['url'];
     const state = candidate?.['state'];
+    const role = candidate?.['role'];
     if (
       candidate === null ||
       typeof candidate !== 'object' ||
@@ -2837,16 +2845,23 @@ export function registerSessionRoutes(
       (state !== undefined &&
         state !== 'open' &&
         state !== 'merged' &&
-        state !== 'closed')
+        state !== 'closed') ||
+      // null is the explicit clear; an omitted role preserves the known one.
+      (role !== undefined && role !== null && !isSessionPrRole(role))
     ) {
       res.status(400).json({
-        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\``,
+        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\`, and an optional \`role\` that is one of \`review\`, \`verify\`, \`fix\`, or null to clear`,
         code: 'invalid_metadata',
         field: 'pr',
       });
       return null;
     }
-    return { number, url, ...(state ? { state } : {}) };
+    return {
+      number,
+      url,
+      ...(state ? { state } : {}),
+      ...(role !== undefined ? { role: role as SessionPrRole | null } : {}),
+    };
   };
 
   const serializeSessionErrors = (
@@ -9368,6 +9383,18 @@ export function registerSessionRoutes(
         }
         const pr = parseSessionPrBody(req, res);
         if (pr === null) return;
+        // The null role clear is sidecar semantics (upsertSessionPr); the
+        // bridge only knows set-or-preserve, and the persisted list
+        // reconciles the live entry right after the upsert anyway.
+        const bridgePr =
+          pr === undefined
+            ? undefined
+            : {
+                number: pr.number,
+                url: pr.url,
+                ...(pr.state ? { state: pr.state } : {}),
+                ...(pr.role != null ? { role: pr.role } : {}),
+              };
         const displayName =
           typeof rawDisplayName === 'string'
             ? rawDisplayName.slice(0, 256)
@@ -9399,7 +9426,7 @@ export function registerSessionRoutes(
           // keeps a rejected request from leaving a durable binding behind.
           effective = runtime.bridge.updateSessionMetadata(
             sessionId,
-            { displayName, ...(pr ? { pr } : {}) },
+            { displayName, ...(bridgePr ? { pr: bridgePr } : {}) },
             clientId !== undefined ? { clientId } : undefined,
           );
           if (pr) {
@@ -9457,6 +9484,16 @@ export function registerSessionRoutes(
       }
       const pr = parseSessionPrBody(req, res);
       if (pr === null) return;
+      // See the primary metadata route: null clears in the sidecar only.
+      const bridgePr =
+        pr === undefined
+          ? undefined
+          : {
+              number: pr.number,
+              url: pr.url,
+              ...(pr.state ? { state: pr.state } : {}),
+              ...(pr.role != null ? { role: pr.role } : {}),
+            };
       if (rawDisplayName === undefined && pr === undefined) {
         res.status(400).json({
           error: 'at least one of `displayName` or `pr` is required',
@@ -9530,6 +9567,7 @@ export function registerSessionRoutes(
                 number: number;
                 url: string;
                 state?: 'open' | 'merged' | 'closed';
+                role?: SessionPrRole;
               }>;
             };
             const service = createWorkspaceRuntimeSessionService(runtime);
@@ -9564,7 +9602,7 @@ export function registerSessionRoutes(
               // located archive state.
               effective = runtime.bridge.updateSessionMetadata(
                 sessionId,
-                { displayName, ...(pr ? { pr } : {}) },
+                { displayName, ...(bridgePr ? { pr: bridgePr } : {}) },
                 clientId !== undefined ? { clientId } : undefined,
               );
               assertRuntimeGenerationOpen?.();

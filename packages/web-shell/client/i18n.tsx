@@ -224,6 +224,15 @@ const EN: Messages = {
   'localControl.connectionRetry':
     'Connection interrupted. Retry to refresh the QR code.',
   'daemon.connection.retry': 'Retry connection',
+  'hooksApproval.title': 'This project wants to run hooks',
+  'hooksApproval.description':
+    'Hooks in this project\u2019s .qwen/settings.json run commands on your machine. They stay disabled until you approve this exact configuration. Any change to the hooks or the project .env asks again.',
+  'hooksApproval.scopeNote':
+    'Approving records a decision for this project only. If folder trust is enabled and this folder is not trusted, the hooks stay disabled until the folder is trusted.',
+  'hooksApproval.approve': 'Approve hooks',
+  'hooksApproval.reject': 'Keep disabled',
+  'hooksApproval.failed':
+    'The decision could not be saved. Nothing changed; please try again.',
   'daemon.capacity.exhausted':
     'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
   'managed.title': 'Managed Agents',
@@ -2379,6 +2388,8 @@ const EN: Messages = {
     `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'}`,
   'sidebar.overview.hooksDisabled': (v) =>
     `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'} (disabled)`,
+  'sidebar.overview.hooksUntrusted': (v) =>
+    `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'}, ${v?.untrusted ?? 0} not loaded (folder not trusted). Enable security.folderTrust.enabled and trust the folder, or run qwen interactively to review.`,
   'sidebar.forceRemoveWorkspace': 'Force remove',
   'sidebar.removeWorkspaceTitle': 'Remove workspace',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -4458,6 +4469,9 @@ const EN: Messages = {
   'channels.editor.section.credentials': 'Credentials',
   'channels.editor.section.connection': 'Connection',
   'channels.editor.section.routing': 'Notifications and routing',
+  'channels.editor.section.boundSessions': 'PR-bound sessions',
+  'channels.editor.section.boundSessions.description':
+    'Watch events apply to PRs bound to a live session. Enable delivery first, then choose the transitions to watch.',
   'channels.editor.section.session': 'Conversation management',
   'channels.editor.section.access': 'Access control',
   'channels.editor.section.access.description':
@@ -4585,6 +4599,8 @@ const EN: Messages = {
   'channels.editor.field.github.prWatchEvents': 'PR Watch Events',
   'channels.editor.field.github.prWatchEvents.description':
     'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
+  'channels.editor.field.github.prWatchEvents.disabledHint':
+    'Enable "Deliver To PR-Bound Sessions" above to select watch events.',
   'channels.editor.field.github.prWatchEvents.option.ci_failure':
     'ci_failure — CI checks turn red on a head commit',
   'channels.editor.field.github.prWatchEvents.option.merge_conflict':
@@ -4593,6 +4609,9 @@ const EN: Messages = {
     'head_change — the PR’s head commit changes',
   'channels.editor.field.github.prWatchEvents.option.state_change':
     'state_change — the PR is merged or closed',
+  'channels.editor.field.github.boundSessionActions': 'Bound Session Actions',
+  'channels.editor.field.github.boundSessionActions.description':
+    'Optional. Operator instruction templates delivered to PR-bound sessions, keyed by event class (watch:<type> or a notification reason), optionally role-qualified (review:, verify:, fix:). Requires Deliver To PR-Bound Sessions. With templates configured, each role gets its own delivery (one winner per role); a role with no matching key skips the event. Template variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%. Use %% for a literal %. Leave empty for the default generic prompt.',
   'channels.editor.field.gitlab.token': 'Personal Access Token',
   'channels.editor.field.gitlab.token.description':
     'PAT with "read_api" + "api" scopes',
@@ -4776,6 +4795,8 @@ const EN: Messages = {
     `This channel stores a group entry that is not an object: ${v?.repositories ?? ''}. The daemon refuses every save while it is there, and the form has no row for it. Fix or remove that entry in settings.json, then reload the channel.`,
   'channels.editor.validation.invalidOption':
     "Remove values that aren't in the allowed list.",
+  'channels.editor.validation.requiresBoundDelivery':
+    'Enable "Deliver To PR-Bound Sessions" to save the selected watch events.',
   'channels.editor.validation.number': 'Enter a valid number.',
   'channels.editor.validation.outOfRange': (v) =>
     v?.min !== undefined && v?.max !== undefined
@@ -4965,6 +4986,14 @@ const ZH: Messages = {
   'daemon.connection.unavailable': '无法连接服务。',
   'localControl.connectionRetry': '连接已中断，请点击重试刷新二维码。',
   'daemon.connection.retry': '重试连接',
+  'hooksApproval.title': '此项目想要运行 hooks',
+  'hooksApproval.description':
+    '此项目 .qwen/settings.json 中的 hooks 会在你的机器上执行命令。只有你批准这份确切配置后它们才会启用；hooks 或项目 .env 发生变化时会重新询问。',
+  'hooksApproval.scopeNote':
+    '批准只记录针对此项目的决定。若启用了文件夹信任且此文件夹未受信任，hooks 仍会保持禁用，直到文件夹受信任。',
+  'hooksApproval.approve': '批准 hooks',
+  'hooksApproval.reject': '保持禁用',
+  'hooksApproval.failed': '决策未能保存，一切保持原样，请重试。',
   'daemon.capacity.exhausted':
     '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
   'managed.title': '托管 Agent',
@@ -7041,6 +7070,8 @@ const ZH: Messages = {
     `${v?.files ?? 0} 个上下文文件，${v?.rules ?? 0} 条规则`,
   'sidebar.overview.hooksDetail': (v) => `${v?.count ?? 0} 个 hook`,
   'sidebar.overview.hooksDisabled': (v) => `${v?.count ?? 0} 个 hook（已禁用）`,
+  'sidebar.overview.hooksUntrusted': (v) =>
+    `${v?.count ?? 0} 个 hook，${v?.untrusted ?? 0} 个未加载（目录未受信任）。请启用 security.folderTrust.enabled 并信任该目录，或在交互式终端中运行 qwen 审查。`,
   'sidebar.forceRemoveWorkspace': '强制移除',
   'sidebar.removeWorkspaceTitle': '移除工作区',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -8947,6 +8978,9 @@ const ZH: Messages = {
   'channels.editor.section.credentials': '应用凭据',
   'channels.editor.section.connection': '连接',
   'channels.editor.section.routing': '通知与路由',
+  'channels.editor.section.boundSessions': 'PR 绑定会话',
+  'channels.editor.section.boundSessions.description':
+    '监视事件作用于已绑定到活跃会话的 PR。先开启投递，再选择要监视的状态转换。',
   'channels.editor.section.session': '会话管理',
   'channels.editor.section.access': '访问控制',
   'channels.editor.section.access.description':
@@ -9071,6 +9105,8 @@ const ZH: Messages = {
   'channels.editor.field.github.prWatchEvents': 'PR 状态监视事件',
   'channels.editor.field.github.prWatchEvents.description':
     '可选。为绑定 PR 监视的状态转换（需开启"投递到 PR 绑定会话"）。留空则禁用。',
+  'channels.editor.field.github.prWatchEvents.disabledHint':
+    '开启上方「投递到 PR 绑定会话」后即可选择监视事件。',
   'channels.editor.field.github.prWatchEvents.option.ci_failure':
     'ci_failure — CI 检查在 head 提交上变红',
   'channels.editor.field.github.prWatchEvents.option.merge_conflict':
@@ -9079,6 +9115,9 @@ const ZH: Messages = {
     'head_change — PR 的 head 提交变更',
   'channels.editor.field.github.prWatchEvents.option.state_change':
     'state_change — PR 被合并或关闭',
+  'channels.editor.field.github.boundSessionActions': '绑定会话动作模板',
+  'channels.editor.field.github.boundSessionActions.description':
+    '可选。投递给 PR 绑定会话的 operator 指令模板，键为事件类别（watch:<type> 或通知 reason），可加角色前缀（review:、verify:、fix:）。需开启"投递到 PR 绑定会话"。配置模板后每个角色各自投递（每角色一个 winner）；没有匹配键的角色跳过该事件。模板变量：%repo%、%pr%、%url%、%title%、%event%、%sender%、%role%。%% 表示字面 %。留空则使用默认通用 prompt。',
   'channels.editor.field.gitlab.token': '个人访问令牌',
   'channels.editor.field.gitlab.token.description':
     '需要 "read_api" + "api" 权限的 PAT',
@@ -9252,6 +9291,8 @@ const ZH: Messages = {
   'channels.editor.validation.invalidGroupEntry': (v) =>
     `该渠道把以下群组条目存成了非对象：${v?.repositories ?? ''}。只要它还在，daemon 就会拒绝每次保存，而表单里没有对应的行。请在 settings.json 里修正或删除该条目，然后重新加载渠道。`,
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
+  'channels.editor.validation.requiresBoundDelivery':
+    '需开启「投递到 PR 绑定会话」才能保存所选的监视事件。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>
     v?.min !== undefined && v?.max !== undefined
