@@ -22,6 +22,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   ModelRegistry,
   resolveModelSelectionAuthType,
+  tryResolveModelProtocol,
 } from './modelRegistry.js';
 import {
   type ModelConfig,
@@ -843,11 +844,19 @@ export class ModelsConfig {
    * Clear configuration fields that were sourced from modelProviders.
    * This ensures provider config atomicity when user manually sets credentials.
    * Other layers (CLI, env, settings, defaults) will participate in resolve.
+   *
+   * A field the chosen entry leaves silent is labelled by what the registry
+   * derived (`computed`/`default`) with the route recorded in `via`, so it must
+   * be cleared too: otherwise a value like a model-name-detected `modalities`
+   * outlives the model it described and is sent to the manually configured one.
    */
   private clearProviderSourcedConfig(): void {
     for (const field of PROVIDER_SOURCED_FIELDS) {
       const source = this.generationConfigSources[field];
-      if (source?.kind === 'modelProviders') {
+      if (
+        source?.kind === 'modelProviders' ||
+        source?.via?.kind === 'modelProviders'
+      ) {
         // Clear the value - let other layers resolve it
         delete (this._generationConfig as Record<string, unknown>)[field];
         delete this.generationConfigSources[field];
@@ -966,6 +975,19 @@ export class ModelsConfig {
     // (QwenLM/qwen-code#16185).
     const entry = this.findDeclaredEntry(model);
     const declared = entry?.generationConfig;
+    // A derived field still came from the provider route, so `via` records that
+    // provenance: `clearProviderSourcedConfig()` follows it and keeps provider
+    // atomicity on `updateCredentials()` without the label pretending the user
+    // declared the value.
+    const derivedVia =
+      entry === undefined
+        ? undefined
+        : {
+            kind: 'modelProviders' as const,
+            authType: model.authType,
+            modelId: model.id,
+            detail: 'generationConfig',
+          };
     for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this._generationConfig as any)[field] = gc[field];
@@ -977,12 +999,17 @@ export class ModelsConfig {
               modelId: model.id,
               detail: `generationConfig.${field}`,
             }
-          : // An entry that exists but says nothing about the field got the
-            // registry's model-name default; no entry at all means the value
-            // is the field's own built-in default.
-            entry === undefined
-            ? { kind: 'default' }
-            : { kind: 'computed', detail: 'auto-detected from model' };
+          : // The entry says nothing about this field. `modalities` is the one
+            // field the registry derives from the model name; every other value
+            // here is the field's own built-in default, so labelling those as
+            // auto-detected would report an inference that never happened.
+            field === 'modalities'
+            ? {
+                kind: 'computed',
+                detail: 'auto-detected from model',
+                ...(derivedVia ? { via: derivedVia } : {}),
+              }
+            : { kind: 'default', ...(derivedVia ? { via: derivedVia } : {}) };
     }
 
     // contextWindowSize fallback: auto-detect from model when not set by provider
@@ -1008,19 +1035,34 @@ export class ModelsConfig {
    * The provider entry `model` was resolved from, as declared — not the
    * resolved copy the registry hands back with its name-based defaults
    * already filled in.
+   *
+   * Looked up by provider id, not by `model.authType`: the config is keyed by
+   * provider identity while the authType is the resolved SDK protocol, so
+   * indexing by protocol misses a `modelProviders.openai` entry carrying
+   * `wireApi: 'responses'` and any custom id routed by `providerProtocol`.
    */
   private findDeclaredEntry(
     model: ResolvedModelConfig,
   ): ModelConfig | undefined {
     const providers = this.getModelProvidersConfig();
+    const protocols = this.getProviderProtocolConfig();
     if (!providers) return undefined;
-    const entries = providers[model.authType as keyof ModelProvidersConfig];
-    if (!Array.isArray(entries)) return undefined;
-    return entries.find(
-      (candidate) =>
-        candidate.id === model.id &&
-        (candidate.baseUrl ?? undefined) === model.registryBaseUrl,
-    );
+    for (const [providerId, entries] of Object.entries(providers)) {
+      if (!Array.isArray(entries)) continue;
+      const entry = entries.find(
+        (candidate) =>
+          candidate.id === model.id &&
+          (candidate.baseUrl || undefined) === model.registryBaseUrl,
+      );
+      if (!entry) continue;
+      // Several provider ids can resolve to one protocol, so the declared
+      // endpoint above is what keeps the match on the right provider.
+      if (
+        tryResolveModelProtocol(providerId, entry, protocols) === model.authType
+      )
+        return entry;
+    }
+    return undefined;
   }
 
   /**

@@ -9,7 +9,11 @@ import { ModelsConfig } from './modelsConfig.js';
 import type { ModelsConfigOptions } from './modelsConfig.js';
 import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
-import type { ModelConfig, ModelProvidersConfig } from './types.js';
+import type {
+  ModelConfig,
+  ModelProvidersConfig,
+  ProviderProtocolConfig,
+} from './types.js';
 import type { ConfigSource, ConfigSources } from '../utils/configResolver.js';
 
 describe('ModelsConfig', () => {
@@ -1289,6 +1293,108 @@ describe('ModelsConfig', () => {
       modelId: 'vision-model',
       detail: 'generationConfig.modalities',
     });
+  });
+
+  it.each<{
+    shape: string;
+    providers: ModelProvidersConfig;
+    protocols?: ProviderProtocolConfig;
+    authType: AuthType;
+  }>([
+    {
+      shape: "openai entry with wireApi: 'responses'",
+      providers: {
+        openai: [
+          {
+            id: 'vision-model',
+            baseUrl: 'https://responses.example.com/v1',
+            envKey: 'KEY',
+            wireApi: 'responses' as const,
+            generationConfig: { modalities: { image: true } },
+          },
+        ],
+      },
+      protocols: undefined,
+      authType: AuthType.USE_OPENAI_RESPONSES,
+    },
+    {
+      shape: 'custom provider id routed by providerProtocol',
+      providers: {
+        idealab: [
+          {
+            id: 'vision-model',
+            baseUrl: 'https://idealab.example.com/v1',
+            envKey: 'KEY',
+            generationConfig: { modalities: { image: true } },
+          },
+        ],
+      },
+      protocols: { idealab: 'openai' },
+      authType: AuthType.USE_OPENAI,
+    },
+  ])(
+    'attributes a declared modalities when the provider is $shape',
+    async ({ providers, protocols, authType }) => {
+      // `modelProviders` is keyed by provider id while `model.authType` is the
+      // resolved protocol, so a protocol-keyed lookup misses both of these
+      // documented shapes and stamps the declared field as a default
+      // (QwenLM/qwen-wt-15780 review R2-1).
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: authType,
+        modelProvidersConfig: providers,
+        ...(protocols === undefined
+          ? {}
+          : { providerProtocolConfig: protocols }),
+      });
+
+      await modelsConfig.switchModel(authType, 'vision-model');
+
+      expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
+        kind: 'modelProviders',
+        authType,
+        modelId: 'vision-model',
+        detail: 'generationConfig.modalities',
+      });
+    },
+  );
+
+  it('clears a name-inferred modalities when manual credentials replace the provider route', async () => {
+    // The registry fills a missing `modalities` from the model name, so the
+    // value outlives the entry without being declared. Clearing drives off the
+    // recorded route, not the label: otherwise a vision-detecting provider
+    // leaves `image: true` on a manually configured text-only model and images
+    // go on the wire (QwenLM/qwen-code#16185 review R2-2).
+    const modelsConfig = openaiConfig([
+      entry('qwen3-vl-detected', 'Vision detected'),
+    ]);
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'qwen3-vl-detected');
+    expect(modelsConfig.getGenerationConfig()['modalities']).toEqual({
+      image: true,
+      video: true,
+    });
+
+    modelsConfig.updateCredentials({
+      apiKey: 'manual-api-key',
+      model: 'text-only-llm',
+    });
+
+    expect(modelsConfig.getGenerationConfig()['modalities']).toBeUndefined();
+    expect(
+      modelsConfig.getGenerationConfigSources()['modalities'],
+    ).toBeUndefined();
+  });
+
+  it('labels only the modality value as auto-detected, not the filed defaults', async () => {
+    const modelsConfig = openaiConfig([entry('text-only-model', 'Text only')]);
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'text-only-model');
+
+    const sources = modelsConfig.getGenerationConfigSources();
+    expect(sources['modalities']).toMatchObject({ kind: 'computed' });
+    // The registry never derives these; they are the field's own default.
+    for (const field of ['timeout', 'samplingParams', 'maxRetries']) {
+      expect(sources[field]).toMatchObject({ kind: 'default' });
+    }
   });
 
   it('should maintain consistency between currentModelId and _generationConfig.model during updateCredentials', () => {
