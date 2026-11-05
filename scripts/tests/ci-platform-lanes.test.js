@@ -27,7 +27,14 @@
 // place so that stays a revert.
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -353,6 +360,29 @@ it('keeps every blocking test_build step under the job ceiling', () => {
   }
 });
 
+it('keeps every shard step cap under the job ceiling', () => {
+  // Same reason as the build job: the job cap cancels the job, and a cancelled
+  // job skips the failure-gated disk-pressure collector at the end. The caps
+  // are pinned one by one rather than summed — they are alternatives in
+  // practice, since a step only runs when the previous one left work to do,
+  // and install plus the test step already add up past the ceiling by design.
+  // The job cap therefore stays the outer backstop, not the sum of the parts.
+  const jobCap = Number(ci.jobs.test['timeout-minutes']);
+  const steps = new Map(
+    (ci.jobs.test.steps ?? []).map((step) => [step.name, step]),
+  );
+  for (const name of [
+    'Install dependencies',
+    'Download the built tree',
+    'Retry downloading the built tree',
+    'Run tests and generate reports',
+  ]) {
+    const minutes = steps.get(name)?.['timeout-minutes'];
+    expect(typeof minutes, `${name} has no step timeout`).toBe('number');
+    expect(minutes, `${name} cannot outlast the job`).toBeLessThan(jobCap);
+  }
+});
+
 it('reports the required Linux check only when the build and every shard pass', () => {
   const gate = ci.jobs.test_ubuntu;
   expect(gate.name).toBe('Test (ubuntu-latest, Node 22.x)');
@@ -394,6 +424,16 @@ it('pins the build-to-shard artifact handoff on both ends', () => {
   expect(name).toBeTruthy();
   expect(shard.get('Download the built tree').with.name).toBe(name);
   expect(shard.get('Retry downloading the built tree').with.name).toBe(name);
+  // Both attempts have to outlast the slow tail, not the median: eight shards
+  // fetch this same artifact at once, the slowest completed one on main took
+  // just under five minutes, and one exceeded the old five-minute cap on two
+  // runs in a row, skipping the unpack entirely.
+  for (const step of [
+    'Download the built tree',
+    'Retry downloading the built tree',
+  ]) {
+    expect(shard.get(step)?.['timeout-minutes'], step).toBe(15);
+  }
   expect(shard.get('Unpack the built tree').run).toContain(
     `\${RUNNER_TEMP}/${name}/${name}.tgz`,
   );
@@ -800,10 +840,24 @@ describe('post-merge push lane', () => {
           // build failed, while lint has no such dependency — so it is
           // stripped here and each side is pinned explicitly below.
           if (job !== 'test_build' && s.name === 'Install dependencies') {
-            expect(s.env).toEqual({
-              QWEN_SKIP_PREPARE: '1',
-              QWEN_SKIP_NOTICE_GENERATION: '1',
-            });
+            if (job === 'test') {
+              expect(s.env).toEqual({
+                QWEN_SKIP_PREPARE: '1',
+                QWEN_SKIP_NOTICE_GENERATION: '1',
+                // The shards' test step overrides HOME, which would hide the
+                // corepack cache install warms here; pin COREPACK_HOME to a
+                // fixed path under runner.temp so the warmup hits it (the
+                // install body clears that exact path first). lint_and_static
+                // routes HOME and COREPACK_HOME together via GITHUB_ENV, so
+                // its install needs no step-level override.
+                COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack',
+              });
+            } else {
+              expect(s.env).toEqual({
+                QWEN_SKIP_PREPARE: '1',
+                QWEN_SKIP_NOTICE_GENERATION: '1',
+              });
+            }
             const { env: _installEnv, if: _installIf, ...install } = s;
             return [
               s.name,
@@ -850,7 +904,49 @@ describe('post-merge push lane', () => {
     expect(install('test').env).toEqual({
       QWEN_SKIP_PREPARE: '1',
       QWEN_SKIP_NOTICE_GENERATION: '1',
+      // The test step's HOME override would hide the corepack cache install
+      // warms here; pin COREPACK_HOME to a fixed path under runner.temp so
+      // the warmup hits it (the install body clears that exact path first).
+      COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack',
     });
+    // Observed on the fleet: the pinned cache entry existed with its pnpm
+    // binary missing, corepack trusts an existing entry without re-verifying
+    // its files, and Install dependencies died instantly with
+    // MODULE_NOT_FOUND (main runs 41876940141, 41889761157, 41927887452).
+    // What left the entry incomplete is undetermined; _work/_temp survives
+    // across jobs on self-hosted runners (the lint job's isolated-HOME step
+    // documents the same fact), so such state persists. Every copy of the
+    // shared install body must clear the cache before corepack runs, and the
+    // guard must match ONLY the shard-owned path: a runner-exported shared
+    // COREPACK_HOME (test_build) and lint's run-unique home — already warmed
+    // by the hosted pnpm-store step — must never be deletion targets. The
+    // execution test below holds the semantics; these pins hold the spelling.
+    for (const job of ['test_build', 'test', 'lint_and_static']) {
+      const body = String(install(job).run ?? '');
+      expect(
+        body,
+        `${job} must scope the reset to the shard-owned path`,
+      ).toContain(
+        'if [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then',
+      );
+      const reset = body.indexOf('rm -rf -- "${COREPACK_HOME}"');
+      expect(
+        reset,
+        `${job} must reset the pinned corepack cache`,
+      ).toBeGreaterThanOrEqual(0);
+      expect(
+        body.indexOf('corepack pnpm install'),
+        `${job} must reset the cache before corepack runs`,
+      ).toBeGreaterThan(reset);
+    }
+    // The test step must keep sharing the cache install warms: a drifted
+    // COREPACK_HOME sends the vitest globalSetup warmup back to the cold
+    // npmjs download whose ETIMEDOUT flake #16328 removed.
+    expect(
+      ci.jobs.test.steps.find(
+        (s) => s.name === 'Run tests and generate reports',
+      ).env.COREPACK_HOME,
+    ).toBe(install('test').env.COREPACK_HOME);
     const namesIn = (job) => (ci.jobs[job].steps ?? []).map((x) => x.name);
     // Values alone are order-blind, and order is load-bearing here: `steps`
     // exposes only steps that already ran, and a missing property reads as
@@ -978,6 +1074,106 @@ describe('post-merge push lane', () => {
     expect(fetchCode).toMatch(/for _attempt in 1 2 3/);
     expect(fetchCode).toContain('Incremental lint history:');
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'executes the shared corepack reset only against the shard-owned path',
+    () => {
+      // Semantic witness for the reset guard. The string pins above hold its
+      // spelling, but a guard that never executes satisfies every one of
+      // them (the verify-pr round on 01d2b116 survived exactly that mutant),
+      // so run the shipped fragment — sliced from the real install body, not
+      // a copy — and watch what it deletes. The environment is built from
+      // scratch: this suite also runs inside CI shards that export their own
+      // COREPACK_HOME and RUNNER_TEMP, and inheriting those would point the
+      // cleanup at the running job's own directories.
+      const step = ci.jobs.test.steps.find(
+        (s) => s.name === 'Install dependencies',
+      );
+      const body = String(step.run ?? '');
+      const start = body.indexOf('if [ "${COREPACK_HOME:-}"');
+      const end = body.indexOf('corepack pnpm install');
+      expect(
+        start,
+        'reset guard is missing from the install body',
+      ).toBeGreaterThanOrEqual(0);
+      expect(end, 'reset must sit before the corepack install').toBeGreaterThan(
+        start,
+      );
+      const fragment = body.slice(start, end);
+      const cells = [
+        {
+          name: 'shard-owned cache is cleared',
+          home: (temp) => join(temp, 'qwen-ci-corepack'),
+          cleared: true,
+        },
+        {
+          name: 'runner-exported shared cache survives',
+          home: (_temp, root) => join(root, 'shared-corepack'),
+          cleared: false,
+        },
+        {
+          name: 'lint run-unique warmed home survives',
+          home: (temp) =>
+            join(temp, 'qwen-lint-home-42-1', '.cache', 'node', 'corepack'),
+          cleared: false,
+        },
+        {
+          name: 'unset variable leaves the default cache alone',
+          home: null,
+          cleared: false,
+        },
+        {
+          name: 'empty variable is not a deletion target',
+          home: () => '',
+          cleared: false,
+        },
+      ];
+      for (const cell of cells) {
+        const root = mkdtempSync(join(tmpdir(), 'corepack-reset-'));
+        try {
+          const temp = join(root, 'temp');
+          const home = join(root, 'home');
+          mkdirSync(temp, { recursive: true });
+          mkdirSync(home, { recursive: true });
+          // With no COREPACK_HOME the default cache is the deletion target
+          // a naive guard would reach; give every cell a marker to watch.
+          const target =
+            cell.home === null
+              ? join(home, '.cache', 'node', 'corepack')
+              : cell.home(temp, root);
+          const marker = join(target, 'v1', 'pnpm', '11.24.0', '.corepack');
+          if (target) {
+            mkdirSync(join(target, 'v1', 'pnpm', '11.24.0'), {
+              recursive: true,
+            });
+            writeFileSync(marker, '{}');
+          }
+          const bystander = join(root, 'bystander');
+          mkdirSync(bystander, { recursive: true });
+          writeFileSync(join(bystander, 'sentinel'), 'keep');
+          const env = {
+            PATH: process.env.PATH,
+            HOME: home,
+            RUNNER_TEMP: temp,
+          };
+          if (cell.home !== null) env.COREPACK_HOME = target;
+          execFileSync(
+            'bash',
+            ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', fragment],
+            { env, cwd: root },
+          );
+          if (cell.cleared) {
+            expect(existsSync(target), cell.name).toBe(false);
+          } else if (target) {
+            expect(existsSync(marker), cell.name).toBe(true);
+          }
+          expect(existsSync(join(bystander, 'sentinel')), cell.name).toBe(true);
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 
   it.each([
     ['first fetch aborts', 1, 99, 99, 1, 0, 'deepen fetch aborted'],

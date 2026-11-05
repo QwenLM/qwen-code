@@ -6,8 +6,17 @@
 
 import express from 'express';
 import request from 'supertest';
-import { describe, expect, it, vi } from 'vitest';
-import type { ListWorkspaceSessionsResult } from '../server/session-list.js';
+import * as fsp from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { PR_BINDING_ROLES } from '@qwen-code/channel-base';
+import {
+  PR_BINDING_ROLES as CORE_PR_BINDING_ROLES,
+  Storage,
+  upsertSessionPr,
+} from '@qwen-code/qwen-code-core';
+import type { BridgeSessionSummary } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   WorkspaceEntry,
   WorkspaceEntryState,
@@ -16,38 +25,167 @@ import type {
 import { createWorkspaceGenerationGuard } from '../workspace-registry.js';
 import { registerSessionPrBindingsRoutes } from './session-pr-bindings.js';
 
-const sessionListMocks = vi.hoisted(() => ({
-  listForResponse: vi.fn<
-    (
-      bridge: unknown,
-      workspaceCwd: string,
-      options?: { archiveState?: string; size?: number; cursor?: string },
-      readOptions?: {
-        mergeLive?: boolean;
-        paginateMerged?: boolean;
-        runtimeBaseDir?: string;
-      },
-    ) => Promise<ListWorkspaceSessionsResult>
-  >(),
-}));
-vi.mock('../server/session-list.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../server/session-list.js')>()),
-  listWorkspaceSessionsForResponse: sessionListMocks.listForResponse,
-}));
+const SESSION_A = '00000000-0000-4000-8000-00000000000a';
+const SESSION_B = '00000000-0000-4000-8000-00000000000b';
+const SESSION_C = '00000000-0000-4000-8000-00000000000c';
+
+let runtimeDir: string;
+let liveSessions: Map<string, BridgeSessionSummary[]>;
+let stderrSpy: { mockRestore(): void } | undefined;
+
+beforeEach(async () => {
+  runtimeDir = await fsp.mkdtemp(
+    path.join(os.tmpdir(), 'qwen-pr-bindings-runtime-'),
+  );
+  process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+  liveSessions = new Map();
+});
+
+afterEach(async () => {
+  stderrSpy?.mockRestore();
+  stderrSpy = undefined;
+  delete process.env['QWEN_RUNTIME_DIR'];
+  await fsp.rm(runtimeDir, { recursive: true, force: true });
+});
+
+function captureStderr(): string[] {
+  const lines: string[] = [];
+  stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(((
+    chunk: unknown,
+  ) => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write);
+  return lines;
+}
+
+async function makeWorkspace(): Promise<string> {
+  const cwd = await fsp.mkdtemp(path.join(runtimeDir, 'work-'));
+  return await fsp.realpath(cwd);
+}
+
+function chatsDirFor(cwd: string): string {
+  return path.join(new Storage(cwd).getProjectDir(), 'chats');
+}
+
+function transcriptPath(cwd: string, sessionId: string): string {
+  return path.join(chatsDirFor(cwd), `${sessionId}.jsonl`);
+}
+
+function sidecarPath(cwd: string, sessionId: string): string {
+  return path.join(chatsDirFor(cwd), `${sessionId}.pr.json`);
+}
+
+async function seedTranscript(
+  cwd: string,
+  sessionId: string,
+  opts: {
+    sourceType?: string;
+    recordCwd?: string;
+    archived?: boolean;
+    mtime?: Date;
+  } = {},
+): Promise<string> {
+  const dir = opts.archived
+    ? path.join(chatsDirFor(cwd), 'archive')
+    : chatsDirFor(cwd);
+  await fsp.mkdir(dir, { recursive: true });
+  const records: Array<Record<string, unknown>> = [
+    {
+      uuid: `${sessionId}-user-1`,
+      parentUuid: null,
+      sessionId,
+      timestamp: '2026-11-01T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: 'hello' }] },
+      cwd: opts.recordCwd ?? cwd,
+    },
+  ];
+  if (opts.sourceType !== undefined) {
+    records.push({
+      uuid: `${sessionId}-source`,
+      parentUuid: `${sessionId}-user-1`,
+      sessionId,
+      timestamp: '2026-11-01T00:00:01.000Z',
+      type: 'system',
+      subtype: 'session_source',
+      systemPayload: { sourceType: opts.sourceType },
+      cwd: opts.recordCwd ?? cwd,
+    });
+  }
+  const file = path.join(dir, `${sessionId}.jsonl`);
+  await fsp.writeFile(
+    file,
+    records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+    'utf8',
+  );
+  if (opts.mtime) await fsp.utimes(file, opts.mtime, opts.mtime);
+  return file;
+}
+
+async function seedBinding(
+  cwd: string,
+  sessionId: string,
+  numbers: number[],
+  opts: {
+    archived?: boolean;
+    state?: 'open' | 'merged' | 'closed';
+    role?: 'review' | 'verify' | 'fix';
+  } = {},
+): Promise<string> {
+  const dir = opts.archived
+    ? path.join(chatsDirFor(cwd), 'archive')
+    : chatsDirFor(cwd);
+  await fsp.mkdir(dir, { recursive: true });
+  const prPath = path.join(dir, `${sessionId}.pr.json`);
+  for (const number of numbers) {
+    await upsertSessionPr(prPath, {
+      number,
+      url: `https://github.com/acme/widgets/pull/${number}`,
+      state: opts.state ?? 'open',
+      ...(opts.role !== undefined ? { role: opts.role } : {}),
+    });
+  }
+  if (numbers.length === 0) {
+    await fsp.writeFile(prPath, JSON.stringify({ prs: [] }), 'utf8');
+  }
+  return prPath;
+}
+
+async function corruptSidecar(cwd: string, sessionId: string): Promise<void> {
+  await fsp.mkdir(chatsDirFor(cwd), { recursive: true });
+  await fsp.writeFile(sidecarPath(cwd, sessionId), '{not json', 'utf8');
+}
+
+function liveSummary(
+  cwd: string,
+  sessionId: string,
+  overrides: Partial<BridgeSessionSummary> = {},
+): BridgeSessionSummary {
+  return {
+    sessionId,
+    workspaceCwd: cwd,
+    createdAt: '2026-11-03T08:00:00.000Z',
+    clientCount: 1,
+    hasActivePrompt: false,
+    ...overrides,
+  };
+}
 
 function makeRuntime(
-  overrides: Partial<{
-    trusted: boolean;
-    primary: boolean;
-    workspaceCwd: string;
-  }> = {},
+  cwd: string,
+  overrides: Partial<{ trusted: boolean; primary: boolean }> = {},
 ): WorkspaceRuntime {
   return {
+    workspaceId: cwd,
+    workspaceCwd: cwd,
+    sessionRuntimeBaseDir: runtimeDir,
     trusted: true,
     primary: false,
-    workspaceCwd: '/ws/a',
-    sessionRuntimeBaseDir: '/tmp/runtime-a',
-    bridge: {},
+    bridge: {
+      listWorkspaceSessions: (workspaceCwd: string) =>
+        liveSessions.get(workspaceCwd) ?? [],
+    },
     ...overrides,
   } as unknown as WorkspaceRuntime;
 }
@@ -59,7 +197,7 @@ function makeEntry(
   return {
     workspaceId: runtime?.workspaceCwd ?? 'ws-absent',
     workspaceCwd: runtime?.workspaceCwd ?? '/ws/absent',
-    primary: false,
+    primary: runtime?.primary ?? false,
     removable: true,
     internal: false,
     registrationIds: [],
@@ -80,22 +218,8 @@ function makeEntry(
   };
 }
 
-function page(
-  sessions: Array<Record<string, unknown>>,
-  nextCursor?: string,
-): ListWorkspaceSessionsResult {
-  return {
-    sessions: sessions as unknown as ListWorkspaceSessionsResult['sessions'],
-    ...(nextCursor !== undefined ? { nextCursor } : {}),
-  };
-}
-
 function appHarness(opts: {
   entries: WorkspaceEntry[];
-  listSessions?: (
-    runtime: WorkspaceRuntime,
-    cursor: string | undefined,
-  ) => Promise<ListWorkspaceSessionsResult>;
   registryError?: Error;
 }) {
   const app = express();
@@ -104,8 +228,6 @@ function appHarness(opts: {
       res.status(500).json({ error: String(err), route: meta.route });
     },
   );
-  // No seam injected means the route uses the real session list path
-  // (module-mocked above); the real-path test relies on that fallback.
   registerSessionPrBindingsRoutes(app, {
     workspaceRegistry: {
       listAllEntries: () => {
@@ -114,52 +236,53 @@ function appHarness(opts: {
       },
     } as never,
     sendBridgeError: sendBridgeError as never,
-    listSessions: opts.listSessions,
   });
-  return { app, listSessions: opts.listSessions, sendBridgeError };
+  return { app, sendBridgeError };
 }
 
-const BOUND_SESSION = {
-  sessionId: 'session-1',
-  updatedAt: '2026-11-01T10:00:00.000Z',
-  sourceType: 'web-shell',
-  prs: [
-    {
-      number: 101,
-      url: 'https://github.com/acme/widgets/pull/101',
-      state: 'open',
-      createdAt: '2026-11-01T09:00:00.000Z',
-      source: 'create',
-    },
-  ],
-};
+interface BindingsBody {
+  bindings: Array<{
+    sessionId: string;
+    workspaceCwd: string;
+    sourceType?: string;
+    updatedAt?: string;
+    prs: Array<{ number: number; url: string; state?: string; role?: string }>;
+  }>;
+  partial: boolean;
+}
+
+async function fetchBindings(entries: WorkspaceEntry[]): Promise<BindingsBody> {
+  const { app } = appHarness({ entries });
+  const res = await request(app).get('/sessions/pr-bindings');
+  expect(res.status).toBe(200);
+  return res.body as BindingsBody;
+}
 
 describe('GET /sessions/pr-bindings', () => {
-  it('projects bound sessions with their PR entries', async () => {
-    const h = appHarness({
-      entries: [makeEntry(makeRuntime())],
-      listSessions: async () =>
-        page([
-          BOUND_SESSION,
-          { sessionId: 'session-2', prs: [] },
-          // Real sidecar-less sessions have no prs key at all.
-          { sessionId: 'session-no-prs' },
-        ]),
-    });
+  it('keeps the channel-side role vocabulary identical to core', () => {
+    // The channel packages cannot depend on core; the two closed lists are
+    // mirrors, and this pin is the drift guard between them. It lives here
+    // (not in daemon-worker.test.ts) because this file imports the REAL
+    // core — a mocked copy would pin nothing.
+    expect([...PR_BINDING_ROLES]).toEqual([...CORE_PR_BINDING_ROLES]);
+  });
 
-    const res = await request(h.app).get('/sessions/pr-bindings');
+  it('projects bound sessions from their sidecars with persisted attribution', async () => {
+    const cwd = await makeWorkspace();
+    const mtime = new Date('2026-11-02T12:00:00.000Z');
+    await seedTranscript(cwd, SESSION_A, { sourceType: 'web-shell', mtime });
+    await seedBinding(cwd, SESSION_A, [101]);
+    await seedTranscript(cwd, SESSION_B);
 
-    expect(res.status).toBe(200);
-    // Every successfully scanned session gets a row — an empty one is a
-    // TOMBSTONE (W2/R1-8): callers must be able to tell "scanned, no
-    // bindings" (an observed unbind) from "not enumerated by this answer".
-    expect(res.body).toEqual({
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({
       bindings: [
         {
-          sessionId: 'session-1',
-          workspaceCwd: '/ws/a',
+          sessionId: SESSION_A,
+          workspaceCwd: cwd,
           sourceType: 'web-shell',
-          updatedAt: '2026-11-01T10:00:00.000Z',
+          updatedAt: mtime.toISOString(),
           prs: [
             {
               number: 101,
@@ -168,564 +291,799 @@ describe('GET /sessions/pr-bindings', () => {
             },
           ],
         },
-        { sessionId: 'session-2', workspaceCwd: '/ws/a', prs: [] },
-        { sessionId: 'session-no-prs', workspaceCwd: '/ws/a', prs: [] },
       ],
       partial: false,
     });
   });
 
-  it('flags an unreadable PR sidecar as partial instead of an unbind (W2, R1-8)', async () => {
-    const h = appHarness({
-      entries: [makeEntry(makeRuntime())],
-      listSessions: async () =>
-        page([
-          { sessionId: 'session-unbound', prs: [] },
-          // The projection sets prsReadFailed when the sidecar EXISTS but
-          // could not be read (I/O error, corrupt JSON, invalid shape).
-          { sessionId: 'session-corrupt', prsReadFailed: true },
-        ]),
-    });
-
-    const res = await request(h.app).get('/sessions/pr-bindings');
-
-    expect(res.status).toBe(200);
-    // The unreadable session's bindings are UNKNOWN: omitting it without
-    // partial would advertise an authoritative absence over bindings that
-    // may still exist, degrading private delivery to the public path.
-    expect(res.body.partial).toBe(true);
-    expect(res.body.bindings).toEqual([
-      { sessionId: 'session-unbound', workspaceCwd: '/ws/a', prs: [] },
-    ]);
-  });
-
-  it('falls back to createdAt when a live summary lacks updatedAt', async () => {
-    const h = appHarness({
-      entries: [makeEntry(makeRuntime())],
-      listSessions: async () =>
-        page([
-          {
-            sessionId: 'live-session',
-            createdAt: '2026-11-02T08:28:06.000Z',
-            prs: [
-              {
-                number: 101,
-                url: 'https://github.com/acme/widgets/pull/101',
-                state: 'open',
-              },
-            ],
-          },
-        ]),
-    });
-
-    const res = await request(h.app).get('/sessions/pr-bindings');
-
-    expect(res.status).toBe(200);
-    expect(res.body.bindings[0].updatedAt).toBe('2026-11-02T08:28:06.000Z');
-  });
-
-  it('skips untrusted workspaces entirely', async () => {
-    const listSessions = vi.fn(async () => page([BOUND_SESSION]));
-    const h = appHarness({
-      entries: [makeEntry(makeRuntime({ trusted: false }))],
-      listSessions,
-    });
-
-    const res = await request(h.app).get('/sessions/pr-bindings');
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ bindings: [], partial: false });
-    expect(listSessions).not.toHaveBeenCalled();
-  });
-
-  it('follows pagination cursors', async () => {
-    const listSessions = vi.fn(
-      async (_runtime: WorkspaceRuntime, cursor: string | undefined) =>
-        cursor === undefined
-          ? page([BOUND_SESSION], 'cursor-2')
-          : page([
-              {
-                ...BOUND_SESSION,
-                sessionId: 'session-3',
-              },
-            ]),
+  it('answers complete for more sessions than one list page', async () => {
+    const cwd = await makeWorkspace();
+    const ids = Array.from(
+      { length: 120 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
     );
-    const h = appHarness({ entries: [makeEntry(makeRuntime())], listSessions });
+    for (const [i, id] of ids.entries()) {
+      await seedTranscript(cwd, id);
+      await seedBinding(cwd, id, [i + 1]);
+    }
 
-    const res = await request(h.app).get('/sessions/pr-bindings');
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
 
-    expect(res.status).toBe(200);
-    expect(listSessions).toHaveBeenCalledTimes(2);
-    expect(listSessions).toHaveBeenNthCalledWith(
-      2,
-      expect.anything(),
-      'cursor-2',
-    );
-    expect(
-      res.body.bindings.map((b: { sessionId: string }) => b.sessionId),
-    ).toEqual(['session-1', 'session-3']);
-    // Activity-ordered pagination is not snapshot-isolated: any multi-page
-    // scan is non-authoritative even when every page succeeds cleanly.
-    expect(res.body.partial).toBe(true);
-  });
-
-  it('keeps other workspaces when one fails to list', async () => {
-    const entries = [
-      makeEntry(makeRuntime({ workspaceCwd: '/ws/broken' })),
-      makeEntry(makeRuntime({ workspaceCwd: '/ws/ok' })),
-    ];
-    const h = appHarness({
-      entries,
-      listSessions: async (runtime) => {
-        if (runtime.workspaceCwd === '/ws/broken') {
-          throw new Error('disk on fire');
-        }
-        return page([BOUND_SESSION]);
-      },
-    });
-
-    const res = await request(h.app).get('/sessions/pr-bindings');
-
-    expect(res.status).toBe(200);
-    expect(res.body.bindings).toHaveLength(1);
-    expect(res.body.bindings[0].workspaceCwd).toBe('/ws/ok');
-    expect(res.body.partial).toBe(true);
-  });
-
-  it('flags partial when the page cap is exhausted with cursors remaining', async () => {
-    const listSessions = vi.fn(async () => page([BOUND_SESSION], 'more'));
-    const h = appHarness({ entries: [makeEntry(makeRuntime())], listSessions });
-
-    const res = await request(h.app).get('/sessions/pr-bindings');
-
-    expect(res.status).toBe(200);
-    expect(res.body.partial).toBe(true);
-    expect(listSessions).toHaveBeenCalledTimes(50);
-  });
-
-  it('propagates page-level truncation as partial', async () => {
-    const listSessions = vi.fn(async () => ({
-      ...page([BOUND_SESSION]),
-      truncated: true,
-    }));
-    const h = appHarness({ entries: [makeEntry(makeRuntime())], listSessions });
-
-    const res = await request(h.app).get('/sessions/pr-bindings');
-
-    expect(res.status).toBe(200);
-    expect(res.body.partial).toBe(true);
-  });
-
-  it('flags partial on a live-merge degraded success', async () => {
-    const listSessions = vi.fn(async () => ({
-      ...page([BOUND_SESSION]),
-      liveMergeFailed: true,
-    }));
-    const h = appHarness({ entries: [makeEntry(makeRuntime())], listSessions });
-
-    const res = await request(h.app).get('/sessions/pr-bindings');
-
-    expect(res.status).toBe(200);
-    // Degraded success keeps the data it could read but stays
-    // non-authoritative even when sessions are non-empty.
-    expect(
-      res.body.bindings.map((b: { sessionId: string }) => b.sessionId),
-    ).toEqual(['session-1']);
-    expect(res.body.partial).toBe(true);
-  });
-
-  it('routes registry failures through sendBridgeError', async () => {
-    const h = appHarness({
-      entries: [],
-      registryError: new Error('registry closed'),
-    });
-
-    const res = await request(h.app).get('/sessions/pr-bindings');
-
-    expect(res.status).toBe(500);
-    expect(h.sendBridgeError).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.any(Error),
-      { route: 'GET /sessions/pr-bindings' },
+    expect(body.partial).toBe(false);
+    expect(new Set(body.bindings.map((b) => b.sessionId))).toEqual(
+      new Set(ids),
     );
   });
 
-  it.each(['draining', 'transitioning', 'blocked'] as const)(
-    'flags partial when a trusted workspace is %s',
-    async (state) => {
-      const listSessions = vi.fn(async (_runtime: WorkspaceRuntime) =>
-        page([BOUND_SESSION]),
-      );
-      const h = appHarness({
-        entries: [
-          makeEntry(makeRuntime({ workspaceCwd: '/ws/lifecycle' }), state),
-          makeEntry(makeRuntime({ workspaceCwd: '/ws/active' })),
-        ],
-        listSessions,
-      });
+  it('emits an unattributed tombstone row for a well-formed empty sidecar', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, { sourceType: 'web-shell' });
+    await seedBinding(cwd, SESSION_A, []);
 
-      const res = await request(h.app).get('/sessions/pr-bindings');
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
 
-      expect(res.status).toBe(200);
-      // The non-active workspace still serves sessions; its absence is not
-      // an authoritative "no bindings".
-      expect(res.body.partial).toBe(true);
-      expect(res.body.bindings).toHaveLength(1);
-      expect(res.body.bindings[0].sessionId).toBe('session-1');
-      expect(res.body.bindings[0].workspaceCwd).toBe('/ws/active');
-      expect(listSessions).toHaveBeenCalledTimes(1);
-      expect(listSessions.mock.calls[0][0].workspaceCwd).toBe('/ws/active');
-    },
-  );
-
-  it('flags partial when an entry has no current runtime', async () => {
-    const h = appHarness({
-      entries: [makeEntry(undefined), makeEntry(makeRuntime())],
-      listSessions: async () => page([BOUND_SESSION]),
+    expect(body).toEqual({
+      bindings: [{ sessionId: SESSION_A, workspaceCwd: cwd, prs: [] }],
+      partial: false,
     });
-
-    const res = await request(h.app).get('/sessions/pr-bindings');
-
-    expect(res.status).toBe(200);
-    expect(res.body.partial).toBe(true);
-    expect(res.body.bindings).toHaveLength(1);
-    expect(res.body.bindings[0].sessionId).toBe('session-1');
   });
 
-  it('resets the pagination cursor per workspace', async () => {
-    const listSessions = vi.fn(
-      async (runtime: WorkspaceRuntime, cursor: string | undefined) => {
-        const label = runtime.workspaceCwd === '/ws/a' ? 'a' : 'b';
-        return cursor === undefined
-          ? page(
-              [{ ...BOUND_SESSION, sessionId: `${label}-1` }],
-              `cursor-${label}-2`,
-            )
-          : page([{ ...BOUND_SESSION, sessionId: `${label}-2` }]);
-      },
-    );
-    const h = appHarness({
-      entries: [
-        makeEntry(makeRuntime({ workspaceCwd: '/ws/a' })),
-        makeEntry(makeRuntime({ workspaceCwd: '/ws/b' })),
-      ],
-      listSessions,
-    });
+  it('projects the binding role additively', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [101], { role: 'review' });
+    await seedBinding(cwd, SESSION_A, [102]);
 
-    const res = await request(h.app).get('/sessions/pr-bindings');
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
 
-    expect(res.status).toBe(200);
-    expect(listSessions).toHaveBeenCalledTimes(4);
-    // Each workspace's FIRST call must start without a cursor, and its
-    // second call must forward its own cursor, not the previous
-    // workspace's residual one.
-    expect(listSessions.mock.calls[0][1]).toBeUndefined();
-    expect(listSessions).toHaveBeenNthCalledWith(
-      2,
-      expect.anything(),
-      'cursor-a-2',
-    );
-    expect(listSessions).toHaveBeenNthCalledWith(
-      3,
-      expect.anything(),
-      undefined,
-    );
-    expect(listSessions).toHaveBeenNthCalledWith(
-      4,
-      expect.anything(),
-      'cursor-b-2',
-    );
-    expect(
-      res.body.bindings.map((b: { sessionId: string }) => b.sessionId),
-    ).toEqual(['a-1', 'a-2', 'b-1', 'b-2']);
-  });
-
-  it('keeps the page cap per workspace', async () => {
-    const pagesByWorkspace = new Map<string, number>();
-    const listSessions = vi.fn(async (runtime: WorkspaceRuntime) => {
-      const n = (pagesByWorkspace.get(runtime.workspaceCwd) ?? 0) + 1;
-      pagesByWorkspace.set(runtime.workspaceCwd, n);
-      const session = {
-        ...BOUND_SESSION,
-        sessionId: `${runtime.workspaceCwd}#${n}`,
-      };
-      return n < 30 ? page([session], `cursor-${n}`) : page([session]);
-    });
-    const h = appHarness({
-      entries: [
-        makeEntry(makeRuntime({ workspaceCwd: '/ws/a' })),
-        makeEntry(makeRuntime({ workspaceCwd: '/ws/b' })),
-      ],
-      listSessions,
-    });
-
-    const res = await request(h.app).get('/sessions/pr-bindings');
-
-    expect(res.status).toBe(200);
-    // 30 pages per workspace (60 total > MAX_PAGES): each workspace gets
-    // its own full budget, so both tail sessions must appear.
-    expect(listSessions).toHaveBeenCalledTimes(60);
-    expect(res.body.bindings).toHaveLength(60);
-    const ids = res.body.bindings.map(
-      (b: { sessionId: string }) => b.sessionId,
-    );
-    expect(ids).toContain('/ws/a#30');
-    expect(ids).toContain('/ws/b#30');
-    // Multi-page scans are non-authoritative regardless of the cap.
-    expect(res.body.partial).toBe(true);
-  });
-
-  it('skips untrusted workspaces but keeps scanning trusted ones', async () => {
-    const listSessions = vi.fn(async (_runtime: WorkspaceRuntime) =>
-      page([BOUND_SESSION]),
-    );
-    const h = appHarness({
-      entries: [
-        makeEntry(
-          makeRuntime({ trusted: false, workspaceCwd: '/ws/untrusted' }),
-        ),
-        makeEntry(makeRuntime({ workspaceCwd: '/ws/trusted' })),
-      ],
-      listSessions,
-    });
-
-    const res = await request(h.app).get('/sessions/pr-bindings');
-
-    expect(res.status).toBe(200);
-    expect(res.body.partial).toBe(false);
-    expect(res.body.bindings).toHaveLength(1);
-    expect(res.body.bindings[0].sessionId).toBe('session-1');
-    expect(res.body.bindings[0].workspaceCwd).toBe('/ws/trusted');
-    expect(listSessions).toHaveBeenCalledTimes(1);
-    expect(listSessions.mock.calls[0][0].workspaceCwd).toBe('/ws/trusted');
-  });
-
-  it('aggregates bindings across multiple healthy trusted workspaces', async () => {
-    const h = appHarness({
-      entries: [
-        makeEntry(makeRuntime({ workspaceCwd: '/ws/a' })),
-        makeEntry(makeRuntime({ workspaceCwd: '/ws/b' })),
-      ],
-      listSessions: async (runtime) =>
-        page([
-          {
-            ...BOUND_SESSION,
-            sessionId:
-              runtime.workspaceCwd === '/ws/a' ? 'session-a' : 'session-b',
-          },
-        ]),
-    });
-
-    const res = await request(h.app).get('/sessions/pr-bindings');
-
-    expect(res.status).toBe(200);
-    expect(res.body.partial).toBe(false);
-    expect(res.body.bindings).toEqual([
-      expect.objectContaining({
-        sessionId: 'session-a',
-        workspaceCwd: '/ws/a',
-      }),
-      expect.objectContaining({
-        sessionId: 'session-b',
-        workspaceCwd: '/ws/b',
-      }),
-    ]);
-  });
-
-  it('retains already-listed pages when a later page fails', async () => {
-    const listSessions = vi.fn(
-      async (_runtime: WorkspaceRuntime, cursor: string | undefined) => {
-        if (cursor === undefined) return page([BOUND_SESSION], 'cursor-2');
-        throw new Error('bridge hiccup');
-      },
-    );
-    const h = appHarness({ entries: [makeEntry(makeRuntime())], listSessions });
-
-    const res = await request(h.app).get('/sessions/pr-bindings');
-
-    expect(res.status).toBe(200);
-    expect(
-      res.body.bindings.map((b: { sessionId: string }) => b.sessionId),
-    ).toEqual(['session-1']);
-    expect(res.body.partial).toBe(true);
-  });
-
-  it('preserves merged and closed PR states verbatim', async () => {
-    const h = appHarness({
-      entries: [makeEntry(makeRuntime())],
-      listSessions: async () =>
-        page([
-          {
-            sessionId: 'session-terminal',
-            prs: [
-              {
-                number: 101,
-                url: 'https://github.com/acme/widgets/pull/101',
-                state: 'merged',
-              },
-              {
-                number: 102,
-                url: 'https://github.com/acme/widgets/pull/102',
-                state: 'closed',
-              },
-            ],
-          },
-        ]),
-    });
-
-    const res = await request(h.app).get('/sessions/pr-bindings');
-
-    expect(res.status).toBe(200);
-    expect(res.body.partial).toBe(false);
-    expect(res.body.bindings).toHaveLength(1);
-    expect(res.body.bindings[0].sessionId).toBe('session-terminal');
-    // Terminal states are load-bearing for downstream retention; they must
-    // survive the projection unchanged.
-    expect(res.body.bindings[0].prs).toEqual([
+    expect(body.partial).toBe(false);
+    expect(body.bindings[0]!.prs).toEqual([
       {
         number: 101,
         url: 'https://github.com/acme/widgets/pull/101',
-        state: 'merged',
+        state: 'open',
+        role: 'review',
       },
       {
         number: 102,
         url: 'https://github.com/acme/widgets/pull/102',
-        state: 'closed',
+        state: 'open',
       },
     ]);
   });
 
-  it('flags partial when skipping an untrusted primary workspace', async () => {
-    const listSessions = vi.fn(async () => page([BOUND_SESSION]));
-    const h = appHarness({
-      entries: [makeEntry(makeRuntime({ trusted: false, primary: true }))],
-      listSessions,
-    });
+  it('flags an unreadable sidecar as partial instead of an unbind and names it once', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [101]);
+    await seedTranscript(cwd, SESSION_B);
+    await corruptSidecar(cwd, SESSION_B);
+    const lines = captureStderr();
 
-    const res = await request(h.app).get('/sessions/pr-bindings');
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
 
-    expect(res.status).toBe(200);
-    // Session creation/restore exempts primary from the trust gate, so an
-    // untrusted primary still serves bound sessions: skipping it must not
-    // hand callers an authoritative absence.
-    expect(res.body).toEqual({ bindings: [], partial: true });
-    expect(listSessions).not.toHaveBeenCalled();
+    expect(body.partial).toBe(true);
+    expect(body.bindings.map((b) => b.sessionId)).toEqual([SESSION_A]);
+    const scanLines = lines.filter((line) => line.includes('PR bindings scan'));
+    expect(scanLines).toHaveLength(1);
+    expect(scanLines[0]).toContain('1 of 2 sessions could not be read');
+    expect(scanLines[0]).toContain(cwd);
+    expect(scanLines[0]).toContain(SESSION_B);
+    expect(scanLines[0]).toContain('invalid JSON');
   });
 
-  it('skips an untrusted non-primary workspace without forcing partial', async () => {
-    const listSessions = vi.fn(async () => page([BOUND_SESSION]));
-    const h = appHarness({
-      entries: [makeEntry(makeRuntime({ trusted: false, primary: false }))],
-      listSessions,
-    });
+  it('writes one diagnostic line per workspace scan however many sessions fail', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await corruptSidecar(cwd, SESSION_A);
+    await seedTranscript(cwd, SESSION_B);
+    await corruptSidecar(cwd, SESSION_B);
+    const lines = captureStderr();
 
-    const res = await request(h.app).get('/sessions/pr-bindings');
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
 
-    expect(res.status).toBe(200);
-    // Non-primary untrusted workspaces cannot create or restore sessions,
-    // so their absence is legitimate and the answer stays authoritative.
-    expect(res.body).toEqual({ bindings: [], partial: false });
-    expect(listSessions).not.toHaveBeenCalled();
+    expect(body).toEqual({ bindings: [], partial: true });
+    const scanLines = lines.filter((line) => line.includes('PR bindings scan'));
+    expect(scanLines).toHaveLength(1);
+    expect(scanLines[0]).toContain('2 of 2 sessions could not be read');
   });
 
-  it('scans active sessions with the real list path options', async () => {
-    sessionListMocks.listForResponse
-      .mockReset()
-      .mockResolvedValueOnce({ sessions: [], nextCursor: 'cursor-2' })
-      .mockResolvedValueOnce({ sessions: [] });
-    // No listSessions seam: exercise the real listActiveSessionsPage path.
-    const h = appHarness({ entries: [makeEntry(makeRuntime())] });
+  it('flags a thrown per-session read as partial and names the session', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [101]);
+    // A directory where the sidecar should be makes the read throw (EISDIR).
+    await fsp.mkdir(sidecarPath(cwd, SESSION_B), { recursive: true });
+    const lines = captureStderr();
 
-    const res = await request(h.app).get('/sessions/pr-bindings');
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
 
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ bindings: [], partial: true });
-    expect(sessionListMocks.listForResponse).toHaveBeenCalledTimes(2);
-    const firstCall = sessionListMocks.listForResponse.mock.calls[0];
-    expect(firstCall[1]).toBe('/ws/a');
-    // The reverse lookup must only ever see active sessions, at the full
-    // page size the scan budget assumes.
-    expect(firstCall[2]).toEqual({ archiveState: 'active', size: 100 });
-    expect(firstCall[3]).toEqual({
-      mergeLive: true,
-      paginateMerged: true,
-      runtimeBaseDir: '/tmp/runtime-a',
-    });
-    expect(sessionListMocks.listForResponse.mock.calls[1][2]).toEqual({
-      archiveState: 'active',
-      size: 100,
-      cursor: 'cursor-2',
-    });
+    expect(body.partial).toBe(true);
+    expect(body.bindings.map((b) => b.sessionId)).toEqual([SESSION_A]);
+    const scanLines = lines.filter((line) => line.includes('PR bindings scan'));
+    expect(scanLines).toHaveLength(1);
+    expect(scanLines[0]).toContain(SESSION_B);
   });
 
-  it('includes the cap-hit page bindings when the page cap is exhausted', async () => {
-    let pages = 0;
-    const listSessions = vi.fn(async () => {
-      pages += 1;
-      return page(
-        [{ ...BOUND_SESSION, sessionId: `session-${pages}` }],
-        `cursor-${pages + 1}`,
-      );
-    });
-    const h = appHarness({ entries: [makeEntry(makeRuntime())], listSessions });
+  it('flags a present but unreadable transcript as partial and omits the row', async () => {
+    const cwd = await makeWorkspace();
+    await seedBinding(cwd, SESSION_A, [101]);
+    // A directory at the transcript path: stat succeeds, nothing can be read.
+    await fsp.mkdir(transcriptPath(cwd, SESSION_A), { recursive: true });
+    captureStderr();
 
-    const res = await request(h.app).get('/sessions/pr-bindings');
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
 
-    expect(res.status).toBe(200);
-    expect(listSessions).toHaveBeenCalledTimes(50);
-    expect(res.body.partial).toBe(true);
-    const ids = res.body.bindings.map(
-      (b: { sessionId: string }) => b.sessionId,
-    );
-    expect(ids).toHaveLength(50);
-    // The cap-hit (50th) page is fetched and projected before the loop
-    // breaks; dropping its data would silently lose the newest bindings.
-    expect(ids[0]).toBe('session-1');
-    expect(ids[49]).toBe('session-50');
+    expect(body).toEqual({ bindings: [], partial: true });
   });
 
-  it('treats a complete empty scan as an authoritative absence', async () => {
-    const h = appHarness({
-      entries: [makeEntry(makeRuntime())],
-      listSessions: async () => page([]),
-    });
+  it('does not let a machine-owned session with a corrupt sidecar make the answer partial', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, { sourceType: 'agent' });
+    await corruptSidecar(cwd, SESSION_A);
 
-    const res = await request(h.app).get('/sessions/pr-bindings');
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
 
-    expect(res.status).toBe(200);
-    // A complete scan that found nothing is the one authoritative empty
-    // answer: callers may prune watch state on it (adapter cold start).
-    expect(res.body).toEqual({ bindings: [], partial: false });
+    expect(body).toEqual({ bindings: [], partial: false });
   });
 
-  it('logs the failing workspace cwd to stderr and flags partial', async () => {
-    const stderrWrites: string[] = [];
-    const stderr = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation((chunk) => {
-        stderrWrites.push(String(chunk));
-        return true;
-      });
-    try {
-      const h = appHarness({
-        entries: [makeEntry(makeRuntime({ workspaceCwd: '/ws/broken' }))],
-        listSessions: async () => {
-          throw new Error('disk on fire');
+  it('preserves merged and closed PR states verbatim', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [7], { state: 'merged' });
+    await seedBinding(cwd, SESSION_A, [8], { state: 'closed' });
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.bindings[0]?.prs.map((pr) => [pr.number, pr.state])).toEqual([
+      [7, 'merged'],
+      [8, 'closed'],
+    ]);
+  });
+
+  it('does not enumerate the archive directory', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, { archived: true });
+    await seedBinding(cwd, SESSION_A, [101], { archived: true });
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('skips an active sidecar left behind by an archived session', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, { archived: true });
+    await seedBinding(cwd, SESSION_A, [101]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('skips a sidecar whose transcript belongs to another project', async () => {
+    const cwd = await makeWorkspace();
+    const other = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, { recordCwd: other });
+    await seedBinding(cwd, SESSION_A, [101]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('lists a binding written before the first transcript flush, attributed from the live session', async () => {
+    const cwd = await makeWorkspace();
+    await seedBinding(cwd, SESSION_A, [101]);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, { sourceType: 'web-shell' }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.partial).toBe(false);
+    expect(body.bindings).toEqual([
+      expect.objectContaining({
+        sessionId: SESSION_A,
+        sourceType: 'web-shell',
+        updatedAt: '2026-11-03T08:00:00.000Z',
+      }),
+    ]);
+  });
+
+  it('lists a dormant binding with no transcript and no live entry without attribution', async () => {
+    const cwd = await makeWorkspace();
+    await seedBinding(cwd, SESSION_A, [101]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.partial).toBe(false);
+    expect(body.bindings).toEqual([
+      { sessionId: SESSION_A, workspaceCwd: cwd, prs: [expect.any(Object)] },
+    ]);
+  });
+
+  it('appends a binding the bridge holds but no sidecar has yet', async () => {
+    const cwd = await makeWorkspace();
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        sourceType: 'web-shell',
+        prs: [
+          {
+            number: 55,
+            url: 'https://github.com/acme/widgets/pull/55',
+            state: 'open',
+          },
+        ],
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({
+      bindings: [
+        {
+          sessionId: SESSION_A,
+          workspaceCwd: cwd,
+          sourceType: 'web-shell',
+          updatedAt: '2026-11-03T08:00:00.000Z',
+          prs: [
+            {
+              number: 55,
+              url: 'https://github.com/acme/widgets/pull/55',
+              state: 'open',
+            },
+          ],
         },
-      });
+      ],
+      partial: false,
+    });
+  });
 
-      const res = await request(h.app).get('/sessions/pr-bindings');
+  it('keeps a listed tombstone row empty even when the bridge still holds bindings', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, []);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: [{ number: 55, url: 'https://github.com/acme/widgets/pull/55' }],
+      }),
+    ]);
 
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({ bindings: [], partial: true });
-      // A persistent partial must name its source, or the channel stalls
-      // with zero log lines pointing at the unreadable workspace.
-      const logged = stderrWrites.join('');
-      expect(logged).toContain('PR bindings scan failed for workspace');
-      expect(logged).toContain('/ws/broken');
-      expect(logged).toContain('disk on fire');
-    } finally {
-      stderr.mockRestore();
-    }
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({
+      bindings: [{ sessionId: SESSION_A, workspaceCwd: cwd, prs: [] }],
+      partial: false,
+    });
+  });
+
+  it('does not append live-only bindings of machine-owned sessions', async () => {
+    const cwd = await makeWorkspace();
+    const prs = [
+      { number: 55, url: 'https://github.com/acme/widgets/pull/55' },
+    ];
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_B, { prs, sourceType: 'agent' }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('decides live-only ownership from the persisted record when the bridge entry carries no source', async () => {
+    const cwd = await makeWorkspace();
+    // A restored agent task session: persisted sourceType 'agent', no
+    // sourceType on its bridge entry, bindings only in bridge memory.
+    await seedTranscript(cwd, SESSION_A, { sourceType: 'agent' });
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: [{ number: 55, url: 'https://github.com/acme/widgets/pull/55' }],
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('caps the bridge merge like the session list: below the cap the newest live numbers win', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: [
+          { number: 101, url: 'https://github.com/acme/widgets/pull/101' },
+          { number: 102, url: 'https://github.com/acme/widgets/pull/102' },
+        ],
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    const numbers = body.bindings[0]?.prs.map((pr) => pr.number);
+    expect(numbers).toHaveLength(10);
+    expect(numbers).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 101, 102]);
+  });
+
+  it('caps the bridge merge like the session list: a full persisted list is not extended', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: Array.from({ length: 10 }, (_, i) => ({
+          number: 100 + i,
+          url: `https://github.com/acme/widgets/pull/${100 + i}`,
+        })),
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.bindings[0]?.prs.map((pr) => pr.number)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    ]);
+  });
+
+  it('answers complete for a registered workspace whose chats directory does not exist yet', async () => {
+    const cwd = await makeWorkspace();
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('takes the later of the persisted and live activity timestamps', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, {
+      mtime: new Date('2026-11-02T12:00:00.000Z'),
+    });
+    await seedBinding(cwd, SESSION_A, [101]);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        createdAt: '2026-11-01T00:00:00.000Z',
+        updatedAt: '2026-11-03T09:00:00.000Z',
+        hasActivePrompt: true,
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.bindings[0]?.updatedAt).toBe('2026-11-03T09:00:00.000Z');
+  });
+
+  it('keeps the persisted timestamp when it is newer than the live one', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, {
+      mtime: new Date('2026-11-04T12:00:00.000Z'),
+    });
+    await seedBinding(cwd, SESSION_A, [101]);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        createdAt: '2026-11-01T00:00:00.000Z',
+        updatedAt: '2026-11-03T09:00:00.000Z',
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.bindings[0]?.updatedAt).toBe('2026-11-04T12:00:00.000Z');
+  });
+
+  it('ignores an unparseable live timestamp', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, {
+      mtime: new Date('2026-11-02T12:00:00.000Z'),
+    });
+    await seedBinding(cwd, SESSION_A, [101]);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        createdAt: 'not-a-date',
+        updatedAt: 'zzzz',
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.bindings[0]?.updatedAt).toBe('2026-11-02T12:00:00.000Z');
+  });
+
+  it('falls back to a parseable live createdAt when updatedAt is unparseable and nothing is persisted', async () => {
+    const cwd = await makeWorkspace();
+    await seedBinding(cwd, SESSION_A, [101]);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        createdAt: '2026-11-03T12:00:00.000Z',
+        updatedAt: 'zzzz',
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.bindings[0]?.updatedAt).toBe('2026-11-03T12:00:00.000Z');
+  });
+
+  it('does not count a restore as activity for a persisted session', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, {
+      mtime: new Date('2026-11-01T12:00:00.000Z'),
+    });
+    await seedBinding(cwd, SESSION_A, [101]);
+    // The bridge stamps a fresh createdAt when it restores a session and
+    // leaves updatedAt absent until a turn completes.
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, { createdAt: '2026-11-03T12:00:00.000Z' }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.bindings[0]?.updatedAt).toBe('2026-11-01T12:00:00.000Z');
+  });
+
+  it('excludes machine-owned hidden-catalog sessions', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, { sourceType: 'agent' });
+    await seedBinding(cwd, SESSION_A, [101]);
+    await seedTranscript(cwd, SESSION_B, { sourceType: 'channel' });
+    await seedBinding(cwd, SESSION_B, [102]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.partial).toBe(false);
+    expect(body.bindings.map((b) => [b.sessionId, b.sourceType])).toEqual([
+      [SESSION_B, 'channel'],
+    ]);
+  });
+
+  it('skips untrusted non-primary workspaces and scans an untrusted primary completely', async () => {
+    const untrusted = await makeWorkspace();
+    await seedTranscript(untrusted, SESSION_A);
+    await seedBinding(untrusted, SESSION_A, [101]);
+    const primary = await makeWorkspace();
+    await seedTranscript(primary, SESSION_B);
+    await seedBinding(primary, SESSION_B, [102]);
+
+    const body = await fetchBindings([
+      makeEntry(makeRuntime(untrusted, { trusted: false })),
+      makeEntry(makeRuntime(primary, { trusted: false, primary: true })),
+    ]);
+
+    expect(body.partial).toBe(false);
+    expect(body.bindings.map((b) => b.sessionId)).toEqual([SESSION_B]);
+  });
+
+  it.each(['draining', 'transitioning', 'blocked'] as const)(
+    'scans a %s workspace that still has a runtime',
+    async (state) => {
+      const cwd = await makeWorkspace();
+      await seedTranscript(cwd, SESSION_A);
+      await seedBinding(cwd, SESSION_A, [101]);
+
+      const body = await fetchBindings([makeEntry(makeRuntime(cwd), state)]);
+
+      expect(body.partial).toBe(false);
+      expect(body.bindings.map((b) => b.sessionId)).toEqual([SESSION_A]);
+    },
+  );
+
+  it('flags partial when an entry has no current runtime', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [101]);
+
+    const lines = captureStderr();
+
+    const body = await fetchBindings([
+      makeEntry(undefined, 'transitioning'),
+      makeEntry(makeRuntime(cwd)),
+    ]);
+
+    expect(body.partial).toBe(true);
+    expect(body.bindings.map((b) => b.sessionId)).toEqual([SESSION_A]);
+    expect(lines).toContainEqual(
+      expect.stringContaining(
+        'workspace /ws/absent has no runtime (state transitioning)',
+      ),
+    );
+  });
+
+  it('aggregates bindings across workspaces', async () => {
+    const a = await makeWorkspace();
+    await seedTranscript(a, SESSION_A);
+    await seedBinding(a, SESSION_A, [1]);
+    const b = await makeWorkspace();
+    await seedTranscript(b, SESSION_B);
+    await seedBinding(b, SESSION_B, [2]);
+    await seedTranscript(b, SESSION_C);
+    await seedBinding(b, SESSION_C, [3]);
+
+    const body = await fetchBindings([
+      makeEntry(makeRuntime(a)),
+      makeEntry(makeRuntime(b)),
+    ]);
+
+    expect(body.partial).toBe(false);
+    // Directory listing order is filesystem-specific; compare as a set.
+    expect(
+      new Set(
+        body.bindings.map(
+          (binding) => `${binding.workspaceCwd}|${binding.sessionId}`,
+        ),
+      ),
+    ).toEqual(
+      new Set([`${a}|${SESSION_A}`, `${b}|${SESSION_B}`, `${b}|${SESSION_C}`]),
+    );
+  });
+
+  it('keeps other workspaces and names the failing one when a chats dir cannot be listed', async () => {
+    const broken = await makeWorkspace();
+    await fsp.mkdir(path.dirname(chatsDirFor(broken)), { recursive: true });
+    await fsp.writeFile(chatsDirFor(broken), 'not a directory', 'utf8');
+    const healthy = await makeWorkspace();
+    await seedTranscript(healthy, SESSION_A);
+    await seedBinding(healthy, SESSION_A, [101]);
+    const lines = captureStderr();
+
+    const body = await fetchBindings([
+      makeEntry(makeRuntime(broken)),
+      makeEntry(makeRuntime(healthy)),
+    ]);
+
+    expect(body.partial).toBe(true);
+    expect(body.bindings.map((b) => b.sessionId)).toEqual([SESSION_A]);
+    expect(lines).toContainEqual(
+      expect.stringContaining(
+        `PR bindings scan failed for workspace ${broken}`,
+      ),
+    );
+  });
+
+  it('treats a workspace without any sidecar as an authoritative absence', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('flags partial and keeps sidecar rows when the live session list cannot be read', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [101]);
+    const runtime = makeRuntime(cwd);
+    (
+      runtime.bridge as unknown as { listWorkspaceSessions: () => never }
+    ).listWorkspaceSessions = () => {
+      throw new Error('EACCES: bridge unavailable');
+    };
+    const lines = captureStderr();
+
+    const body = await fetchBindings([makeEntry(runtime)]);
+
+    expect(body.partial).toBe(true);
+    expect(body.bindings.map((b) => b.sessionId)).toEqual([SESSION_A]);
+    expect(lines).toContainEqual(
+      expect.stringContaining('live session list unavailable'),
+    );
+  });
+
+  it('merges bridge-held PR numbers into a listed non-empty row', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [101]);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: [
+          { number: 101, url: 'https://github.com/acme/widgets/pull/101' },
+          { number: 56, url: 'https://github.com/acme/widgets/pull/56' },
+        ],
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.partial).toBe(false);
+    expect(body.bindings).toHaveLength(1);
+    expect(body.bindings[0]?.prs.map((pr) => pr.number)).toEqual([101, 56]);
+  });
+
+  it('does not list an empty sidecar of a machine-owned or archived session as a tombstone', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, { sourceType: 'agent' });
+    await seedBinding(cwd, SESSION_A, []);
+    await seedTranscript(cwd, SESSION_B, { archived: true });
+    await seedBinding(cwd, SESSION_B, []);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('compares timestamps chronologically, not lexicographically', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, {
+      mtime: new Date('2026-11-02T05:00:00.000Z'),
+    });
+    await seedBinding(cwd, SESSION_A, [101]);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        createdAt: '2026-11-01T00:00:00.000Z',
+        // 01:00Z, earlier than the persisted mtime despite sorting after it.
+        updatedAt: '2026-11-02T09:00:00+08:00',
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.bindings[0]?.updatedAt).toBe('2026-11-02T05:00:00.000Z');
+  });
+
+  it('treats a non-empty transcript that yields no records as unreadable', async () => {
+    const cwd = await makeWorkspace();
+    await seedBinding(cwd, SESSION_A, [101]);
+    await fsp.writeFile(transcriptPath(cwd, SESSION_A), 'not jsonl\n', 'utf8');
+    captureStderr();
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: true });
+  });
+
+  it('resolves session storage from the runtime it was handed, not the ambient base', async () => {
+    const cwd = await makeWorkspace();
+    const otherBase = await fsp.mkdtemp(path.join(runtimeDir, 'other-base-'));
+    const chats = path.join(
+      new Storage(cwd, otherBase).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chats, { recursive: true });
+    await fsp.writeFile(
+      path.join(chats, `${SESSION_A}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${SESSION_A}-user-1`,
+        parentUuid: null,
+        sessionId: SESSION_A,
+        timestamp: '2026-11-01T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'hello' }] },
+        cwd,
+      })}\n`,
+      'utf8',
+    );
+    await upsertSessionPr(path.join(chats, `${SESSION_A}.pr.json`), {
+      number: 101,
+      url: 'https://github.com/acme/widgets/pull/101',
+      state: 'open',
+    });
+    const runtime = {
+      ...makeRuntime(cwd),
+      sessionRuntimeBaseDir: otherBase,
+    } as WorkspaceRuntime;
+
+    const body = await fetchBindings([makeEntry(runtime)]);
+
+    expect(body.partial).toBe(false);
+    expect(body.bindings.map((b) => b.sessionId)).toEqual([SESSION_A]);
+  });
+
+  it('skips a sidecar that vanishes between the listing and the read', async () => {
+    const cwd = await makeWorkspace();
+    await fsp.mkdir(chatsDirFor(cwd), { recursive: true });
+    // A dangling symlink lists under the sidecar name but reads as ENOENT.
+    await fsp.symlink(
+      path.join(chatsDirFor(cwd), 'missing-target.pr.json'),
+      sidecarPath(cwd, SESSION_A),
+    );
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('does not re-list a session with an unreadable sidecar from the bridge subset', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await corruptSidecar(cwd, SESSION_A);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: [{ number: 102, url: 'https://github.com/acme/widgets/pull/102' }],
+      }),
+    ]);
+    captureStderr();
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    // The session's persisted bindings are unknown: listing its live subset
+    // would make it look enumerated and cost it the bindings the adapter
+    // retains across partial answers.
+    expect(body).toEqual({ bindings: [], partial: true });
+  });
+
+  it('counts a live-only session in the diagnostic denominator when its transcript is unreadable', async () => {
+    const cwd = await makeWorkspace();
+    await fsp.mkdir(transcriptPath(cwd, SESSION_A), { recursive: true });
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: [{ number: 55, url: 'https://github.com/acme/widgets/pull/55' }],
+      }),
+    ]);
+    const lines = captureStderr();
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: true });
+    expect(lines).toContainEqual(
+      expect.stringContaining('1 of 1 sessions could not be read'),
+    );
+  });
+
+  it('skips a machine-owned live session before its unreadable transcript can degrade the answer', async () => {
+    const cwd = await makeWorkspace();
+    await seedBinding(cwd, SESSION_A, [101]);
+    await fsp.mkdir(transcriptPath(cwd, SESSION_A), { recursive: true });
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, { sourceType: 'agent' }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('skips a machine-owned session before its unreadable sidecar can degrade the answer', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, { sourceType: 'agent' });
+    await fsp.mkdir(sidecarPath(cwd, SESSION_A), { recursive: true });
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('does not resurrect a PR replaced by a same-number rebind', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    // The production writer replaces #5 when it is re-bound to another
+    // repository; the bridge still holds the replaced entry.
+    const prPath = await seedBinding(cwd, SESSION_A, [5]);
+    await upsertSessionPr(prPath, {
+      number: 5,
+      url: 'https://github.com/acme/gadgets/pull/5',
+      state: 'open',
+    });
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: [
+          { number: 5, url: 'https://github.com/acme/widgets/pull/5' },
+          { number: 5, url: 'https://github.com/acme/gadgets/pull/5' },
+        ],
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.bindings[0]?.prs.map((pr) => pr.url)).toEqual([
+      'https://github.com/acme/gadgets/pull/5',
+    ]);
+  });
+
+  it('routes registry failures through sendBridgeError', async () => {
+    const { app, sendBridgeError } = appHarness({
+      entries: [],
+      registryError: new Error('registry down'),
+    });
+
+    const res = await request(app).get('/sessions/pr-bindings');
+
+    expect(res.status).toBe(500);
+    expect(sendBridgeError).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Error),
+      { route: 'GET /sessions/pr-bindings' },
+    );
   });
 });

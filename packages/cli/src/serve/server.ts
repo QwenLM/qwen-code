@@ -133,6 +133,8 @@ import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
 import { registerDaemonUpdateRoutes } from './routes/daemon-update.js';
 import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
+import { registerWorkspaceSubscriptionRoutes } from './routes/workspace-subscription.js';
+import { registerSubscriptionAuthRoutes } from './routes/subscription-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import {
@@ -1101,12 +1103,18 @@ export function createServeApp(
   const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
   const trustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
     workspaceTrusted: true,
+    autoDiscover: true,
   });
   const untrustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
     workspaceTrusted: false,
     includeUntrustedSkills: true,
+    autoDiscover: true,
   });
   const getSkillsConfigStatus = (workspaceCwd: string, trusted: boolean) => {
+    const obsolete = trusted
+      ? untrustedSkillsConfigStatus
+      : trustedSkillsConfigStatus;
+    obsolete.invalidate?.(workspaceCwd);
     const provider = trusted
       ? trustedSkillsConfigStatus
       : untrustedSkillsConfigStatus;
@@ -1116,6 +1124,7 @@ export function createServeApp(
     trustedSkillsConfigStatus.invalidate?.(workspaceCwd);
     untrustedSkillsConfigStatus.invalidate?.(workspaceCwd);
   };
+  app.locals['invalidateSkillsConfigStatus'] = invalidateSkillsConfigStatus;
   const webTerminalRegistry = new WebTerminalRegistry();
   const webTerminalLocals = app.locals as {
     stopWebTerminalRegistry?: () => void;
@@ -2930,6 +2939,7 @@ export function createServeApp(
   });
   registerWorkspaceQualifiedStatusRoutes(app, {
     workspaceRegistry,
+    mutate,
     sendBridgeError,
   });
   registerWorkspaceRuntimeStopRoutes(app, {
@@ -3551,6 +3561,38 @@ export function createServeApp(
     },
   });
 
+  registerWorkspaceSubscriptionRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    persistSettings: deps.persistSettings,
+    sendBridgeError,
+  });
+  const stopSubscriptionAuth = registerSubscriptionAuthRoutes(
+    app,
+    mutate,
+    async () => {
+      let failed = false;
+      for (const runtime of workspaceRegistry.listAll()) {
+        if (runtime.generationGuard?.closed) continue;
+        try {
+          runtime.generationGuard?.assertOpen();
+          const result = await runtime.workspaceService.reloadModelProviders(
+            createBuildWorkspaceCtx(runtime.workspaceCwd)(
+              'POST /auth/subscription/revoke',
+            ),
+            { subscriptionSignedOut: true },
+          );
+          if (result.status !== 'applied') failed = true;
+        } catch {
+          failed = true;
+        }
+      }
+      if (failed)
+        throw new Error('Unable to restore model connections after sign-out.');
+    },
+  );
+  app.locals['stopSubscriptionAuth'] = stopSubscriptionAuth;
+
   registerWorkspaceAuthRoutes(app, {
     mutate,
     deviceFlowRegistry,
@@ -3689,6 +3731,7 @@ export function createServeApp(
       safeBody,
       parseAndValidateClientId: (req, res, runtime) =>
         parseAndValidateWorkspaceClientId(req, res, runtime.bridge),
+      daemonEnv: daemonEnvAtBoot,
       conversationRuntimeActivity,
     });
   }
@@ -4339,6 +4382,13 @@ export function createServeApp(
   }
 
   let appDrainComplete = false;
+  const disposeSkillsConfigStatus = async () => {
+    await Promise.all([
+      trustedSkillsConfigStatus.dispose?.(),
+      untrustedSkillsConfigStatus.dispose?.(),
+    ]);
+  };
+  serveAppLifecycle.addAppDrain(disposeSkillsConfigStatus);
   if (!deps.serveAppLifecycle)
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
@@ -4376,6 +4426,7 @@ export function createServeApp(
       stopAppResource(locals.stopExtensionGenerationReconciler);
       stopAppResource(locals.stopSessionAgentOrchestrators);
       stopAppResource(locals.stopHostedMountHandbacks);
+      stopAppResource(stopSubscriptionAuth);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());

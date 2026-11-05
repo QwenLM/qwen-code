@@ -19,7 +19,7 @@
 9551 build-and-publish-image.yml
 55276 cd-cua-driver.yml
 2222 cd-mobile-mcp.yml
-192263 ci.yml
+195906 ci.yml
 4193 codeql.yml
 9389 comment-attachment-guard.yml
 2090 desktop-packaging-check.yml
@@ -39,7 +39,7 @@
 6495 pr-self-report-label.yml
 9646 qwen-autofix-fork-bridge.yml
 5942 qwen-autofix-fork-signal.yml
-469584 qwen-autofix.yml
+451750 qwen-autofix.yml
 7061 qwen-ci-flaky-rerun.yml
 276955 qwen-code-pr-review.yml
 107075 qwen-fleet-shepherd.yml
@@ -47,7 +47,7 @@
 5760 qwen-pr-safety-precheck.yml
 3243 qwen-review-runner-schedule.yml
 27648 qwen-triage-finalize.yml
-375110 qwen-triage.yml
+378242 qwen-triage.yml
 15726 release-chrome-extension.yml
 26801 release-managed-agent-reference.yml
 13464 release-managed-runtime.yml
@@ -60,7 +60,7 @@
 1079 scorecard-monthly.yml
 9751 sdk-java-contract-open-prs.yml
 9555 sdk-java-flyway-open-prs.yml
-150332 sdk-java.yml
+155888 sdk-java.yml
 3886 sdk-python.yml
 5595 security-checks.yml
 6777 serve-ab-publish.yml
