@@ -4590,6 +4590,14 @@ Errors (non-2xx):
 
 SSE events (workspace-scoped): `mcp_server_restarted` with `{serverName, durationMs, originatorClientId?}` on success; `mcp_server_restart_refused` with `{serverName, reason, originatorClientId?}` on soft skip.
 
+#### `POST /workspaces/:workspace/language`
+
+Sessionless workspace UI-language sync, registered when settings persistence is available. Ownership: selected-runtime. Resolves the workspace id or encoded absolute cwd, requires an active trusted runtime and validates client ownership against that runtime. Inactive generations return `503 workspace_runtime_unavailable`; unresolved selectors never fall back to the primary workspace.
+
+Request: `{ "language": "zh" }`. The language uses the same supported codes as `POST /language`. Persists only the selected workspace's `general.language`, then reads its effective merged setting and synchronizes already-live channels through `qwen/control/user/language` with `scope: "workspace"`. Cold channels are skipped without starting a process or creating a conversation. Output language and model settings remain unchanged; `syncOutputLanguage: true` is rejected.
+
+The response has the same shape as `POST /language`, with `outputLanguage: null`; `language` is the effective configured locale (including `auto`) and `refresh` counts the selected runtime only. A workspace `language_changed` event is emitted on success. The SDK exposes `client.workspaceByCwd(cwd).setUiLanguage(language)` over REST, independently of the session transport.
+
 #### `POST /language`
 
 Capability tag: `user_language_sync` (conditional — advertised only when settings persistence is available, same condition as `workspace_settings`). Bridge → ACP extMethod `qwen/control/user/language` per trusted runtime with a live channel.
