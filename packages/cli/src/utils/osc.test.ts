@@ -14,6 +14,8 @@ import {
   oscGhosttyNotify,
   sanitizeOscPayload,
   encodeKittyPayload,
+  oscProgramStatus,
+  oscProgramStatusClear,
   OSC,
   BEL,
   ST,
@@ -276,5 +278,78 @@ describe('osc sanitizes payloads', () => {
     expect(result).not.toContain('\x1b]hack');
     expect(result).toContain('Title]hack');
     expect(result).toContain('Bodyend');
+  });
+});
+
+describe('oscProgramStatus', () => {
+  const decodeMsg = (seq: string) => {
+    const match = /:msg=([A-Za-z0-9+/=]*)/.exec(seq);
+    return match ? Buffer.from(match[1]!, 'base64').toString('utf8') : null;
+  };
+
+  let savedTmux: string | undefined;
+  beforeEach(() => {
+    savedTmux = process.env['TMUX'];
+  });
+  afterEach(() => {
+    if (savedTmux === undefined) delete process.env['TMUX'];
+    else process.env['TMUX'] = savedTmux;
+  });
+
+  it('uses code 7501', () => {
+    expect(OSC.PROGRAM_STATUS).toBe(7501);
+  });
+
+  it('builds a working report with app and ST terminator', () => {
+    expect(oscProgramStatus({ state: 'working' })).toBe(
+      `\x1b]7501;state=working:app=qwen-code${ST}`,
+    );
+  });
+
+  it('includes kind and a base64 msg for blocked', () => {
+    const seq = oscProgramStatus({
+      state: 'blocked',
+      kind: 'permission',
+      msg: 'Permission needed: Shell',
+    });
+    expect(seq.startsWith('\x1b]7501;')).toBe(true);
+    expect(seq.endsWith(ST)).toBe(true);
+    expect(seq).toMatch(
+      /^.\]7501;state=blocked:kind=permission:app=qwen-code:msg=[A-Za-z0-9+/=]+.\\$/,
+    );
+    expect(decodeMsg(seq)).toBe('Permission needed: Shell');
+  });
+
+  it('drops kind for states other than blocked', () => {
+    expect(oscProgramStatus({ state: 'done', kind: 'question' })).not.toContain(
+      'kind=',
+    );
+  });
+
+  it('encodes UTF-8 and removes control characters and newlines', () => {
+    const seq = oscProgramStatus({
+      state: 'error',
+      msg: '失败\nline\x07two\u2028',
+    });
+    expect(decodeMsg(seq)).toBe('失败 line two');
+  });
+
+  it('keeps the encoded msg and the whole sequence within spec limits', () => {
+    const seq = oscProgramStatus({ state: 'error', msg: '界'.repeat(5000) });
+    const encoded = /:msg=([A-Za-z0-9+/=]*)/.exec(seq)![1]!;
+    expect(encoded.length).toBeLessThanOrEqual(2732);
+    expect(Buffer.byteLength(seq)).toBeLessThanOrEqual(4096);
+    expect(decodeMsg(seq)).toMatch(/^界+$/);
+  });
+
+  it('is never wrapped for tmux passthrough', () => {
+    process.env['TMUX'] = '/tmp/tmux-501/default,1,0';
+    expect(oscProgramStatus({ state: 'idle' })).toBe(
+      `\x1b]7501;state=idle:app=qwen-code${ST}`,
+    );
+  });
+
+  it('builds a clear report', () => {
+    expect(oscProgramStatusClear()).toBe(`\x1b]7501;state=clear${ST}`);
   });
 });

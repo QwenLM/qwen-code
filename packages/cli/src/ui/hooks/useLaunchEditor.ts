@@ -4,6 +4,10 @@ import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
 import { getEditorExecutable } from '@qwen-code/qwen-code-core/utils/editor.js';
 import { spawnSync } from 'child_process';
 import { useSettings } from '../contexts/SettingsContext.js';
+import {
+  releaseProgramStatus,
+  restoreProgramStatus,
+} from '../../utils/program-status.js';
 
 /**
  * Determines the editor command to use based on user preferences and platform.
@@ -64,6 +68,7 @@ export function useLaunchEditor() {
       const wasRaw = stdin?.isRaw ?? false;
       try {
         setRawMode?.(false);
+        releaseProgramStatus();
 
         // On Windows, .cmd and .bat files need shell: true
         const needsShell =
@@ -81,6 +86,7 @@ export function useLaunchEditor() {
         }
       } finally {
         if (wasRaw) setRawMode?.(true);
+        restoreProgramStatus();
       }
     },
     [settings.merged.general?.preferredEditor, setRawMode, stdin],
