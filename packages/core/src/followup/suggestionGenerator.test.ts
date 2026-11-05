@@ -271,6 +271,19 @@ describe('shouldFilterSuggestion', () => {
     'รัน npx vitest run src/followupแล้วรายงานผลให้ฟังหน่อยนะครับ',
   ];
 
+  it('keeps the slash command exemption for these scripts', () => {
+    // 61 characters and 15 segments: over both bounds without the exemption.
+    const slash =
+      '/อธิบายโค้ดส่วนนี้ให้ละเอียดหน่อยนะครับผมอยากเข้าใจมันมากขึ้น';
+    expect(getFilterReason(slash)).toBeNull();
+    _setWordSegmenterForTest(null);
+    try {
+      expect(getFilterReason(slash)).toBeNull();
+    } finally {
+      _setWordSegmenterForTest(undefined);
+    }
+  });
+
   it('keeps whitespace bounds for these scripts when the suggestion has spaces', () => {
     for (const suggestion of MIXED_WITH_SPACES) {
       expect(getFilterReason(suggestion)).toBeNull();

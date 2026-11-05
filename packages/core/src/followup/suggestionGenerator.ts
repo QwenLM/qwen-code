@@ -391,6 +391,7 @@ export function getFilterReason(suggestion: string): string | null {
       suggestion,
     );
   if (hasSpacelessScript && !hasCJK && wordCount < 2) {
+    if (suggestion.startsWith('/')) return null; // slash commands ok
     if (suggestion.length < 2) return 'too_few_words';
     const words = countSegmentedWords(suggestion);
     // Without a segmenter, fall back to a character bound sized for these
