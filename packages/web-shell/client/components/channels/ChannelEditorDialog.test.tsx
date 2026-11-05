@@ -1491,6 +1491,97 @@ describe('ChannelEditorDialog', () => {
     );
   });
 
+  it('deletes a record key when its row is cleared, never stranding an empty value', async () => {
+    // The channel validators reject empty template values. Two layers keep
+    // a touched-then-cleared row from stranding one: the editor drops the
+    // key from the form state on clear, and the save serializer filters
+    // empty values regardless. Pin the end-to-end outcome: the cleared key
+    // is absent from the upsert config, the untouched sibling survives.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: [
+        ...DINGTALK.fields,
+        {
+          key: 'boundSessionActions',
+          label: 'Bound Session Actions',
+          kind: 'record',
+          options: [
+            {
+              value: 'review:watch:head_change',
+              label: 'review:watch:head_change',
+            },
+            { value: 'fix:comment', label: 'fix:comment' },
+          ],
+        },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, instance: INSTANCE, onSave });
+
+    // Record input ids embed the option key (colons included), which is not
+    // a valid CSS selector — resolve through getElementById, not #id.
+    const recordInput = (labelText: string): HTMLInputElement | null => {
+      const label = Array.from(document.querySelectorAll('label')).find(
+        (item) => item.textContent?.includes(labelText),
+      );
+      const id = label?.htmlFor;
+      return id
+        ? (document.getElementById(id) as HTMLInputElement | null)
+        : null;
+    };
+    const reviewRow = recordInput('review:watch:head_change');
+    const fixRow = recordInput('fix:comment');
+    expect(reviewRow).not.toBeNull();
+    expect(fixRow).not.toBeNull();
+
+    await act(async () => {
+      setInputValue(reviewRow!, 'Run /review %pr%');
+      setInputValue(fixRow!, 'Address the comments');
+    });
+    await act(async () => {
+      setInputValue(reviewRow!, '');
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith(
+      'release-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          boundSessionActions: { 'fix:comment': 'Address the comments' },
+        }),
+      }),
+    );
+  });
+
+  it('resolves the boundSessionActions label and description in Chinese', async () => {
+    // FIELD_LABEL_KEYS.github must register the field, or the zh-CN editor
+    // falls back to the descriptor's English label and description.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      type: 'github',
+      displayName: 'GitHub',
+      fields: [
+        {
+          key: 'boundSessionActions',
+          label: 'Bound Session Actions',
+          kind: 'record',
+          options: [{ value: 'default', label: 'default' }],
+        },
+      ],
+    };
+    await renderDialog({ descriptor, instance: INSTANCE, language: 'zh-CN' });
+    expect(document.body.textContent).toContain('绑定会话动作模板');
+    expect(document.body.textContent).toContain(
+      '投递给 PR 绑定会话的 operator 指令模板',
+    );
+  });
+
   it('submits a new instance with typed fields and the current revision', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     await renderDialog({ onSave });
