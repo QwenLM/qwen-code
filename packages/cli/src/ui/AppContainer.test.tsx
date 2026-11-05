@@ -932,6 +932,7 @@ describe('AppContainer State Management', () => {
       await vi.waitFor(() =>
         expect(initialize).toHaveBeenCalledWith(['AbovePrompt'], {
           prompts: true,
+          runsPrompts: true,
         }),
       );
 
@@ -5037,6 +5038,7 @@ describe('AppContainer State Management', () => {
       canUndoLastLoggedUserMessage: boolean;
       turnProducedMeaningfulContent: boolean;
       wasGoalTurn?: boolean;
+      wasModPromptTurn?: boolean;
     }) => void;
     let capturedOnCancelSubmit: CapturedCancelSubmit | null = null;
 
@@ -5535,79 +5537,85 @@ describe('AppContainer State Management', () => {
       expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
     });
 
-    it('strips the orphaned continuation prompt when a Goal turn is cancelled', async () => {
-      const mockStripOrphans = vi.fn();
-      const mockTruncateToItem = vi.fn();
-      mockedUseTextBuffer.mockReturnValue({
-        text: '',
-        setText: vi.fn(),
-      });
-      mockedUseHistory.mockReturnValue({
-        history: [{ id: 1, type: 'info', text: 'Request cancelled.' }],
-        addItem: vi.fn(),
-        updateItem: vi.fn(),
-        clearItems: vi.fn(),
-        loadHistory: vi.fn(),
-        truncateToItem: mockTruncateToItem,
-      });
-      mockedUseLogger.mockReturnValue({
-        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
-        removeLastUserMessage: vi.fn().mockResolvedValue(true),
-      });
-      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
-        initialize: vi.fn().mockResolvedValue(undefined),
-        setTools: vi.fn().mockResolvedValue(undefined),
-        isInitialized: vi.fn().mockReturnValue(false),
-        stripOrphanedUserEntriesFromHistory: mockStripOrphans,
-      } as unknown as LlmClient);
-      installCancelCapture({
-        streamingState: 'responding',
-        submitQuery: vi.fn(),
-        initError: null,
-        pendingHistoryItems: [],
-        thought: null,
-        cancelOngoingRequest: vi.fn(),
-        retryLastPrompt: vi.fn(),
-      });
-      mockedUseMessageQueue.mockReturnValue({
-        removeGoalTurns: vi.fn().mockReturnValue([]),
-        messageQueue: [],
-        addMessage: vi.fn(),
-        clearQueue: vi.fn(),
-        getQueuedMessagesText: vi.fn().mockReturnValue(''),
-        popAllMessages: vi.fn().mockReturnValue(null),
-        drainQueue: vi.fn().mockReturnValue([]),
-        popNextTurn: vi.fn().mockReturnValue(null),
-      });
+    it.each([
+      ['a Goal continuation turn', { wasGoalTurn: true }],
+      ["a Mod's own prompt turn", { wasModPromptTurn: true }],
+    ] as const)(
+      'strips the orphaned prompt when %s is cancelled',
+      async (_turn, flag) => {
+        const mockStripOrphans = vi.fn();
+        const mockTruncateToItem = vi.fn();
+        mockedUseTextBuffer.mockReturnValue({
+          text: '',
+          setText: vi.fn(),
+        });
+        mockedUseHistory.mockReturnValue({
+          history: [{ id: 1, type: 'info', text: 'Request cancelled.' }],
+          addItem: vi.fn(),
+          updateItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+          truncateToItem: mockTruncateToItem,
+        });
+        mockedUseLogger.mockReturnValue({
+          getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+          removeLastUserMessage: vi.fn().mockResolvedValue(true),
+        });
+        vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
+          initialize: vi.fn().mockResolvedValue(undefined),
+          setTools: vi.fn().mockResolvedValue(undefined),
+          isInitialized: vi.fn().mockReturnValue(false),
+          stripOrphanedUserEntriesFromHistory: mockStripOrphans,
+        } as unknown as LlmClient);
+        installCancelCapture({
+          streamingState: 'responding',
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          removeGoalTurns: vi.fn().mockReturnValue([]),
+          messageQueue: [],
+          addMessage: vi.fn(),
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(''),
+          popAllMessages: vi.fn().mockReturnValue(null),
+          drainQueue: vi.fn().mockReturnValue([]),
+          popNextTurn: vi.fn().mockReturnValue(null),
+        });
 
-      render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
 
-      await Promise.resolve();
-      await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
 
-      // A Goal continuation turn adds no UI user item, so lastTurnUserItem is
-      // null and the auto-restore branch (with its own orphan strip) bails.
-      // wasGoalTurn must trigger the strip independently so the synthetic
-      // "no new real user input" prompt can't merge into the next message.
-      triggerCancel({
-        pendingItem: null,
-        lastTurnUserItem: null,
-        canUndoLastLoggedUserMessage: false,
-        turnProducedMeaningfulContent: false,
-        wasGoalTurn: true,
-      });
+        // A Goal continuation turn and a Mod's own prompt add no UI user item,
+        // so lastTurnUserItem is null and the auto-restore branch (with its own
+        // orphan strip) bails. The flag must trigger the strip independently
+        // so the stopped prompt can't reach the model with the next message.
+        triggerCancel({
+          pendingItem: null,
+          lastTurnUserItem: null,
+          canUndoLastLoggedUserMessage: false,
+          turnProducedMeaningfulContent: false,
+          ...flag,
+        });
 
-      expect(mockStripOrphans).toHaveBeenCalledWith(true);
-      // Auto-restore itself bailed: there was no user item to rewind.
-      expect(mockTruncateToItem).not.toHaveBeenCalled();
-    });
+        expect(mockStripOrphans).toHaveBeenCalledWith(true);
+        // Auto-restore itself bailed: there was no user item to rewind.
+        expect(mockTruncateToItem).not.toHaveBeenCalled();
+      },
+    );
 
     it.each([
       ['queue', false, true, false, false],

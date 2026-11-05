@@ -1270,7 +1270,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Restore the transcript before Mod diagnostics, without making input
       // or Mod startup wait for asynchronous session recovery.
       void getInteractiveModSession(config)
-        ?.initialize(['AbovePrompt'], { prompts: true })
+        ?.initialize(['AbovePrompt'], { prompts: true, runsPrompts: true })
         .catch(() => {});
 
       if (resumedSessionData) {
@@ -3790,10 +3790,12 @@ export const AppContainer = (props: AppContainerProps) => {
       // so the auto-restore branch below bails out before its orphan strip
       // runs. Strip the orphaned prompt here; otherwise appendCuratedContent
       // merges the user's NEXT real message into the "no new real user input"
-      // preamble. Safe even if the turn already produced a model response:
-      // the strip only pops trailing user entries, and a responded prompt is
-      // not trailing.
-      if (info?.wasGoalTurn) {
+      // preamble. A Mod's own prompt is stripped the same way: the person
+      // stopped it, so the next prompt must not reach the model behind it.
+      // Safe even if the turn already produced a model response: the strip
+      // only pops trailing user entries, and a responded prompt is not
+      // trailing.
+      if (info?.wasGoalTurn || info?.wasModPromptTurn) {
         llmClient?.stripOrphanedUserEntriesFromHistory?.(true);
       }
 
