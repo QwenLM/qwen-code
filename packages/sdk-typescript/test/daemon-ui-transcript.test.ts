@@ -11,6 +11,32 @@ import { matchTurnEvent } from '../src/daemon/DaemonClient.js';
 import { normalizeDaemonEvent } from '../src/daemon/ui/normalizer.js';
 
 describe('daemon transcript rewind', () => {
+  it('retains subscription quota display context through normalization and replay', () => {
+    const subscriptionQuota = {
+      type: 'subscription_quota',
+      memberType: 'pro',
+      resetAt: 1800000000,
+    };
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session',
+        message: 'quota fallback',
+        subscriptionQuota,
+      },
+    });
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      events,
+    );
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'error',
+      text: 'quota fallback',
+      data: { subscriptionQuota },
+    });
+  });
   it.each([
     { v: 1, type: 'session_rewound', data: {} },
     { v: 1, type: 'session_update', data: { sessionId: 'other-session' } },

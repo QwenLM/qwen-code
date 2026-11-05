@@ -2695,6 +2695,19 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(event).not.toHaveProperty('errorKind');
   });
 
+  it.each(['', 'bailian'])(
+    'keeps automatic logout model changes silent (%s)',
+    (modelId) => {
+      expect(
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'model_switched',
+          data: { sessionId: 'session', modelId, subscriptionSignedOut: true },
+        }),
+      ).toEqual([]);
+    },
+  );
+
   it('normalizes daemon lifecycle and control events', () => {
     expect(
       normalizeDaemonEvent({

@@ -144,7 +144,7 @@ final class JournalResourceWrites {
             csiOriginal.requireContinuation();
         }
         if (authority == null && csiOriginal == null) {
-            fencing.requireSessionStorageOpenForAdmission(tenantId, request.workspaceId(), sessionId);
+            fencing.requireSessionStorageOpenForRead(tenantId, request.workspaceId(), sessionId);
         } else {
             fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
         }

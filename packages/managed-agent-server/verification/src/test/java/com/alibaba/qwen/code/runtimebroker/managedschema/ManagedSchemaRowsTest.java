@@ -58,7 +58,7 @@ class ManagedSchemaRowsTest {
             statement.execute("CREATE TABLE fixture (tenant_id VARBINARY(64), actor_id VARBINARY(64),"
                     + " record_bytes BLOB, revision BIGINT, is_enabled TINYINT, is_workspace_bound BOOLEAN,"
                     + " committed_sequence BIGINT, gmt_create BIGINT UNSIGNED,"
-                    + " is_execution_exclusive TINYINT)");
+                    + " is_rewind_pending TINYINT)");
             byte[] actor = {(byte) 0xff, 0};
             byte[] payload = {0, (byte) 0xfe, 10};
             long timestamp = java.time.Instant.parse("2026-10-14T01:02:03.123Z").toEpochMilli();
@@ -75,7 +75,7 @@ class ManagedSchemaRowsTest {
                 insert.executeUpdate();
             }
             try (var result = statement.executeQuery("SELECT tenant_id, actor_id, record_bytes,"
-                    + " revision, is_enabled, is_workspace_bound, committed_sequence, gmt_create, is_execution_exclusive,"
+                    + " revision, is_enabled, is_workspace_bound, committed_sequence, gmt_create, is_rewind_pending,"
                     + " CASE WHEN is_enabled = 1 THEN 1 ELSE 0 END AS is_quarantined FROM fixture")) {
                 result.next();
                 ResultSet driver = differentObjectTypes(result);
@@ -85,7 +85,7 @@ class ManagedSchemaRowsTest {
                 assertArrayEquals(payload, (byte[]) row.get("record_bytes"));
                 assertEquals(9_007_199_254_740_993L, row.get("revision"));
                 assertEquals(Boolean.TRUE, row.get("is_enabled"));
-                assertEquals(Boolean.TRUE, row.get("is_execution_exclusive"));
+                assertEquals(Boolean.TRUE, row.get("is_rewind_pending"));
                 assertEquals(1, row.get("is_quarantined"));
                 assertNull(row.get("is_workspace_bound"));
                 assertNull(row.get("committed_sequence"));
