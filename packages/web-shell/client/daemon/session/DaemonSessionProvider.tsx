@@ -1229,28 +1229,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             history.rejectedPage = undefined;
             history.hasMore = true;
             history.capacityReached = false;
-            const reopenedState = {
+            setTranscriptHistoryState({
               hasMore: true,
               loading: false,
               capacityReached: false,
               paginationError: history.paginationError,
-            };
-            if (detail.evictedOldest === false) {
-              // A rewind drops the NEWEST blocks, and the reducer installs the
-              // surviving replay prefix BEFORE it invokes this truncation
-              // callback — the rebuilt window is already committed at publish
-              // time. Publishing the re-open synchronously would still let a
-              // concurrently batched same-anchor page append (an in-flight
-              // loadMore resolving against the pre-rewind window) land ahead
-              // of the rewind's own state publish in the same batch, which
-              // macOS CI observed once as a block-order inversion (#16347).
-              // Deferring the publish one microtask keeps the latch ref
-              // consistent for any synchronous reader while the dispatch
-              // lands after the rewind's commit has been observed.
-              queueMicrotask(() => setTranscriptHistoryState(reopenedState));
-            } else {
-              setTranscriptHistoryState(reopenedState);
-            }
+            });
           }
         },
       }),

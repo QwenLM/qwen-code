@@ -24012,11 +24012,7 @@ describe('DaemonSessionProvider', () => {
     // synchronously and the React state publish follows on the same drain; a
     // regression that keeps the latch closed across a rewind — e.g. dropping
     // the truncation reconciliation on the rebuild's `store.reset()` — turns
-    // this red even though the pre-rewind latch assertions stay green. This
-    // accompanies the #16347 ordering fix (the re-open publish for a rewind is
-    // deferred one microtask past the rebuild commit; the deferred-vs-sync
-    // distinction is not observable through React's `act()` microtask
-    // flushing, so it is not what this test pins).
+    // this red even though the pre-rewind latch assertions stay green.
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',
       features: ['session_transcript_pagination'],
