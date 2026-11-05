@@ -120,7 +120,9 @@ export function projectAbout(systemInfo: Record<string, unknown>): string {
   let authLabel = '';
   if (selectedAuthType) {
     const matched = findProviderByCredentials(baseUrl, apiKeyEnvKey);
-    if (matched && resolveMetadataKey(matched) && matched.label) {
+    if (selectedAuthType === 'qwen-subscription') {
+      authLabel = 'Qwen Subscription';
+    } else if (matched && resolveMetadataKey(matched) && matched.label) {
       authLabel = matched.label;
     } else if (
       selectedAuthType.startsWith('oauth') ||
@@ -1181,8 +1183,19 @@ export function projectItemToStreamEvent(
         sentToModel: item.sentToModel ?? false,
         ...(item.promptId ? { promptId: item.promptId } : {}),
       };
-    case 'info':
-      return viaSpecialText();
+    case 'info': {
+      const text = projectSpecialItemText(item, ctx);
+      return text === null
+        ? null
+        : {
+            type: 'info',
+            text,
+            ...(isSyntheticHistoryItem(item)
+              ? {}
+              : { historyIsSynthetic: false }),
+            ...(item.presentation ? { presentation: item.presentation } : {}),
+          };
+    }
     case 'warning':
       return { type: 'warning', text: item.text };
     // No success row in the live model yet; ink's green SuccessMessage

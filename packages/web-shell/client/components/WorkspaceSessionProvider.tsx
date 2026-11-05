@@ -56,6 +56,7 @@ function withChrome(
 }
 
 interface WorkspaceSessionProviderProps {
+  viewHidden?: boolean;
   urlNavigation?: WebShellUrlNavigationOptions;
   sessionId?: string;
   workspaceId?: string;
@@ -187,6 +188,7 @@ function ResolvedWorkspaceSessionProvider(
 }
 
 function WorkspaceSessionProviderWorkspace({
+  viewHidden,
   sessionId,
   workspaceId,
   workspaceCwd,
@@ -434,18 +436,24 @@ function WorkspaceSessionProviderWorkspace({
       suppressOwnUserEcho
       restartEventStreamOnPrompt={restartSseOnPrompt}
     >
-      <App
-        {...appProps}
-        historyPageSize={historyPageSize}
-        restartSseOnPrompt={restartSseOnPrompt}
-        initialSelectedWorkspaceCwd={
-          !lockWorkspaceCwd && targetWorkspace ? targetWorkspace.cwd : undefined
-        }
-        lockedWorkspaceCwd={lockWorkspaceCwd ? targetWorkspace?.cwd : undefined}
-        lockedWorkspaceCapability={
-          lockWorkspaceCwd ? targetWorkspace : undefined
-        }
-      />
+      {!viewHidden && (
+        <App
+          {...appProps}
+          historyPageSize={historyPageSize}
+          restartSseOnPrompt={restartSseOnPrompt}
+          initialSelectedWorkspaceCwd={
+            !lockWorkspaceCwd && targetWorkspace
+              ? targetWorkspace.cwd
+              : undefined
+          }
+          lockedWorkspaceCwd={
+            lockWorkspaceCwd ? targetWorkspace?.cwd : undefined
+          }
+          lockedWorkspaceCapability={
+            lockWorkspaceCwd ? targetWorkspace : undefined
+          }
+        />
+      )}
     </DaemonSessionProvider>
   );
 }
