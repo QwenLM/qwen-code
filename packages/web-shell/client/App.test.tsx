@@ -14237,7 +14237,7 @@ describe('App conversation indicator keep-alive (#9487)', () => {
     );
   });
 
-  it('polls prompt authority only for trusted workspaces when the sidebar is disabled (#10989)', async () => {
+  it('polls prompt authority only for the connected trusted workspace when the sidebar is disabled (#10989, #16355)', async () => {
     mockConnection.capabilities.features = ['workspace_session_live_state'];
     mockWorkspace.capabilities = {
       sessionLiveStatePollIntervalMs: 10_000,
@@ -14266,7 +14266,7 @@ describe('App conversation indicator keep-alive (#9487)', () => {
       {
         enabled: true,
         pollIntervalMs: 10_000,
-        workspaceCwds: ['/tmp/project', '/tmp/live'],
+        workspaceCwds: ['/tmp/project'],
         groupWorkspaceCwds: [],
       },
     );
@@ -14290,6 +14290,78 @@ describe('App conversation indicator keep-alive (#9487)', () => {
         enabled: false,
         pollIntervalMs: undefined,
         workspaceCwds: [],
+        groupWorkspaceCwds: [],
+      },
+    );
+  });
+
+  it('avoids polling workspaces on an idle welcome view when the sidebar is disabled (#16355)', async () => {
+    mockConnection.capabilities.features = ['workspace_session_live_state'];
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      sessionLiveStatePollIntervalMs: 5_000,
+      workspaces: [
+        {
+          id: 'ws1',
+          cwd: '/tmp/ws1',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'ws2',
+          cwd: '/tmp/ws2',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+
+    renderApp({ sidebar: false });
+    await flush();
+
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenCalledWith(
+      mockWorkspace.client,
+      {
+        enabled: false,
+        pollIntervalMs: 5_000,
+        workspaceCwds: [],
+        groupWorkspaceCwds: [],
+      },
+    );
+  });
+
+  it('polls the live workspace when a live session is connected and sidebar is disabled (#16355)', async () => {
+    mockConnection.capabilities.features = ['workspace_session_live_state'];
+    mockConnection.sessionId = 'session-1';
+    mockConnection.sessionContext = { kind: 'live' };
+    mockWorkspace.capabilities = {
+      sessionLiveStatePollIntervalMs: 10_000,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'live',
+          cwd: '/tmp/live',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    };
+
+    renderApp({ sidebar: false });
+    await flush();
+
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenCalledWith(
+      mockWorkspace.client,
+      {
+        enabled: true,
+        pollIntervalMs: 10_000,
+        workspaceCwds: ['/tmp/live'],
         groupWorkspaceCwds: [],
       },
     );

@@ -4127,12 +4127,50 @@ export function App({
     () => workspaces.filter((entry) => entry.kind !== 'live'),
     [workspaces],
   );
+  // Daemon-authoritative "turn is running" signal for the connected session:
+  // keeps the conversation indicator (and its cancel affordances) alive
+  // through >3s silent tool gaps where streamingState drops to idle (#9487).
+  const trustedLiveWorkspaces = useMemo(
+    () =>
+      workspaces.filter(
+        (entry) =>
+          entry.kind === 'live' && entry.trusted && isAbsolutePath(entry.cwd),
+      ),
+    [workspaces],
+  );
+  const activePromptWorkspaceCwd =
+    connection.sessionContext?.kind === 'live'
+      ? trustedLiveWorkspaces.length === 1
+        ? trustedLiveWorkspaces[0]?.cwd
+        : undefined
+      : connection.workspaceCwd;
+  // Narrow sidebarless live-state polling to the workspace(s) with a displayed
+  // or connected session so idle welcome views avoid polling all trusted
+  // workspaces (#16355), while preserving the connected workspace's prompt
+  // authority retain (#10989).
   const sidebarlessLiveStateWorkspaceCwds = useMemo(() => {
-    if (sidebarOptions.enabled) return [];
-    return workspaces
-      .filter((entry) => entry.trusted && isAbsolutePath(entry.cwd))
-      .map((entry) => entry.cwd);
-  }, [sidebarOptions.enabled, workspaces]);
+    if (sidebarOptions.enabled || !connection.sessionId) return [];
+    if (connection.sessionContext?.kind === 'live') {
+      return trustedLiveWorkspaces.map((entry) => entry.cwd);
+    }
+    if (
+      !activePromptWorkspaceCwd ||
+      !isAbsolutePath(activePromptWorkspaceCwd)
+    ) {
+      return [];
+    }
+    const isTrusted = workspaces.some(
+      (entry) => entry.trusted && entry.cwd === activePromptWorkspaceCwd,
+    );
+    return isTrusted ? [activePromptWorkspaceCwd] : [];
+  }, [
+    activePromptWorkspaceCwd,
+    connection.sessionId,
+    connection.sessionContext?.kind,
+    sidebarOptions.enabled,
+    trustedLiveWorkspaces,
+    workspaces,
+  ]);
   useWorkspaceSessionLiveState(workspace.client, {
     pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
     enabled: Boolean(
@@ -4145,19 +4183,6 @@ export function App({
     workspaceCwds: sidebarlessLiveStateWorkspaceCwds,
     groupWorkspaceCwds: [],
   });
-  // Daemon-authoritative "turn is running" signal for the connected session:
-  // keeps the conversation indicator (and its cancel affordances) alive
-  // through >3s silent tool gaps where streamingState drops to idle (#9487).
-  const trustedLiveWorkspaces = workspaces.filter(
-    (entry) =>
-      entry.kind === 'live' && entry.trusted && isAbsolutePath(entry.cwd),
-  );
-  const activePromptWorkspaceCwd =
-    connection.sessionContext?.kind === 'live'
-      ? trustedLiveWorkspaces.length === 1
-        ? trustedLiveWorkspaces[0]?.cwd
-        : undefined
-      : connection.workspaceCwd;
   const {
     hasActivePrompt: daemonHasActivePrompt,
     activeWorkState: sessionActiveWorkState,
