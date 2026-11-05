@@ -6289,7 +6289,24 @@ export function registerHostedHarnessSessionRoutes(
         (effectiveMcpServers?.length || mcpSettings.length) &&
         brokerOptions &&
         !session.mcp
-      )
+      ) {
+        // A non-terminal discard can leave drained rows under a superseded
+        // owner; now that this bundle is durably active, release them so the
+        // constructor below does not see owners.size>1 (R15-3). The active
+        // owner's own drained rows stay for the reload to re-initialize, so a
+        // failed apply that kept the previous revision active is never stranded.
+        if (extensionBundle)
+          await HostedMcpSession.releaseSupersededDrained(
+            managed,
+            `extensions-components-${createHash('sha256')
+              .update(
+                JSON.stringify([
+                  managed.authority.sessionHeader.sessionKey,
+                  extensionBundle.configRevision,
+                ]),
+              )
+              .digest('hex')}`,
+          );
         session.mcp = new HostedMcpSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
           managed,
@@ -6298,6 +6315,7 @@ export function registerHostedHarnessSessionRoutes(
           undefined,
           extensionBundle !== undefined,
         );
+      }
       if (effectiveHookCatalog && brokerOptions && !session.hooks)
         session.hooks = new HostedHookSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },

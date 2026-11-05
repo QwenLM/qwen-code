@@ -912,6 +912,105 @@ it('hands the mount back without tombstoning the owner on a non-terminal close (
   ).toBe(false);
 });
 
+it('re-initializes an extensionView owner across repeated non-terminal close/reload cycles (R15-1 fix-induced)', async () => {
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'ext-claim',
+  );
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockResolvedValue();
+  const opts = { baseUrl: 'http://127.0.0.1:1', token: 'test' };
+  const ext = new HostedMcpSession(
+    opts,
+    session,
+    [pin],
+    undefined,
+    undefined,
+    true,
+  );
+  await ext.ensureReady();
+  const owner = ext.broker.runtimeSessionId;
+  // Cycle 1: the detach drains the deterministic-id row; the reload advances it
+  // to released and installs a fresh row under a random configurationId.
+  await ext.closeResources();
+  const reload1 = new HostedMcpSession(
+    opts,
+    session,
+    [pin],
+    undefined,
+    undefined,
+    true,
+  );
+  await reload1.ensureReady();
+  expect(reload1.broker.runtimeSessionId).toBe(owner);
+  // Cycle 2: the next reload resolves the deterministic id back to the RELEASED
+  // row left by cycle 1; it must reinstall fresh instead of aborting.
+  await reload1.closeResources();
+  const reload2 = new HostedMcpSession(
+    opts,
+    session,
+    [pin],
+    undefined,
+    undefined,
+    true,
+  );
+  await reload2.ensureReady();
+  expect(reload2.recoveryBlocked).toBe(false);
+  expect(reload2.broker.runtimeSessionId).toBe(owner);
+});
+
+it('clears superseded drained siblings so a multi-revision server reloads unblocked (R16-1)', async () => {
+  await mcp.ensureReady();
+  // A second configuration for the same server leaves two active rows; the
+  // non-terminal close drains both, but the reload only reinstalls the latest.
+  await mcp.configure(randomUUID(), pin, 1);
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'mcp-claim',
+  );
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockResolvedValue();
+  await mcp.closeResources();
+  const reloaded = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin],
+  );
+  await reloaded.ensureReady();
+  expect(reloaded.recoveryBlocked).toBe(false);
+  expect(
+    session.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .some(
+        (entry) =>
+          parseMcpConfiguration(entry.record).releaseState === 'drained',
+      ),
+  ).toBe(false);
+});
+
+it('releaseSupersededDrained spares the active owner and releases superseded drained rows (R15-3)', async () => {
+  await mcp.ensureReady();
+  const ownerA = mcp.broker.runtimeSessionId;
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'mcp-claim',
+  );
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockResolvedValue();
+  // A non-terminal discard leaves the row drained under owner A.
+  await mcp.closeResources();
+  const state = () =>
+    parseMcpConfiguration(
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
+    ).releaseState;
+  expect(state()).toBe('drained');
+  // While owner A is the durable-active owner (a failed apply kept it), its
+  // drained rows must stay for the reload to re-initialize — never stranded.
+  await HostedMcpSession.releaseSupersededDrained(session, ownerA);
+  expect(state()).toBe('drained');
+  // Once a newer bundle (owner B) is durably active, owner A's drained rows are
+  // superseded and must be released so the constructor sees a single owner.
+  await HostedMcpSession.releaseSupersededDrained(
+    session,
+    `extensions-components-${'b'.repeat(64)}`,
+  );
+  expect(state()).toBe('released');
+});
+
 it('restores the original owner before close and uses fresh identities after confirmed release', async () => {
   await mcp.ensureReady();
   const original = mcp.broker.runtimeSessionId;
