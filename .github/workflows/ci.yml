@@ -25,11 +25,11 @@ on:
       - 'omni-experiment'
   merge_group:
   # Scheduled macOS and Windows tests provide a non-Linux signal even when
-  # the merge queue is not enabled and these jobs are excluded from
-  # `pull_request` runs (see test_macos_shards and test_windows). The
-  # `pull_request` trigger itself still fires: those runs appear on the pull
-  # request as skipped, not absent. These lanes also admit `merge_group` and
-  # `workflow_dispatch`; treat a red nightly as a blocker, not as noise.
+  # the merge queue is not enabled. This workflow's `pull_request` trigger
+  # still fires, but `test_macos_shards` and `test_windows` gate themselves
+  # out of pull-request runs — their `if:` arms admit only `merge_group`,
+  # `schedule` and `workflow_dispatch` — so they appear on a pull request as
+  # skipped, not absent. Treat a red nightly as a blocker, not as noise.
   schedule:
     - cron: '17 19 * * *'
   workflow_dispatch:
@@ -1911,24 +1911,24 @@ jobs:
   # `realpath -m` in a workflow guard, with the suite that pinned it red on
   # every Mac).
   #
-  # The pull-request trigger is OFF, and this is the whole reason the nightly
-  # above exists. Over the 18 hours measured before it was pulled, the Windows
-  # lane reported 13 failures and 0 successes on pull requests — one standing
-  # set of Windows-only path and symlink failures (resolved paths into
-  # read_many_files, releaseWorktree through an ancestor symlink, the SHA-256
-  # review worktree) repeating across unrelated PRs — and macOS queued for a
-  # p90 of 42 minutes, 159 at worst, on a hosted pool this repository does not
-  # saturate by itself. Neither lane gates a merge: the `main` ruleset carries
-  # no required status check. So the cost landed entirely on contributors, who
-  # read a red X no diff of theirs caused and waited on checks that never had
-  # to pass.
+  # The pull-request gate on these two lanes is OFF, and this is the whole
+  # reason the nightly above exists. Over the 18 hours measured before it was
+  # pulled, the Windows lane reported 13 failures and 0 successes on pull
+  # requests — one standing set of Windows-only path and symlink failures
+  # (resolved paths into read_many_files, releaseWorktree through an ancestor
+  # symlink, the SHA-256 review worktree) repeating across unrelated PRs — and
+  # macOS queued for a p90 of 42 minutes, 159 at worst, on a hosted pool this
+  # repository does not saturate by itself. Neither lane gates a merge: the
+  # `main` ruleset carries no required status check. So the cost landed
+  # entirely on contributors, who read a red X no diff of theirs caused and
+  # waited on checks that never had to pass.
   #
   # Two triggers remain, in cost order: the merge queue if it is ever enabled
   # again, and a nightly run on `main` — which is now the only thing keeping
   # macOS and Windows visible at all, so it is load-bearing rather than a
   # backstop. Read a red nightly as a blocker; nothing else will report it.
   #
-  # Restoring the pull-request trigger is the last step of fixing those
+  # Restoring that pull-request gate is the last step of fixing those
   # failures, not a separate decision — and it is a REVERT of the commit that
   # carried this change, not an edit: the classifier job, its `if` arms on
   # both lanes, and the contract pins in scripts/tests/ci-platform-lanes.
