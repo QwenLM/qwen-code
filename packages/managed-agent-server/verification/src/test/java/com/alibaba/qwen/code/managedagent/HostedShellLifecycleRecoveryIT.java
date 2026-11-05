@@ -23,7 +23,6 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -47,6 +46,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -442,14 +442,14 @@ class HostedShellLifecycleRecoveryIT {
         /** The durable blocker the collectors persisted; survives a lost Spring log. */
         private Map<String, Object> collectionState() {
             var state = new LinkedHashMap<String, Object>();
-            state.put("capture", jdbc.queryForList("SELECT retention_state, collected_at, write_evidence,"
-                    + " accepted_complete, quarantined, producer_phase FROM ma_output_capture"
+            state.put("capture", jdbc.queryForList("SELECT retention_state, collected_at, is_write_evidence,"
+                    + " is_accepted_complete, is_quarantined, producer_phase FROM ma_output_capture"
                     + " WHERE tenant_id = ? AND session_id = ?", tenant, session));
             state.put("operations", jdbc.queryForList("SELECT operation_kind, state, phase, failure_code,"
                     + " available_at FROM ma_operation WHERE operation_kind IN ('CAPTURE_GC',"
                     + " 'SESSION_RESOURCE_GC') AND tenant_id = ? AND session_id = ?", tenant, session));
-            state.put("retirement", jdbc.queryForList("SELECT retired_at, recovery_protected,"
-                    + " resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+            state.put("retirement", jdbc.queryForList("SELECT retired_at, is_recovery_protected,"
+                    + " is_resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                     tenant, session));
             state.put("liveReadLeases", jdbc.queryForObject("SELECT COUNT(*) FROM ma_read_lease"
                     + " WHERE tenant_key = ? AND session_key = ? AND expires_at > ?", Long.class,
@@ -491,8 +491,8 @@ class HostedShellLifecycleRecoveryIT {
         }
 
         private void startSpring() throws Exception {
-            springPort = freePort();
-            int brokerPort = freePort();
+            springPort = reservePort();
+            int brokerPort = reservePort();
             var properties = new LinkedHashMap<String, Object>();
             properties.put("server.address", "127.0.0.1");
             properties.put("server.port", springPort);
@@ -581,7 +581,7 @@ class HostedShellLifecycleRecoveryIT {
                     Map.of("auth", Map.of("selectedType", "openai")), "model", Map.of("name", "l4-fixture"),
                     "telemetry", Map.of("enabled", false), "modelProviders", Map.of("openai", List.of(Map.of(
                             "id", "l4-fixture", "envKey", "OPENAI_API_KEY", "baseUrl", modelUrl))))));
-            harnessUri = URI.create("http://127.0.0.1:" + freePort());
+            harnessUri = URI.create("http://127.0.0.1:" + reservePort());
             var builder = new ProcessBuilder(node, cli.toString(), "serve", "--profile", "hosted-harness", "--http-bridge",
                     "--hostname", "127.0.0.1", "--port", Integer.toString(harnessUri.getPort()), "--require-auth", "--no-web",
                     "--workspace", root.resolve("decoy").toString(), "--managed-runtime-broker-url", broker.uri().toString(),
@@ -684,12 +684,6 @@ class HostedShellLifecycleRecoveryIT {
                     }
                 }
             }
-        }
-    }
-
-    private static int freePort() throws IOException {
-        try (var socket = new ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
-            return socket.getLocalPort();
         }
     }
 

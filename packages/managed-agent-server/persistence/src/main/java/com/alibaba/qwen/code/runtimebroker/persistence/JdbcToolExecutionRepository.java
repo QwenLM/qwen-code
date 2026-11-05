@@ -37,7 +37,7 @@ public final class JdbcToolExecutionRepository
             "runtime_session_id", "runtime_session_key", "turn_id",
             "tool_call_id", "request_digest", "reference_json",
             "execution_state", "execution_status", "result_json",
-            "last_sequence", "cancel_requested", "dispatch_owner",
+            "last_sequence", "is_cancel_requested", "dispatch_owner",
             "dispatch_lease_until", "dispatch_generation", "record_version",
             "settled_at", "abandoned_at", "loss_evidence_id",
             "authorized_dispatch_generation", "authorized_binding_version");
@@ -1082,7 +1082,7 @@ public final class JdbcToolExecutionRepository
             ToolExecutionRecord record) throws SQLException {
         String sql = "UPDATE ma_tool_execution SET execution_state = ?, "
                 + "execution_status = ?, result_json = ?, "
-                + "last_sequence = ?, cancel_requested = ?, "
+                + "last_sequence = ?, is_cancel_requested = ?, "
                 + "dispatch_owner = ?, dispatch_lease_until = ?, "
                 + "dispatch_generation = ?, record_version = ?, "
                 + "settled_at = ?, abandoned_at = ?, loss_evidence_id = ?, "
@@ -1183,7 +1183,7 @@ public final class JdbcToolExecutionRepository
                 result.getString("execution_status"),
                 fromJson(result.getString("result_json")),
                 result.getLong("last_sequence"),
-                result.getBoolean("cancel_requested"),
+                result.getBoolean("is_cancel_requested"),
                 result.getString("dispatch_owner"),
                 JdbcRepositorySupport.getInstant(result,
                         "dispatch_lease_until"),

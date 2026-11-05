@@ -40,11 +40,11 @@ class ManagedAgentReplayOutageTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE"
                 + ";LOCK_TIMEOUT=10000");
         ManagedSchema.initialize(source);
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
                 new ManagedSchemaJdbcTemplate(source), new ObjectMapper(),
                 Clock.systemUTC(), events -> {},
                 mock(ManagedWorkspaceRegistry.class),
-                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         HarnessCoordinator coordinator = mock(HarnessCoordinator.class);
         UnavailableHarnessConnector harness =
                 new UnavailableHarnessConnector();
