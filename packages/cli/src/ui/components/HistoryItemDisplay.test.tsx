@@ -5,7 +5,9 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { Text } from 'ink';
+import { Static, Text } from 'ink';
+import stripAnsi from 'strip-ansi';
+import stringWidth from 'string-width';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { type HistoryItem, ToolCallStatus } from '../types.js';
 import { MessageType } from '../types.js';
@@ -105,6 +107,45 @@ describe('<HistoryItemDisplay />', () => {
     expect(output.startsWith('\n')).toBe(true);
     expect(output).toContain('◆\uFE0E Hello');
   });
+
+  // #14075: the Static path's paragraph Text used to derive its wrap width
+  // from implicit yoga measurement, which let a full line consume the right
+  // margin (zero slack at the terminal edge).
+  it.each(['gemini', 'user'] as const)(
+    'keeps %s lines inside the right margin on the static path',
+    (type) => {
+      const item: HistoryItem = {
+        id: 1,
+        type,
+        text: "This is a long paragraph about the history of computing from the earliest mechanical counting machines and Babbage's analytic engine through vacuum tube and transistor computers, integrated circuits and modern processors with many cores and caches.",
+      };
+      const terminalWidth = 100;
+      const { lastFrame, stdout } = renderWithProviders(
+        <Static
+          items={[
+            <HistoryItemDisplay
+              key="history-item"
+              item={item}
+              terminalWidth={terminalWidth}
+              isPending={false}
+            />,
+          ]}
+        >
+          {(rendered) => rendered}
+        </Static>,
+      );
+
+      // ink-testing-library's fake stdout is fixed at 100 columns; keep the
+      // budget prop aligned with the frame the assertions measure.
+      expect(stdout.columns).toBe(terminalWidth);
+      const lines = stripAnsi(lastFrame() ?? '').split('\n');
+      // HistoryItemDisplay leaves a 2-column margin on each side.
+      const overWide = lines.filter(
+        (line) => stringWidth(line) > terminalWidth - 2,
+      );
+      expect(overWide).toEqual([]);
+    },
+  );
 
   it.each(['gemini', 'gemini_content'] as const)(
     'passes images from a %s history item to the assistant renderer',
