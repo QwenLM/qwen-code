@@ -8,7 +8,31 @@ Qwen Code’s first-run `/auth` menu has five top-level options. Pick the one th
 - **Third-party Providers**: choose a built-in provider and connect with an API key (DeepSeek, Grok, MiniMax, Z.AI, Kimi, Idealab, ModelScope, OpenRouter, Requesty).
 - **Custom Provider**: manually connect a local server, proxy, or unsupported provider — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
 
-## ☁️ Option 1: QwenCloud
+## **Option 1: Qwen OAuth —** [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code)
+
+Qwen OAuth lets you sign in with your Qwen account and use your **Plus or Pro subscription** from [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) to access **Qwen Code and Agent**. In the first-run menu or `/auth` dialog, choose [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code) to get started.
+
+- **How it works**: select [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code) and follow the browser sign-in flow to authorize Qwen Code with your Qwen account.
+- **Requirements**: a Qwen account with an active **Plus or Pro subscription** from [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) and internet access.
+- **Benefits**: access **Qwen Code and Agent** through your Qwen subscription without manually configuring an API key.
+- **Cost & quota**: usage is subject to your subscription plan. Visit [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) for Plus and Pro plan details.
+
+### **Interactive setup**
+
+1. If you don’t have a subscription yet, visit [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) and subscribe to **Plus or Pro**. If you already have an active subscription, continue with the next step.
+2. Start Qwen Code in your terminal:
+
+   ```bash
+   qwen
+   ```
+
+3. In the first-run menu, choose [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code). If Qwen Code is already running, enter `/auth` to open the authentication menu and select the same option.
+4. Complete the browser sign-in and authorization flow using the **same Qwen account you used to subscribe at** [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code).
+5. Return to Qwen Code to start working with your subscription.
+
+For non-interactive environments where you cannot complete the browser sign-in flow, such as CI or unattended containers, use an API-key-based authentication method instead.
+
+## ☁️ Option 2: QwenCloud
 
 The official platform entry. Choose it when your API key comes from 千问AI平台 (China) or QwenCloud (International).
 
@@ -88,30 +112,6 @@ As with the other provider-specific keys, `QWENCLOUD_API_KEY` and `QWENCLOUD_TOK
 > [!note]
 >
 > QwenCloud and Alibaba ModelStudio are separate entries with separate env keys and endpoints. Choosing QwenCloud does not rewrite or delete saved ModelStudio credentials, endpoints, or model selections.
-
-## **Option 2: Qwen OAuth —** [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code)
-
-Qwen OAuth lets you sign in with your Qwen account and use your **Plus or Pro subscription** from [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) to access **Qwen Code and Agent**. In the first-run menu or `/auth` dialog, choose [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code) to get started.
-
-- **How it works**: select [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code) and follow the browser sign-in flow to authorize Qwen Code with your Qwen account.
-- **Requirements**: a Qwen account with an active **Plus or Pro subscription** from [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) and internet access.
-- **Benefits**: access **Qwen Code and Agent** through your Qwen subscription without manually configuring an API key.
-- **Cost & quota**: usage is subject to your subscription plan. Visit [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) for Plus and Pro plan details.
-
-### **Interactive setup**
-
-1. If you don’t have a subscription yet, visit [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) and subscribe to **Plus or Pro**. If you already have an active subscription, continue with the next step.
-2. Start Qwen Code in your terminal:
-
-   ```bash
-   qwen
-   ```
-
-3. In the first-run menu, choose [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code). If Qwen Code is already running, enter `/auth` to open the authentication menu and select the same option.
-4. Complete the browser sign-in and authorization flow using the **same Qwen account you used to subscribe at** [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code).
-5. Return to Qwen Code to start working with your subscription.
-
-For non-interactive environments where you cannot complete the browser sign-in flow, such as CI or unattended containers, use an API-key-based authentication method instead.
 
 ## 💳 Option 3: Alibaba Cloud Coding Plan
 
@@ -202,7 +202,7 @@ Token Plan is available in two regions, each with its own dedicated endpoint:
 
 ### Interactive setup
 
-Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **Alibaba ModelStudio**, and choose **Token Plan** from the sub-menu. Choose your region (**China (Beijing)** or **Singapore (International)**), then enter your API key. The wizard then shows its final step (Step 3/3 · Model IDs), where you pick the model IDs to configure: the models served by your endpoint are offered there and are applied only when you explicitly select them. ModelStudio Token Plan API keys have no prefix requirement, unlike Coding Plan keys, which start with `sk-sp-`, and unlike the separate QwenCloud Token Plan keys in Option 1, which also start with `sk-sp-`.
+Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **Alibaba ModelStudio**, and choose **Token Plan** from the sub-menu. Choose your region (**China (Beijing)** or **Singapore (International)**), then enter your API key. The wizard then shows its final step (Step 3/3 · Model IDs), where you pick the model IDs to configure: the models served by your endpoint are offered there and are applied only when you explicitly select them. ModelStudio Token Plan API keys have no prefix requirement, unlike Coding Plan keys, which start with `sk-sp-`, and unlike the separate QwenCloud Token Plan keys in Option 2, which also start with `sk-sp-`.
 
 After authentication, use the `/model` command to browse and switch between the models configured for your Token Plan. The model lineup evolves over time, so it is intentionally not listed here; model discovery from the endpoint happens during the `/auth` setup step above (the endpoint's own list is offered there and must be selected explicitly), and `/model` then shows the models configured for your plan.
 

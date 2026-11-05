@@ -77,7 +77,7 @@ The first-run menu lets you connect a model provider. Choose one of:
   - **Token Plan**: subscription with a monthly Credit quota on a dedicated endpoint (Personal and Team editions).
   - **Standard API Key**: pay-as-you-go, connect with an existing platform API key.
 
-  Either way you then pick the platform explicitly (China or International), so the UI language never decides your endpoint. See [Authentication → Option 1: QwenCloud](./configuration/auth) for details.
+  Either way you then pick the platform explicitly (China or International), so the UI language never decides your endpoint. See [Authentication → Option 2: QwenCloud](./configuration/auth) for details.
 
 - **Alibaba ModelStudio** — opens a sub-menu:
   - **Coding Plan**: connect with an Alibaba Cloud Coding Plan API key. See [Authentication](./configuration/auth.md#-option-3-alibaba-cloud-coding-plan) for setup.
