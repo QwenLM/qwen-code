@@ -23,7 +23,7 @@ public final class ManagedSchemaRows {
             "is_default",
             "is_drain_requested",
             "is_enabled",
-            "is_execution_exclusive",
+            "is_rewind_pending",
             "is_paused",
             "is_plan_enabled",
             "is_projection_pending",
