@@ -27,7 +27,15 @@
 // place so that stays a revert.
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -833,23 +841,15 @@ describe('post-merge push lane', () => {
           // build failed, while lint has no such dependency — so it is
           // stripped here and each side is pinned explicitly below.
           if (job !== 'test_build' && s.name === 'Install dependencies') {
-            if (job === 'test') {
-              expect(s.env).toEqual({
-                QWEN_SKIP_PREPARE: '1',
-                QWEN_SKIP_NOTICE_GENERATION: '1',
-                // The shards' test step overrides HOME, which would hide the
-                // corepack cache install warms here; pin COREPACK_HOME to a
-                // per-run path so the warmup hits it. lint_and_static routes
-                // HOME and COREPACK_HOME together via GITHUB_ENV, so its
-                // install needs no step-level override.
-                COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack',
-              });
-            } else {
-              expect(s.env).toEqual({
-                QWEN_SKIP_PREPARE: '1',
-                QWEN_SKIP_NOTICE_GENERATION: '1',
-              });
-            }
+            // Neither install carries a step-level COREPACK_HOME: the shard
+            // mints a fresh one and exports it through GITHUB_ENV (a fixed
+            // path under the cross-job RUNNER_TEMP is what #16328 broke on),
+            // while lint_and_static routes HOME and COREPACK_HOME together
+            // the same way.
+            expect(s.env).toEqual({
+              QWEN_SKIP_PREPARE: '1',
+              QWEN_SKIP_NOTICE_GENERATION: '1',
+            });
             const { env: _installEnv, if: _installIf, ...install } = s;
             return [
               s.name,
@@ -896,11 +896,76 @@ describe('post-merge push lane', () => {
     expect(install('test').env).toEqual({
       QWEN_SKIP_PREPARE: '1',
       QWEN_SKIP_NOTICE_GENERATION: '1',
-      // The test step's HOME override would hide the corepack cache install
-      // warms here; pin COREPACK_HOME to a per-run path so the warmup hits it.
-      COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack',
     });
     const namesIn = (job) => (ci.jobs[job].steps ?? []).map((x) => x.name);
+    // COREPACK_HOME must be fresh per job. RUNNER_TEMP survives across jobs
+    // on this fleet, and the runner's corepack trusts an existing entry
+    // without checking it: the shard failed on a v1/pnpm/11.24.0 whose
+    // bin/pnpm.mjs was missing, before pnpm started. Deleting a fixed path is
+    // not enough — rm fails on a subtree owned by another UID, which would
+    // gate the install on a cache it does not need — so the step mints the
+    // directory with mktemp and exports it through GITHUB_ENV for both
+    // consumers.
+    const homeStep = stepOf('test', 'Create isolated corepack home');
+    const homeRun = String(homeStep?.run);
+    // Corepack's tarball fetch has no retry of its own and ignores the npm
+    // retry settings above; the per-job home makes that fetch mandatory on
+    // every shard, so keep the bounded retry in the shared install body
+    // (test_build carries the same bytes, enforced by the parity assertion).
+    const installRun = String(install('test').run);
+    expect(installRun).toContain('corepack pnpm install flaked; retrying');
+    expect(
+      installRun.match(/corepack pnpm install --frozen-lockfile/g),
+    ).toHaveLength(2);
+    expect(homeRun).toContain(
+      'mktemp -d "${RUNNER_TEMP:?}/qwen-ci-corepack.XXXXXXXX"',
+    );
+    expect(homeRun).toContain(
+      'printf \'COREPACK_HOME=%s\\n\' "$corepack_home" >> "${GITHUB_ENV}"',
+    );
+    // The private copy marks the directory as this job's own; cleanup keys
+    // off it so a COREPACK_HOME inherited from the runner is never deleted.
+    expect(homeRun).toContain(
+      'printf \'QWEN_CI_COREPACK_HOME=%s\\n\' "$corepack_home" >> "${GITHUB_ENV}"',
+    );
+    // Anchor the parity with a literal: a change that drops the same conjunct
+    // from both gates keeps the parity green while a lite-profile run starts
+    // executing a full install whose prelude was gated off.
+    expect(install('test').if).toBe(
+      "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}",
+    );
+    // The home must exist before the install that fills it, and be gated
+    // exactly like it; a drift either way leaves the install to invent a
+    // path, or skips the export while the install still runs.
+    expect(homeStep?.if).toBe(install('test').if);
+    // The gate reads `ci_profile`, which only exists once its step has run;
+    // moved above it, the check evaluates '' and the export is skipped.
+    expect(namesIn('test').indexOf('Use trusted CI profile')).toBeLessThan(
+      namesIn('test').indexOf('Create isolated corepack home'),
+    );
+    // Tolerating a failed mint or export would let the install run without a
+    // per-job home and fall back to the runner's shared path.
+    expect(homeStep?.['continue-on-error']).toBeUndefined();
+    expect(
+      namesIn('test').indexOf('Create isolated corepack home'),
+    ).toBeLessThan(namesIn('test').indexOf('Install dependencies'));
+    // Both consumers must inherit that one home; a step-level value would
+    // silently reintroduce the fixed shared path (or a second cold cache).
+    const unitTestStep = stepOf('test', 'Run tests and generate reports');
+    expect(unitTestStep.env.COREPACK_HOME).toBeUndefined();
+    // The per-job home must be reclaimed after the tests; RUNNER_TEMP is
+    // reused, so every shard would otherwise leave a pinned pnpm behind.
+    const cleanupStep = stepOf('test', 'Remove isolated corepack home');
+    expect(cleanupStep?.if).toBe('${{ always() }}');
+    expect(String(cleanupStep?.run)).toContain(
+      'rm -rf -- "${QWEN_CI_COREPACK_HOME}"',
+    );
+    expect(String(cleanupStep?.run)).not.toContain('"${COREPACK_HOME}"');
+    expect(
+      namesIn('test').indexOf('Remove isolated corepack home'),
+    ).toBeGreaterThan(
+      namesIn('test').indexOf('Run tests and generate reports'),
+    );
     // Values alone are order-blind, and order is load-bearing here: `steps`
     // exposes only steps that already ran, and a missing property reads as
     // ''. Moving `Use trusted CI profile` below its consumers changes no
@@ -1027,6 +1092,85 @@ describe('post-merge push lane', () => {
     expect(fetchCode).toMatch(/for _attempt in 1 2 3/);
     expect(fetchCode).toContain('Incremental lint history:');
   });
+
+  // The static pins above can only say the mechanism is written down; this
+  // runs the two steps. The planted entry is the shape the shard died on
+  // (v1/pnpm/11.24.0 present, bin/pnpm.mjs missing): a fixed-path install
+  // would reuse it, so the test proves the job neither reads nor deletes it.
+  it.skipIf(process.platform === 'win32')(
+    'mints a per-job corepack home instead of touching a broken shared one',
+    () => {
+      const create = stepOf('test', 'Create isolated corepack home');
+      const cleanup = stepOf('test', 'Remove isolated corepack home');
+      const root = mkdtempSync(join(tmpdir(), 'qwen-ci-corepack-'));
+      try {
+        const shared = join(root, 'qwen-ci-corepack');
+        const broken = join(shared, 'v1', 'pnpm', '11.24.0');
+        mkdirSync(broken, { recursive: true });
+        writeFileSync(join(broken, 'package.json'), '{}');
+
+        const envFile = join(root, 'github-env');
+        // This suite also runs inside the shard job, where both variables
+        // point at the live home: inheriting them would let the cleanup
+        // assertions delete the cache the job is using.
+        const baseEnv = {
+          ...process.env,
+          RUNNER_TEMP: root,
+          GITHUB_ENV: envFile,
+        };
+        delete baseEnv.COREPACK_HOME;
+        delete baseEnv.QWEN_CI_COREPACK_HOME;
+        expect(baseEnv.COREPACK_HOME).toBeUndefined();
+        expect(baseEnv.QWEN_CI_COREPACK_HOME).toBeUndefined();
+        const run = (step, extra = {}) =>
+          execFileSync('bash', ['-e', '-c', step.run], {
+            env: { ...baseEnv, ...extra },
+            stdio: 'pipe',
+          });
+        const exportHome = () => {
+          writeFileSync(envFile, '');
+          run(create);
+          return Object.fromEntries(
+            readFileSync(envFile, 'utf8')
+              .trim()
+              .split('\n')
+              .map((line) => line.split('=')),
+          );
+        };
+
+        const first = exportHome();
+        expect(first.COREPACK_HOME).not.toBe(shared);
+        expect(
+          first.COREPACK_HOME.startsWith(`${root}/qwen-ci-corepack.`),
+        ).toBe(true);
+        expect(readdirSync(first.COREPACK_HOME)).toEqual([]);
+        expect(first.QWEN_CI_COREPACK_HOME).toBe(first.COREPACK_HOME);
+
+        // A second job on the same host never inherits the first home.
+        const second = exportHome();
+        expect(second.COREPACK_HOME).not.toBe(first.COREPACK_HOME);
+
+        // Cleanup reclaims only a home this job minted: an inherited
+        // COREPACK_HOME carries no marker and must survive.
+        const inherited = join(root, 'inherited');
+        mkdirSync(inherited);
+        run(cleanup, { COREPACK_HOME: inherited });
+        expect(existsSync(inherited)).toBe(true);
+        // When this suite runs inside the shard job, that job's live home
+        // must not be reachable from the assertions above.
+        if (process.env.QWEN_CI_COREPACK_HOME) {
+          expect(existsSync(process.env.QWEN_CI_COREPACK_HOME)).toBe(true);
+        }
+        run(cleanup, first);
+        run(cleanup, second);
+        expect(existsSync(first.COREPACK_HOME)).toBe(false);
+        expect(existsSync(second.COREPACK_HOME)).toBe(false);
+        expect(existsSync(join(broken, 'package.json'))).toBe(true);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.each([
     ['first fetch aborts', 1, 99, 99, 1, 0, 'deepen fetch aborted'],

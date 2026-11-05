@@ -679,7 +679,11 @@ jobs:
           ( while sleep 10; do sample_disk; done ) &
           SAMPLER_PID=$!
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
-          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          # corepack's fetch does not retry (npm's settings do not apply) and
+          # the per-job home makes it mandatory; absorb one egress blip here.
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only || {
+            echo '::warning::corepack pnpm install flaked; retrying'
+            corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; }
 
       - name: 'Report npm cache usage (self-hosted)'
         if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
@@ -1070,6 +1074,24 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
+      # COREPACK_HOME must be fresh per job. A shard failed (run 41927887452)
+      # with v1/pnpm/11.24.0 present but bin/pnpm.mjs missing, and the
+      # runner's corepack reuses a cache hit without checking the contents, so
+      # that host kept dying in under a second, before pnpm started. How the
+      # entry got damaged is not established — an interrupted install and a
+      # planted entry are both possible. RUNNER_TEMP survives across jobs on
+      # this fleet (see the lint job's isolated HOME), so a fixed path under
+      # it is shared state either way, and deleting it is not an option: rm
+      # fails on a subtree owned by another UID, which would gate the install
+      # on a cache the job does not need. Mint a fresh directory and hand it
+      # to the install and test steps through GITHUB_ENV.
+      - name: 'Create isolated corepack home'
+        if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          corepack_home="$(mktemp -d "${RUNNER_TEMP:?}/qwen-ci-corepack.XXXXXXXX")"
+          printf 'COREPACK_HOME=%s\n' "$corepack_home" >> "${GITHUB_ENV}"
+          printf 'QWEN_CI_COREPACK_HOME=%s\n' "$corepack_home" >> "${GITHUB_ENV}"
+
       # `test_build` already ran the `prepare` build; its archive below
       # brings the outputs this install skips.
       - name: 'Install dependencies'
@@ -1078,12 +1100,6 @@ jobs:
         env:
           QWEN_SKIP_PREPARE: '1'
           QWEN_SKIP_NOTICE_GENERATION: '1'
-          # Pin COREPACK_HOME to a per-run path so the corepack cache written
-          # here is visible to the test step below, which overrides HOME for
-          # isolation. corepack does not re-verify extracted entries on cache
-          # hit, so this must NOT be a shared/persistent path (poisoning
-          # channel) — per-run is safe and sufficient.
-          COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack'
         run: |-
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
           echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}] cpus[$(nproc 2>/dev/null || echo unknown)]" > "$DISK_SAMPLES" 2>/dev/null || true
@@ -1097,7 +1113,11 @@ jobs:
           ( while sleep 10; do sample_disk; done ) &
           SAMPLER_PID=$!
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
-          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          # corepack's fetch does not retry (npm's settings do not apply) and
+          # the per-job home makes it mandatory; absorb one egress blip here.
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only || {
+            echo '::warning::corepack pnpm install flaked; retrying'
+            corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; }
 
       # Eight shards pull this same artifact at once, so the cap has to clear
       # the slow tail rather than the median: on main four shards finished
@@ -1252,13 +1272,11 @@ jobs:
           QWEN_CI_COVERAGE: "${{ github.event_name == 'push' && '1' || '' }}"
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
-          # HOME above hides the runner's corepack cache; without this the
-          # vitest globalSetup (scripts/tests/corepack-warmup.js) spawns
-          # `corepack pnpm --version` on a cold cache and downloads the pinned
-          # pnpm from npmjs, which the ECS egress can time out on. Must match
-          # the Install dependencies step's COREPACK_HOME so it hits the cache
-          # install already warmed.
-          COREPACK_HOME: '${{ runner.temp }}/qwen-ci-corepack'
+          # HOME above hides the runner's corepack cache, so this step reads
+          # the per-job COREPACK_HOME the pre-install step exports through
+          # GITHUB_ENV. That keeps the vitest globalSetup
+          # (scripts/tests/corepack-warmup.js) on the copy the install just
+          # warmed instead of downloading the pinned pnpm again.
           # Bound each Vitest process on the shared ECS host. Operators can
           # tune the maximum without changing this workflow.
           VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
@@ -1333,6 +1351,18 @@ jobs:
           kill "$SAMPLER_PID" 2>/dev/null || true
           if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
           exit "$RC"
+
+      # Reclaim the per-job corepack home. RUNNER_TEMP survives across jobs on
+      # this fleet, so without this every shard would leave a pinned pnpm
+      # behind. Delete the private name, not COREPACK_HOME: the latter can be
+      # inherited from the runner when the creation step was skipped, and that
+      # path is not this job's to remove.
+      - name: 'Remove isolated corepack home'
+        if: '${{ always() }}'
+        run: |-
+          if [ -n "${QWEN_CI_COREPACK_HOME:-}" ]; then
+            rm -rf -- "${QWEN_CI_COREPACK_HOME}" || echo "::warning::could not remove isolated corepack home: ${QWEN_CI_COREPACK_HOME}"
+          fi
 
       # A timeout or a cancel kills the test step before the lane script
       # replays its side lane, which runs every suite but the CLI and core
@@ -1873,7 +1903,11 @@ jobs:
           ( while sleep 10; do sample_disk; done ) &
           SAMPLER_PID=$!
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
-          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          # corepack's fetch does not retry (npm's settings do not apply) and
+          # the per-job home makes it mandatory; absorb one egress blip here.
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only || {
+            echo '::warning::corepack pnpm install flaked; retrying'
+            corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; }
 
       - name: 'Report npm cache usage (self-hosted)'
         if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
