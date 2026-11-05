@@ -176,6 +176,7 @@ OpenTUI 终端在两处触发该事件。实时回合（`useOpenTuiLiveTurn`）�
   - 两条循环下的 headless 测试：用户的回合结束时排队的提示在其后运行，带框文、上下文和提交的提示，`asUser` 的提示原样读取，每个回合都有 `turn.start`，Mod 命令的提示在其回复之后运行、命令本身不占回合；
   - Ink 流测试：排队的提示在空闲后作为 `UserQuery` 运行，带框文、提交的提示、Mod 名字、召回查询和上下文，`turn.start` 听到它的文本，显示为通知行而没有用户行，不经过 `prompt.submit` hook，不写入输入历史，不读取 `@`；`asUser` 的提示原样发送，不运行其中的命令；排队的提示一个回合接一个回合运行；等待用户排队的提示和掌管回合的 Goal；用户的提示而不是 Mod 的提示重新计数；Esc 清空队列，`$.turn.abort` 保留队列；回合无法开始时提示被放回；所有者的声明及队列的通知；
   - 恢复：`mod_prompt` 记录恢复为 Mod 的通知行，`asUser` 也一样；
+  - 构建后的 CLI 在真实 Ink 终端中对接 fixture 服务器（`integration-tests/interactive/mods-prompt-submit.test.ts`）：`turn.complete` hook 提交的提示在用户的回合之后运行，显示在注明 Mod 的行下，第二个请求带框文，transcript 把它记为 Mod 的提示；每回合都提交的 hook 在上限处停止；
   - 构建后的 CLI 对接 fixture 服务器（`integration-tests/cli/mods-prompt-submit.test.ts`）：`turn.complete` hook 提交提示，第二个请求带框文和 hook 附加的上下文，transcript 把它记为 Mod 的提示，`asUser` 的提示原样读取，每回合都提交的 hook 在上限处停止。
 
 ## 风险与待定问题

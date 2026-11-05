@@ -239,6 +239,7 @@ describe('no-AK integration CI wiring', () => {
       './interactive/workflow-intent.test.ts',
       './interactive/workflow-mode.test.ts',
       './interactive/mods-tool-middleware.test.ts',
+      './interactive/mods-prompt-submit.test.ts',
       './interactive/statusline-parity.test.ts',
       './interactive/tui-editor-parity.test.ts',
       './interactive/tui-input-ownership.test.ts',
