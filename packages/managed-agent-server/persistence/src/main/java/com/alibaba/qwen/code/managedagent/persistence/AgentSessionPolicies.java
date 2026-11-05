@@ -228,7 +228,7 @@ final class AgentSessionPolicies {
         }
         requireSessionStatus(session.status(), "ACTIVE");
         requireCwdChangeRegistryFacts(session);
-        WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+        WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         boolean replay = operationId != null && !jdbc.queryForList("SELECT 1 FROM ma_session_journal_tx"
                 + " WHERE tenant_id=? AND session_id=? AND command_id=? AND operation='manageMcp' LIMIT 1",
                 tenantId, sessionId, operationId).isEmpty();
@@ -276,7 +276,7 @@ final class AgentSessionPolicies {
         if (mutation) {
             requireSessionStatus(session.status(), "ACTIVE");
             requireCwdChangeRegistryFacts(session);
-            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+            WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
             if (!same) {
                 ManagedConfigStore.requireOpen(jdbc, tenantId, sessionId);
                 requireMcpManagementIdle(session);
@@ -696,7 +696,7 @@ final class AgentSessionPolicies {
         requirePublicChildImmutable(session);
         String tenantId = session.tenantId();
         String sessionId = session.sessionId();
-        WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+        WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         requireSessionStatus(session.status(), "ACTIVE");
         requireCwdChangeRegistryFacts(session);
         if (!live && (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session))) {
