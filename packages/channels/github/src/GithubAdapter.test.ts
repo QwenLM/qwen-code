@@ -94,7 +94,7 @@ vi.mock('@qwen-code/channel-base', async (importOriginal) => {
   };
 });
 
-import { GithubChannel } from './GithubAdapter.js';
+import { GithubChannel, validateBoundSessionConfig } from './GithubAdapter.js';
 
 const octokitModule = (await import('@octokit/rest')) as unknown as {
   Octokit: Mock;
@@ -220,6 +220,24 @@ function inboundTaskPath(
     getWorkspaceScopeDirName(cwd),
     `${channelName}-${nameHash}-github-inbound-tasks.json`,
   );
+}
+
+/** Every row of a Channel's event journal; none before the first write. */
+function readChannelEvents(
+  channelName = 'test-github',
+): Array<Record<string, unknown>> {
+  const path = inboundTaskPath('/tmp/test', channelName).replace(
+    'github-inbound-tasks.json',
+    'channel-events.jsonl',
+  );
+  try {
+    return readFileSync(path, 'utf-8')
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch {
+    return [];
+  }
 }
 
 /** Mirrors channelFilePath('github-bound-deadletter.jsonl') for assertions. */
@@ -1493,7 +1511,7 @@ describe('GithubChannel', () => {
       expect(markOrder).toBeGreaterThan(commentOrder);
     });
 
-    it('marks all fetched notifications read even on failure', async () => {
+    it('marks all fetched notifications read when a thread fails permanently', async () => {
       const good = makeNotification({
         id: '1',
         updated_at: '2026-07-02T08:00:00.000Z',
@@ -1507,7 +1525,9 @@ describe('GithubChannel', () => {
       mockOctokit.paginate
         .mockResolvedValueOnce([good, bad])
         .mockResolvedValueOnce([makeComment()])
-        .mockRejectedValue(new Error('rate limit'));
+        .mockRejectedValue(
+          Object.assign(new Error('Not Found'), { status: 404 }),
+        );
 
       await pollOnce();
 
@@ -1519,11 +1539,1503 @@ describe('GithubChannel', () => {
       });
     });
 
+    describe('transient per-thread GitHub errors', () => {
+      const transient = () =>
+        Object.assign(new Error('Server Error'), { status: 502 });
+
+      const journal = () => readChannelEvents();
+      const journalRows = () =>
+        journal().filter((event) => event['reason'] === 'github_api_error');
+
+      async function initFailing() {
+        await initWithoutLoop();
+        // A running channel: the disconnect() in initWithoutLoop would make a
+        // rate-limited read give up instead of retrying.
+        (
+          channel as unknown as {
+            pendingFinalDeliveryRetryStopRequested: boolean;
+          }
+        ).pendingFinalDeliveryRetryStopRequested = false;
+        (
+          channel as unknown as {
+            abortableSleep: (ms: number) => Promise<void>;
+          }
+        ).abortableSleep = vi.fn().mockResolvedValue(undefined);
+        // A thread whose comment listing succeeds with nothing new falls
+        // through to first contact; its body does not mention the bot.
+        mockOctokit.rest.issues.get.mockResolvedValue({
+          data: {
+            title: 'Test Issue',
+            body: 'Nothing for the bot here',
+            user: { login: 'alice' },
+          },
+        });
+      }
+
+      it('keeps the notification unread and answers the comment on the next poll', async () => {
+        await initFailing();
+        mockOctokit.paginate
+          .mockResolvedValueOnce([makeNotification()])
+          .mockRejectedValueOnce(transient())
+          .mockRejectedValueOnce(transient())
+          .mockRejectedValueOnce(transient());
+
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes).toHaveLength(0);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+        expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+        expect(journalRows()).toEqual([
+          expect.objectContaining({
+            type: 'inbound',
+            outcome: 'failed',
+            repository: 'owner/repo',
+            thread: 'issue:42',
+            number: 42,
+          }),
+        ]);
+
+        mockOctokit.paginate
+          .mockResolvedValueOnce([makeNotification()])
+          .mockResolvedValueOnce([makeComment()]);
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '1001',
+        ]);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledWith({
+          last_read_at: '2026-07-02T10:00:00.000Z',
+          read: true,
+        });
+      });
+
+      it('retries a first-contact body whose issue fetch failed transiently', async () => {
+        await initFailing();
+        mockOctokit.paginate
+          .mockResolvedValueOnce([makeNotification()])
+          .mockResolvedValueOnce([]);
+        mockOctokit.rest.issues.get
+          .mockRejectedValueOnce(transient())
+          .mockRejectedValueOnce(transient())
+          .mockRejectedValueOnce(transient());
+
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes).toHaveLength(0);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+
+        mockOctokit.rest.issues.get.mockResolvedValueOnce({
+          data: {
+            title: 'Test Issue',
+            body: '@test-bot the build is red',
+            user: { login: 'alice' },
+          },
+        });
+        mockOctokit.paginate
+          .mockResolvedValueOnce([makeNotification()])
+          .mockResolvedValueOnce([]);
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          'issue-body-42',
+        ]);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+      });
+
+      it.each([
+        [
+          'a secondary rate limit without retry-after',
+          403,
+          'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.',
+          false,
+        ],
+        ['a network failure, reported as 500', 500, 'fetch failed', false],
+        [
+          'the older abuse-detection wording',
+          403,
+          'You have triggered an abuse detection mechanism. Please wait a few minutes before you try again.',
+          false,
+        ],
+        [
+          'a SAML-protected repository',
+          403,
+          'Resource protected by organization SAML enforcement.',
+          true,
+        ],
+        ['a deleted issue', 404, 'Not Found', true],
+        ['a 403 whose only signal is retry-after', 403, 'Forbidden', false],
+      ])(
+        'classifies %s (HTTP %i) for the cursor',
+        async (label, status, message, marksRead) => {
+          await initFailing();
+          mockOctokit.paginate
+            .mockResolvedValueOnce([makeNotification()])
+            .mockRejectedValue(
+              Object.assign(new Error(message), {
+                status,
+                response: {
+                  headers: {
+                    'x-ratelimit-remaining': '4999',
+                    ...(label.includes('retry-after')
+                      ? { 'retry-after': '60' }
+                      : {}),
+                  },
+                },
+              }),
+            );
+
+          await pollOnce();
+
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead.mock.calls.length,
+          ).toBe(marksRead ? 1 : 0);
+          expect(journalRows()).toEqual([
+            expect.objectContaining({
+              outcome: marksRead ? 'skipped' : 'failed',
+            }),
+          ]);
+        },
+      );
+
+      it('gives up on a thread GitHub keeps failing so the cursor cannot freeze', async () => {
+        await initFailing();
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (
+            method ===
+            mockOctokit.rest.activity.listNotificationsForAuthenticatedUser
+          ) {
+            return [makeNotification()];
+          }
+          throw transient();
+        });
+
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          for (let poll = 1; poll < 30; poll++) await pollOnce();
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).not.toHaveBeenCalled();
+
+          await pollOnce();
+
+          // The channel's own line is throttled like the timeline rows.
+          expect(
+            stderr.mock.calls
+              .map((call) => String(call[0]))
+              .filter((line) => line.includes('API error processing issue:42'))
+              .map((line) => line.match(/\((\d+)\/30\)|skipping/)?.[0]),
+          ).toEqual(['(1/30)', '(10/30)', '(20/30)', 'skipping']);
+        } finally {
+          stderr.mockRestore();
+        }
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+        // Reported when the streak starts, every tenth retry and at give-up.
+        expect(
+          journalRows().map((row) => [
+            row['outcome'],
+            (row['detail'] as { failures: number }).failures,
+          ]),
+        ).toEqual([
+          ['failed', 1],
+          ['failed', 10],
+          ['failed', 20],
+          ['skipped', 30],
+        ]);
+      });
+
+      it('begins the hold budget again after a restart', async () => {
+        await initFailing();
+        const failingThread = async (method: unknown) => {
+          if (
+            method ===
+            mockOctokit.rest.activity.listNotificationsForAuthenticatedUser
+          ) {
+            return [makeNotification()];
+          }
+          throw transient();
+        };
+        mockOctokit.paginate.mockImplementation(failingThread);
+        const failures = () =>
+          journalRows().map((row) => [
+            row['outcome'],
+            (row['detail'] as { failures: number }).failures,
+          ]);
+
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          for (let poll = 1; poll < 30; poll++) await pollOnce();
+          expect(failures()).toEqual([
+            ['failed', 1],
+            ['failed', 10],
+            ['failed', 20],
+          ]);
+
+          // A restart: the poll loop saves the cursor after every poll, and a
+          // fresh instance loads it from disk with the rest of the state.
+          (channel as unknown as { saveCursor: () => void }).saveCursor();
+          channel = new TestableGithubChannel(
+            'test-github',
+            makeConfig(),
+            makeBridge(),
+          );
+          expect(channel.cursor.lastProcessedAt).toBe(
+            '2026-07-01T00:00:00.000Z',
+          );
+          mockOctokit.paginate.mockResolvedValueOnce([]);
+          await channel.connect();
+          channel.disconnect();
+          (
+            channel as unknown as {
+              abortableSleep: (ms: number) => Promise<void>;
+            }
+          ).abortableSleep = vi.fn().mockResolvedValue(undefined);
+          for (let poll = 1; poll < 30; poll++) await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        // The budget is in memory: 29 more polls still hold the window.
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+        expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+        expect(failures()).toEqual([
+          ['failed', 1],
+          ['failed', 10],
+          ['failed', 20],
+          ['failed', 1],
+          ['failed', 10],
+          ['failed', 20],
+        ]);
+      });
+
+      const issueNotification = (n: number, updatedAt?: string) =>
+        makeNotification({
+          id: String(n),
+          updated_at: updatedAt ?? `2026-07-02T0${n}:00:00.000Z`,
+          subject: {
+            title: `Issue ${n}`,
+            url: `https://api.github.com/repos/owner/repo/issues/${n}`,
+            type: 'Issue',
+          },
+        });
+      const isListNotifications = (method: unknown) =>
+        method ===
+        mockOctokit.rest.activity.listNotificationsForAuthenticatedUser;
+
+      it.each([
+        [
+          'a secondary rate limit 403',
+          403,
+          'You have exceeded a secondary rate limit',
+          {},
+        ],
+        [
+          'an exhausted-budget 403',
+          403,
+          'API rate limit exceeded',
+          { 'x-ratelimit-remaining': '0' },
+        ],
+        ['a 429', 429, 'Too Many Requests', {}],
+        ['a 401', 401, 'Bad credentials', {}],
+      ])(
+        'stops reading further threads and holds the window on %s',
+        async (_label, status, message, headers) => {
+          await initFailing();
+          const read: number[] = [];
+          let poll = 0;
+          mockOctokit.paginate.mockImplementation(
+            async (method: unknown, params: { issue_number?: number }) => {
+              if (isListNotifications(method)) {
+                poll += 1;
+                return [issueNotification(1), issueNotification(2)];
+              }
+              read.push(params.issue_number!);
+              if (poll === 1) {
+                throw Object.assign(new Error(message), {
+                  status,
+                  response: { headers },
+                });
+              }
+              return [];
+            },
+          );
+
+          await pollOnce();
+
+          // The limit answered thread 1 (three in-call attempts); thread 2
+          // was not read at all, and nothing was marked read.
+          expect(read).toEqual([1, 1, 1]);
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).not.toHaveBeenCalled();
+          expect(journalRows()).toEqual([
+            expect.objectContaining({ outcome: 'failed', number: 1 }),
+          ]);
+
+          await pollOnce();
+
+          expect(read.slice(3)).toEqual([1, 2]);
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it('skips at once when the failure is a local exception without a status', async () => {
+        await initFailing();
+        mockOctokit.paginate
+          .mockResolvedValueOnce([makeNotification()])
+          .mockRejectedValue(new TypeError('unexpected comment shape'));
+
+        await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        expect(journalRows()).toEqual([
+          expect.objectContaining({ outcome: 'skipped' }),
+        ]);
+      });
+
+      it('shares one budget between threads that fail one after another', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return poll < 15
+                ? [issueNotification(1)]
+                : [issueNotification(1), issueNotification(2)];
+            }
+            // Thread 1 fails through poll 15; thread 2 arrives on poll 15
+            // and keeps failing.
+            if (params.issue_number === 1 ? poll <= 15 : true) {
+              throw transient();
+            }
+            return [];
+          },
+        );
+
+        for (let i = 0; i < 29; i++) await pollOnce();
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+
+        await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        // Each thread reports its own first and tenth failure, at the
+        // window's poll count; the window's 30th failing poll is thread 2's
+        // 16th failure.
+        expect(
+          journalRows().map((row) => {
+            const detail = row['detail'] as {
+              failures: number;
+              heldPolls?: number;
+            };
+            return [
+              row['number'],
+              row['outcome'],
+              detail.failures,
+              detail.heldPolls,
+            ];
+          }),
+        ).toEqual([
+          [1, 'failed', 1, 1],
+          [1, 'failed', 10, 10],
+          [2, 'failed', 1, 15],
+          [2, 'failed', 10, 24],
+          [2, 'skipped', 16, undefined],
+        ]);
+      });
+
+      it('reads a cleanly read thread again on every held poll', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              // Thread 1's notification keeps its timestamp: the comment that
+              // arrives on poll 2 lands in the same second.
+              return [issueNotification(1), issueNotification(2)];
+            }
+            if (params.issue_number === 2) throw transient();
+            if (poll === 1) return [];
+            const at = '2026-07-02T01:00:00.000Z';
+            return [makeComment({ id: 7001, created_at: at, updated_at: at })];
+          },
+        );
+
+        await pollOnce();
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '7001',
+        ]);
+      });
+
+      it('feeds a first-contact body on the poll after a failed comment turn', async () => {
+        await initFailing();
+        mockOctokit.rest.issues.get.mockResolvedValue({
+          data: {
+            title: 'Test Issue',
+            body: 'please triage this issue',
+            user: { login: 'carol' },
+          },
+        });
+        mockOctokit.paginate.mockImplementation(async (method: unknown) =>
+          isListNotifications(method)
+            ? [makeNotification({ reason: 'subscribed' })]
+            : [makeComment({ id: 5000, body: 'a plain comment' })],
+        );
+        let failed = false;
+        channel.handleInboundHook = (envelope) => {
+          if (envelope.messageId === '5000' && !failed) {
+            failed = true;
+            throw new Error('turn failed');
+          }
+        };
+
+        for (let i = 0; i < 4; i++) await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '5000',
+          'issue-body-42',
+        ]);
+      });
+
+      it('reads a thread again after a poll that could not read the publication audit', async () => {
+        await initFailing();
+        const audit = inboundTaskPath().replace(
+          'github-inbound-tasks.json',
+          'github-audit.jsonl',
+        );
+        // A directory where the audit file belongs cannot be read.
+        mkdirSync(audit, { recursive: true });
+        mockOctokit.paginate.mockImplementation(async (method: unknown) =>
+          isListNotifications(method) ? [makeNotification()] : [makeComment()],
+        );
+
+        await pollOnce();
+        expect(channel.inboundEnvelopes).toHaveLength(0);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+
+        rmSync(audit, { recursive: true });
+        await pollOnce();
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '1001',
+        ]);
+      });
+
+      it('keeps the budget when the commit itself fails', async () => {
+        await initFailing();
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (isListNotifications(method)) return [makeNotification()];
+          throw transient();
+        });
+        const markReadError = () =>
+          Object.assign(new Error('Server Error'), { status: 500 });
+        mockOctokit.rest.activity.markNotificationsAsRead
+          .mockRejectedValueOnce(markReadError())
+          .mockRejectedValueOnce(markReadError())
+          .mockRejectedValueOnce(markReadError());
+
+        for (let i = 0; i < 29; i++) await pollOnce();
+        // The 30th poll gives up but cannot mark the window read (three
+        // in-call attempts).
+        await expect(pollOnce()).rejects.toThrow('Server Error');
+
+        // Still out of budget: the next poll commits instead of holding.
+        await pollOnce();
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(4);
+        expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+      });
+
+      it('keeps threads of two repositories with the same number apart', async () => {
+        await initFailing();
+        const other = makeNotification({
+          id: '200',
+          subject: {
+            title: 'Other Issue',
+            url: 'https://api.github.com/repos/owner/other/issues/42',
+            type: 'Issue',
+          },
+          repository: { full_name: 'owner/other' },
+        });
+        const read: string[] = [];
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { repo?: string }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return [makeNotification(), other];
+            }
+            read.push(`${params.repo}:${poll}`);
+            // Both fail on poll 1; on poll 2 only the second one still does.
+            if (poll === 1 || params.repo === 'other') throw transient();
+            return [];
+          },
+        );
+
+        await pollOnce();
+        await pollOnce();
+
+        expect(
+          journalRows().map((row) => [
+            row['repository'],
+            (row['detail'] as { failures: number }).failures,
+          ]),
+        ).toEqual([
+          ['owner/repo', 1],
+          ['owner/other', 1],
+        ]);
+        // Reading owner/repo#42 on poll 2 does not count as reading
+        // owner/other#42, which is read again on poll 3.
+        await pollOnce();
+        expect(read.filter((entry) => entry.startsWith('other:'))).toEqual([
+          'other:1',
+          'other:1',
+          'other:1',
+          'other:2',
+          'other:2',
+          'other:2',
+          'other:3',
+          'other:3',
+          'other:3',
+        ]);
+      });
+
+      it('restarts the count of a thread that comes back after the window committed', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              // Thread 1 is read elsewhere after poll 12 and comes back with
+              // new activity on poll 14; thread 2 lets poll 13 commit.
+              if (poll <= 12) return [issueNotification(1)];
+              if (poll === 13) return [issueNotification(2)];
+              return [issueNotification(1, '2026-07-02T03:00:00.000Z')];
+            }
+            if (params.issue_number === 2) return [];
+            throw transient();
+          },
+        );
+
+        for (let i = 0; i < 14; i++) await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        const thread1 = journalRows()
+          .filter((row) => row['number'] === 1)
+          .map((row) => {
+            const detail = row['detail'] as {
+              failures: number;
+              heldPolls: number;
+            };
+            return [detail.failures, detail.heldPolls];
+          });
+        // The commit on poll 13 gives the next window a fresh budget.
+        expect(thread1).toEqual([
+          [1, 1],
+          [10, 10],
+          [1, 1],
+        ]);
+      });
+
+      it("skips every thread still failing on the window's 30th failing poll", async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (isListNotifications(method)) {
+            poll += 1;
+            // Thread 2 starts failing one poll after thread 1.
+            return poll === 1
+              ? [issueNotification(1)]
+              : [issueNotification(1), issueNotification(2)];
+          }
+          throw transient();
+        });
+
+        for (let i = 0; i < 29; i++) await pollOnce();
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+
+        await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T02:00:00.000Z');
+        expect(
+          journalRows()
+            .filter((row) => row['outcome'] === 'skipped')
+            .map((row) => [
+              row['number'],
+              (row['detail'] as { failures: number }).failures,
+            ]),
+        ).toEqual([
+          [1, 30],
+          [2, 29],
+        ]);
+      });
+
+      it('journals a permanent failure once per window while a 5xx holds it', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return [issueNotification(1), issueNotification(2)];
+            }
+            if (params.issue_number === 1) {
+              throw Object.assign(new Error('Not Found'), { status: 404 });
+            }
+            // Thread 2 holds the window for three polls, then recovers.
+            if (poll <= 3) throw transient();
+            return [];
+          },
+        );
+
+        for (let i = 0; i < 4; i++) await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          journalRows()
+            .filter((row) => row['number'] === 1)
+            .map((row) => row['outcome']),
+        ).toEqual(['skipped']);
+
+        // A new window journals it again.
+        await pollOnce();
+        expect(
+          journalRows()
+            .filter((row) => row['number'] === 1)
+            .map((row) => row['outcome']),
+        ).toEqual(['skipped', 'skipped']);
+      });
+
+      it('journals a shared failure on its first and every tenth stopped poll', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (isListNotifications(method)) {
+            poll += 1;
+            return [issueNotification(1)];
+          }
+          // Rate-limited for twelve polls, then a poll that commits, then
+          // the limit again in the next window.
+          if (poll <= 12 || poll === 14) {
+            throw Object.assign(
+              new Error('You have exceeded a secondary rate limit'),
+              { status: 403, response: { headers: {} } },
+            );
+          }
+          return [];
+        });
+
+        for (let i = 0; i < 14; i++) await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          journalRows().map(
+            (row) => (row['detail'] as { heldPolls: number }).heldPolls,
+          ),
+        ).toEqual([1, 10, 1]);
+      });
+
+      it('journals a skip of a comment re-read by a held window once', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              // New activity moves thread 1's notification on every poll,
+              // so the held window reads its comments again each time.
+              return [
+                issueNotification(1, `2026-07-02T01:0${poll}:00.000Z`),
+                issueNotification(2),
+              ];
+            }
+            if (params.issue_number === 2) throw transient();
+            const at = '2026-07-02T00:30:00.000Z';
+            return [
+              makeComment({ id: 1001, created_at: at, updated_at: at }),
+              makeComment({
+                id: 1002,
+                body: 'no mention',
+                created_at: at,
+                updated_at: at,
+              }),
+            ];
+          },
+        );
+
+        for (let i = 0; i < 3; i++) await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '1001',
+        ]);
+        expect(
+          journal()
+            .filter(
+              (row) =>
+                row['reason'] === 'duplicate' ||
+                row['reason'] === 'mention_required',
+            )
+            .map((row) => [row['reason'], row['messageId']]),
+        ).toEqual([
+          ['mention_required', 'C_1002'],
+          ['duplicate', 'C_1001'],
+        ]);
+      });
+
+      it('does not spend the 5xx budget on polls a rate limit stopped', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (isListNotifications(method)) {
+            poll += 1;
+            return [issueNotification(1)];
+          }
+          // Twenty rate-limited polls, then a 5xx on every poll.
+          if (poll <= 20) {
+            throw Object.assign(new Error('Too Many Requests'), {
+              status: 429,
+              response: { headers: {} },
+            });
+          }
+          throw transient();
+        });
+
+        for (let i = 0; i < 49; i++) await pollOnce();
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+
+        await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+      });
+
+      it('journals a give-up once while a rate limit keeps the window held', async () => {
+        await initFailing();
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              return [issueNotification(1), issueNotification(2)];
+            }
+            if (params.issue_number === 1) throw transient();
+            throw Object.assign(new Error('Too Many Requests'), {
+              status: 429,
+              response: { headers: {} },
+            });
+          },
+        );
+
+        for (let i = 0; i < 45; i++) await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+        expect(
+          journalRows()
+            .filter((row) => row['number'] === 1)
+            .map((row) => [
+              row['outcome'],
+              (row['detail'] as { failures: number }).failures,
+            ]),
+        ).toEqual([
+          ['failed', 1],
+          ['failed', 10],
+          ['failed', 20],
+          ['skipped', 30],
+        ]);
+        expect(
+          journalRows()
+            .filter((row) => row['number'] === 2)
+            .map((row) => (row['detail'] as { heldPolls: number }).heldPolls),
+        ).toEqual([1, 10, 20, 30, 40]);
+      });
+
+      it('spends no budget while nothing newer waits to be marked read', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              // Thread 1 stays unread at the cursor (its mark-as-read never
+              // applied) and nothing newer arrives until poll 31.
+              const stale = issueNotification(1, '2026-07-01T00:00:00.000Z');
+              return poll <= 30 ? [stale] : [stale, issueNotification(2)];
+            }
+            if (params.issue_number === 1 || poll === 31) throw transient();
+            const at = '2026-07-02T01:30:00.000Z';
+            return [makeComment({ id: 2001, created_at: at, updated_at: at })];
+          },
+        );
+
+        for (let i = 0; i < 32; i++) await pollOnce();
+
+        // Thread 2's first failure holds the new window; its comment is
+        // answered on the next poll, and the stale thread's failures do not
+        // keep that window from being marked read.
+        expect(
+          journalRows()
+            .filter((row) => row['number'] === 2)
+            .map((row) => row['outcome']),
+        ).toEqual(['failed']);
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '2001',
+        ]);
+        expect(
+          journalRows()
+            .filter((row) => row['number'] === 1)
+            .map((row) => row['outcome']),
+        ).toEqual(['skipped']);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+      });
+
+      it('reports a thread as retried while a failing task store holds the window', async () => {
+        await initFailing();
+        mockOctokit.paginate
+          .mockResolvedValueOnce([makeNotification()])
+          .mockResolvedValueOnce([makeComment()]);
+        const originalRename = nodeFs.renameSync;
+        const spy = vi.spyOn(nodeFs, 'renameSync').mockImplementation(((
+          from: string,
+          to: string,
+        ) => {
+          if (
+            typeof to === 'string' &&
+            to.endsWith('-github-inbound-tasks.json')
+          ) {
+            throw Object.assign(new Error('ENOSPC: no space left on device'), {
+              code: 'ENOSPC',
+            });
+          }
+          return (originalRename as (a: string, b: string) => void)(from, to);
+        }) as unknown as typeof nodeFs.renameSync);
+        try {
+          await pollOnce();
+        } finally {
+          spy.mockRestore();
+        }
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+        expect(journalRows()).toEqual([
+          expect.objectContaining({ outcome: 'failed', number: 42 }),
+        ]);
+
+        mockOctokit.paginate
+          .mockResolvedValueOnce([makeNotification()])
+          .mockResolvedValueOnce([makeComment()]);
+        await pollOnce();
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '1001',
+        ]);
+      });
+
+      it('journals a skip after a retried store failure of the same thread', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (isListNotifications(method)) {
+            poll += 1;
+            return [makeNotification()];
+          }
+          if (poll === 1) return [makeComment()];
+          throw Object.assign(new Error('Not Found'), { status: 404 });
+        });
+        const originalRename = nodeFs.renameSync;
+        const spy = vi.spyOn(nodeFs, 'renameSync').mockImplementation(((
+          from: string,
+          to: string,
+        ) => {
+          if (poll === 1 && to.endsWith('-github-inbound-tasks.json')) {
+            throw Object.assign(new Error('ENOSPC: no space left on device'), {
+              code: 'ENOSPC',
+            });
+          }
+          return (originalRename as (a: string, b: string) => void)(from, to);
+        }) as unknown as typeof nodeFs.renameSync);
+        try {
+          await pollOnce();
+          await pollOnce();
+        } finally {
+          spy.mockRestore();
+        }
+
+        expect(journalRows().map((row) => row['outcome'])).toEqual([
+          'failed',
+          'skipped',
+        ]);
+      });
+
+      it('skips an HTTP error on another thread while the task store is failing', async () => {
+        await initFailing();
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              return [issueNotification(1), issueNotification(2)];
+            }
+            if (params.issue_number === 2) {
+              throw Object.assign(new Error('Not Found'), { status: 404 });
+            }
+            const at = '2026-07-02T00:30:00.000Z';
+            return [makeComment({ id: 2001, created_at: at, updated_at: at })];
+          },
+        );
+        const originalRename = nodeFs.renameSync;
+        const spy = vi.spyOn(nodeFs, 'renameSync').mockImplementation(((
+          from: string,
+          to: string,
+        ) => {
+          if (to.endsWith('-github-inbound-tasks.json')) {
+            throw Object.assign(new Error('ENOSPC: no space left on device'), {
+              code: 'ENOSPC',
+            });
+          }
+          return (originalRename as (a: string, b: string) => void)(from, to);
+        }) as unknown as typeof nodeFs.renameSync);
+        try {
+          await pollOnce();
+        } finally {
+          spy.mockRestore();
+        }
+
+        expect(
+          journalRows().map((row) => [row['number'], row['outcome']]),
+        ).toEqual([
+          [1, 'failed'],
+          [2, 'skipped'],
+        ]);
+      });
+
+      it('journals the give-up of a thread first seen stale', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (isListNotifications(method)) {
+            poll += 1;
+            // Stale on poll 1, then new activity moves it past the cursor.
+            return [
+              issueNotification(
+                1,
+                poll === 1
+                  ? '2026-07-01T00:00:00.000Z'
+                  : '2026-07-02T01:00:00.000Z',
+              ),
+            ];
+          }
+          throw transient();
+        });
+
+        for (let i = 0; i < 31; i++) await pollOnce();
+
+        expect(
+          journalRows().map((row) => [
+            row['outcome'],
+            (row['detail'] as { failures?: number } | undefined)?.failures,
+          ]),
+        ).toEqual([
+          ['skipped', undefined],
+          ['failed', 1],
+          ['failed', 10],
+          ['failed', 20],
+          ['skipped', 30],
+        ]);
+      });
+
+      it('holds the window when a stale notification hits a rate limit', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return [
+                issueNotification(1, '2026-07-01T00:00:00.000Z'),
+                issueNotification(2),
+              ];
+            }
+            if (params.issue_number === 1) {
+              if (poll === 1) {
+                throw Object.assign(new Error('Too Many Requests'), {
+                  status: 429,
+                  response: { headers: {} },
+                });
+              }
+              return [];
+            }
+            const at = '2026-07-02T01:30:00.000Z';
+            return [makeComment({ id: 5001, created_at: at, updated_at: at })];
+          },
+        );
+
+        await pollOnce();
+        // The limit stopped the poll before the newer thread was read.
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '5001',
+        ]);
+      });
+
+      it('still reads a thread it gave up on while a rate limit holds the window', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return [issueNotification(1), issueNotification(2)];
+            }
+            if (params.issue_number === 1) {
+              // Fails past the budget, then recovers on poll 31.
+              if (poll <= 30) throw transient();
+              const at = '2026-07-02T00:30:00.000Z';
+              return [
+                makeComment({ id: 6001, created_at: at, updated_at: at }),
+              ];
+            }
+            // Thread 2 is rate-limited until poll 31 and holds the window.
+            if (poll <= 30) {
+              throw Object.assign(new Error('Too Many Requests'), {
+                status: 429,
+                response: { headers: {} },
+              });
+            }
+            return [];
+          },
+        );
+
+        for (let i = 0; i < 31; i++) await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '6001',
+        ]);
+      });
+
+      it('reads a thread that failed with a 404 again on the next held poll', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return [issueNotification(1), issueNotification(2)];
+            }
+            if (params.issue_number === 2) throw transient();
+            // A just-created issue can read as missing for a moment.
+            if (poll === 1) {
+              throw Object.assign(new Error('Not Found'), { status: 404 });
+            }
+            const at = '2026-07-02T00:30:00.000Z';
+            return [makeComment({ id: 8001, created_at: at, updated_at: at })];
+          },
+        );
+
+        await pollOnce();
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+          '8001',
+        ]);
+      });
+
+      it('reads a stale notification again after its read failed', async () => {
+        await initFailing();
+        let poll = 0;
+        // A late notification at the committed cursor's second: its
+        // first-contact body is not bounded by the cursor window.
+        const stale = issueNotification(1, '2026-07-01T00:00:00.000Z');
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (isListNotifications(method)) {
+            poll += 1;
+            return poll === 1 ? [stale] : [stale, issueNotification(2)];
+          }
+          return [];
+        });
+        mockOctokit.rest.issues.get
+          .mockRejectedValueOnce(transient())
+          .mockRejectedValueOnce(transient())
+          .mockRejectedValueOnce(transient())
+          .mockResolvedValue({
+            data: {
+              title: 'Issue 1',
+              body: '@test-bot please look at this',
+              user: { login: 'alice' },
+            },
+          });
+
+        await pollOnce();
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes.map((e) => e.messageId)).toContain(
+          'issue-body-1',
+        );
+      });
+
+      describe('a local error part-way through a thread', () => {
+        // An unreadable pending-deliveries file throws after a comment was
+        // claimed: no persistence flag is set, the task stays running and
+        // holds the window, and the rest of the thread must be read again.
+        const corruptPending = () => {
+          const path = inboundTaskPath().replace(
+            'github-inbound-tasks.json',
+            'github-pending-deliveries.json',
+          );
+          mkdirSync(dirname(path), { recursive: true });
+          writeFileSync(path, '{not json', 'utf-8');
+          return path;
+        };
+
+        it('still answers the later comments of the thread', async () => {
+          await initFailing();
+          const pending = corruptPending();
+          let poll = 0;
+          mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return poll <= 3 ? [makeNotification()] : [];
+            }
+            return [
+              makeComment({ id: 1001 }),
+              makeComment({
+                id: 1002,
+                body: '@test-bot and this too',
+                created_at: '2026-07-02T09:30:00.000Z',
+                updated_at: '2026-07-02T09:30:00.000Z',
+              }),
+            ];
+          });
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockReturnValue(true);
+          try {
+            await pollOnce();
+            await pollOnce();
+            rmSync(pending, { force: true });
+            await pollOnce();
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+
+          expect(channel.inboundEnvelopes.map((e) => e.messageId)).toContain(
+            '1002',
+          );
+          // The claimed task held the window, so the thread was read again.
+          expect(journalRows()).toEqual([
+            expect.objectContaining({ outcome: 'failed', thread: 'issue:42' }),
+          ]);
+        });
+
+        it('still reads the comment lane after a failed direct dispatch', async () => {
+          await initFailing();
+          const pending = corruptPending();
+          mockOctokit.rest.pulls.get.mockResolvedValue({
+            data: { title: 'PR', user: { login: 'alice' }, state: 'open' },
+          });
+          let poll = 0;
+          mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return poll <= 3
+                ? [
+                    makeNotification({
+                      reason: 'review_requested',
+                      subject: {
+                        title: 'PR',
+                        url: 'https://api.github.com/repos/owner/repo/pulls/42',
+                        type: 'PullRequest',
+                      },
+                    }),
+                  ]
+                : [];
+            }
+            if (method === mockOctokit.rest.issues.listEvents) {
+              return [makeIssueEvent()];
+            }
+            return [
+              makeComment({
+                id: 1001,
+                created_at: '2026-07-02T09:30:00.000Z',
+                updated_at: '2026-07-02T09:30:00.000Z',
+              }),
+            ];
+          });
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockReturnValue(true);
+          try {
+            await pollOnce();
+            await pollOnce();
+            rmSync(pending, { force: true });
+            await pollOnce();
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+
+          expect(channel.inboundEnvelopes.map((e) => e.messageId)).toContain(
+            '1001',
+          );
+          expect(journalRows()).toEqual([
+            expect.objectContaining({ outcome: 'failed', thread: 'pr:42' }),
+          ]);
+        });
+
+        it('reports the skip once the thread no longer holds the window', async () => {
+          await initFailing();
+          const pending = corruptPending();
+          let poll = 0;
+          mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return [makeNotification()];
+            }
+            if (poll === 1) return [makeComment({ id: 1001 })];
+            throw Object.assign(new Error('Not Found'), { status: 404 });
+          });
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockReturnValue(true);
+          try {
+            await pollOnce();
+            expect(
+              mockOctokit.rest.activity.markNotificationsAsRead,
+            ).not.toHaveBeenCalled();
+            // The claimed task settles at the start of the next poll; the
+            // thread then fails on its own and the window is marked read.
+            rmSync(pending, { force: true });
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+
+          expect(
+            journalRows().map((row) => [row['outcome'], row['thread']]),
+          ).toEqual([
+            ['failed', 'issue:42'],
+            ['skipped', 'issue:42'],
+          ]);
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).toHaveBeenCalledTimes(1);
+        });
+
+        it("reports another thread skipped while one thread's task holds the window", async () => {
+          await initFailing();
+          corruptPending();
+          mockOctokit.paginate.mockImplementation(
+            async (method: unknown, params: { issue_number?: number }) => {
+              if (isListNotifications(method)) {
+                return [issueNotification(1), issueNotification(2)];
+              }
+              if (params.issue_number === 1) {
+                return [
+                  makeComment({
+                    created_at: '2026-07-02T00:30:00.000Z',
+                    updated_at: '2026-07-02T00:30:00.000Z',
+                  }),
+                ];
+              }
+              throw Object.assign(new Error('Not Found'), { status: 404 });
+            },
+          );
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockReturnValue(true);
+          try {
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+
+          // Thread 1's task holds the window; thread 2 is given up on.
+          expect(
+            journalRows()
+              .map((row) => [row['thread'], row['outcome']])
+              .sort(),
+          ).toEqual([
+            ['issue:1', 'failed'],
+            ['issue:2', 'skipped'],
+          ]);
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).not.toHaveBeenCalled();
+        });
+
+        it('reports the thread skipped when its only task no longer holds the window', async () => {
+          // A task that used up its attempts no longer holds the cursor.
+          writeInboundTasks([
+            makeInboundTaskRecord({ state: 'failed', attempts: 3 }),
+          ]);
+          await initFailing();
+          mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+            if (isListNotifications(method)) return [makeNotification()];
+            throw Object.assign(new Error('Not Found'), { status: 404 });
+          });
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockReturnValue(true);
+          try {
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+
+          expect(journalRows()).toEqual([
+            expect.objectContaining({ outcome: 'skipped', thread: 'issue:42' }),
+          ]);
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).toHaveBeenCalledTimes(1);
+        });
+
+        it('reports the thread skipped when its task settled before the error', async () => {
+          await initFailing();
+          mockOctokit.rest.pulls.get.mockResolvedValue({
+            data: { title: 'PR', user: { login: 'alice' }, state: 'open' },
+          });
+          mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+            if (isListNotifications(method)) {
+              return [
+                makeNotification({
+                  reason: 'review_requested',
+                  subject: {
+                    title: 'PR',
+                    url: 'https://api.github.com/repos/owner/repo/pulls/42',
+                    type: 'PullRequest',
+                  },
+                }),
+              ];
+            }
+            if (method === mockOctokit.rest.issues.listEvents) {
+              return [makeIssueEvent()];
+            }
+            // The review request was answered; the comment lane then fails
+            // locally, with no task of the thread left to hold the window.
+            throw new TypeError('cannot read the comment lane');
+          });
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockReturnValue(true);
+          try {
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+
+          expect(channel.inboundEnvelopes).toHaveLength(1);
+          expect(journalRows()).toEqual([
+            expect.objectContaining({ outcome: 'skipped', thread: 'pr:42' }),
+          ]);
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).toHaveBeenCalledTimes(1);
+        });
+      });
+
+      it('bounds the per-thread failure counts', async () => {
+        await initFailing();
+        const failures = (
+          channel as unknown as {
+            transientNotificationFailures: Map<string, number>;
+          }
+        ).transientNotificationFailures;
+        for (let i = 0; i < 8192; i++) failures.set(`x|issue:${i}`, 1);
+        mockOctokit.paginate.mockImplementation(async (method: unknown) => {
+          if (isListNotifications(method)) return [issueNotification(1)];
+          throw transient();
+        });
+
+        await pollOnce();
+        await pollOnce();
+
+        expect(failures.size).toBe(8192);
+        expect(failures.has('owner/repo|issue:1')).toBe(false);
+        // A thread whose count is not kept is still reported once, not on
+        // every poll.
+        expect(journalRows()).toEqual([
+          expect.objectContaining({ outcome: 'failed', thread: 'issue:1' }),
+        ]);
+      });
+
+      it('bounds the once-per-window journal keys', async () => {
+        await initFailing();
+        const journalOnce = (
+          channel as unknown as {
+            journalOncePerWindow: (key: string) => boolean;
+          }
+        ).journalOncePerWindow.bind(channel);
+        const keys = (channel as unknown as { windowJournalKeys: Set<string> })
+          .windowJournalKeys;
+
+        for (let i = 0; i < 8192; i++) journalOnce(`k${i}`);
+        expect(keys.size).toBe(8192);
+        expect(journalOnce('k0')).toBe(false);
+
+        // Past the bound a key is journaled every time, the rest stay quiet.
+        expect(journalOnce('one more')).toBe(true);
+        expect(journalOnce('one more')).toBe(true);
+        expect(journalOnce('k1')).toBe(false);
+        expect(keys.size).toBe(8192);
+      });
+    });
+
     it('aborts the poll cycle without advancing cursor when markNotificationsAsRead fails', async () => {
       await initWithoutLoop();
-      mockOctokit.paginate.mockResolvedValueOnce([
-        makeNotification({ updated_at: '2026-07-02T10:00:00.000Z' }),
-      ]);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            updated_at: '2026-07-02T10:00:00.000Z',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([]);
       mockOctokit.rest.activity.markNotificationsAsRead.mockRejectedValue(
         new Error('server error'),
       );
@@ -2917,7 +4429,12 @@ describe('GithubChannel', () => {
     async function connectForPublication() {
       mockOctokit.paginate.mockResolvedValue([]);
       await channel.connect();
-      channel.disconnect();
+      // Stop the poll loop but not the publication retries: disconnect()
+      // would also make a rate-limit retry give up, and these cases exercise
+      // the retries. Stopping the loop aborts the controller that a retry wait
+      // without a signal sleeps on, so such a wait ends at once; a case that
+      // checks a wait stubs sleepForRetry and asserts its calls.
+      (channel as unknown as { stopPollLoop: () => void }).stopPollLoop();
     }
 
     it('suppresses the exact no-reply sentinel and audits the outcome', async () => {
@@ -3384,6 +4901,304 @@ describe('GithubChannel', () => {
       ]);
     });
 
+    it('keeps every pending final and stops the pass on a secondary rate limit', async () => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({ id: 'second', sourceMessageId: '1002' }),
+      ]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(
+          new Error(
+            'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.',
+          ),
+          {
+            status: 403,
+            response: { headers: { 'x-ratelimit-remaining': '4999' } },
+          },
+        ),
+      );
+
+      await retryPendingForTest();
+
+      // One record's attempts only: the limit answers the rest the same way.
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(3);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['first', 'second']);
+      expect(existsSync(auditPath())).toBe(false);
+    });
+
+    it('stops the pass on an exhausted hourly budget as well', async () => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({ id: 'second', sourceMessageId: '1002' }),
+      ]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error('API rate limit exceeded'), {
+          status: 403,
+          response: { headers: { 'x-ratelimit-remaining': '0' } },
+        }),
+      );
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(3);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['first', 'second']);
+    });
+
+    it('audits and drops an ambiguous answer that arrives after the stop', async () => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({
+          id: 'second',
+          threadId: 'issue:43',
+          sourceMessageId: '1002',
+        }),
+      ]);
+      const abort = new AbortController();
+      // The stop lands while the write is in flight; its abort fires once the
+      // write ends, which here ends with an answer that may have posted it.
+      mockOctokit.rest.issues.createComment.mockImplementationOnce(async () => {
+        abort.abort();
+        throw Object.assign(new Error('Bad Gateway'), { status: 502 });
+      });
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        retryPendingFinalDeliveries: (signal?: AbortSignal) => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+
+      await privateChannel.retryPendingFinalDeliveries(abort.signal);
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['second']);
+      expect(readFileSync(auditPath(), 'utf-8')).toContain(
+        '"outcome":"failed_ambiguous"',
+      );
+    });
+
+    it('keeps the records when a stop deferred by another write lets the wait run out', async () => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({
+          id: 'second',
+          threadId: 'issue:43',
+          sourceMessageId: '1002',
+        }),
+      ]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error('You have exceeded a secondary rate limit'), {
+          status: 403,
+          response: { headers: { 'x-ratelimit-remaining': '4999' } },
+        }),
+      );
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        sleepForRetry: (ms: number) => Promise<void>;
+        pendingFinalDeliveryRequestsActive: number;
+        retryPendingFinalDeliveries: (signal?: AbortSignal) => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      // Another write is in flight when the channel stops, so the pass's
+      // abort waits for it and the retry wait simply ends.
+      privateChannel.sleepForRetry = vi.fn().mockImplementation(async () => {
+        privateChannel.pendingFinalDeliveryRequestsActive += 1;
+        channel.disconnect();
+        privateChannel.pendingFinalDeliveryRequestsActive -= 1;
+      });
+
+      await privateChannel.retryPendingFinalDeliveries(
+        new AbortController().signal,
+      );
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['first', 'second']);
+      expect(existsSync(auditPath())).toBe(false);
+    });
+
+    it('keeps a record whose retry an abort stopped before it was sent', async () => {
+      writePending([pendingRecord({ id: 'first', sourceMessageId: '1001' })]);
+      const abort = new AbortController();
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error('You have exceeded a secondary rate limit'), {
+          status: 403,
+          response: { headers: { 'x-ratelimit-remaining': '4999' } },
+        }),
+      );
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        sleepForRetry: (ms: number) => Promise<void>;
+        retryPendingFinalDeliveries: (signal?: AbortSignal) => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      // The abort ends the wait without a stop request (a reconnect).
+      privateChannel.sleepForRetry = vi.fn().mockImplementation(async () => {
+        abort.abort();
+      });
+
+      await privateChannel.retryPendingFinalDeliveries(abort.signal);
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['first']);
+      expect(existsSync(auditPath())).toBe(false);
+    });
+
+    it("stops the pass after a rate limit that GitHub's header does not vouch for", async () => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({
+          id: 'second',
+          threadId: 'issue:43',
+          sourceMessageId: '1002',
+        }),
+        pendingRecord({
+          id: 'third',
+          threadId: 'issue:44',
+          sourceMessageId: '1003',
+        }),
+      ]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error('Too Many Requests'), {
+          status: 429,
+          response: { headers: { 'retry-after': '30' } },
+        }),
+      );
+
+      await retryPendingForTest();
+
+      // The first may have been written, so it is dropped; the others wait.
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['second', 'third']);
+      expect(readFileSync(auditPath(), 'utf-8')).toContain(
+        '"outcome":"failed_ambiguous"',
+      );
+    });
+
+    it('starts no further record once the channel stops during the pass', async () => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({
+          id: 'second',
+          threadId: 'issue:43',
+          sourceMessageId: '1002',
+        }),
+      ]);
+      // The stop lands while the first record's write is in flight; the
+      // pass's own signal stays live, as when another write defers the abort.
+      mockOctokit.rest.issues.createComment.mockImplementationOnce(async () => {
+        channel.disconnect();
+        return {
+          data: {
+            id: 2011,
+            html_url:
+              'https://github.com/owner/repo/issues/42#issuecomment-2011',
+          },
+        };
+      });
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        retryPendingFinalDeliveries: (signal?: AbortSignal) => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+
+      await privateChannel.retryPendingFinalDeliveries(
+        new AbortController().signal,
+      );
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['second']);
+    });
+
+    it('still drops a later record already posted once the pass stops on a rate limit', async () => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({
+          id: 'kept',
+          threadId: 'issue:44',
+          sourceMessageId: '1003',
+        }),
+        pendingRecord({
+          id: 'second',
+          threadId: 'issue:43',
+          sourceMessageId: '1002',
+        }),
+      ]);
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          state: 'reply_pending',
+          envelope: undefined,
+          source: {
+            chatId: 'owner/repo',
+            threadId: 'issue:43',
+            messageId: '1002',
+          },
+        }),
+      ]);
+      mkdirSync(join(auditPath(), '..'), { recursive: true });
+      writeFileSync(
+        auditPath(),
+        `${JSON.stringify({
+          at: '2026-07-30T00:01:00.000Z',
+          type: 'github_publication',
+          outcome: 'posted',
+          channel: 'test-github',
+          repository: 'owner/repo',
+          number: 43,
+          sessionId: 'session-publication',
+          threadId: 'issue:43',
+          pendingId: 'second',
+        })}\n`,
+      );
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error('You have exceeded a secondary rate limit'), {
+          status: 403,
+          response: { headers: { 'x-ratelimit-remaining': '4999' } },
+        }),
+      );
+
+      await retryPendingForTest();
+
+      // No request for the posted record: only its stale entry goes.
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(3);
+      expect(
+        mockOctokit.rest.issues.createComment.mock.calls.every(
+          ([request]) => request.issue_number === 42,
+        ),
+      ).toBe(true);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['first', 'kept']);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
     it('drops and audits an ambiguous pending final retry failure', async () => {
       writePending([
         pendingRecord({ triggerKind: 'mention', sourceMessageId: '1001' }),
@@ -3588,29 +5403,45 @@ describe('GithubChannel', () => {
       channel.disconnect();
     });
 
-    it('keeps bare 429 publication failures single-shot', async () => {
-      await connectForPublication();
-      const error = Object.assign(new Error('secondary rate limit'), {
-        status: 429,
-      });
-      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
-      const publish = (
-        channel as unknown as {
-          publishFinalResponse: (
-            chatId: string,
-            threadId: string,
-            text: string,
-            sessionId: string,
-          ) => Promise<void>;
-        }
-      ).publishFinalResponse.bind(channel);
+    it.each([
+      ['without headers', undefined],
+      ['with only retry-after', { 'retry-after': '30' }],
+    ])(
+      'keeps bare 429 publication failures single-shot (%s)',
+      async (_label, headers) => {
+        await connectForPublication();
+        const error = Object.assign(new Error('secondary rate limit'), {
+          status: 429,
+          ...(headers ? { response: { headers } } : {}),
+        });
+        mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+        const publish = (
+          channel as unknown as {
+            publishFinalResponse: (
+              chatId: string,
+              threadId: string,
+              text: string,
+              sessionId: string,
+            ) => Promise<void>;
+          }
+        ).publishFinalResponse.bind(channel);
 
-      await expect(
-        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
-      ).rejects.toMatchObject({ cause: error });
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
-      expect(existsSync(pendingPath())).toBe(false);
-    });
+        await expect(
+          publish(
+            'owner/repo',
+            'issue:42',
+            'Final reply',
+            'session-publication',
+          ),
+        ).rejects.toMatchObject({ cause: error });
+        expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+        expect(existsSync(pendingPath())).toBe(false);
+        // It may have been posted: the key stays consumed.
+        expect(readFileSync(auditPath(), 'utf-8')).toContain(
+          '"outcome":"failed_ambiguous"',
+        );
+      },
+    );
 
     it('audits an ambiguous publication failure as failed_ambiguous, keeping the key consumed (R6-A3)', async () => {
       await connectForPublication();
@@ -3666,6 +5497,381 @@ describe('GithubChannel', () => {
       expect(audit).not.toContain('"outcome":"failed_ambiguous"');
       expect(existsSync(pendingPath())).toBe(true);
     });
+
+    const SECONDARY_LIMIT =
+      'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.';
+    it.each([
+      [
+        'a 403 with retry-after',
+        403,
+        SECONDARY_LIMIT,
+        { 'retry-after': '60' },
+        [60_000, 60_000],
+      ],
+      ['a bare 403', 403, SECONDARY_LIMIT, {}, [60_000, 120_000]],
+      [
+        'a 403 with retry-after and other wording',
+        403,
+        'Forbidden',
+        { 'retry-after': '30' },
+        [30_000, 30_000],
+      ],
+      ['a 429', 429, SECONDARY_LIMIT, {}, [60_000, 120_000]],
+      [
+        'the older abuse-detection wording',
+        403,
+        'You have triggered an abuse detection mechanism. Please wait a few minutes before you try again.',
+        {},
+        [60_000, 120_000],
+      ],
+    ])(
+      'retries the final reply, then keeps it pending, on a secondary rate limit sent as %s',
+      async (_label, status, message, extraHeaders, waits) => {
+        await connectForPublication();
+        // The retry cooldown alone: the poll loop's own interval sleep shares
+        // abortableSleep and would interleave with these values.
+        const sleep = vi.fn().mockResolvedValue(undefined);
+        (
+          channel as unknown as {
+            sleepForRetry: (ms: number) => Promise<void>;
+          }
+        ).sleepForRetry = sleep;
+        const error = Object.assign(
+          new Error(`${message} - https://docs.github.com/rest`),
+          {
+            status,
+            response: {
+              headers: { 'x-ratelimit-remaining': '4999', ...extraHeaders },
+            },
+          },
+        );
+        mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+        const publish = (
+          channel as unknown as {
+            publishFinalResponse: (
+              chatId: string,
+              threadId: string,
+              text: string,
+              sessionId: string,
+            ) => Promise<void>;
+          }
+        ).publishFinalResponse.bind(channel);
+
+        await expect(
+          publish(
+            'owner/repo',
+            'issue:42',
+            'Final reply',
+            'session-publication',
+          ),
+        ).rejects.toMatchObject({ cause: error });
+        expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(3);
+        expect(sleep.mock.calls.map(([ms]) => ms)).toEqual(waits);
+        const audit = readFileSync(auditPath(), 'utf-8');
+        expect(audit).toContain('"outcome":"failed"');
+        expect(audit).not.toContain('"outcome":"failed_ambiguous"');
+        expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toEqual([
+          expect.objectContaining({
+            threadId: 'issue:42',
+            fullText: 'Final reply',
+          }),
+        ]);
+      },
+    );
+
+    it('posts the final reply once when GitHub accepts the retry after a secondary limit', async () => {
+      await connectForPublication();
+      const sleep = vi.fn().mockResolvedValue(undefined);
+      (
+        channel as unknown as {
+          sleepForRetry: (ms: number) => Promise<void>;
+        }
+      ).sleepForRetry = sleep;
+      mockOctokit.rest.issues.createComment
+        .mockRejectedValueOnce(
+          Object.assign(
+            new Error(`${SECONDARY_LIMIT} - https://docs.github.com/rest`),
+            {
+              status: 403,
+              response: { headers: { 'x-ratelimit-remaining': '4999' } },
+            },
+          ),
+        )
+        .mockResolvedValueOnce({
+          data: {
+            id: 2010,
+            html_url:
+              'https://github.com/owner/repo/issues/42#issuecomment-2010',
+          },
+        });
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await publish(
+        'owner/repo',
+        'issue:42',
+        'Final reply',
+        'session-publication',
+      );
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
+      expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([60_000]);
+      const audit = readFileSync(auditPath(), 'utf-8');
+      expect(audit).toContain('"outcome":"posted"');
+      expect(audit).not.toContain('"outcome":"failed');
+      expect(existsSync(pendingPath())).toBe(false);
+    });
+
+    it.each([
+      [
+        'retry-after',
+        SECONDARY_LIMIT,
+        { 'x-ratelimit-remaining': '4999', 'retry-after': '30' },
+      ],
+      [
+        'an exhausted budget and its reset',
+        'API rate limit exceeded',
+        {
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': String(Math.ceil(Date.now() / 1000) + 3600),
+        },
+      ],
+      [
+        'an exhausted budget without a reset',
+        'API rate limit exceeded',
+        { 'x-ratelimit-remaining': '0' },
+      ],
+      [
+        'the secondary-limit wording',
+        SECONDARY_LIMIT,
+        { 'x-ratelimit-remaining': '4999' },
+      ],
+    ])(
+      'keeps the final reply pending, without an immediate retry, when a stop ends a wait set by %s',
+      async (_label, message, headers) => {
+        await connectForPublication();
+        // The channel stops while the reply waits out the limit.
+        const sleep = vi.fn().mockImplementation(async () => {
+          channel.disconnect();
+        });
+        (
+          channel as unknown as {
+            sleepForRetry: (ms: number) => Promise<void>;
+          }
+        ).sleepForRetry = sleep;
+        const error = Object.assign(
+          new Error(`${message} - https://docs.github.com/rest`),
+          { status: 403, response: { headers } },
+        );
+        mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+        const publish = (
+          channel as unknown as {
+            publishFinalResponse: (
+              chatId: string,
+              threadId: string,
+              text: string,
+              sessionId: string,
+            ) => Promise<void>;
+          }
+        ).publishFinalResponse.bind(channel);
+
+        await expect(
+          publish(
+            'owner/repo',
+            'issue:42',
+            'Final reply',
+            'session-publication',
+          ),
+        ).rejects.toMatchObject({ cause: error });
+        expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+        expect(sleep).toHaveBeenCalledTimes(1);
+        const audit = readFileSync(auditPath(), 'utf-8');
+        expect(audit).toContain('"outcome":"failed"');
+        expect(audit).not.toContain('"outcome":"failed_ambiguous"');
+        expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toEqual([
+          expect.objectContaining({ fullText: 'Final reply' }),
+        ]);
+      },
+    );
+
+    it('keeps a reply single-shot when the budget header is a negative number', async () => {
+      await connectForPublication();
+      const error = Object.assign(new Error('Forbidden'), {
+        status: 403,
+        response: {
+          headers: { 'x-ratelimit-remaining': -1, 'retry-after': '30' },
+        },
+      });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toMatchObject({ cause: error });
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(existsSync(pendingPath())).toBe(false);
+    });
+
+    it('neither waits nor retries a reply that starts after the stop', async () => {
+      await connectForPublication();
+      channel.disconnect();
+      const sleep = vi.fn().mockResolvedValue(undefined);
+      (
+        channel as unknown as {
+          sleepForRetry: (ms: number) => Promise<void>;
+        }
+      ).sleepForRetry = sleep;
+      const error = Object.assign(new Error(SECONDARY_LIMIT), {
+        status: 403,
+        response: { headers: { 'x-ratelimit-remaining': '4999' } },
+      });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await expect(
+          publish(
+            'owner/repo',
+            'issue:42',
+            'Final reply',
+            'session-publication',
+          ),
+        ).rejects.toMatchObject({ cause: error });
+        expect(
+          stderr.mock.calls.some((call) =>
+            String(call[0]).includes('retrying in'),
+          ),
+        ).toBe(false);
+      } finally {
+        stderr.mockRestore();
+      }
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+      expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toHaveLength(1);
+    });
+
+    it('waits and retries again after the channel reconnects', async () => {
+      await connectForPublication();
+      channel.disconnect();
+      await connectForPublication();
+      const sleep = vi.fn().mockResolvedValue(undefined);
+      (
+        channel as unknown as {
+          sleepForRetry: (ms: number) => Promise<void>;
+        }
+      ).sleepForRetry = sleep;
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error(SECONDARY_LIMIT), {
+          status: 403,
+          response: { headers: { 'x-ratelimit-remaining': '4999' } },
+        }),
+      );
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toBeDefined();
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(3);
+      expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([60_000, 120_000]);
+    });
+
+    it.each([
+      [
+        'a permission 403',
+        403,
+        'Resource not accessible by personal access token',
+        '4999',
+      ],
+      [
+        'a permission 403 with an empty budget header',
+        403,
+        'Resource not accessible by personal access token',
+        '',
+      ],
+      [
+        'a permission 403 with a leading space in the budget header',
+        403,
+        'Resource not accessible by personal access token',
+        ' 0',
+      ],
+      [
+        'a permission 403 with a trailing space in the budget header',
+        403,
+        'Resource not accessible by personal access token',
+        '0 ',
+      ],
+      ['a 502 carrying an exhausted budget header', 502, 'Server Error', '0'],
+    ])(
+      'keeps %s on the final reply single-shot',
+      async (_label, status, message, remaining) => {
+        await connectForPublication();
+        const error = Object.assign(new Error(message), {
+          status,
+          response: { headers: { 'x-ratelimit-remaining': remaining } },
+        });
+        mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+        const publish = (
+          channel as unknown as {
+            publishFinalResponse: (
+              chatId: string,
+              threadId: string,
+              text: string,
+              sessionId: string,
+            ) => Promise<void>;
+          }
+        ).publishFinalResponse.bind(channel);
+
+        await expect(
+          publish(
+            'owner/repo',
+            'issue:42',
+            'Final reply',
+            'session-publication',
+          ),
+        ).rejects.toMatchObject({ cause: error });
+        expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+        expect(readFileSync(auditPath(), 'utf-8')).toContain(
+          '"outcome":"failed_ambiguous"',
+        );
+        expect(existsSync(pendingPath())).toBe(false);
+      },
+    );
 
     it('migrates legacy pending finals before retrying', async () => {
       const legacyPath = join(
@@ -4610,6 +6816,50 @@ describe('GithubChannel', () => {
       ]);
     });
 
+    it('recovers a persisted task after the store is repaired (issue #16393)', async () => {
+      // The store is unreadable at connect and at the first poll's recovery,
+      // so the in-memory recoverable count latches at 0. Repairing the file
+      // must still be picked up by a later poll: the failed recovery stays
+      // armed, and the repaired task runs instead of freezing the cursor.
+      class NoPollLoopChannel extends TestableGithubChannel {
+        protected override startPollLoop(): void {}
+      }
+      channel = new NoPollLoopChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      mkdirSync(join(inboundTaskPath(), '..'), { recursive: true });
+      writeFileSync(inboundTaskPath(), '{corrupt', 'utf-8');
+      mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
+      channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
+
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+
+      // The operator repairs the store while the daemon keeps running.
+      writeInboundTasks([makeInboundTaskRecord()]);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ last_read_at: '2026-07-02T09:00:00.000Z' }),
+        ])
+        .mockResolvedValueOnce([]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes.map((env) => env.messageId)).toEqual([
+        '1001',
+      ]);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).toHaveBeenCalledWith({
+        last_read_at: '2026-07-02T10:00:00.000Z',
+        read: true,
+      });
+    });
+
     it('keeps the cancelled record when cancellation resolves normally', async () => {
       await initWithoutLoop();
       const task = makeInboundTaskRecord();
@@ -4678,12 +6928,14 @@ describe('GithubChannel', () => {
     it('commits the recovered notification window after restart', async () => {
       writeInboundTasks([makeInboundTaskRecord()]);
       channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
-      mockOctokit.paginate.mockResolvedValueOnce([
-        makeNotification({
-          last_read_at: '2026-07-02T09:00:00.000Z',
-          updated_at: '2026-07-02T10:00:00.000Z',
-        }),
-      ]);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            last_read_at: '2026-07-02T09:00:00.000Z',
+            updated_at: '2026-07-02T10:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([]);
 
       const privateChannel = channel as unknown as {
         octokit: typeof mockOctokit;
@@ -5800,6 +8052,221 @@ describe('GithubChannel', () => {
       dateSpy.mockRestore();
     });
 
+    it('waits at least a minute, then longer, on a secondary limit without retry-after', async () => {
+      const sleep = stubSleep();
+      // GitHub sends the hourly reset with every answer; quota is left, so
+      // it does not set this wait.
+      const secondary = (status: number) =>
+        Object.assign(
+          new Error(
+            'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.',
+          ),
+          {
+            status,
+            response: {
+              headers: {
+                'x-ratelimit-remaining': '4999',
+                'x-ratelimit-reset': String(
+                  Math.ceil(Date.now() / 1000) + 3000,
+                ),
+              },
+            },
+          },
+        );
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(secondary(403))
+        .mockRejectedValueOnce(secondary(429))
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenNthCalledWith(1, 60_000);
+      expect(sleep).toHaveBeenNthCalledWith(2, 120_000);
+    });
+
+    it('lets retry-after override the secondary-limit minimum', async () => {
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          Object.assign(new Error('You have exceeded a secondary rate limit'), {
+            status: 403,
+            response: {
+              headers: { 'x-ratelimit-remaining': '4999', 'retry-after': '5' },
+            },
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(5000);
+    });
+
+    it('waits for the reset, not the secondary minimum, when the budget is exhausted', async () => {
+      const now = 1_700_000_000_000;
+      const dateSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          Object.assign(new Error('You have exceeded a secondary rate limit'), {
+            status: 403,
+            response: {
+              headers: {
+                'x-ratelimit-remaining': '0',
+                'x-ratelimit-reset': String(now / 1000 + 5),
+              },
+            },
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(6000);
+      dateSpy.mockRestore();
+    });
+
+    it.each([
+      ['an HTTP date', 'Wed, 21 Oct 2026 07:28:00 GMT'],
+      ['zero seconds', '0'],
+      ['infinite', 'Infinity'],
+    ])(
+      'keeps the secondary-limit minimum when retry-after is %s',
+      async (_label, retryAfter) => {
+        const sleep = stubSleep();
+        const fn = vi
+          .fn()
+          .mockRejectedValueOnce(
+            Object.assign(
+              new Error('You have exceeded a secondary rate limit'),
+              {
+                status: 403,
+                response: {
+                  headers: {
+                    'x-ratelimit-remaining': '4999',
+                    'retry-after': retryAfter,
+                  },
+                },
+              },
+            ),
+          )
+          .mockResolvedValueOnce('ok');
+        await expect(githubApi(fn)).resolves.toBe('ok');
+        expect(sleep).toHaveBeenCalledWith(60_000);
+      },
+    );
+
+    it('waits the rate-limit minimum when retry-after is unusable and the wording differs', async () => {
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          Object.assign(new Error('Forbidden'), {
+            status: 403,
+            response: {
+              headers: {
+                'x-ratelimit-remaining': '4999',
+                'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT',
+              },
+            },
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(60_000);
+    });
+
+    it('matches the secondary-limit wording in any letter case', async () => {
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          Object.assign(new Error('Secondary Rate Limit exceeded'), {
+            status: 429,
+            response: { headers: {} },
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(60_000);
+    });
+
+    it('keeps the short backoff for a server error that quotes the secondary-limit wording', async () => {
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          Object.assign(new Error('You have exceeded a secondary rate limit'), {
+            status: 500,
+            response: { headers: {} },
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(1000);
+    });
+
+    it('keeps the short backoff for a server error carrying an exhausted budget', async () => {
+      const now = 1_700_000_000_000;
+      const dateSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          httpError(502, {
+            'x-ratelimit-remaining': '0',
+            'x-ratelimit-reset': String(now / 1000 + 600),
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(1000);
+      dateSpy.mockRestore();
+    });
+
+    it('waits the rate-limit minimum when the budget reset looks past', async () => {
+      const now = 1_700_000_000_000;
+      const dateSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          httpError(403, {
+            'x-ratelimit-remaining': '0',
+            'x-ratelimit-reset': String(now / 1000 - 10),
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      // GitHub still counts the budget as spent: the local clock is ahead.
+      expect(sleep).toHaveBeenCalledWith(60_000);
+      dateSpy.mockRestore();
+    });
+
+    it('caps a very long retry-after at the timer limit', async () => {
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(httpError(429, { 'retry-after': '1e10' }))
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(2_147_483_647);
+    });
+
+    it('gives up after a retry-after wait that a stop ended', async () => {
+      const sleep = vi.fn().mockImplementation(async () => {
+        channel.disconnect();
+      });
+      (
+        channel as unknown as {
+          abortableSleep: (ms: number) => Promise<void>;
+        }
+      ).abortableSleep = sleep;
+      const fn = vi
+        .fn()
+        .mockRejectedValue(httpError(503, { 'retry-after': '7' }));
+      await expect(githubApi(fn)).rejects.toThrow('HTTP 503');
+      expect(fn).toHaveBeenCalledTimes(1);
+      expect(sleep).toHaveBeenCalledWith(7000);
+    });
+
     it('falls back to exponential backoff without rate-limit headers', async () => {
       const sleep = stubSleep();
       const fn = vi
@@ -5862,26 +8329,26 @@ describe('GithubChannel', () => {
         ),
       ).resolves.toBe('https://github.example.com');
     });
+
+    it('strips a bare trailing slash from the baseUrl', async () => {
+      await expect(
+        connectAndReadWebOrigin(
+          makeConfig({ baseUrl: 'https://github.example.com/' }),
+        ),
+      ).resolves.toBe('https://github.example.com');
+      await expect(
+        connectAndReadWebOrigin(
+          makeConfig({ baseUrl: 'https://api.github.com/' }),
+        ),
+      ).resolves.toBe('https://github.com');
+    });
   });
 
   describe('event journal', () => {
-    function readJournal(
-      channelName = 'test-github',
-    ): Array<Record<string, unknown>> {
-      const path = inboundTaskPath('/tmp/test', channelName).replace(
-        'github-inbound-tasks.json',
-        'channel-events.jsonl',
+    const readJournal = (channelName = 'test-github') =>
+      readChannelEvents(channelName).filter(
+        (event) => event['type'] !== 'poll',
       );
-      try {
-        return readFileSync(path, 'utf-8')
-          .split('\n')
-          .filter((line) => line.length > 0)
-          .map((line) => JSON.parse(line) as Record<string, unknown>)
-          .filter((event) => event['type'] !== 'poll');
-      } catch {
-        return [];
-      }
-    }
 
     it('records a notification dropped by reasonFilter before any session exists', async () => {
       await initWithoutLoop({ reasonFilter: ['mention'] });
@@ -6196,7 +8663,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
     await (channel as unknown as { pollOnce: () => Promise<void> }).pollOnce();
   }
 
-  function prNotification(reason = 'mention') {
+  function prNotification(
+    reason = 'mention',
+    overrides: Record<string, unknown> = {},
+  ) {
     return makeNotification({
       reason,
       subject: {
@@ -6204,6 +8674,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         url: 'https://api.github.com/repos/owner/repo/pulls/42',
         type: 'PullRequest',
       },
+      ...overrides,
     });
   }
 
@@ -6228,6 +8699,72 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(prompt).not.toContain('published verbatim');
       expect(channel.inboundEnvelopes).toHaveLength(0);
       expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
+    it('journals the bound target session and its workspace on task rows', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // A workspace different from the channel's own proves the journal
+      // carries the BINDING's owner, not the channel cwd.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [makeBinding({ workspaceCwd: '/work/bound' })],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const journalPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'channel-events.jsonl',
+      );
+      const events = readFileSync(journalPath, 'utf-8')
+        .split('\n')
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const taskEvents = events.filter((event) => event['type'] === 'task');
+      expect(taskEvents.length).toBeGreaterThan(0);
+      for (const event of taskEvents) {
+        expect(event).toMatchObject({
+          sessionId: 'bound-session',
+          sessionWorkspaceCwd: '/work/bound',
+        });
+      }
+      // The acceptance and the delivered mark both name the target.
+      expect(taskEvents.map((event) => event['outcome'])).toEqual(
+        expect.arrayContaining(['accepted', 'running']),
+      );
+    });
+
+    it('keeps public-path task rows free of a session identity', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // No binding matches this PR, and the complete snapshot proves
+      // absence, so the event takes the public channel path.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const journalPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'channel-events.jsonl',
+      );
+      const events = readFileSync(journalPath, 'utf-8')
+        .split('\n')
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const taskEvents = events.filter((event) => event['type'] === 'task');
+      expect(taskEvents.length).toBeGreaterThan(0);
+      for (const event of taskEvents) {
+        expect(event).not.toHaveProperty('sessionId');
+        expect(event).not.toHaveProperty('sessionWorkspaceCwd');
+      }
     });
 
     it('strips the aggregate no-reply instruction for bound delivery', async () => {
@@ -6830,6 +9367,237 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(mockOctokit.paginate).toHaveBeenCalled();
     });
 
+    it('names the binding lookup, not workspace storage, when failing refreshes reach the cold-empty cap (R1-8)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockRejectedValue(new Error('daemon cold'));
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        for (let i = 0; i < 30; i++) {
+          await pollOnce();
+        }
+        const capLine = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been an empty partial for 30'));
+        expect(capLine).toBeDefined();
+        expect(capLine).toContain('binding lookup itself has been failing');
+        expect(capLine).not.toContain('chats directory');
+        // No snapshot has ever succeeded, so the gate keeps the lane closed:
+        // the cap line must not claim it opened.
+        expect(capLine).not.toContain('opening the comment lane');
+        expect(capLine).toContain('remains stalled');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('hints at unreadable storage after ten partial snapshots and counts the listed rows (R1-8)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // One tombstone row: no routable binding, but a listed session.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [{ sessionId: 'tomb', workspaceCwd: '/ws', prs: [] }],
+        partial: true,
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        for (let i = 0; i < 10; i++) {
+          await pollOnce();
+        }
+        const hint = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been partial for 10'));
+        expect(hint).toBeDefined();
+        expect(hint).toContain('(1 sessions listed)');
+        expect(hint).toContain('PR bindings scan');
+        expect(hint).toContain('no runtime');
+        // The lane is still deferred on the tenth cold poll: no claim that
+        // issue events flow.
+        expect(hint).toContain('PR and issue events are both stalled');
+        expect(hint).not.toContain('issue events are unaffected');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('keeps hinting while retention holds bindings the partial answers no longer list (R1-8)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValue([]);
+      // One complete snapshot lands a binding; then the chats dir becomes
+      // unlistable and every poll answers an empty partial. Retention keeps
+      // the binding in the map, so the hint must still fire.
+      boundSessions.listPrBindings.mockResolvedValueOnce({
+        bindings: [makeBinding()],
+        partial: false,
+      });
+      await pollOnce();
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        for (let i = 0; i < 10; i++) {
+          await pollOnce();
+        }
+        const hint = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been partial for 10'));
+        expect(hint).toBeDefined();
+        expect(hint).toContain('(0 sessions listed)');
+        // The lane opened on the complete snapshot: issue events do flow.
+        expect(hint).toContain('issue events are unaffected');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('does not blame the binding lookup when the cold-empty cap was reached by successful empty partials (R3-2)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValue([]);
+      // 29 successful empty partials, then one transient failure lands the
+      // cap on the failure path; the wording must name the storage causes.
+      for (let i = 0; i < 29; i++) {
+        boundSessions.listPrBindings.mockResolvedValueOnce({
+          bindings: [],
+          partial: true,
+        });
+        await pollOnce();
+      }
+      boundSessions.listPrBindings.mockRejectedValue(new Error('502'));
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await pollOnce();
+        const capLine = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been an empty partial for 30'));
+        expect(capLine).toBeDefined();
+        expect(capLine).not.toContain('binding lookup itself has been failing');
+        expect(capLine).toContain("'PR bindings scan' line");
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('names the binding lookup when failed lookups seeded the cold-empty cap and one empty partial lands it (R4-5)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValue([]);
+      boundSessions.listPrBindings.mockRejectedValue(new Error('daemon cold'));
+      for (let i = 0; i < 29; i++) {
+        await pollOnce();
+      }
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await pollOnce();
+        const capLine = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been an empty partial for 30'));
+        expect(capLine).toBeDefined();
+        expect(capLine).toContain('binding lookup itself has been failing');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('attributes the cold-empty cap to the failed lookups when one empty partial interrupted them (R6)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValue([]);
+      boundSessions.listPrBindings.mockRejectedValue(new Error('daemon cold'));
+      for (let i = 0; i < 15; i++) {
+        await pollOnce();
+      }
+      // One empty partial resets boundSnapshotFailureStreak; the streak that
+      // reaches the cap is still 29 failed lookups out of 30 polls.
+      boundSessions.listPrBindings.mockResolvedValueOnce({
+        bindings: [],
+        partial: true,
+      });
+      await pollOnce();
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        for (let i = 0; i < 14; i++) {
+          await pollOnce();
+        }
+        const capLine = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been an empty partial for 30'));
+        expect(capLine).toBeDefined();
+        expect(capLine).toContain(
+          'binding lookup itself has been failing for 29 of those polls',
+        );
+        expect(capLine).toContain("'PR bindings scan' line");
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('keeps the storage cause in front when only a few polls of the cold-empty streak failed the lookup (R6)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValue([]);
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      for (let i = 0; i < 28; i++) {
+        await pollOnce();
+      }
+      boundSessions.listPrBindings.mockRejectedValue(new Error('502'));
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await pollOnce();
+        await pollOnce();
+        const capLine = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been an empty partial for 30'));
+        expect(capLine).toBeDefined();
+        expect(capLine).not.toContain('binding lookup itself has been failing');
+        expect(capLine).toContain("'PR bindings scan' line");
+        expect(capLine).toContain('2 of those polls also failed the lookup');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('resets the failed-lookup count together with the cold-empty streak (R6)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValue([]);
+      boundSessions.listPrBindings.mockRejectedValue(new Error('daemon cold'));
+      for (let i = 0; i < 5; i++) {
+        await pollOnce();
+      }
+      // A non-empty partial ends the cold-empty streak; the five failures
+      // before it must not be charged to the next streak, which starts when
+      // that session's tombstone empties the map again.
+      boundSessions.listPrBindings.mockResolvedValueOnce({
+        bindings: [makeBinding()],
+        partial: true,
+      });
+      await pollOnce();
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [{ ...makeBinding(), prs: [] }],
+        partial: true,
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        for (let i = 0; i < 30; i++) {
+          await pollOnce();
+        }
+        const capLine = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been an empty partial for 30'));
+        expect(capLine).toBeDefined();
+        expect(capLine).toContain("'PR bindings scan' line");
+        expect(capLine).not.toContain('failed the lookup');
+        expect(capLine).not.toContain('binding lookup itself has been failing');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
     it('opens the lane on a non-empty partial snapshot and delivers known targets (R1-7)', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
       // A partial answer that LISTS the binding is enough for the known
@@ -6891,8 +9659,8 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
     it('routes an issue event publicly under a permanent partial snapshot (R14-B1)', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
-      // A PERMANENT partial (a multi-page scan or a long-lived non-active
-      // workspace) never lands a complete snapshot, so boundSnapshotTrusted
+      // A PERMANENT partial (a sidecar the daemon persistently cannot read)
+      // never lands a complete snapshot, so boundSnapshotTrusted
       // stays false forever. Bindings are PR-only and GitHub's issue/PR
       // number space is exclusive, so an issue event can never have a bound
       // target: its absence is provable without any snapshot and it must
@@ -8721,6 +11489,1438 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
     });
   });
 
+  describe('role-aware bound delivery (boundSessionActions)', () => {
+    const roleBindings = () => [
+      makeBinding({
+        sessionId: 'review-session',
+        updatedAt: '2026-07-02T00:00:00.000Z',
+        prs: [
+          {
+            number: 42,
+            url: 'https://github.com/owner/repo/pull/42',
+            state: 'open',
+            role: 'review',
+          },
+        ],
+      }),
+      makeBinding({
+        sessionId: 'verify-session',
+        updatedAt: '2026-07-02T00:00:00.000Z',
+        prs: [
+          {
+            number: 42,
+            url: 'https://github.com/owner/repo/pull/42',
+            state: 'open',
+            role: 'verify',
+          },
+        ],
+      }),
+      makeBinding({
+        sessionId: 'fix-session',
+        updatedAt: '2026-07-02T00:00:00.000Z',
+        prs: [
+          {
+            number: 42,
+            url: 'https://github.com/owner/repo/pull/42',
+            state: 'open',
+            role: 'fix',
+          },
+        ],
+      }),
+    ];
+
+    describe('configuration validation', () => {
+      it('rejects unknown keys by name, empty values, and oversized templates', () => {
+        expect(
+          validateBoundSessionConfig(
+            {
+              deliverToBoundSessions: true,
+              boundSessionActions: { 'review:bogus': 'do it' },
+            },
+            'test-github',
+          ),
+        ).toContain('review:bogus');
+        expect(
+          validateBoundSessionConfig(
+            {
+              deliverToBoundSessions: true,
+              boundSessionActions: { default: '   ' },
+            },
+            'test-github',
+          ),
+        ).toContain('non-empty');
+        expect(
+          validateBoundSessionConfig(
+            {
+              deliverToBoundSessions: true,
+              boundSessionActions: {
+                default: 'x'.repeat(2_001),
+              },
+            },
+            'test-github',
+          ),
+        ).toContain('2000');
+      });
+
+      it('requires deliverToBoundSessions and accepts the closed vocabulary', () => {
+        expect(
+          validateBoundSessionConfig(
+            { boundSessionActions: { default: 'do it' } },
+            'test-github',
+          ),
+        ).toContain('deliverToBoundSessions');
+        expect(
+          validateBoundSessionConfig(
+            {
+              deliverToBoundSessions: true,
+              boundSessionActions: {
+                default: 'triage',
+                'watch:head_change': 're-review',
+                'review:watch:head_change': 're-review',
+                'verify:default': 'verify',
+                comment: 'address comments',
+                state_change: 'notification reason',
+                'watch:state_change': 'watch transition',
+              },
+            },
+            'test-github',
+          ),
+        ).toBeUndefined();
+        expect(
+          validateBoundSessionConfig(
+            {
+              deliverToBoundSessions: true,
+              boundSessionActions: { 'triage:comment': 'unknown role' },
+            },
+            'test-github',
+          ),
+        ).toContain('triage:comment');
+      });
+    });
+
+    it('fans a comment out to the matched roles only, with rendered templates', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'review:comment': 'Review the new comments on %repo%#%pr%.',
+            'fix:comment': 'Address the comments (role %role%, event %event%).',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: roleBindings(),
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      const calls = boundSessions.deliverPrompt.mock.calls as Array<
+        [string, string]
+      >;
+      const bySession = new Map(calls.map(([id, prompt]) => [id, prompt]));
+      expect(bySession.get('review-session')).toContain(
+        'Review the new comments on owner/repo#42.',
+      );
+      expect(bySession.get('review-session')).toContain('Role: review');
+      expect(bySession.get('review-session')).toContain(
+        '[Operator instruction — trusted',
+      );
+      expect(bySession.get('fix-session')).toContain(
+        'Address the comments (role fix, event comment).',
+      );
+      // verify has no comment key: the map is a per-role subscription.
+      expect(bySession.has('verify-session')).toBe(false);
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
+    it('retires privately when followers exist but no role matched', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'fix:watch:ci_failure': 'fix it',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: roleBindings(),
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('resolves role:default then bare keys, and keeps untyped bindings on the bare chain', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'review:default': 'review fallback',
+            comment: 'bare comment instruction',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          ...roleBindings(),
+          makeBinding({ sessionId: 'untyped-session' }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const calls = boundSessions.deliverPrompt.mock.calls as Array<
+        [string, string]
+      >;
+      const bySession = new Map(calls.map(([id, prompt]) => [id, prompt]));
+      // review:comment absent → review:default wins over the bare key.
+      expect(bySession.get('review-session')).toContain('review fallback');
+      // verify/fix have no role chain match → bare comment key.
+      expect(bySession.get('verify-session')).toContain(
+        'bare comment instruction',
+      );
+      expect(bySession.get('fix-session')).toContain(
+        'bare comment instruction',
+      );
+      // The untyped binding resolves only the bare chain, no Role line.
+      expect(bySession.get('untyped-session')).toContain(
+        'bare comment instruction',
+      );
+      expect(bySession.get('untyped-session')).not.toContain('Role:');
+    });
+
+    it('renders %% escapes, leaves unknown variables literal, and caps hostile titles', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            default: '100%% done %unknown% %title%',
+          },
+        },
+        { boundSessions },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            subject: {
+              title: 'T'.repeat(300),
+              url: 'https://api.github.com/repos/owner/repo/pulls/42',
+              type: 'PullRequest',
+            },
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain('100% done %unknown%');
+      // The cap applies to the SUBSTITUTED value in the operator block; the
+      // identity line keeps the full title per the existing prompt contract.
+      const lines = prompt.split('\n');
+      const operatorLine =
+        lines[
+          lines.indexOf(
+            "[Operator instruction — trusted, from this channel's configuration]",
+          ) + 1
+        ] ?? '';
+      expect(operatorLine).toContain('[truncated]');
+      expect(operatorLine).not.toContain('T'.repeat(201));
+    });
+
+    it('defers one queue-full role without blocking the other roles', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'review:comment': 'review',
+            'verify:comment': 'verify',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: roleBindings(),
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 'review-session') {
+            throw new BoundSessionQueueFullError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const delivered = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).map(([id]) => id);
+      expect(delivered).toContain('verify-session');
+      expect(delivered).toContain('review-session');
+      // The review target persists as a backpressure task; verify settled.
+      const tasks = JSON.parse(
+        readFileSync(inboundTaskPath(), 'utf-8'),
+      ) as Array<{
+        delivery?: { sessionId?: string };
+        backpressure?: boolean;
+      }>;
+      const review = tasks.find(
+        (task) => task.delivery?.sessionId === 'review-session',
+      );
+      expect(review?.backpressure).toBe(true);
+      expect(
+        tasks.some((task) => task.delivery?.sessionId === 'verify-session'),
+      ).toBe(false);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
+    it('keeps the legacy prompt byte-compatible when no actions are configured', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain('Handle the event with your normal workflow');
+      expect(prompt).not.toContain('[Operator instruction');
+      expect(prompt).not.toContain('Role:');
+    });
+
+    it('legacy gone-fallback stays generic even when bindings carry roles', async () => {
+      // A /review backfill stamps roles with no map configured; the legacy
+      // gone-fallback must not leak the role into the generic prompt.
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'gone-session',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'review',
+              },
+            ],
+          }),
+          makeBinding({ sessionId: 'live-session' }),
+        ],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 'gone-session') {
+            throw new BoundSessionGoneError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const calls = boundSessions.deliverPrompt.mock.calls as Array<
+        [string, string]
+      >;
+      const fallback = calls.find(([id]) => id === 'live-session');
+      expect(fallback).toBeDefined();
+      expect(fallback![1]).toContain(
+        'Handle the event with your normal workflow',
+      );
+      expect(fallback![1]).not.toContain('Role:');
+      expect(fallback![1]).not.toContain('[Operator instruction');
+    });
+  });
+
+  describe('review-round regressions (durable fan-out, delivery ring, role loss, partial guard, lane class)', () => {
+    const reviewBinding = () =>
+      makeBinding({
+        sessionId: 'review-session',
+        prs: [
+          {
+            number: 42,
+            url: 'https://github.com/owner/repo/pull/42',
+            state: 'open',
+            role: 'review',
+          },
+        ],
+      });
+    const verifyBinding = () =>
+      makeBinding({
+        sessionId: 'verify-session',
+        prs: [
+          {
+            number: 42,
+            url: 'https://github.com/owner/repo/pull/42',
+            state: 'open',
+            role: 'verify',
+          },
+        ],
+      });
+    const fixBinding = () =>
+      makeBinding({
+        sessionId: 'fix-session',
+        prs: [
+          {
+            number: 42,
+            url: 'https://github.com/owner/repo/pull/42',
+            state: 'open',
+            role: 'fix',
+          },
+        ],
+      });
+
+    function tasksPath(): string {
+      return inboundTaskPath();
+    }
+    function deliveredRingPath(): string {
+      const nameHash = createHash('sha256')
+        .update('test-github')
+        .digest('hex')
+        .slice(0, 16);
+      return join(
+        process.env.QWEN_HOME!,
+        'channels',
+        getWorkspaceScopeDirName('/tmp/test'),
+        `test-github-${nameHash}-github-bound-delivered.json`,
+      );
+    }
+    function writeTasks(records: unknown[]): void {
+      const path = tasksPath();
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `${JSON.stringify(records)}\n`, 'utf-8');
+    }
+    function readTasks(): Array<Record<string, unknown>> {
+      if (!existsSync(tasksPath())) return [];
+      return JSON.parse(readFileSync(tasksPath(), 'utf-8')) as Array<
+        Record<string, unknown>
+      >;
+    }
+    const commentEnvelope = {
+      channelName: 'test-github',
+      senderId: 'alice',
+      senderName: 'alice',
+      chatId: 'owner/repo',
+      threadId: 'pr:42',
+      messageId: '1001',
+      text: '@test-bot please fix this',
+      isGroup: true,
+      isMentioned: true,
+      isReplyToBot: false,
+      metadata:
+        'Type: Pull Request | Title: Test PR | URL: https://github.com/owner/repo/pull/42\nTrigger: comment.',
+    };
+
+    it('reconstructs missing fan-out siblings after a crash between claims (C1)', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'review:comment': 'review it',
+            'verify:comment': 'verify it',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding(), verifyBinding()],
+        partial: false,
+      });
+      // The crash state: only the FIRST target's task survived, carrying
+      // the full fan-out intent and the event-wide dedupe key. Without
+      // reconstruction, recovery applies the survivor's dedupe and the
+      // re-listed comment is skipped — verify loses the event permanently.
+      writeTasks([
+        {
+          version: 1,
+          id: 'survivor',
+          createdAt: '2026-07-02T09:00:00.000Z',
+          updatedAt: '2026-07-02T09:00:00.000Z',
+          state: 'accepted',
+          issueNumber: 42,
+          source: {
+            chatId: 'owner/repo',
+            threadId: 'pr:42',
+            messageId: '1001',
+          },
+          envelope: commentEnvelope,
+          dedupe: { dispatchedComments: ['C_1001'] },
+          attempts: 0,
+          delivery: {
+            kind: 'bound-session',
+            sessionId: 'review-session',
+            role: 'review',
+          },
+          fanout: [
+            { sessionId: 'review-session', role: 'review' },
+            { sessionId: 'verify-session', role: 'verify' },
+          ],
+        },
+      ]);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const delivered = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).map(([id]) => id);
+      expect(delivered).toContain('review-session');
+      expect(delivered).toContain('verify-session');
+      expect(delivered).toHaveLength(2);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
+    it('never goes public after a sibling accepted, even across a restart with zero followers (C2)', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'review:comment': 'review it',
+            'verify:comment': 'verify it',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding(), verifyBinding()],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 'verify-session') {
+            throw new BoundSessionQueueFullError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      // review accepted privately; the durable ring recorded the event.
+      expect(existsSync(deliveredRingPath())).toBe(true);
+      const ringKeys = (
+        JSON.parse(readFileSync(deliveredRingPath(), 'utf-8')) as {
+          keys: string[];
+        }
+      ).keys;
+      // The comment may ride the direct or the aggregate lane; the ring
+      // records the event identity AND a per-target completion key.
+      expect(ringKeys).toHaveLength(2);
+      expect(ringKeys.every((k) => k.startsWith('github:owner/repo:'))).toBe(
+        true,
+      );
+      expect(ringKeys.some((k) => k.includes(':t:review-session'))).toBe(true);
+
+      // Simulate the gone-fallback defer that cleared verify's target, then
+      // every follower disappears. Recovery re-resolves to nothing on a
+      // COMPLETE snapshot: without the ring the absence gate would route
+      // the already-delivered event publicly.
+      const deferred = readTasks().map((task) => ({
+        ...task,
+        delivery: undefined,
+        backpressure: true,
+      }));
+      writeTasks(deferred);
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+
+      // Restart leg: a fresh adapter loads the ring from disk and still
+      // suppresses the public fallback for the same event.
+      writeTasks(deferred);
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'review:comment': 'review it',
+            'verify:comment': 'verify it',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('retires a queued comment whose role lost its match instead of injecting the obsolete instruction (C3)', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: { 'review:comment': 'review it' },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding()],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockRejectedValue(
+        new BoundSessionQueueFullError('review-session'),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(readTasks().length).toBe(1);
+
+      // The operator changes the binding's role to fix, which has no
+      // comment subscription. The queued review comment must retire, not
+      // inject the obsolete review instruction into the frozen session.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'review-session',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'fix',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockResolvedValue(undefined);
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+
+      // Only the original queue-full attempt; no obsolete injection.
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(readTasks()).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('defers instead of retiring when no visible role matches under a partial snapshot (D1)', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: { 'fix:comment': 'fix it' },
+        },
+        { boundSessions },
+      );
+      // Only the review role is visible, and the snapshot is partial: the
+      // unscanned fix role might still match. Retiring here would consume
+      // the event on incomplete evidence.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding()],
+        partial: true,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      const tasks = readTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!['backpressure']).toBe(true);
+      expect(tasks[0]!['delivery']).toBeUndefined();
+
+      // The complete snapshot reveals the fix role: the deferred event
+      // delivers privately instead of having been consumed.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [fixBinding()],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      const delivered = boundSessions.deliverPrompt.mock.calls as Array<
+        [string, string]
+      >;
+      expect(delivered.map(([id]) => id)).toEqual(['fix-session']);
+      expect(delivered[0]![1]).toContain('fix it');
+    });
+
+    it('matches fix:comment for a comment delivered under another thread reason, reason-specific keys still winning (D2)', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'fix:comment': 'lane instruction',
+            'fix:mention': 'mention instruction',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [fixBinding()],
+        partial: false,
+      });
+      // A comment arriving under the subscribed reason matches the lane
+      // class `comment`...
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('subscribed')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      let calls = boundSessions.deliverPrompt.mock.calls as Array<
+        [string, string]
+      >;
+      expect(calls[0]![0]).toBe('fix-session');
+      expect(calls[0]![1]).toContain('lane instruction');
+
+      // ...while a reason-specific key still wins for its own reason.
+      boundSessions.deliverPrompt.mockClear();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          prNotification('mention', {
+            updated_at: '2026-07-02T11:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ id: 1002, created_at: '2026-07-02T10:30:00.000Z' }),
+        ]);
+      await pollOnce();
+      calls = boundSessions.deliverPrompt.mock.calls as Array<[string, string]>;
+      expect(calls[0]![1]).toContain('mention instruction');
+    });
+
+    it('keeps the fanout intent durable when a later claim fails to persist (C1 residual)', async () => {
+      const config = {
+        deliverToBoundSessions: true,
+        boundSessionActions: {
+          'review:comment': 'review it',
+          'verify:comment': 'verify it',
+        },
+      };
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding(), verifyBinding()],
+        partial: false,
+      });
+      // EIO on the write that would persist BOTH claims: the verify claim
+      // fails after the review claim landed. Content-based injection, not a
+      // write counter: an interleaved claim-run implementation writes the
+      // running transition (and the removal via unlink) before the second
+      // claim, so a counter hits the wrong write and masks the regression.
+      // Two-phase dispatch must not have run (and removed) the review task
+      // yet, so its fanout record survives for recovery.
+      const originalRename = nodeFs.renameSync;
+      const spy = vi.spyOn(nodeFs, 'renameSync').mockImplementation(((
+        from: string,
+        to: string,
+      ) => {
+        if (
+          typeof to === 'string' &&
+          to.endsWith('-github-inbound-tasks.json')
+        ) {
+          const staged = JSON.parse(
+            nodeFs.readFileSync(from, 'utf-8'),
+          ) as unknown[];
+          if (Array.isArray(staged) && staged.length === 2) {
+            throw Object.assign(new Error('EIO: i/o error'), {
+              code: 'EIO',
+            });
+          }
+        }
+        return (originalRename as (a: string, b: string) => void)(from, to);
+      }) as unknown as typeof nodeFs.renameSync);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce().catch(() => undefined);
+      spy.mockRestore();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      const surviving = readTasks();
+      expect(surviving).toHaveLength(1);
+      expect(surviving[0]!['fanout']).toBeDefined();
+
+      // Restart and re-list: recovery reconstructs verify from the durable
+      // fanout and BOTH roles receive the comment.
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding(), verifyBinding()],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      const delivered = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).map(([id]) => id);
+      expect(delivered).toContain('review-session');
+      expect(delivered).toContain('verify-session');
+    });
+
+    it('preserves the comment lane when reconstructing siblings under a mention reason (R2-1)', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'review:comment': 'review it',
+            'verify:comment': 'verify it',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding(), verifyBinding()],
+        partial: false,
+      });
+      // Crash state with a MENTION-reason comment: the reconstructed verify
+      // sibling must keep the dispatchedComments lane identity, or the
+      // lane-class fallback is lost and revalidation retires it.
+      writeTasks([
+        {
+          version: 1,
+          id: 'survivor',
+          createdAt: '2026-07-02T09:00:00.000Z',
+          updatedAt: '2026-07-02T09:00:00.000Z',
+          state: 'accepted',
+          issueNumber: 42,
+          source: {
+            chatId: 'owner/repo',
+            threadId: 'pr:42',
+            messageId: '1001',
+          },
+          envelope: {
+            ...commentEnvelope,
+            metadata:
+              'Type: Pull Request | Title: Test PR | URL: https://github.com/owner/repo/pull/42\nTrigger: mention.',
+          },
+          dedupe: { dispatchedComments: ['C_1001'] },
+          attempts: 0,
+          delivery: {
+            kind: 'bound-session',
+            sessionId: 'review-session',
+            role: 'review',
+          },
+          fanout: [
+            { sessionId: 'review-session', role: 'review' },
+            { sessionId: 'verify-session', role: 'verify' },
+          ],
+        },
+      ]);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('mention')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      const delivered = boundSessions.deliverPrompt.mock.calls as Array<
+        [string, string]
+      >;
+      expect(delivered.map(([id]) => id)).toContain('verify-session');
+      const verifyPrompt = delivered.find(
+        ([id]) => id === 'verify-session',
+      )![1];
+      expect(verifyPrompt).toContain('verify it');
+    });
+
+    it('does not reconstruct a completed target after the role rebinds (R2-2)', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'review:comment': 'review it',
+            'verify:comment': 'verify it',
+          },
+        },
+        { boundSessions },
+      );
+      const verifyOld = makeBinding({
+        sessionId: 'verify-old',
+        prs: [
+          {
+            number: 42,
+            url: 'https://github.com/owner/repo/pull/42',
+            state: 'open',
+            role: 'verify',
+          },
+        ],
+      });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding(), verifyOld],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 'review-session') {
+            throw new BoundSessionQueueFullError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      // verify-old accepted and its task was removed; review stays queued
+      // holding the full fanout list.
+      expect(
+        (boundSessions.deliverPrompt.mock.calls as Array<[string]>).map(
+          ([id]) => id,
+        ),
+      ).toContain('verify-old');
+
+      // The verify binding moves to a NEW session while review is still
+      // backpressured. Recovery must not recreate verify-old's completed
+      // task and retarget it to verify-new — that would execute the event
+      // for the verify role a second time.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          makeBinding({
+            sessionId: 'verify-new',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      const all = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).map(([id]) => id);
+      expect(all).not.toContain('verify-new');
+      expect(all.filter((id) => id === 'verify-old')).toHaveLength(1);
+    });
+
+    it('keeps ordinary issue comments deliverable when the delivery ring is damaged (R2-3)', async () => {
+      const config = {
+        deliverToBoundSessions: true,
+        boundSessionActions: { 'fix:comment': 'fix it' },
+      };
+      await initChannel(config, { boundSessions });
+      mkdirSync(dirname(deliveredRingPath()), { recursive: true });
+      writeFileSync(deliveredRingPath(), '{corrupt', 'utf-8');
+      // Fresh adapter loads the damaged ring (fail-closed for PR events).
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      // An ordinary ISSUE comment can never have a PR-bound private
+      // delivery: the damaged ring must not retire it.
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            subject: {
+              title: 'Test Issue',
+              url: 'https://api.github.com/repos/owner/repo/issues/42',
+              type: 'Issue',
+            },
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes.length).toBeGreaterThan(0);
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+    });
+
+    it('keeps a privately retired comment out of the public path when task removal fails (R2-4)', async () => {
+      const config = {
+        deliverToBoundSessions: true,
+        boundSessionActions: { 'review:comment': 'review it' },
+      };
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding()],
+        partial: false,
+      });
+      // A normal network failure (backpressure: false), then the role
+      // changes: the retry reaches the private-retirement cleanup.
+      boundSessions.deliverPrompt.mockRejectedValue(new Error('network down'));
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(readTasks()).toHaveLength(1);
+
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'review-session',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'fix',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      const removeSpy = vi
+        .spyOn(
+          channel as unknown as { removeInboundTask: (id: string) => void },
+          'removeInboundTask',
+        )
+        .mockImplementation(() => {
+          throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+        });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce().catch(() => undefined);
+      removeSpy.mockRestore();
+
+      // The retirement is durable even though the removal failed.
+      const tasks = readTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!['state']).toBe('cancelled');
+
+      // Restart: the cancelled task is not recoverable and must never reach
+      // the public reply path.
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
+    it('completes the original fanout slot when a deferred target accepts after retargeting (R2-2 retarget)', async () => {
+      const config = {
+        deliverToBoundSessions: true,
+        boundSessionActions: {
+          'review:comment': 'review it',
+          'verify:comment': 'verify it',
+        },
+      };
+      await initChannel(config, { boundSessions });
+      const verifyBindingFor = (sessionId: string, updatedAt?: string) =>
+        makeBinding({
+          sessionId,
+          ...(updatedAt ? { updatedAt } : {}),
+          prs: [
+            {
+              number: 42,
+              url: 'https://github.com/owner/repo/pull/42',
+              state: 'open',
+              role: 'verify',
+            },
+          ],
+        });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding(), verifyBindingFor('verify-old')],
+        partial: false,
+      });
+      // Both roles queue-full: the review carrier keeps the full fanout.
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 'review-session' || sessionId === 'verify-old') {
+            throw new BoundSessionQueueFullError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+
+      // verify rebinds to verify-mid while review stays blocked: the
+      // deferred verify task retargets and accepts under the NEW session.
+      // The completion must land on the ORIGINAL fanout slot (the role),
+      // not only on verify-mid's per-target ring key.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          verifyBindingFor('verify-mid', '2026-07-03T00:00:00.000Z'),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      // Count BEFORE the restart: initChannel clears the mock history.
+      const midCalls = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).filter(([id]) => id === 'verify-mid');
+      expect(midCalls).toHaveLength(1);
+
+      // A second rebind must not replay the event for the verify role.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          verifyBindingFor('verify-new', '2026-07-04T00:00:00.000Z'),
+        ],
+        partial: false,
+      });
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          verifyBindingFor('verify-new', '2026-07-04T00:00:00.000Z'),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      const afterRestart = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).map(([id]) => id);
+      expect(afterRestart).not.toContain('verify-new');
+      expect(afterRestart).not.toContain('verify-mid');
+    });
+
+    it('keeps fanout completion durable when background traffic evicts the delivery ring (R2-2 eviction)', async () => {
+      const config = {
+        deliverToBoundSessions: true,
+        boundSessionActions: {
+          'review:comment': 'review it',
+          'verify:comment': 'verify it',
+        },
+      };
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          makeBinding({
+            sessionId: 'verify-old',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 'review-session') {
+            throw new BoundSessionQueueFullError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      // Count BEFORE the restart: initChannel clears the mock history.
+      const oldCalls = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).filter(([id]) => id === 'verify-old');
+      expect(oldCalls).toHaveLength(1);
+
+      // 512 unrelated single-target acceptances (1024 keys) evict the
+      // original completion from the bounded ring while the review
+      // sibling is still at deferCount 1, well inside its retry horizon.
+      // The on-task slot mark must survive the eviction.
+      mkdirSync(dirname(deliveredRingPath()), { recursive: true });
+      writeFileSync(
+        deliveredRingPath(),
+        JSON.stringify({
+          keys: Array.from(
+            { length: 1024 },
+            (_, i) => `github:other/repo:bg-${i}`,
+          ),
+        }),
+        'utf-8',
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          makeBinding({
+            sessionId: 'verify-new',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          makeBinding({
+            sessionId: 'verify-new',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      const afterRestart = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).map(([id]) => id);
+      expect(afterRestart).not.toContain('verify-new');
+      expect(afterRestart).not.toContain('verify-old');
+    });
+
+    it('keeps the slot unreconstructable when the completion mark write fails (R2-2 mark write failure)', async () => {
+      const config = {
+        deliverToBoundSessions: true,
+        boundSessionActions: {
+          'review:comment': 'review it',
+          'verify:comment': 'verify it',
+        },
+      };
+      await initChannel(config, { boundSessions });
+      const verifyBindingFor = (sessionId: string, updatedAt?: string) =>
+        makeBinding({
+          sessionId,
+          ...(updatedAt ? { updatedAt } : {}),
+          prs: [
+            {
+              number: 42,
+              url: 'https://github.com/owner/repo/pull/42',
+              state: 'open',
+              role: 'verify',
+            },
+          ],
+        });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding(), verifyBindingFor('verify-old')],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 'review-session' || sessionId === 'verify-old') {
+            throw new BoundSessionQueueFullError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+
+      // verify-mid accepts, but the ONE write that would persist the
+      // carrier's completed:true slot mark fails with a real rename EIO
+      // (content-selected, fired once; the completion helper is not mocked).
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          verifyBindingFor('verify-mid', '2026-07-03T00:00:00.000Z'),
+        ],
+        partial: false,
+      });
+      const originalRename = nodeFs.renameSync;
+      let fired = false;
+      const spy = vi.spyOn(nodeFs, 'renameSync').mockImplementation(((
+        from: string,
+        to: string,
+      ) => {
+        if (
+          !fired &&
+          typeof to === 'string' &&
+          to.endsWith('-github-inbound-tasks.json')
+        ) {
+          const staged = JSON.parse(
+            nodeFs.readFileSync(from, 'utf-8'),
+          ) as Array<{ fanout?: Array<{ completed?: boolean }> }>;
+          if (
+            Array.isArray(staged) &&
+            staged.some((record) =>
+              (record.fanout ?? []).some((t) => t.completed === true),
+            )
+          ) {
+            fired = true;
+            throw Object.assign(new Error('EIO: i/o error'), {
+              code: 'EIO',
+            });
+          }
+        }
+        return (originalRename as (a: string, b: string) => void)(from, to);
+      }) as unknown as typeof nodeFs.renameSync);
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce().catch(() => undefined);
+      spy.mockRestore();
+      expect(fired).toBe(true);
+
+      // The acceptance evidence survives on disk: the accepted task is NOT
+      // removed, and the carrier's original slot is still unmarked.
+      const afterFailure = readTasks();
+      const acceptedTask = afterFailure.find(
+        (t) =>
+          (t['delivery'] as { sessionId?: string } | undefined)?.sessionId ===
+          'verify-mid',
+      );
+      expect(acceptedTask).toBeDefined();
+      expect(acceptedTask!['deliveredAt']).toBeDefined();
+      const carrier = afterFailure.find((t) => t['fanout'] !== undefined);
+      expect(carrier).toBeDefined();
+      expect(
+        (
+          carrier!['fanout'] as Array<{
+            sessionId: string;
+            completed?: boolean;
+          }>
+        ).find((t) => t.sessionId === 'verify-old')!['completed'],
+      ).toBeUndefined();
+
+      // Rebind again WITHOUT a restart: recovery must honor the acceptance
+      // evidence (no reconstruction into verify-new), then complete the
+      // mark from the deliveredAt record and retire the accepted task.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          reviewBinding(),
+          verifyBindingFor('verify-new', '2026-07-04T00:00:00.000Z'),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      const all = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).map(([id]) => id);
+      expect(all).not.toContain('verify-new');
+      expect(all.filter((id) => id === 'verify-mid')).toHaveLength(1);
+      const healed = readTasks().find((t) => t['fanout'] !== undefined);
+      expect(healed).toBeDefined();
+      expect(
+        (
+          healed!['fanout'] as Array<{
+            sessionId: string;
+            completed?: boolean;
+          }>
+        ).find((t) => t.sessionId === 'verify-old')!['completed'],
+      ).toBe(true);
+    });
+
+    it('keeps a ring-retired comment terminal when task removal fails (R2-4 ring branch)', async () => {
+      const config = {
+        deliverToBoundSessions: true,
+        boundSessionActions: { 'review:comment': 'review it' },
+      };
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding()],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledWith(
+        'review-session',
+        expect.any(String),
+        expect.any(String),
+      );
+
+      // Restart with every follower gone AND the cursor lost: the same
+      // event re-lists, is claimed untargeted, and the ring guard retires
+      // it privately. The removal then fails inside the delivery
+      // try/catch — the terminal outcome must survive the cleanup error.
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      const nameHash = createHash('sha256')
+        .update('test-github')
+        .digest('hex')
+        .slice(0, 16);
+      nodeFs.rmSync(
+        join(
+          process.env.QWEN_HOME!,
+          'channels',
+          getWorkspaceScopeDirName('/tmp/test'),
+          `test-github-${nameHash}-poll-cursor.json`,
+        ),
+        { force: true },
+      );
+      const removeSpy = vi
+        .spyOn(
+          channel as unknown as { removeInboundTask: (id: string) => void },
+          'removeInboundTask',
+        )
+        .mockImplementation(() => {
+          throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+        });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce().catch(() => undefined);
+      removeSpy.mockRestore();
+
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      const tasks = readTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!['state']).toBe('cancelled');
+
+      // Restart: the terminal record stays non-recoverable and private.
+      await initChannel(config, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+  });
+
   describe('PR state watch', () => {
     // Routing queues (listForRef / notifications / comments) are consumed
     // per API call, and some tests intentionally leave a value unconsumed
@@ -9179,6 +13379,216 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         `test-github-${nameHash}-github-pr-watch.json`,
       );
     }
+
+    describe('role-aware watch fan-out', () => {
+      const headChangeKey = 'watch:head_change:42:1:1751446800000';
+
+      const roleWatchConfig = {
+        deliverToBoundSessions: true,
+        prWatchEvents: ['head_change'],
+        boundSessionActions: {
+          'review:watch:head_change': 'Re-review %repo%#%pr% (role %role%).',
+          'verify:watch:head_change': 'Re-verify %repo%#%pr%.',
+        },
+      };
+
+      function roleBindings() {
+        return (['review', 'verify', 'fix'] as const).map((role) =>
+          makeBinding({
+            sessionId: `${role}-session`,
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role,
+              },
+            ],
+          }),
+        );
+      }
+
+      function headChangePending(sessionId = 'review-session') {
+        return {
+          key: headChangeKey,
+          issueNumber: 42,
+          envelope: {
+            channelName: 'test-github',
+            senderId: 'github',
+            senderName: 'GitHub',
+            chatId: 'owner/repo',
+            threadId: 'pr:42',
+            messageId: headChangeKey,
+            text: 'PR head advanced to sha-1.',
+            isGroup: true,
+            isMentioned: true,
+            isReplyToBot: false,
+            metadata:
+              'Type: Pull Request | Title: Test PR | URL: https://github.com/owner/repo/pull/42\nEvent: head_change.',
+          },
+          delivery: { kind: 'bound-session', sessionId },
+        };
+      }
+
+      function seedHeadChangeBaseline(pending: unknown[]) {
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            ci: 'success',
+            mergeableState: 'clean',
+            prState: 'open',
+            prUpdatedAt: '2026-07-02T09:00:00.000Z',
+            seq: 1,
+            fired: [],
+            pending,
+          },
+        });
+      }
+
+      function writeTasks(records: unknown[]): void {
+        const path = inboundTaskPath();
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, `${JSON.stringify(records)}\n`, 'utf-8');
+      }
+
+      function readTasks(): Array<Record<string, unknown>> {
+        if (!existsSync(inboundTaskPath())) return [];
+        return JSON.parse(readFileSync(inboundTaskPath(), 'utf-8')) as Array<
+          Record<string, unknown>
+        >;
+      }
+
+      it('delivers one watch transition to each matched role and fires only after all claims', async () => {
+        await initChannel(roleWatchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: roleBindings(),
+          partial: false,
+        });
+        seedHeadChangeBaseline([headChangePending()]);
+        mockPull({});
+        mockNotificationsOnce([]);
+
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+        const calls = boundSessions.deliverPrompt.mock.calls as Array<
+          [string, string]
+        >;
+        const bySession = new Map(calls.map(([id, prompt]) => [id, prompt]));
+        expect(bySession.get('review-session')).toContain(
+          'Re-review owner/repo#42 (role review).',
+        );
+        expect(bySession.get('verify-session')).toContain(
+          'Re-verify owner/repo#42.',
+        );
+        // fix has no head_change key: not disturbed.
+        expect(bySession.has('fix-session')).toBe(false);
+        const state = readWatchState();
+        const entry = state.entries['owner/repo#42']!;
+        expect(entry['pending']).toEqual([]);
+        expect(entry['fired']).toEqual([headChangeKey]);
+        expect(readTasks()).toHaveLength(0);
+      });
+
+      it('re-claims only the missing target after a crash mid-fan-out', async () => {
+        await initChannel(roleWatchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: roleBindings(),
+          partial: false,
+        });
+        const pending = headChangePending();
+        seedHeadChangeBaseline([pending]);
+        // The review target was claimed before the crash; its task survived
+        // but the pending→fired save did not. The drain must REUSE it and
+        // claim only verify — never a second review task.
+        writeTasks([
+          {
+            version: 1,
+            id: 'pre-crash-review-task',
+            createdAt: '2026-07-02T09:00:00.000Z',
+            updatedAt: '2026-07-02T09:00:00.000Z',
+            state: 'accepted',
+            issueNumber: 42,
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: headChangeKey,
+            },
+            envelope: pending.envelope,
+            dedupe: {},
+            attempts: 0,
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'review-session',
+              role: 'review',
+            },
+          },
+        ]);
+        mockPull({});
+        mockNotificationsOnce([]);
+
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+        const state = readWatchState();
+        expect(state.entries['owner/repo#42']!['fired']).toEqual([
+          headChangeKey,
+        ]);
+        expect(readTasks()).toHaveLength(0);
+      });
+
+      it('keeps per-(PR, target) ordering: a stuck role does not block the others', async () => {
+        await initChannel(roleWatchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: roleBindings(),
+          partial: false,
+        });
+        seedHeadChangeBaseline([headChangePending()]);
+        // An unsettled EARLIER watch task for the review target blocks only
+        // review; verify drains now and the event stays pending for review.
+        writeTasks([
+          {
+            version: 1,
+            id: 'review-predecessor',
+            createdAt: '2026-07-02T08:00:00.000Z',
+            updatedAt: '2026-07-02T08:00:00.000Z',
+            state: 'failed',
+            issueNumber: 42,
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: 'watch:head_change:42:0:1751443200000',
+            },
+            envelope: {
+              ...headChangePending().envelope,
+              messageId: 'watch:head_change:42:0:1751443200000',
+            },
+            dedupe: {},
+            attempts: 1,
+            error: 'transient',
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'review-session',
+              role: 'review',
+            },
+          },
+        ]);
+        mockPull({});
+        mockNotificationsOnce([]);
+
+        await pollOnce();
+
+        const calls = boundSessions.deliverPrompt.mock.calls as Array<[string]>;
+        // verify delivered; the predecessor retried via recovery; the NEW
+        // event's review target waits (no second review delivery).
+        expect(calls.map(([id]) => id)).toContain('verify-session');
+        expect(calls.filter(([id]) => id === 'review-session')).toHaveLength(1);
+        const state = readWatchState();
+        const entry = state.entries['owner/repo#42']!;
+        expect(entry['pending']).toHaveLength(1);
+        expect(entry['fired']).toEqual([]);
+      });
+    });
 
     it('delivers a comment privately during a partial binding scan', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
@@ -11417,7 +15827,66 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       }
     });
 
-    it('aborts the whole watch pass on a shared 403 instead of one doomed call per PR (R1-11)', async () => {
+    it.each([
+      [
+        'a shared 403',
+        Object.assign(new Error('API rate limit exceeded'), {
+          status: 403,
+          response: { headers: { 'x-ratelimit-remaining': '0' } },
+        }),
+      ],
+      [
+        'a bare 429',
+        Object.assign(new Error('Too Many Requests'), {
+          status: 429,
+          response: { headers: {} },
+        }),
+      ],
+    ])(
+      'aborts the whole watch pass on %s instead of one doomed call per PR (R1-11)',
+      async (_label, rejection) => {
+        await initChannel(watchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding(),
+            makeBinding({
+              sessionId: 'other-session',
+              updatedAt: '2026-07-03T00:00:00.000Z',
+              prs: [
+                {
+                  number: 43,
+                  url: 'https://github.com/owner/repo/pull/43',
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        mockOctokit.rest.pulls.get.mockRejectedValue(rejection);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          mockNotificationsOnce([]);
+          await pollOnce();
+
+          // Two watched PRs, ONE rejected call: the pass aborts instead of
+          // walking the rest of the set against an unreset budget.
+          expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(1);
+          const errText = stderr.mock.calls
+            .map((call) => String(call[0]))
+            .join('');
+          expect(errText).toContain('PR watch pass aborted');
+          // The notification lane still runs in the same poll.
+          expect(
+            mockOctokit.rest.activity.listNotificationsForAuthenticatedUser,
+          ).toHaveBeenCalledTimes(1);
+        } finally {
+          stderr.mockRestore();
+        }
+      },
+    );
+
+    it('aborts the watch pass on a secondary limit named only by its message', async () => {
       await initChannel(watchConfig, { boundSessions });
       boundSessions.listPrBindings.mockResolvedValue({
         bindings: [
@@ -11436,28 +15905,27 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         ],
         partial: false,
       });
+      // Quota left and no retry-after: only GitHub's wording marks the limit.
       mockOctokit.rest.pulls.get.mockRejectedValue(
-        Object.assign(new Error('API rate limit exceeded'), {
-          status: 403,
-          response: { headers: { 'x-ratelimit-remaining': '0' } },
-        }),
+        Object.assign(
+          new Error(
+            'You have exceeded a secondary rate limit. Please wait a few minutes before you try again. - https://docs.github.com/rest',
+          ),
+          {
+            status: 403,
+            response: { headers: { 'x-ratelimit-remaining': '4999' } },
+          },
+        ),
       );
       const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
       try {
         mockNotificationsOnce([]);
         await pollOnce();
 
-        // Two watched PRs, ONE rejected call: the pass aborts instead of
-        // walking the rest of the set against an unreset budget.
         expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(1);
-        const errText = stderr.mock.calls
-          .map((call) => String(call[0]))
-          .join('');
-        expect(errText).toContain('PR watch pass aborted');
-        // The notification lane still runs in the same poll.
         expect(
-          mockOctokit.rest.activity.listNotificationsForAuthenticatedUser,
-        ).toHaveBeenCalledTimes(1);
+          stderr.mock.calls.map((call) => String(call[0])).join(''),
+        ).toContain('PR watch pass aborted');
       } finally {
         stderr.mockRestore();
       }
@@ -11523,44 +15991,50 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(2);
     });
 
-    it('keeps watching the other PRs on a per-repo permission 403 (R1-11)', async () => {
-      await initChannel(watchConfig, { boundSessions });
-      boundSessions.listPrBindings.mockResolvedValue({
-        bindings: [
-          makeBinding(),
-          makeBinding({
-            sessionId: 'other-session',
-            updatedAt: '2026-07-03T00:00:00.000Z',
-            prs: [
-              {
-                number: 43,
-                url: 'https://github.com/owner/repo/pull/43',
-                state: 'open',
-              },
-            ],
-          }),
-        ],
-        partial: false,
-      });
-      // A fine-grained token lacking access to ONE repo answers a permission
-      // 403 with x-ratelimit-remaining > 0 and no retry-after. Bindings come
-      // from sessions, not the token's grants, so this is per-PR: the pass
-      // must continue to the next PR, not abort and starve every other
-      // watched PR of detection.
-      mockOctokit.rest.pulls.get
-        .mockRejectedValueOnce(
-          Object.assign(new Error('Resource not accessible by integration'), {
-            status: 403,
-            response: { headers: { 'x-ratelimit-remaining': '4999' } },
-          }),
-        )
-        .mockResolvedValue({ data: makePrMeta() });
-      mockNotificationsOnce([]);
-      mockChecks([{ status: 'completed', conclusion: 'success' }]);
-      await pollOnce();
+    it.each([
+      ['with quota left', '4999'],
+      ['with an empty budget header', ''],
+    ])(
+      'keeps watching the other PRs on a per-repo permission 403 %s (R1-11)',
+      async (_label, remaining) => {
+        await initChannel(watchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding(),
+            makeBinding({
+              sessionId: 'other-session',
+              updatedAt: '2026-07-03T00:00:00.000Z',
+              prs: [
+                {
+                  number: 43,
+                  url: 'https://github.com/owner/repo/pull/43',
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        // A fine-grained token lacking access to ONE repo answers a permission
+        // 403 with x-ratelimit-remaining > 0 and no retry-after. Bindings come
+        // from sessions, not the token's grants, so this is per-PR: the pass
+        // must continue to the next PR, not abort and starve every other
+        // watched PR of detection.
+        mockOctokit.rest.pulls.get
+          .mockRejectedValueOnce(
+            Object.assign(new Error('Resource not accessible by integration'), {
+              status: 403,
+              response: { headers: { 'x-ratelimit-remaining': remaining } },
+            }),
+          )
+          .mockResolvedValue({ data: makePrMeta() });
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
 
-      expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(2);
-    });
+        expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(2);
+      },
+    );
 
     it('re-checks a pending CI aggregate on the pending interval, not every poll (R1-3)', async () => {
       vi.useFakeTimers();

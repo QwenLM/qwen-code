@@ -110,7 +110,6 @@ final class AgentLifecycleOperations {
 
     OperationAdmission beginWorkspaceClose(String tenantId, String sessionId, String actorId,
             String actorDigest, String key, String digest, boolean supported) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         return beginLifecycle(tenantId, sessionId, OperationKind.CLOSE, actorDigest, key, digest, actorId, supported);
     }
 
@@ -602,8 +601,7 @@ final class AgentLifecycleOperations {
     Optional<OperationRecord> claimOperation(String tenantId,
             String sessionId, String operationId, String owner,
             Duration leaseDuration) {
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
-        storeRows.requireLegacyMutation(tenantId, sessionId);
+        ManagedLegacySessionGuard.requireLegacyMutation(lockOperationSession(tenantId, sessionId));
         long now = storeRows.lifecycleDatabaseTime();
         int updated =
                 jdbc.update(
@@ -733,7 +731,7 @@ final class AgentLifecycleOperations {
     boolean failOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             String failureCode) {
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+        lockOperationSession(tenantId, sessionId);
         long now = storeRows.lifecycleDatabaseTime();
         // The same fencing as completeOperation, and deliberately no
         // Session effect beyond the claim-mirror release below: the Session
@@ -787,8 +785,7 @@ final class AgentLifecycleOperations {
 
     boolean renewLifecycleOperation(String tenantId, String sessionId, String operationId,
             String owner, long generation, Duration duration) {
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
-        storeRows.requireLegacyMutation(tenantId, sessionId);
+        ManagedLegacySessionGuard.requireLegacyMutation(lockOperationSession(tenantId, sessionId));
         long now = storeRows.lifecycleDatabaseTime();
         int updated =
                 jdbc.update(
@@ -841,8 +838,7 @@ final class AgentLifecycleOperations {
     void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
             String owner, long generation, String failureCode, long availableAt,
             boolean budgetExempt) {
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
-        storeRows.requireLegacyMutation(tenantId, sessionId);
+        ManagedLegacySessionGuard.requireLegacyMutation(lockOperationSession(tenantId, sessionId));
         long now = storeRows.lifecycleDatabaseTime();
         // The exempt count increments from itself, never from
         // attempt_count: a wait refunds no already-charged attempt, so
@@ -886,8 +882,7 @@ final class AgentLifecycleOperations {
     void retryOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             long availableAt, boolean budgetExempt) {
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
-        storeRows.requireLegacyMutation(tenantId, sessionId);
+        ManagedLegacySessionGuard.requireLegacyMutation(lockOperationSession(tenantId, sessionId));
         long delay = Math.max(0, availableAt - clock.millis());
         long now = storeRows.lifecycleDatabaseTime();
         availableAt = Math.addExact(now, delay);
@@ -927,9 +922,16 @@ final class AgentLifecycleOperations {
         }
     }
 
+    private boolean lockOperationSession(String tenantId, String sessionId) {
+        // Match lifecycle admission's Session -> operation -> head order without
+        // creating a root when a stale caller names a missing Session.
+        return jdbc.queryForList("SELECT is_csi_guard FROM ma_session WHERE tenant_id = ?"
+                        + " AND session_id = ? FOR UPDATE", Boolean.class, tenantId, sessionId)
+                .stream().anyMatch(Boolean.TRUE::equals);
+    }
+
     void markOperationAnswered(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration) {
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         storeRows.requireLegacyMutation(tenantId, sessionId);
         long now = storeRows.lifecycleDatabaseTime();
         // Watermark only: the row stays leased and no reschedule runs here —

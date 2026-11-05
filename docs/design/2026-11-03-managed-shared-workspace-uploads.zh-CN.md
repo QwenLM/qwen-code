@@ -2,6 +2,8 @@
 
 [English](2026-11-03-managed-shared-workspace-uploads.md) | [简体中文](2026-11-03-managed-shared-workspace-uploads.zh-CN.md)
 
+下述 rewind 排他决定已由[取消 rewind 的目录排他](2026-11-05-managed-rewind-concurrency.zh-CN.md)替代。共享上传和物理维护保护仍保留。
+
 ## 问题与范围
 
 普通 Session 已经可以共享 Workspace 目录。上传准入仍要求没有执行成员，并设置

@@ -503,12 +503,10 @@ async function enrichPrSidecars(
         ...summary,
         prs: sidecarToPrInfos(result.prs),
       });
-    } else if (result.status === 'invalid') {
-      // An unreadable sidecar is UNKNOWN bindings, not an unbind: flag it
-      // so authoritative consumers (the PR-bindings snapshot) degrade to
-      // partial instead of silently dropping the session.
-      bySessionId.set(sessionId, { ...summary, prsReadFailed: true });
     }
+    // An unreadable sidecar is UNKNOWN bindings, not an unbind: leave `prs`
+    // unset rather than projecting an empty list. The PR-bindings snapshot
+    // reads the sidecars itself and reports such a session as partial.
   }
 }
 
@@ -705,11 +703,9 @@ async function liveOnlySummary(
   }
   if (result.status === 'ok') {
     summary.prs = mergeSummaryPrs(sidecarToPrInfos(result.prs), live.prs);
-  } else if (result.status === 'invalid') {
-    // Unknown bindings, not an unbind; the live entry's own bindings (if
-    // any) survive via the spread above.
-    summary.prsReadFailed = true;
   }
+  // Invalid: unknown bindings, not an unbind; the live entry's own bindings
+  // (if any) survive via the spread above.
   return summary;
 }
 
