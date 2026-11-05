@@ -579,7 +579,13 @@ class ServerEnvironmentTest {
                 "qwen.managed-agent.runtime-broker.token",
                 "qwen.managed-agent.session-store.binding-key",
                 "SPRING_DATASOURCE_PASSWORD", "server.ssl.key-store-password",
-                "example.secret")) {
+                "example.secret",
+                // Spellings Spring binds to the same property.
+                "qwen.managed-agent.runtime-broker.credentialKey",
+                "qwen.managed-agent.runtime-broker.credentialkey",
+                "qwen.managed-agent.runtime-broker.credential_key",
+                "qwen.managed-agent.runtime-broker.previous_credential_keys.old-v1",
+                "qwen.managed-agent.auth.signingKey", "example.APIKey")) {
             assertTrue(ManagedAgentPreflight.secretProperty(secret), secret);
         }
         // Paths to files that hold a secret, and IDs, hold none.
@@ -590,9 +596,83 @@ class ServerEnvironmentTest {
                 "qwen.managed-agent.harness.pool.key-store-file",
                 "qwen.managed-agent.harness.credentials-file",
                 "qwen.managed-agent.runtime-broker.resident-kubernetes-token-file",
-                "qwen.managed-agent.auth.mode", "spring.datasource.username")) {
+                "qwen.managed-agent.auth.mode", "spring.datasource.username",
+                "qwen.managed-agent.runtime-broker.credentialKeyId",
+                "qwen.managed-agent.harness.pool.kubernetesTokenFile")) {
             assertTrue(!ManagedAgentPreflight.secretProperty(plain), plain);
         }
+    }
+
+    @Test
+    void judgesAFileByTheKeysItDeclares() throws IOException {
+        // The same rule as a config tree value file's name: a token the
+        // three text markers do not spell is a secret all the same.
+        Path yaml = write("conf/application.yml", "qwen.managed-agent.harness.token: abc123\n");
+        Path properties = write("conf/broker.properties",
+                "qwen.managed-agent.runtime-broker.staticToken=abc123\n");
+        Path xml = write("conf/broker.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                + "<!DOCTYPE properties SYSTEM \"http://java.sun.com/dtd/properties.dtd\">\n"
+                + "<properties><entry key=\"qwen.managed-agent.runtime-broker.token\">x</entry>"
+                + "</properties>\n");
+        // A path to a file that holds a secret is none.
+        Path path = write("conf/pool.yml",
+                "qwen.managed-agent.harness.pool.kubernetes-token-file: /var/run/token\n");
+        for (Path file : List.of(yaml, properties, xml, path)) {
+            Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
+        }
+        for (Path file : List.of(yaml, properties, xml)) {
+            ManagedAgentPreflight.Check check = ManagedAgentPreflight.configFileCheck(file, null);
+            assertEquals(ManagedAgentPreflight.Status.WARN, check.status(), check.toString());
+            assertEquals("chmod 600 " + file, check.fix());
+        }
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                ManagedAgentPreflight.configFileCheck(path, null).status());
+    }
+
+    @Test
+    void resolvesAPlaceholderInALocationAsSpringDoes() throws IOException {
+        // systemd does not expand ${...} in an environment file; Spring does,
+        // from the same sources it reads the locations from.
+        Path empty = write("etc/application.yml", "# only a comment\n");
+        Map<String, Object> variables = new HashMap<>();
+        variables.put("SPRING_CONFIG_ADDITIONAL_LOCATION", "optional:file:${CONF}/");
+        variables.put("CONF", empty.getParent().toString());
+        ManagedAgentPreflight.Prepared prepared = prepare(environment(variables),
+                new ArrayList<>());
+        assertEquals(List.of(empty), prepared.files());
+        // A file cannot supply it.
+        Path named = write("conf/application.yml", "CONF: " + empty.getParent() + "\n");
+        variables.put("SPRING_CONFIG_ADDITIONAL_LOCATION",
+                "optional:file:" + named.getParent() + "/,optional:file:${CONF}/");
+        variables.remove("CONF");
+        prepared = prepare(environment(variables), new ArrayList<>());
+        assertEquals(List.of(named), prepared.files());
+    }
+
+    @Test
+    void namesEveryVariantThatHoldsTheErrorUnlessAProfileSaysWhich() throws IOException {
+        // Two variants with the very same error at the very same place.
+        Path config = write("conf/application.yml", "server.port: 9090\n");
+        Path aaa = write("conf/application-aaa.yml", "server: [\n");
+        Path zzz = write("conf/application-zzz.yml", "server: [\n");
+        String problem = ", line 2, column 1: expected the node content, but found '<stream end>'";
+        Map<String, Object> variables = new HashMap<>();
+        variables.put("SPRING_CONFIG_ADDITIONAL_LOCATION", "optional:file:" + config.getParent() + "/");
+        variables.put("SPRING_PROFILES_ACTIVE", "zzz");
+        assertEquals(zzz + problem, refused(environment(variables)).detail());
+        variables.remove("SPRING_PROFILES_ACTIVE");
+        variables.put("SPRING_PROFILES_INCLUDE", "zzz");
+        assertEquals(zzz + problem, refused(environment(variables)).detail());
+        // The profile set in a file, which the environment Spring was given
+        // does not hold: both are named.
+        Files.writeString(config, "spring.profiles.active: zzz\n");
+        assertEquals(aaa + " or " + zzz + problem,
+                refused(named("optional:file:" + config.getParent() + "/")).detail());
+        // A base file Spring reads for certain is the one, even beside a
+        // variant with the same error.
+        Files.writeString(config, "server: [\n");
+        assertEquals(config + problem,
+                refused(named("optional:file:" + config.getParent() + "/")).detail());
     }
 
     @Test

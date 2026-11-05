@@ -24,10 +24,14 @@ import org.springframework.boot.autoconfigure.web.ServerProperties;
 import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
 import org.springframework.boot.context.properties.bind.Bindable;
 import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.env.PropertiesPropertySourceLoader;
+import org.springframework.boot.env.PropertySourceLoader;
 import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.env.EnumerablePropertySource;
 import org.springframework.core.env.PropertySource;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 
 import java.io.File;
@@ -59,6 +63,7 @@ import java.sql.SQLTimeoutException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -98,6 +103,11 @@ public final class ManagedAgentPreflight {
     private static final int DEFAULT_SERVER_PORT = 8080;
     private static final List<String> SECRET_MARKERS =
             List.of("credential-key", "signing-key", "password");
+    // A property whose last word is one of these holds a secret, in the
+    // configuration reference's terms; credential-key-id and the paths to
+    // files that hold one end otherwise.
+    private static final List<String> SECRET_SUFFIXES =
+            List.of("password", "token", "key", "keys", "secret");
 
     private ManagedAgentPreflight() {
     }
@@ -424,8 +434,10 @@ public final class ManagedAgentPreflight {
             return new Check("config", Status.WARN,
                     path + ": cannot inspect permissions", null);
         }
+        // A file that names its properties is judged by the keys it declares,
+        // and by the markers in its text, commented-out lines among them.
         boolean secrets = property == null
-                ? SECRET_MARKERS.stream().anyMatch(content::contains)
+                ? SECRET_MARKERS.stream().anyMatch(content::contains) || declaresSecret(file)
                 : secretProperty(property);
         return secrets ? sharedSecretFileCheck("config", file, path)
                 : new Check("config", Status.PASS, path, null);
@@ -438,13 +450,38 @@ public final class ManagedAgentPreflight {
      * kubernetes-token-file, and credential-key-id hold none.
      */
     static boolean secretProperty(String property) {
-        for (String part : property.toLowerCase(Locale.ROOT).split("[./_\\[\\]]+")) {
-            if (part.equals("password") || part.endsWith("-password")
-                    || part.equals("token") || part.endsWith("-token")
-                    || part.equals("key") || part.endsWith("-key") || part.endsWith("-keys")
-                    || part.equals("secret") || part.endsWith("-secret")) {
+        for (String element : property.split("[./\\[\\]]+")) {
+            // Spring matches names ignoring case, dashes and underscores, so
+            // credential-key, credentialKey, credential_key and credentialkey
+            // are one name, and each ends in key.
+            String lower = element.toLowerCase(Locale.ROOT);
+            if (SECRET_SUFFIXES.stream().anyMatch(lower::endsWith)) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    /** Whether a file declares a property that holds a secret. */
+    private static boolean declaresSecret(Path file) {
+        String name = file.getFileName().toString().toLowerCase(Locale.ROOT);
+        PropertySourceLoader loader = name.endsWith(".yml") || name.endsWith(".yaml")
+                ? new YamlPropertySourceLoader()
+                : name.endsWith(".properties") || name.endsWith(".xml")
+                        ? new PropertiesPropertySourceLoader() : null;
+        if (loader == null) {
+            return false;
+        }
+        try {
+            for (PropertySource<?> source : loader.load(name, new FileSystemResource(file))) {
+                if (source instanceof EnumerablePropertySource<?> declared
+                        && Arrays.stream(declared.getPropertyNames())
+                                .anyMatch(ManagedAgentPreflight::secretProperty)) {
+                    return true;
+                }
+            }
+        } catch (IOException | RuntimeException error) {
+            // A file that does not parse is judged by its text alone.
         }
         return false;
     }

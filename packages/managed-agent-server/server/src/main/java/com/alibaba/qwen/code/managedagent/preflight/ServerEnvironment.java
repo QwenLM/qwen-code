@@ -8,7 +8,9 @@ import org.springframework.boot.context.config.ConfigDataNotFoundException;
 import org.springframework.boot.context.config.ConfigDataResourceNotFoundException;
 import org.springframework.boot.context.config.StandardConfigDataResource;
 import org.springframework.boot.context.event.ApplicationEnvironmentPreparedEvent;
+import org.springframework.boot.context.properties.bind.Bindable;
 import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.context.properties.bind.PropertySourcesPlaceholdersResolver;
 import org.springframework.boot.context.properties.source.ConfigurationPropertySources;
 import org.springframework.boot.convert.ApplicationConversionService;
 import org.springframework.boot.env.ConfigTreePropertySource;
@@ -128,7 +130,7 @@ final class ServerEnvironment {
         String[] active = environment.getActiveProfiles();
         List<String> profiles = List.of(active.length > 0 ? active
                 : environment.getDefaultProfiles());
-        for (Path file : locationFiles(environment, workingDirectory, profiles)) {
+        for (Path file : locationFiles(environment, workingDirectory, profiles).keySet()) {
             if (Files.isRegularFile(file)) {
                 files.add(file.toAbsolutePath().normalize());
             }
@@ -171,7 +173,8 @@ final class ServerEnvironment {
         List<Location> named = new ArrayList<>();
         for (String property : List.of("spring.config.import",
                 "spring.config.additional-location", "spring.config.location")) {
-            locations(topLevel(environment, property), workingDirectory, workingDirectory, named);
+            locations(String.join(",", topLevel(environment, property)), workingDirectory,
+                    workingDirectory, named);
         }
         // Spring honours an import a file declares, and no other location a
         // file sets; it reads a bare relative one beside that file.
@@ -224,7 +227,7 @@ final class ServerEnvironment {
      * locations and spring.config.name: from the arguments, the process
      * environment and the other sources no configuration file adds.
      */
-    private static String topLevel(ConfigurableEnvironment environment, String property) {
+    private static List<String> topLevel(ConfigurableEnvironment environment, String property) {
         List<PropertySource<?>> sources = new ArrayList<>();
         for (PropertySource<?> source : environment.getPropertySources()) {
             if (!(source instanceof OriginTrackedMapPropertySource)
@@ -232,9 +235,11 @@ final class ServerEnvironment {
                 sources.add(source);
             }
         }
-        // from() skips the attached view of every source, files' included.
-        return new Binder(ConfigurationPropertySources.from(sources))
-                .bind(property, String.class).orElse(null);
+        // from() skips the attached view of every source, files' included;
+        // a placeholder resolves against the same sources, as Spring's.
+        return new Binder(ConfigurationPropertySources.from(sources),
+                new PropertySourcesPlaceholdersResolver(sources))
+                .bind(property, Bindable.listOf(String.class)).orElse(List.of());
     }
 
     /**
@@ -245,14 +250,16 @@ final class ServerEnvironment {
      * refused to start, the files it read are not known, so neither is a
      * location one of them imports.
      */
-    private static Set<Path> locationFiles(ConfigurableEnvironment environment,
+    private static Map<Path, String> locationFiles(ConfigurableEnvironment environment,
             Path workingDirectory, List<String> profiles) {
         List<String> names = new ArrayList<>();
-        String configName = topLevel(environment, "spring.config.name");
-        for (String name : (configName == null ? "application" : configName).split(",")) {
+        for (String name : topLevel(environment, "spring.config.name")) {
             if (!name.isBlank()) {
                 names.add(name.strip());
             }
+        }
+        if (names.isEmpty()) {
+            names.add("application");
         }
         List<Path> directories = new ArrayList<>();
         Set<Path> files = new LinkedHashSet<>();
@@ -263,7 +270,7 @@ final class ServerEnvironment {
                 files.add(named.path());
             }
         }
-        if (topLevel(environment, "spring.config.location") == null) {
+        if (topLevel(environment, "spring.config.location").isEmpty()) {
             for (String directory : DEFAULT_DIRECTORIES) {
                 directories.add(workingDirectory.resolve(directory));
             }
@@ -277,12 +284,15 @@ final class ServerEnvironment {
                 }
             }
         }
-        Set<Path> variants = new LinkedHashSet<>();
+        // Each file, then its variants, each with the profile it is for.
+        Map<Path, String> located = new LinkedHashMap<>();
         for (Path file : files) {
-            variants.addAll(variants(file, profiles));
+            located.put(file, null);
         }
-        files.addAll(variants);
-        return files;
+        for (Path file : files) {
+            variants(file, profiles).forEach(located::putIfAbsent);
+        }
+        return located;
     }
 
     /** The directory, or for a last name of *, each directory in its parent. */
@@ -302,33 +312,41 @@ final class ServerEnvironment {
         return directories;
     }
 
-    /** The profile variants of a file, as application-edge.yml is of application.yml. */
-    private static List<Path> variants(Path file, List<String> profiles) {
+    /**
+     * The profile variants of a file, as application-edge.yml is of
+     * application.yml, each with its profile.
+     */
+    private static Map<Path, String> variants(Path file, List<String> profiles) {
         String name = file.getFileName().toString();
         int dot = name.lastIndexOf('.');
         if (dot <= 0) {
-            return List.of();
+            return Map.of();
         }
         String stem = name.substring(0, dot) + "-";
         String extension = name.substring(dot);
         Path directory = file.getParent() == null ? Path.of("") : file.getParent();
-        List<Path> variants = new ArrayList<>();
+        Map<Path, String> variants = new LinkedHashMap<>();
         if (profiles != null) {
             for (String profile : profiles) {
-                variants.add(directory.resolve(stem + profile + extension));
+                variants.put(directory.resolve(stem + profile + extension), profile);
             }
             return variants;
         }
+        List<Path> found = new ArrayList<>();
         try (DirectoryStream<Path> each = Files.newDirectoryStream(directory, path -> {
             String other = path.getFileName().toString();
             return other.startsWith(stem) && other.endsWith(extension)
                     && other.length() > stem.length() + extension.length();
         })) {
-            each.forEach(variants::add);
+            each.forEach(found::add);
         } catch (IOException error) {
             // No such directory, or none to read.
         }
-        variants.sort(null);
+        found.sort(null);
+        for (Path variant : found) {
+            String other = variant.getFileName().toString();
+            variants.put(variant, other.substring(stem.length(), other.length() - extension.length()));
+        }
         return variants;
     }
 
@@ -400,7 +418,8 @@ final class ServerEnvironment {
             return new Failure((file == null ? notFound.getReferenceDescription() : file)
                     + " does not exist", "create it, or correct the location that names it");
         }
-        Set<Path> candidates = locationFiles(environment, workingDirectory, null);
+        Map<Path, String> located = locationFiles(environment, workingDirectory, null);
+        Set<Path> candidates = located.keySet();
         IOException io = cause(error, IOException.class);
         if (io != null) {
             // The file the error names, which an import inside another file
@@ -418,17 +437,29 @@ final class ServerEnvironment {
         }
         MarkedYAMLException marked = cause(error, MarkedYAMLException.class);
         if (marked != null) {
-            for (Path candidate : candidates) {
-                // The same problem at the same place, as a profile variant
-                // no profile activates may hold another error.
-                if (Files.isRegularFile(candidate)
-                        && sameProblem(yamlError(candidate), marked)) {
-                    return yamlFailure(candidate.toAbsolutePath().normalize().toString(),
-                            marked);
+            // The files with the same problem at the same place: those Spring
+            // reads for certain, a base file or a variant of a profile the
+            // arguments or the environment activate, else every one, since a
+            // file may activate a profile too.
+            Set<String> active = new LinkedHashSet<>(topLevel(environment, "spring.profiles.active"));
+            active.addAll(topLevel(environment, "spring.profiles.include"));
+            List<String> matches = new ArrayList<>();
+            List<String> read = new ArrayList<>();
+            for (Map.Entry<Path, String> candidate : located.entrySet()) {
+                Path file = candidate.getKey();
+                if (Files.isRegularFile(file) && sameProblem(yamlError(file), marked)) {
+                    String name = file.toAbsolutePath().normalize().toString();
+                    matches.add(name);
+                    if (candidate.getValue() == null || active.contains(candidate.getValue())) {
+                        read.add(name);
+                    }
                 }
             }
-            // In a file an import names from inside another.
-            return yamlFailure("a configuration file", marked);
+            if (matches.isEmpty()) {
+                // In a file an import names from inside another.
+                return yamlFailure("a configuration file", marked);
+            }
+            return yamlFailure(String.join(" or ", read.isEmpty() ? matches : read), marked);
         }
         String message = oneLine(error.getMessage());
         String cause = oneLine(ManagedAgentPreflight.rootMessage(error));

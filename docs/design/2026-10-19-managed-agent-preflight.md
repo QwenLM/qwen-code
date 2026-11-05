@@ -26,7 +26,8 @@ The command reads the configuration the server reads, prepared as
 keeps Spring's precedence:
 
 - the command line (`--server.address=...`, `--qwen.managed-agent.*`);
-- the process environment, `SPRING_APPLICATION_JSON` included;
+- the process environment, `SPRING_APPLICATION_JSON` included, and the JVM
+  system properties (`-D…`, such as those `JAVA_OPTS` passes);
 - the configuration files Spring Boot reads: those named by
   `spring.config.location`, `spring.config.additional-location` or
   `spring.config.import`, as an argument or a `SPRING_CONFIG_*` variable (the
@@ -34,7 +35,7 @@ keeps Spring's precedence:
   `config/application.yml` exists, and the systemd unit's `server.env` names
   `/etc/qwen-managed-agent/application.yml`); those at its default locations
   `./`, `./config/` and `./config/*/`, unless `spring.config.location`
-  replaces them; as `.yml`, `.yaml` or `.properties`, under
+  replaces them; as `.yml`, `.yaml`, `.properties` or `.xml`, under
   `spring.config.name`; their profile variants, the files they import and
   config trees;
 - the classpath `application.yml` that maps `QWEN_MANAGED_AGENT_*` variables.
@@ -93,7 +94,9 @@ files the prepared property sources came from, then the files Spring read at a
 location without finding a setting. When the preparation throws, the row
 names what Spring refused: the file, read as missing or unreadable, or the
 YAML error's file and line, found among the files Spring looks for, since
-Spring's error names neither; a file this process cannot read names the
+Spring's error names neither: each file whose own error is Spring's, the same
+problem at the same place, unless a profile the arguments or the environment
+activate tells which one Spring read; a file this process cannot read names the
 service account when that cannot read it either, and otherwise says to run the
 check as that account. The other rows then read the arguments, the process
 environment and the packaged defaults. `Binder` produces

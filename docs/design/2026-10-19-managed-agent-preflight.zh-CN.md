@@ -16,8 +16,8 @@
 命令读取服务端读取的配置，按 `SpringApplication` 在创建 context 之前准备环境的方式准备，因此每项输入都保持 Spring 的优先级：
 
 - 命令行参数（`--server.address=...`、`--qwen.managed-agent.*`）；
-- 进程环境变量，包括 `SPRING_APPLICATION_JSON`；
-- Spring Boot 读取的配置文件：由 `spring.config.location`、`spring.config.additional-location` 或 `spring.config.import` 指定的文件，以参数或 `SPRING_CONFIG_*` 变量给出（启动脚本在 `config/application.yml` 存在时设置 `SPRING_CONFIG_ADDITIONAL_LOCATION`，systemd unit 的 `server.env` 指定 `/etc/qwen-managed-agent/application.yml`）；默认位置 `./`、`./config/` 和 `./config/*/` 下的文件，除非 `spring.config.location` 替换了它们；`.yml`、`.yaml` 或 `.properties` 格式，文件名取 `spring.config.name`；以及它们的 profile 变体、它们 import 的文件和 config tree；
+- 进程环境变量（包括 `SPRING_APPLICATION_JSON`）以及 JVM 系统属性（`-D…`，例如经 `JAVA_OPTS` 传入的）；
+- Spring Boot 读取的配置文件：由 `spring.config.location`、`spring.config.additional-location` 或 `spring.config.import` 指定的文件，以参数或 `SPRING_CONFIG_*` 变量给出（启动脚本在 `config/application.yml` 存在时设置 `SPRING_CONFIG_ADDITIONAL_LOCATION`，systemd unit 的 `server.env` 指定 `/etc/qwen-managed-agent/application.yml`）；默认位置 `./`、`./config/` 和 `./config/*/` 下的文件，除非 `spring.config.location` 替换了它们；`.yml`、`.yaml`、`.properties` 或 `.xml` 格式，文件名取 `spring.config.name`；以及它们的 profile 变体、它们 import 的文件和 config tree；
 - classpath 中把 `QWEN_MANAGED_AGENT_*` 变量映射为属性的 `application.yml`。
 
 相对位置（包括默认位置）与服务端一样在工作目录中解析，因此命令要在服务端的工作目录中运行：分发包根目录，或 unit 的 `WorkingDirectory`。在 [#16057](https://github.com/QwenLM/qwen-code/issues/16057) 之前，它只读取启动脚本或 `server.env` 指定的那个文件，漏掉了服务端从工作目录 `config/application.yml` 读到的 `server.port`。
@@ -49,7 +49,7 @@
 
 ## 实现
 
-`ManagedAgentServerApplication` 在 `SpringApplication.run` 之前拦截 `--check`，因此不会启动监听、调度器、数据源连接池或 worker。`ServerEnvironment` 按 `SpringApplication` 的方式准备 servlet 环境：参数、进程环境，然后经 `EnvironmentPostProcessorApplicationListener` 运行 classpath 上的所有 environment post-processor，并启用宽松绑定。它不创建 context；升级命令读取设置所用的 `ResolvedConfiguration` 也准备同一个环境。`config` 行先列出准备好的属性源来自的文件，再列出 Spring 在某个位置读到但其中没有任何设置的文件。准备过程抛出异常时，该行写明 Spring 拒绝的原因：被当作不存在或不可读的文件，或 YAML 错误所在的文件和行号。由于 Spring 的错误信息不包含这两者，需要在 Spring 会查找的文件中定位。本进程读不了的文件，若 service account 也读不了，就写 service account；否则提示以该账号运行检查。此时其余各行读取参数、进程环境和打包默认值。`Binder` 生成 `ManagedAgentProperties`，Harness 探测使用 JDK HTTP client，数据库探测使用 JDBC，连接与 socket 超时均为 5 秒。
+`ManagedAgentServerApplication` 在 `SpringApplication.run` 之前拦截 `--check`，因此不会启动监听、调度器、数据源连接池或 worker。`ServerEnvironment` 按 `SpringApplication` 的方式准备 servlet 环境：参数、进程环境，然后经 `EnvironmentPostProcessorApplicationListener` 运行 classpath 上的所有 environment post-processor，并启用宽松绑定。它不创建 context；升级命令读取设置所用的 `ResolvedConfiguration` 也准备同一个环境。`config` 行先列出准备好的属性源来自的文件，再列出 Spring 在某个位置读到但其中没有任何设置的文件。准备过程抛出异常时，该行写明 Spring 拒绝的原因：被当作不存在或不可读的文件，或 YAML 错误所在的文件和行号。由于 Spring 的错误信息不包含这两者，需要在 Spring 会查找的文件中定位：列出自身错误与 Spring 一致（问题相同、位置相同）的每个文件；若参数或环境变量激活的 profile 能确定 Spring 读的是哪一个，则只列那一个。本进程读不了的文件，若 service account 也读不了，就写 service account；否则提示以该账号运行检查。此时其余各行读取参数、进程环境和打包默认值。`Binder` 生成 `ManagedAgentProperties`，Harness 探测使用 JDK HTTP client，数据库探测使用 JDBC，连接与 socket 超时均为 5 秒。
 
 ## 验收
 
