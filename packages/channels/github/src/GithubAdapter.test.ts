@@ -6816,6 +6816,50 @@ describe('GithubChannel', () => {
       ]);
     });
 
+    it('recovers a persisted task after the store is repaired (issue #16393)', async () => {
+      // The store is unreadable at connect and at the first poll's recovery,
+      // so the in-memory recoverable count latches at 0. Repairing the file
+      // must still be picked up by a later poll: the failed recovery stays
+      // armed, and the repaired task runs instead of freezing the cursor.
+      class NoPollLoopChannel extends TestableGithubChannel {
+        protected override startPollLoop(): void {}
+      }
+      channel = new NoPollLoopChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      mkdirSync(join(inboundTaskPath(), '..'), { recursive: true });
+      writeFileSync(inboundTaskPath(), '{corrupt', 'utf-8');
+      mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
+      channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
+
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+
+      // The operator repairs the store while the daemon keeps running.
+      writeInboundTasks([makeInboundTaskRecord()]);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ last_read_at: '2026-07-02T09:00:00.000Z' }),
+        ])
+        .mockResolvedValueOnce([]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes.map((env) => env.messageId)).toEqual([
+        '1001',
+      ]);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).toHaveBeenCalledWith({
+        last_read_at: '2026-07-02T10:00:00.000Z',
+        read: true,
+      });
+    });
+
     it('keeps the cancelled record when cancellation resolves normally', async () => {
       await initWithoutLoop();
       const task = makeInboundTaskRecord();
