@@ -31,6 +31,7 @@ vi.mock('../../config/loadedSettingsAdapter.js', () => ({
 const settings = {
   merged: {},
   isTrusted: true,
+  workspaceSettingsActive: true,
   setValues: vi.fn(),
 } as unknown as LoadedSettings;
 function config() {
@@ -44,6 +45,7 @@ function config() {
   } as unknown as Config;
 }
 beforeEach(() => {
+  vi.mocked(settings.setValues).mockClear();
   vi.stubEnv('DEV', false);
   delete process.env['DEV'];
   mocks.userInfo.mockReset().mockResolvedValue({ member_type: 'pro' });
@@ -51,7 +53,7 @@ beforeEach(() => {
   mocks.createAdapter.mockReset().mockReturnValue(mocks.adapter);
 });
 afterEach(() => vi.unstubAllEnvs());
-it('uses a token-free install plan and the common selection and refresh callbacks', async () => {
+it('installs the subscription in the project without writing user settings', async () => {
   const runtime = config();
   const signal = new AbortController().signal;
   await activateSubscription(settings, runtime, signal);
@@ -69,6 +71,7 @@ it('uses a token-free install plan and the common selection and refresh callback
     settings,
     SettingScope.Workspace,
   );
+  expect(settings.setValues).not.toHaveBeenCalled();
   callbacks.syncAuthState(
     plan.authType,
     plan.modelSelection.modelId,
@@ -133,26 +136,16 @@ it.each(['qwen3.8-flash', 'removed-model'])(
         security: { auth: { selectedType: 'qwen-subscription' } },
         model: { name: savedModel },
       },
-      setValues: vi.fn(),
     } as unknown as LoadedSettings;
     await activateSubscription(existing, runtime, new AbortController().signal);
     expect(mocks.apply.mock.calls[0][0].modelSelection.modelId).toBe(
       'qwen3.8-max',
     );
-    expect(existing.setValues).toHaveBeenCalledWith(
-      expect.arrayContaining([
-        {
-          scope: SettingScope.User,
-          key: 'model.name',
-          value: 'qwen3.8-max',
-        },
-      ]),
-    );
   },
 );
 it('honors the authentication policy without DEV', async () => {
   const restricted = {
-    isTrusted: true,
+    ...settings,
     merged: { security: { auth: { enforcedType: 'openai' } } },
   } as LoadedSettings;
   await expect(
@@ -181,6 +174,19 @@ it('rejects an untrusted workspace without falling back to user settings', async
   expect(mocks.userInfo).not.toHaveBeenCalled();
   expect(mocks.createAdapter).not.toHaveBeenCalled();
   expect(mocks.apply).not.toHaveBeenCalled();
+});
+
+it('requires a project when workspace settings are inactive', async () => {
+  const inactive = {
+    ...settings,
+    workspaceSettingsActive: false,
+  } as LoadedSettings;
+  await expect(
+    activateSubscription(inactive, config(), new AbortController().signal),
+  ).rejects.toThrow('Open a project folder');
+  expect(mocks.userInfo).not.toHaveBeenCalled();
+  expect(mocks.createAdapter).not.toHaveBeenCalled();
+  expect(inactive.setValues).not.toHaveBeenCalled();
 });
 
 it('keeps committed disk settings and runtime consistent when the dialog closes during refresh', async () => {

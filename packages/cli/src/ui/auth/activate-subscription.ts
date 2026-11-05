@@ -23,6 +23,9 @@ export async function activateSubscription(
   if (!settings.isTrusted) {
     throw new Error('Workspace is not trusted.');
   }
+  if (!settings.workspaceSettingsActive) {
+    throw new Error('Open a project folder to activate Qwen Subscription.');
+  }
   const enforced = settings.merged.security?.auth?.enforcedType;
   if (enforced && enforced !== AuthType.QWEN_SUBSCRIPTION) {
     throw new Error('Authentication is restricted by policy.');
@@ -54,19 +57,6 @@ export async function activateSubscription(
       refreshAuth: (authType) => config.refreshAuth(authType),
     },
   );
-  settings.setValues([
-    {
-      scope: SettingScope.User,
-      key: 'security.auth.selectedType',
-      value: AuthType.QWEN_SUBSCRIPTION,
-    },
-    { scope: SettingScope.User, key: 'model.name', value: modelId },
-    {
-      scope: SettingScope.User,
-      key: 'model.baseUrl',
-      value: QWEN_SUBSCRIPTION_BASE_URL,
-    },
-  ]);
   config.setSubscriptionPlan(plan);
   return info;
 }

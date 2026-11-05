@@ -75,8 +75,15 @@ export function registerWorkspaceSubscriptionRoutes(
         const settings = loadSettings(runtime.workspaceCwd, {
           skipLoadEnvironment: true,
           workspaceTrusted: true,
-        }).merged;
-        const enforced = settings.security?.auth?.enforcedType;
+        });
+        if (!settings.workspaceSettingsActive) {
+          res.status(409).json({
+            code: 'workspace_settings_unavailable',
+            message: 'Open a project folder to activate Qwen Subscription.',
+          });
+          return;
+        }
+        const enforced = settings.merged.security?.auth?.enforcedType;
         if (enforced && enforced !== AuthType.QWEN_SUBSCRIPTION) {
           res.status(403).json({ code: 'auth_type_enforced' });
           return;
@@ -101,17 +108,21 @@ export function registerWorkspaceSubscriptionRoutes(
           runtime.workspaceCwd,
           [
             {
+              scope: SettingScope.Workspace,
               key: 'security.auth.selectedType',
               value: AuthType.QWEN_SUBSCRIPTION,
             },
-            { key: 'model.name', value: modelId },
-            { key: 'model.baseUrl', value: QWEN_SUBSCRIPTION_BASE_URL },
-          ].flatMap((write) =>
-            [SettingScope.User, SettingScope.Workspace].map((scope) => ({
-              ...write,
-              scope,
-            })),
-          ),
+            {
+              scope: SettingScope.Workspace,
+              key: 'model.name',
+              value: modelId,
+            },
+            {
+              scope: SettingScope.Workspace,
+              key: 'model.baseUrl',
+              value: QWEN_SUBSCRIPTION_BASE_URL,
+            },
+          ],
           assertActive,
         );
         assertActive();

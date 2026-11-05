@@ -38,7 +38,10 @@ beforeEach(() => {
   mocks.models
     .mockReset()
     .mockResolvedValue({ models: ['qwen3.8-max'], cached: false });
-  mocks.loadSettings.mockReturnValue({ merged: {} });
+  mocks.loadSettings.mockReturnValue({
+    merged: {},
+    workspaceSettingsActive: true,
+  });
 });
 afterEach(() => vi.unstubAllEnvs());
 function setup(trusted = true) {
@@ -129,7 +132,7 @@ it.each([
   },
 );
 
-it('activates the selected runtime and persists user defaults for new workspaces', async () => {
+it('activates the selected runtime and writes only its workspace settings', async () => {
   const { app, persistSettings, reloadModelProviders } = setup();
   const response = await request(app)
     .post('/workspaces/secondary/auth/subscription')
@@ -153,12 +156,7 @@ it('activates the selected runtime and persists user defaults for new workspaces
         key: 'model.baseUrl',
         value: QWEN_SUBSCRIPTION_BASE_URL,
       },
-    ].flatMap((write) =>
-      [SettingScope.User, SettingScope.Workspace].map((scope) => ({
-        ...write,
-        scope,
-      })),
-    ),
+    ],
     expect.any(Function),
   );
   expect(reloadModelProviders).toHaveBeenCalledWith(
@@ -242,9 +240,25 @@ it('does not fall back for an unknown or untrusted workspace', async () => {
   expect(persistSettings).not.toHaveBeenCalled();
   expect(mocks.userInfo).not.toHaveBeenCalled();
 });
+it('requires a project when workspace settings are inactive', async () => {
+  const { app, persistSettings, reloadModelProviders } = setup();
+  mocks.loadSettings.mockReturnValue({
+    merged: {},
+    workspaceSettingsActive: false,
+  });
+  const response = await request(app).post(
+    '/workspaces/secondary/auth/subscription',
+  );
+  expect(response.status).toBe(409);
+  expect(response.body.message).toContain('Open a project folder');
+  expect(mocks.userInfo).not.toHaveBeenCalled();
+  expect(persistSettings).not.toHaveBeenCalled();
+  expect(reloadModelProviders).not.toHaveBeenCalled();
+});
 it('respects enforced authentication policy without DEV', async () => {
   const { app, persistSettings } = setup();
   mocks.loadSettings.mockReturnValue({
+    workspaceSettingsActive: true,
     merged: { security: { auth: { enforcedType: 'openai' } } },
   });
   expect(
@@ -285,6 +299,7 @@ it.each(['qwen3.8-flash', 'removed-model'])(
       cached: false,
     });
     mocks.loadSettings.mockReturnValue({
+      workspaceSettingsActive: true,
       merged: {
         security: { auth: { selectedType: 'qwen-subscription' } },
         model: { name: savedModel },
@@ -297,13 +312,13 @@ it.each(['qwen3.8-flash', 'removed-model'])(
     expect(response.body.modelId).toBe('qwen3.8-max');
     expect(persistSettings).toHaveBeenCalledWith(
       '/secondary',
-      expect.arrayContaining(
-        [SettingScope.User, SettingScope.Workspace].map((scope) => ({
-          scope,
+      expect.arrayContaining([
+        {
+          scope: SettingScope.Workspace,
           key: 'model.name',
           value: 'qwen3.8-max',
-        })),
-      ),
+        },
+      ]),
       expect.any(Function),
     );
   },
