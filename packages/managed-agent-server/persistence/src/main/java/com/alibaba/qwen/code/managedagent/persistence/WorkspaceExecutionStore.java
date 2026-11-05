@@ -11,7 +11,6 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
-import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.ConnectionCallback;
@@ -20,7 +19,6 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.List;
@@ -433,21 +431,17 @@ public class WorkspaceExecutionStore
                     return row.getString("execution_storage_key");
                 },
                 session.getBindingId(), session.getRuntimeGeneration(), session.getRuntimeSessionId());
-        if (held.size() != 1) {
+        if (held.size() != 1 || (held.getFirst() != null && !key.equals(held.getFirst()))) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        }
+        if (!directoryAdmits(key)) {
+            throw busy();
         }
         if (key.equals(held.getFirst())) {
-            if (!directoryAdmits(key)) {
-                throw busy();
-            }
             return;
         }
-        if (held.getFirst() != null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-        }
         if (jdbc.update("UPDATE ma_storage_owner SET member_count = member_count + 1 WHERE storage_key = ?"
-                + " AND mount_state = 'READY' AND mount_revision = ? AND holder_key IS NULL"
-                + " AND maintenance_id IS NULL",
+                + " AND mount_state = 'READY' AND mount_revision = ?",
                 key, mountRevision) != 1) {
             throw busy();
         }
@@ -468,11 +462,8 @@ public class WorkspaceExecutionStore
     }
 
     private boolean directoryAdmits(String key) {
-        List<Boolean> open = jdbc.query("SELECT holder_key, maintenance_id, mount_state"
-                + " FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", (row, index) ->
-                        row.getString("holder_key") == null && row.getString("maintenance_id") == null
-                        && "READY".equals(row.getString("mount_state")), key);
-        return open.size() == 1 && Boolean.TRUE.equals(open.getFirst());
+        return !jdbc.queryForList("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ?"
+                + " AND mount_state = 'READY' FOR UPDATE", String.class, key).isEmpty() && StorageOwnerMembership.membersAllowed(jdbc, key);
     }
 
     public void beginRewind(ContextBinding binding, RuntimeSessionRecord session) {
@@ -540,9 +531,7 @@ public class WorkspaceExecutionStore
         }
         WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         String key = storageKey(binding);
-        if (jdbc.queryForList("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ?"
-                + " AND storage_kind IN ('LOCAL', 'SSH_LOCAL') AND holder_key IS NULL AND maintenance_id IS NULL",
-                String.class, key).isEmpty()) {
+        if (!StorageOwnerMembership.membersAllowed(jdbc, key)) {
             return false;
         }
         return !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session WHERE execution_storage_key = ?"
@@ -601,13 +590,12 @@ public class WorkspaceExecutionStore
     }
 
     /**
-     * The child Workspace maintenance holder (#13753 I1): a physical step
-     * of a child Workspace excludes execution members,
-     * so a turn meets it as workspace_busy and polls, while W1a fence and
-     * registration, which need an idle lease, refuse. The Runtime holder
-     * columns stay null and maintenance_id names the child Workspace. The
-     * hold belongs to the child Workspace's current claim generation: a
-     * different generation cannot take it over. A physical step releases
+     * Physical maintenance excludes other maintenance. Child steps and checkout
+     * cleanup also exclude execution members; main Session worktree preparation
+     * from a frozen commit permits them. W1a fence and registration still need
+     * an idle lease. Runtime holder columns stay null and maintenance_id names
+     * the owning operation. Its claim generation owns the hold; another
+     * generation cannot take it over. A physical step releases
      * only its own generation after returning; claim expiry leaves the
      * original holder in place until its process is reconciled.
      */
@@ -615,7 +603,7 @@ public class WorkspaceExecutionStore
             long claimGeneration) {
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         WorkspaceStorageKindGuard.requireFreshTransaction();
-        String holder = maintenanceHolderKey(maintenanceId, claimGeneration);
+        String holder = StorageOwnerMembership.maintenanceHolderKey(maintenanceId, claimGeneration);
         return transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
@@ -630,11 +618,13 @@ public class WorkspaceExecutionStore
             if (storageGuard != null) {
                 storageGuard.verifyLocked(binding);
             }
+            boolean preparing = Boolean.TRUE.equals(jdbc.execute((ConnectionCallback<Boolean>) connection ->
+                    StorageOwnerMembership.isWorktreePreparation(connection, key, maintenanceId, claimGeneration)));
             if (jdbc.update("UPDATE ma_storage_owner SET holder_key = ?,"
                     + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL,"
                     + " maintenance_id = ?, maintenance_generation = ? WHERE storage_key = ? AND storage_kind = 'LOCAL'"
-                    + " AND member_count = 0 AND (holder_key IS NULL OR holder_key = ?)",
-                    holder, maintenanceId, claimGeneration, key, holder) != 1) {
+                    + " AND (? OR member_count = 0) AND (holder_key IS NULL OR holder_key = ?)",
+                    holder, maintenanceId, claimGeneration, key, preparing, holder) != 1) {
                 throw busy();
             }
             return WorkspaceMaintenanceRecovery.recordStart(jdbc, binding, maintenanceId, claimGeneration);
@@ -653,7 +643,7 @@ public class WorkspaceExecutionStore
             int released = jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL,"
                     + " maintenance_id = NULL, maintenance_generation = NULL WHERE storage_key = ? AND storage_kind = 'LOCAL'"
                     + " AND holder_key = ? AND maintenance_id = ? AND maintenance_generation = ?", key,
-                    maintenanceHolderKey(maintenanceId, claimGeneration), maintenanceId, claimGeneration);
+                    StorageOwnerMembership.maintenanceHolderKey(maintenanceId, claimGeneration), maintenanceId, claimGeneration);
             if (released != 1) {
                 status.setRollbackOnly();
             }
@@ -709,9 +699,7 @@ public class WorkspaceExecutionStore
         if (members.contains(false)) {
             return false;
         }
-        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE storage_key = ?"
-                + " AND storage_kind IN ('LOCAL', 'SSH_LOCAL') AND (holder_key IS NOT NULL OR maintenance_id IS NOT NULL)",
-                Long.class, physical) == 0;
+        return StorageOwnerMembership.membersAllowed(jdbc, physical);
     }
 
     public void releaseLost(RuntimeBindingRecord saved) {
@@ -832,16 +820,4 @@ public class WorkspaceExecutionStore
 
     private static final String RELEASE_MEMBERS = "UPDATE ma_storage_owner SET member_count = member_count - ?"
             + " WHERE storage_key = ? AND member_count >= ?";
-
-    private static String maintenanceHolderKey(String maintenanceId, long claimGeneration) {
-        return digest("child-workspace\u0000" + maintenanceId + "\u0000" + claimGeneration);
-    }
-
-    private static String digest(String value) {
-        try {
-            return DigestUtils.sha256Hex(value.getBytes(StandardCharsets.UTF_8));
-        } catch (IllegalArgumentException error) {
-            throw new IllegalStateException("SHA-256 is unavailable", error);
-        }
-    }
 }
