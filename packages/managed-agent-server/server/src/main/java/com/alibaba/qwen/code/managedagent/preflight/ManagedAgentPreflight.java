@@ -191,10 +191,11 @@ public final class ManagedAgentPreflight {
 
     /**
      * The environment the checks read, and either the configuration files it
-     * holds from the file system or why Spring would refuse to start.
+     * holds from the file system, with the property each config tree value
+     * file holds, or why Spring would refuse to start.
      */
     record Prepared(ConfigurableEnvironment environment, List<Path> files,
-            ServerEnvironment.Failure failure) {
+            Map<Path, String> values, ServerEnvironment.Failure failure) {
     }
 
     /**
@@ -209,14 +210,14 @@ public final class ManagedAgentPreflight {
         try {
             ConfigurableEnvironment environment =
                     ServerEnvironment.prepare(args, base);
-            return new Prepared(environment,
-                    ServerEnvironment.files(environment), null);
+            return new Prepared(environment, ServerEnvironment.files(environment),
+                    ServerEnvironment.valueFiles(environment), null);
         } catch (RuntimeException error) {
             ServerEnvironment.Failure failure = ServerEnvironment.failure(error, base);
             // Spring adds the files' sources once it has read them all, so
             // base holds what the arguments and the process environment set.
             loadDefaults(base, checks);
-            return new Prepared(base, List.of(), failure);
+            return new Prepared(base, List.of(), Map.of(), failure);
         }
     }
 
@@ -227,7 +228,7 @@ public final class ManagedAgentPreflight {
     static List<Check> configChecks(Prepared prepared, ServiceAccount account,
             String runner) {
         return prepared.failure() == null
-                ? configFileChecks(prepared.files(), account)
+                ? configFileChecks(prepared.files(), account, prepared.values())
                 : List.of(configFailureCheck(prepared.failure(), account, runner));
     }
 
@@ -379,6 +380,12 @@ public final class ManagedAgentPreflight {
      */
     static List<Check> configFileChecks(List<Path> files,
             ServiceAccount account) {
+        return configFileChecks(files, account, Map.of());
+    }
+
+    /** As above, with the property each config tree value file holds. */
+    static List<Check> configFileChecks(List<Path> files,
+            ServiceAccount account, Map<Path, String> values) {
         if (files.isEmpty()) {
             return List.of(new Check("config", Status.WARN,
                     "no configuration file; packaged defaults and the"
@@ -387,12 +394,20 @@ public final class ManagedAgentPreflight {
         }
         List<Check> checks = new ArrayList<>();
         for (Path file : files) {
-            checks.add(configFileCheck(file, account));
+            checks.add(configFileCheck(file, account, values.get(file)));
         }
         return checks;
     }
 
     static Check configFileCheck(Path file, ServiceAccount account) {
+        return configFileCheck(file, account, null);
+    }
+
+    /**
+     * As above, for a config tree value file that holds this property's
+     * value, or null for a file that names its properties.
+     */
+    static Check configFileCheck(Path file, ServiceAccount account, String property) {
         String path = file.toString();
         if (!readable(file, account)) {
             return account == null
@@ -409,12 +424,29 @@ public final class ManagedAgentPreflight {
             return new Check("config", Status.WARN,
                     path + ": cannot inspect permissions", null);
         }
-        // A config tree's file is named for its property and holds the value.
-        String name = file.getFileName().toString();
-        boolean secrets = SECRET_MARKERS.stream().anyMatch(marker ->
-                content.contains(marker) || name.contains(marker));
+        boolean secrets = property == null
+                ? SECRET_MARKERS.stream().anyMatch(content::contains)
+                : secretProperty(property);
         return secrets ? sharedSecretFileCheck("config", file, path)
                 : new Check("config", Status.PASS, path, null);
+    }
+
+    /**
+     * Whether a property holds a secret, as the configuration reference
+     * marks them: a password, token or key, or one of a map of keys, such as
+     * previous-credential-keys.<id>. A path to a file that holds one, such as
+     * kubernetes-token-file, and credential-key-id hold none.
+     */
+    static boolean secretProperty(String property) {
+        for (String part : property.toLowerCase(Locale.ROOT).split("[./_\\[\\]]+")) {
+            if (part.equals("password") || part.endsWith("-password")
+                    || part.equals("token") || part.endsWith("-token")
+                    || part.equals("key") || part.endsWith("-key") || part.endsWith("-keys")
+                    || part.equals("secret") || part.endsWith("-secret")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Spring reads YAML as UTF-8, or UTF-16 after a byte order mark, and

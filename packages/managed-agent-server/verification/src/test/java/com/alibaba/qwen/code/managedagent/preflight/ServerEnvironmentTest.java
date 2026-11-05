@@ -295,6 +295,36 @@ class ServerEnvironmentTest {
         assertEquals("chown " + user + " " + locked + ", chmod 600 " + locked
                 + ", and let " + user + " enter every directory on its path,"
                 + " following symbolic links", config.fix());
+        // Reached through an import inside another file, as well.
+        Path importer = write("importer.yml", "spring.config.import: file:" + locked + "\n");
+        config = refused(named("file:" + importer));
+        assertEquals(locked + " is not readable by " + user, config.detail());
+        assertEquals(ManagedAgentPreflight.unreadableFix(user, locked.toString()), config.fix());
+    }
+
+    @Test
+    void namesTheFileTheIoErrorNamesWhereverSpringFoundIt() throws IOException {
+        // An import inside another file names a file no location does.
+        Path secrets = write("etc/secrets.yml", "spring.datasource.password: x\n");
+        String user = System.getProperty("user.name");
+        java.util.function.Predicate<Path> locked =
+                file -> !file.toAbsolutePath().normalize().equals(secrets);
+        for (RuntimeException error : List.of(cannotRead(secrets.toString()),
+                // Relative to the working directory, as Spring opened it.
+                cannotRead("etc/secrets.yml"),
+                // And as NIO words it.
+                new IllegalStateException(new java.nio.file.AccessDeniedException(
+                        secrets.toString())))) {
+            ServerEnvironment.Failure failure = ServerEnvironment.failure(error,
+                    environment(Map.of()), locked, file -> false, directory);
+            assertEquals(secrets + " is not readable by " + user, failure.detail(),
+                    error.toString());
+            assertEquals(secrets, failure.unreadable());
+        }
+        // A file it can read is not the one Spring could not.
+        assertEquals("etc/secrets.yml (Permission denied)", ServerEnvironment.failure(
+                cannotRead("etc/secrets.yml"), environment(Map.of()), file -> true,
+                file -> false, directory).detail());
     }
 
     @Test
@@ -501,17 +531,131 @@ class ServerEnvironmentTest {
         Path port = write("secrets/server.port", "9090");
         Files.setPosixFilePermissions(password, PosixFilePermissions.fromString("rw-r--r--"));
         Files.setPosixFilePermissions(port, PosixFilePermissions.fromString("rw-r--r--"));
+        // The broker's token, a key of a map in a directory of its own, and
+        // the ID of the active key, which is no secret.
+        Path token = write("secrets/qwen.managed-agent.runtime-broker.token", "s3cr3t-token");
+        Path old = write("secrets/qwen.managed-agent.runtime-broker.previous-credential-keys/old-v1",
+                "a2V5");
+        Path id = write("secrets/qwen.managed-agent.runtime-broker.credential-key-id", "v2");
+        for (Path file : List.of(password, port, token, old, id)) {
+            Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
+        }
         ManagedAgentPreflight.Prepared prepared = prepare(environment(Map.of()),
                 new ArrayList<>(), "--spring.config.import=optional:configtree:"
                         + password.getParent() + "/");
         assertEquals("hunter2", prepared.environment().getProperty("spring.datasource.password"));
-        assertEquals(Set.of(password, port), Set.copyOf(prepared.files()));
-        // A value file is named for its property, so the name says it holds a secret.
-        ManagedAgentPreflight.Check secret = ManagedAgentPreflight.configFileCheck(password, null);
-        assertEquals(ManagedAgentPreflight.Status.WARN, secret.status());
-        assertEquals("chmod 600 " + password, secret.fix());
+        assertEquals("a2V5", prepared.environment().getProperty(
+                "qwen.managed-agent.runtime-broker.previous-credential-keys.old-v1"));
+        assertEquals(Set.of(password, port, token, old, id), Set.copyOf(prepared.files()));
+        assertEquals("qwen.managed-agent.runtime-broker.previous-credential-keys.old-v1",
+                prepared.values().get(old));
+        // A value file holds a value alone; its property says whether that is a secret.
+        Map<Path, String> rows = new HashMap<>();
+        for (ManagedAgentPreflight.Check row : rows(prepared)) {
+            rows.put(Path.of(row.detail().split(" ")[0]),
+                    row.status() + (row.fix() == null ? "" : " " + row.fix()));
+        }
+        assertEquals(Map.of(
+                password, "WARN chmod 600 " + password,
+                token, "WARN chmod 600 " + token,
+                old, "WARN chmod 600 " + old,
+                port, "PASS",
+                id, "PASS"), rows);
+        // A file that names its properties is judged by what it holds.
         assertEquals(ManagedAgentPreflight.Status.PASS,
-                ManagedAgentPreflight.configFileCheck(port, null).status());
+                ManagedAgentPreflight.configFileCheck(password, null).status());
+    }
+
+    @Test
+    void tellsTheSecretPropertiesAsTheConfigurationReferenceDoes() {
+        for (String secret : List.of("spring.datasource.password",
+                "qwen.managed-agent.auth.signing-key",
+                "qwen.managed-agent.harness.token",
+                "qwen.managed-agent.runtime-broker.credential-key",
+                "qwen.managed-agent.runtime-broker.previous-credential-keys.old-v1",
+                "qwen.managed-agent.runtime-broker.previous-credential-keys[old-v1]",
+                "qwen.managed-agent.runtime-broker.external-provider-token",
+                "qwen.managed-agent.runtime-broker.static-token",
+                "qwen.managed-agent.runtime-broker.token",
+                "qwen.managed-agent.session-store.binding-key",
+                "SPRING_DATASOURCE_PASSWORD", "server.ssl.key-store-password",
+                "example.secret")) {
+            assertTrue(ManagedAgentPreflight.secretProperty(secret), secret);
+        }
+        // Paths to files that hold a secret, and IDs, hold none.
+        for (String plain : List.of("server.port",
+                "qwen.managed-agent.runtime-broker.credential-key-id",
+                "qwen.managed-agent.harness.pool.kubernetes-token-file",
+                "qwen.managed-agent.harness.pool.key-store-password-file",
+                "qwen.managed-agent.harness.pool.key-store-file",
+                "qwen.managed-agent.harness.credentials-file",
+                "qwen.managed-agent.runtime-broker.resident-kubernetes-token-file",
+                "qwen.managed-agent.auth.mode", "spring.datasource.username")) {
+            assertTrue(!ManagedAgentPreflight.secretProperty(plain), plain);
+        }
+    }
+
+    @Test
+    void listsAnXmlFileTheServerReads() throws IOException {
+        // Spring reads application.xml, whose values carry no origin.
+        Path xml = write("conf/application.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                + "<!DOCTYPE properties SYSTEM \"http://java.sun.com/dtd/properties.dtd\">\n"
+                + "<properties><entry key=\"spring.datasource.password\">s3cret</entry></properties>\n");
+        Files.setPosixFilePermissions(xml, PosixFilePermissions.fromString("rw-r--r--"));
+        ManagedAgentPreflight.Prepared prepared = prepare(named("optional:file:"
+                + xml.getParent() + "/"), new ArrayList<>());
+        assertEquals("s3cret", prepared.environment().getProperty("spring.datasource.password"));
+        assertEquals(List.of(xml), prepared.files());
+        assertEquals("chmod 600 " + xml, rows(prepared).get(0).fix());
+    }
+
+    @Test
+    void readsTheLocationsSpringReadsBeforeAnyFile() throws IOException {
+        // A file cannot move Spring's locations: it ignores
+        // spring.config.location and spring.config.name set there.
+        Path conf = write("conf/application.yml", "spring.config.location: file:"
+                + directory.resolve("other") + "/\nspring.config.name: renamed\nserver.port: 1111\n");
+        Path fallback = write("conf/application-default.yml", "# only a comment\n");
+        write("other/application.yml", "server.port: 2222\n");
+        write("conf/renamed.yml", "# only a comment\n");
+        Path example = write("config/application.yml", "# only a comment\n");
+        ManagedAgentPreflight.Prepared prepared = prepare(named("optional:file:"
+                + conf.getParent() + "/"), new ArrayList<>());
+        assertEquals("1111", prepared.environment().getProperty("server.port"));
+        // Base files first, then their profile variants.
+        assertEquals(List.of(conf, example, fallback),
+                ServerEnvironment.files(prepared.environment(), directory));
+        // An import a file declares counts, each file's, in either form: a
+        // bare relative one beside that file, a file: one in the working
+        // directory.
+        Path imports = write("etc/application.yml", "spring.config.import:\n"
+                + "  - optional:beside.yml\n  - optional:file:" + directory.resolve("wd.yml") + "\n");
+        Path other = write("etc2/application.yml",
+                "spring.config.import: optional:near.yml, optional:probe.yml\n");
+        Path beside = write("etc/beside.yml", "# only a comment\n");
+        Path near = write("etc2/near.yml", "# only a comment\n");
+        Path wd = write("wd.yml", "# only a comment\n");
+        // Where Spring itself reads a bare one.
+        Path probe = write("etc2/probe.yml", "probe.near: beside\n");
+        prepared = prepare(named("optional:file:" + imports + ",optional:file:" + other),
+                new ArrayList<>());
+        assertEquals("beside", prepared.environment().getProperty("probe.near"));
+        assertEquals(Set.of(imports, other, beside, near, wd, probe),
+                Set.copyOf(prepared.files()));
+        // Set where Spring reads it, it counts.
+        prepared = prepare(named("optional:file:" + conf.getParent() + "/"),
+                new ArrayList<>(), "--spring.config.name=renamed");
+        assertEquals(List.of(directory.resolve("conf/renamed.yml")),
+                ServerEnvironment.files(prepared.environment(), directory));
+    }
+
+    @Test
+    void readsALocationWhosePathHoldsAColon() throws IOException {
+        // After file:, a colon is part of the path, as Spring reads it.
+        Path empty = write("conf:b/application.yml", "# only a comment\n");
+        ManagedAgentPreflight.Prepared prepared = prepare(named("optional:file:"
+                + empty.getParent() + "/"), new ArrayList<>());
+        assertEquals(List.of(empty), prepared.files());
     }
 
     @Test

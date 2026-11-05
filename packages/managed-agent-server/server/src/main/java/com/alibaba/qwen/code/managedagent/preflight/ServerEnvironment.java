@@ -8,9 +8,12 @@ import org.springframework.boot.context.config.ConfigDataNotFoundException;
 import org.springframework.boot.context.config.ConfigDataResourceNotFoundException;
 import org.springframework.boot.context.config.StandardConfigDataResource;
 import org.springframework.boot.context.event.ApplicationEnvironmentPreparedEvent;
+import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.context.properties.source.ConfigurationPropertySources;
 import org.springframework.boot.convert.ApplicationConversionService;
+import org.springframework.boot.env.ConfigTreePropertySource;
 import org.springframework.boot.env.EnvironmentPostProcessorApplicationListener;
+import org.springframework.boot.env.OriginTrackedMapPropertySource;
 import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.boot.origin.Origin;
 import org.springframework.boot.origin.OriginLookup;
@@ -26,16 +29,22 @@ import org.springframework.core.io.Resource;
 import org.yaml.snakeyaml.error.Mark;
 import org.yaml.snakeyaml.error.MarkedYAMLException;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
+import java.nio.file.FileSystemException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Predicate;
+import java.util.regex.Pattern;
 
 /**
  * The environment the server runs with, prepared the way
@@ -52,7 +61,11 @@ final class ServerEnvironment {
     // Where Spring Boot looks without being told, relative to the working
     // directory; config/*/ is a wildcard.
     private static final List<String> DEFAULT_DIRECTORIES = List.of("", "config", "config/*");
-    private static final List<String> EXTENSIONS = List.of("yml", "yaml", "properties");
+    // Those of the property source loaders Spring Boot registers.
+    private static final List<String> EXTENSIONS = List.of("yml", "yaml", "properties", "xml");
+    // A location such as classpath: or configtree:, as Spring tells one from a path.
+    private static final Pattern SCHEME = Pattern.compile("^[a-zA-Z][a-zA-Z0-9*]*?:");
+    private static final String IMPORT = "spring.config.import";
 
     private ServerEnvironment() {
     }
@@ -92,8 +105,7 @@ final class ServerEnvironment {
      * a setting, each value file of a config tree among them, then those
      * Spring reads at a location without finding a setting, such as a copy
      * of the example with every line commented out. The packaged defaults
-     * and other class path resources are left out, and so is a file without
-     * a setting that an import names from inside another.
+     * and other class path resources are left out.
      */
     static List<Path> files(ConfigurableEnvironment environment) {
         return files(environment, Path.of(""));
@@ -124,30 +136,58 @@ final class ServerEnvironment {
         return new ArrayList<>(files);
     }
 
+    /**
+     * The config tree value files among {@link #files}, each with the
+     * property it holds the value of, as its name is all that says whether
+     * the value is a secret.
+     */
+    static Map<Path, String> valueFiles(ConfigurableEnvironment environment) {
+        Map<Path, String> values = new LinkedHashMap<>();
+        for (PropertySource<?> source : environment.getPropertySources()) {
+            if (source instanceof ConfigTreePropertySource tree) {
+                for (String name : tree.getPropertyNames()) {
+                    Path file = file(resource(tree.getOrigin(name)));
+                    if (file != null) {
+                        values.put(file, name);
+                    }
+                }
+            }
+        }
+        return values;
+    }
+
     /** A file system location, which names a directory when it ends in a slash. */
     private record Location(Path path, boolean directory) {
     }
 
     /**
      * The file system locations named at the top level, by the arguments or
-     * the process environment. Locations of another kind, such as
-     * classpath: or configtree:, are left out.
+     * the process environment, and those imported, at the top level or by a
+     * file Spring read. Locations of another kind, such as classpath: or
+     * configtree:, are left out.
      */
     private static List<Location> named(ConfigurableEnvironment environment,
             Path workingDirectory) {
         List<Location> named = new ArrayList<>();
         for (String property : List.of("spring.config.import",
                 "spring.config.additional-location", "spring.config.location")) {
-            String value = environment.getProperty(property);
-            if (value == null) {
+            locations(topLevel(environment, property), workingDirectory, workingDirectory, named);
+        }
+        // Spring honours an import a file declares, and no other location a
+        // file sets; it reads a bare relative one beside that file.
+        for (PropertySource<?> source : environment.getPropertySources()) {
+            if (!(source instanceof OriginTrackedMapPropertySource tracked)) {
                 continue;
             }
-            for (String location : value.split("[,;]")) {
-                String path = location.strip().replaceFirst("^optional:", "")
-                        .replaceFirst("^file:", "");
-                if (!path.isEmpty() && !path.contains(":")) {
-                    named.add(new Location(workingDirectory.resolve(path),
-                            path.endsWith("/")));
+            for (Map.Entry<String, Object> entry : tracked.getSource().entrySet()) {
+                String key = entry.getKey();
+                if (!key.equals(IMPORT) && !key.startsWith(IMPORT + "[")) {
+                    continue;
+                }
+                Path declaring = file(resource(tracked.getOrigin(key)));
+                if (declaring != null) {
+                    locations(String.valueOf(entry.getValue()), workingDirectory,
+                            declaring.getParent(), named);
                 }
             }
         }
@@ -155,17 +195,61 @@ final class ServerEnvironment {
     }
 
     /**
-     * The files Spring looks for at the locations named at the top level
-     * and, unless spring.config.location replaces them, at its default ones
-     * in the working directory: each location's files, then their variants
-     * for these profiles, or for any profile when profiles is null. A file
-     * an import names from inside another is not among them.
+     * Adds the file system locations of a value: a file: one, read in the
+     * working directory when relative, and a bare one, read in base.
+     */
+    private static void locations(String value, Path workingDirectory, Path base,
+            List<Location> named) {
+        if (value == null) {
+            return;
+        }
+        for (String location : value.split("[,;]")) {
+            String path = location.strip().replaceFirst("^optional:", "");
+            Path relativeTo = base;
+            if (path.startsWith("file:")) {
+                // A colon after it is part of the path.
+                path = path.substring("file:".length());
+                relativeTo = workingDirectory;
+            } else if (SCHEME.matcher(path).lookingAt()) {
+                continue;
+            }
+            if (!path.isEmpty()) {
+                named.add(new Location(relativeTo.resolve(path), path.endsWith("/")));
+            }
+        }
+    }
+
+    /**
+     * A property as Spring reads it before any file, as it reads the
+     * locations and spring.config.name: from the arguments, the process
+     * environment and the other sources no configuration file adds.
+     */
+    private static String topLevel(ConfigurableEnvironment environment, String property) {
+        List<PropertySource<?>> sources = new ArrayList<>();
+        for (PropertySource<?> source : environment.getPropertySources()) {
+            if (!(source instanceof OriginTrackedMapPropertySource)
+                    && !(source instanceof ConfigTreePropertySource)
+                    && !ConfigurationPropertySources.isAttachedConfigurationPropertySource(source)) {
+                sources.add(source);
+            }
+        }
+        return new Binder(ConfigurationPropertySources.from(sources))
+                .bind(property, String.class).orElse(null);
+    }
+
+    /**
+     * The files Spring looks for at the locations {@link #named} finds and,
+     * unless spring.config.location replaces them, at its default ones in
+     * the working directory: each location's files, then their variants for
+     * these profiles, or for any profile when profiles is null. Where Spring
+     * refused to start, the files it read are not known, so neither is a
+     * location one of them imports.
      */
     private static Set<Path> locationFiles(ConfigurableEnvironment environment,
             Path workingDirectory, List<String> profiles) {
         List<String> names = new ArrayList<>();
-        for (String name : environment.getProperty("spring.config.name",
-                "application").split(",")) {
+        String configName = topLevel(environment, "spring.config.name");
+        for (String name : (configName == null ? "application" : configName).split(",")) {
             if (!name.isBlank()) {
                 names.add(name.strip());
             }
@@ -179,7 +263,7 @@ final class ServerEnvironment {
                 files.add(named.path());
             }
         }
-        if (environment.getProperty("spring.config.location") == null) {
+        if (topLevel(environment, "spring.config.location") == null) {
             for (String directory : DEFAULT_DIRECTORIES) {
                 directories.add(workingDirectory.resolve(directory));
             }
@@ -317,7 +401,15 @@ final class ServerEnvironment {
                     + " does not exist", "create it, or correct the location that names it");
         }
         Set<Path> candidates = locationFiles(environment, workingDirectory, null);
-        if (cause(error, IOException.class) != null) {
+        IOException io = cause(error, IOException.class);
+        if (io != null) {
+            // The file the error names, which an import inside another file
+            // may have led to; else the first of those Spring reads that
+            // this process cannot.
+            Path named = ioFile(io, workingDirectory);
+            if (named != null && Files.isRegularFile(named) && !readable.test(named)) {
+                return unreadable(named.toAbsolutePath().normalize(), user);
+            }
             for (Path candidate : candidates) {
                 if (Files.isRegularFile(candidate) && !readable.test(candidate)) {
                     return unreadable(candidate.toAbsolutePath().normalize(), user);
@@ -348,6 +440,27 @@ final class ServerEnvironment {
     private static Failure unreadable(Path file, String user) {
         return new Failure(file + " is not readable by " + user,
                 ManagedAgentPreflight.unreadableFix(user, file.toString()), file);
+    }
+
+    /** The file an I/O error is about, as the process opened it, or null. */
+    private static Path ioFile(IOException error, Path workingDirectory) {
+        String name = null;
+        if (error instanceof FileSystemException system) {
+            name = system.getFile();
+        } else if (error instanceof FileNotFoundException && error.getMessage() != null) {
+            // "<path> (<reason>)", as FileInputStream words it.
+            String message = error.getMessage();
+            int reason = message.lastIndexOf(" (");
+            name = reason > 0 && message.endsWith(")") ? message.substring(0, reason) : message;
+        }
+        if (name == null || name.isEmpty()) {
+            return null;
+        }
+        try {
+            return workingDirectory.resolve(name);
+        } catch (InvalidPathException invalid) {
+            return null;
+        }
     }
 
     private static <T extends Throwable> T cause(Throwable error, Class<T> type) {

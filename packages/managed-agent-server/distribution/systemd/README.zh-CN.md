@@ -55,18 +55,31 @@ systemctl enable --now qwen-hosted-harness qwen-managed-agent-server
 
 ## 验证
 
-加载 unit 使用的同一份环境文件，在 unit 的工作目录中、并在服务停止时运行预检：
+在服务停止时，按 unit 运行服务端的方式运行预检：使用它的账号、它的环境文件、它的工作目录，并处于它的沙箱中：
 
 ```bash
 sudo systemd-run --wait --pipe --collect \
   --property=User=qwen-managed-agent \
+  --property=Group=qwen-managed-agent \
   --property=EnvironmentFile=/etc/qwen-managed-agent/server.env \
   --working-directory=/opt/qwen-managed-agent \
+  --property=StateDirectory=qwen-managed-agent \
+  --property=StateDirectoryMode=0750 \
+  --property="ReadWritePaths=/var/lib/qwen-managed-agent /srv/qwen-workspace" \
+  --property=NoNewPrivileges=true \
+  --property=PrivateTmp=true \
+  --property=ProtectSystem=strict \
+  --property=ProtectHome=true \
   /opt/qwen-managed-agent/bin/qwen-managed-agent-server --check
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
 
-预检按服务端的方式读取配置。除了 `SPRING_CONFIG_ADDITIONAL_LOCATION` 指定的文件，服务端还会读取其工作目录下的 `application.yml` 和 `config/application.yml`，因此 `--working-directory` 必须与 unit 的 `WorkingDirectory` 一致。它为读到的每个文件打印一行 `config`，并在服务端会拒绝启动的地方让该行失败：指定的文件不存在、服务账号读不了的文件，或 YAML 错误，并给出文件和行号。
+预检按服务端的方式读取配置。除了 `SPRING_CONFIG_ADDITIONAL_LOCATION` 指定的文件，服务端还会读取其工作目录下的 `application.yml` 和 `config/application.yml`，因此 `--working-directory` 必须与 unit 的 `WorkingDirectory` 一致。沙箱相关的属性与 unit 的一致，使预检看到的文件与服务端相同：unit 会隐藏 `/home`、`/root` 和主机的 `/tmp`，并且只能写入它的 `ReadWritePaths`。修改 unit 时请同步修改这些属性。预检为读到的每个文件打印一行 `config`；在服务端会拒绝启动，或本次运行无法检查服务端所读内容的地方，该行失败：
+
+- 指定的文件不存在；
+- 服务账号读不了的文件；
+- 只有运行 `--check` 的账号读不了的文件，修复方法是改用服务账号运行；
+- YAML 错误：给出行号；除非它位于由另一个文件内部 import 的文件中，否则也给出文件。
 
 `--check` 会实际绑定配置端口，其 `workers` 行还会对上次启动遗留、仍在运行的 Runtime worker 给出警告，因此请在服务停止时运行。服务运行期间请加上 `--online`：端口相关的行改为检查服务端与 Broker 是否在监听；`workers` 行只报告已停止的服务端遗留的 worker，对持久模式的 Broker 则跳过，因为它会接管这些 worker。
 
