@@ -30,32 +30,41 @@
  * runtime Config to the ExtensionManager.
  */
 
+import { ExtensionManager } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
+import { ExtensionStore } from '@qwen-code/qwen-code-core/extension/extension-store.js';
 import {
-  ExtensionManager,
-  ExtensionStore,
   SkillManager,
-  Storage,
-  isSafeModeEnv,
-  getExtensionDisplayName,
+  watcherIgnored,
+  WATCHER_MAX_DEPTH,
+} from '@qwen-code/qwen-code-core/skills/skill-manager.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { isSafeModeEnv } from '@qwen-code/qwen-code-core/utils/safe-mode.js';
+import { closeFileWatcher } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import { getExtensionDisplayName } from '@qwen-code/qwen-code-core/extension/i18n.js';
+import {
+  AUTO_MEMORY_SKILL_NAME,
   authoredSkillName,
   qualifySkillName,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/skills/types.js';
 import type { Config, Extension, SkillLevel } from '@qwen-code/qwen-code-core';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import * as fs from 'node:fs/promises';
+import { watch, type FSWatcher } from 'chokidar';
 import { loadSettings } from '../config/settings.js';
 import { resolveLanguage, resolveLanguageSetting } from '../i18n/index.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { mapSkillConfigToStatus } from '../runtime/workspace-skills-mapping.js';
 import { resolveSkillSettings } from '../config/skill-settings.js';
-import { WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS } from './workspace-service/index.js';
+import {
+  WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS,
+  WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS,
+} from './workspace-skills-refresh-policy.js';
 
 export interface WorkspaceSkillsStatusProvider {
   (workspaceCwd: string): Promise<ServeWorkspaceSkillsStatus>;
   invalidate?(workspaceCwd: string): void;
-  /** Stops every file watcher this provider owns, after which it must not be called. */
-  dispose?(): void;
+  dispose?(): Promise<void>;
 }
 
 export interface WorkspaceSkillsSnapshot {
@@ -73,6 +82,8 @@ export interface WorkspaceSkillsStatusProviderOptions {
   workspaceTrusted?: boolean;
   /** Read inert on-disk Skill manifests without loading workspace settings. */
   includeUntrustedSkills?: boolean;
+  /** Enable independent automatic discovery for the configuration catalog. */
+  autoDiscover?: boolean;
 }
 
 const VALID_SKILL_LEVELS: ReadonlySet<string> = new Set<SkillLevel>([
@@ -81,70 +92,6 @@ const VALID_SKILL_LEVELS: ReadonlySet<string> = new Set<SkillLevel>([
   'extension',
   'bundled',
 ]);
-
-/**
- * Re-discover Skills at most this often per workspace. It is the runtime Skills
- * snapshot's interval (`workspace-service/index.ts`), so the two cannot drift:
- * file changes are applied by the `SkillManager` watchers as they happen, and
- * this interval only bounds the background revalidation that covers changes a
- * watcher could not observe (a Skills directory created after the watchers
- * started, a dropped event).
- */
-export const SKILLS_REVALIDATE_INTERVAL_MS =
-  WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS;
-
-// The two levels the `SkillManager` watchers subscribe to (bundled Skills are
-// immutable and extension Skills are managed by the extension system), so a
-// watcher-driven revalidation rescans the same set instead of every level.
-const WATCHED_SKILL_LEVELS = ['project', 'user'] as const;
-
-/**
- * Every watcher the daemon-local catalog starts, tracked per workspace so the
- * daemon can release them on removal and shutdown no matter which provider
- * created them. Each provider starts at most one watcher set per workspace,
- * and the throwaway `snapshot()` path starts none.
- */
-const watchingManagers = new Map<string, Set<SkillManager>>();
-
-function trackWatchingManager(
-  workspaceCwd: string,
-  manager: SkillManager,
-): void {
-  let managers = watchingManagers.get(workspaceCwd);
-  if (!managers) {
-    managers = new Set();
-    watchingManagers.set(workspaceCwd, managers);
-  }
-  managers.add(manager);
-}
-
-function stopWatchingManager(
-  workspaceCwd: string,
-  manager: SkillManager,
-): void {
-  watchingManagers.get(workspaceCwd)?.delete(manager);
-  if (watchingManagers.get(workspaceCwd)?.size === 0) {
-    watchingManagers.delete(workspaceCwd);
-  }
-  manager.stopWatching();
-}
-
-/** Stops the catalog watchers for a workspace that is no longer served. */
-export function disposeWorkspaceSkillsWatchers(workspaceCwd: string): void {
-  const managers = watchingManagers.get(workspaceCwd);
-  if (!managers) return;
-  watchingManagers.delete(workspaceCwd);
-  for (const manager of managers) {
-    manager.stopWatching();
-  }
-}
-
-/** Stops every catalog watcher created by any provider, for daemon shutdown. */
-export function disposeAllSkillsWatchers(): void {
-  for (const workspaceCwd of [...watchingManagers.keys()]) {
-    disposeWorkspaceSkillsWatchers(workspaceCwd);
-  }
-}
 
 /**
  * The `Config` surface `SkillManager.listSkills()` actually reads. Declaring it
@@ -162,17 +109,26 @@ type SkillManagerConfigShim = Pick<
   | 'getProjectRoot'
   | 'getActiveExtensions'
   | 'getDisabledSkillLevels'
-  | 'getCustomSkillDirs'
+  | 'isSkillEnabled'
 >;
 
 interface WorkspaceSkillManagers {
   skillManager: SkillManager;
   extensionManager?: ExtensionManager;
   extensionSkillStates: Map<Extension, Map<string, boolean>>;
-  /** When the last background revalidation started; throttles it per workspace. */
-  revalidatedAt: number;
-  /** In-flight background revalidation shared by concurrent readers. */
-  refreshing?: Promise<void>;
+  watchDirectories: string[];
+}
+
+interface SkillsDiscoveryState {
+  safeMode: boolean;
+  startedAt: number;
+  sequence: number;
+  publishedSequence: number;
+  activeScans: number;
+  dirty: boolean;
+  directories: Set<string>;
+  debounce?: NodeJS.Timeout;
+  pending?: { timeout: NodeJS.Timeout };
 }
 
 export function createWorkspaceSkillsStatusProvider(
@@ -180,22 +136,172 @@ export function createWorkspaceSkillsStatusProvider(
 ): WorkspaceSkillsStatusProvider & {
   snapshot(workspaceCwd: string): Promise<WorkspaceSkillsSnapshot>;
 } {
-  // Reuse one SkillManager per workspace so repeat queries hit its in-memory
-  // skills cache instead of re-scanning (and re-parsing frontmatter / compiling
-  // globs for) every level on each call. Its file watchers apply Skill changes
-  // made directly on disk, so reads stay cache-backed like the runtime Skills
-  // endpoint; the background revalidation below only covers changes the
-  // watchers could not observe. The live child still re-lists authoritatively
-  // once a session exists.
+  // Warm reads reuse a committed manager while discovery builds its replacement
+  // separately. Runtime fallback callers keep explicit invalidation semantics.
   const managers = new Map<string, WorkspaceSkillManagers>();
   // An enumeration that overlaps an invalidation captured pre-invalidation
   // settings, so it must not install its managers; the next read rebuilds.
   const epochs = new Map<string, number>();
   const inFlight = new Map<string, Promise<ServeWorkspaceSkillsStatus>>();
+  const discovery = new Map<string, SkillsDiscoveryState>();
+  const watchers = new Map<
+    string,
+    { watcher: FSWatcher; workspaces: Set<string> }
+  >();
+  const closing = new Set<Promise<void>>();
+  const watcherRetryAfter = new Map<string, number>();
   let disposed = false;
+
+  function closeWatcher(directory: string): void {
+    const subscription = watchers.get(directory);
+    if (!subscription) return;
+    watchers.delete(directory);
+    const pending = closeFileWatcher(subscription.watcher)
+      .catch((error: unknown) => {
+        writeStderrLine(
+          `qwen serve: Skills watcher close failed: ${String(error)}`,
+        );
+      })
+      .finally(() => closing.delete(pending));
+    closing.add(pending);
+  }
+
+  function releaseDirectories(
+    workspaceCwd: string,
+    state: SkillsDiscoveryState,
+  ) {
+    for (const directory of state.directories) {
+      const subscription = watchers.get(directory);
+      subscription?.workspaces.delete(workspaceCwd);
+      if (subscription?.workspaces.size === 0) closeWatcher(directory);
+    }
+    state.directories.clear();
+  }
+
+  function scheduleChange(workspaceCwd: string, state: SkillsDiscoveryState) {
+    if (disposed || discovery.get(workspaceCwd) !== state) return;
+    state.dirty = true;
+    if (state.debounce) clearTimeout(state.debounce);
+    state.debounce = setTimeout(() => {
+      state.debounce = undefined;
+      refresh(workspaceCwd, state);
+    }, 150);
+    state.debounce.unref();
+  }
+
+  function subscribe(workspaceCwd: string, state: SkillsDiscoveryState) {
+    const cached = managers.get(workspaceCwd);
+    if (!cached || disposed || discovery.get(workspaceCwd) !== state) return;
+    const directories = new Set(cached.watchDirectories);
+    for (const directory of state.directories) {
+      if (directories.has(directory)) continue;
+      const subscription = watchers.get(directory);
+      subscription?.workspaces.delete(workspaceCwd);
+      if (subscription?.workspaces.size === 0) closeWatcher(directory);
+    }
+    state.directories = directories;
+    for (const directory of directories) {
+      const existing = watchers.get(directory);
+      if (existing) {
+        existing.workspaces.add(workspaceCwd);
+        continue;
+      }
+      if (Date.now() < (watcherRetryAfter.get(directory) ?? 0)) continue;
+      try {
+        const workspaces = new Set([workspaceCwd]);
+        const watcher = watch(directory, {
+          ignoreInitial: true,
+          ignored: watcherIgnored,
+          depth: WATCHER_MAX_DEPTH,
+        });
+        watchers.set(directory, { watcher, workspaces });
+        watcherRetryAfter.delete(directory);
+        watcher.on('all', () => {
+          for (const cwd of workspaces) {
+            const current = discovery.get(cwd);
+            if (current) scheduleChange(cwd, current);
+          }
+        });
+        watcher.on('error', (error: unknown) => {
+          if (watchers.get(directory)?.watcher !== watcher) return;
+          watcherRetryAfter.set(directory, Date.now() + 30_000);
+          writeStderrLine(
+            `qwen serve: Skills watcher failed: ${String(error)}`,
+          );
+          if (watchers.get(directory)?.watcher === watcher)
+            closeWatcher(directory);
+        });
+      } catch (error) {
+        watcherRetryAfter.set(directory, Date.now() + 30_000);
+        writeStderrLine(`qwen serve: Skills watcher failed: ${String(error)}`);
+      }
+    }
+  }
+
+  function refresh(workspaceCwd: string, state: SkillsDiscoveryState): void {
+    if (
+      disposed ||
+      discovery.get(workspaceCwd) !== state ||
+      state.pending ||
+      state.activeScans >= 2
+    )
+      return;
+    state.activeScans++;
+    state.dirty = false;
+    state.startedAt = Date.now();
+    const sequence = ++state.sequence;
+    const freshManagers = new Map<string, WorkspaceSkillManagers>();
+    const release = () => {
+      clearTimeout(pending.timeout);
+      if (state.pending === pending) state.pending = undefined;
+      if (!state.pending && state.dirty && state.activeScans < 2)
+        scheduleChange(workspaceCwd, state);
+    };
+    const pending = {
+      timeout: setTimeout(release, WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS),
+    };
+    pending.timeout.unref();
+    state.pending = pending;
+    void buildWorkspaceSkillsStatus(
+      workspaceCwd,
+      freshManagers,
+      options.workspaceTrusted ?? true,
+      options.includeUntrustedSkills ?? false,
+    )
+      .then((status) => {
+        const candidate = freshManagers.get(workspaceCwd);
+        if (
+          !status.initialized ||
+          status.errors?.length ||
+          !candidate ||
+          candidate.skillManager.hasDiscoveryReadErrors()
+        )
+          return;
+        // A timeout releases the slot, not publication rights. A valid slow
+        // scan can still publish, but cannot overwrite a newer successful one.
+        if (
+          disposed ||
+          discovery.get(workspaceCwd) !== state ||
+          state.safeMode !== isSafeModeEnv() ||
+          sequence <= state.publishedSequence
+        )
+          return;
+        state.publishedSequence = sequence;
+        managers.set(workspaceCwd, candidate);
+        subscribe(workspaceCwd, state);
+      })
+      .catch((error: unknown) => {
+        writeStderrLine(
+          `qwen serve: Skills revalidation failed: ${String(error)}`,
+        );
+      })
+      .finally(() => {
+        state.activeScans--;
+        release();
+      });
+  }
+
   const provider = ((workspaceCwd: string) => {
-    // A read that lands after `dispose()` must not rebuild a manager and start
-    // a watcher the teardown sweep has already passed.
     if (disposed) {
       return Promise.resolve({
         v: STATUS_SCHEMA_VERSION,
@@ -204,21 +310,50 @@ export function createWorkspaceSkillsStatusProvider(
         skills: [],
       } satisfies ServeWorkspaceSkillsStatus);
     }
+    let state = discovery.get(workspaceCwd);
+    if (state && state.safeMode !== isSafeModeEnv()) {
+      provider.invalidate?.(workspaceCwd);
+      state = undefined;
+    }
+    if (options.autoDiscover && !state) {
+      state = {
+        safeMode: isSafeModeEnv(),
+        startedAt: Date.now(),
+        sequence: 0,
+        publishedSequence: 0,
+        activeScans: 0,
+        dirty: false,
+        directories: new Set(),
+      };
+      discovery.set(workspaceCwd, state);
+    }
     const pending = inFlight.get(workspaceCwd);
     if (pending) return pending;
     const epoch = epochs.get(workspaceCwd) ?? 0;
+    const current = () =>
+      !disposed && (epochs.get(workspaceCwd) ?? 0) === epoch;
+    if (state && managers.has(workspaceCwd)) {
+      const elapsed = Date.now() - state.startedAt;
+      if (elapsed < 0 || elapsed >= WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS) {
+        refresh(workspaceCwd, state);
+      }
+    }
     const promise = buildWorkspaceSkillsStatus(
       workspaceCwd,
       managers,
       options.workspaceTrusted ?? true,
       options.includeUntrustedSkills ?? false,
-      () => (epochs.get(workspaceCwd) ?? 0) === epoch,
-      true,
-    ).finally(() => {
-      if (inFlight.get(workspaceCwd) === promise) {
-        inFlight.delete(workspaceCwd);
-      }
-    });
+      current,
+    )
+      .then((status) => {
+        if (state && current()) subscribe(workspaceCwd, state);
+        return status;
+      })
+      .finally(() => {
+        if (inFlight.get(workspaceCwd) === promise) {
+          inFlight.delete(workspaceCwd);
+        }
+      });
     inFlight.set(workspaceCwd, promise);
     return promise;
   }) as WorkspaceSkillsStatusProvider & {
@@ -226,31 +361,38 @@ export function createWorkspaceSkillsStatusProvider(
   };
   provider.invalidate = (workspaceCwd) => {
     epochs.set(workspaceCwd, (epochs.get(workspaceCwd) ?? 0) + 1);
-    const cached = managers.get(workspaceCwd);
-    if (cached) stopWatchingManager(workspaceCwd, cached.skillManager);
     managers.delete(workspaceCwd);
     // An enumeration that started before this invalidation must not answer a
     // read issued after it; the caller needs its own observation.
     inFlight.delete(workspaceCwd);
-  };
-  provider.dispose = () => {
-    disposed = true;
-    for (const workspaceCwd of [...managers.keys()]) {
-      provider.invalidate?.(workspaceCwd);
+    const state = discovery.get(workspaceCwd);
+    discovery.delete(workspaceCwd);
+    if (state) {
+      clearTimeout(state.debounce);
+      clearTimeout(state.pending?.timeout);
+      releaseDirectories(workspaceCwd, state);
     }
+  };
+  provider.dispose = async () => {
+    disposed = true;
+    for (const cwd of new Set([
+      ...managers.keys(),
+      ...inFlight.keys(),
+      ...discovery.keys(),
+    ])) {
+      provider.invalidate?.(cwd);
+    }
+    await Promise.all(closing);
+    watcherRetryAfter.clear();
   };
   provider.snapshot = async (workspaceCwd) => {
     if (options.workspaceTrusted === false)
       throw new Error('Skills snapshots require a trusted Workspace.');
     const freshManagers = new Map<string, WorkspaceSkillManagers>();
-    // A throwaway enumeration must not leave watchers behind, so it never
-    // starts them.
     const status = await buildWorkspaceSkillsStatus(
       workspaceCwd,
       freshManagers,
       true,
-      false,
-      undefined,
       false,
     );
     const manager = freshManagers.get(workspaceCwd)?.skillManager;
@@ -299,7 +441,6 @@ async function buildWorkspaceSkillsStatus(
   workspaceTrusted: boolean,
   includeUntrustedSkills: boolean,
   canInstall?: () => boolean,
-  watch = true,
 ): Promise<ServeWorkspaceSkillsStatus> {
   try {
     const settings = loadSettings(workspaceCwd, {
@@ -308,13 +449,6 @@ async function buildWorkspaceSkillsStatus(
       skipWorkspaceSettings: !workspaceTrusted,
       workspaceTrusted,
     });
-    const safeMode =
-      (!workspaceTrusted && !includeUntrustedSkills) || isSafeModeEnv();
-    // Only a trusted, non-safe catalog watches the workspace: an untrusted or
-    // safe-mode read lists bundled Skills only, so a subscription (and the user
-    // Skills directory `startWatching` creates) would be a side effect with
-    // nothing to observe.
-    const watchEnabled = watch && workspaceTrusted && !safeMode;
     const rawLanguage = settings.merged.general?.language;
     const locale = resolveLanguage(
       resolveLanguageSetting(
@@ -337,19 +471,13 @@ async function buildWorkspaceSkillsStatus(
             )
           : [],
       );
-      // Same normalization as loadCliConfig, which drops custom directories in
-      // safe mode. The child loads them, so the catalog has to scan them too.
-      const customSkillDirs = safeMode
-        ? []
-        : (Array.isArray(settings.merged.skills?.directories)
-            ? settings.merged.skills.directories
-            : []
-          )
-            .filter(
-              (dir): dir is string =>
-                typeof dir === 'string' && dir.trim().length > 0,
-            )
-            .map((dir) => dir.trim());
+      const safeMode =
+        (!workspaceTrusted && !includeUntrustedSkills) || isSafeModeEnv();
+      // Mirror loadCliConfig: safe mode turns managed auto-memory off, and the
+      // daemon never runs bare.
+      const managedAutoMemoryEnabled =
+        !isSafeModeEnv() &&
+        settings.merged.memory?.enableManagedAutoMemory !== false;
       let extensionManager: ExtensionManager | undefined;
       const extensionSkillStates = new Map<Extension, Map<string, boolean>>();
       if (workspaceTrusted && !safeMode) {
@@ -406,15 +534,27 @@ async function buildWorkspaceSkillsStatus(
           extensionManager?.getLoadedExtensions().filter((e) => e.isActive) ??
           [],
         getDisabledSkillLevels: () => disabledLevels,
-        getCustomSkillDirs: () => customSkillDirs,
+        // SkillManager asks only about the bundled skills that serve an
+        // optional feature; the catalog applies `skills.disabled` itself.
+        // `auto-memory` follows the child's managed auto-memory switch. The
+        // structured recall protocol, which also hides it, needs a corpus scan
+        // the daemon does not run, so the catalog lists it as legacy does.
+        isSkillEnabled: (skill) =>
+          !(
+            skill.level === 'bundled' &&
+            skill.name === AUTO_MEMORY_SKILL_NAME &&
+            !managedAutoMemoryEnabled
+          ),
       };
       const skillManager = new SkillManager(shim as Config);
+      const watchDirectories: string[] = [];
       if (!safeMode) {
         for (const level of ['project', 'user'] as const) {
           if (disabledLevels.has(level)) continue;
           for (const directory of skillManager.getSkillsBaseDirs(level)) {
             try {
               await fs.readdir(directory);
+              if (workspaceTrusted) watchDirectories.push(directory);
             } catch (error) {
               if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
                 throw error;
@@ -423,41 +563,18 @@ async function buildWorkspaceSkillsStatus(
           }
         }
       }
-      const watching = watchEnabled
-        ? await startSkillsWatcher(workspaceCwd, skillManager)
-        : false;
       cached = {
         skillManager,
         extensionManager,
         extensionSkillStates,
-        revalidatedAt: Date.now(),
+        watchDirectories,
       };
-      if (!canInstall || canInstall()) {
-        managers.set(workspaceCwd, cached);
-      } else if (watching) {
-        stopWatchingManager(workspaceCwd, skillManager);
-      }
+      if (!canInstall || canInstall()) managers.set(workspaceCwd, cached);
     }
     const { disablements, enabledNames } = resolveSkillSettings(settings);
     const { skillManager, extensionManager, extensionSkillStates } = cached;
-    // A workspace removal stops the watchers but keeps this provider alive, so
-    // the next read over the retained manager must re-subscribe. A manager this
-    // read built and did not install never gets here: nothing will read it, and
-    // a subscription for it would outlive its catalog.
-    if (
-      watchEnabled &&
-      managers.get(workspaceCwd) === cached &&
-      !skillManager.hasActiveWatcher()
-    ) {
-      await startSkillsWatcher(workspaceCwd, skillManager);
-    }
     const extensions = extensionManager?.getLoadedExtensions() ?? [];
-    // The fallback scan passes explicit levels, which bypass the manager's
-    // safe-mode default, so it must follow the same trust gate as the watcher.
-    if (watchEnabled && managers.get(workspaceCwd) === cached) {
-      scheduleSkillsRevalidation(workspaceCwd, cached, managers);
-    }
-    const skills = await skillManager.listSkills({});
+    const skills = await skillManager.listSkills();
     const statuses = skills.map((skill) => {
       const extension =
         skill.level === 'extension'
@@ -532,76 +649,4 @@ async function buildWorkspaceSkillsStatus(
       ],
     };
   }
-}
-
-/**
- * Starts the same directory discovery the runtime `SkillManager` uses, so a
- * Skill created, edited, or removed on disk refreshes the retained cache
- * without a configuration mutation. A watcher failure is reported and leaves
- * the background revalidation as the only refresh path — it must not fail the
- * read.
- */
-async function startSkillsWatcher(
-  workspaceCwd: string,
-  manager: SkillManager,
-): Promise<boolean> {
-  try {
-    await manager.startWatching();
-    if (!manager.hasActiveWatcher()) {
-      // chokidar can report an attach failure after `startWatching()` resolves;
-      // recording that as a live watcher would leave the failure invisible.
-      writeStderrLine(
-        `qwen serve: daemon-local Skills watcher failed for ${workspaceCwd}: no directory attached`,
-      );
-      return false;
-    }
-    trackWatchingManager(workspaceCwd, manager);
-    return true;
-  } catch (error) {
-    manager.stopWatching();
-    writeStderrLine(
-      `qwen serve: daemon-local Skills watcher failed for ${workspaceCwd}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    return false;
-  }
-}
-
-/**
- * Covers the changes the watchers cannot observe — a Skills directory created
- * after they started, or a dropped event — by re-running discovery at most once
- * per interval. This is a bounded forced rescan over the watched levels,
- * independent of watcher health, so it also covers a watcher that never
- * attached. The read never waits for it: the retained cache answers, so the
- * catalog stays bounded to the runtime endpoint's freshness policy instead of
- * blocking a request on a full scan.
- */
-function scheduleSkillsRevalidation(
-  workspaceCwd: string,
-  cached: WorkspaceSkillManagers,
-  managers: Map<string, WorkspaceSkillManagers>,
-): void {
-  if (cached.refreshing) return;
-  const elapsed = Date.now() - cached.revalidatedAt;
-  // A backwards clock step makes `elapsed` negative; treating that as fresh
-  // would freeze the fallback until the clock caught up.
-  if (elapsed >= 0 && elapsed < SKILLS_REVALIDATE_INTERVAL_MS) return;
-  if (managers.get(workspaceCwd) !== cached) return;
-  cached.revalidatedAt = Date.now();
-  cached.refreshing = cached.skillManager
-    .refreshCache({ levels: WATCHED_SKILL_LEVELS })
-    .then(
-      () => undefined,
-      (error: unknown) => {
-        writeStderrLine(
-          `qwen serve: daemon-local Skills revalidation failed for ${workspaceCwd}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      },
-    )
-    .finally(() => {
-      cached.refreshing = undefined;
-    });
 }

@@ -71,16 +71,20 @@ them rather than at the end of the document.
   self-consistent assertion triple, and no `merge-ready` carrying a failed
   assertion. Report shape and evidence naming are warnings, because a
   documentation-only round has no capture and a checker cannot know whether a
-  harness ran.
+  harness ran. With `--context <snapshot>` the expected head comes from that
+  host-held file instead of the artifact's writable `context.json`, and an
+  unusable snapshot is a hard exit 1, not a warning: the artifact directory is
+  writable by the PR code the round just ran.
 - `scripts/verify-pr-guard.mjs` owns both halves of the pre-publish guard.
   `--pr <n> --repo <owner>/<repo> --snapshot <file>` fetches the head, the PR
   state and all three comment lists with `--paginate`, and writes the file only
   when every call succeeded. `--compare --start <a> --now <b>` reports every
   reason the round is dirty and exits 1.
 
-The checker gains two rules over the artifacts the contract asks the round to
-write. The artifact contract names both, because a file no artifact list asks
-for is a file no round produces, and a check over an absent file is silent:
+The checker gains three rules over the artifacts the contract asks the round
+to write. The artifact contract names all three, because a file no artifact
+list asks for is a file no round produces, and a check over an absent file is
+silent:
 
 - `assertions.json` carries `failures: [{ id, attribution }]` whenever `fail` is
   nonzero, one entry per failed assertion, attributed `pr`, `harness` or
@@ -93,6 +97,13 @@ for is a file no round produces, and a check over an absent file is silent:
 <target>` and
   `rows[].commit`. A listed commit with no row is an error naming the commits,
   and so is an empty list: a claim over no commits is vacuously true.
+- `assertions.json` may carry `gates: [{ suite, pass, fail, skipped? }]`, one
+  entry per existing test suite the round ran as a targeted gate. Those counts
+  stay out of `pass`/`fail`/`total`, which count only the checks the round
+  wrote, each suite run counting as one, and the publisher prints their
+  totals on a line of their own. A malformed list is an error. Over 1000
+  assertions with no gate results is a warning: the four such rounds among
+  18 recent CI artifacts had each counted whole workspace suites.
 
 Each prepared artifact directory keeps `context.json` with the round's full
 coordinates — `repo`, `pr`, `baseRefOid` and `headRefOid` — so a local round
@@ -408,6 +419,11 @@ A published verification comment ends with the same attribution shape
 - A report with its own round snapshot keeps the same checked head after a
   later preparation into a different artifact directory. Publishable round
   snapshots contain no PR title or body.
+
+## Related designs
+
+- The container boundary and its host-side model proxy:
+  [verify-pr-local-model-proxy.md](verify-pr-local-model-proxy.md).
 
 ## Open questions
 

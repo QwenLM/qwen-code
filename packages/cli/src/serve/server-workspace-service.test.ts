@@ -7,6 +7,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SettingScope } from '../config/settings.js';
 import type { ServeOptions } from './types.js';
+import type { WorkspaceSkillsStatusProviderOptions } from './workspace-skills-status.js';
+import {
+  getServeAppLifecycle,
+  ServeAppLifecycleController,
+} from './serve-app-lifecycle.js';
 
 const mockCreateDaemonWorkspaceService = vi.hoisted(() =>
   vi.fn((_deps: unknown) => ({})),
@@ -17,6 +22,15 @@ vi.mock('./workspace-service/index.js', () => ({
   // The Skills status provider reuses the runtime interval for its revalidation
   // fallback; the barrel is mocked here, so the constant has to be present.
   WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS: 1_000,
+}));
+
+const mockCreateSkillsProvider = vi.hoisted(() =>
+  vi.fn((_options: WorkspaceSkillsStatusProviderOptions) =>
+    Object.assign(vi.fn(), { dispose: vi.fn(async () => {}) }),
+  ),
+);
+vi.mock('./workspace-skills-status.js', () => ({
+  createWorkspaceSkillsStatusProvider: mockCreateSkillsProvider,
 }));
 
 const { createServeApp } = await import('./server.js');
@@ -37,10 +51,62 @@ function makeBridge() {
       failed: 0,
     })),
     publishWorkspaceEvent: vi.fn(),
+    shutdown: vi.fn(async () => {}),
   };
 }
 
 describe('createServeApp workspace service wiring', () => {
+  it.each(['before', 'after'] as const)(
+    'preserves an injected lifecycle drain registered %s app creation',
+    async (order) => {
+      mockCreateSkillsProvider.mockClear();
+      const lifecycle = new ServeAppLifecycleController();
+      const drain = vi.fn(async () => {});
+      if (order === 'before') lifecycle.setAppDrain(drain);
+      const app = createServeApp(baseOpts, undefined, {
+        boundWorkspace: '/workspace',
+        bridge: makeBridge(),
+        serveAppLifecycle: lifecycle,
+      } as never);
+      if (order === 'after') lifecycle.setAppDrain(drain);
+      await getServeAppLifecycle(app).close();
+      expect(drain).toHaveBeenCalledOnce();
+      for (const [
+        index,
+        [options],
+      ] of mockCreateSkillsProvider.mock.calls.entries()) {
+        if (options.autoDiscover)
+          expect(
+            mockCreateSkillsProvider.mock.results[index]!.value.dispose,
+          ).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'disposes both automatic catalogs with an externally supplied lifecycle: %s',
+    async (supplied) => {
+      mockCreateSkillsProvider.mockClear();
+      const app = createServeApp(baseOpts, undefined, {
+        boundWorkspace: '/workspace',
+        bridge: makeBridge(),
+        ...(supplied
+          ? { serveAppLifecycle: new ServeAppLifecycleController() }
+          : {}),
+      } as never);
+      const automatic = mockCreateSkillsProvider.mock.calls.flatMap(
+        ([options], index) =>
+          options.autoDiscover
+            ? [mockCreateSkillsProvider.mock.results[index]!.value]
+            : [],
+      );
+      expect(automatic).toHaveLength(2);
+      await getServeAppLifecycle(app).close();
+      for (const provider of automatic)
+        expect(provider.dispose).toHaveBeenCalledOnce();
+    },
+  );
+
   it('forwards batch settings persistence to the workspace service', () => {
     mockCreateDaemonWorkspaceService.mockClear();
     const persistSetting = vi.fn(

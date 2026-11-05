@@ -40,7 +40,11 @@ const prSkill = readFileSync(
   'utf8',
 );
 const triageSkillDoc = readFileSync('.qwen/skills/triage/SKILL.md', 'utf8');
-import { ATTRIBUTIONS, VERDICTS } from '../../scripts/verify-pr-check.mjs';
+import {
+  ATTRIBUTIONS,
+  VERDICTS,
+  checkArtifacts,
+} from '../../scripts/verify-pr-check.mjs';
 
 const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 const hasGnuRealpath =
@@ -4469,7 +4473,8 @@ describe('qwen-triage verify hardening round 2', () => {
     try {
       // The stub records which HTTP verb the publisher used and against
       // which comment id, keeps the body it sent, and serves a comments
-      // listing from a fixture.
+      // listing from a fixture. STUB_FAIL_LIST / STUB_FAIL_USER fail the
+      // listing or the bot-identity lookup.
       writeFileSync(
         join(dir, 'gh'),
         [
@@ -4477,9 +4482,10 @@ describe('qwen-triage verify hardening round 2', () => {
           'all="$*"',
           'for a in "$@"; do case "$a" in body=@*) cp "${a#body=@}" "$BODY_OUT";; esac; done',
           'case "$all" in',
-          '  *"api user"*|*" user "*) echo qwen-code-ci-bot ;;',
+          '  *"api user"*|*" user "*) [ -n "${STUB_FAIL_USER:-}" ] && exit 1; echo qwen-code-ci-bot ;;',
+          '  */pulls/7999*) [ "$STUB_PR_STATE" = fail ] && exit 1; echo "${STUB_PR_STATE:-open}" ;;',
           '  *"-X PATCH"*) echo "PATCH $all" >> "$CALLS" ;;',
-          '  *comments*--method*GET*) cat "$LISTING" ;;',
+          '  *comments*--method*GET*) [ -n "${STUB_FAIL_LIST:-}" ] && exit 1; cat "$LISTING" ;;',
           '  *issues/*/comments*) echo "POST $all" >> "$CALLS" ;;',
           'esac',
           'exit 0',
@@ -4529,7 +4535,7 @@ describe('qwen-triage verify hardening round 2', () => {
             ...env,
           },
         });
-        expect(res.status).toBe(0);
+        expect(res.status, res.stderr).toBe(0);
         return readFileSync(calls, 'utf8');
       };
 
@@ -4575,6 +4581,17 @@ describe('qwen-triage verify hardening round 2', () => {
       const foreign = run([status(777, 1, 'someone-else')]);
       expect(foreign).toContain('POST');
       expect(foreign).not.toContain('/issues/comments/777');
+
+      // A lookup that cannot read the listing or the bot identity finds no
+      // comment of this run's, so the report is posted fresh. The step runs
+      // under its own `set -u`: each value the lookup would set needs its
+      // initializer, or this path aborts with nothing posted.
+      const blindLookups = [{ STUB_FAIL_LIST: '1' }, { STUB_FAIL_USER: '1' }];
+      for (const env of blindLookups) {
+        const blind = run([status(555, 1)], env);
+        expect(blind).toContain('POST');
+        expect(blind).not.toContain('/issues/comments/555');
+      }
 
       // Publishers queue, so the newest marker comment can be another
       // round's: its live status is that round's to replace, and an earlier
@@ -4660,6 +4677,122 @@ describe('qwen-triage verify hardening round 2', () => {
       const quotedOnly = run([quoting]);
       expect(quotedOnly).toContain('POST');
       expect(quotedOnly).not.toContain('PATCH');
+
+      // A round can queue for hours. Once the PR has closed, a notice with
+      // no status of its own to finalize is not posted; the summary says
+      // why. Its own live status is still finalized, a report is still
+      // posted, and a failed state lookup posts.
+      const summary = join(dir, 'summary.md');
+      const closed = { STUB_PR_STATE: 'closed', GITHUB_STEP_SUMMARY: summary };
+      for (const env of [
+        { DOWNLOAD_OUTCOME: 'failure' },
+        { VERIFY_RESULT: 'cancelled' },
+        { VERIFY_RESULT: 'failure' },
+        { VERDICT: 'infra-error', PREPARE_FAILURE_PHASE: 'install' },
+      ]) {
+        writeFileSync(summary, '');
+        expect(run([], { ...closed, ...env })).toBe('');
+        expect(readFileSync(summary, 'utf8')).toContain(
+          'PR #7999 closed before this round published; notice not posted',
+        );
+        // Only a flaky verdict is exempt; the gate's other verdicts are
+        // still notices.
+        expect(run([], { ...closed, ...env, FLAKE_VERDICT: 'pass' })).toBe('');
+        expect(run([ownReport], { ...closed, ...env })).toBe('');
+        const finalized = run([status(555, 1)], { ...closed, ...env });
+        expect(finalized).toContain('/issues/comments/555');
+        expect(finalized).not.toContain('POST');
+        expect(run([], { STUB_PR_STATE: 'fail', ...env })).toContain('POST');
+        expect(run([], { STUB_PR_STATE: 'open', ...env })).toContain('POST');
+      }
+      expect(run([], closed)).toContain('POST');
+      expect(
+        run([], { ...closed, VERDICT: 'fail', PREPARE_FAILURE_PHASE: 'build' }),
+      ).toContain('POST');
+      // A flaky demotion is a finding, not noise: on a merged PR it names
+      // tests now on main. Each body that carries one without the
+      // substantive marker posts, unless this run's own report already
+      // carries the demotion. Without a live status of its own, a later
+      // attempt finds an earlier attempt's report, which can predate the
+      // verdict; the marker counts only in that report's header.
+      const flaky = { ...closed, FLAKE_VERDICT: 'flaky' };
+      const ownFlakyReport = {
+        ...ownReport,
+        body: `${M}\n<!-- qwen-triage:verify-run=1 -->\n<!-- qwen-triage:verify-flaky -->\n<!-- qwen-triage:verify-substantive -->\n\nreport`,
+      };
+      for (const [env, headline] of [
+        [{ DOWNLOAD_OUTCOME: 'failure' }, 'result artifact unavailable'],
+        [{ VERIFY_RESULT: 'cancelled' }, 'job cancelled before the report'],
+        [{ VERIFY_RESULT: 'failure' }, 'the job then failed before the report'],
+      ]) {
+        writeFileSync(bodyOut, '');
+        expect(run([], { ...flaky, ...env })).toContain('POST');
+        expect(readFileSync(bodyOut, 'utf8')).toContain(
+          `❌ not passed — non-deterministic tests (flakiness gate); ${headline}**`,
+        );
+        expect(run([ownFlakyReport], { ...flaky, ...env })).toBe('');
+        // Unable to read that report, the lookup cannot tell whether it
+        // carries the demotion, so the notice posts.
+        for (const blind of blindLookups) {
+          expect(
+            run([ownFlakyReport], { ...flaky, ...env, ...blind }),
+          ).toContain('POST');
+        }
+        for (const earlier of [
+          ownReport,
+          {
+            ...ownReport,
+            body: `${ownReport.body}\n<!-- qwen-triage:verify-flaky -->`,
+          },
+        ]) {
+          const beside = run([earlier], { ...flaky, ...env });
+          expect(beside).toContain('POST');
+          expect(beside).not.toContain('/issues/comments/555');
+        }
+        // A full re-run posts its own live status first, and that status
+        // is what this attempt finalizes.
+        const rerun = run([ownReport, status(600, 1)], { ...flaky, ...env });
+        expect(rerun).toContain('/issues/comments/600');
+        expect(rerun).not.toContain('POST');
+      }
+      // The exemption keys on the gate verdict, not on the rendered body.
+      // The skipped, n/a and prepare-failure bodies stay ⚠️ under `flaky`;
+      // only the gate step's condition keeps them from meeting one.
+      expect(
+        stepIn('verify', 'Flakiness gate: re-run changed test files'),
+      ).toContain(
+        `if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"`,
+      );
+      // The verify lane runs only on an open PR, and a closed PR is where
+      // a results-unavailable notice can now land: either variant scopes
+      // its re-run advice to an open PR.
+      for (const [comments, env] of [
+        [[], { ...flaky, DOWNLOAD_OUTCOME: 'failure' }],
+        [[status(555, 1)], { ...closed, DOWNLOAD_OUTCOME: 'failure' }],
+      ]) {
+        writeFileSync(bodyOut, '');
+        run(comments, env);
+        const body = readFileSync(bodyOut, 'utf8');
+        expect(body).toContain(
+          'while the PR is open, re-run `@qwen-code /verify` for a fresh report',
+        );
+        expect(body).toContain(
+          'PR 未关闭时，如需完整报告请重新运行 `@qwen-code /verify`',
+        );
+      }
+      // A round whose agent wrote no report.md gets the report body
+      // without the marker: a notice, posted only when the gate demoted it.
+      rmSync(join(art, 'report.md'));
+      try {
+        expect(run([], closed)).toBe('');
+        writeFileSync(bodyOut, '');
+        expect(run([], flaky)).toContain('POST');
+        expect(readFileSync(bodyOut, 'utf8')).toContain(
+          '❌ not passed — non-deterministic tests (flakiness gate)**',
+        );
+      } finally {
+        writeFileSync(join(art, 'report.md'), '## real report\n');
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -5423,9 +5556,25 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'fill those same variables at startup from operator scopes only',
     );
-    // Posting is consent, not a coordinate: it stays per-invocation.
+    // Posting is consent, not a coordinate: it stays per-invocation, with
+    // one exception — a same-session follow-up inherits the session's
+    // current consent for that PR, never a cross-session default.
     expect(flat).toContain('Only coordinates like these are defaultable');
     expect(flat).toContain('posting stays a per-invocation request');
+    expect(flat).toContain(
+      "a follow-up round in the same session inherits the session's current publish consent",
+    );
+    // Consent is granted by an explicit publish request (flag or words)
+    // and kept by bare triggers until a round withdraws it.
+    expect(flat).toContain(
+      'granted by an explicit publish request and kept by bare triggers',
+    );
+    expect(flat).toContain('A follow-up round inherits that request only');
+    // The Hard rules bullet must recognize the inherited request too, or
+    // the file's most absolute posting rule reads against the exception.
+    expect(flat).toContain(
+      "given in the round's invocation or inherited within the same session",
+    );
     // The flag is not a shortcut around the metadata rule.
     expect(flat).toContain('does not license an `origin` fallback');
     // ...nor may the image host fall back to a contributor's fork.
@@ -5497,17 +5646,62 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(
       flat.indexOf('Register the round in the shared watch state'),
     ).toBeLessThan(flat.indexOf('Run the follow-up protocol above'));
-    // Publishing consent is not inherited from the phrase.
+    // Publishing consent is a per-PR session state: R1 `/verify-pr <n>
+    // --publish` (or the request in words) grants it, and the bare
+    // triggers R2 and R3 both publish under that original grant — an
+    // inherited round must not drop the chain just because its own
+    // invocation lacked the flag. Only a quiet round or --no-publish
+    // withdraws it; the phrase itself grants nothing, and neither does a
+    // published comment found on the PR.
     expect(flat).toContain('the phrase alone does not post a comment');
+    expect(flat).toContain('Publish consent is a per-PR state of this session');
+    // The grant rides on the explicit request, flag or words alike, so a
+    // words-request round seeds the same consent (review R1-2).
+    expect(flat).toContain('a round invoked with an explicit publish request');
+    expect(flat).toContain(
+      'the `--publish` flag or the request in words — grants it',
+    );
+    // One contiguous withdrawal sentence: splitting it so a fresh round
+    // keeps consent must fail (deep-verification M06).
+    expect(flat).toContain(
+      'a fresh `/verify-pr` round invoked without a publish request, or a trigger carrying `--no-publish`, withdraws it',
+    );
+    expect(flat).toContain('a bare trigger keeps it unchanged');
+    // The chain's upper bound is pinned too (deep-verification M15).
+    expect(flat).toContain(
+      'consecutive bare triggers keep publishing under the original grant until a round withdraws it',
+    );
+    // Watch consent stays in its own domain: a watch fire neither grants
+    // nor withdraws the manual chain.
+    expect(flat).toContain(
+      'Watch rounds run under their own standing consent and never change this state',
+    );
+    // The announcement names its grant (M08) and leaves a trace in the
+    // published comment, not only in the session (S4).
+    expect(flat).toContain('say so in one line before posting');
+    expect(flat).toContain('naming the round that granted it');
+    expect(flat).toContain(
+      'the same line goes into the comment body before the attribution footer',
+    );
+    expect(flat).toContain(
+      'places its one-line announcement immediately before the footer',
+    );
+    // A published comment is history, not consent (S2).
+    expect(flat).toContain(
+      'a published comment found on the PR is evidence of a past round',
+    );
+    expect(flat).toContain('not consent for this one');
   });
 
   // The TUI renders `argument-hint` beside the command name; without the field
-  // `/verify-pr` looks like it takes no arguments, unlike `/review`.
+  // `/verify-pr` looks like it takes no arguments, unlike `/review`. The
+  // opt-out belongs in the hint too: an undiscoverable --no-publish
+  // mitigates less than it appears to.
   it('declares an argument hint for the command prompt', () => {
     const frontmatter = parse(/^---\n([\s\S]*?)\n---/.exec(verifySkill)[1]);
 
     expect(frontmatter['argument-hint']).toBe(
-      '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]',
+      '<pr-number> [--publish] [--no-publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]',
     );
   });
 
@@ -6256,8 +6450,9 @@ describe('qwen-triage verify publish fidelity', () => {
   // A re-run of the publisher finds what it already published by the run
   // marker, and a notice must not replace findings, so every terminal body
   // opens with a header: the verify marker both lookups select on, this
-  // run's marker, and the substantive marker when it carries findings. The
-  // lookups read markers only from the lines before the first blank line.
+  // run's marker, the flaky marker when the gate demoted the run, and the
+  // substantive marker when it carries findings. The lookups read markers
+  // only from the lines before the first blank line.
   it('opens every terminal body with its header', () => {
     const dir = fixture();
     try {
@@ -6266,6 +6461,14 @@ describe('qwen-triage verify publish fidelity', () => {
         '<!-- qwen-triage:verify-run=41 -->',
       ];
       const strong = [...weak, '<!-- qwen-triage:verify-substantive -->'];
+      // Every body a flaky verdict can reach is demoted, and its header says
+      // so ahead of the substantive marker.
+      const flakyMark = '<!-- qwen-triage:verify-flaky -->';
+      const flakyWeak = [...weak, flakyMark];
+      const flakyStrong = [
+        ...flakyWeak,
+        '<!-- qwen-triage:verify-substantive -->',
+      ];
       const variants = [
         ['real report', strong, { AGENT_VERDICT: 'merge-ready' }],
         ['incomplete — cancelled', weak, { VERIFY_RESULT: 'cancelled' }],
@@ -6291,6 +6494,31 @@ describe('qwen-triage verify publish fidelity', () => {
           weak,
           { VERDICT: 'infra-error', PREPARE_FAILURE_PHASE: 'install' },
         ],
+        [
+          'non-deterministic tests (flakiness gate)**',
+          flakyStrong,
+          { AGENT_VERDICT: 'merge-ready', FLAKE_VERDICT: 'flaky' },
+        ],
+        [
+          'job cancelled before the report',
+          flakyWeak,
+          { VERIFY_RESULT: 'cancelled', FLAKE_VERDICT: 'flaky' },
+        ],
+        [
+          'the job then failed before the report',
+          flakyWeak,
+          { VERIFY_RESULT: 'failure', VERDICT: '', FLAKE_VERDICT: 'flaky' },
+        ],
+        [
+          'result artifact unavailable',
+          flakyWeak,
+          { DOWNLOAD_OUTCOME: 'failure', FLAKE_VERDICT: 'flaky' },
+        ],
+        [
+          'real report',
+          strong,
+          { AGENT_VERDICT: 'merge-ready', FLAKE_VERDICT: 'pass' },
+        ],
       ];
       variants.forEach(([shown, header, env], i) => {
         const body = render(dir, {
@@ -6309,6 +6537,12 @@ describe('qwen-triage verify publish fidelity', () => {
       });
       expect(reportless).toContain('No report.md was found');
       expect(reportless.split('\n\n')[0].split('\n')).toEqual(weak);
+      const flakyReportless = render(dir, {
+        NAME: 'hdr-noreport-flaky',
+        GITHUB_RUN_ID: '41',
+        FLAKE_VERDICT: 'flaky',
+      });
+      expect(flakyReportless.split('\n\n')[0].split('\n')).toEqual(flakyWeak);
 
       // Written once, before the branches, which only append: a new branch
       // cannot open its body without it.
@@ -6527,6 +6761,389 @@ describe('qwen-triage verify publish fidelity', () => {
     }
   });
 
+  // Rounds folded whole workspace suites into their assertion counts.
+  // Suite results now have a line of their own, as totals only: a suite
+  // name is agent-chosen text.
+  it('prints gate totals on a line of their own', () => {
+    const dir = fixture();
+    const file = join(
+      dir,
+      'work',
+      'verify-results',
+      'prA-verify-1',
+      'assertions.json',
+    );
+    const counts = { pass: 10, fail: 0, total: 10 };
+    const publishWith = (name, assertions) => {
+      writeFileSync(file, JSON.stringify(assertions));
+      return render(dir, { NAME: name, AGENT_VERDICT: 'merge-ready' });
+    };
+    try {
+      const body = publishWith('gates', {
+        ...counts,
+        gates: [
+          { suite: '@everyone <!-- x -->', pass: 1290, fail: 2, skipped: 1 },
+          { suite: 'core client', pass: 619, fail: 0, skipped: 0 },
+        ],
+      });
+      expect(body).toContain(
+        'Scripted assertions: 10 passed · 0 failed · 10 total',
+      );
+      expect(body).toContain(
+        'Targeted gates (existing tests, not counted individually above): 1909 passed · 2 failed · 1 skipped across 2 suite(s)',
+      );
+      expect(
+        body.indexOf(
+          '定向门禁（已有测试，不逐条计入上面的断言）：1909 通过 · 2 失败 · 1 跳过，共 2 个套件',
+        ),
+      ).toBeGreaterThan(body.indexOf('<details>'));
+      expect(body).not.toContain('@everyone');
+      // A gate red is the repo's test result: the verdict still comes from
+      // the round's own assertions and their ledger.
+      expect(body).toContain('✅ passed');
+      // A trusted verdict over gate reds carries one advisory sentence,
+      // in both languages, without demoting the headline.
+      expect(body).toContain(
+        'Gate totals do not decide the verdict: a gate red the PR causes belongs in the assertion ledger above',
+      );
+      expect(body.indexOf('门禁合计不影响判定')).toBeGreaterThan(
+        body.indexOf('<details>'),
+      );
+
+      // Absent skipped is "not recorded", not a measured zero: the clause
+      // drops out, and with no gate red there is no advisory either.
+      const noSkip = publishWith('gates-noskip', {
+        ...counts,
+        gates: [{ suite: 'cli', pass: 1292, fail: 0 }],
+      });
+      expect(noSkip).toContain(
+        'Targeted gates (existing tests, not counted individually above): 1292 passed · 0 failed across 1 suite(s)',
+      );
+      expect(noSkip).toContain(
+        '定向门禁（已有测试，不逐条计入上面的断言）：1292 通过 · 0 失败，共 1 个套件',
+      );
+      expect(noSkip).not.toContain('0 skipped');
+      expect(noSkip).not.toContain('Gate totals do not decide the verdict');
+
+      // A mixed list records skips for only some suites: the partial sum
+      // is not the run's total, so the clause drops out entirely.
+      const mixed = publishWith('gates-mixed', {
+        ...counts,
+        gates: [
+          { suite: 'cli', pass: 1290, fail: 0, skipped: 12 },
+          { suite: 'core', pass: 619, fail: 0 },
+        ],
+      });
+      expect(mixed).toContain(
+        'Targeted gates (existing tests, not counted individually above): 1909 passed · 0 failed across 2 suite(s)',
+      );
+      expect(mixed).toContain(
+        '定向门禁（已有测试，不逐条计入上面的断言）：1909 通过 · 0 失败，共 2 个套件',
+      );
+      expect(mixed).not.toContain('12 skipped');
+
+      // A recorded zero is a measurement: the clause stays. This is the
+      // only input that distinguishes "recorded zero" from "not recorded".
+      const zeroSkip = publishWith('gates-zeroskip', {
+        ...counts,
+        gates: [{ suite: 'cli', pass: 1292, fail: 0, skipped: 0 }],
+      });
+      expect(zeroSkip).toContain(
+        'Targeted gates (existing tests, not counted individually above): 1292 passed · 0 failed · 0 skipped across 1 suite(s)',
+      );
+
+      // The advisory is gated on a trusted verdict: an untrusted run with
+      // gate reds prints the totals but never the sentence about judging
+      // the verdict. The fixture carries a gate red so the trust half of
+      // the guard is the only thing withholding the advisory.
+      writeFileSync(
+        file,
+        JSON.stringify({
+          ...counts,
+          gates: [{ suite: 'cli', pass: 1290, fail: 2 }],
+        }),
+      );
+      const untrusted = render(dir, {
+        NAME: 'gates-untrusted',
+        VERDICT: 'timeout',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(untrusted).toContain('Targeted gates');
+      expect(untrusted).not.toContain('Gate totals do not decide the verdict');
+      expect(untrusted).not.toContain('门禁合计不影响判定');
+      expect(untrusted).toContain('⚠️ incomplete');
+
+      // No list prints no line. Neither does a malformed one, and the
+      // checker refuses it, so the verdict is not trusted either. The
+      // shape rules mirror the checker's: a blank suite name and a
+      // non-count skipped (false/null) are refused, not defaulted.
+      expect(publishWith('gates-none', counts)).not.toContain('Targeted gates');
+      expect(
+        publishWith('gates-empty', { ...counts, gates: [] }),
+      ).not.toContain('Targeted gates');
+      for (const gates of [
+        [{ suite: 'x', pass: '1290', fail: 0 }],
+        [{ pass: 1290, fail: 0 }],
+        [{ suite: '', pass: 1290, fail: 0 }],
+        [{ suite: '   ', pass: 1290, fail: 0 }],
+        [{ suite: 'x', pass: -1, fail: 0 }],
+        [{ suite: 'x', pass: 1, fail: -1 }],
+        [{ suite: 'x', pass: 1, fail: 0, skipped: 0.5 }],
+        [{ suite: 'x', pass: 1, fail: 0, skipped: false }],
+        [{ suite: 'x', pass: 1, fail: 0, skipped: null }],
+      ]) {
+        const bad = publishWith('gates-bad', { ...counts, gates });
+        expect(bad).not.toContain('Targeted gates');
+        expect(bad).not.toContain('定向门禁（');
+        expect(bad).toContain('⚠️ inconclusive');
+      }
+      // Gates ride the validated triple: an inconsistent one drops both.
+      expect(
+        publishWith('gates-triple', {
+          pass: 10,
+          fail: 0,
+          total: 9,
+          gates: [{ suite: 'x', pass: 1, fail: 0 }],
+        }),
+      ).not.toContain('Targeted gates');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The shape rule lives in two implementations — the publisher's jq and
+  // checkArtifacts — so one table drives both: the totals line renders
+  // exactly when the checker accepts a non-empty list. A rule dropped from
+  // either side reds the fixture that rule covers, in either direction.
+  it('keeps the publisher jq and the checker one rule set', () => {
+    const dir = fixture();
+    const file = join(
+      dir,
+      'work',
+      'verify-results',
+      'prA-verify-1',
+      'assertions.json',
+    );
+    const triple = '"pass":10,"fail":0,"total":10';
+    const withGates = (gates) => `{${triple},"gates":${gates}}`;
+    // Raw literals, not JSON.stringify: 1e309 would serialize to null and
+    // hide the overflow that jq clamps to a finite double.
+    const table = [
+      {
+        name: 'valid',
+        text: withGates('[{"suite":"cli","pass":1290,"fail":2,"skipped":1}]'),
+        accepts: true,
+        renders: true,
+      },
+      {
+        name: 'max-safe',
+        text: withGates('[{"suite":"x","pass":9007199254740991,"fail":0}]'),
+        accepts: true,
+        renders: true,
+      },
+      { name: 'absent', text: `{${triple}}`, accepts: true, renders: false },
+      { name: 'empty', text: withGates('[]'), accepts: true, renders: false },
+      {
+        name: 'object',
+        text: withGates('{"cli":{"pass":1,"fail":0}}'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'null-entry',
+        text: withGates('[null]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'missing-suite',
+        text: withGates('[{"pass":1,"fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'blank-suite',
+        text: withGates('[{"suite":"   ","pass":1,"fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+      // Blank is JSON whitespace only. jq's \S counts U+0085 as space and
+      // JS's trim() strips U+FEFF, so either test alone split the two.
+      {
+        name: 'whitespace-suite',
+        text: withGates('[{"suite":" \\t\\n\\r","pass":1,"fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'nel-suite',
+        text: withGates('[{"suite":"\\u0085","pass":1,"fail":0}]'),
+        accepts: true,
+        renders: true,
+      },
+      {
+        name: 'bom-suite',
+        text: withGates('[{"suite":"\\ufeff","pass":1,"fail":0}]'),
+        accepts: true,
+        renders: true,
+      },
+      {
+        name: 'string-count',
+        text: withGates('[{"suite":"x","pass":"1","fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'negative',
+        text: withGates('[{"suite":"x","pass":-1,"fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'fraction',
+        text: withGates('[{"suite":"x","pass":1,"fail":0.5}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'skipped-string',
+        text: withGates('[{"suite":"x","pass":1,"fail":0,"skipped":"2"}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'skipped-false',
+        text: withGates('[{"suite":"x","pass":1,"fail":0,"skipped":false}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'skipped-null',
+        text: withGates('[{"suite":"x","pass":1,"fail":0,"skipped":null}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'overflow',
+        text: withGates('[{"suite":"x","pass":1e309,"fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'huge-finite',
+        text: withGates('[{"suite":"x","pass":1e308,"fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'over-max-safe',
+        text: withGates('[{"suite":"x","pass":9007199254740992,"fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+    ];
+    try {
+      for (const f of table) {
+        writeFileSync(file, f.text);
+        const result = checkArtifacts({
+          files: {
+            report: `merge-ready · 10 passed · 0 failed · 10 total · ${'b'.repeat(40)}\n\n# Report\n`,
+            verdict: 'merge-ready\n',
+            assertions: f.text,
+          },
+        });
+        const gatesError = result.errors.some((e) =>
+          e.includes('gates must be an array'),
+        );
+        const body = render(dir, {
+          NAME: `parity-${f.name}`,
+          AGENT_VERDICT: 'merge-ready',
+        });
+        expect(gatesError, f.name).toBe(!f.accepts);
+        expect(body.includes('Targeted gates'), f.name).toBe(f.renders);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The publisher reads `gates` only if rounds write it: both places the
+  // skill defines the counts have to say where suite results go.
+  it('teaches the gates field the publisher reads', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain('Gate counts are not assertions');
+    expect(flat).toContain('never in `pass`, `fail` or `total`');
+    expect(flat).toContain('A mutant run is likewise one assertion');
+    expect(flat).toContain('one `{suite, pass, fail}` entry per suite');
+    // The compensation for the change's main risk: the requirement that
+    // routes a PR-caused gate red back into the count the verdict reads.
+    expect(flat).toContain(
+      'gate red the PR causes, green at base and red at head, fails with its attribution',
+    );
+    // A round that ran only suites still needs a positive total.
+    expect(flat).toContain('So is each suite run');
+    expect(flat).toContain('still records a positive total');
+    // The size warning is inert unless the round is told to act on it,
+    // in both the local clear-list and the CI-path sentence.
+    expect(flat).toContain(
+      'act on a gates-size warning by recording the suites it ran under `gates`',
+    );
+    expect(flat).toContain('a gates-size warning reaches nobody but you');
+    // ...and told what to do when there is no suite to move.
+    const noSuite = 'say in the report what the count holds';
+    expect(flat.split(noSuite)).toHaveLength(3);
+  });
+
+  // The checker runs only for a completed run with a report, valid counts
+  // and a verdict word. Without one of them the verdict is untrusted anyway,
+  // and a checker run would add a refusal sentence about the wrong cause.
+  // (A verdict is only read beside a report, so no report means no verdict.)
+  it('consults the checker only when there is a verdict to check', () => {
+    const dir = fixture();
+    const calls = join(dir, 'checker-calls');
+    const stub = join(dir, 'checker-stub.mjs');
+    writeFileSync(
+      stub,
+      `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(calls)}, 'called\\n');\n`,
+    );
+    const consulted = (env) => {
+      rmSync(calls, { force: true });
+      const body = render(dir, { VERIFY_PR_CHECK: stub, ...env });
+      return { body, called: existsSync(calls) };
+    };
+    try {
+      // Control: with every input present the stub is reached.
+      expect(
+        consulted({ NAME: 'leg-all', AGENT_VERDICT: 'merge-ready' }).called,
+      ).toBe(true);
+      const legs = [
+        {
+          NAME: 'leg-timeout',
+          AGENT_VERDICT: 'merge-ready',
+          VERDICT: 'timeout',
+        },
+        { NAME: 'leg-noverdict' },
+      ];
+      for (const env of legs) {
+        const { body, called } = consulted(env);
+        expect(called).toBe(false);
+        expect(body).not.toContain('consistency check');
+      }
+      writeFileSync(
+        join(dir, 'work', 'verify-results', 'prA-verify-1', 'assertions.json'),
+        '{"pass":1,"fail":0,"total":0}',
+      );
+      const { body, called } = consulted({
+        NAME: 'leg-counts',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(called).toBe(false);
+      expect(body).not.toContain('consistency check');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // #7836: when the agent claims merge-ready but assertions.json records
   // failures, the publisher must explain the mismatch in the comment body
   // so a reader does not see a hedged headline above "7 failed" with
@@ -6546,6 +7163,12 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(body).toContain(
         'The agent reported `merge-ready`, but `assertions.json` recorded 7 failures',
       );
+      // The checker's rule, not an invitation to excuse the failures.
+      expect(body).toContain(
+        'an expected A/B control red counts as a pass, so a recorded failure contradicts `merge-ready`',
+      );
+      expect(body).not.toContain('see the report for whether');
+      expect(body).toContain('与 `merge-ready` 相矛盾');
       expect(body).toContain('\u26a0\ufe0f inconclusive');
       expect(body).not.toContain('\u2705 passed');
       // The Chinese counterpart must sit INSIDE the fold, so a Chinese-only

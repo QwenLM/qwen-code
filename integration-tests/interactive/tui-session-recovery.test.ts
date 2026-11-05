@@ -25,6 +25,7 @@ import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import { startFakeOpenAIServer } from '../fake-openai-server.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
+import { createUntil } from './wait.js';
 import {
   InteractiveSession,
   sendAboutUntilRendered,
@@ -40,14 +41,7 @@ const png = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC',
   'base64',
 );
-const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
-async function until(check: () => boolean | Promise<boolean>, reason: string) {
-  const deadline = Date.now() + 15_000;
-  while (!(await check())) {
-    if (Date.now() > deadline) throw new Error(reason);
-    await sleep(100);
-  }
-}
+const until = createUntil(15_000);
 
 type Part = { type: string; text?: string; image_url?: { url: string } };
 type Message = { role: string; content: string | Part[] };

@@ -60,6 +60,11 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // Qwen VL (vision-language) models: image + video
   [/^qwen-vl-/, { image: true, video: true }],
   [/^qwen3-vl-/, { image: true, video: true }],
+  // Open-weight Qwen2-VL / Qwen2.5-VL, including sizes and quantized builds
+  // the bundled catalog has no entry for (32B, 3B, -AWQ, -FP8).
+  [/^qwen2(?:\.5)?-vl-/, { image: true, video: true }],
+  // QVQ visual reasoning models.
+  [/^qvq-/, { image: true }],
 
   // Qwen coder / text models: text-only
   [/^qwen3-coder-/, {}],
@@ -96,7 +101,11 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // -------------------
   // Moonshot / Kimi
   // -------------------
-  [/^kimi-k3/, { image: true, video: true }],
+  // Kimi Code exposes the K3 generation without the `kimi-` prefix, so the
+  // prefix is optional here too. Its 256K variant accepts images but not
+  // video, so it is named ahead of the video-capable row.
+  [/^(?:kimi-)?k3-256k/, { image: true }],
+  [/^(?:kimi-)?k3/, { image: true, video: true }],
   [/^kimi-k2\./, { image: true, video: true }],
   [/^kimi-/, {}],
 
