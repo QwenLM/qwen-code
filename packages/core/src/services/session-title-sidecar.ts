@@ -46,6 +46,14 @@ export function truncateTitleForList(
   return text;
 }
 
+/** Hard cap without an ellipsis, counted in code points so no pair splits. */
+function truncateCodePoints(text: string, maxCodePoints: number): string {
+  const codePoints = Array.from(text);
+  return codePoints.length <= maxCodePoints
+    ? text
+    : codePoints.slice(0, maxCodePoints).join('');
+}
+
 export function sessionTitleSidecarPath(
   chatsDir: string,
   sessionId: string,
@@ -78,7 +86,7 @@ export function readSessionTitleSidecar(
   if (
     record['version'] !== 1 ||
     displayName.length === 0 ||
-    displayName.length > MAX_DISPLAY_NAME_CHARS ||
+    Array.from(displayName).length > MAX_DISPLAY_NAME_CHARS ||
     (source !== 'manual' && source !== 'auto' && source !== 'prompt')
   ) {
     return undefined;
@@ -103,7 +111,10 @@ export function writeSessionTitleSidecar(
   displayName: string,
   source: SessionTitleSidecarSource,
 ): boolean {
-  const normalized = displayName.trim().slice(0, MAX_DISPLAY_NAME_CHARS);
+  const normalized = truncateCodePoints(
+    displayName.trim(),
+    MAX_DISPLAY_NAME_CHARS,
+  );
   if (normalized.length === 0) return false;
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });

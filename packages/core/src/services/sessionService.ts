@@ -1934,6 +1934,28 @@ export class SessionService {
     fs.unlinkSync(sourcePath);
   }
 
+  /**
+   * A conflict resolution keeps one transcript and drops the other. The kept
+   * transcript's label wins: move the dropped side's sidecar in only when the
+   * kept side has none, and discard it otherwise.
+   */
+  private reconcileTitleSidecarOnConflict(
+    sessionId: string,
+    keptState: SessionArchiveState,
+    droppedState: SessionArchiveState,
+  ): void {
+    const kept = this.getSessionTitleSidecarPathForState(sessionId, keptState);
+    const dropped = this.getSessionTitleSidecarPathForState(
+      sessionId,
+      droppedState,
+    );
+    if (fs.existsSync(kept)) {
+      removeSessionTitleSidecar(dropped);
+    } else {
+      moveSessionTitleSidecar(dropped, kept);
+    }
+  }
+
   private async moveArchiveSidecars(
     sessionId: string,
     action: 'archive' | 'unarchive',
@@ -3969,6 +3991,8 @@ export class SessionService {
           this.removeFileIfExists(
             this.getPromptLedgerPathForState(sessionId, 'active'),
           );
+          options.assertCleanupOwned?.();
+          this.reconcileTitleSidecarOnConflict(sessionId, 'archived', 'active');
           archived.push(sessionId);
           resolvedConflicts.push(sessionId);
           continue;
@@ -4107,6 +4131,8 @@ export class SessionService {
           this.removeFileIfExists(
             this.getPromptLedgerPathForState(sessionId, 'archived'),
           );
+          options.assertCleanupOwned?.();
+          this.reconcileTitleSidecarOnConflict(sessionId, 'active', 'archived');
           unarchived.push(sessionId);
           resolvedConflicts.push(sessionId);
           continue;

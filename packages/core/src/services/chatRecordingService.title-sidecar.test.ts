@@ -182,4 +182,91 @@ describe('ChatRecordingService - list title sidecar', () => {
       source: 'manual',
     });
   });
+
+  it('does not replace a persisted prompt label with a later prompt', () => {
+    service.recordUserMessage([{ text: '首条 prompt' }]);
+    service.recordUserMessage([{ text: '第二条 prompt' }]);
+
+    expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
+      displayName: '首条 prompt',
+      source: 'prompt',
+    });
+  });
+
+  it('lets a later text prompt label a session whose first prompt was image-only', () => {
+    service.recordUserMessage([
+      { inlineData: { mimeType: 'image/png', data: 'AA==' } },
+    ]);
+    service.recordUserMessage([{ text: '第二轮的文本 prompt' }]);
+
+    expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
+      displayName: '第二轮的文本 prompt',
+      source: 'prompt',
+    });
+  });
+
+  it('seeds the first prompt of a long resumed session, not the sliding window head', () => {
+    const messages: ChatRecord[] = Array.from({ length: 25 }, (_, index) => ({
+      uuid: `resumed-${index}`,
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: `2026-01-01T00:00:${String(index).padStart(2, '0')}.000Z`,
+      type: 'user',
+      cwd: root,
+      version: '1.0.0',
+      message: { role: 'user', parts: [{ text: `prompt ${index + 1}` }] },
+      systemPayload: { displayText: `prompt ${index + 1}` },
+    }));
+    newService(
+      makeConfig({
+        getResumedSessionData: () => ({
+          conversation: { messages },
+          filePath: path.join(projectDir, 'chats', `${SESSION_ID}.jsonl`),
+          lastCompletedUuid: null,
+        }),
+      }),
+    );
+
+    expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
+      displayName: 'prompt 1',
+      source: 'prompt',
+    });
+  });
+
+  it('seeds a resume prompt from its message text when no display text exists', () => {
+    const prompt = '只有 message parts 的 prompt';
+    const resumed: ChatRecord = {
+      uuid: 'resumed-plain',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      cwd: root,
+      version: '1.0.0',
+      message: { role: 'user', parts: [{ text: prompt }] },
+    };
+    newService(
+      makeConfig({
+        getResumedSessionData: () => ({
+          conversation: { messages: [resumed] },
+          filePath: path.join(projectDir, 'chats', `${SESSION_ID}.jsonl`),
+          lastCompletedUuid: null,
+        }),
+      }),
+    );
+
+    expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
+      displayName: prompt,
+      source: 'prompt',
+    });
+  });
+
+  it('keeps an astral prompt intact through truncation and validation', () => {
+    service.recordUserMessage([{ text: '😀'.repeat(300) }]);
+
+    const stored = readSessionTitleSidecar(sidecarPath);
+    expect(Array.from(stored!.displayName)).toHaveLength(203);
+    expect(stored!.displayName.endsWith('...')).toBe(true);
+    expect(stored!.displayName.includes('\uFFFD')).toBe(false);
+  });
 });

@@ -2032,7 +2032,7 @@ describe('SessionService', () => {
         errors: [],
       });
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(3);
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(4);
     },
     warnsOnWorktreeSidecarFailure: async (kind: MoveKind) => {
       const m = seeded(kind, '.worktree.json');

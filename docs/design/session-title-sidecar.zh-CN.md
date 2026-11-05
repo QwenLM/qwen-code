@@ -8,9 +8,12 @@
 
 会话在侧栏中的名字完全来自 transcript：服务端从 `custom_title` 记录取
 `customTitle`，否则回退到前十条记录中的首条用户 prompt。当 transcript 丢失头部
-时——文件被删除后由写入器在下次追加时重建、崩溃截断、或 chats 目录被外部清理
-——首条 prompt 不存在了，`displayName` 变成空字符串，Web Shell 只能回退到会话
-id 的前八个字符，而那不是名字。
+时——文件被删除后由写入器在下次追加时重建、崩溃截断——首条 prompt 不存在了，
+`displayName` 变成空字符串，Web Shell 只能回退到会话 id 的前八个字符，而那不是
+名字。
+
+sidecar 无法覆盖整个目录被删除的情况：标签与 transcript 同目录，外部清空 chats
+目录时两者一起消失，该会话仍需手动重命名。
 
 实际案例：一个 live 会话的 transcript 在 15:57 被重建，只剩 `ui_telemetry` 与
 后台任务通知，列表行显示 `9d68a0dc`，尽管该会话创建时有正常的 prompt。
@@ -92,8 +95,9 @@ id 的前八个字符，而那不是名字。
   prompt 本来就是列表使用的标签。
 - **best-effort 写入。** sidecar 写失败绝不能导致 prompt 或重命名失败；缺失的
   sidecar 视为“没有持久化标签”。
-- **transcript 已经能命名的会话不读 sidecar。** 只有 transcript 既没有自定义
-  标题也没有首条 prompt 时才读 sidecar，而这正是 sidecar 要修复的状态。
+- **transcript 能提供的字段才不读 sidecar。** 列表路径只有在 transcript 同时给出
+  自定义标题与首条 prompt 时才跳过 sidecar；两者缺任一都会读取，因为 sidecar 可以
+  独立提供重命名或 prompt 标签。
 
 ## 风险
 
@@ -115,8 +119,8 @@ id 的前八个字符，而那不是名字。
 
 ## 验收标准
 
-- 在本改动之后，有首条 prompt 或自定义标题的会话，其 transcript 丢头或被重建
-  时不再产生空的 `displayName`。
-- 手动重命名在 transcript 丢失后仍然保留。
+- 有首条 prompt 或自定义标题的会话，其 transcript 丢头或被重建时不再产生空的
+  `displayName`，前提是 chats 目录本身仍然存在。
+- 手动重命名在 transcript 重建或截断后仍然保留。
 - 没有 sidecar 的会话显示中性标签，而不是 id 前缀。
 - 归档、取消归档与删除会话后，sidecar 状态与 transcript 保持一致。

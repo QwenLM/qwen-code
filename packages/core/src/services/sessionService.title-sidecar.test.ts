@@ -148,6 +148,31 @@ describe('SessionService - title sidecar fallback', () => {
     ).toMatchObject({ displayName: '分支标题', source: 'manual' });
   });
 
+  it('moves the title sidecar through archive and unarchive', async () => {
+    writeHeadlessTranscript([record('system', { subtype: 'ui_telemetry' })]);
+    writeSessionTitleSidecar(sidecarPath, 'CI 验证与复验', 'manual');
+    const archivedSidecar = sessionTitleSidecarPath(
+      path.join(path.dirname(transcriptPath), 'archive'),
+      SESSION_ID,
+    );
+
+    const archived = await service.archiveSessions([SESSION_ID]);
+    expect(archived.archived).toEqual([SESSION_ID]);
+    expect(readSessionTitleSidecar(sidecarPath)).toBeUndefined();
+    expect(readSessionTitleSidecar(archivedSidecar)).toMatchObject({
+      displayName: 'CI 验证与复验',
+      source: 'manual',
+    });
+
+    const unarchived = await service.unarchiveSessions([SESSION_ID]);
+    expect(unarchived.unarchived).toEqual([SESSION_ID]);
+    expect(readSessionTitleSidecar(archivedSidecar)).toBeUndefined();
+    expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
+      displayName: 'CI 验证与复验',
+      source: 'manual',
+    });
+  });
+
   it('drops the sidecar together with the session', async () => {
     writeHeadlessTranscript([record('system', { subtype: 'ui_telemetry' })]);
     writeSessionTitleSidecar(sidecarPath, 'CI 验证与复验', 'manual');

@@ -454,6 +454,21 @@ it('clears a previous standalone archive error before the next visit commits', a
   expect(commits[0]).not.toContain('Failed to load');
 });
 
+it('renders the untitled label instead of an id for a nameless session', async () => {
+  active.sessions = [makeSession('nameless', { displayName: '' })];
+  active.data = active.sessions;
+  renderSidebar();
+  await flushSidebar();
+
+  const titles = Array.from(
+    container.querySelectorAll('[data-web-shell-session-title]'),
+  );
+  expect(titles.some((node) => node.textContent === 'Untitled session')).toBe(
+    true,
+  );
+  expect(titles.some((node) => node.textContent === 'nameless')).toBe(false);
+});
+
 describe('WebShellSidebar current-session delete (issue #12619)', () => {
   it('keeps Managed navigation visible when local Workspaces are collapsed', async () => {
     window.localStorage.setItem(

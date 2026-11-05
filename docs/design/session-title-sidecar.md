@@ -10,9 +10,13 @@ A session's sidebar label is derived exclusively from its transcript: the
 server takes `customTitle` from a `custom_title` record, or falls back to the
 first user prompt scanned from the first ten records. When a transcript is
 recreated without its head — a missing file recreated by the writer on the next
-append, a crash-truncated file, or an externally cleared chats directory — the
-first prompt is gone and `displayName` becomes empty. The Web Shell then falls
-back to the first eight characters of the session id, which is not a name.
+append, or a crash-truncated file — the first prompt is gone and `displayName`
+becomes empty. The Web Shell then falls back to the first eight characters of
+the session id, which is not a name.
+
+A sidecar cannot cover a directory that is deleted wholesale: the label lives
+next to the transcript, so an external clear of the chats directory removes
+both and the session still needs a manual rename.
 
 Observed case: a live session whose transcript file was recreated at 15:57 kept
 only `ui_telemetry` and background-task notifications. Its list row showed
@@ -104,9 +108,10 @@ fallback, because the id is the only stable identifier there.
   list already uses.
 - **Best-effort writes.** A failed sidecar write must never fail a prompt or a
   rename; missing sidecars are treated as “no persisted label”.
-- **No sidecar read for a session the transcript can already name.** The list
-  path reads the sidecar only when the transcript yields neither a custom title
-  nor a first prompt, which is exactly the state the sidecar exists to repair.
+- **A sidecar read only when the transcript cannot supply a field.** The list
+  paths skip the sidecar only when the transcript yields both a custom title and
+  a first prompt; if either is missing they read it, because the sidecar can
+  supply the rename and the prompt label independently.
 
 ## Risks
 
@@ -131,8 +136,9 @@ fallback, because the id is the only stable identifier there.
 ## Acceptance criteria
 
 - A headless or recreated transcript no longer produces an empty `displayName`
-  for a session that had a first prompt or a custom title after this change.
-- A manual rename survives transcript loss.
+  for a session that had a first prompt or a custom title, as long as the chats
+  directory itself still exists.
+- A manual rename survives a transcript rebuild or truncation.
 - A session with no sidecar renders a neutral label, not an id prefix.
 - Archive, unarchive, and delete keep sidecar state consistent with the
   transcript.
