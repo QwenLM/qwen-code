@@ -281,8 +281,12 @@ describe('WorkspaceHostHeading / OtherHostProjects', () => {
     );
     await settle();
 
-    expect(sessionRow(container, 'Untitled session')).not.toBeNull();
+    const row = sessionRow(container, 'Untitled session');
+    expect(row).not.toBeNull();
     expect(sessionRow(container, 'nameless')).toBeNull();
+    // The row has no visible id and no details tooltip; the title attribute
+    // keeps the id so two nameless rows stay distinguishable.
+    expect(row!.getAttribute('title')).toContain('nameless');
   });
 
   it('falls back to the legacy navigation when no in-app opener is wired', async () => {

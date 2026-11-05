@@ -864,13 +864,18 @@ export function WorkspaceSection({
   };
   const renderReadOnlySessionRow = (session: DaemonSessionSummary) => {
     const label = getSessionLabel(session, untitledSessionLabel);
+    // The body text stays the label; the id lives in the accessible name so
+    // two untitled rows are not announced identically.
+    const accessibleLabel = session.displayName?.trim()
+      ? `${label}. ${trustToOpenLabel}`
+      : `${label} (${session.sessionId.slice(0, 8)}). ${trustToOpenLabel}`;
     const stamp = session.updatedAt || session.createdAt;
     const row = (
       <div
         key={session.sessionId}
         className={styles.sessionItemReadOnly}
         role="note"
-        aria-label={`${label}. ${trustToOpenLabel}`}
+        aria-label={accessibleLabel}
         onMouseEnter={(event) => measureSessionTitleScroll(event.currentTarget)}
       >
         <span className={styles.sessionName} data-web-shell-session-title>

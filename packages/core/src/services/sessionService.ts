@@ -1033,6 +1033,30 @@ export class SessionService {
     );
   }
 
+  /**
+   * The custom title for one transcript, with the sidecar as a fallback. A
+   * `prompt`-sourced sidecar is deliberately excluded: it labels the list row,
+   * it is not a title the user gave the session. Reads stay transcript-first,
+   * so a rebuilt transcript that regained a `custom_title` outranks the file.
+   */
+  private readSessionTitleInfoWithSidecar(
+    sessionId: string,
+    filePath: string,
+    state: SessionArchiveState,
+    tailBuffer?: Buffer,
+  ): { title?: string; source?: TitleSource } {
+    const fromTranscript = this.readSessionTitleInfoFromFile(
+      filePath,
+      tailBuffer,
+    );
+    if (fromTranscript.title) return fromTranscript;
+    const sidecar = this.readSessionTitleSidecarForSession(sessionId, state);
+    if (sidecar && sidecar.source !== 'prompt') {
+      return { title: sidecar.displayName, source: sidecar.source };
+    }
+    return fromTranscript;
+  }
+
   private async sessionBelongsToCurrentProject(
     sessionId: string,
     recordCwd: string,
@@ -2316,13 +2340,7 @@ export class SessionService {
     }
     const chatsDir = this.getChatsDir();
     const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
-    const fromTranscript = this.readSessionTitleInfoFromFile(filePath);
-    if (fromTranscript.title) return fromTranscript;
-    const sidecar = this.readSessionTitleSidecarForSession(sessionId, 'active');
-    if (sidecar && sidecar.source !== 'prompt') {
-      return { title: sidecar.displayName, source: sidecar.source };
-    }
-    return fromTranscript;
+    return this.readSessionTitleInfoWithSidecar(sessionId, filePath, 'active');
   }
 
   /**
@@ -3991,8 +4009,19 @@ export class SessionService {
           this.removeFileIfExists(
             this.getPromptLedgerPathForState(sessionId, 'active'),
           );
-          options.assertCleanupOwned?.();
-          this.reconcileTitleSidecarOnConflict(sessionId, 'archived', 'active');
+          try {
+            options.assertCleanupOwned?.();
+            this.reconcileTitleSidecarOnConflict(
+              sessionId,
+              'archived',
+              'active',
+            );
+          } catch (titleSidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `archiveSessions: failed to reconcile title sidecar for ${sessionId}: ${titleSidecarError}`,
+            );
+          }
           archived.push(sessionId);
           resolvedConflicts.push(sessionId);
           continue;
@@ -4051,9 +4080,18 @@ export class SessionService {
     sessionId: string,
     archivedFilePath: string,
   ): Promise<void> {
-    const currentTitle = await this.readSessionDisplayNameFromFile(
-      archivedFilePath,
-    ).catch(() => undefined);
+    // The archived row can be named only by its sidecar after a transcript
+    // rebuild; the collision check must see that name too, or unarchiving
+    // leaves two rows reading the same.
+    const currentTitle =
+      this.readSessionTitleInfoWithSidecar(
+        sessionId,
+        archivedFilePath,
+        'archived',
+      ).title ??
+      (await this.readSessionDisplayNameFromFile(archivedFilePath).catch(
+        () => undefined,
+      ));
     if (!currentTitle) return;
     const normalizedTitle = currentTitle.toLowerCase().trim();
     const activeTitles = new Set(
@@ -4131,8 +4169,19 @@ export class SessionService {
           this.removeFileIfExists(
             this.getPromptLedgerPathForState(sessionId, 'archived'),
           );
-          options.assertCleanupOwned?.();
-          this.reconcileTitleSidecarOnConflict(sessionId, 'active', 'archived');
+          try {
+            options.assertCleanupOwned?.();
+            this.reconcileTitleSidecarOnConflict(
+              sessionId,
+              'active',
+              'archived',
+            );
+          } catch (titleSidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `unarchiveSessions: failed to reconcile title sidecar for ${sessionId}: ${titleSidecarError}`,
+            );
+          }
           unarchived.push(sessionId);
           resolvedConflicts.push(sessionId);
           continue;
@@ -4740,6 +4789,25 @@ export class SessionService {
             `branch committed session=${newSessionId} but its title sidecar could not be written`,
           );
         }
+      } else {
+        // A fork copies only the source's surviving records. When the source
+        // lost its head, its label lives in the sidecar alone; carrying it
+        // keeps the branch named like the session it came from.
+        const sourceTitle = readSessionTitleSidecar(
+          sessionTitleSidecarPath(chatsDir, sourceSessionId),
+        );
+        if (
+          sourceTitle &&
+          !writeSessionTitleSidecar(
+            sessionTitleSidecarPath(chatsDir, newSessionId),
+            sourceTitle.displayName,
+            sourceTitle.source,
+          )
+        ) {
+          this.warn(
+            `branch committed session=${newSessionId} but its title sidecar could not be copied from ${sourceSessionId}`,
+          );
+        }
       }
       try {
         await fsyncDirectoryBestEffort(chatsDir);
@@ -4812,40 +4880,62 @@ export class SessionService {
       : undefined;
   }
 
-  private async readSessionDisplayNameFromFile(
+  private async readSessionDisplayNameOutcome(
     filePath: string,
     titleInfo = this.readSessionTitleInfoFromFile(filePath),
-  ): Promise<string | undefined> {
+  ): Promise<
+    | { status: 'name'; name: string }
+    | { status: 'no-name' }
+    | { status: 'not-member' }
+  > {
     const records = await jsonl.readLines<ChatRecord>(
       filePath,
       titleInfo.title ? 1 : MAX_PROMPT_SCAN_LINES,
     );
-    if (records.length === 0) return undefined;
+    if (records.length === 0) return { status: 'no-name' };
     if (
       !(await this.sessionBelongsToCurrentProject(
         records[0].sessionId,
         records[0].cwd,
       ))
     ) {
-      return undefined;
+      return { status: 'not-member' };
     }
-    return (
+    const name =
       titleInfo.title ||
       this.extractFirstPromptFromRecords(records) ||
-      undefined
+      undefined;
+    return name ? { status: 'name', name } : { status: 'no-name' };
+  }
+
+  private async readSessionDisplayNameFromFile(
+    filePath: string,
+    titleInfo = this.readSessionTitleInfoFromFile(filePath),
+  ): Promise<string | undefined> {
+    const outcome = await this.readSessionDisplayNameOutcome(
+      filePath,
+      titleInfo,
     );
+    return outcome.status === 'name' ? outcome.name : undefined;
   }
 
   async getSessionDisplayName(sessionId: string): Promise<string | undefined> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) return undefined;
     const filePath = path.join(this.getChatsDir(), `${sessionId}.jsonl`);
+    let outcome:
+      | { status: 'name'; name: string }
+      | { status: 'no-name' }
+      | { status: 'not-member' }
+      | { status: 'error' };
     try {
-      const name = await this.readSessionDisplayNameFromFile(filePath);
-      if (name) return name;
+      outcome = await this.readSessionDisplayNameOutcome(filePath);
     } catch {
-      // Fall through to the sidecar: a damaged transcript must not erase the
-      // name the session already had.
+      // A read error is exactly what the sidecar covers; a membership refusal
+      // is not, and it must not be turned into another project's text.
+      outcome = { status: 'error' };
     }
+    if (outcome.status === 'not-member') return undefined;
+    if (outcome.status === 'name') return outcome.name;
     return this.readSessionTitleSidecarForSession(sessionId, 'active')
       ?.displayName;
   }
@@ -4907,8 +4997,15 @@ export class SessionService {
 
       // Cheap check first: tail-read the title and skip non-matches before
       // doing the full hydration work (first-record read, project filter,
-      // prompt extraction).
-      const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
+      // prompt extraction). A name that only the sidecar carries still matches
+      // here, so the picker's `--resume "<name>"` can find what the list row
+      // displays.
+      const titleInfo = this.readSessionTitleInfoWithSidecar(
+        file.name.slice(0, -'.jsonl'.length),
+        filePath,
+        'active',
+        tailBuffer,
+      );
       if (titleInfo.title?.toLowerCase().trim() !== normalizedTitle) continue;
 
       const records = await jsonl.readLines<ChatRecord>(
@@ -4998,7 +5095,11 @@ export class SessionService {
       filesProcessed++;
 
       const filePath = path.join(chatsDir, name);
-      const titleInfo = this.readSessionTitleInfoFromFile(filePath);
+      const titleInfo = this.readSessionTitleInfoWithSidecar(
+        name.slice(0, -'.jsonl'.length),
+        filePath,
+        archiveState,
+      );
       if (
         titleInfo.title &&
         !titleInfo.title.toLowerCase().trim().startsWith(normalizedPrefix)
@@ -5007,10 +5108,16 @@ export class SessionService {
       }
 
       try {
-        const displayName = await this.readSessionDisplayNameFromFile(
+        const outcome = await this.readSessionDisplayNameOutcome(
           filePath,
           titleInfo,
         );
+        // A sidecar-only name still has to belong to this project; the
+        // transcript's own refusal is the membership signal.
+        if (outcome.status === 'not-member') continue;
+        const displayName =
+          titleInfo.title ??
+          (outcome.status === 'name' ? outcome.name : undefined);
         if (!displayName) continue;
         if (!displayName.toLowerCase().trim().startsWith(normalizedPrefix)) {
           continue;

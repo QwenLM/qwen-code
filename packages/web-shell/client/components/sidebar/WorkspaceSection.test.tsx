@@ -350,6 +350,9 @@ describe('WorkspaceSection label', () => {
     if (!row) throw new Error('read-only row was not rendered');
     expect(row.textContent).toBe('Untitled session');
     expect(row.textContent).not.toContain('550e8400');
+    // The visible text drops the id; the accessible name keeps it so two
+    // untitled read-only rows are not announced identically.
+    expect(row.getAttribute('aria-label')).toContain('550e8400');
   });
 
   it('shows read-only session details from row hover', async () => {

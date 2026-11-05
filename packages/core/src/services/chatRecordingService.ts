@@ -334,14 +334,19 @@ function titleText(record: ChatRecord): string | null | undefined {
 }
 
 /**
- * The label a transcript's first user turn supports. Unlike `titleText`, this
- * falls back to the record's own text parts for transcripts whose prompts
- * never carried a `displayText` projection.
+ * The label a transcript's first user turn supports, under the same policy
+ * the list reader uses to derive that label from an intact transcript: an
+ * explicitly empty `displayText` projection offers nothing and lets a later
+ * prompt label the session, a record without a projection falls back to its
+ * own text parts, and a Mod-submitted prompt is not filtered out (the reader
+ * does not filter it either). Both sidecar writers go through this one
+ * function so a live write and a resume seed cannot disagree.
  */
 function firstPromptLabelText(record: ChatRecord): string | undefined {
-  const projected = titleText(record)?.trim();
-  if (projected) return projected;
-  if (record.provenance === 'mod_prompt') return undefined;
+  const payload = record.systemPayload as UserPromptRecordPayload | undefined;
+  if (payload?.displayText !== undefined) {
+    return payload.displayText.trim() || undefined;
+  }
   return (
     record.message?.parts
       ?.find((part): part is { text: string } => 'text' in part)
@@ -1314,6 +1319,12 @@ export class ChatRecordingService {
     | undefined;
   private readonly userDisplayTextsForTitle: Array<string | null | undefined> =
     [];
+  /**
+   * Set when the recorder attached through the projected restore, which
+   * carries no record stream. The session's first prompt (if any) is unknown
+   * there, so a later prompt must not become its label.
+   */
+  private firstPromptUnknown = false;
   // The Mods' prompts as the model read them, which a title drawn from the
   // conversation leaves out, as the projection does.
   private readonly modPromptKeysForTitle = new Set<string>();
@@ -1510,23 +1521,19 @@ export class ChatRecordingService {
     }
   }
 
-  private persistPromptDerivedTitle(
-    message: Content | undefined,
-    displayText?: string,
-  ): void {
+  private persistPromptDerivedTitle(record: ChatRecord): void {
     if (this.managedSink) return;
+    // The projected restore carries no record stream, so the session's first
+    // prompt is unknown. Inventing a label from a later prompt would name the
+    // session after the wrong turn as soon as its transcript loses its head.
+    if (this.firstPromptUnknown) return;
     try {
       const sidecarPath = this.titleSidecarPath();
       // Any persisted label wins: a later prompt must not replace the first
       // prompt's label, a rename, or an auto title. This also lets an
       // image-only first prompt leave the slot open for the next text prompt.
       if (readSessionTitleSidecar(sidecarPath)) return;
-      const preferred = displayText?.trim();
-      const text =
-        preferred ||
-        message?.parts
-          ?.find((part): part is { text: string } => 'text' in part)
-          ?.text?.trim();
+      const text = firstPromptLabelText(record);
       if (!text) return;
       writeSessionTitleSidecar(
         sidecarPath,
@@ -1599,6 +1606,7 @@ export class ChatRecordingService {
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
     this.modPromptKeysForTitle.clear();
+    this.firstPromptUnknown = false;
     if (!sessionData) return;
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
     // Tracked separately from `userDisplayTextsForTitle`: that buffer keeps
@@ -1684,6 +1692,10 @@ export class ChatRecordingService {
   }
 
   private restoreProjectedState(state: ChatRecordingRestoreState): void {
+    // A projection only exists for a transcript that is already on disk, so
+    // the first prompt (if any) predates this recorder. No record stream is
+    // carried here, so the seed cannot recover it.
+    this.firstPromptUnknown = true;
     this.lastRecordUuid = state.lastCompletedUuid;
     this.lastPersistedRecordUuid = state.lastCompletedUuid;
     this.resetExternalRecordIndex();
@@ -2722,10 +2734,7 @@ export class ChatRecordingService {
       // append, so an unwritable label path can never drop the message. It
       // only fills a missing label: a persisted prompt or custom title is
       // never replaced by a later prompt.
-      this.persistPromptDerivedTitle(
-        record.message,
-        promptPayload?.displayText,
-      );
+      this.persistPromptDerivedTitle(record);
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
     }

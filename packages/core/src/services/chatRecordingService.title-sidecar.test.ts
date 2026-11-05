@@ -17,6 +17,7 @@ import {
 import {
   readSessionTitleSidecar,
   sessionTitleSidecarPath,
+  writeSessionTitleSidecar,
 } from './session-title-sidecar.js';
 
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
@@ -268,5 +269,158 @@ describe('ChatRecordingService - list title sidecar', () => {
     expect(Array.from(stored!.displayName)).toHaveLength(203);
     expect(stored!.displayName.endsWith('...')).toBe(true);
     expect(stored!.displayName.includes('\uFFFD')).toBe(false);
+  });
+
+  it('treats an explicitly empty projection as no label for that turn', () => {
+    service.recordUserMessage([{ text: 'wire-only text' }], undefined, {
+      displayText: '',
+      hookContext: '',
+    });
+
+    expect(readSessionTitleSidecar(sidecarPath)).toBeUndefined();
+
+    service.recordUserMessage([{ text: '后续的文本 prompt' }], undefined, {
+      displayText: '后续的文本 prompt',
+      hookContext: '',
+    });
+    expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
+      displayName: '后续的文本 prompt',
+      source: 'prompt',
+    });
+  });
+
+  it('writes the same label a resume seed derives for a Mod prompt', () => {
+    const prompt = '检查这段代码';
+    service.recordUserMessage([{ text: 'wire text' }], undefined, {
+      displayText: prompt,
+      hookContext: '',
+      mod: 'lint',
+    });
+
+    expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
+      displayName: prompt,
+      source: 'prompt',
+    });
+
+    rmSync(sidecarPath, { force: true });
+    const resumed: ChatRecord = {
+      uuid: 'resumed-mod',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      cwd: root,
+      version: '1.0.0',
+      provenance: 'mod_prompt',
+      message: { role: 'user', parts: [{ text: 'wire text' }] },
+      systemPayload: { displayText: prompt, hookContext: '', mod: 'lint' },
+    };
+    newService(
+      makeConfig({
+        getResumedSessionData: () => ({
+          conversation: { messages: [resumed] },
+          filePath: path.join(projectDir, 'chats', `${SESSION_ID}.jsonl`),
+          lastCompletedUuid: null,
+        }),
+      }),
+    );
+
+    expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
+      displayName: prompt,
+      source: 'prompt',
+    });
+  });
+
+  it('keeps an explicit sidecar name across a headless resume', () => {
+    writeSessionTitleSidecar(sidecarPath, '手动名字', 'manual');
+    const resumed: ChatRecord = {
+      uuid: 'resumed-prompt-only',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      cwd: root,
+      version: '1.0.0',
+      message: { role: 'user', parts: [{ text: '首条 prompt' }] },
+      systemPayload: { displayText: '首条 prompt', hookContext: '' },
+    };
+    newService(
+      makeConfig({
+        getResumedSessionData: () => ({
+          conversation: { messages: [resumed] },
+          filePath: path.join(projectDir, 'chats', `${SESSION_ID}.jsonl`),
+          lastCompletedUuid: null,
+        }),
+      }),
+    );
+
+    expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
+      displayName: '手动名字',
+      source: 'manual',
+    });
+  });
+
+  it('seeds an explicit title when the projected restore runs', () => {
+    new ChatRecordingService(makeConfig(), undefined, false, {
+      lastCompletedUuid: 'tail',
+      turnParentUuids: [null],
+      customTitle: '投影标题',
+      titleSource: 'manual',
+    });
+
+    expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
+      displayName: '投影标题',
+      source: 'manual',
+    });
+  });
+
+  it('does not label a resumed session from its first post-resume prompt', () => {
+    const recorder = new ChatRecordingService(makeConfig(), undefined, false, {
+      lastCompletedUuid: 'tail',
+      turnParentUuids: [null],
+    });
+
+    recorder.recordUserMessage([{ text: '继续看 CI' }], undefined, {
+      displayText: '继续看 CI',
+      hookContext: '',
+    });
+
+    expect(readSessionTitleSidecar(sidecarPath)).toBeUndefined();
+  });
+
+  it('lets a later prompt label a resumed session whose first prompt had no text', () => {
+    const imageOnly: ChatRecord = {
+      uuid: 'resumed-image',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      cwd: root,
+      version: '1.0.0',
+      message: {
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'AA==' } }],
+      },
+    };
+    newService(
+      makeConfig({
+        getResumedSessionData: () => ({
+          conversation: { messages: [imageOnly] },
+          filePath: path.join(projectDir, 'chats', `${SESSION_ID}.jsonl`),
+          lastCompletedUuid: null,
+        }),
+      }),
+    );
+    expect(readSessionTitleSidecar(sidecarPath)).toBeUndefined();
+
+    service.recordUserMessage([{ text: '恢复后的文本 prompt' }], undefined, {
+      displayText: '恢复后的文本 prompt',
+      hookContext: '',
+    });
+
+    expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
+      displayName: '恢复后的文本 prompt',
+      source: 'prompt',
+    });
   });
 });

@@ -57,20 +57,30 @@ Add a per-session sidecar next to the transcript:
 
 - `ChatRecordingService.recordUserMessage` writes the first real user prompt as
   `source: "prompt"`, using the same 200-code-point-plus-ellipsis policy the
-  list reader applies (`truncateTitleForList`) and preferring the prompt's
-  `systemPayload.displayText` over the wire text. Later prompts do not overwrite
-  it, and a first prompt with no text part (image only) produces no label.
+  list reader applies (`truncateTitleForList`) and the same label-selection
+  policy: an explicitly empty `displayText` projection offers nothing and lets a
+  later prompt label the session, a record without a projection falls back to
+  its text parts, and a Mod-submitted prompt is not filtered out. Later prompts
+  do not overwrite it, and a first prompt with no text part (image only)
+  produces no label.
 - `ChatRecordingService.recordCustomTitle` writes the custom title with its
   title source. A `prompt` entry never overwrites an `auto`/`manual` entry, so a
   rename survives a later prompt.
 - `SessionService.renameSession` — the fallback used when no live recording is
   attached — writes the sidecar after appending its `custom_title` record.
 - `ChatRecordingService` seeds the sidecar from a resumed transcript: the
-  resolved custom title, otherwise the first recorded prompt display text.
-  Without this, sessions created before the sidecar existed would never gain
-  one, because a resumed session does not record another first prompt.
+  resolved custom title, otherwise the first recorded prompt label. Without
+  this, sessions created before the sidecar existed would never gain one,
+  because a resumed session does not record another first prompt. An existing
+  `manual`/`auto` entry is never replaced by the seeded prompt.
+- The projected restore carries no record stream, so it cannot recover the
+  first prompt. A recorder that attached through it does not create a prompt
+  label from a later prompt; the transcript still supplies the name while its
+  head survives.
 - `SessionService.forkSession` writes the new session's title sidecar after the
-  forked transcript commits.
+  forked transcript commits. Without an explicit fork title it copies the
+  source's sidecar, so a branch of a headless source keeps the name the source
+  still shows.
 - Managed session logs are skipped: they own their metadata projection.
 
 ### Read points
@@ -80,7 +90,12 @@ Add a per-session sidecar next to the transcript:
 - `SessionService.listSessions` and `getSessionListItem` use the `prompt`
   sidecar when the transcript has no first prompt.
 - `SessionService.getSessionDisplayName` falls back to the sidecar after a
-  damaged transcript read.
+  damaged transcript read or a transcript with no name. A transcript that is
+  refused because it belongs to another project returns no name; the sidecar is
+  not consulted, so another project's prompt text cannot leak through.
+- Title lookups see the same names the rows show: `findSessionsByTitle`,
+  `findSessionTitlesByPrefix` (the picker and its uniqueness scan), and the
+  unarchive collision guard also accept a `manual`/`auto` sidecar name.
 - The transcript remains authoritative: a `custom_title` record or a readable
   first prompt always wins.
 
@@ -125,7 +140,10 @@ fallback, because the id is the only stable identifier there.
 ## Validation
 
 - Unit tests cover round-trip/validation, transcript-headless list fallback,
-  rename preference, session deletion, and first-prompt/custom-title writes.
+  rename preference, session deletion in both archive states, the archived list
+  reader, first-prompt/custom-title writes, the shared write/read filesystem,
+  the fork copy, title lookup from the sidecar, membership and read-error
+  handling, and the resume policies above.
 - Real daemon scenario: start an isolated `qwen serve` with a fake
   OpenAI-compatible endpoint, send a prompt, replace the transcript with a
   single `ui_telemetry` record, restart the daemon, and confirm the list still
