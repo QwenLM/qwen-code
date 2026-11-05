@@ -60,6 +60,135 @@ describe('ManagedAgentWebShell', () => {
     container.remove();
   });
 
+  it('uses the injected provider and resets host selection when its identity scope changes', async () => {
+    const fetchImpl = vi.fn();
+    const first = { storageKey: 'tenant-a:actor-a' } as ManagedAgentProvider;
+    const second = { storageKey: 'tenant-b:actor-b' } as ManagedAgentProvider;
+    const render = async (
+      provider: ManagedAgentProvider,
+      sessionId?: string,
+    ) => {
+      await act(async () =>
+        root.render(
+          <ManagedAgentWebShell
+            managedAgentProvider={provider}
+            hostSessionOnly
+            sessionId={sessionId}
+            fetch={fetchImpl}
+          />,
+        ),
+      );
+    };
+    await render(first, 'old');
+    expect(captured.props).toMatchObject({
+      managedAgentProvider: first,
+      hostSessionOnly: true,
+      sessionId: 'old',
+    });
+    await render(second, 'old');
+    expect(captured.props).toMatchObject({
+      managedAgentProvider: second,
+      sessionId: undefined,
+    });
+    await render(second, 'new');
+    expect(captured.props).toMatchObject({ sessionId: 'new' });
+    await act(async () => {
+      (
+        captured.props as { onSelectSession: (id?: string) => void }
+      ).onSelectSession('unrequested');
+    });
+    expect(captured.props).toMatchObject({ sessionId: 'new' });
+    await render(second);
+    expect(captured.props).toMatchObject({ sessionId: undefined });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('discards internal selection when a host takes ownership without an ID', async () => {
+    const provider = { storageKey: 'host-mode-switch' } as ManagedAgentProvider;
+    await act(async () =>
+      root.render(<ManagedAgentWebShell managedAgentProvider={provider} />),
+    );
+    await act(async () => {
+      (
+        captured.props as { onSelectSession: (id?: string) => void }
+      ).onSelectSession('internal-session');
+    });
+    expect(captured.props).toMatchObject({ sessionId: 'internal-session' });
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          hostSessionOnly
+        />,
+      ),
+    );
+    expect(captured.props).toMatchObject({
+      sessionId: undefined,
+      hostSessionOnly: true,
+    });
+  });
+
+  it('lets a delete/archive clear through when the host has no echo channel', async () => {
+    const provider = { storageKey: 'host-no-echo' } as ManagedAgentProvider;
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          hostSessionOnly
+          sessionId="s1"
+        />,
+      ),
+    );
+    expect(captured.props).toMatchObject({ sessionId: 's1' });
+    // New selections stay host-owned even without an echo channel…
+    await act(async () => {
+      (
+        captured.props as { onSelectSession: (id?: string) => void }
+      ).onSelectSession('unrequested');
+    });
+    expect(captured.props).toMatchObject({ sessionId: 's1' });
+    // …but clearing the deleted/archived session must reach the page.
+    await act(async () => {
+      (
+        captured.props as { onSelectSession: (id?: string) => void }
+      ).onSelectSession(undefined);
+    });
+    expect(captured.props).toMatchObject({ sessionId: undefined });
+  });
+
+  it('routes the clear through the echo channel when the host provides one', async () => {
+    const provider = { storageKey: 'host-echo' } as ManagedAgentProvider;
+    const onSessionChange = vi.fn();
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          hostSessionOnly
+          sessionId="s1"
+          onSessionChange={onSessionChange}
+        />,
+      ),
+    );
+    await act(async () => {
+      (
+        captured.props as { onSelectSession: (id?: string) => void }
+      ).onSelectSession(undefined);
+    });
+    expect(onSessionChange).toHaveBeenCalledWith(undefined);
+    // The host owns the selection: no internal write before the echo.
+    expect(captured.props).toMatchObject({ sessionId: 's1' });
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          hostSessionOnly
+          onSessionChange={onSessionChange}
+        />,
+      ),
+    );
+    expect(captured.props).toMatchObject({ sessionId: undefined });
+  });
+
   it('constructs a Java provider without daemon workspace props', async () => {
     await act(async () => {
       root.render(
@@ -411,5 +540,47 @@ describe('ManagedAgentWebShell', () => {
     expect(
       newScopeRenders.every((render) => render.sessionId === undefined),
     ).toBe(true);
+  });
+
+  it('forwards the navigation slot props unchanged to the sessions page', async () => {
+    const provider = { storageKey: 'navigation-props' } as ManagedAgentProvider;
+    const navigationTarget = document.createElement('nav');
+    const archivedNavigationTarget = document.createElement('section');
+    const onArchivedSessionsStatusChange = vi.fn();
+    await act(async () => {
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          navigationTarget={navigationTarget}
+          archivedNavigationTarget={archivedNavigationTarget}
+          onArchivedSessionsStatusChange={onArchivedSessionsStatusChange}
+          navigationActive={false}
+          navigationSearch="release"
+        />,
+      );
+    });
+    expect(captured.props).toMatchObject({
+      navigationTarget,
+      archivedNavigationTarget,
+      onArchivedSessionsStatusChange,
+      navigationActive: false,
+      navigationSearch: 'release',
+    });
+  });
+
+  it('leaves the navigation defaults to the sessions page when unset', async () => {
+    const provider = {
+      storageKey: 'navigation-defaults',
+    } as ManagedAgentProvider;
+    await act(async () => {
+      root.render(<ManagedAgentWebShell managedAgentProvider={provider} />);
+    });
+    expect(captured.props).toMatchObject({
+      navigationTarget: undefined,
+      archivedNavigationTarget: undefined,
+      onArchivedSessionsStatusChange: undefined,
+      navigationActive: undefined,
+      navigationSearch: undefined,
+    });
   });
 });

@@ -206,6 +206,15 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
   workspaceMcpInitialize: 'qwen/control/workspace/mcp/initialize',
   workspaceMcpReload: 'qwen/control/workspace/mcp/reload',
+  /**
+   * Record the user's decision on the workspace's pending project hooks.
+   * A dedicated control route, not session/request_permission: permission
+   * prompts are auto-answered by automation clients, while this decision
+   * persists a hash-bound approval and must be an explicit user act.
+   * Params: `{ decision: 'approve' | 'reject' }`; result:
+   * `{ decision, reloaded }`.
+   */
+  projectHooksApprove: 'qwen/control/workspace/hooks/approve',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
   workspaceGenerationStart: 'qwen/control/workspace/generation/start',
   workspaceGenerationCancel: 'qwen/control/workspace/generation/cancel',
@@ -1279,6 +1288,28 @@ export interface ServeSessionStatsModelMetrics {
     /** Output tokens of the requests in `totalGenerationDurationMs`. */
     totalThroughputOutputTokens: number;
   };
+  /**
+   * Most recent timed, non-internal responses (oldest first, at most 200).
+   * Absent until a streamed response records its timing, and from older
+   * daemons.
+   */
+  timingSamples?: Array<{
+    /** Event time, epoch ms. */
+    at: number;
+    ttftMs: number;
+    /** Generation window; below 100 ms it measures no output rate. */
+    generationMs: number;
+    outputTokens: number;
+    /** Subagent that issued the request; absent for the main conversation. */
+    source?: string;
+  }>;
+  /** Failed API calls; absent until the first failure, and from older daemons. */
+  failures?: {
+    /** Count per HTTP status code, else error type, else `unknown`. */
+    byKind: Record<string, number>;
+    /** Most recent failures, oldest first, at most 50. */
+    recent: Array<{ at: number; kind: string; source?: string }>;
+  };
 }
 
 export interface ServeSessionStatsToolByName {
@@ -1549,6 +1580,8 @@ export interface ServeHookEntry {
   matcher?: string;
   sequential?: boolean;
   enabled: boolean;
+  /** Why a disabled hook is off; absent when enabled or the reason is entry-local. */
+  disabledReason?: string;
   hookId?: string;
   skillRoot?: string;
 }
@@ -1560,6 +1593,21 @@ export interface ServeWorkspaceHooksStatus {
   disabled: boolean;
   hooks: ServeHookEntry[];
   events: Record<string, ServeHookEventMeta>;
+  /**
+   * The workspace's project hooks await the user's approval decision. A
+   * client renders its approval affordance from this flag and records the
+   * decision via SERVE_CONTROL_EXT_METHODS.projectHooksApprove.
+   */
+  pendingApproval?: boolean;
+  /** Sanitized display lines of the withheld hooks, for the approval prompt. */
+  pendingApprovalHooks?: string[];
+  /**
+   * The canonical hash of the block this prompt renders. The client echoes
+   * it back with the decision so the daemon binds that decision to the
+   * exact block the user reviewed; a block that changed since the render
+   * stays pending instead of being approved unseen.
+   */
+  pendingApprovalHash?: string;
   errors?: ServeStatusCell[];
 }
 

@@ -2402,13 +2402,38 @@ export function useComposerCore(
       onPasteCapture: (event) => {
         const pastedText = event.clipboardData.getData('text/plain');
         if (pastedText) {
+          const isEditorPaste =
+            pastedInEditor(event.target) ||
+            (event.target === event.currentTarget &&
+              event.currentTarget instanceof HTMLTextAreaElement);
+          if (
+            isEditorPaste &&
+            !disabledRef.current &&
+            !shellModeRef.current &&
+            attachmentsEnabledRef.current &&
+            /^https?:\/\/\S+$/iu.test(pastedText.trim())
+          ) {
+            const draft =
+              viewRef.current?.state.doc.toString() ?? mobileTextRef.current;
+            if (/^[!/]/.test(draft.trimStart())) return;
+            const transfer = extractFileTransfer(event.clipboardData, 'paste');
+            // A copied image can carry its source URL alongside the bitmap.
+            if (
+              transfer.imageCandidates.length === 1 &&
+              transfer.fileCandidates.length === 0 &&
+              transfer.rejected.length === 0 &&
+              enqueueExtractedTransfer(transfer)
+            ) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+          }
           // These handlers live on the composer surface, which also contains
           // controls that take text of their own (the history search box), so
           // only a paste aimed at the editor may be folded.
           if (
-            (pastedInEditor(event.target) ||
-              (event.target === event.currentTarget &&
-                event.currentTarget instanceof HTMLTextAreaElement)) &&
+            isEditorPaste &&
             foldPastedTextIntoCard(
               pastedText,
               event.target instanceof HTMLTextAreaElement
@@ -2483,6 +2508,7 @@ export function useComposerCore(
     }),
     [
       clearImageDragState,
+      enqueueExtractedTransfer,
       enqueueImageTransfer,
       foldPastedTextIntoCard,
       isTouchComposer,

@@ -134,6 +134,13 @@ describe('defaultModalities', () => {
     casesFor('returns image + video for', [
       ['qwen-vl-max', ONLY_IMAGE_VIDEO],
       ['qwen3-vl-plus', has({ image: true, video: true })],
+      ['qwen2.5-vl-32b-instruct', ONLY_IMAGE_VIDEO],
+      [
+        'quantized Qwen2.5-VL builds',
+        ONLY_IMAGE_VIDEO,
+        'Qwen/Qwen2.5-VL-3B-Instruct-AWQ',
+      ],
+      ['qwen2-vl-7b-instruct', ONLY_IMAGE_VIDEO],
       ['coder-model (same as qwen3.5-plus)', IMAGE_VIDEO, 'coder-model'],
       ['qwen3.5-plus', ONLY_IMAGE_VIDEO],
       ['qwen3.7-plus', ONLY_IMAGE_VIDEO],
@@ -153,6 +160,7 @@ describe('defaultModalities', () => {
     ]);
 
     casesFor('returns image for', [
+      ['qvq-72b-preview', IMAGE],
       [
         'qwen3.8-max-preview (provider-prefixed)',
         IMAGE,
@@ -219,8 +227,16 @@ describe('defaultModalities', () => {
   describe('Kimi', () => {
     casesFor('returns image + video for', [
       ['kimi-k3', ONLY_IMAGE_VIDEO],
+      ['kimi-k3.1-pro', ONLY_IMAGE_VIDEO],
+      ['k3.1-pro', ONLY_IMAGE_VIDEO],
+      ['k3.1-pro-highspeed', ONLY_IMAGE_VIDEO],
       ['kimi-k2.5', ONLY_IMAGE_VIDEO],
     ]);
+
+    it('returns image only for the K3 256K variant', () => {
+      expect(defaultModalities('k3-256k')).toEqual({ image: true });
+      expect(defaultModalities('kimi-k3-256k')).toEqual({ image: true });
+    });
 
     it('returns text-only for kimi-k2', () => {
       TEXT_ONLY('kimi-k2');

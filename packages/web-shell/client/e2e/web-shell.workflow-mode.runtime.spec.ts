@@ -33,8 +33,13 @@ import {
 
 const repoRoot = fileURLToPath(new URL('../../../../', import.meta.url));
 const cliBin = path.join(repoRoot, 'dist/cli.js');
-const modeSwitch = (page: Page) =>
-  page.getByRole('switch', { name: 'Workflow mode', exact: true });
+async function modeSwitch(page: Page) {
+  const trigger = page.getByTestId('composer-add-menu-trigger');
+  if ((await trigger.getAttribute('aria-expanded')) !== 'true') {
+    await trigger.click();
+  }
+  return page.getByTestId('composer-add-menu-workflow');
+}
 
 test.skip(
   process.platform === 'win32',
@@ -369,7 +374,9 @@ async function openBrowser(
     await page.goto(
       `${daemon.base}/session/${session.sessionId}#token=${encodeURIComponent(daemon.token)}`,
     );
-    await expect(modeSwitch(page)).toBeEnabled();
+    await expect(await modeSwitch(page)).toBeEnabled();
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('composer-add-menu-workflow')).toBeHidden();
     await Promise.all(assetReads);
     expect(assets.length).toBeGreaterThan(0);
   } catch (error) {
@@ -406,6 +413,14 @@ async function openBrowser(
 }
 
 async function send(page: Page, marker: string) {
+  if (
+    (await page
+      .getByTestId('composer-add-menu-trigger')
+      .getAttribute('aria-expanded')) === 'true'
+  ) {
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('composer-add-menu-workflow')).toBeHidden();
+  }
   await page
     .locator('[data-web-shell-composer-editor] .cm-content')
     .fill(marker);
@@ -497,9 +512,12 @@ test('real browsers share owner mode while a turn runs and persist only that ses
       .locator('[data-web-shell-composer-editor] .cm-content')
       .fill(draft);
     const beforeToggle = runtime.server.requests.length;
-    await modeSwitch(firstClient.page).click();
-    await expect(modeSwitch(firstClient.page)).toBeChecked();
-    await expect(modeSwitch(secondClient.page)).toBeChecked();
+    await (await modeSwitch(firstClient.page)).click();
+    await expect(
+      firstClient.page.getByTestId('composer-add-menu-workflow'),
+    ).toBeHidden();
+    await expect(await modeSwitch(firstClient.page)).toBeChecked();
+    await expect(await modeSwitch(secondClient.page)).toBeChecked();
     await expect(
       secondClient.page.locator('[data-web-shell-composer-editor] .cm-content'),
     ).toHaveText(draft);
@@ -522,9 +540,12 @@ test('real browsers share owner mode while a turn runs and persist only that ses
         /Workflow mode is enabled for this session\./g,
       ),
     ).toHaveLength(1);
-    await modeSwitch(secondClient.page).click();
-    await expect(modeSwitch(firstClient.page)).not.toBeChecked();
-    await expect(modeSwitch(secondClient.page)).not.toBeChecked();
+    await (await modeSwitch(secondClient.page)).click();
+    await expect(
+      secondClient.page.getByTestId('composer-add-menu-workflow'),
+    ).toBeHidden();
+    await expect(await modeSwitch(firstClient.page)).not.toBeChecked();
+    await expect(await modeSwitch(secondClient.page)).not.toBeChecked();
     expect(heldRequest!.transport.closedAt).toBeUndefined();
     hold.release();
     await expect(
@@ -619,11 +640,11 @@ test('real browsers share owner mode while a turn runs and persist only that ses
       .getByText(other.sessionId.slice(0, 8), { exact: true })
       .first()
       .click();
-    await expect(modeSwitch(firstClient.page)).toBeEnabled();
-    await expect(modeSwitch(firstClient.page)).not.toBeChecked();
+    await expect(await modeSwitch(firstClient.page)).toBeEnabled();
+    await expect(await modeSwitch(firstClient.page)).not.toBeChecked();
     await sidebar.getByText(marker, { exact: true }).first().click();
-    await expect(modeSwitch(firstClient.page)).toBeEnabled();
-    await expect(modeSwitch(firstClient.page)).not.toBeChecked();
+    await expect(await modeSwitch(firstClient.page)).toBeEnabled();
+    await expect(await modeSwitch(firstClient.page)).not.toBeChecked();
     expect(
       firstClient.requests.filter((request) =>
         request.path.endsWith('/config-option'),
@@ -671,8 +692,11 @@ test('real browser restores requested mode after child restart and can disable u
       testInfo,
       'before-restart',
     );
-    await modeSwitch(client.page).click();
-    await expect(modeSwitch(client.page)).toBeChecked();
+    await (await modeSwitch(client.page)).click();
+    await expect(
+      client.page.getByTestId('composer-add-menu-workflow'),
+    ).toBeHidden();
+    await expect(await modeSwitch(client.page)).toBeChecked();
     const marker = `DW04B_restore_${randomUUID()}`;
     await send(client.page, marker);
     await expect
@@ -712,7 +736,7 @@ test('real browser restores requested mode after child restart and can disable u
       testInfo,
       'cold-restored',
     );
-    await expect(modeSwitch(client.page)).toBeChecked();
+    await expect(await modeSwitch(client.page)).toBeChecked();
     expect(
       client.requests.filter((request) =>
         request.path.endsWith('/config-option'),
@@ -747,7 +771,7 @@ test('real browser restores requested mode after child restart and can disable u
       testInfo,
       'unavailable',
     );
-    await expect(modeSwitch(client.page)).toBeChecked();
+    await expect(await modeSwitch(client.page)).toBeChecked();
     const status = await daemon.client.sessionContext(
       unavailable.sessionId,
       unavailable.clientId,
@@ -764,9 +788,12 @@ test('real browser restores requested mode after child restart and can disable u
         },
       }),
     );
-    await modeSwitch(client.page).click();
-    await expect(modeSwitch(client.page)).not.toBeChecked();
-    await expect(modeSwitch(client.page)).toBeDisabled();
+    await (await modeSwitch(client.page)).click();
+    await expect(
+      client.page.getByTestId('composer-add-menu-workflow'),
+    ).toBeHidden();
+    await expect(await modeSwitch(client.page)).not.toBeChecked();
+    await expect(await modeSwitch(client.page)).toBeDisabled();
     const records = await modeRecords(runtime.runtime, session.sessionId);
     expect(enabledValues(records.records)).toEqual([true, false]);
     expect(runtime.server.requests).toHaveLength(requestsBeforeRestore);
