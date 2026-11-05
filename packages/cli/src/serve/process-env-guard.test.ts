@@ -477,8 +477,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'The sandbox launcher assembles the sandboxed child environment: ' +
         'it passes through the process environment, forwards provider keys, ' +
         'proxy settings, and debug switches, and reads the SANDBOX_* control ' +
-        'variables. It entered the scanned serve/ layer via the #9146 ' +
-        'leaf-layer move.',
+        'variables. It also forwards the trusted-folders path so the sandboxed ' +
+        'child reads the same trust store. It entered the scanned serve/ layer ' +
+        'via the #9146 leaf-layer move.',
       accesses: {
         'computed:envVar': 2,
         'key:BUILD_SANDBOX': 2,
@@ -507,6 +508,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:QWEN_CODE_INTEGRATION_TEST': 1,
         'key:QWEN_CODE_HOOK_APPROVALS_PATH': 2,
         'key:QWEN_CODE_MCP_APPROVALS_PATH': 2,
+        'key:QWEN_CODE_TRUSTED_FOLDERS_PATH': 2,
         'key:QWEN_CODE_WARNINGS_FILE': 2,
         'key:QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE': 1,
         'key:QWEN_CODE_TEST_VAR': 2,
