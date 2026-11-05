@@ -11,7 +11,13 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -385,12 +391,19 @@ describe('tool hook additionalContext delivery', () => {
     // The agent keeps writing under QWEN_HOME briefly after it exits, so keep
     // it out of rig.testDir, whose teardown would otherwise race those writes.
     const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
-    // Both authorities: enable the trust feature (the inherited rig trust
-    // store grants this directory) and record the approval an interactive
-    // user would give, so the ACP child loads the fixture's project hooks.
+    // Both authorities: enable the trust feature and record the approval an
+    // interactive user would give, so the ACP child loads the fixture's
+    // project hooks. The child's home is the scratch dir, NOT the rig home,
+    // so the rig's trust store and approvals file must be re-created here —
+    // the feature-on gate withholds every workspace scope (hooks included)
+    // for a folder the child's own trust store does not grant (#16322).
     writeFileSync(
       join(qwenHome, 'settings.json'),
       JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    writeFileSync(
+      join(qwenHome, 'trustedFolders.json'),
+      JSON.stringify({ [realpathSync(rig.testDir!)]: 'TRUST_FOLDER' }),
     );
     approveProjectHooks(qwenHome, rig.testDir!);
     const child = spawn(
