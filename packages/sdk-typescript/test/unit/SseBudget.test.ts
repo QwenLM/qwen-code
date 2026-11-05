@@ -55,6 +55,36 @@ async function collect(
   return out;
 }
 
+/**
+ * Pull `gen` until it ends, but never longer than `deadlineMs`: a
+ * mutation that keeps the stream open after `replay_complete` would
+ * block an unbounded `for await` forever, and a hung test file reads
+ * as an infrastructure timeout instead of a deterministic failure.
+ */
+async function collectBounded(
+  gen: AsyncGenerator<DaemonEvent>,
+  deadlineMs = 1_500,
+): Promise<DaemonEvent[]> {
+  const deadline = new Promise<'timeout'>((resolve) => {
+    const timer = setTimeout(() => resolve('timeout'), deadlineMs);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  const out: DaemonEvent[] = [];
+  for (;;) {
+    const r = await Promise.race([gen.next(), deadline]);
+    if (r === 'timeout') {
+      await gen.return?.();
+      throw new Error(
+        `collectBounded: generator did not end within ${deadlineMs}ms ` +
+          '(stream kept open after replay_complete?)',
+      );
+    }
+    if (r.done) break;
+    out.push(r.value);
+  }
+  return out;
+}
+
 afterEach(() => {
   vi.useRealTimers();
   resetSseBudgetRegistry();
@@ -275,7 +305,10 @@ describe('SseBudgetRegistry.catchUp', () => {
       );
     }) as typeof globalThis.fetch;
 
-    const events = await collect(
+    // Bounded: the stream stays open after the boundary, so a mutant
+    // that ignores `replay_complete` must fail the deadline instead of
+    // hanging the runner.
+    const events = await collectBounded(
       reg.catchUp(
         fetchFn,
         'http://daemon/session/s1/events',
@@ -304,7 +337,9 @@ describe('SseBudgetRegistry.catchUp', () => {
       ]);
     }) as typeof globalThis.fetch;
 
-    await collect(
+    // Bounded: after the boundary the stream stays open; a mutant that
+    // ignores `replay_complete` must fail the deadline, not hang.
+    await collectBounded(
       reg.catchUp(
         fetchFn,
         'http://daemon/session/s1/events',

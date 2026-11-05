@@ -22,6 +22,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { RestSseTransport } from '../../src/daemon/RestSseTransport.js';
 import {
+  SSE_CATCH_UP_RETRY_DELAY_MS,
   resetSseBudgetRegistry,
   setSseBudgetFocus,
 } from '../../src/daemon/SseBudget.js';
@@ -259,6 +260,69 @@ describe('RestSseTransport SSE budget focus eviction', () => {
       .sort();
     expect(open).toEqual(['B', 'C', 'D', 'E']);
   });
+
+  it('a pane that is not the focused session never evicts (background acquires are denied)', async () => {
+    // Focus belongs to an unrelated session: E !== 'Z' and focus is not
+    // null, so E must take the background path (catch-up) and no
+    // existing holder may be preempted.
+    setSseBudgetFocus('Z');
+    const { fetch, connections } = makeFakeDaemon();
+    const transport = new RestSseTransport('http://daemon', undefined, fetch);
+
+    const gens = ['A', 'B', 'C', 'D'].map((id) =>
+      transport.subscribeEvents(id),
+    );
+    for (const gen of gens) await pump(gen, 1);
+
+    const itE = transport.subscribeEvents('E', { lastEventId: 5 });
+    const rE = await itE.next();
+    expect(rE.done).toBe(false);
+    // E took the catch-up path (replay from id 5)...
+    expect(rE.value?.id).toBe(6);
+    expect(connsFor(connections, 'E')[0].lastEventId).toBe(5);
+    // ...and nobody was evicted: all 4 background holders stay live.
+    for (const id of ['A', 'B', 'C', 'D']) {
+      expect(connsFor(connections, id)[0].closed).toBe(false);
+    }
+  });
+
+  it('live frames refresh LRU order, so a recently active pane survives focus eviction', async () => {
+    vi.useFakeTimers();
+    try {
+      setSseBudgetFocus('E');
+      const { fetch, connections } = makeFakeDaemon();
+      const transport = new RestSseTransport('http://daemon', undefined, fetch);
+
+      // A acquires first, so by acquire-time it is the LRU holder.
+      const itA = transport.subscribeEvents('A');
+      const itB = transport.subscribeEvents('B');
+      const itC = transport.subscribeEvents('C');
+      const itD = transport.subscribeEvents('D');
+      await pump(itA, 1);
+      await pump(itB, 1);
+      await pump(itC, 1);
+      await pump(itD, 1);
+
+      // A keeps delivering frames, so the frame-level touch makes A the
+      // MOST recently active holder (B is the LRU one now).
+      await vi.advanceTimersByTimeAsync(1_000);
+      await pump(itA, 2);
+
+      const itE = transport.subscribeEvents('E');
+      const rE = await itE.next();
+      expect(rE.done).toBe(false);
+
+      // B (least recently active) is evicted, A survives the eviction.
+      const rB = await itB.next();
+      expect(rB.done).toBe(true);
+      expect(connsFor(connections, 'B')[0].closed).toBe(true);
+      for (const id of ['A', 'C', 'D', 'E']) {
+        expect(connsFor(connections, id)[0].closed).toBe(false);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -291,17 +355,32 @@ describe('RestSseTransport SSE budget promotion', () => {
 
       // E resumes: the catch-up body is cancelled, the retry wait
       // (2.5 s) elapses, and E takes the freed slot LIVE — resuming
-      // from the furthest id its catch-up delivered (12).
+      // from the furthest id its catch-up delivered (12). Bounded: if
+      // the freed slot is never observed (e.g. teardown does not
+      // release it, or the catch-up cycle lock is never ended) E must
+      // fail the deadline instead of hanging the runner.
       const nextE = itE.next();
-      await vi.advanceTimersByTimeAsync(2_500);
-      const rE = await nextE;
-      expect(rE.done).toBe(false);
+      const rE = await Promise.race([
+        nextE,
+        vi
+          .advanceTimersByTimeAsync(3 * SSE_CATCH_UP_RETRY_DELAY_MS)
+          .then(() => 'TIMEOUT' as const),
+      ]);
+      expect(rE).not.toBe('TIMEOUT');
+      expect((rE as IteratorResult<DaemonEvent>).done).toBe(false);
 
       const eConns = connsFor(connections, 'E');
       expect(eConns).toHaveLength(2);
       expect(eConns[0].lastEventId).toBe(5);
       expect(eConns[0].closed).toBe(true);
       expect(eConns[1].lastEventId).toBe(12);
+      expect(eConns[1].closed).toBe(false);
+
+      // The promoted connection must be LIVE, not a catch-up cycle:
+      // drive one more step — a catch-up would have broken at the
+      // replay boundary and cancelled its body by now.
+      void itE.next();
+      await vi.advanceTimersByTimeAsync(0);
       expect(eConns[1].closed).toBe(false);
     } finally {
       vi.useRealTimers();
@@ -336,11 +415,24 @@ describe('RestSseTransport SSE budget catch-up errors', () => {
     expect(error).toBeInstanceOf(DaemonHttpError);
     expect((error as DaemonHttpError).status).toBe(404);
 
-    // The failed cycle was released: F's catch-up works.
-    const itF = transport.subscribeEvents('F', { lastEventId: 5 });
-    const rF = await itF.next();
-    expect(rF.done).toBe(false);
-    expect(rF.value?.id).toBe(6);
-    expect(connsFor(connections, 'F')[0].lastEventId).toBe(5);
+    // The failed cycle was released: F's catch-up works. Bounded: if
+    // the cycle lock were never ended, F would sit in the retry wait
+    // forever — the deadline turns that hang into a deterministic fail.
+    vi.useFakeTimers();
+    try {
+      const itF = transport.subscribeEvents('F', { lastEventId: 5 });
+      const rF = await Promise.race([
+        itF.next(),
+        vi
+          .advanceTimersByTimeAsync(3 * SSE_CATCH_UP_RETRY_DELAY_MS)
+          .then(() => 'TIMEOUT' as const),
+      ]);
+      expect(rF).not.toBe('TIMEOUT');
+      expect((rF as IteratorResult<DaemonEvent>).done).toBe(false);
+      expect((rF as IteratorResult<DaemonEvent>).value?.id).toBe(6);
+      expect(connsFor(connections, 'F')[0].lastEventId).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
