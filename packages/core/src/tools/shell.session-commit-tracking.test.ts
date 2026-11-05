@@ -944,6 +944,45 @@ describe.skipIf(process.platform === 'win32')(
       expect(amendSpy.mock.calls[0]![2]).toBe(true);
     });
 
+    it.each([
+      [
+        'control-flow keywords',
+        () => 'if true; then git commit --amend --no-edit; fi',
+      ],
+      [
+        'absolute git path',
+        () =>
+          `${execSync('command -v git', { encoding: 'utf-8' }).trim()} commit --amend --no-edit`,
+      ],
+      ['leading time keyword', () => 'time git commit --amend --no-edit'],
+    ])(
+      'uses the amend delta in the attribution note for an amend spelled with %s (issue #12514)',
+      async (_label, buildCommand) => {
+        // #12514-C: `isAmendCommit` was the one recogniser that still required
+        // `tokens[0] === 'git'`. A loose-spelled amend therefore reached
+        // attribution classified as a fresh commit, so the note diffed
+        // `postHead~1..postHead` instead of `preHead..postHead`. The extra file
+        // below makes that observable: it landed in the pre-amend commit but
+        // was untouched by the amend, so only the wrong range includes it.
+        rawCommit('first.txt', 'first version\n', 'add first');
+        rawCommit('second.txt', 'second version\n', 'add second');
+        fs.writeFileSync(path.join(repoDir, 'first.txt'), 'first amended\n');
+        rawGit('add first.txt');
+        CommitAttributionService.getInstance().recordEdit(
+          path.join(repoDir, 'first.txt'),
+          'first version\n',
+          'first amended\n',
+        );
+
+        await runShellCommand(buildCommand());
+
+        const note = JSON.parse(
+          rawGit('notes --ref=refs/notes/ai-attribution show HEAD'),
+        );
+        expect(Object.keys(note.files)).toEqual(['first.txt']);
+      },
+    );
+
     it('registers the commit even when gitCoAuthor.commit attribution is disabled', async () => {
       // Regression ④: session tracking is deliberately independent of the
       // commit-attribution toggle. A user who turned attribution off must not

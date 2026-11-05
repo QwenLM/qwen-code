@@ -25,7 +25,7 @@
 | Provider HTTP 补充      | `provision`, `observe`             | 追加 `storage:provision`、`storage:observe`、publication/capture（§5/§7） |
 | Workspace 状态机        | —                                  | 与 LOCAL/SSH_LOCAL 同状态机，ownership 新增 `EXTERNAL` kind               |
 
-部署侧通过 `QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER=external-workspace` 显式开启，且相应 Workspace files/shell 同时被配置打开。阶段一的 scratch 档案与 `validateExternalRuntime` 校验保持不变。
+部署侧通过 `QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER=external-workspace` 显式开启，且相应 Workspace files/shell 同时被配置打开。阶段一的 scratch 档案及其校验规则保持不变（现由 `ExternalRuntimeProviderFactory.validate` 承担）。
 
 ## 3. 身份与持久化契约（延续阶段一）
 
