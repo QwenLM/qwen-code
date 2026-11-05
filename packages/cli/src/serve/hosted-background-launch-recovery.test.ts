@@ -583,6 +583,18 @@ describe('hosted background launch recovery (#13847)', () => {
     }
   });
 
+  it('declines a park whose owed workflow call lacks the child ledger', async () => {
+    await parkYoloWithOwedCall('workflow');
+    const replacement = await open('boot-2', false);
+    try {
+      const outcome = await takeoverRaw(replacement, {});
+      expect(outcome).toEqual({ kind: 'declined', reason: 'model_start' });
+      expect(await unsettledTurnIds(replacement)).toContain(PROMPT_ID);
+    } finally {
+      await replacement.close();
+    }
+  });
+
   it('declines a park whose owed team call lacks one of its two evidence funnels', async () => {
     await parkYoloWithOwedCall('task_create');
     const replacement = await open('boot-2', false);

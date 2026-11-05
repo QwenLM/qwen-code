@@ -18,6 +18,7 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.IOException;
@@ -35,6 +36,7 @@ import java.util.UUID;
 public class WorkspaceCreationStore {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
+    private final TransactionTemplate readTransaction;
     private final WorkspaceStorageGuard guard;
     private final ManagedWorkspaceRegistry registry;
     private final WorkspaceCreationRoots roots;
@@ -48,6 +50,8 @@ public class WorkspaceCreationStore {
             ManagedAgentSettings properties, @Qualifier("managedAgentObjectMapper") ObjectMapper json, @Qualifier("managedAgentClock") Clock clock) {
         this.jdbc = jdbc;
         transaction = new TransactionTemplate(manager);
+        readTransaction = new TransactionTemplate(manager);
+        readTransaction.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         this.guard = guard;
         this.registry = registry;
         roots = new WorkspaceCreationRoots(jdbc, properties);
@@ -225,12 +229,13 @@ public class WorkspaceCreationStore {
     }
 
     public DirectoryPage directories(String tenant, String actor, String workspace, String cwd) {
+        WorkspaceStorageKindGuard.requireFreshTransaction();
         if (!directorySelectionEnabled()) {
             throw new ManagedAgentException(409, "workspace_creation_unavailable",
                     "Directory selection is not enabled.");
         }
         WorkspaceSelection selected = new WorkspaceSelection(workspace, cwd);
-        var source = transaction.execute(status -> ownedSource(tenant, actor, selected));
+        var source = readTransaction.execute(status -> ownedSource(tenant, actor, selected, false));
         ContextBinding binding = Objects.requireNonNull(source).binding();
         Path root = guard.verifiedRoot(binding);
         Path directory = root.resolve(selected.cwdRelative()).normalize();
@@ -258,6 +263,10 @@ public class WorkspaceCreationStore {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable(error);
         }
         guard.verify(binding);
+        var after = readTransaction.execute(status -> ownedSource(tenant, actor, selected, false));
+        if (!binding.equals(Objects.requireNonNull(after).binding())) {
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        }
         children.sort(Comparator.comparing(Directory::name));
         return new DirectoryPage(root.toString(), selected.cwdRelative(), children, truncated);
     }
@@ -320,12 +329,19 @@ public class WorkspaceCreationStore {
 
     private ManagedWorkspaceRegistry.ResolvedBinding ownedSource(String tenant, String actor,
             WorkspaceSelection selected) {
+        return ownedSource(tenant, actor, selected, true);
+    }
+
+    private ManagedWorkspaceRegistry.ResolvedBinding ownedSource(String tenant, String actor,
+            WorkspaceSelection selected, boolean lock) {
         for (String segment : selected.cwdRelative().split("/")) {
             if (reserved(segment)) {
                 throw new ManagedAgentException(400, "invalid_cwd", "Select a project directory.");
             }
         }
-        var source = registry.resolveOwnedDirectory(tenant, actor, selected.workspaceId(), selected.cwdRelative());
+        var source = lock
+                ? registry.resolveOwnedDirectory(tenant, actor, selected.workspaceId(), selected.cwdRelative())
+                : registry.resolveOwnedDirectoryForRead(tenant, actor, selected.workspaceId(), selected.cwdRelative());
         Path root = guard.verifiedRoot(source.binding());
         Path directory = root.resolve(selected.cwdRelative()).normalize();
         if (!Files.isReadable(directory) || !Files.isExecutable(directory)) {

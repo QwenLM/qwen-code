@@ -34,6 +34,7 @@ import {
 } from '../review/lib/gh.js';
 import { git, gitOpt, repoRoot } from '../review/lib/git.js';
 import { normalizeSegment } from '../review/lib/remote-match.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 export const REPLY_MARKER = '<!-- qwen-autofix-pr:v1 -->';
 
@@ -1313,7 +1314,19 @@ export function withWatchLock<T>(
     id: randomUUID(),
   } satisfies LockToken);
   const pending = `${lockPath}.${randomUUID()}`;
-  writeFileSync(pending, token, { flag: 'wx' });
+  try {
+    writeFileSync(pending, token, { flag: 'wx' });
+  } catch (err) {
+    // No directory to hold the lock: no watch was ever prepared here, or
+    // its files were removed since. `prepare` makes the directory first.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new AutofixPrRefusal(
+        'not_prepared',
+        `PR #${prNumber} is not prepared here; run \`qwen autofix-pr prepare ${prNumber} --repo <owner>/<repo>\` first.`,
+      );
+    }
+    throw err;
+  }
   try {
     for (let attempt = 0; ; attempt += 1) {
       if (takeLock(pending, lockPath, token)) break;
@@ -1345,7 +1358,8 @@ export function withWatchLock<T>(
         if (breakStaleLock(lockPath, held, pending)) break;
         continue;
       }
-      throw new Error(
+      throw new AutofixPrRefusal(
+        'busy',
         `another autofix-pr helper is working on PR #${prNumber}; run one at a time (a lock left by a helper that was killed expires after ${LOCK_STALE_MS / 60_000} minutes, or \`qwen autofix-pr cleanup ${prNumber} --force\` removes it).`,
       );
     }
@@ -1455,7 +1469,8 @@ export function requireState(
 ): AutofixPrState {
   const state = readState(statePath);
   if (!state) {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'not_prepared',
       `PR #${prNumber} is not prepared here; run \`qwen autofix-pr prepare ${prNumber} --repo <owner>/<repo>\` first.`,
     );
   }
@@ -1484,14 +1499,16 @@ export function taskArg(argv: Record<string, unknown>): string | undefined {
 export function assertWatching(state: AutofixPrState, task?: string): void {
   // First: a stopped watch says so to whichever session asks.
   if (state.ended) {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'watch_stopped',
       `PR #${state.prNumber}'s watch was stopped (${state.ended.reason}); ` +
         `its worktree was kept. Start it again with /autofix-pr ${state.prNumber}.`,
     );
   }
   assertOwnedBySession(state);
   if (task !== undefined && state.watch?.task !== task) {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'task_replaced',
       `task ${task} no longer drives PR #${state.prNumber}'s watch; ` +
         `delete the task whose gate has --task ${task}` +
         (state.watch?.task
@@ -1511,7 +1528,8 @@ export function ghNotFound(err: unknown): boolean {
 export function assertOwnedBySession(state: AutofixPrState): void {
   const sessionId = currentSessionId();
   if (state.sessionId !== sessionId) {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'watched_elsewhere',
       `PR #${state.prNumber} is watched by another session ` +
         `(${state.sessionId || 'no session'}). Take it over with ` +
         (state.watch

@@ -261,6 +261,72 @@ describe('runCleanup (real git)', () => {
     }
   });
 
+  // Another checkout has the watch's branch (a `sync --discard` that could
+  // not switch back answers so, and the skill then stops the watch): git
+  // refuses to delete the branch, so nothing goes, --force or not, and the
+  // watch ends until that checkout lets the branch go.
+  describe('a branch another checkout has', () => {
+    let holder: string;
+    beforeEach(() => {
+      run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
+      holder = join(repo, 'other-wt');
+      run(repo, 'worktree', 'add', '-q', holder, paths.branch);
+    });
+    afterEach(() => rmSync(holder, { recursive: true, force: true }));
+
+    it.each([false, true])(
+      'keeps all three and ends the watch (force: %s)',
+      (force) => {
+        runCleanup(7, force);
+        expect(existsSync(paths.worktreePath)).toBe(true);
+        expect(branchExists()).toBe(true);
+        expect(readState(paths.statePath)?.ended).toEqual({
+          at: expect.any(String),
+          reason: `${paths.branch} is checked out in ${holder}`,
+        });
+        expect(lastReport()).toEqual({
+          removed: false,
+          worktreePath: paths.worktreePath,
+          heldBy: holder,
+          reason: expect.stringMatching(
+            /^kept because qwen-autofix\/pr-7 is checked out in .*other-wt\. Switch that checkout to another branch or remove it \(`git -C '.*' worktree remove '.*other-wt'`\); then run `qwen autofix-pr cleanup 7` again$/,
+          ),
+        });
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'removes all three once the command it gave has freed the branch',
+      () => {
+        runCleanup(7, false);
+        const [, command] =
+          /`(git -C [^`]+)`/.exec(String(lastReport()['reason'])) ?? [];
+        execFileSync('sh', ['-c', command!], { cwd: tmpdir(), stdio: 'pipe' });
+        runCleanup(7, false);
+        expect(lastReport()).toMatchObject({ removed: true });
+        expect(existsSync(paths.worktreePath)).toBe(false);
+        expect(existsSync(paths.statePath)).toBe(false);
+        expect(branchExists()).toBe(false);
+      },
+    );
+
+    it('keeps the branch and the state when the worktree was deleted by hand', () => {
+      rmSync(paths.worktreePath, { recursive: true, force: true });
+      runCleanup(7, false);
+      expect(existsSync(paths.statePath)).toBe(true);
+      expect(branchExists()).toBe(true);
+      expect(lastReport()).toMatchObject({ removed: false, heldBy: holder });
+    });
+  });
+
+  it("removes a watch whose own worktree, deleted by hand, is git's only holder of the branch", () => {
+    rmSync(paths.worktreePath, { recursive: true, force: true });
+    runCleanup(7, true);
+    expect(lastReport()).toMatchObject({ removed: true });
+    expect(existsSync(paths.statePath)).toBe(false);
+    expect(branchExists()).toBe(false);
+  });
+
   it('keeps everything when the worktree has uncommitted changes', () => {
     writeFileSync(join(paths.worktreePath, 'wip.txt'), 'wip');
     runCleanup(7, false);
@@ -563,11 +629,31 @@ describe('runCleanup (real git)', () => {
     expect(existsSync(paths.statePath)).toBe(false);
   });
 
-  it('keeps the state file when the branch cannot be deleted', () => {
+  it('keeps the branch and the state of one the clone checkout has', () => {
     rmSync(paths.worktreePath, { recursive: true, force: true });
     run(repo, 'worktree', 'prune');
     run(repo, 'switch', '-q', paths.branch);
-    expect(() => runCleanup(7, false)).toThrow();
+    runCleanup(7, true);
+    expect(branchExists()).toBe(true);
+    expect(existsSync(paths.statePath)).toBe(true);
+    expect(lastReport()).toMatchObject({
+      removed: false,
+      heldBy: repo,
+      reason: expect.stringMatching(
+        /checked out in .*\. Switch that checkout to another branch; then run/,
+      ),
+    });
+  });
+
+  it('keeps the state file when the branch cannot be deleted', () => {
+    rmSync(paths.worktreePath, { recursive: true, force: true });
+    run(repo, 'worktree', 'prune');
+    // A lock git left on the ref stops the delete.
+    writeFileSync(
+      run(repo, 'rev-parse', '--git-path', `refs/heads/${paths.branch}.lock`),
+      '',
+    );
+    expect(() => runCleanup(7, false)).toThrow(/branch -D/);
     expect(branchExists()).toBe(true);
     expect(existsSync(paths.statePath)).toBe(true);
   });

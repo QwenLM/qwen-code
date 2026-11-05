@@ -311,10 +311,10 @@ public class ManagedActionStore
                             && continuation.path("calls").get(0).path("call").path("callId").equals(options.path("functionCallId"))
                             && continuation.path("calls").get(0).path("inputRef").equals(options.path("inputRef"))
                             && continuation.path("calls").get(0).path("actionId").asText().equals(id));
-                    jdbc.update("UPDATE ma_session SET plan_enabled=FALSE, approval_revision=approval_revision+1,"
-                                    + " version=version+1, gmt_modified=? WHERE tenant_id=? AND session_id=? AND plan_enabled=TRUE"
+                    jdbc.update("UPDATE ma_session SET is_plan_enabled=FALSE, approval_revision=approval_revision+1,"
+                                    + " version=version+1, gmt_modified=? WHERE tenant_id=? AND session_id=? AND is_plan_enabled=TRUE"
                                     + " AND EXISTS (SELECT 1 FROM ma_turn WHERE tenant_id=? AND session_id=?"
-                                    + " AND prompt_id=? AND plan_enabled=TRUE AND status IN ('ACCEPTED','RUNNING'))",
+                                    + " AND prompt_id=? AND is_plan_enabled=TRUE AND status IN ('ACCEPTED','RUNNING'))",
                             event.path("occurredAt").asLong(), tenantId, sessionId, tenantId, sessionId,
                             options.path("turnId").asText());
                 }
@@ -384,7 +384,7 @@ public class ManagedActionStore
         return options.path("v").asInt() == 3 && options.path("toolName").asText().equals("exit_plan_mode")
                 && jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn t JOIN ma_session s ON s.tenant_id=t.tenant_id"
                         + " AND s.session_id=t.session_id WHERE t.tenant_id=? AND t.session_id=? AND t.prompt_id=?"
-                        + " AND t.plan_enabled=TRUE AND s.session_kind='PUBLIC' AND s.parent_session_id IS NULL",
+                        + " AND t.is_plan_enabled=TRUE AND s.session_kind='PUBLIC' AND s.parent_session_id IS NULL",
                         Integer.class, tenantId, sessionId, options.path("turnId").asText()) == 1;
     }
 
@@ -465,7 +465,6 @@ public class ManagedActionStore
             String actionId,
             JsonNode body,
             long now) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         // Serialize admission with journal projection and other Session commands.
         jdbc.queryForObject(
@@ -656,7 +655,7 @@ public class ManagedActionStore
             throw new ManagedAgentException(409, "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }
-        WorkspaceMigrationAdmission.requireSessionOpen(jdbc, tenantId, sessionId);
+        WorkspaceMigrationAdmission.requireSessionOpenForAdmission(jdbc, tenantId, sessionId);
         String sessionStatus = jdbc.queryForObject("SELECT status FROM ma_session"
                 + " WHERE tenant_id = ? AND session_id = ?", String.class, tenantId, sessionId);
         if (!"ACTIVE".equals(sessionStatus)) {
