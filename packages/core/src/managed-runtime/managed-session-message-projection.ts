@@ -80,6 +80,13 @@ interface StoreBodies {
  * fill the cache: a body a projection has never read is still read from the
  * store, and fails the projection if the store no longer has it.
  *
+ * The resource store's own read contract does not change. Readers that open
+ * their own store, such as `readManagedSessionRecords`, read it on every call,
+ * so if a store loses a body that a committed event references, they fail,
+ * while a projection whose cache kept that body keeps serving it until the
+ * entry is evicted or its store object is collected. Losing such a body is
+ * damage: while the Session can still be read, nothing removes it.
+ *
  * A projection reads every body of its Session in commit order, so plain LRU
  * would let a Session whose bodies exceed the bound evict each body just
  * before its next projection reached it, and never hit. Instead a store never
