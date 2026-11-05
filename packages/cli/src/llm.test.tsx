@@ -1979,7 +1979,7 @@ describe('llm.tsx main function', () => {
       processExitSpy.mockRestore();
     }
 
-    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[11]).toBe(true);
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[12]).toBe(true);
   });
 
   it('hands the workspace-only exemption to the main loadCliConfig call (R5-17)', async () => {
@@ -2027,6 +2027,7 @@ describe('llm.tsx main function', () => {
       isSafeMode: () => false,
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getSessionId: () => 'test-session-id',
+      isProjectHooksPendingApproval: () => false,
     } as unknown as Config);
     vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
 
@@ -2039,7 +2040,7 @@ describe('llm.tsx main function', () => {
       processExitSpy.mockRestore();
     }
 
-    expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[11]).toBe(true);
+    expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[12]).toBe(true);
   });
 
   describe('registerLspHotReload', () => {

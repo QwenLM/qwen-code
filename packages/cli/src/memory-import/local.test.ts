@@ -133,7 +133,7 @@ it.each([true, false])(
     mocks.workspaceOnly = workspaceOnly;
     const { createLocalMemoryImportService } = await import('./local.js');
     await createLocalMemoryImportService();
-    expect(mocks.loadCliConfigArgs).toHaveLength(12);
-    expect(mocks.loadCliConfigArgs[11]).toBe(workspaceOnly);
+    expect(mocks.loadCliConfigArgs).toHaveLength(13);
+    expect(mocks.loadCliConfigArgs[12]).toBe(workspaceOnly);
   },
 );

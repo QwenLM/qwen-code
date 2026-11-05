@@ -36,6 +36,7 @@ export async function createLocalMemoryImportService(): Promise<MemoryImportServ
     undefined,
     undefined,
     undefined,
+    undefined,
     // Same managed model policy as the interactive and ACP paths: a
     // workspace-only allowlist must not drop the Qwen OAuth built-ins.
     isAllowedBaseUrlsWorkspaceOnly(settings),

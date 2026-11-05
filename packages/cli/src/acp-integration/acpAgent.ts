@@ -4501,6 +4501,7 @@ class QwenAgent implements Agent {
               }
             : undefined,
           buildEnabledSkillNamesProvider(settings),
+          undefined,
           // Workspace-only allowlist exemption for the Qwen OAuth built-ins
           // (issue #12805), derived from the same LoadedSettings.
           isAllowedBaseUrlsWorkspaceOnly(settings),
@@ -16485,16 +16486,16 @@ class QwenAgent implements Agent {
           }
         : undefined,
       agentHostReadOnly ? undefined : buildEnabledSkillNamesProvider(settings),
-      // Workspace-only allowlist exemption for the Qwen OAuth built-ins
-      // (issue #12805), derived from the LoadedSettings mergedSettings came
-      // from — omitting it fails personal Qwen login closed with an
-      // operator-scope error for a repository's own list.
-      isAllowedBaseUrlsWorkspaceOnly(settings),
       // Live per-request settings, for the same reason as the skill provider
       // above: the YOLO-exit re-gate reads the block the session holds now.
       agentHostReadOnly
         ? undefined
         : () => getProjectHooksForApproval(settings),
+      // Workspace-only allowlist exemption for the Qwen OAuth built-ins
+      // (issue #12805), derived from the LoadedSettings mergedSettings came
+      // from — omitting it fails personal Qwen login closed with an
+      // operator-scope error for a repository's own list.
+      isAllowedBaseUrlsWorkspaceOnly(settings),
     );
     workflowAncestorTrustSession.config = config;
     // /clear rotates the recording ID while the ACP transport keeps its ID.

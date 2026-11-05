@@ -1874,6 +1874,16 @@ export async function loadCliConfig(
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
   /**
+   * Live-read provider for the project hooks block the approval gate covers.
+   * The YOLO-exit transition re-gates against what the settings hold NOW, not
+   * the startup snapshot: a `/hooks` reload while YOLO-exempt can replace the
+   * block without re-gating. Like `disabledSkillNamesProvider`, callers MUST
+   * close over the live `LoadedSettings` instance, not the merged snapshot.
+   * Callers without one never reload settings mid-session, so the startup
+   * approval stays accurate for them.
+   */
+  projectHooksApprovalProvider?: () => ProjectHooksApproval | undefined,
+  /**
    * True when `model.allowedBaseUrls` is set ONLY in workspace scope (no
    * operator scope): the list still narrows configured provider endpoints,
    * but the Qwen OAuth built-ins must be exempt from the filter — their
@@ -1884,16 +1894,6 @@ export async function loadCliConfig(
    * `isAllowedBaseUrlsWorkspaceOnly`.
    */
   allowedBaseUrlsWorkspaceOnly?: boolean,
-  /**
-   * Live-read provider for the project hooks block the approval gate covers.
-   * The YOLO-exit transition re-gates against what the settings hold NOW, not
-   * the startup snapshot: a `/hooks` reload while YOLO-exempt can replace the
-   * block without re-gating. Like `disabledSkillNamesProvider`, callers MUST
-   * close over the live `LoadedSettings` instance, not the merged snapshot.
-   * Callers without one never reload settings mid-session, so the startup
-   * approval stays accurate for them.
-   */
-  projectHooksApprovalProvider?: () => ProjectHooksApproval | undefined,
 ): Promise<Config> {
   const modelConfiguration = hostPolicy?.modelConfiguration;
   if (modelConfiguration) {

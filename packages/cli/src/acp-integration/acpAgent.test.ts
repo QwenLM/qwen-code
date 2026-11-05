@@ -4825,7 +4825,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       const { agent, agentPromise } = await bootAcpAgent();
       await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
-      expect(vi.mocked(loadCliConfig).mock.calls[0]![11]).toBe(true);
+      expect(vi.mocked(loadCliConfig).mock.calls[0]![12]).toBe(true);
       // Derived from the session's own LoadedSettings.
       expect(vi.mocked(isAllowedBaseUrlsWorkspaceOnly)).toHaveBeenCalledWith(
         vi.mocked(loadSettings).mock.results.at(-1)?.value,
@@ -34665,7 +34665,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
         .mocked(loadCliConfig)
         .mock.calls.find(
           (call) => call[1]?.sessionId === 'workspace-mcp-discovery',
-        )?.[11],
+        )?.[12],
     ).toBe(false);
     expect(vi.mocked(isAllowedBaseUrlsWorkspaceOnly)).toHaveBeenCalled();
     const ancestorTrustProvider =

@@ -765,6 +765,7 @@ export async function main() {
             }
           : undefined,
         buildEnabledSkillNamesProvider(settings),
+        undefined,
         isAllowedBaseUrlsWorkspaceOnly(settings),
       );
 
@@ -1122,10 +1123,10 @@ export async function main() {
           }
         : undefined,
       buildEnabledSkillNamesProvider(settings),
-      isAllowedBaseUrlsWorkspaceOnly(settings),
       // Close over the live LoadedSettings: the YOLO-exit re-gate must see
       // blocks a `/hooks` reload replaced, not the startup snapshot.
       () => getProjectHooksForApproval(settings),
+      isAllowedBaseUrlsWorkspaceOnly(settings),
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
