@@ -36,6 +36,7 @@ import type {
   ModCommandPresentation,
   ModLog,
   ModPromptSubmit,
+  ModQueuedPrompt,
   ModSessionFacts,
   ModTurnComplete,
   ModTurnStart,
@@ -78,6 +79,11 @@ import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOu
 
 const logger = createDebugLogger('MODS');
 
+/**
+ * How many turns the Mods' own prompts may start before the person sends one:
+ * a hook that submits a prompt at every turn's end would otherwise never stop.
+ */
+export const MOD_PROMPT_TURN_LIMIT = 8;
 // A resize redraws the band once it has settled; renders otherwise run at
 // Claude Code's rate for an expanded band, and at its steady rate for a second
 // after one ran longer than that.
@@ -92,6 +98,8 @@ export interface ModTerminalHost {
   presentation(): ModCommandPresentation;
   /** The render sites the terminal draws, read once at load. */
   sites?(): readonly ModRenderSite[];
+  /** Whether the terminal raises `prompt.submit`, read once at load. */
+  prompts?(): boolean;
   /** Draws the tree the band's hooks settled on, drawn by `owner`. */
   draw?(tree: ModRenderElement, owner: string): void;
 }
@@ -164,6 +172,11 @@ export class ModSession implements ICommandLoader {
   private recorder?: ChatRecordingService;
   private context = { tokens: 0, window: 0 };
   private turn?: RunningTurn;
+  // Prompts the Mods submitted, each waiting for the session to be idle.
+  private readonly submitted: Array<ModQueuedPrompt & { sessionId: string }> =
+    [];
+  // Turns the Mods' prompts started since the person last sent one.
+  private modTurns = 0;
   // Also runs on every API response, so a session that no hook saw still has
   // its figures when it ends. A subagent's response emits from inside its
   // agent frame, whose model would otherwise answer for the main session.
@@ -404,8 +417,9 @@ export class ModSession implements ICommandLoader {
           sites.length
             ? { sites, invalidate: () => this.requestRender() }
             : undefined,
-          // The terminals raise no prompt.submit yet.
-          !this.terminal,
+          this.terminal ? this.terminal.prompts?.() === true : true,
+          // The terminals do not run a Mod's own prompts yet.
+          this.terminal ? undefined : (prompt) => this.queuePrompt(prompt),
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({
@@ -526,6 +540,9 @@ export class ModSession implements ICommandLoader {
       if (current === this.sessionId || this.closing) return;
       await this.end(reason);
       this.sessionId = current;
+      // The Mods' prompts and the turns they started belong to the old one.
+      this.submitted.length = 0;
+      this.modTurns = 0;
       this.adoptedAt = Date.now();
       this.startedAt = undefined;
       this.recorder = undefined;
@@ -699,6 +716,69 @@ export class ModSession implements ICommandLoader {
       this.toolQueue = task.catch(() => {});
       return task;
     };
+  }
+
+  // `$.prompt.submit` lands here once the hooks let the prompt through.
+  private queuePrompt(prompt: ModQueuedPrompt): string | undefined {
+    // A switch to another session ends this one, as /clear or /resume do;
+    // the hooks that hear it end cannot queue a prompt for it.
+    if (this.closing || this.sessionId !== this.config.getSessionId())
+      return 'the session is ending';
+    if (this.modTurns + this.submitted.length >= MOD_PROMPT_TURN_LIMIT) {
+      const refused = `the Mods have started ${MOD_PROMPT_TURN_LIMIT} turns since the last prompt from the person`;
+      this.pendingLogs.push({
+        text: `$.prompt.submit refused: ${refused}`,
+        to: 'transcript',
+        plugin: prompt.plugin,
+        sessionId: this.sessionId,
+      });
+      this.flushLogs();
+      return refused;
+    }
+    this.submitted.push({ ...prompt, sessionId: this.sessionId });
+    return undefined;
+  }
+
+  /**
+   * Takes the next prompt a Mod submitted for the current session, to run as
+   * a turn of its own now that the session is idle. It counts toward
+   * {@link MOD_PROMPT_TURN_LIMIT}.
+   */
+  takeSubmittedPrompt(): ModQueuedPrompt | undefined {
+    const sessionId = this.config.getSessionId();
+    let next = this.submitted.shift();
+    while (next && next.sessionId !== sessionId) next = this.submitted.shift();
+    if (!next || this.closing) return undefined;
+    this.modTurns++;
+    const { sessionId: _session, ...prompt } = next;
+    return prompt;
+  }
+
+  /** Whether a prompt a Mod submitted for the current session waits to run. */
+  get hasSubmittedPrompts(): boolean {
+    const sessionId = this.config.getSessionId();
+    return (
+      !this.closing &&
+      this.submitted.some((prompt) => prompt.sessionId === sessionId)
+    );
+  }
+
+  /** The person sent a prompt, so the Mods' prompts may start turns again. */
+  notePersonPrompt(): void {
+    this.modTurns = 0;
+  }
+
+  /**
+   * Drops the prompts the Mods submitted that have not started: a run that
+   * stopped early does not run them, and neither does the next one.
+   */
+  discardSubmittedPrompts(): void {
+    this.submitted.length = 0;
+  }
+
+  /** Whether a loaded Mod hooks `prompt.submit`. */
+  get hearsPrompts(): boolean {
+    return !this.closing && (this.runtime?.promptHooks.length ?? 0) > 0;
   }
 
   /**

@@ -82,6 +82,34 @@ export interface ExtendedCompletionChunkDelta
   reasoning?: string | null;
 }
 
+type OpenAIToolCallWithThoughtSignature =
+  OpenAI.Chat.ChatCompletionMessageToolCall & {
+    thoughtSignature?: string;
+    extra_content?: { google: { thought_signature: string } };
+  };
+
+function readThoughtSignature(toolCall: unknown): string | undefined {
+  const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  const call = asRecord(toolCall);
+  const direct = call?.['thoughtSignature'];
+  const nested = asRecord(asRecord(call?.['extra_content'])?.['google'])?.[
+    'thought_signature'
+  ];
+  const directSignature = typeof direct === 'string' ? direct : undefined;
+  const nestedSignature = typeof nested === 'string' ? nested : undefined;
+  if (
+    directSignature !== undefined &&
+    nestedSignature !== undefined &&
+    directSignature !== nestedSignature
+  ) {
+    return undefined;
+  }
+  return directSignature ?? nestedSignature;
+}
+
 // Threshold for treating an exact-repeat chunk as a cumulative marker rather
 // than legitimate repeated content. Cumulative providers replay the entire
 // accumulated buffer (typically hundreds of bytes) on each re-send, while
@@ -655,7 +683,7 @@ function processContent(
 
   const contentParts: OpenAIContentPart[] = [];
   const reasoningParts: string[] = [];
-  const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
+  const toolCalls: OpenAIToolCallWithThoughtSignature[] = [];
   let toolCallIndex = 0;
   const emittedFunctionCallIds = new Set<string>();
   const emittedFunctionResponseIds = new Set<string>();
@@ -747,6 +775,7 @@ function processContent(
         emittedFunctionCallIds.add(callId);
       }
 
+      const thoughtSignature = part.thoughtSignature;
       toolCalls.push({
         id: callId || `call_${toolCallIndex}`,
         type: 'function' as const,
@@ -754,6 +783,14 @@ function processContent(
           name: normalizeMcpToolName(part.functionCall.name || ''),
           arguments: JSON.stringify(part.functionCall.args || {}),
         },
+        ...(typeof thoughtSignature === 'string'
+          ? {
+              thoughtSignature,
+              extra_content: {
+                google: { thought_signature: thoughtSignature },
+              },
+            }
+          : {}),
       });
       toolCallIndex += 1;
     }
@@ -1448,6 +1485,7 @@ export function convertOpenAIResponseToLlm(
           if (toolCall.function.arguments) {
             args = safeJsonParse(toolCall.function.arguments, {});
           }
+          const thoughtSignature = readThoughtSignature(toolCall);
 
           parts.push({
             functionCall: {
@@ -1455,6 +1493,7 @@ export function convertOpenAIResponseToLlm(
               name: toolCall.function.name,
               args,
             },
+            ...(thoughtSignature !== undefined ? { thoughtSignature } : {}),
           });
         }
       }
@@ -1753,6 +1792,7 @@ export function convertOpenAIChunkToLlm(
     if (choice.delta?.tool_calls) {
       for (const toolCall of choice.delta.tool_calls) {
         const index = toolCall.index ?? 0;
+        const thoughtSignature = readThoughtSignature(toolCall);
 
         // Process the tool call chunk through the streaming parser
         const parseResult = toolCall.function?.arguments
@@ -1761,12 +1801,14 @@ export function convertOpenAIChunkToLlm(
               toolCall.function.arguments,
               toolCall.id,
               toolCall.function.name,
+              thoughtSignature,
             )
           : toolCallParser.addChunk(
               index,
               '', // Empty chunk for metadata-only updates
               toolCall.id,
               toolCall.function?.name,
+              thoughtSignature,
             );
 
         const { id: callId, name: toolName } = toolCallParser.getToolCallMeta(
@@ -2007,6 +2049,9 @@ export function convertOpenAIChunkToLlm(
               name: toolCall.name,
               args: toolCall.args,
             },
+            ...(toolCall.thoughtSignature !== undefined
+              ? { thoughtSignature: toolCall.thoughtSignature }
+              : {}),
           });
         }
       }

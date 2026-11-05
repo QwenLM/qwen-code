@@ -17,17 +17,19 @@ Qwen Code skips `prompt.submit` hooks at load and reports `Hooks for unsupported
 
 ## Goals and non-goals
 
-Goals, in four pull requests:
+Goals, in six pull requests:
 
 1. Core and headless runs: the event, its rules and its context. This document lands with it.
 2. The Ink terminal.
 3. The OpenTUI terminal.
-4. `$.prompt.submit`.
+4. `$.prompt.submit` in core and headless runs, described in section 9.
+5. `$.prompt.submit` in the Ink terminal.
+6. `$.prompt.submit` in the OpenTUI terminal.
 
 Non-goals:
 
 - Slash commands, which Claude Code raises with `command`. They come with a later step on command rows.
-- Prompts the person did not type: background notifications, scheduled prompts, teammate messages, goal continuations and the continuation of an interrupted turn. Claude Code marks some of these with `isMeta`.
+- Prompts the host starts on its own: background notifications, scheduled prompts, teammate messages, goal continuations and the continuation of an interrupted turn. Claude Code marks some of these with `isMeta`. A prompt a Mod submits with `$.prompt.submit` is in scope, as section 9 describes, though the person did not type it either.
 - Prompts typed while a turn runs that steer it at a model boundary.
 - `attachments` and `$.prompt.media`.
 
@@ -35,17 +37,17 @@ Non-goals:
 
 ### 1. When it fires
 
-`prompt.submit` fires for each prompt a person submits, after the host has its text and before anything reads it: before UserPromptSubmit, before `@` references are read and before the user message is recorded or shown. Only a host that raises the event loads its hooks; any other host skips them at startup with the usual line, so a guard is never silently bypassed. Step 1 raises it in headless runs, for the `-p` prompt and each stream-json user message.
+`prompt.submit` fires for each prompt a person submits, and from step 4 for each prompt a Mod submits (section 9), after the host has its text and before anything reads it: before UserPromptSubmit, before `@` references are read and before the user message is recorded or shown. Only a host that raises the event loads its hooks; any other host skips them at startup with the usual line, so a guard is never silently bypassed. Step 1 raises it in headless runs, for the `-p` prompt and each stream-json user message. Step 2 raises it in the Ink terminal, as described in section 7, and step 3 in the OpenTUI terminal, as described in section 8.
 
 ### 2. Input
 
-| Field     | Value                                                                                          |
-| --------- | ---------------------------------------------------------------------------------------------- |
-| `text`    | the prompt as submitted, with pasted text expanded; for a stream-json message, its text blocks |
-| `context` | absent as the host raises it                                                                   |
-| `wait`    | `false`                                                                                        |
-| `origin`  | `{ kind: 'sdk' }` in headless runs; `{ kind: 'composer' }` in the terminals                    |
-| `turnId`  | absent until a terminal raises the event for a prompt typed during a turn                      |
+| Field     | Value                                                                                                                                         |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `text`    | the prompt as submitted, with pasted text expanded; for a stream-json message, its text blocks                                                |
+| `context` | absent as the host raises it                                                                                                                  |
+| `wait`    | `false`                                                                                                                                       |
+| `origin`  | `{ kind: 'sdk' }` in headless runs; `{ kind: 'composer' }` in the terminals; `{ kind: 'plugin', name, asUser? }` for a prompt a Mod submitted |
+| `turnId`  | absent until a terminal raises the event for a prompt typed during a turn                                                                     |
 
 A hook passes `text` and `context` on to `next`; `origin`, `wait` and `turnId` are pinned. `context` is a list of texts.
 
@@ -75,6 +77,44 @@ A drop stops the prompt before UserPromptSubmit and before any model request, an
 
 A prompt longer than half a Mod payload (128 KiB as JSON) reaches no hook, and the line `prompt.submit hook skipped: the prompt is too long for a Mod payload` appears where transcript logs do. Claude Code passes it whole. A rewrite or context that makes a hook's answer larger than a Mod payload fails that hook.
 
+### 7. The Ink terminal
+
+The Ink terminal raises the event in `prepareQueryForLlm`, for a prompt the person typed, before the input history records it, before its row is added and before `@` references are read. It loads the hooks only once it raises the event: `InteractiveModSession.initialize` takes `{ prompts: true }`, and the terminal host passes it on to the load request. The first `initialize()` call decides, since it is the one that loads the Mods: `{ prompts: true }` must ride that call, because a later call cannot turn prompt hooks on. A host that draws a band initializes once, with both.
+
+- **Which prompts.** A typed prompt, including one queued while a turn runs, which raises the event when it is sent. Slash commands, shell-mode commands, scheduled prompts, notifications, teammate messages and retries raise none.
+- **Queued prompts wait for the turn to end.** The terminal normally sends a prompt typed during a turn into that turn at the next tool boundary. While a Mod hooks `prompt.submit`, that boundary takes none, so each queued prompt is sent, and heard, once the turn ends.
+- **What the hooks hear.** The text the person typed, with pasted text expanded. Attachment references and the one-shot notices the terminal puts ahead of a prompt for the model alone, such as a resumed worktree, are not part of it.
+- **A rewrite.** It replaces the typed text in the model's prompt, with the attachment references and notices still ahead of it, and in the prompt's row, the input history, the cancel restore, the workflow keywords and `turn.start`. The terminal finds the typed text at the end of the model's prompt by framing its pastes as the composer did. Each paste the rewrite gives back whole is collapsed and framed again; a rewrite that does not give every paste back whole is refused, as below. An answer that differs from the prompt only in surrounding whitespace is no rewrite.
+- **A drop.** The reason is shown as an error line. The prompt gets no row and is not written to the input history. It goes back to the input box with its pastes collapsed, ahead of anything typed since, so the person can edit it and send it again.
+- **Esc while the hooks run.** It cancels the prompt, which goes back to the input box the same way.
+
+### 8. The OpenTUI terminal
+
+The OpenTUI terminal raises the event at two sites. The live turn (`useOpenTuiLiveTurn`) raises it for a prompt the person typed, before its row is added, before the input history records it and before `@` references are read. The command dispatcher (`OpenTuiSlashDispatcher`) raises it for `?`-form input, before the input history records it and before the command runs. It opts in the same way, through `initialize(['AbovePrompt'], { prompts: true })`, in the one call that loads the Mods.
+
+- **Which prompts.** The same as in Ink: a typed prompt, including one queued while a turn runs, which raises the event when it becomes a turn. Slash-form text, shell-mode commands, prompts a slash command generates and retries raise none. Slash-form text sent with an attached image is the exception: the shell sends it to the model as a prompt, so it raises the event like any typed prompt. `?`-form input such as `?btw`, which OpenTUI runs as a command and Ink sends as a prompt, is typed text too: the hooks hear it with its pastes expanded before it is recorded or run, a drop refuses it and hands it back, and a rewrite runs in its place. A rewrite must keep the command the person typed; one that resolves to another command, or leaves `?`-form, is refused with an error line and runs nothing. Context the hooks attach rides the first send of a turn the command starts, such as a skill's; `?btw` starts none, so its context is not used.
+- **Queued prompts wait for the turn to end**, as in Ink: while a Mod hooks `prompt.submit`, the tool boundary takes no queued prompt.
+- **What the hooks hear.** The typed text with its pastes expanded. The composer sends attached images as parts of their own beside the text, and OpenTUI adds no notices to a prompt, so the hooks hear the whole of the prompt's text.
+- **The row waits for the hooks.** Without prompt hooks the row is added when the prompt is submitted. With them, it is added once the hooks let the prompt through, holding the rewrite if there is one; until then the turn shows as working.
+- **A prompt sent while the Mods load waits for them**, as in Ink, so the first prompt of a session cannot pass before its hooks load. If the Mods fail to load, the prompt is refused with the line Ink shows and goes back to the input box. Slash-form text neither waits nor is refused, as in Ink, unless it carries an attached image and so goes to the model as a prompt. A session that fails to start before it loads the Mods is not a Mod failure: its prompts go on to the send, which reports the session's own error.
+- **A rewrite.** It replaces the prompt's text for the model, the row and its recall text, the input history, the cancel restore, the `UserPromptSubmit` provenance and `turn.start`. Attached images stay after it. Each paste the rewrite gives back whole is collapsed and framed again; a rewrite that does not give every paste back whole is refused, as below. Surrounding whitespace alone is no rewrite.
+- **A drop.** The reason is shown as an error line, the prompt gets no row and no input history entry, and it goes back to the input box with its pastes collapsed, ahead of anything typed since.
+- **Esc while the hooks run.** The prompt goes back to the input box ahead of the prompts queued behind it and of anything typed since. When a dialog has the input box closed, the prompt waits for the box to open again and the queued prompts stay queued.
+
+### 9. A Mod's own prompt: `$.prompt.submit`
+
+`$.prompt.submit({ text, asUser? })` submits a prompt a Mod wrote, to start a turn of its own once the session is idle.
+
+- **The call.** It is an API event, like the other `$` methods: the worker raises `prompt.submit` with the input `{ text, wait: false, origin: { kind: 'plugin', name, asUser? } }`, `name` being the caller's. The hooks it runs through are every hook but the caller and those the caller runs beneath, which the existing frames of a `$` call leave out; the caller's plugin's other hooks hear it. A call of another shape rejects, and `attachments` reject with a line of their own. A call whose text is empty or only whitespace, or longer than half a Mod payload (128 KiB as JSON), resolves to a drop without raising the event; an input too large for any Mod call rejects.
+- **The bottom of the chain.** Once every hook has answered, what last arrived beneath them goes to the host as `{ plugin, text, context?, asUser? }`, so a hook that calls `next` twice queues one prompt. The host queues it or says why not, and the call resolves to `{ text, context?, origin }` or to `{ drop }`. A hook's drop, a hook that answers without `next`, or a hook that passes on an empty text or one past half a payload queues nothing. Held to half a payload, what the call resolves to always fits a Mod payload, so a queued prompt is never reported as failed.
+- **When it resolves.** At the end of that chain, inside the dispatch of the hook that called. The worker runs one dispatch at a time and waits for a dispatch's calls before it ends, so a call that waited for its turn to start would hold up the very dispatch that keeps the session from being idle. The chain's hooks do not run beneath the calling hook, so a call the hook does not await still queues after the hook has returned. For the same reason the call does not pause the caller's budget as other calls do: a hook that went on running while the call was pending would otherwise run unbudgeted. A hook that awaits it is charged for the time the other Mods' `prompt.submit` hooks take.
+- **Where hosts take it.** A host that runs such prompts passes a queue at load, and the load request says so. `$.session.version()` lists the method only then; elsewhere a call resolves to a drop without raising the event. This step passes one in headless runs only.
+- **The turn.** When the run is idle, the prompt runs as a turn of its own after the queue's earlier items: a `UserQuery` with the Mod's text as the submitted prompt and the context the hooks attached, so UserPromptSubmit hears it and it counts toward the session turn limit. `@` references are not read. The turn raises `turn.start` and `turn.complete`. A slash command that answers with a message, as a Mod command does, starts no turn of its own: when it leaves a Mod's prompt queued, the run shows its reply and goes on to run the prompt, and ends with one result. Text output, which prints only the run's last answer, writes the reply as it comes. A worktree notice the run would have given the command goes with the first request the run sends.
+- **What the model reads.** Unless the Mod passed `asUser`, the text goes inside a `<qwen:mod-prompt mod="<name>">` block, followed by a line saying the Mod sent it and it waited until the session was idle, that the person did not type it, and that it is a request on the person's behalf within what they asked for and allowed. Every `<` and `>` inside the text is escaped, as for the hooks' context, so no spelling of a closing marker can end the block. With `asUser` the model reads the text as it is.
+- **The record.** The transcript keeps the prompt as a user message with the provenance `mod_prompt`, the Mod's name and its text as the display text. Goal evidence and the session-agent view read only the person's words, so neither takes it for theirs. It keeps its turn's place among the texts a session title is drawn from but offers the title nothing, and it does not by itself make the title read only those texts, so a session whose prompts recorded no display text still draws its title from the conversation, with the Mod's message, as the model read it, left out; one sent with `asUser` is not left out, since its bare text reads as the person's and would match a prompt the person typed alike. It does not count as a prompt in the commit attribution. Memory recall searches for the Mod's text, not the frame. A stream-json client, which did not send the prompt, receives its text as a user message and then a `mod_prompt` system message naming the Mod, before the turn's output.
+- **The turn limit.** The Mods' prompts start at most 8 turns, queued ones counted, before the person sends a prompt. Past that, a call resolves to a drop and the line `$.prompt.submit refused: …` appears where transcript logs do. In a headless run the prompt the run was given is the person's, and in a stream-json session each message the client sends is, a slash command too. A switch to another session, by `/clear` or `/resume`, starts the new one with nothing queued and the count at 0, and a prompt submitted while the old one ends is refused as `the session is ending`.
+- **What does not run.** A prompt queued for a session that `/clear` or `/resume` replaced, one queued once the session is closing, and one still queued when a run stops early on an interrupt, a structured result, a detected loop or a slash command that fails.
+
 ## Design decisions
 
 - **The host raises the event.** Each host already holds the submitted text before it expands or records it. Raising the event there keeps the rewrite ahead of every use of the text without changing core's send.
@@ -82,17 +122,28 @@ A prompt longer than half a Mod payload (128 KiB as JSON) reaches no hook, and t
 - **Hosts opt in.** The load request says whether the host raises `prompt.submit`, as it names the sites it draws for `ui.render`, so each step enables only the host it adds.
 - **The context shares the hook context block.** It reaches the model, the transcript and resume the way UserPromptSubmit's context does, so no new record kind is needed. A context the conversation already holds word for word is not sent again, as for UserPromptSubmit. Each Mod context and UserPromptSubmit's count on their own, so a Mod context that changes every turn does not make an unchanged UserPromptSubmit context repeat.
 
+- **A dropped prompt is kept out of the input history.** The input history is written to disk and comes back in later sessions, and a guard usually drops a prompt for what it holds, such as a credential. Keeping it out of that history keeps the guard's purpose. Handing it back to the input box still lets the person fix it without retyping; whatever was typed since stays after it.
+- **Steering waits while prompt hooks are loaded.** Steering appends queued text to the tool results of a running turn and has no prompt of its own to hold back or rewrite. Holding queued prompts until the turn ends lets every prompt the person types pass the hooks, at the cost of mid-turn steering for sessions with such a hook.
+- **In OpenTUI the row waits for the hooks.** A guard drops a prompt for what it holds, so a row that showed the prompt first would display what the guard meant to keep out, and a rewrite would replace a row the person had already seen. The row is held while a Mod hooks `prompt.submit` and until the Mods finish loading, so the transcript never shows a prompt before the hooks that may drop it can answer; sessions whose Mods hook nothing pay only the load. A prompt typed during a turn still shows in the queued-messages strip until it is sent, as the input box showed it: the strip is the person's own pending input, it is not recorded, and the prompt leaves it when the hooks hear it.
+- **A rewrite gives every paste back whole, or it is refused.** The model is told which text was pasted, so it treats that text as material rather than as the person's instructions. The hooks hear the pastes expanded, so the terminal finds each paste in a rewrite by its text. A paste that comes back edited inside, removed or repeated cannot be found, and sending the rewrite would hand the model pasted text as if the person had typed it. The terminal refuses such a rewrite with an error line and hands the prompt back, in Ink, in OpenTUI and for `?`-form input alike. A guard that must keep a paste out drops the prompt. The same text pasted twice is found when it appears twice.
+- **`$.prompt.submit` resolves when its prompt is queued.** The worker's single dispatch is what keeps a hook's calls from outliving it; a call that resolved at its turn's start would need a call that survives its dispatch, and a hook that awaited it would hold the session busy so the turn never started. Resolving once the hooks have answered matches what `next(e)` already does for a typed prompt, so a Mod reads the same shape at the same moment either way.
+- **The model is told who sent a Mod's prompt.** A prompt the person did not type should not read as theirs: the model weighs a person's words above a tool's, and a Mod can run code the person never looked at. The block names the Mod, and the line after it gives the prompt the standing of a request made for the person. `asUser` is the Mod's choice to send the text as the person's words, as the API allows.
+- **A Mod's prompt has a provenance of its own.** The transcript marks the person's prompts as theirs, and a Goal's verifier reads those as what the person asked for. A prompt a Mod wrote under the person's provenance would let a Mod speak for them there; a provenance of its own keeps every reader that looks for the person's words from finding it. The session title and the commit attribution's prompt count read the person's prompts in other ways, so each skips a Mod's prompt on its own.
+- **A limit on the Mods' turns.** A hook that submits at every `turn.complete` would keep a session busy forever, and in a headless run would never let it exit. Eight turns covers a Mod that follows up a few times; the person's next prompt resets the count, so an interactive session keeps going while the person does.
+- **UserPromptSubmit hears a Mod's prompt.** It is a prompt entering the session, and a settings hook that guards prompts should not be bypassed because a Mod wrote one.
+- **The hooks hear the typed text, not the model-only notices.** The person wrote the typed text; the notices belong to the terminal and change from session to session. A rewrite replaces only what the person typed, so a guard cannot drop the terminal's notices by accident.
+
 ## Differences from Claude Code
 
 These go into the user guide:
 
-- Until steps 2 and 3, only headless runs raise `prompt.submit`.
 - Slash commands and prompts the person did not type raise none, so `command` and `isMeta` never appear.
 - `attachments` never appears, and `$.prompt.media` does not exist.
 - A UserPromptSubmit block does not turn `next(e)` into `{ drop }`, and `next(e)` resolves before the turn starts.
 - A context the conversation already holds word for word is not sent again, each Mod context and UserPromptSubmit's on its own.
 - A prompt longer than 128 KiB as JSON reaches no hook.
 - A headless drop is an error result with exit code 1.
+- `$.prompt.submit` resolves once its prompt is queued, not once its turn starts, and takes no `attachments`.
 
 ## Validation and acceptance
 
@@ -105,10 +156,25 @@ These go into the user guide:
   - a `.catch` that drops for a failed guard.
 - Mod session tests: no hooks, the origin, a rewrite with context, a drop's one line and its 4,096 characters, a failed worker, a cancelled prompt, and a prompt too long for a payload.
 - Client test: the Mods' context ahead of UserPromptSubmit's, escaped, with and without UserPromptSubmit hooks, and only for a new prompt.
+- OpenTUI live-turn tests: a rewrite with context in the sent prompt, the row, the input history and `turn.start`; a paste kept whole beside an attached image; a rewrite that changed a paste refused and handed back; the context a `?`-form command carries reaching its turn's send; a whitespace-only answer; a drop handed back with its pastes; Esc while the hooks run, with and without a composer; a prompt sent while the Mods load waiting for them, refused and handed back when they fail, and handed back on Esc while it waits; queued prompts held from the tool boundary and heard, with their pastes expanded, when they run; no event for slash-form text or a generated prompt, and an event for slash-form text sent with an image.
+- OpenTUI dispatcher tests for `?`-form input: the hooks hear it with pastes expanded and a rewrite keeps a paste framed; a rewrite that changed a paste is refused; a drop refuses it; a rewrite that leaves `?`-form, turns into the slash form or resolves to another command is refused; the hooks' context reaches the turn a command starts; it waits for Mods that are still loading, is refused when they fail, and is refused on Esc while it waits; the shell hands a refused input back, at once or from the queue in the order sent with its pastes, and keeps it for the input box when a queued command behind it opens a dialog.
 - Headless tests: the rewritten prompt and its context reaching the send and `turn.start`, a drop in JSON and text, and no event for a slash command or a notification.
 - The built CLI against a fixture server in headless JSON, text and stream-json: a rewrite that the model request and the transcript both hold, context in the hidden block, a drop, and a guard whose `.catch` drops.
+- `$.prompt.submit`:
+  - real QuickJS worker tests: the event through every hook but the caller's and those it runs beneath, the origin, what is queued and what the call resolves to; a hook's drop, a hook that answers without `next`, an empty text from the caller or a hook, and a host's refusal queuing nothing; a call the hook does not await, under a slow hook, queued once as it last arrived though a hook called `next` twice; a host that runs no such prompts; calls of the wrong shape;
+  - Mod session tests: the queue in order, the turn limit counting queued and started prompts, its line, the person's prompt resetting it, a replaced or closing session, a run discarding what has not started, and no queue in a terminal;
+  - the record: provenance `mod_prompt` and the Mod's name; the title projection keeping its place with nothing in it, live and on resume, and a title drawn from the conversation leaving the Mod's message out; no attribution count;
+  - the frame: the Mod named, a closing marker in any spelling escaped, `asUser` read as it is;
+  - a prompt past half a payload, from the call or a hook, dropped before it is queued, and an input too large for the bridge rejecting;
+  - Goal evidence leaving a `mod_prompt` record out beside a person's;
+  - title keys kept least recently used, and none for an `asUser` prompt;
+  - a Mod command's reply in text output, and the worktree notice reaching the prompt it hands on;
+  - a stream-json run that stops early not carrying a Mod's prompt into the next one, and memory recall reading the Mod's text;
+  - headless tests on both loops: a prompt queued while the person's turn ended running after it, framed, with its context and submitted prompt, an `asUser` prompt read bare, `turn.start` for each turn, and a Mod command's prompt running after its reply with no turn for the command;
+  - the built CLI against a fixture server (`integration-tests/cli/mods-prompt-submit.test.ts`): a `turn.complete` hook that submits, the second request holding the frame and the hooks' context, the transcript record as the Mod's, an `asUser` prompt read bare, and a hook that submits at every turn stopped at the limit.
 
 ## Risks and open questions
 
 - A slow hook delays the prompt by up to its budget, 10 seconds a hook.
 - Masking a slash command's arguments needs `command.run` today; `prompt.submit` with `command` comes later.
+- A resumed session shows a Mod's prompt as the text it submitted; how the terminals show such a prompt and its transcript record comes with the Ink step.

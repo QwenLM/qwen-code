@@ -1137,6 +1137,8 @@ export default {
   'disabled (bare mode)': 'отключен (минимальный режим)',
   'disabled (safe mode)': 'отключен (безопасный режим)',
   'disabled (disableAllHooks)': 'отключен (disableAllHooks)',
+  'disabled (not approved)': 'отключен (не одобрен)',
+  'disabled (rejected)': 'отключен (отклонён)',
   'disabled (folder not trusted)': 'отключен (папка не доверенная)',
   'disabled (turned off for this session)': 'отключен (выключен в этой сессии)',
   'Server:': 'Сервер:',

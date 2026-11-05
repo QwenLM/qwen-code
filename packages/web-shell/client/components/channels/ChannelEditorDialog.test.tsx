@@ -97,6 +97,35 @@ const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
   ],
 };
 
+// Same field keys as the real GitHub descriptor; labels/descriptions
+// intentionally differ from the i18n values so a missing FIELD_LABEL_KEYS
+// entry or i18n key surfaces the untranslated descriptor fallback.
+const GITHUB_BOUND: DaemonChannelTypeDescriptor = {
+  type: 'github',
+  displayName: 'GitHub',
+  manageable: true,
+  fields: [
+    { key: 'token', label: 'Token (descriptor)', kind: 'secret' },
+    {
+      key: 'deliverToBoundSessions',
+      label: 'Bound sessions (descriptor)',
+      kind: 'boolean',
+      default: 'false',
+      description: 'Descriptor description for bound sessions',
+    },
+    {
+      key: 'prWatchEvents',
+      label: 'Watch events (descriptor)',
+      kind: 'string-list',
+      description: 'Descriptor description for watch events',
+      options: [
+        { value: 'ci_failure', label: 'ci_failure' },
+        { value: 'merge_conflict', label: 'merge_conflict' },
+      ],
+    },
+  ],
+};
+
 const OPTIONAL_SECRET: DaemonChannelTypeDescriptor = {
   ...DINGTALK,
   fields: DINGTALK.fields.map((field) =>
@@ -398,6 +427,20 @@ async function chooseRadioOption(optionLabel: string) {
   });
 }
 
+// Advanced fields unmount while the panel is collapsed; tests that exercise
+// them expand it first. A panel that auto-opened on configured values is left
+// alone so the helper never toggles it shut.
+async function expandAdvancedSettings(label = 'Advanced settings') {
+  const trigger = Array.from(document.querySelectorAll('button')).find(
+    (button) => button.textContent?.includes(label),
+  );
+  expect(trigger).toBeDefined();
+  if (trigger!.getAttribute('data-state') === 'open') return;
+  await act(async () => {
+    trigger!.click();
+  });
+}
+
 function setInputValue(input: HTMLInputElement, value: string) {
   Object.getOwnPropertyDescriptor(
     HTMLInputElement.prototype,
@@ -620,6 +663,7 @@ describe('ChannelEditorDialog', () => {
       ],
     };
     await renderDialog({ descriptor });
+    await expandAdvancedSettings();
 
     expect(document.body.textContent).toContain('Named tasks');
     expect(document.body.textContent).toContain(
@@ -733,6 +777,7 @@ describe('ChannelEditorDialog', () => {
 
   it('renders a multiline string field as a textarea and leaves a plain one as an input', async () => {
     await renderDialog({ descriptor: MULTILINE_INSTRUCTIONS });
+    await expandAdvancedSettings();
 
     const instructions = fieldByLabel('Instructions');
     const endpoint = fieldByLabel('API endpoint (descriptor)');
@@ -741,15 +786,17 @@ describe('ChannelEditorDialog', () => {
     expect(endpoint?.tagName).toBe('INPUT');
   });
 
-  it('groups the shared instructions control with conversation management', async () => {
+  it('files the shared instructions control under advanced settings', async () => {
     await renderDialog({ descriptor: MULTILINE_INSTRUCTIONS });
+    await expandAdvancedSettings();
 
-    // `instructions` is not a credential: it is stored in clear text and
-    // injected into the session context, so it belongs with the other shared
-    // session controls rather than in the catch-all credentials panel.
-    expect(sectionHeadingOf(fieldByLabel('Instructions'))).toBe(
-      'Conversation management',
+    // `instructions` is rarely changed tuning: it lives in the advanced
+    // disclosure panel rather than the catch-all credentials panel, while a
+    // plain credential string stays in Credentials.
+    const panel = fieldByLabel('Instructions')?.closest(
+      '[data-slot="collapsible"]',
     );
+    expect(panel?.textContent).toContain('Advanced settings');
     expect(sectionHeadingOf(fieldByLabel('API endpoint (descriptor)'))).toBe(
       'Credentials',
     );
@@ -757,6 +804,7 @@ describe('ChannelEditorDialog', () => {
 
   it('renders the localized instructions copy above the textarea instead of the descriptor literal', async () => {
     await renderDialog({ descriptor: MULTILINE_INSTRUCTIONS });
+    await expandAdvancedSettings();
 
     // `instructions` is the only multiline field in the fixture, so the single
     // textarea anchors the field. fieldDescription resolves
@@ -771,11 +819,593 @@ describe('ChannelEditorDialog', () => {
     expect(description).not.toContain('DESCRIPTOR FALLBACK COPY');
   });
 
+  it('renders the bound-session fields with translated EN labels', async () => {
+    await renderDialog({ descriptor: GITHUB_BOUND });
+    const labels = Array.from(document.querySelectorAll('label')).map(
+      (l) => l.textContent ?? '',
+    );
+    expect(labels.some((t) => t.includes('Deliver To PR-Bound Sessions'))).toBe(
+      true,
+    );
+    expect(labels.some((t) => t.includes('PR Watch Events'))).toBe(true);
+    // No descriptor fallback may leak through for these keys.
+    expect(labels.some((t) => t.includes('(descriptor)'))).toBe(false);
+    // fieldDescription falls back to field.description whenever the
+    // `<labelKey>.description` key is missing, so label-only assertions would
+    // stay green with the raw descriptor copy rendered under each field.
+    expect(document.body.textContent ?? '').not.toContain(
+      'Descriptor description',
+    );
+    expect(
+      descriptionOf(fieldByLabel('Deliver To PR-Bound Sessions')),
+    ).toContain('instead of a channel-owned session');
+    expect(descriptionOf(fieldByLabel('PR Watch Events'))).toContain(
+      'Leave empty to disable',
+    );
+  });
+
+  it('renders the bound-session fields with translated zh-CN labels', async () => {
+    await renderDialog({ descriptor: GITHUB_BOUND, language: 'zh-CN' });
+    const labels = Array.from(document.querySelectorAll('label')).map(
+      (l) => l.textContent ?? '',
+    );
+    expect(labels.some((t) => t.includes('投递到 PR 绑定会话'))).toBe(true);
+    expect(labels.some((t) => t.includes('PR 状态监视事件'))).toBe(true);
+    expect(labels.some((t) => t.includes('(descriptor)'))).toBe(false);
+    // With the `.description` keys dropped from BOTH locale maps the
+    // translator falls through to field.description, so pin the rendered
+    // description copy too — the ZH substrings occur in no other locale.
+    expect(document.body.textContent ?? '').not.toContain(
+      'Descriptor description',
+    );
+    expect(descriptionOf(fieldByLabel('投递到 PR 绑定会话'))).toContain(
+      '以 prompt 形式投递进该会话，而不是频道自有会话',
+    );
+    expect(descriptionOf(fieldByLabel('PR 状态监视事件'))).toContain(
+      '为绑定 PR 监视的状态转换',
+    );
+  });
+
+  it('frames both bound-session fields in one panel', async () => {
+    await renderDialog({ descriptor: GITHUB_BOUND });
+
+    const delivery = fieldByLabel('Deliver To PR-Bound Sessions');
+    const watch = fieldByLabel('PR Watch Events');
+    expect(delivery).not.toBeNull();
+    expect(watch).not.toBeNull();
+    expect(delivery!.closest('section')).toBe(watch!.closest('section'));
+    expect(sectionHeadingOf(delivery)).toBe('PR-bound sessions');
+  });
+
+  it('disables the watch boxes with an inline hint until delivery is on', async () => {
+    await renderDialog({ descriptor: GITHUB_BOUND });
+
+    const boxes = () =>
+      Array.from(
+        document.querySelectorAll<HTMLInputElement>(
+          '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+        ),
+      );
+    expect(boxes().length).toBeGreaterThan(0);
+    expect(boxes().every((box) => box.disabled)).toBe(true);
+    // The dimmed-row styling hook must track the gate, not just the input.
+    expect(
+      boxes().every(
+        (box) => box.closest('label')?.getAttribute('data-disabled') === 'true',
+      ),
+    ).toBe(true);
+    expect(document.body.textContent).toContain(
+      'Enable "Deliver To PR-Bound Sessions" above to select watch events.',
+    );
+
+    const toggle = document.querySelector<HTMLButtonElement>(
+      'button[role="switch"]',
+    );
+    expect(toggle).not.toBeNull();
+    await act(async () => {
+      toggle!.click();
+    });
+
+    expect(boxes().every((box) => box.disabled)).toBe(false);
+    expect(document.body.textContent).not.toContain(
+      'above to select watch events.',
+    );
+  });
+
+  it('shows the disabled hint in zh-CN', async () => {
+    await renderDialog({ descriptor: GITHUB_BOUND, language: 'zh-CN' });
+
+    expect(document.body.textContent).toContain(
+      '开启上方「投递到 PR 绑定会话」后即可选择监视事件。',
+    );
+  });
+
+  it('saves the selected watch events once delivery is enabled', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: GITHUB_BOUND, onSave });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'github-bot');
+      setInputValue(inputByLabel('Personal Access Token')!, 'ghp_test');
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+    const box = Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+      ),
+    ).find((b) => b.closest('label')?.textContent?.includes('ci_failure'));
+    expect(box).toBeDefined();
+    await act(async () => {
+      box!.click();
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith(
+      'github-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          deliverToBoundSessions: true,
+          prWatchEvents: ['ci_failure'],
+        }),
+      }),
+    );
+  });
+
+  it('names the delivery dependency when a stored selection lacks it', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        prWatchEvents: ['ci_failure'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance, onSave });
+
+    const box = document.querySelector<HTMLInputElement>(
+      '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+    );
+    expect(box!.checked).toBe(true);
+    // The stored selection stays clearable even while the gate is closed.
+    expect(box!.disabled).toBe(false);
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'Enable "Deliver To PR-Bound Sessions" to save the selected watch events.',
+    );
+
+    // Following the instruction must retire the instruction: turning the
+    // switch on clears the stale dependency error without another Save.
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+    expect(document.body.textContent).not.toContain(
+      'to save the selected watch events.',
+    );
+  });
+
+  it('lets a stored selection be cleared while delivery is off', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        prWatchEvents: ['ci_failure'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance, onSave });
+
+    const boxes = Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+      ),
+    );
+    const selected = boxes.find((b) =>
+      b.closest('label')?.textContent?.includes('ci_failure'),
+    )!;
+    expect(selected.checked).toBe(true);
+    expect(selected.disabled).toBe(false);
+    expect(boxes.filter((b) => b !== selected).every((b) => b.disabled)).toBe(
+      true,
+    );
+    // A clearable stored row keeps the selected styling, not the dimmed one.
+    expect(selected.closest('label')?.getAttribute('data-disabled')).toBe(
+      'false',
+    );
+    expect(
+      boxes
+        .filter((b) => b !== selected)
+        .every(
+          (b) => b.closest('label')?.getAttribute('data-disabled') === 'true',
+        ),
+    ).toBe(true);
+
+    await act(async () => {
+      selected.click();
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['prWatchEvents']).toBeUndefined();
+    expect(request.config['deliverToBoundSessions']).toBe(false);
+  });
+
+  it('keeps the invalid-option message when delivery is switched on', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        prWatchEvents: ['bogus_event'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+    expect(document.body.textContent).toContain(
+      "Remove values that aren't in the allowed list.",
+    );
+
+    // Switching delivery on remedies the dependency, not the unknown value:
+    // the higher-precedence invalidOption message must survive.
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+    expect(document.body.textContent).toContain(
+      "Remove values that aren't in the allowed list.",
+    );
+    expect(document.body.textContent).not.toContain(
+      'to save the selected watch events.',
+    );
+  });
+
+  it('clears the dependency message when the last event is unticked', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        prWatchEvents: ['ci_failure'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+    expect(document.body.textContent).toContain(
+      'to save the selected watch events.',
+    );
+
+    // Unticking the last event is the other remedy; the alert must retire
+    // without another Save.
+    const box = Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+      ),
+    ).find((b) => b.closest('label')?.textContent?.includes('ci_failure'))!;
+    await act(async () => {
+      box.click();
+    });
+    expect(document.body.textContent).not.toContain(
+      'to save the selected watch events.',
+    );
+  });
+
+  it('retires the invalid-option message when the offending value is unticked', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        prWatchEvents: ['bogus_event'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance });
+
+    await act(async () => {
+      (
+        Array.from(document.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === 'Save',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(document.body.textContent).toContain(
+      "Remove values that aren't in the allowed list.",
+    );
+
+    // Unticking the offending value is the remedy the message asks for; it
+    // must retire the message without a second Save.
+    const bogus = Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+      ),
+    ).find((b) => b.closest('label')?.textContent?.includes('bogus_event'))!;
+    await act(async () => {
+      bogus.click();
+    });
+    expect(document.body.textContent).not.toContain(
+      "Remove values that aren't in the allowed list.",
+    );
+  });
+
+  it('replaces the invalid-option message with the dependency one when a valid event remains', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        prWatchEvents: ['ci_failure', 'bogus_event'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance });
+
+    await act(async () => {
+      (
+        Array.from(document.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === 'Save',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(document.body.textContent).toContain(
+      "Remove values that aren't in the allowed list.",
+    );
+
+    const bogus = Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+      ),
+    ).find((b) => b.closest('label')?.textContent?.includes('bogus_event'))!;
+    await act(async () => {
+      bogus.click();
+    });
+    // The remaining value is allowed, so the invalid-option instruction is
+    // gone; the still-unsatisfied dependency takes over the slot.
+    expect(document.body.textContent).not.toContain(
+      "Remove values that aren't in the allowed list.",
+    );
+    expect(document.body.textContent).toContain(
+      'to save the selected watch events.',
+    );
+  });
+
+  it('does not surface validation before the first submit', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        prWatchEvents: ['ci_failure', 'merge_conflict'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance });
+    expect(document.querySelectorAll('[role="alert"]').length).toBe(0);
+
+    // A legitimate gated edit must not reveal validation state the operator
+    // never submitted; submit stays the only population site.
+    const box = Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+      ),
+    ).find((b) => b.closest('label')?.textContent?.includes('merge_conflict'))!;
+    await act(async () => {
+      box.click();
+    });
+    expect(document.querySelectorAll('[role="alert"]').length).toBe(0);
+  });
+
+  it('keeps a shown invalid-option message when delivery is switched off', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        deliverToBoundSessions: true,
+        prWatchEvents: ['bogus_event'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance });
+    const clickSave = async () => {
+      await act(async () => {
+        (
+          Array.from(document.querySelectorAll('button')).find(
+            (button) => button.textContent?.trim() === 'Save',
+          ) as HTMLButtonElement
+        ).click();
+      });
+    };
+    const clickSwitch = async () => {
+      await act(async () => {
+        document
+          .querySelector<HTMLButtonElement>('button[role="switch"]')!
+          .click();
+      });
+    };
+
+    await clickSave();
+    expect(document.body.textContent).toContain(
+      "Remove values that aren't in the allowed list.",
+    );
+    // The mirror case: a shown instruction survives the switch moving off
+    // (re-derived, not silently dropped), in both directions.
+    await clickSwitch();
+    expect(document.body.textContent).toContain(
+      "Remove values that aren't in the allowed list.",
+    );
+    await clickSwitch();
+    expect(document.body.textContent).toContain(
+      "Remove values that aren't in the allowed list.",
+    );
+  });
+
+  it('renders no bound-session panel for channels without the fields', async () => {
+    await renderDialog({ descriptor: DINGTALK });
+    expect(document.body.textContent).not.toContain('PR-bound sessions');
+  });
+
+  it('renders no bound-session panel for channels without the fields (zh-CN)', async () => {
+    await renderDialog({ descriptor: DINGTALK, language: 'zh-CN' });
+    expect(document.body.textContent).not.toContain('PR 绑定会话');
+  });
+
+  it('scrolls a non-advanced watch-events error into view on save', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        prWatchEvents: ['ci_failure'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    // jsdom has no scrollIntoView; stub it so the scroll is observable.
+    const scrollIntoView = vi.fn();
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      await renderDialog({ descriptor: GITHUB_BOUND, instance });
+      await act(async () => {
+        (
+          Array.from(document.querySelectorAll('button')).find(
+            (button) => button.textContent?.trim() === 'Save',
+          ) as HTMLButtonElement
+        ).click();
+      });
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
+      const target = scrollIntoView.mock.instances[0] as HTMLElement;
+      expect(target.id.endsWith('-prWatchEvents')).toBe(true);
+    } finally {
+      Element.prototype.scrollIntoView = originalScrollIntoView;
+    }
+  });
+
+  it('associates the disabled hint with the checkbox group', async () => {
+    await renderDialog({ descriptor: GITHUB_BOUND });
+
+    const group = document.querySelector(
+      '[role="group"][aria-label="PR Watch Events"]',
+    )!;
+    const describedBy = group.getAttribute('aria-describedby');
+    expect(describedBy).not.toBeNull();
+    const hint = document.getElementById(describedBy!);
+    expect(hint?.textContent).toContain('above to select watch events');
+    expect(hint?.getAttribute('aria-live')).toBe('polite');
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+    expect(group.getAttribute('aria-describedby')).toBeNull();
+  });
+
+  it('mounts a stored delivery-on instance with its events enabled', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        deliverToBoundSessions: true,
+        prWatchEvents: ['ci_failure'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance });
+
+    const boxes = Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+      ),
+    );
+    expect(boxes.length).toBeGreaterThan(0);
+    expect(boxes.every((box) => !box.disabled)).toBe(true);
+    expect(
+      boxes.find((b) =>
+        b.closest('label')?.textContent?.includes('ci_failure'),
+      )!.checked,
+    ).toBe(true);
+    expect(document.body.textContent).not.toContain(
+      'above to select watch events.',
+    );
+
+    // The live region must exist (empty) before the hint appears, and the
+    // same node must survive the transition — a region mounted together
+    // with its text is exactly what aria-live cannot announce.
+    const region = Array.from(
+      document.querySelectorAll<HTMLElement>('span[aria-live="polite"]'),
+    ).find((node) => node.id.endsWith('-prWatchEvents-disabled-hint'));
+    expect(region).toBeDefined();
+    expect(region!.textContent).toBe('');
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+    expect(region!.isConnected).toBe(true);
+    expect(region!.textContent).toContain('above to select watch events');
+  });
+
   it('localizes the instructions copy for zh-CN operators', async () => {
     await renderDialog({
       descriptor: MULTILINE_INSTRUCTIONS,
       language: 'zh-CN',
     });
+    await expandAdvancedSettings('高级设置');
 
     // getTranslator resolves `messages[key] ?? EN[key] ?? key`, so an assertion
     // phrased only as "not the raw key", or as an English substring, still
@@ -789,6 +1419,7 @@ describe('ChannelEditorDialog', () => {
   it('saves a multi-line instructions value with the newline intact', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     await renderDialog({ descriptor: MULTILINE_INSTRUCTIONS, onSave });
+    await expandAdvancedSettings();
 
     const instructions = fieldByLabel('Instructions');
     expect(instructions).toBeInstanceOf(HTMLTextAreaElement);
@@ -858,6 +1489,342 @@ describe('ChannelEditorDialog', () => {
         }),
       }),
     );
+  });
+
+  it('renders record entries on demand and filters empty values on save', async () => {
+    // The channel validators reject empty template values. The editor keeps
+    // an added-but-empty row in the draft so it holds its place, and the save
+    // serializer filters empty values regardless. Pin the end-to-end outcome:
+    // the cleared key is absent from the upsert config, the untouched sibling
+    // survives.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: [
+        ...DINGTALK.fields,
+        {
+          key: 'boundSessionActions',
+          label: 'Bound Session Actions',
+          kind: 'record',
+          options: [
+            {
+              value: 'review:watch:head_change',
+              label: 'review:watch:head_change',
+            },
+            { value: 'fix:comment', label: 'fix:comment' },
+          ],
+        },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, instance: INSTANCE, onSave });
+
+    // A fresh draft shows the add picker, not one row per descriptor option.
+    expect(document.querySelectorAll('textarea')).toHaveLength(0);
+    expect(fieldByLabel('Bound Session Actions')).not.toBeNull();
+    // This fixture is dingtalk-typed, where the field has no label-key
+    // registration, so the generic entry copy applies (the template-worded
+    // override is pinned in the github-typed cases below).
+    expect(document.body.textContent).toContain('No entries configured yet.');
+
+    // Record row ids embed the option key (colons included), which is not a
+    // valid CSS selector — resolve through getElementById, not #id.
+    const recordTextarea = (labelText: string): HTMLTextAreaElement | null => {
+      const label = Array.from(document.querySelectorAll('label')).find(
+        (item) => item.textContent?.includes(labelText),
+      );
+      const id = label?.htmlFor;
+      return id
+        ? (document.getElementById(id) as HTMLTextAreaElement | null)
+        : null;
+    };
+
+    await selectOption('Bound Session Actions', 'review:watch:head_change');
+    await selectOption('Bound Session Actions', 'fix:comment');
+    const reviewRow = recordTextarea('review:watch:head_change');
+    const fixRow = recordTextarea('fix:comment');
+    expect(reviewRow).toBeInstanceOf(HTMLTextAreaElement);
+    expect(fixRow).toBeInstanceOf(HTMLTextAreaElement);
+
+    await act(async () => {
+      setTextareaValue(reviewRow!, 'Run /review %pr%');
+      setTextareaValue(fixRow!, 'Address the comments');
+    });
+    await act(async () => {
+      setTextareaValue(reviewRow!, '');
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith(
+      'release-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          boundSessionActions: { 'fix:comment': 'Address the comments' },
+        }),
+      }),
+    );
+  });
+
+  it('removes a record entry through its delete button', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: [
+        ...DINGTALK.fields,
+        {
+          key: 'boundSessionActions',
+          label: 'Bound Session Actions',
+          kind: 'record',
+          options: [{ value: 'fix:comment', label: 'fix:comment' }],
+        },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, instance: INSTANCE, onSave });
+
+    await selectOption('Bound Session Actions', 'fix:comment');
+    const remove = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.getAttribute('aria-label') === 'Remove fix:comment',
+    );
+    expect(remove).toBeDefined();
+    await act(async () => {
+      remove!.click();
+    });
+    expect(document.querySelectorAll('textarea')).toHaveLength(0);
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    const request = onSave.mock.calls[0]?.[1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['boundSessionActions']).toBeUndefined();
+  });
+
+  it('keeps stored record keys the descriptor does not enumerate', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: [
+        ...DINGTALK.fields,
+        {
+          key: 'boundSessionActions',
+          label: 'Bound Session Actions',
+          kind: 'record',
+          options: [{ value: 'fix:comment', label: 'fix:comment' }],
+        },
+      ],
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: {
+        ...INSTANCE.config,
+        boundSessionActions: { 'custom:key': 'Do the custom thing' },
+      },
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, instance, onSave });
+
+    const label = Array.from(document.querySelectorAll('label')).find((item) =>
+      item.textContent?.includes('custom:key'),
+    );
+    expect(label).toBeDefined();
+    const textarea = document.getElementById(
+      label!.htmlFor,
+    ) as HTMLTextAreaElement;
+    expect(textarea.value).toBe('Do the custom thing');
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+    expect(onSave).toHaveBeenCalledWith(
+      'release-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          boundSessionActions: { 'custom:key': 'Do the custom thing' },
+        }),
+      }),
+    );
+  });
+
+  it('uses generic copy and no picker for an options-less record field', async () => {
+    // messageRoutes is a record field with no options: the empty state must
+    // not call routes "templates", and there is nothing to add from.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: [
+        ...DINGTALK.fields,
+        { key: 'messageRoutes', label: 'Message Routes', kind: 'record' },
+      ],
+    };
+    await renderDialog({ descriptor });
+    await expandAdvancedSettings();
+
+    expect(document.body.textContent).toContain('No entries configured yet.');
+    expect(document.body.textContent).not.toContain(
+      'No templates configured yet.',
+    );
+    // No add picker: the field label targets no control.
+    expect(fieldByLabel('Message Routes')).toBeNull();
+
+    // Stored routes still render as editable rows without a picker.
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: {
+        ...INSTANCE.config,
+        messageRoutes: { '/qa': 'Answer questions' },
+      },
+    };
+    await renderDialog({ descriptor, instance });
+    await expandAdvancedSettings();
+    const label = Array.from(document.querySelectorAll('label')).find((item) =>
+      item.textContent?.includes('/qa'),
+    );
+    expect(label).toBeDefined();
+    const textarea = document.getElementById(
+      label!.htmlFor,
+    ) as HTMLTextAreaElement;
+    expect(textarea.value).toBe('Answer questions');
+    expect(fieldByLabel('Message Routes')).toBeNull();
+  });
+
+  it('gates adding templates on bound delivery and names the prerequisite', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'github',
+      displayName: 'GitHub',
+      manageable: true,
+      fields: [
+        {
+          key: 'useLocalGh',
+          label: 'Use Local GitHub CLI Authentication',
+          kind: 'boolean',
+        },
+        {
+          key: 'deliverToBoundSessions',
+          label: 'Deliver To PR-Bound Sessions',
+          kind: 'boolean',
+          default: 'false',
+        },
+        {
+          key: 'boundSessionActions',
+          label: 'Bound Session Actions',
+          kind: 'record',
+          options: [{ value: 'fix:comment', label: 'fix:comment' }],
+        },
+      ],
+    };
+    await renderDialog({ descriptor });
+
+    const picker = fieldByLabel('Bound Session Actions') as HTMLButtonElement;
+    expect(picker.disabled).toBe(true);
+    expect(document.body.textContent).toContain(
+      'Enable "Deliver To PR-Bound Sessions" above to add templates.',
+    );
+    // The github-typed field keeps the template-worded empty state and
+    // add-picker placeholder through its field label-key overrides.
+    expect(document.body.textContent).toContain('No templates configured yet.');
+    expect(document.body.textContent).toContain('Add template…');
+
+    // Resolve the delivery switch by its label instead of guessing ids.
+    const deliveryLabel = Array.from(document.querySelectorAll('label')).find(
+      (item) =>
+        item.textContent?.includes('Deliver To PR-Bound Sessions') &&
+        item.htmlFor,
+    );
+    const deliverySwitch = document.getElementById(deliveryLabel!.htmlFor)!;
+    await act(async () => {
+      deliverySwitch.click();
+    });
+    expect(
+      (fieldByLabel('Bound Session Actions') as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it('toggles the editor dialog fullscreen and back', async () => {
+    await renderDialog();
+    const toggle = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.getAttribute('aria-label') === 'Fullscreen',
+    );
+    expect(toggle).toBeDefined();
+    expect(toggle!.getAttribute('aria-pressed')).toBe('false');
+    await act(async () => {
+      toggle!.click();
+    });
+    expect(toggle!.getAttribute('aria-pressed')).toBe('true');
+    expect(toggle!.getAttribute('aria-label')).toBe('Exit fullscreen');
+    await act(async () => {
+      toggle!.click();
+    });
+    expect(toggle!.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('resolves the boundSessionActions label and description in Chinese', async () => {
+    // FIELD_LABEL_KEYS.github must register the field, or the zh-CN editor
+    // falls back to the descriptor's English label and description.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      type: 'github',
+      displayName: 'GitHub',
+      fields: [
+        {
+          key: 'deliverToBoundSessions',
+          label: 'Deliver To PR-Bound Sessions',
+          kind: 'boolean',
+          default: 'false',
+        },
+        {
+          key: 'boundSessionActions',
+          label: 'Bound Session Actions',
+          kind: 'record',
+          options: [
+            { value: 'default', label: 'default', group: 'any' },
+            {
+              value: 'watch:ci_failure',
+              label: 'watch:ci_failure',
+              group: 'any',
+            },
+          ],
+        },
+      ],
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: { ...INSTANCE.config, deliverToBoundSessions: true },
+    };
+    await renderDialog({ descriptor, instance, language: 'zh-CN' });
+    expect(document.body.textContent).toContain('绑定会话动作模板');
+    expect(document.body.textContent).toContain(
+      '投递给 PR 绑定会话的 operator 指令模板',
+    );
+    // The template-worded empty state comes from the zh-CN field override.
+    expect(document.body.textContent).toContain('尚未配置模板。');
+
+    // The picker group header and the per-key description must both come
+    // from the zh-CN dictionary, not the English descriptor fallback.
+    const trigger = fieldByLabel('绑定会话动作模板')!;
+    await act(async () => {
+      trigger.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(document.body.textContent).toContain('任意角色');
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.includes('watch:ci_failure'));
+    expect(option).toBeDefined();
+    expect(option!.textContent).toContain('head 提交上的 CI 检查变红');
+    await act(async () => {
+      option!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(document.body.textContent).toContain('head 提交上的 CI 检查变红');
   });
 
   it('submits a new instance with typed fields and the current revision', async () => {
@@ -1053,6 +2020,8 @@ describe('ChannelEditorDialog', () => {
     };
     const onSave = vi.fn().mockResolvedValue(undefined);
     await renderDialog({ descriptor, onSave });
+    // Operators is a permission grant: it renders in Access control, not in
+    // the advanced panel, so no expansion is needed here.
     await act(async () => {
       setInputValue(inputByLabel('Instance name')!, 'release-bot');
       setInputValue(inputByLabel('Client ID')!, 'ding-client-id');
@@ -1176,6 +2145,11 @@ describe('ChannelEditorDialog', () => {
       toggle!.click();
     });
 
+    // The pre-existing hint call sites pass no hintId: the local-gh hint
+    // must keep rendering without an id or a live region.
+    expect(document.querySelectorAll('span[aria-live]').length).toBe(0);
+    expect(document.querySelectorAll('span[id]').length).toBe(0);
+
     const save = Array.from(document.querySelectorAll('button')).find(
       (button) => button.textContent?.trim() === 'Save',
     );
@@ -1196,6 +2170,7 @@ describe('ChannelEditorDialog', () => {
   it('renders the reason filter as checkboxes and saves the checked reasons', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     await renderDialog({ descriptor: GITHUB_CONFIGURED, onSave });
+    await expandAdvancedSettings();
 
     const group = document.querySelector(
       '[role="group"][aria-label="Reason Filter"]',
@@ -1535,13 +2510,16 @@ describe('ChannelEditorDialog', () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
-  it('separates connection and notification fields from credentials', async () => {
+  it('files connection and notification tuning under advanced settings', async () => {
     await renderDialog({ descriptor: GITHUB_CONFIGURED });
+    await expandAdvancedSettings();
 
-    expect(sectionHeadingOf(fieldByLabel('Base URL'))).toBe('Connection');
-    expect(sectionHeadingOf(fieldByLabel('Reason Filter'))).toBe(
-      'Notifications and routing',
+    // The endpoint stays in Connection; only the notification tuning moves.
+    expect(sectionHeadingOf(inputByLabel('Base URL'))).toBe('Connection');
+    const panel = fieldByLabel('Reason Filter')?.closest(
+      '[data-slot="collapsible"]',
     );
+    expect(panel?.textContent).toContain('Advanced settings');
     expect(sectionHeadingOf(inputByLabel('Personal Access Token'))).toBe(
       'Credentials',
     );
@@ -1550,17 +2528,28 @@ describe('ChannelEditorDialog', () => {
     );
   });
 
-  it('splits connection and routing fields for a non-GitHub channel', async () => {
-    await renderDialog({ descriptor: GITLAB_ROUTING });
+  it('files connection and routing tuning under advanced settings for a non-GitHub channel', async () => {
+    // A stored default route keeps its field visible even without routes, so
+    // the fixture can assert the whole routing group inside the panel.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: { type: 'gitlab', defaultMessageRoute: '/qa' },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITLAB_ROUTING, instance });
+    await expandAdvancedSettings();
 
-    expect(sectionHeadingOfLabel('Instance URL')).toBe('Connection');
     expect(sectionHeadingOfLabel('Personal Access Token')).toBe('Credentials');
-    expect(sectionHeadingOfLabel('Message Routes')).toBe(
-      'Notifications and routing',
-    );
-    expect(sectionHeadingOfLabel('Default Message Route')).toBe(
-      'Notifications and routing',
-    );
+    expect(sectionHeadingOfLabel('Instance URL')).toBe('Connection');
+    const panelOf = (labelText: string) =>
+      Array.from(document.querySelectorAll('label'))
+        .find((item) => item.textContent?.includes(labelText))
+        ?.closest('[data-slot="collapsible"]');
+    const panel = panelOf('Message Routes');
+    expect(panel?.textContent).toContain('Advanced settings');
+    expect(panelOf('Default Message Route')).toBe(panel);
   });
 
   it('asks for repository full names when GitHub groups are allowlisted', async () => {
@@ -1764,5 +2753,1022 @@ describe('ChannelEditorDialog', () => {
 
     expect(document.body.textContent).toContain('Pairing approvals');
     expect(listPairingRequests).toHaveBeenCalledWith('release-bot');
+  });
+});
+
+describe('GitHub per-repository settings', () => {
+  const GITHUB_POLLING: DaemonChannelTypeDescriptor = {
+    ...GITHUB_CONFIGURED,
+    fields: [
+      ...GITHUB_CONFIGURED.fields,
+      {
+        key: 'pollInterval',
+        label: 'Poll Interval (ms)',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: 86_400_000,
+        default: '60000',
+      },
+    ],
+  };
+
+  function githubInstance(
+    groups: Record<string, unknown>,
+  ): DaemonChannelInstanceSnapshot {
+    return {
+      name: 'github-bot',
+      config: { type: 'github', groupPolicy: 'allowlist', groups },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+  }
+
+  function rowLabels(text: string): HTMLElement[] {
+    return Array.from(document.querySelectorAll('label')).filter((label) =>
+      label.textContent?.includes(text),
+    );
+  }
+
+  function rowControl(
+    repositoryId: string,
+    kind: 'mention' | 'senders' | 'speakers',
+  ): HTMLElement | null {
+    return document.querySelector(`[id$="-${kind}-${repositoryId}"]`);
+  }
+
+  async function chooseRowOption(
+    repositoryId: string,
+    kind: 'mention' | 'senders',
+    optionLabel: string,
+  ) {
+    const trigger = rowControl(repositoryId, kind);
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      trigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.trim() === optionLabel);
+    expect(option).toBeDefined();
+    await act(async () => {
+      option!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+  }
+
+  async function save() {
+    const button = Array.from(document.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      button?.click();
+    });
+  }
+
+  it('renders one row per allowlisted repository', async () => {
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': {},
+        'qwenlm/qwen-code': {},
+        'acme/widgets': {},
+      }),
+    });
+
+    expect(rowLabels('Require a mention')).toHaveLength(2);
+    expect(rowLabels('Who may speak')).toHaveLength(2);
+    expect(document.body.textContent).toContain('qwenlm/qwen-code');
+    expect(document.body.textContent).toContain('acme/widgets');
+  });
+
+  it('adds a row as soon as a repository is typed into the allowlist', async () => {
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({ 'qwenlm/qwen-code': {} }),
+    });
+    expect(rowLabels('Require a mention')).toHaveLength(1);
+
+    const allowlist = inputByLabel('Allowed repositories');
+    expect(allowlist).not.toBeNull();
+    await act(async () => {
+      setInputValue(allowlist!, 'qwenlm/qwen-code, acme/widgets');
+    });
+
+    expect(rowLabels('Require a mention')).toHaveLength(2);
+    expect(rowControl('acme/widgets', 'mention')).not.toBeNull();
+  });
+
+  it('names the inherited value in the inherit option', async () => {
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { requireMention: false, senders: 'allowlist' },
+        'qwenlm/qwen-code': {},
+      }),
+    });
+
+    expect(rowControl('qwenlm/qwen-code', 'mention')?.textContent).toContain(
+      'Inherit (answer without a mention)',
+    );
+    expect(rowControl('qwenlm/qwen-code', 'senders')?.textContent).toContain(
+      'Inherit (allowlist only)',
+    );
+  });
+
+  it('shows the speaker input only once the row allows a list', async () => {
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'open' },
+        'qwenlm/qwen-code': {},
+      }),
+    });
+    expect(rowControl('qwenlm/qwen-code', 'speakers')).toBeNull();
+
+    await chooseRowOption('qwenlm/qwen-code', 'senders', 'Allowlist only');
+
+    expect(rowControl('qwenlm/qwen-code', 'speakers')).not.toBeNull();
+  });
+
+  it('shows the speaker input for a row inheriting an allowlist', async () => {
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        'qwenlm/qwen-code': {},
+      }),
+    });
+
+    expect(rowControl('qwenlm/qwen-code', 'speakers')).not.toBeNull();
+    expect(rowControl('qwenlm/qwen-code', 'senders')?.textContent).toContain(
+      'Inherit (allowlist only)',
+    );
+  });
+
+  it('saves an explicit per-repository override', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({ 'qwenlm/qwen-code': {} }),
+      onSave,
+    });
+
+    await chooseRowOption(
+      'qwenlm/qwen-code',
+      'mention',
+      'Answer without a mention',
+    );
+    await chooseRowOption('qwenlm/qwen-code', 'senders', 'Allowlist only');
+    await act(async () => {
+      setInputValue(
+        rowControl('qwenlm/qwen-code', 'speakers') as HTMLInputElement,
+        'alice, bob',
+      );
+    });
+    await save();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['groups']).toEqual({
+      'qwenlm/qwen-code': {
+        requireMention: false,
+        senders: 'allowlist',
+        allowedUsers: ['alice', 'bob'],
+      },
+    });
+  });
+
+  it('labels each row so repeated control names stay distinguishable', async () => {
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        'qwenlm/qwen-code': {},
+        'acme/widgets': {},
+      }),
+    });
+
+    const rows = Array.from(
+      document.querySelectorAll('[role="group"][aria-labelledby]'),
+    ).filter((row) => row.querySelector('h4'));
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.querySelector('h4')?.textContent)).toEqual([
+      'qwenlm/qwen-code',
+      'acme/widgets',
+    ]);
+    for (const row of rows) {
+      expect(row.getAttribute('aria-labelledby')).toBe(
+        row.querySelector('h4')?.id,
+      );
+    }
+  });
+
+  it('renders the poll interval under advanced settings', async () => {
+    await renderDialog({ descriptor: GITHUB_POLLING });
+    await expandAdvancedSettings();
+
+    const panel = Array.from(document.querySelectorAll('label'))
+      .find((item) => item.textContent?.includes('Poll Interval (ms)'))
+      ?.closest('[data-slot="collapsible"]');
+    expect(panel?.textContent).toContain('Advanced settings');
+    expect(inputByLabel('Poll Interval (ms)')?.type).toBe('number');
+  });
+
+  it('files the poll interval under advanced settings for any platform declaring it', async () => {
+    // The advanced map is keyed by field name, so Email's existing interval
+    // moves too. Pin the documented side effect instead of leaving it to prose.
+    const email: DaemonChannelTypeDescriptor = {
+      type: 'email',
+      displayName: 'Email',
+      manageable: true,
+      fields: [
+        {
+          key: 'pollInterval',
+          label: 'Poll Interval (ms)',
+          kind: 'number',
+          exclusiveMinimum: 0,
+          default: '60000',
+        },
+      ],
+    };
+    await renderDialog({ descriptor: email });
+    await expandAdvancedSettings();
+
+    const panel = Array.from(document.querySelectorAll('label'))
+      .find((item) => item.textContent?.includes('Poll Interval (ms)'))
+      ?.closest('[data-slot="collapsible"]');
+    expect(panel?.textContent).toContain('Advanced settings');
+    expect(document.body.textContent).not.toContain('Per-repository settings');
+  });
+
+  it('keeps repository rows away from chat platforms', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'chat-bot',
+      config: {
+        type: 'dingtalk',
+        clientId: 'id',
+        clientSecret: 'secret',
+        groupPolicy: 'allowlist',
+        // Shaped like a repository on purpose: a `group-a` fixture would pass
+        // even if the platform gate were removed, because the owner/repo
+        // filter would hide the rows anyway.
+        groups: { 'acme/widgets': {} },
+      },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: DINGTALK_WITH_ACCESS, instance });
+
+    expect(rowLabels('Require a mention')).toHaveLength(0);
+    expect(document.body.textContent).not.toContain('Per-repository settings');
+  });
+
+  it('derives the speaker hint from what the save will own, not the draft policy', async () => {
+    // Two stored shapes this PR deliberately preserves. A policy with no list
+    // inherits the channel-wide members; a list with no policy admits nobody.
+    // Reading the hint off the draft policy tells both the opposite.
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op', 'release-bot'] },
+        'qwenlm/qwen-code': { senders: 'allowlist' },
+        'acme/widgets': { allowedUsers: [] },
+      }),
+    });
+
+    expect(descriptionOf(rowControl('qwenlm/qwen-code', 'speakers'))).toContain(
+      'Leave empty to use the channel-wide list',
+    );
+    expect(descriptionOf(rowControl('acme/widgets', 'speakers'))).toContain(
+      'Empty means nobody',
+    );
+  });
+
+  it('shows each row its own stored speakers and edits only that row', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        'qwenlm/qwen-code': {
+          senders: 'allowlist',
+          allowedUsers: ['alice', 'bob'],
+        },
+        'acme/widgets': {},
+      }),
+      onSave,
+    });
+
+    expect(
+      (rowControl('qwenlm/qwen-code', 'speakers') as HTMLInputElement).value,
+    ).toBe('alice, bob');
+    expect(
+      (rowControl('acme/widgets', 'speakers') as HTMLInputElement).value,
+    ).toBe('');
+
+    await act(async () => {
+      setInputValue(
+        rowControl('acme/widgets', 'speakers') as HTMLInputElement,
+        'carol',
+      );
+    });
+    await save();
+
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['groups']).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': {
+        senders: 'allowlist',
+        allowedUsers: ['alice', 'bob'],
+      },
+      'acme/widgets': { allowedUsers: ['carol'] },
+    });
+  });
+
+  it('shows an explicitly open row as Anyone rather than as inheriting', async () => {
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        'qwenlm/qwen-code': { senders: 'open' },
+      }),
+    });
+
+    expect(rowControl('qwenlm/qwen-code', 'senders')?.textContent).toContain(
+      'Anyone',
+    );
+    expect(rowControl('qwenlm/qwen-code', 'speakers')).toBeNull();
+  });
+
+  it('renders the localized interval label, not the descriptor fallback', async () => {
+    // The fixture's descriptor label is byte-identical to the English string,
+    // so only a zh-CN render proves the label mapping is load-bearing.
+    await renderDialog({ descriptor: GITHUB_POLLING, language: 'zh-CN' });
+    await expandAdvancedSettings('高级设置');
+
+    expect(inputByLabel('轮询间隔（毫秒）')).not.toBeNull();
+    const panel = Array.from(document.querySelectorAll('label'))
+      .find((item) => item.textContent?.includes('轮询间隔（毫秒）'))
+      ?.closest('[data-slot="collapsible"]');
+    expect(panel?.textContent).toContain('高级设置');
+  });
+
+  it('names the repositories whose settings outlive the allowlist policy', async () => {
+    // The runtime resolves per-repository senders without consulting
+    // groupPolicy, so switching the policy away must not make those entries
+    // invisible while they still decide who may drive the agent.
+    const instance = githubInstance({
+      '*': {},
+      'acme/widgets': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+    instance.config['groupPolicy'] = 'open';
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance });
+
+    expect(rowLabels('Require a mention')).toHaveLength(0);
+    expect(document.body.textContent).toContain(
+      'Repository settings still apply',
+    );
+    expect(document.body.textContent).toContain('acme/widgets');
+  });
+
+  it('says nothing about retained settings when there are none', async () => {
+    const instance = githubInstance({ '*': { senders: 'open' } });
+    instance.config['groupPolicy'] = 'open';
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance });
+
+    expect(document.body.textContent).not.toContain(
+      'Repository settings still apply',
+    );
+  });
+
+  it('saves an unrelated edit on a channel whose stored interval the runtime tolerates', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: { type: 'github', groupPolicy: 'open', pollInterval: 0 },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_POLLING, instance, onSave });
+
+    expect(inputByLabel('Poll Interval (ms)')?.value).toBe('0');
+    await save();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['pollInterval']).toBe(0);
+  });
+
+  it('tells a stored list under an inherited policy that clearing it returns the channel-wide list', async () => {
+    // The hint promises what an EMPTY box will do. Asking the projection about
+    // the untouched draft would say "nobody" here, while clearing the box
+    // actually deletes the list and widens the repository back to the wildcard.
+    // The repository's own list is the admitted set until then, so the hint has
+    // to say the channel-wide list will be *used*, not that it is already kept.
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op', 'release-bot'] },
+        'qwenlm/qwen-code': { allowedUsers: ['alice'] },
+      }),
+      onSave,
+    });
+
+    const speakers = rowControl(
+      'qwenlm/qwen-code',
+      'speakers',
+    ) as HTMLInputElement;
+    expect(speakers.value).toBe('alice');
+    expect(descriptionOf(speakers)).toContain(
+      'Leave empty to use the channel-wide list',
+    );
+
+    await act(async () => setInputValue(speakers, ''));
+    await save();
+
+    // What the hint promised: the repository no longer owns a list, so the
+    // runtime's `??` hands it the two channel-wide members instead of alice.
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['groups']).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op', 'release-bot'] },
+      'qwenlm/qwen-code': {},
+    });
+  });
+
+  it('says the retained settings are kept but inert while the policy is Disabled', async () => {
+    // The group gate drops every envelope before the mention or sender lookup,
+    // so "still apply" would be false under Disabled.
+    const instance = githubInstance({
+      '*': {},
+      'acme/widgets': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+    instance.config['groupPolicy'] = 'disabled';
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance });
+
+    expect(document.body.textContent).toContain(
+      'Repository settings are kept but not applied',
+    );
+    expect(document.body.textContent).not.toContain(
+      'Repository settings still apply',
+    );
+    expect(document.body.textContent).toContain('acme/widgets');
+  });
+
+  it('refuses an edited row when the policy leaves a conflicting allowlist', async () => {
+    // The rows disappear once the policy leaves Allowlist and the save path
+    // keeps both spellings as stored, so an edit made before switching would be
+    // discarded while the dialog closes on success. The error has to land on a
+    // control still on screen — the policy select, not the hidden allowlist.
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: {
+          '*': { senders: 'allowlist', allowedUsers: ['op'] },
+          'Acme/Widgets': { senders: 'allowlist', allowedUsers: ['alice'] },
+          'acme/widgets': { senders: 'open' },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance, onSave });
+
+    await chooseRowOption('acme/widgets', 'senders', 'Allowlist only');
+    await selectOption('Group Policy', 'Open');
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'This channel lists one repository twice with different settings',
+    );
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('still saves an untouched switch away from a conflicting allowlist', async () => {
+    // Refusing every save would strand an operator who only changed the policy:
+    // keeping both spellings verbatim is what the runtime already resolved.
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: {
+          '*': { senders: 'allowlist', allowedUsers: ['op'] },
+          'Acme/Widgets': { senders: 'allowlist', allowedUsers: ['alice'] },
+          'acme/widgets': { senders: 'open' },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance, onSave });
+
+    await selectOption('Group Policy', 'Open');
+    await save();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['groups']).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'Acme/Widgets': { senders: 'allowlist', allowedUsers: ['alice'] },
+      'acme/widgets': { senders: 'open' },
+    });
+  });
+
+  it('names a repository the save writes but storage has never seen', async () => {
+    // Typing a repository, narrowing its row and switching the policy away
+    // writes an entry that keeps deciding who may drive that repository. The
+    // alert used to enumerate stored groups, so it named nothing and the
+    // dialog reported success in silence.
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      }),
+      onSave,
+    });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Allowed repositories')!, 'acme/widgets');
+    });
+    await chooseRowOption('acme/widgets', 'senders', 'Allowlist only');
+    await act(async () => {
+      setInputValue(
+        rowControl('acme/widgets', 'speakers') as HTMLInputElement,
+        'alice',
+      );
+    });
+    await selectOption('Group Policy', 'Open');
+
+    expect(document.body.textContent).toContain(
+      'Repository settings still apply',
+    );
+    expect(document.body.textContent).toContain('acme/widgets');
+  });
+
+  it('does not announce a speaker list the resolved open policy makes inert', async () => {
+    // senderGateFor builds an allowlist only when the resolved policy is
+    // allowlist, so this array restricts nobody and must not be announced as a
+    // setting that still applies.
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'open' },
+        'acme/widgets': { allowedUsers: ['alice'] },
+      }),
+    });
+
+    await selectOption('Group Policy', 'Open');
+
+    expect(document.body.textContent).not.toContain(
+      'Repository settings still apply',
+    );
+  });
+
+  it('refuses a save while a stored group entry is not an object, and names it', async () => {
+    // The store rejects such an entry on every save, unchanged or not, and no
+    // row can represent it. A generic daemon error would leave the operator
+    // with nothing to act on, so the refusal names the entry and where to fix
+    // it — and the entry is still not deleted, which would widen the alias.
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        'Acme/Widgets': 'hand-written-garbage',
+      }),
+      onSave,
+    });
+
+    await selectOption('Group Policy', 'Open');
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'stores a group entry that is not an object',
+    );
+    expect(document.body.textContent).toContain('Acme/Widgets');
+    expect(document.body.textContent).toContain('settings.json');
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('maps the Inherit option back to an absent key in both row selects', async () => {
+    // The widget's `inherit` sentinel only becomes the draft's '' here, and a
+    // cast hides a regression from the type checker: passing the raw value
+    // through would write requireMention = ('inherit' === 'true') = false.
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        'qwenlm/qwen-code': {
+          requireMention: false,
+          senders: 'allowlist',
+          allowedUsers: ['alice'],
+        },
+      }),
+      onSave,
+    });
+
+    await chooseRowOption(
+      'qwenlm/qwen-code',
+      'mention',
+      'Inherit (require a mention)',
+    );
+    await chooseRowOption(
+      'qwenlm/qwen-code',
+      'senders',
+      'Inherit (allowlist only)',
+    );
+    await save();
+
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    // A typed list survives a return to Inherit; only the two policy keys go.
+    expect(request.config['groups']).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { allowedUsers: ['alice'] },
+    });
+  });
+
+  it('names only the bounds the descriptor declares in the range message', async () => {
+    const maxOnly: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'concurrency',
+          label: 'Concurrency',
+          kind: 'number',
+          maximum: 4,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: maxOnly });
+    await act(async () => {
+      setInputValue(inputByLabel('Concurrency')!, '9');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain('Enter a number at most 4.');
+    expect(document.body.textContent).not.toContain('greater than');
+  });
+
+  it('names both bounds when the descriptor declares both', async () => {
+    await renderDialog({ descriptor: GITHUB_POLLING });
+    await expandAdvancedSettings();
+    await act(async () => {
+      setInputValue(inputByLabel('Poll Interval (ms)')!, '2592000000');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number greater than 0 and at most 86400000.',
+    );
+  });
+});
+
+describe('Channel editor progressive disclosure', () => {
+  function advancedTrigger(): HTMLButtonElement | undefined {
+    return Array.from(document.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Advanced settings'),
+    );
+  }
+
+  async function clickAdvancedTrigger() {
+    const trigger = advancedTrigger();
+    expect(trigger).toBeDefined();
+    await act(async () => {
+      trigger!.click();
+    });
+  }
+
+  async function saveDialog() {
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+  }
+
+  it('hides the default message route until a route exists', async () => {
+    await renderDialog({ descriptor: GITLAB_ROUTING });
+    await expandAdvancedSettings();
+
+    // Record fields render a label without a control id, so assert on the
+    // label text rather than fieldByLabel.
+    const labels = Array.from(document.querySelectorAll('label')).map(
+      (label) => label.textContent ?? '',
+    );
+    expect(labels.some((text) => text.includes('Message Routes'))).toBe(true);
+    expect(labels.some((text) => text.includes('Default Message Route'))).toBe(
+      false,
+    );
+  });
+
+  it('shows the default message route when routes are configured', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        messageRoutes: { '/qa': 'Answer questions' },
+      },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITLAB_ROUTING, instance });
+    await expandAdvancedSettings();
+
+    expect(fieldByLabel('Default Message Route')).not.toBeNull();
+  });
+
+  it('collapses advanced settings on a fresh draft', async () => {
+    await renderDialog({ descriptor: GITHUB_CONFIGURED });
+
+    expect(advancedTrigger()?.getAttribute('data-state')).toBe('closed');
+    // The primary endpoint stays visible; only tuning collapses.
+    expect(sectionHeadingOf(inputByLabel('Base URL'))).toBe('Connection');
+    expect(fieldByLabel('Reason Filter')).toBeNull();
+    // No count badge while nothing is configured (the word also occurs in
+    // unrelated field copy, so scope the check to the trigger).
+    expect(advancedTrigger()?.textContent).not.toContain('configured');
+
+    await clickAdvancedTrigger();
+    expect(advancedTrigger()?.getAttribute('data-state')).toBe('open');
+    expect(fieldByLabel('Reason Filter')).not.toBeNull();
+  });
+
+  it('renders the advanced panel title as a heading outside the trigger', async () => {
+    await renderDialog({ descriptor: GITHUB_CONFIGURED });
+
+    // ARIA makes a button's descendants presentational, so the section title
+    // must be a real heading wrapping the trigger, not a span inside it.
+    const heading = Array.from(document.querySelectorAll('h3')).find((h) =>
+      h.textContent?.includes('Advanced settings'),
+    );
+    expect(heading).toBeDefined();
+    const trigger = advancedTrigger();
+    expect(trigger?.tagName).toBe('BUTTON');
+    expect(heading!.contains(trigger!)).toBe(true);
+  });
+
+  it('opens advanced settings for configured values and badges the count when collapsed', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...GITHUB_CONFIGURED,
+      fields: [
+        ...GITHUB_CONFIGURED.fields,
+        {
+          key: 'instructions',
+          label: 'Instructions',
+          kind: 'string',
+          multiline: true,
+        },
+      ],
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'open',
+        reasonFilter: ['mention'],
+        instructions: 'Review carefully',
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor, instance });
+
+    expect(advancedTrigger()?.getAttribute('data-state')).toBe('open');
+    expect(fieldByLabel('Instructions')).toHaveProperty(
+      'value',
+      'Review carefully',
+    );
+
+    await clickAdvancedTrigger();
+    expect(advancedTrigger()?.getAttribute('data-state')).toBe('closed');
+    expect(advancedTrigger()?.textContent).toContain('2 configured');
+  });
+
+  it('opens advanced settings for a stored boolean value', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...GITHUB_CONFIGURED,
+      fields: [
+        ...GITHUB_CONFIGURED.fields,
+        { key: 'multiSession', label: 'Named Sessions', kind: 'boolean' },
+      ],
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: { type: 'github', groupPolicy: 'open', multiSession: true },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor, instance });
+
+    // Pins the boolean arm of the configured predicate: without it the
+    // stored value would open collapsed out of sight.
+    expect(advancedTrigger()?.getAttribute('data-state')).toBe('open');
+  });
+
+  it('opens advanced settings for stored message routes', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        messageRoutes: { '/qa': 'Answer questions' },
+      },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITLAB_ROUTING, instance });
+
+    // Pins the record arm of the configured predicate, without the tolerant
+    // expand helper so the auto-open itself is what passes the test.
+    expect(advancedTrigger()?.getAttribute('data-state')).toBe('open');
+  });
+
+  it('forces advanced settings open and scrolls the erroring field into view', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...GITHUB_CONFIGURED,
+      fields: [
+        ...GITHUB_CONFIGURED.fields,
+        {
+          key: 'pollInterval',
+          label: 'Poll Interval (ms)',
+          kind: 'number',
+          exclusiveMinimum: 0,
+          maximum: 86_400_000,
+        },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    // jsdom has no scrollIntoView; stub it so the scroll is observable.
+    const scrollIntoView = vi.fn();
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      await renderDialog({ descriptor, onSave });
+      await expandAdvancedSettings();
+      await act(async () => {
+        setInputValue(inputByLabel('Poll Interval (ms)')!, '2592000000');
+      });
+      await clickAdvancedTrigger();
+      expect(advancedTrigger()?.getAttribute('data-state')).toBe('closed');
+
+      await saveDialog();
+
+      expect(advancedTrigger()?.getAttribute('data-state')).toBe('open');
+      expect(document.body.textContent).toContain(
+        'Enter a number greater than 0 and at most 86400000.',
+      );
+      expect(onSave).not.toHaveBeenCalled();
+      // Opening the panel is not enough: the error must be brought into
+      // view, on the erroring control itself.
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
+      expect(scrollIntoView.mock.instances[0]).toBe(
+        inputByLabel('Poll Interval (ms)'),
+      );
+    } finally {
+      Element.prototype.scrollIntoView = originalScrollIntoView;
+    }
+  });
+
+  it('saves collapsed advanced values unchanged', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...GITHUB_CONFIGURED,
+      fields: [
+        ...GITHUB_CONFIGURED.fields,
+        {
+          key: 'instructions',
+          label: 'Instructions',
+          kind: 'string',
+          multiline: true,
+        },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'open',
+        reasonFilter: ['mention', 'comment'],
+        instructions: 'Review carefully',
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor, instance, onSave });
+    await clickAdvancedTrigger();
+    expect(advancedTrigger()?.getAttribute('data-state')).toBe('closed');
+
+    await saveDialog();
+
+    expect(onSave).toHaveBeenCalledWith(
+      'github-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          reasonFilter: ['mention', 'comment'],
+          instructions: 'Review carefully',
+        }),
+      }),
+    );
+  });
+
+  it('keeps primary endpoints in Connection while tuning moves to advanced', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'wecom',
+      displayName: 'WeCom',
+      manageable: true,
+      fields: [
+        { key: 'botId', label: 'Bot ID', kind: 'string', required: true },
+        { key: 'wsUrl', label: 'WebSocket URL', kind: 'string' },
+        { key: 'baseUrl', label: 'Base URL', kind: 'string' },
+        {
+          key: 'pollInterval',
+          label: 'Poll Interval (ms)',
+          kind: 'number',
+          exclusiveMinimum: 0,
+        },
+      ],
+    };
+    await renderDialog({ descriptor });
+    await expandAdvancedSettings();
+
+    // Both endpoints decide where a token is sent, so a fresh draft must
+    // show them; only genuine tuning collapses.
+    expect(sectionHeadingOf(fieldByLabel('WebSocket URL'))).toBe('Connection');
+    expect(sectionHeadingOf(fieldByLabel('Base URL'))).toBe('Connection');
+    const panel = fieldByLabel('Poll Interval (ms)')?.closest(
+      '[data-slot="collapsible"]',
+    );
+    expect(panel?.textContent).toContain('Advanced settings');
+  });
+
+  it('localizes the advanced panel and its count badge for zh-CN', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...GITHUB_CONFIGURED,
+      fields: [
+        ...GITHUB_CONFIGURED.fields,
+        {
+          key: 'instructions',
+          label: 'Instructions',
+          kind: 'string',
+          multiline: true,
+        },
+      ],
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'open',
+        reasonFilter: ['mention'],
+        instructions: 'Review carefully',
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({
+      descriptor,
+      instance,
+      language: 'zh-CN',
+    });
+
+    const trigger = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('高级设置'),
+    );
+    expect(trigger).toBeDefined();
+    expect(trigger?.getAttribute('data-state')).toBe('open');
+    await act(async () => {
+      trigger!.click();
+    });
+    expect(trigger?.textContent).toContain('已配置 2 项');
   });
 });

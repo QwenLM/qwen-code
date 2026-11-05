@@ -47,8 +47,19 @@ import {
 } from '@qwen-code/acp-bridge/bridgeErrors';
 
 import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeouts';
+import {
+  WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS,
+  WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS,
+} from '../workspace-skills-refresh-policy.js';
 
 import { loadSettings } from '../../config/settings.js';
+import {
+  getProjectHooksApprovalState,
+  getProjectHooksForApprovalFromRawWorkspace,
+  hashProjectHooks,
+  loadHookApprovals,
+  summarizeProjectHooks,
+} from '../../config/hook-approvals.js';
 import {
   evaluateDaemonWorkspaceTrust,
   readDaemonTrustPolicySnapshot,
@@ -82,6 +93,8 @@ import {
   WorkspaceSkillNotFoundError,
   WorkspaceSettingsPartialPersistError,
   WorkspaceTrustGrantIneffectiveError,
+  WorkspaceProjectHooksNotPendingError,
+  WorkspaceProjectHooksChangedError,
 } from './types.js';
 import type {
   DaemonWorkspaceService,
@@ -135,11 +148,8 @@ export {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Start throttle for background revalidation, measured from task start.
-const WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS = 1_000;
 // Wire-visible age at which snapshot.stale becomes true.
 const WORKSPACE_SKILLS_STALE_AFTER_MS = 1_000;
-const WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS = 5_000;
 
 function createSkillToggleMutation(input: {
   skills: ReadonlyArray<{ name: string; enabled: boolean }>;
@@ -775,9 +785,41 @@ export function createDaemonWorkspaceService(
     },
 
     async getWorkspaceHooksStatus(_ctx: WorkspaceRequestContext) {
-      return queryWorkspaceStatus(SERVE_STATUS_EXT_METHODS.workspaceHooks, () =>
-        createIdleWorkspaceHooksStatus(boundWorkspace),
+      const status = await queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceHooks,
+        () => createIdleWorkspaceHooksStatus(boundWorkspace),
       );
+      // The approval prompt must appear on a cold daemon too: no live ACP
+      // child means the idle placeholder, which knows nothing about the
+      // workspace file. Read the same pending-decision truth locally.
+      if (status.pendingApproval) return status;
+      try {
+        // Same rule as the live child: explicit folder trust authorizes the
+        // block, so no card for hooks that would run.
+        if (isWorkspaceTrusted()) return status;
+        const settings = loadSettings(boundWorkspace, {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: false,
+          workspaceTrusted: true,
+          preserveInvalidWorkspaceSettings: true,
+        });
+        if (settings.merged.disableAllHooks) return status;
+        const approval = getProjectHooksForApprovalFromRawWorkspace(settings);
+        if (!approval || getProjectHooksApprovalState(approval) !== 'pending') {
+          return status;
+        }
+        return {
+          ...status,
+          pendingApproval: true,
+          pendingApprovalHooks: summarizeProjectHooks(
+            approval.resolved,
+            approval.hooks,
+          ),
+          pendingApprovalHash: hashProjectHooks(approval),
+        };
+      } catch {
+        return status;
+      }
     },
 
     async getWorkspaceExtensionsStatus(_ctx: WorkspaceRequestContext) {
@@ -785,6 +827,52 @@ export function createDaemonWorkspaceService(
         SERVE_STATUS_EXT_METHODS.workspaceExtensions,
         () => createIdleWorkspaceExtensionsStatus(boundWorkspace),
       );
+    },
+
+    async approveProjectHooks(
+      _ctx: WorkspaceRequestContext,
+      decision: 'approve' | 'reject',
+      expectedHash?: string,
+    ) {
+      assertActiveGeneration();
+      // Load the workspace file for review only; this never trusts the
+      // folder or feeds the execution accessors.
+      const settings = loadSettings(boundWorkspace, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: false,
+        workspaceTrusted: true,
+        preserveInvalidWorkspaceSettings: true,
+      });
+      const approval = getProjectHooksForApprovalFromRawWorkspace(settings);
+      if (!approval) {
+        throw new WorkspaceProjectHooksNotPendingError();
+      }
+      const approvalHash = hashProjectHooks(approval);
+      // The client echoes the hash it rendered; a block that changed since
+      // then must not be persisted as approved unseen — the user reviews the
+      // new block and decides again.
+      if (expectedHash !== undefined && expectedHash !== approvalHash) {
+        throw new WorkspaceProjectHooksChangedError();
+      }
+      await loadHookApprovals().setState(
+        approval,
+        decision === 'approve' ? 'approved' : 'rejected',
+      );
+      assertActiveGeneration();
+      // Best-effort live propagation: the persisted decision is
+      // authoritative, and every config re-reads the store on reload. A
+      // cold daemon (no ACP child) simply applies it on next start.
+      let reloaded = false;
+      try {
+        await invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.projectHooksApprove,
+          { decision, hash: approvalHash },
+        );
+        reloaded = true;
+      } catch {
+        // No live channel, or the child predates the control method.
+      }
+      return { decision, reloaded };
     },
 
     async getWorkspaceTrustStatus(_ctx: WorkspaceRequestContext) {

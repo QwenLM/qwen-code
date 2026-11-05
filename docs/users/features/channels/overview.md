@@ -371,7 +371,7 @@ All group settings use field-by-field inheritance: the specific group, then `"*"
 
 On the `github` and `gitlab` channels all inbound traffic is group traffic, so only `groupPolicy` and group member settings govern admission — see those channels' Security notes before using it on a public repository or project. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
 
-In the Web Shell channel editor, **Who can talk in groups** and **Allowed group member IDs** edit `groups["*"]`, and **Session operators** edits `operators`. When `senders` is unset, the editor shows its effective default and writes nothing until you pick a value. Per-group overrides and an explicitly empty `"operators": []` are set in `settings.json`; saving from the editor keeps them.
+In the Web Shell channel editor, **Who can talk in groups** and **Allowed group member IDs** edit `groups["*"]`, and **Session operators** edits `operators`. When `senders` is unset, the editor shows its effective default and writes nothing until you pick a value. On `github`, the editor also shows one row per allowlisted repository for that repository's `senders`, `allowedUsers`, and `requireMention` — see [GitHub](./github.md#editing-from-the-web-shell). Other per-group overrides (`dispatchMode`, `groupHistoryLimit`, and per-group `requireMention` on chat platforms) and an explicitly empty `"operators": []` are set in `settings.json`; saving from the editor keeps them.
 
 ### Group History Backfill
 
@@ -588,6 +588,32 @@ Channels support slash commands. These are handled locally (no agent round-trip)
 All other slash commands (e.g., `/compress`, `/summary`) are forwarded to the agent. Named-task commands are registered only when the mode is enabled, so `/sessions` remains agent-visible for existing configurations.
 
 Named-task commands work on all channel types (Telegram, WeChat, QQ, DingTalk, WeCom, Feishu, GitHub). `/cancel` is currently registered only by Telegram, and loop creation requires proactive delivery support for the current adapter and target.
+
+## Channel Events in the Web Shell
+
+The Web Shell's **Channel events** page shows a timeline of what every Channel
+in the current workspace did: the inbound messages it accepted, and the ones it
+skipped and why (`reason_filter`, `mention_required`, `duplicate`, a sender-gate
+rejection, `github_api_error` when reading or handling a GitHub thread failed;
+a `failed` row with that reason means the thread will be read again), the
+replies it published or suppressed, its inbound task transitions, and how each
+poll went. Pick the workspace whose Channels you want
+to inspect, then filter by Channel and by event type; the page refreshes every
+few seconds while its tab is visible, pauses in a background tab, and has a
+manual refresh.
+
+Use it to answer "why did the bot not reply to that comment?" without reading
+the daemon log. Events never include message text — only routing decisions,
+identifiers, and errors. The page and its route exist wherever Channel
+management is available (`channel_management`), and each Channel keeps its
+journal under `~/.qwen/channels/<workspace>/` with one rotated file, so it
+never grows without bound.
+
+Rows that refer to a concrete session carry an **Open session** button:
+outbound rows open the Channel's own reply session, and GitHub task rows for
+bound-session delivery open the PR-bound session that received the event —
+including when that session lives in another registered workspace. Rows
+without a session (polls, skipped inbound messages) show no button.
 
 ## Running
 

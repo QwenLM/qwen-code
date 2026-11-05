@@ -386,6 +386,36 @@ class ManagedModelSelectionTest {
         return new ManagedAgentService(source, new RequestDigests(), mock(HarnessCoordinator.class), harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
+    @Test
+    void modelChangeDoesNotWaitForTheTenantPlacementGuard() throws Exception {
+        try (var holder = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
+            holder.setAutoCommit(false);
+            com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.lockPlacementDomain(holder, tenant);
+            try {
+                assertThat(change("actor", "guarded", "model-a", 0).modelSelection())
+                        .isEqualTo(new WebShellModelSelection("model-a", 1));
+            } finally {
+                holder.rollback();
+            }
+        }
+    }
+
+    @Test
+    void workspaceSessionCreationDoesNotWaitForTheTenantPlacementGuard() throws Exception {
+        try (var holder = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
+            holder.setAutoCommit(false);
+            com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.lockPlacementDomain(holder, tenant);
+            try {
+                String created = transaction().execute(status -> service.createWorkspaceSession(tenant, "actor",
+                        "create-guarded", "qwen-code", null, null, null, List.of(),
+                        new WorkspaceSelection("ws", "."))).sessionId();
+                assertThat(created).isNotBlank().isNotEqualTo(session);
+            } finally {
+                holder.rollback();
+            }
+        }
+    }
+
     private WebShellModelChangeResult change(String actor, String key, String model, long revision) {
         return transaction().execute(status -> service.changeWebShellSessionModel(tenant, actor, session, key, model, revision));
     }
