@@ -68,6 +68,7 @@ import java.util.concurrent.Executors;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.ALLOCATION;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.CAPTURE_BYTES;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMIT_MARKER;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.CSI_REGISTRATION;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.checkpointPayload;
@@ -121,11 +122,7 @@ class ToolPublicationStoreTest {
     private void initialize(javax.sql.DataSource source, boolean csiWorkspace,
             ToolPublicationObjectStore objects) {
         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
-        csiRegistration = csiWorkspace
-                ? new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
-                        "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
-                        "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1)
-                : null;
+        csiRegistration = csiWorkspace ? CSI_REGISTRATION : null;
         jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         projectionProperties = new ManagedAgentProperties();
