@@ -512,6 +512,101 @@ class WorkspaceFileUploadStoreTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void worktreePreparationSharesRuntimeAndPendingUploadsInEitherOrder(boolean prepareFirst) {
+        var binding = files.scope("tenant", "actor", workspace, ".").binding();
+        var authority = new WorkspaceExecutionStore(jdbc, manager, guard);
+        var runtime = runtime();
+        String maintenance = worktreeOperation(binding, true);
+        String step = prepareFirst ? authority.holdForMaintenance(binding, maintenance, 1) : null;
+        String revision = revision();
+        String upload = UUID.randomUUID().toString();
+        authority.claim(binding, runtime);
+        try (var process = mockStatic(WorkspaceFileProcess.class)) {
+            process.when(() -> WorkspaceFileProcess.upload(anyString(), anyString(), any()))
+                    .thenAnswer(call -> response(call.getArgument(2), "pending", null));
+            assertThatThrownBy(() -> upload(upload, "pending.bin", revision, new byte[0]))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_upload_pending"));
+            if (!prepareFirst) {
+                step = authority.holdForMaintenance(binding, maintenance, 1);
+            }
+            assertThat(jdbc.queryForObject("SELECT member_count FROM ma_storage_owner", Long.class)).isEqualTo(2);
+            jdbc.update("UPDATE ma_session_worktree SET state = 'BLOCKED'");
+            jdbc.update("UPDATE ma_operation SET state = 'BLOCKED', claim_until = 0 WHERE operation_kind = 'SESSION_WORKTREE'");
+            authority.claim(binding, runtime);
+            authority.assertHeld(binding, runtime);
+            authority.beginRewind(binding, runtime);
+            authority.endRewind(binding, runtime);
+            process.when(() -> WorkspaceFileProcess.upload(anyString(), anyString(), any()))
+                    .thenAnswer(call -> response(call.getArgument(2), "completed", null));
+            assertThat(upload(UUID.randomUUID().toString(), "new.bin", revision, new byte[0]).sizeBytes()).isZero();
+            assertThat(uploads.query("tenant", "actor", upload).state()).isEqualTo("completed");
+            assertThat(uploads.query("tenant", "actor", upload).state()).isEqualTo("completed");
+            assertThat(jdbc.queryForObject("SELECT member_count FROM ma_storage_owner", Long.class)).isEqualTo(1);
+            String cleanup = worktreeOperation(binding, false);
+            assertThatThrownBy(() -> authority.holdForMaintenance(binding, cleanup, 1)).isInstanceOf(RuntimeBrokerException.class);
+            authority.releaseMaintenance(binding, maintenance, 2, step);
+            assertThat(jdbc.queryForObject("SELECT maintenance_id FROM ma_storage_owner", String.class)).isEqualTo(maintenance);
+            authority.release(binding, runtime);
+            assertThat(jdbc.queryForObject("SELECT member_count FROM ma_storage_owner", Long.class)).isZero();
+            assertThatThrownBy(() -> authority.holdForMaintenance(binding, cleanup, 1)).isInstanceOf(RuntimeBrokerException.class);
+            authority.releaseMaintenance(binding, maintenance, 1, step);
+            assertSharedMembers(0);
+            String cleanupStep = authority.holdForMaintenance(binding, cleanup, 1);
+            assertThatThrownBy(() -> authority.claim(binding, runtime)).isInstanceOf(RuntimeBrokerException.class);
+            assertThatThrownBy(() -> upload(UUID.randomUUID().toString(), "blocked.bin", revision, new byte[0]))
+                    .isInstanceOf(ManagedAgentException.class);
+            authority.releaseMaintenance(binding, cleanup, 1, cleanupStep);
+            assertSharedMembers(0);
+        }
+    }
+
+    @Test
+    void mismatchedRuntimeMemberRemainsUnavailableDuringPreparation() {
+        var binding = files.scope("tenant", "actor", workspace, ".").binding();
+        var authority = new WorkspaceExecutionStore(jdbc, manager, guard);
+        var runtime = runtime();
+        authority.holdForMaintenance(binding, worktreeOperation(binding, true), 1);
+        authority.claim(binding, runtime);
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = 'different-storage'");
+        jdbc.update("UPDATE ma_operation SET claim_generation = 2 WHERE operation_kind = 'SESSION_WORKTREE'");
+        assertThatThrownBy(() -> authority.claim(binding, runtime))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+    }
+
+    @Test
+    void mismatchedPreparationGenerationNeverAdmitsAMember() {
+        var binding = files.scope("tenant", "actor", workspace, ".").binding();
+        var authority = new WorkspaceExecutionStore(jdbc, manager, guard);
+        var runtime = runtime();
+        String maintenance = worktreeOperation(binding, true);
+        String step = authority.holdForMaintenance(binding, maintenance, 1);
+        jdbc.update("UPDATE ma_operation SET claim_generation = 2 WHERE operation_kind = 'SESSION_WORKTREE'");
+        assertThatThrownBy(() -> authority.claim(binding, runtime)).isInstanceOf(RuntimeBrokerException.class);
+        assertThat(jdbc.queryForObject("SELECT member_count FROM ma_storage_owner", Long.class)).isZero();
+        jdbc.update("UPDATE ma_operation SET claim_generation = 1 WHERE operation_kind = 'SESSION_WORKTREE'");
+        authority.releaseMaintenance(binding, maintenance, 1, step);
+    }
+
+    private String worktreeOperation(com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding binding, boolean preparing) {
+        String worktree = UUID.randomUUID().toString().replace("-", "");
+        String operation = preparing ? worktree : UUID.randomUUID().toString().replace("-", "");
+        String state = preparing ? "PREPARING" : "REMOVING";
+        new org.springframework.transaction.support.TransactionTemplate(manager).executeWithoutResult(status -> {
+            jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_key,"
+                            + " worktree_id, owner_actor_key, state, revision, plan_json, operation_id, gmt_create, gmt_modified)"
+                            + " VALUES ('tenant', ?, ?, ?, ?, ?, 'actor', ?, 1, '{}', ?, 1, 1)",
+                    worktree, workspace, binding.getStorageId(), WorkspaceExecutionStore.storageKey(jdbc, binding), worktree, state, operation);
+            new WorkspaceOperations(jdbc, "tenant").create(WorkspaceOperations.Kind.SESSION_WORKTREE, operation,
+                    WorkspaceOperations.values("session_id", worktree, "storage_id", binding.getStorageId(), "state", state));
+            jdbc.update("UPDATE ma_operation SET claim_owner = 'maintenance', claim_generation = 1, claim_until = "
+                            + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime.SQL_NOW + " + 60000 WHERE operation_key = ?",
+                    WorkspaceOperations.key(WorkspaceOperations.Kind.SESSION_WORKTREE, "tenant", operation));
+        });
+        return operation;
+    }
+
     @Test
     void terminalEvidenceCannotReleaseADifferentStorageHolder() {
         String id = UUID.randomUUID().toString();

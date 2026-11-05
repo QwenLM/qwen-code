@@ -6,7 +6,7 @@
 
 import {
   EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
-  type DaemonClient,
+  DaemonClient,
   type GoalControlRequest,
   type GoalSnapshotV2,
   type GoalStateResponse,
@@ -55,6 +55,17 @@ export function createDaemonWorkspaceActions({
   baseUrl,
   token,
 }: CreateDaemonWorkspaceActionsArgs): DaemonWorkspaceActions {
+  // Login cleanup must outlive disposal of the workspace transport.
+  const subscriptionRequest = async <T>(
+    run: (client: DaemonClient) => Promise<T>,
+  ): Promise<T> => {
+    const client = new DaemonClient({ baseUrl, token });
+    try {
+      return await run(client);
+    } finally {
+      client.dispose();
+    }
+  };
   const requestRest = (url: URL, init: RequestInit) =>
     createDaemonRestRequest(
       baseUrl,
@@ -1171,6 +1182,42 @@ export function createDaemonWorkspaceActions({
         client.cancelDeviceFlow(deviceFlowId),
         'Cancel device flow timed out',
       );
+    },
+
+    activateSubscription(options) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Connect Qwen Subscription failed',
+      );
+      return workspace.activateSubscription(options);
+    },
+
+    getSubscriptionConfig(options) {
+      return subscriptionRequest((client) =>
+        client.getSubscriptionConfig(options),
+      );
+    },
+    startSubscriptionLogin() {
+      return subscriptionRequest((client) => client.startSubscriptionLogin());
+    },
+    getSubscriptionLogin(id, options) {
+      return subscriptionRequest((client) =>
+        client.getSubscriptionLogin(id, options),
+      );
+    },
+    cancelSubscriptionLogin(id) {
+      return subscriptionRequest((client) =>
+        client.cancelSubscriptionLogin(id),
+      );
+    },
+    getSubscriptionUserInfo(options) {
+      return subscriptionRequest((client) =>
+        client.getSubscriptionUserInfo(options),
+      );
+    },
+    signOutSubscription() {
+      return subscriptionRequest((client) => client.signOutSubscription());
     },
 
     async getAuthStatus() {
