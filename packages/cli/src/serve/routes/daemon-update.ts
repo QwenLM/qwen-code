@@ -275,10 +275,20 @@ function createUpdateController(deps: UpdateRouteDeps) {
   ): Promise<PreparedUpdate> => {
     if (!preparedVersion) return candidate;
     try {
-      const { checkForUpdatesDetailed } = await import(
-        '../../ui/utils/updateCheck.js'
-      );
+      const { checkForUpdatesDetailed, describeUpdateCheckFailure } =
+        await import('../../ui/utils/updateCheck.js');
       const result = await checkForUpdatesDetailed();
+      // A registry failure resolves as `error`; it does not throw. Without
+      // this branch an unreachable registry and a routine "nothing newer"
+      // would be indistinguishable afterwards, even though both apply the
+      // older prepared release.
+      if (result.status === 'error') {
+        writeStderrLine(
+          'qwen serve: update re-resolve failed, applying the prepared release: ' +
+            describeUpdateCheckFailure(result.error),
+        );
+        return candidate;
+      }
       if (result.status !== 'update') return candidate;
       const latestVersion = result.info.update.latest;
       if (!semver.gt(latestVersion, preparedVersion)) return candidate;
@@ -295,8 +305,10 @@ function createUpdateController(deps: UpdateRouteDeps) {
         .catch(() => undefined);
       return staged;
     } catch (error) {
+      // What throws here is detection or staging, not the registry lookup,
+      // which reports its own failures above.
       writeStderrLine(
-        'qwen serve: update re-resolve failed, applying the prepared release: ' +
+        'qwen serve: update restage failed, applying the prepared release: ' +
           (error instanceof Error ? error.message : String(error)),
       );
       return candidate;

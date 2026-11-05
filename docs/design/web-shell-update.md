@@ -85,11 +85,16 @@ existing graceful shutdown path; it does not resume an interrupted model turn.
   click: the daemon keeps answering while it re-resolves and stages, which can
   outlast any fixed click-time budget, and a reachable daemon is still working.
   If it has been unreachable for 60 seconds, show an error on the first completed
-  poll. Keep a generous absolute cap as well, above the daemon's own staging
-  ceilings (five-minute archive download, ten-minute managed npm child), so a
+  poll. Keep a generous absolute cap as well — 20 minutes — so a
   daemon that stays reachable but never leaves restarting — a hung activation or
-  process replacement — cannot disable the control forever with no error. The cap
-  must sit high enough that a slow but progressing update never reaches it.
+  process replacement — cannot disable the control forever with no error. Size
+  it against the whole staging chain, not a single timeout constant: the
+  standalone archive download tries OSS and then GitHub sequentially with a
+  five-minute budget _each_, and the checksum and signature fetches add up to
+  two more minutes, so one restage can spend about twelve minutes downloading
+  and verifying before activation; the managed npm child is capped at ten. The
+  cap must sit far enough above that chain that a slow but progressing update
+  never reaches it.
   Unreachability is not the only terminal condition. Restarting is sticky
   until the process is replaced, so once the restart is acknowledged a reachable
   daemon reporting any other state with an unchanged running version means the
@@ -101,8 +106,11 @@ existing graceful shutdown path; it does not resume an interrupted model turn.
   it, and treating that snapshot as a settled daemon reports a false failure and
   suppresses the reload a successful update still owes the user. Dropping the
   short click-time budget must not leave the control waiting
-  forever for a version change that will never arrive, nor hide the control by
-  leaving a stale restarting status rendered.
+  forever for a version change that will never arrive. No failure path may hide
+  the control either: a wedged daemon keeps reporting restarting, which the
+  render gate does not display, so every give-up path — both deadlines and a
+  daemon-reported error — keeps a retryable entry on screen rather than leaving
+  the user one notification and then no affordance at all.
   Unmounting cancels browser polling, not daemon work.
 - Hide the control for older daemons and the desktop shell. Custom footer items
   can omit `update`; this also disables the browser's preparation requests.
@@ -156,7 +164,9 @@ orderings around the acknowledgement: a settled snapshot delivered before it mus
 not terminate the wait, and one delivered after it by a poll that was initiated
 before it must not either — only a poll initiated afterwards may. Cover a daemon
 that stays reachable and wedged in restarting, so the absolute cap is shown to
-end the wait without firing during a slow but progressing update. Browser
+end the wait without firing during a slow but progressing update, and assert a
+visible retryable entry afterwards — "the spinner is gone" is equally true of a
+control that vanished, so it cannot witness this property. Browser
 fixtures must
 model the daemon's own contract — restarting from the acknowledged restart until
 the process is replaced — because a fixture that keeps reporting a prepared state

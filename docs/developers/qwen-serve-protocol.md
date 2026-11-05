@@ -843,9 +843,15 @@ launcher; clients cannot supply a version or command.
   captured when the update was requested. Because staging runs after the `202`
   and can take minutes, the client measures its restart deadline from continuous
   unreachability, not from the click: a daemon that keeps answering is still
-  working. A generous absolute cap above the daemon's own staging ceilings
-  (five-minute archive download, ten-minute managed npm child) backstops a daemon
-  that stays reachable but never leaves `restarting`. Once the restart is
+  working. A generous absolute cap (20 minutes) backstops a daemon
+  that stays reachable but never leaves `restarting`. It sits above the whole
+  staging chain, not above a single timeout constant: a standalone archive
+  download tries OSS and then GitHub sequentially with a five-minute budget
+  _each_, and the checksum and signature fetches add up to two more minutes, so
+  one restage can spend about twelve minutes downloading and verifying before
+  activation; the managed npm child is capped at ten. Every give-up path keeps a
+  retryable entry on screen, because a wedged daemon keeps reporting
+  `restarting`, which the control does not otherwise display. Once the restart is
   acknowledged, `restarting` is sticky until the
   process is replaced, so a reachable daemon that reports any other state with an
   unchanged `currentVersion` means the replacement did not land on the new build;

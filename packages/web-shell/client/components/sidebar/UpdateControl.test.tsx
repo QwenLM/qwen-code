@@ -462,9 +462,9 @@ describe('UpdateControl', () => {
       getByRole(container, 'button', { name: 'Update' }).click(),
     );
     // Reachable throughout, so the unreachability deadline never starts. Only
-    // the absolute backstop above the daemon's own staging ceilings can end
-    // this, and it must not fire during a slow but progressing update.
-    await act(async () => vi.advanceTimersByTimeAsync(14 * 60_000));
+    // the absolute backstop above the daemon's own staging chain can end this,
+    // and it must not fire during a slow but progressing update.
+    await act(async () => vi.advanceTimersByTimeAsync(19 * 60_000));
     expect(onError).not.toHaveBeenCalled();
     expect(
       getByRole(container, 'button', { name: 'Restarting…' }).hasAttribute(
@@ -477,6 +477,36 @@ describe('UpdateControl', () => {
     expect(
       queryByRole(container, 'button', { name: 'Restarting…' }),
     ).toBeNull();
+    // Giving up must hand back a retryable entry, not vanish: the daemon is
+    // still reporting `restarting`, which the render gate hides on its own.
+    expect(
+      getByRole(container, 'button', { name: 'Update' }).hasAttribute(
+        'disabled',
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps a retryable entry when the daemon itself reports an error', async () => {
+    client.daemonUpdateStatus.mockResolvedValue(ready);
+    const container = render();
+    await flushReact();
+    client.daemonUpdateStatus.mockResolvedValue(restarting);
+    await act(async () =>
+      getByRole(container, 'button', { name: 'Update' }).click(),
+    );
+    client.daemonUpdateStatus.mockResolvedValue({
+      ...restarting,
+      state: 'error',
+      message: 'Activation failed',
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onRestarted).not.toHaveBeenCalled();
+    expect(
+      getByRole(container, 'button', { name: 'Update' }).hasAttribute(
+        'disabled',
+      ),
+    ).toBe(false);
   });
 
   it('keeps the collapsed button accessible in Chinese', async () => {

@@ -30,12 +30,17 @@ function reloadPage(url: string) {
   window.location.reload();
 }
 
-// Backstop above the daemon's own staging ceilings (5-minute archive download,
-// 10-minute managed npm child). A daemon that stays reachable but wedged in
-// `restarting` — a hung activation or process replacement — must not leave the
-// control disabled forever with no error. Generous enough that a slow but
-// successful update never reaches it.
-const RESTART_ABSOLUTE_CAP_MS = 15 * 60_000;
+// Backstop above the daemon's own staging ceilings. Those are larger than a
+// single timeout constant suggests: a standalone archive download tries OSS
+// and then GitHub sequentially with a five-minute budget *each*, and the
+// checksum and signature fetches add up to two more minutes, so one restage
+// can spend about twelve minutes downloading and verifying before activation;
+// the managed npm child is capped at ten. A daemon that stays reachable but
+// wedged in `restarting` — a hung activation or process replacement — must not
+// leave the control disabled forever with no error, and the cap must stay far
+// enough above that real chain that a slow but progressing update never
+// reaches it.
+const RESTART_ABSOLUTE_CAP_MS = 20 * 60_000;
 const RESTART_UNREACHABLE_CAP_MS = 60_000;
 
 export function UpdateControl({
@@ -53,6 +58,12 @@ export function UpdateControl({
     version: string;
     url: string;
   } | null>(null);
+  // Giving up must not take the entry with it. A wedged daemon keeps reporting
+  // `restarting`, which the render gate below does not display, so without this
+  // the user would get one error notification and then no update affordance at
+  // all. The flag keeps a retryable entry on screen until the daemon offers a
+  // displayable state again or the user clicks.
+  const [gaveUp, setGaveUp] = useState(false);
   const restartRequested = useRef(false);
   // Polling starts when the click sets `restarting`, before the restart POST
   // resolves, so the first poll can still observe the pre-click state. Only
@@ -65,6 +76,7 @@ export function UpdateControl({
   useEffect(() => {
     setStatus(null);
     setRestarting(null);
+    setGaveUp(false);
     restartRequested.current = false;
     restartAcknowledged.current = false;
     return () => {
@@ -103,6 +115,7 @@ export function UpdateControl({
           if (next.state === 'error') {
             restartRequested.current = false;
             setRestarting(null);
+            setGaveUp(true);
             callbacks.current.onError(
               new Error(next.message),
               callbacks.current.t('update.failed'),
@@ -119,6 +132,7 @@ export function UpdateControl({
             // in place would hide the control entirely instead of handing the
             // user back whatever the daemon now offers.
             setStatus(next);
+            setGaveUp(false);
             setRestarting(null);
             callbacks.current.onError(
               new Error(callbacks.current.t('update.failed')),
@@ -145,6 +159,9 @@ export function UpdateControl({
       ) {
         restartRequested.current = false;
         setRestarting(null);
+        // Keep a retryable entry: the daemon may still be reporting
+        // `restarting`, which the render gate does not display on its own.
+        setGaveUp(true);
         callbacks.current.onError(
           failure ?? new Error(callbacks.current.t('update.failed')),
           callbacks.current.t('update.failed'),
@@ -164,6 +181,7 @@ export function UpdateControl({
     if (restartRequested.current) return;
     restartRequested.current = true;
     restartAcknowledged.current = false;
+    setGaveUp(false);
     const generation = clientGeneration.current;
     setRestarting({
       startedAt: Date.now(),
@@ -189,7 +207,12 @@ export function UpdateControl({
     status.instructions?.length
       ? status.instructions
       : undefined;
-  if (status?.state !== 'ready' && restarting === null && !manualInstructions)
+  if (
+    status?.state !== 'ready' &&
+    restarting === null &&
+    !manualInstructions &&
+    !gaveUp
+  )
     return null;
   const label = t(restarting !== null ? 'update.restarting' : 'update.button');
   const Icon = restarting !== null ? LoaderCircleIcon : ArrowUpCircleIcon;

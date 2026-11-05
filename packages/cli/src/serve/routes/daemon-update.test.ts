@@ -385,7 +385,7 @@ describe('daemon update routes', () => {
     });
   });
 
-  it('applies the prepared release when the activation-time re-resolve fails', async () => {
+  it('applies the prepared release and logs when the registry is unreachable', async () => {
     const activated: string[] = [];
     mocks.standalone.mockImplementation(
       async (_dir: string, version: string) => ({
@@ -395,13 +395,43 @@ describe('daemon update routes', () => {
         cleanup: async () => {},
       }),
     );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     const app = await makeApp();
     await ready(app);
-    mocks.check.mockRejectedValue(new Error('offline'));
+    // The real check resolves an error result for a registry outage; it does
+    // not throw. Pinning the thrown shape would test the mock, not the product.
+    mocks.check.mockResolvedValue({
+      status: 'error',
+      error: new Error('offline'),
+      currentVersion: '1.0.0',
+    });
     await request(app).post('/daemon/update/restart').send({}).expect(202);
     await vi.waitFor(() => expect(mocks.restart).toHaveBeenCalledTimes(1));
     expect(activated).toEqual(['2.0.0']);
     expect(mocks.standalone).toHaveBeenCalledTimes(1);
+    const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+    expect(logged).toContain('update re-resolve failed');
+    expect(logged).toContain('registry unreachable');
+    stderr.mockRestore();
+  });
+
+  it('names staging, not the registry, when the restage itself throws', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const app = await makeApp();
+    await ready(app);
+    mocks.check.mockResolvedValue(release('3.0.0'));
+    mocks.standalone.mockRejectedValueOnce(new Error('Download failed'));
+    await request(app).post('/daemon/update/restart').send({}).expect(202);
+    await vi.waitFor(() => expect(mocks.restart).toHaveBeenCalledTimes(1));
+    const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+    expect(logged).toContain('update restage failed');
+    expect(logged).toContain('Download failed');
+    expect(logged).not.toContain('re-resolve failed');
+    stderr.mockRestore();
   });
 
   it('applies the prepared release when the registry reports nothing newer', async () => {
