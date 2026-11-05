@@ -47,6 +47,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -105,7 +106,7 @@ public final class LocalProcessRuntimeProvisioner
     // Serialize spawn-and-register, and the release-side move out of
     // `owned`, against the exit snapshot, so a worker can never exist unseen
     // by terminateAll.
-    private final Object lifecycle = new Object();
+    private final ReentrantLock lifecycle = new ReentrantLock();
     private volatile boolean terminated;
     private final Thread exitHook;
 
@@ -194,7 +195,8 @@ public final class LocalProcessRuntimeProvisioner
 
     private void terminateAll() {
         List<Process> all;
-        synchronized (lifecycle) {
+        lifecycle.lock();
+        try {
             terminated = true;
             all = new ArrayList<>(starting.size() + owned.size());
             for (OwnedProcess process : starting) {
@@ -203,6 +205,8 @@ public final class LocalProcessRuntimeProvisioner
             for (OwnedProcess process : owned.values()) {
                 all.add(process.process);
             }
+        } finally {
+            lifecycle.unlock();
         }
         all.forEach(Process::destroy);
         forceAllAfterGrace(all);
@@ -453,7 +457,8 @@ public final class LocalProcessRuntimeProvisioner
 
     void stop(RuntimeLease lease) {
         OwnedProcess process;
-        synchronized (lifecycle) {
+        lifecycle.lock();
+        try {
             // Move the worker from owned to starting under the same lock
             // terminateAll() snapshots with, so an exit can never find it in
             // neither set. Once terminated, that snapshot already covered it.
@@ -465,6 +470,8 @@ public final class LocalProcessRuntimeProvisioner
             if (process != null && !terminated) {
                 starting.add(process);
             }
+        } finally {
+            lifecycle.unlock();
         }
         if (process != null) {
             process.process.destroy();
@@ -575,7 +582,8 @@ public final class LocalProcessRuntimeProvisioner
             Map<String, Object> document = boot(request, seed);
             byte[] encoded = JsonCodec.encode(document);
             Process process;
-            synchronized (lifecycle) {
+            lifecycle.lock();
+            try {
                 if (terminated) {
                     closedRefusal = failed(
                             "Managed Runtime provisioner is closed.");
@@ -584,6 +592,8 @@ public final class LocalProcessRuntimeProvisioner
                 process = workerProcess().start();
                 ownedProcess = new OwnedProcess(process, null, seed);
                 starting.add(ownedProcess);
+            } finally {
+                lifecycle.unlock();
             }
             readerProcess.complete(process);
             process.getOutputStream().write(encoded);
@@ -923,14 +933,17 @@ public final class LocalProcessRuntimeProvisioner
             // The worker is provably gone; holding its entry would leak the
             // ownership record for the broker's lifetime, while dropping the
             // fact entirely would make the NOT_FOUND verdict one-shot. Reap
-            // under stop()'s monitor, and only when the remove lands: a
+            // under stop()'s lock, and only when the remove lands: a
             // release that already moved the entry out also cleared the
             // tombstone, and re-putting one here would outlive that clear.
-            synchronized (lifecycle) {
+            lifecycle.lock();
+            try {
                 if (owned.remove(ownershipKey(lastLease), process)) {
                     reaped.put(tombstone(ownershipKey(lastLease)),
                             process.process.pid());
                 }
+            } finally {
+                lifecycle.unlock();
             }
             if (handle == null) {
                 return RuntimeObservation.notFound();

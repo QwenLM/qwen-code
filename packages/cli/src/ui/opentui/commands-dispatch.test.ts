@@ -21,12 +21,18 @@ import {
   makeFakeConfig,
 } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import {
   CommandKind,
   type SlashCommand,
   type SlashCommandActionReturn,
 } from '../commands/types.js';
 import { quitCommand } from '../commands/quitCommand.js';
+import {
+  logoutCommand,
+  upgradeCommand,
+} from '../commands/subscription-commands.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { cdCommand } from '../commands/cdCommand.js';
 import type { HistoryItem } from '../types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
@@ -247,6 +253,82 @@ async function dispatch(
 }
 
 describe('guards (ink handleSlashCommand parity)', () => {
+  it('removes subscription commands from presentation and dispatch without subscription auth', async () => {
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+      { ...logoutCommand },
+      { ...upgradeCommand },
+    ]);
+    try {
+      for (const name of ['logout', 'upgrade']) {
+        expect(await dispatcher.handle(`/${name}`)).toEqual({
+          kind: 'handled',
+        });
+        expect(host.items.at(-1)).toMatchObject({
+          type: 'error',
+          text: `Unknown command: /${name}`,
+        });
+      }
+    } finally {
+      dispatcher.dispose();
+    }
+  });
+
+  it('refreshes subscription command availability on auth changes and preserves custom and hidden commands', async () => {
+    const config = makeFakeConfig({});
+    const auth = vi.spyOn(config, 'getAuthType');
+    const signedIn = vi
+      .spyOn(QwenSubscriptionSession.prototype, 'isSignedIn')
+      .mockReturnValue(true);
+    const action = vi.fn();
+    const custom = stub({ name: 'logout', kind: CommandKind.FILE, action });
+    const hidden = stub({ name: 'hidden', hidden: true, action });
+    const commands = [{ ...logoutCommand }, { ...upgradeCommand }, hidden];
+    vi.spyOn(config, 'getSkillManager').mockReturnValue(
+      {} as ReturnType<Config['getSkillManager']>,
+    );
+    loadInteractiveCommandsMock.mockResolvedValue(commands);
+    const host = createFakeHost();
+    host.isIdle = () => false;
+    const dispatcher = new OpenTuiSlashDispatcher(
+      host,
+      { ...services, config },
+      commands,
+    );
+    try {
+      auth.mockReturnValue(AuthType.QWEN_SUBSCRIPTION);
+      await dispatcher.handle('/logout');
+      expect(host.items.at(-1)).toMatchObject({
+        type: 'warning',
+        text: 'Wait for the current response to finish before signing out.',
+      });
+      auth.mockReturnValue(AuthType.USE_OPENAI);
+      for (const name of ['logout', 'upgrade']) {
+        await dispatcher.handle(`/${name}`);
+        expect(host.items.at(-1)).toMatchObject({
+          type: 'error',
+          text: `Unknown command: /${name}`,
+        });
+      }
+      auth.mockReturnValue(AuthType.QWEN_SUBSCRIPTION);
+      await dispatcher.handle('/logout');
+      expect(host.items.at(-1)).toMatchObject({ type: 'warning' });
+      expect(dispatcher.commands).toEqual(commands);
+
+      auth.mockReturnValue(AuthType.USE_OPENAI);
+      dispatcher.setCommands([custom, { ...upgradeCommand }, hidden]);
+      await dispatcher.handle('/logout');
+      await dispatcher.handle('/hidden');
+      expect(action).toHaveBeenCalledTimes(2);
+    } finally {
+      auth.mockRestore();
+      signedIn.mockRestore();
+      vi.mocked(config.getSkillManager).mockRestore();
+      loadInteractiveCommandsMock.mockReset();
+      dispatcher.dispose();
+    }
+  });
+
   it.each(['unchanged', 'changed'] as const)(
     'keeps command history current across an await when history is %s',
     async (kind) => {
