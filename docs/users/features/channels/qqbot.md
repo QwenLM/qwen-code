@@ -87,8 +87,6 @@ export QQ_APP_SECRET=<your-app-secret>
 | `purgeLegacySessions`      | `false` | Delete legacy single-scope and user-scope session routes — see below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `forwardBotMessages`       | `false` | Deliver messages authored by other bots with a `[bot]` sender prefix instead of dropping them — see [Group Chats](#group-chats).                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
-> > > > > > > origin/main
-
 All standard channel options (see [Channel Overview](./overview#options)) are also supported:
 `privatePolicy`, `allowedUsers`, `sessionScope`, `cwd`, `instructions`, `groupPolicy`, `groups`, `dispatchMode`.
 
