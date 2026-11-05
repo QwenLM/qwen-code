@@ -476,6 +476,9 @@ describe('hooksCommand', () => {
         matcher?: string;
         config: { type: string; command?: string; name?: string };
       }>;
+      withheldApproval?: Record<string, unknown>;
+      withheldTrust?: Record<string, unknown>;
+      rejected?: boolean;
     }) {
       const sessionConfig = {
         getHookSystem: vi.fn().mockReturnValue({
@@ -489,12 +492,65 @@ describe('hooksCommand', () => {
           }),
         }),
         getSessionId: vi.fn().mockReturnValue('sid'),
+        getWithheldProjectHooks: vi.fn().mockReturnValue(opts.withheldApproval),
+        getTrustWithheldProjectHooks: vi
+          .fn()
+          .mockReturnValue(opts.withheldTrust),
+        isProjectHooksRejected: vi.fn().mockReturnValue(opts.rejected ?? false),
       };
       return createMockCommandContext({
         executionMode: 'non_interactive',
         services: { config: sessionConfig },
       });
     }
+
+    it('lists approval-withheld project hooks as disabled instead of claiming none', async () => {
+      const ctx = makeContext({
+        configHooks: [],
+        withheldApproval: {
+          SessionStart: [
+            {
+              hooks: [
+                { type: 'command', command: 'node marker.mjs', name: 'marker' },
+              ],
+            },
+          ],
+        },
+      });
+
+      const result = await hooksCommand.action!(ctx, '');
+
+      expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+      const content = (result as { content: string }).content;
+      expect(content).toContain('1 total');
+      expect(content).toContain('marker');
+      expect(content).toContain('disabled (not approved)');
+    });
+
+    it('names a rejection and the trust gate with their own reasons', async () => {
+      const rejectedCtx = makeContext({
+        configHooks: [],
+        withheldApproval: {
+          Stop: [{ hooks: [{ type: 'command', command: 'x' }] }],
+        },
+        rejected: true,
+      });
+      const rejectedResult = await hooksCommand.action!(rejectedCtx, '');
+      expect((rejectedResult as { content: string }).content).toContain(
+        'disabled (rejected)',
+      );
+
+      const trustCtx = makeContext({
+        configHooks: [],
+        withheldTrust: {
+          Stop: [{ hooks: [{ type: 'command', command: 'y' }] }],
+        },
+      });
+      const trustResult = await hooksCommand.action!(trustCtx, '');
+      expect((trustResult as { content: string }).content).toContain(
+        'disabled (folder not trusted)',
+      );
+    });
 
     it('groups hooks under matcher headings', async () => {
       const ctx = makeContext({
