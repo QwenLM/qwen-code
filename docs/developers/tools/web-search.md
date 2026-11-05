@@ -15,7 +15,7 @@ If you configured nothing under `tools.webSearch`, the tool registers whenever t
 
 | How you signed in                                                                                                          | Built-in search                                 |
 | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Qwen Account with Subscription — **Plus or Pro**                                                                           | on                                              |
+| [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code) — **Plus or Pro**                             | on                                              |
 | Alibaba ModelStudio → **Standard API Key**                                                                                 | on                                              |
 | Alibaba ModelStudio → **Token Plan**                                                                                       | on                                              |
 | Alibaba ModelStudio → **Coding Plan**                                                                                      | off — its endpoint is not verified for this API |

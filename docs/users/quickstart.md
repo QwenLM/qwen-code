@@ -86,8 +86,6 @@ The first-run menu lets you connect a model provider. Choose one of:
 - **Third-party Providers** — choose a built-in provider (DeepSeek, Grok, MiniMax, Z.AI, Kimi, Idealab, ModelScope, OpenRouter, Requesty, and more) and connect with an API key.
 - **Custom Provider** — manually connect a local server, proxy, or unsupported provider.
 
-The legacy free Qwen OAuth allowance was discontinued on April 15, 2026. Qwen Account with Subscription requires an active Plus or Pro subscription and does not restore that free allowance.
-
 > [!note]
 >
 > Qwen Code stores its configuration and customizations in `.qwen` directories: `~/.qwen/` for user-level settings (e.g. `settings.json`) and global custom commands, and `<project>/.qwen/` for project-specific files such as custom commands and summaries.
