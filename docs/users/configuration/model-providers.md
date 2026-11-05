@@ -186,7 +186,6 @@ Use one of the built-in provider ids below, or map a custom id with `providerPro
 | `openai`           | OpenAI-compatible APIs. Defaults to Chat Completions; set a model's `wireApi` to `responses` for the Responses API.                             |
 | `anthropic`        | Anthropic Claude API                                                                                                                            |
 | `gemini`           | Google Gemini API                                                                                                                               |
-| `qwen-oauth`       | Legacy free Qwen OAuth (discontinued; separate from Qwen Account with Subscription)                                                             |
 | `vertex-ai`        | Google Vertex AI (uses the `gemini` protocol and the `@google/genai` SDK in Vertex AI mode; selecting it sets `GOOGLE_GENAI_USE_VERTEXAI=true`) |
 
 > [!note]
