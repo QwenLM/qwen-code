@@ -14556,9 +14556,20 @@ describe('useLlmStream', () => {
             },
           };
           let snapshot: unknown = { goal: null, activity: 'idle' };
+          const goalListeners = new Set<() => void>();
           mockConfig.getGoalRuntime = vi.fn(() => ({
             getSnapshot: () => snapshot,
+            subscribe: (listener: () => void) => {
+              goalListeners.add(listener);
+              return () => goalListeners.delete(listener);
+            },
           })) as unknown as Config['getGoalRuntime'];
+          // The Goal changes with nothing queued since, as when its verifier
+          // accepts after the session went idle.
+          const broadcast = () =>
+            act(() => {
+              for (const listener of goalListeners) listener();
+            });
           renderTestHook(
             [],
             undefined,
@@ -14577,11 +14588,11 @@ describe('useLlmStream', () => {
           expect(mockSendMessageStream).not.toHaveBeenCalled();
           queuedUserMessages = false;
           snapshot = { goal: { status: 'active' }, activity: 'idle' };
-          await queue();
+          broadcast();
           await settle();
           expect(mockSendMessageStream).not.toHaveBeenCalled();
           snapshot = { goal: null, activity: 'idle' };
-          await queue();
+          broadcast();
 
           await waitFor(() =>
             expect(mockSendMessageStream).toHaveBeenCalledOnce(),

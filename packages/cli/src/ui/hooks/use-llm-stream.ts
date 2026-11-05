@@ -8084,6 +8084,20 @@ export const useLlmStream = (
       ),
     [config],
   );
+  // A Goal lets go of the session's turns on its own schedule, after the
+  // session is already idle (its verifier accepts, its last turn is
+  // released), so the drain hears the Goal too.
+  useEffect(() => {
+    try {
+      return config.getGoalRuntime().subscribe(() => {
+        if (getInteractiveModSession(config)?.hasSubmittedPrompts)
+          setModPromptTrigger((n) => n + 1);
+      });
+    } catch {
+      // Goal persistence can be disabled for this session.
+      return undefined;
+    }
+  }, [config, sessionStates.sessionId]);
   useEffect(() => {
     const mods = getInteractiveModSession(config);
     if (
@@ -8118,7 +8132,10 @@ export const useLlmStream = (
           submittedPrompt: prompt.text,
           shellMode: false,
           // Another submission won this idle moment; the prompt waits for
-          // it to settle.
+          // it to settle. When the turn could not start for a failure of
+          // its own (the Mods failed to start, the prompt failed to
+          // prepare) the prompt also waits for the next settle rather than
+          // retrying at once, which would fail the same way in a loop.
           onAdmissionFailed: () => mods.returnSubmittedPrompt(prompt),
         },
       ).catch((error) => {
