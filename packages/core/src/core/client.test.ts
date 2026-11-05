@@ -526,7 +526,9 @@ const ideContext = (openFiles: IdeOpenFile[]) => ({
 });
 
 const dateReminderRe = (date = '') =>
-  new RegExp(`^<system-reminder>\\nThe current date is:.*${date}`);
+  new RegExp(
+    `^<system-reminder>\\n(?:Today's date is|The date has changed since earlier in this conversation\\. Today's date is now) [^\\n]*${date}`,
+  );
 /** Matches the date system-reminder that opens a user turn. */
 const dateReminder = (date = '') => expect.stringMatching(dateReminderRe(date));
 
@@ -4296,12 +4298,6 @@ describe('Gemini Client (client.ts)', () => {
       await client.initialize();
 
       expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledTimes(1);
-    });
-
-    it('should reset lastInjectedDate', async () => {
-      client['lastInjectedDate'] = 'Friday, June 5, 2026';
-      await client.resetChat();
-      expect(client['lastInjectedDate']).toBeUndefined();
     });
 
     it('resets Hook microcompaction checkpoint', async () => {
@@ -10473,24 +10469,102 @@ Other open files:
       expect(mockMemoryManager.recall).toHaveBeenCalledTimes(2);
     });
 
-    /** Clears the injected date, pins the clock and stubs a replying chat. */
-    const dateSession = (iso: string, reply = 'Hello') => {
-      client['lastInjectedDate'] = undefined;
+    /** Pins the clock and stubs a replying chat over `history`. */
+    const dateSession = (iso: string, history: Content[] = []) => {
       vi.setSystemTime(new Date(iso));
-      mockTurnRunFn.mockReturnValue(textTurn(reply));
-      return installChat();
+      mockTurnRunFn.mockReturnValue(textTurn('Hello'));
+      return installChat({ getHistory: vi.fn().mockReturnValue(history) });
     };
+    const startupContext = (date: string) =>
+      userText(
+        wrapSystemReminder(
+          `This is the Qwen Code. We are setting up the context for our chat.\nToday's date is ${date}.\nMy operating system is: linux`,
+        ),
+      );
+    const dateReminderTurn = (reminder: string, prompt: string) => ({
+      role: 'user' as const,
+      parts: [{ text: reminder }, { text: prompt }],
+    });
+    const CHANGED = (date: string) =>
+      `<system-reminder>\nThe date has changed since earlier in this conversation. Today's date is now ${date}. Use this date from here on; there is no need to mention the change to the user.\n</system-reminder>`;
 
-    it('should inject the current date on every UserQuery turn', async () => {
+    it('tells the date when the history carries none', async () => {
       dateSession('2026-06-05T12:00:00Z');
 
       await run([{ text: 'What day is it?' }], 'prompt-id-date-inject');
 
-      // The date reminder, wrapped in <system-reminder> tags, comes first.
       expect(mockTurnRunFn).toHaveBeenCalledWith(
-        ...exactRequest(dateReminder('June 5, 2026'), {
-          text: 'What day is it?',
-        }),
+        ...exactRequest(
+          "<system-reminder>\nToday's date is Friday, June 5, 2026.\n</system-reminder>",
+          { text: 'What day is it?' },
+        ),
+      );
+    });
+
+    it.each([
+      ['the startup context', [startupContext('Friday, June 5, 2026')]],
+      [
+        'an earlier date reminder',
+        [
+          startupContext('Thursday, June 4, 2026'),
+          dateReminderTurn(CHANGED('Friday, June 5, 2026'), 'Earlier'),
+          modelText('Hello'),
+        ],
+      ],
+    ])(
+      'adds no date when %s already carries today',
+      async (_title, history) => {
+        dateSession('2026-06-05T12:00:00Z', history);
+
+        await run([{ text: 'Question' }], 'prompt-id-date-current');
+
+        expect(mockTurnRunFn).toHaveBeenCalledWith(
+          ...exactRequest({ text: 'Question' }),
+        );
+      },
+    );
+
+    it.each([
+      [
+        // Past midnight, or after a rewind dropped the reminder that
+        // followed the startup context.
+        'the startup context is from an earlier day',
+        [startupContext('Thursday, June 4, 2026'), modelText('Hello')],
+      ],
+      [
+        // A compressed record keeps an older reminder after the fresh
+        // startup context; the older one is the last the model read.
+        'a later entry carries an older date',
+        [
+          startupContext('Friday, June 5, 2026'),
+          dateReminderTurn(
+            '<system-reminder>\nThe current date is: Thursday, June 4, 2026. Note: This is the authoritative current date — it may differ from the "Today\'s date" mentioned earlier in the conversation startup context.\n</system-reminder>',
+            'Kept turn',
+          ),
+          modelText('Hello'),
+        ],
+      ],
+    ])('says the date has changed when %s', async (_title, history) => {
+      dateSession('2026-06-05T12:00:00Z', history);
+
+      await run([{ text: 'Question' }], 'prompt-id-date-changed');
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        ...exactRequest(CHANGED('Friday, June 5, 2026'), { text: 'Question' }),
+      );
+    });
+
+    it('does not read a date the user wrote', async () => {
+      dateSession('2026-06-05T12:00:00Z', [
+        startupContext('Thursday, June 4, 2026'),
+        userText("Today's date is Friday, June 5, 2026."),
+        modelText('Noted'),
+      ]);
+
+      await run([{ text: 'Question' }], 'prompt-id-date-user-text');
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        ...exactRequest(CHANGED('Friday, June 5, 2026'), { text: 'Question' }),
       );
     });
 
@@ -10712,79 +10786,30 @@ Other open files:
       },
     );
 
-    it('should not inject duplicate date on the same day', async () => {
-      const mockChat = dateSession('2026-06-05T12:00:00Z');
-
-      // First query on June 5 — should inject date
-      await run([{ text: 'First question' }], 'prompt-id-date-first');
-
-      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
-        ...exactRequest(dateReminder('June 5, 2026'), {
-          text: 'First question',
-        }),
-      );
-
-      // Second query the same day: no date prefix again.
-      mockTurnRunFn.mockReturnValue(textTurn('World'));
-      mockChat.getHistory = vi
-        .fn()
-        .mockReturnValue([userText('First question'), modelText('Hello')]);
-
-      await run([{ text: 'Second question' }], 'prompt-id-date-second');
-
-      const secondCall = mockTurnRunFn.mock.calls[1];
-      expect(secondCall[1][0]).toEqual({ text: 'Second question' });
-    });
-
-    it('should re-inject date when session spans midnight', async () => {
-      const mockChat = dateSession('2026-06-04T12:00:00Z');
-
-      // First query on June 4 — should inject date
-      await run([{ text: 'Day one' }], 'prompt-id-date-day-one');
-
-      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
-        ...exactRequest(dateReminder('June 4, 2026'), { text: 'Day one' }),
-      );
-
-      // Advance to June 5: the new date is injected.
-      vi.setSystemTime(new Date('2026-06-05T12:00:00Z'));
-
-      mockTurnRunFn.mockReturnValue(textTurn('New day'));
-      mockChat.getHistory = vi
-        .fn()
-        .mockReturnValue([userText('Day one'), modelText('Hello')]);
-
-      await run([{ text: 'Day two' }], 'prompt-id-date-day-two');
-
-      const secondCall = mockTurnRunFn.mock.calls[1];
-      expect(secondCall[1][0]).toMatch(dateReminderRe('June 5, 2026'));
-    });
-
-    it('should not inject date on Cron turns', async () => {
-      const mockChat = dateSession('2026-06-05T12:00:00Z', 'Cron response');
+    it('tells the date on a Cron turn past midnight', async () => {
+      dateSession('2026-06-05T12:00:00Z', [
+        startupContext('Thursday, June 4, 2026'),
+        modelText('Hello'),
+      ]);
 
       await run([{ text: 'cron-task' }], 'prompt-id-cron', {
         type: SendMessageType.Cron,
       });
 
-      // The date must be absent; other system reminders (e.g. PlanMode) may
-      // be included, so check for the date reminder specifically.
-      const cronCall = mockTurnRunFn.mock.calls[0];
-      const cronRequest = cronCall[1].join('\n');
-      expect(cronRequest).not.toContain(
-        '<system-reminder>\nThe current date is:',
+      expect(mockTurnRunFn.mock.calls[0]![1]).toContain(
+        CHANGED('Friday, June 5, 2026'),
       );
+    });
 
-      // UserQuery after Cron should still inject date normally
-      client['lastInjectedDate'] = undefined;
-      mockChat.getHistory = vi.fn().mockReturnValue([]);
-      mockTurnRunFn.mockReturnValue(textTurn('Hello'));
-      await run([{ text: 'User question' }], 'prompt-id-cron-user');
+    it('adds no date on a tool-result turn', async () => {
+      dateSession('2026-06-05T12:00:00Z');
 
-      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
-        ...exactRequest(dateReminder('June 5, 2026'), {
-          text: 'User question',
-        }),
+      await run([fnResponse('read_file', { ok: true })], 'prompt-id-tool', {
+        type: SendMessageType.ToolResult,
+      });
+
+      expect(JSON.stringify(mockTurnRunFn.mock.calls[0]![1])).not.toContain(
+        "Today's date",
       );
     });
 
@@ -11661,7 +11686,7 @@ Other open files:
         await toolResponseTurn();
 
         expect(mockChat.addHistory).not.toHaveBeenCalled();
-        expect(getLastTurnRequestText()).not.toContain('<system-reminder>');
+        expect(getLastTurnRequestText()).not.toContain('editor context');
         mockTurnRunFn.mockClear();
 
         // Step 2: after the tool response a new message carries the latest

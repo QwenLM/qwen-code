@@ -17,6 +17,9 @@ import {
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
+  buildDateReminder,
+  buildStartupContextReminder,
+  findLastAnnouncedDate,
   getEnvironmentContext,
   getDirectoryContextString,
   getInitialChatHistory,
@@ -182,6 +185,115 @@ describe('getDirectoryContextString', () => {
       TWO_DIRS,
       folderStructure('Structure 1\nStructure 2'),
     );
+  });
+});
+
+describe('findLastAnnouncedDate', () => {
+  const user = (...texts: string[]): Content => ({
+    role: 'user',
+    parts: texts.map((text) => ({ text })),
+  });
+  const model = (text: string): Content => ({
+    role: 'model',
+    parts: [{ text }],
+  });
+  const startup = (date: string) =>
+    user(
+      wrapSystemReminder(
+        `This is the Qwen Code. We are setting up the context for our chat.\nToday's date is ${date}.\nMy operating system is: linux`,
+      ),
+    );
+
+  afterEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('reads the date of the startup context the client builds', async () => {
+    vi.mocked(getFolderStructure).mockResolvedValue('Mock Folder Structure');
+    const prelude = await buildStartupContextReminder(
+      workspaceConfig() as Config,
+    );
+
+    expect(findLastAnnouncedDate([user(prelude)])).toBe(formatDateForContext());
+  });
+
+  it('reads a legacy prelude without the reminder wrapper', () => {
+    const history = [
+      user(
+        "This is the Qwen Code. We are setting up the context for our chat.\nToday's date is Monday, June 1, 2026.\nMy operating system is: linux",
+      ),
+      model('Got it. Thanks for the context!'),
+    ];
+
+    expect(findLastAnnouncedDate(history)).toBe('Monday, June 1, 2026');
+  });
+
+  it.each([
+    ['a first reminder', buildDateReminder('Friday, June 5, 2026', false)],
+    [
+      'a changed-date reminder',
+      buildDateReminder('Friday, June 5, 2026', true),
+    ],
+    [
+      'the wording recorded before',
+      `<system-reminder>\nThe current date is: Friday, June 5, 2026. Note: This is the authoritative current date — it may differ from the "Today's date" mentioned earlier in the conversation startup context.\n</system-reminder>`,
+    ],
+  ])('reads %s after the startup context', (_title, reminder) => {
+    const history = [
+      startup('Thursday, June 4, 2026'),
+      user(reminder, 'Question'),
+      model('Answer'),
+    ];
+
+    expect(findLastAnnouncedDate(history)).toBe('Friday, June 5, 2026');
+  });
+
+  it('reads a reminder concatenated into the prompt text', () => {
+    const history = [
+      startup('Thursday, June 4, 2026'),
+      user(`${buildDateReminder('Friday, June 5, 2026', true)}\nQuestion`),
+    ];
+
+    expect(findLastAnnouncedDate(history)).toBe('Friday, June 5, 2026');
+  });
+
+  it('returns the latest of several reminders', () => {
+    const history = [
+      startup('Wednesday, June 3, 2026'),
+      user(buildDateReminder('Thursday, June 4, 2026', true), 'Day two'),
+      model('Answer'),
+      user(buildDateReminder('Friday, June 5, 2026', true), 'Day three'),
+    ];
+
+    expect(findLastAnnouncedDate(history)).toBe('Friday, June 5, 2026');
+  });
+
+  it.each([
+    ['plain user text', "Today's date is Friday, June 5, 2026."],
+    [
+      'a reminder with other content',
+      wrapSystemReminder("Note.\nToday's date is Friday, June 5, 2026."),
+    ],
+  ])('ignores a date in %s', (_title, text) => {
+    const history = [startup('Thursday, June 4, 2026'), user(text)];
+
+    expect(findLastAnnouncedDate(history)).toBe('Thursday, June 4, 2026');
+  });
+
+  it('ignores model text and returns undefined with no announced date', () => {
+    expect(
+      findLastAnnouncedDate([
+        user('Hi'),
+        model(buildDateReminder('Friday, June 5, 2026', false)),
+      ]),
+    ).toBeUndefined();
+    expect(findLastAnnouncedDate([])).toBeUndefined();
+  });
+
+  it('reads the startup date only at the start of the history', () => {
+    const history = [user('Hi'), startup('Friday, June 5, 2026')];
+
+    expect(findLastAnnouncedDate(history)).toBeUndefined();
   });
 });
 

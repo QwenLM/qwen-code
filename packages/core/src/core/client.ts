@@ -176,6 +176,8 @@ import {
 // Utilities
 import {
   AUTO_MEMORY_SNAPSHOT_METADATA,
+  buildDateReminder,
+  findLastAnnouncedDate,
   formatDateForContext,
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
@@ -719,14 +721,6 @@ export class LlmClient {
       this.agentRemindersInitialized = false;
     }
   }
-
-  /**
-   * Tracks the most recently injected date string to prevent injecting
-   * duplicate or conflicting dates when a session spans midnight.
-   * Only UserQuery turns inject dates; Cron/ToolResult turns reuse the
-   * startup-context date which is still current within the same session.
-   */
-  private lastInjectedDate: string | undefined;
 
   /**
    * Promises for pending background memory tasks (dream / extract / skill review).
@@ -2905,7 +2899,6 @@ export class LlmClient {
     this.lastDeliveredMemoryTreeRevision = undefined;
     this.trustedUserAnswers.clear();
     this.forceFullIdeContext = true;
-    this.lastInjectedDate = undefined;
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
 
@@ -5063,20 +5056,17 @@ export class LlmClient {
           systemReminders.push(PAUSED_GOAL_SYSTEM_REMINDER);
         }
 
-        // Inject fresh date on UserQuery turns only; Cron and ToolResult turns
-        // reuse the same session and the startup-context date is still current.
-        if (messageType === SendMessageType.UserQuery) {
-          const today = formatDateForContext();
-
-          // Only inject if the date has changed since the last injection.
-          // This prevents accumulating conflicting dates when a session
-          // spans midnight.
-          if (today !== this.lastInjectedDate) {
-            systemReminders.push(
-              `<system-reminder>\nThe current date is: ${today}. Note: This is the authoritative current date — it may differ from the "Today's date" mentioned earlier in the conversation startup context.\n</system-reminder>`,
-            );
-            this.lastInjectedDate = today;
-          }
+        // Tell the model today's date only when the last date the history
+        // gives it is a different one, or there is none. The startup context
+        // carries the date at session start, so the first turn adds nothing;
+        // a reminder follows once the date changes, after a session runs past
+        // midnight or a rewind drops the reminder.
+        const today = formatDateForContext();
+        const announced = findLastAnnouncedDate(this.getHistoryShallow());
+        if (announced !== today) {
+          systemReminders.push(
+            buildDateReminder(today, announced !== undefined),
+          );
         }
 
         // add plan mode system reminder if approval mode is plan
