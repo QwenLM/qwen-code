@@ -7,6 +7,7 @@ import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type { WebShellProps } from '../App';
 import { ManagedStandaloneApp } from '../ManagedStandaloneApp';
 import { inferStandaloneBasePath } from '../utils/sessionPath';
+import { Dialog, DialogContent, DialogTitle } from './ui/dialog';
 
 const mocks = vi.hoisted(() => ({
   connection: {
@@ -33,6 +34,7 @@ const mocks = vi.hoisted(() => ({
   providerUnmounts: 0,
   providerProps: [] as Array<Record<string, unknown>>,
   appProps: [] as Array<Record<string, unknown>>,
+  appDialogOpen: false,
 }));
 
 vi.mock('../ManagedAgentWebShell', () => ({
@@ -61,7 +63,17 @@ vi.mock('../App', () => ({
   App: (props: Record<string, unknown>) => {
     mocks.appProps.push(props);
     return (
-      <output>{String(props['initialSelectedWorkspaceCwd'] ?? '')}</output>
+      <>
+        <output>{String(props['initialSelectedWorkspaceCwd'] ?? '')}</output>
+        {mocks.appDialogOpen && (
+          <Dialog open>
+            <DialogContent aria-describedby={undefined}>
+              <DialogTitle>Old chat dialog</DialogTitle>
+              <button>Dialog action</button>
+            </DialogContent>
+          </Dialog>
+        )}
+      </>
     );
   },
 }));
@@ -102,6 +114,7 @@ describe('WorkspaceSessionProvider targets', () => {
     mocks.providerUnmounts = 0;
     mocks.providerProps = [];
     mocks.appProps = [];
+    mocks.appDialogOpen = false;
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -147,6 +160,37 @@ describe('WorkspaceSessionProvider targets', () => {
     expect(mocks.appProps.at(-1)).toMatchObject({
       initialSelectedWorkspaceCwd: '/work/b',
     });
+  });
+
+  it('removes portals and modal locks while the hidden view keeps its session attached', async () => {
+    mocks.appDialogOpen = true;
+    await renderTarget('session-a', '/work/a');
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.body.style.pointerEvents).toBe('none');
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="session-a"
+          workspaceCwd="/work/a"
+          viewHidden
+          webShellProps={{}}
+        />,
+      );
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.body.style.pointerEvents).not.toBe('none');
+    const loginInput = document.createElement('input');
+    container.appendChild(loginInput);
+    loginInput.focus();
+    expect(document.activeElement).toBe(loginInput);
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerUnmounts).toBe(0);
+    expect(mocks.providerProps.at(-1)?.sessionId).toBe('session-a');
+    mocks.appDialogOpen = false;
+    await renderTarget('session-a', '/work/a');
+    expect(container.textContent).toBe('/work/a');
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerUnmounts).toBe(0);
   });
 
   it('waits for the primary workspace before mounting an initial session', async () => {

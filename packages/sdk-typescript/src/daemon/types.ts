@@ -3238,6 +3238,7 @@ export type DaemonContinueSessionResult =
       interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
     };
 
+/** Local category estimates are independent of the reported totalTokens. */
 export interface DaemonContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
@@ -3249,13 +3250,14 @@ export interface DaemonContextCategoryBreakdown {
   /** Startup prelude outside the skill listing. Absent from older daemons. */
   startupContext?: number;
   /**
-   * Conversation tokens after the startup prelude. When `totalTokens` is 0
+   * Independent conversation estimate after the startup prelude, never derived
+   * from or capped by totalTokens. When `totalTokens` is 0
    * (no provider count yet: after a model switch, `/restore` or a resume) this
    * is a local estimate of the history rather than 0, so the rows include the
    * conversation. Older daemons report 0 there.
    */
   messages: number;
-  /** Provider total not accounted for by any category. Absent from older daemons. */
+  /** @deprecated Legacy residual; accepted from old daemons but no longer emitted or displayed. */
   unattributed?: number;
   /** Cached prefix tokens; an annotation that overlaps categories. Absent from older daemons. */
   cachedTokens?: number;
@@ -4898,10 +4900,23 @@ export type DaemonChannelConfigFieldKind =
   | 'record'
   | 'object';
 
+/**
+ * One selectable value of a config field. `description` explains the value
+ * in management UIs; `group` buckets related values under one picker
+ * section. Both are optional display metadata — validators only ever read
+ * `value`.
+ */
+interface DaemonChannelConfigFieldOption {
+  value: string;
+  label: string;
+  description?: string;
+  group?: string;
+}
+
 interface DaemonChannelConfigFieldDescriptorBase {
   key: string;
   label: string;
-  options?: ReadonlyArray<{ value: string; label: string }>;
+  options?: readonly DaemonChannelConfigFieldOption[];
   default?: string;
   description?: string;
 }
@@ -4931,7 +4946,7 @@ export interface DaemonChannelConfigEnumFieldDescriptor
   required?: boolean;
   envResolvable?: never;
   multiline?: never;
-  options: ReadonlyArray<{ value: string; label: string }>;
+  options: readonly DaemonChannelConfigFieldOption[];
   properties?: never;
 }
 
@@ -5039,6 +5054,13 @@ export interface DaemonChannelEvent {
   number?: number;
   actor?: string;
   sessionId?: string;
+  /**
+   * Workspace owning `sessionId`, when the Channel knew it at write time.
+   * Bound-session delivery can target a session in another workspace;
+   * clients need this to open it. Absent on older records, where the
+   * journal's own workspace is the fallback.
+   */
+  sessionWorkspaceCwd?: string;
   messageId?: string;
   durationMs?: number;
   error?: string;
@@ -6054,4 +6076,41 @@ export interface DaemonMcpAppToolResult {
   isError?: boolean;
   structuredContent?: unknown;
   [key: string]: unknown;
+}
+
+export interface DaemonSubscriptionConfig {
+  enabled: boolean;
+  signedIn?: boolean;
+  plansUrl?: string;
+}
+
+export interface DaemonSubscriptionUserInfo {
+  sub: string;
+  name: string;
+  email: string;
+  member_type: string;
+}
+
+export interface DaemonSubscriptionFlow {
+  id: string;
+  status: 'waiting' | 'ready' | 'error' | 'cancelled';
+  authorizationUrl?: string;
+  userInfo?: DaemonSubscriptionUserInfo;
+  errorCode?: string;
+  errorStage?:
+    | 'device'
+    | 'exchange'
+    | 'credentials'
+    | 'userinfo'
+    | 'refresh'
+    | 'revoke'
+    | 'cleanup';
+  errorStatus?: number;
+  retryAfterMs?: number;
+}
+
+export interface DaemonSubscriptionActivation {
+  authType: 'qwen-subscription';
+  modelId: string;
+  runtimeSync: DaemonModelProviderRuntimeSyncResult;
 }
