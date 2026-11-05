@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.*;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -93,6 +94,29 @@ class JournalLockContractTest {
         assertThat(trace.events().stream().filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
                 .map(StoreLockTrace.Event::sql)).anyMatch(sql -> sql.contains("runtime_placement"))
                 .noneMatch(sql -> sql.contains("output_publication"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void onlyTheOrdinaryPublicationWriterOmitsStorageLocks(boolean placement) {
+        var jdbc = new ManagedSchemaJdbcTemplate(trace);
+        String physical = "d".repeat(64);
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
+                        + " storage_kind, registration_state, registration_revision, registration_json)"
+                        + " VALUES (?, ?, ?, ?, 'storage', ?, 'LOCAL', 'REGISTERED', 1, '{}')",
+                JdbcRuntimeBindingRepository.storageAliasKey(TENANT, "storage"),
+                JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
+                JdbcRuntimeBindingRepository.storageFenceKey("storage"), TENANT, physical);
+        jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, mount_state)"
+                + " VALUES (?, ?, 'LOCAL', 'READY')", physical, physical);
+        jdbc.update("UPDATE ma_session SET workspace_storage_id = 'storage' WHERE tenant_id = ?", TENANT);
+        trace.clear();
+        transactions.execute(status -> raw.lockPublicationWriter(TENANT, "workspace", SESSION, "writer", 1, TOKEN,
+                placement, false));
+        var reads = trace.events().stream().filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
+                .map(StoreLockTrace.Event::sql).filter(sql -> sql.contains(" from ma_storage ")
+                        || sql.contains(" from ma_storage_owner ")).toList();
+        assertThat(reads).hasSize(2).allSatisfy(sql -> assertThat(sql.contains("for update")).isEqualTo(placement));
     }
 
     @Test

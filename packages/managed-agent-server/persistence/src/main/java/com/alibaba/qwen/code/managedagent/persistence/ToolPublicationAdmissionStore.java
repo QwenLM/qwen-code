@@ -379,6 +379,7 @@ public final class ToolPublicationAdmissionStore {
             // in checkLifecycleWriter) keeps it where it was (design
             // 2026-11-04-managed-publication-tenant-guards, C2).
             boolean guard = csi || authority != null;
+            boolean ordinary = !placement && !guard;
             if (guard) {
                 lockTenant(key);
             }
@@ -405,8 +406,9 @@ public final class ToolPublicationAdmissionStore {
                     && Objects.equals(candidate.get("object_key"), object.get("object_key")),
                     "Admission resource changed");
             if ("REFERENCED".equals(publication.get("producer_phase"))) {
-                var committed = sessions.commit(text(key, "tenantId"), text(key, "sessionId"),
-                        writerToken, request, authority);
+                var committed = ordinary
+                        ? sessions.commitPublicationReceipt(text(key, "tenantId"), text(key, "sessionId"), writerToken, request)
+                        : sessions.commit(text(key, "tenantId"), text(key, "sessionId"), writerToken, request, authority);
                 require(committed.journalRevision() == ((Number) publication.get("receipt_revision")).longValue()
                         && committed.lastSequence() == ((Number) publication.get("receipt_sequence")).longValue(),
                         "Receipt replay conflicts with original transaction");
@@ -419,8 +421,9 @@ public final class ToolPublicationAdmissionStore {
             if (manifestBytes != null) {
                 installManifestResource(key, request, manifestRef, manifestBytes);
             }
-            var receipt = sessions.commit(text(key, "tenantId"), text(key, "sessionId"),
-                    writerToken, request, authority);
+            var receipt = ordinary
+                    ? sessions.commitPublicationReceipt(text(key, "tenantId"), text(key, "sessionId"), writerToken, request)
+                    : sessions.commit(text(key, "tenantId"), text(key, "sessionId"), writerToken, request, authority);
             jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", producer_phase = 'REFERENCED', admission_held_bytes = admission_used_bytes, receipt_sequence = ?, receipt_revision = ?, is_accepted_complete = ? WHERE scope_key = ? AND publication_id = ?",
                     request.lastSequence(), receipt.journalRevision(),
                     "committed".equals(outcome.path("decision").asText())

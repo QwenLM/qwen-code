@@ -169,6 +169,11 @@ final class JournalFencing {
                 WorkspaceMigrationAdmission.sessionStorage(jdbc, tenantId, sessionId, workspaceId));
     }
 
+    void requireSessionStorageOpenForRead(String tenantId, String workspaceId, String sessionId) {
+        WorkspaceMigrationAdmission.requirePhysicalOpenForRead(jdbc, tenantId,
+                WorkspaceMigrationAdmission.sessionStorage(jdbc, tenantId, sessionId, workspaceId));
+    }
+
     // Locks the Session root by primary key (a record lock, never a gap) as
     // the transaction's first statement and answers its CSI pin, which never
     // changes once the row exists, for lockCsiContinuation to reuse instead
