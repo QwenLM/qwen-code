@@ -97,8 +97,8 @@ class JournalLockContractTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void onlyTheOrdinaryPublicationWriterOmitsStorageLocks(boolean placement) {
+    @ValueSource(strings = {"publication", "placement-publication", "commit", "tool-result"})
+    void ordinaryJournalAndPublicationCheckStorageWithoutLocking(String route) {
         var jdbc = new ManagedSchemaJdbcTemplate(trace);
         String physical = "d".repeat(64);
         jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
@@ -111,12 +111,19 @@ class JournalLockContractTest {
                 + " VALUES (?, ?, 'LOCAL', 'READY')", physical, physical);
         jdbc.update("UPDATE ma_session SET workspace_storage_id = 'storage' WHERE tenant_id = ?", TENANT);
         trace.clear();
-        transactions.execute(status -> raw.lockPublicationWriter(TENANT, "workspace", SESSION, "writer", 1, TOKEN,
-                placement, false));
+        boolean placement = "placement-publication".equals(route);
+        switch (route) {
+            case "commit" -> proxy.commit(TENANT, SESSION, TOKEN, genesis());
+            case "tool-result" -> proxy.publishToolResult(TENANT, SESSION, TOKEN, toolResult(new byte[] {1}));
+            default -> transactions.execute(status -> raw.lockPublicationWriter(TENANT, "workspace", SESSION, "writer", 1, TOKEN,
+                    placement, false));
+        }
         var reads = trace.events().stream().filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
                 .map(StoreLockTrace.Event::sql).filter(sql -> sql.contains(" from ma_storage ")
                         || sql.contains(" from ma_storage_owner ")).toList();
-        assertThat(reads).hasSize(2).allSatisfy(sql -> assertThat(sql.contains("for update")).isEqualTo(placement));
+        assertThat(reads).hasSize(2).allSatisfy(sql -> assertThat(sql.contains("for update") || sql.contains("for share")).isEqualTo(placement));
+        trace.assertRootBeforeHead(TENANT, SESSION);
+        trace.assertOneTransaction(TENANT, SESSION);
     }
 
     @Test

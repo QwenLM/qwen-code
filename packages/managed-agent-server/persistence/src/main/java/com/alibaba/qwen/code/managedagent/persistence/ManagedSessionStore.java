@@ -234,11 +234,6 @@ public class ManagedSessionStore
         return commits.commit(tenantId, sessionId, writerToken, request, authority);
     }
 
-    CommitReceipt commitPublicationReceipt(String tenantId, String sessionId, String writerToken,
-            CommitTransactionRequest request) {
-        return commits.commitPublicationReceipt(tenantId, sessionId, writerToken, request);
-    }
-
     @Transactional(readOnly = true)
     public RestoreHead restore(String tenantId, String workspaceId,
             String sessionId, String writerToken) {

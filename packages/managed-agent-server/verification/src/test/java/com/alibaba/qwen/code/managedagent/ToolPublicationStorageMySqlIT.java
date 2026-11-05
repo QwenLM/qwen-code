@@ -145,7 +145,7 @@ class ToolPublicationStorageMySqlIT {
     }
 
     @Test
-    void genericJournalNamedRecordToolResultStillLocksStorage() throws Exception {
+    void genericJournalRejectsMissingPublicationResourceWithoutStorageLock() throws Exception {
         fixture(false);
         var generic = work("generic-receipt", false);
         var before = journal.jdbc.queryForList("SELECT journal_revision, committed_sequence FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION'");
@@ -167,7 +167,7 @@ class ToolPublicationStorageMySqlIT {
                             assertThat(error.getCode()).isEqualTo("managed_session_resource_corrupt"));
             assertThat(journal.jdbc.queryForList("SELECT journal_revision, committed_sequence FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION'"))
                     .isEqualTo(before);
-            assertThat(blocked).as("an operation label is not proof that publication validation ran").isTrue();
+            assertThat(blocked).as("ordinary generic commits check storage without locking").isFalse();
         }
     }
 

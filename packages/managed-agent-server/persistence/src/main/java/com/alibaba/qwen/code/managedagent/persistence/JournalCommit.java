@@ -67,17 +67,6 @@ final class JournalCommit {
 
     CommitReceipt commit(String tenantId, String sessionId, String writerToken,
             CommitTransactionRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        return commit(tenantId, sessionId, writerToken, request, authority, false);
-    }
-
-    CommitReceipt commitPublicationReceipt(String tenantId, String sessionId, String writerToken,
-            CommitTransactionRequest request) {
-        return commit(tenantId, sessionId, writerToken, request, null, true);
-    }
-
-    private CommitReceipt commit(String tenantId, String sessionId, String writerToken,
-            CommitTransactionRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
-            boolean publicationStorageChecked) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
@@ -161,15 +150,10 @@ final class JournalCommit {
             return replay(existing, request, validated.recordDigest(),
                     writerToken);
         }
-        // The storage's alias and directory rows order this commit against
-        // migration and physical fences; migration prepare checks idleness on
-        // committed data after locking them, so the guard adds nothing here.
+        // Physical fencing and migration require stopped writers. Ordinary
+        // commits only read storage state and need not block member updates.
         if (authority == null && csiOriginal == null) {
-            // A verified ordinary publication already checked physical state in
-            // this transaction. Generic journal requests retain their locks.
-            if (!publicationStorageChecked) {
-                fencing.requireSessionStorageOpenForAdmission(tenantId, request.workspaceId(), sessionId);
-            }
+            fencing.requireSessionStorageOpenForRead(tenantId, request.workspaceId(), sessionId);
         } else {
             fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
         }
