@@ -49,6 +49,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/workspace-auto-memory.ts',
+    {
+      reason:
+        'Auto-memory routes resolve core memory lookups under the selected workspace runtime: the project scope is read from QWEN_CODE_MEMORY_PROJECT_SCOPE for parent-process runtimes without a snapshot, and the process-global memory overrides are checked against the process environment, the reference the daemon cannot apply per runtime.',
+      accesses: { 'computed:MEMORY_PROJECT_SCOPE_ENV': 1, 'computed:key': 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/hosted-harness-contract.ts',
     {
       reason:

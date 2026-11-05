@@ -96,6 +96,8 @@ Typed classes thrown by the bridge / mediator. Most carry an HTTP status via the
 | `invalid_config`           | MCP or daemon configuration was invalid.                                |
 | `prompt_deadline_exceeded` | Prompt wallclock deadline expired.                                      |
 | `writer_idle_timeout`      | SSE writer made no successful writes before its idle timeout.           |
+| `readdir_failed`           | A managed auto-memory root exists but could not be listed.              |
+| `symlinked_root`           | A project auto-memory root is (or resolves through) a symlink; refused. |
 
 These are surfaced through the preflight cell's `errorKind` so client UIs render structured remediation (not raw stack traces).
 

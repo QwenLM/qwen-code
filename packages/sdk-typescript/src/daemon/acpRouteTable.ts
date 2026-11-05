@@ -690,6 +690,24 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (_s, _b, _m, q) => boolParam(q, 'content'),
     },
   },
+  // GET /workspace/auto-memory → _qwen/workspace/auto-memory
+  {
+    httpMethod: 'GET',
+    pattern: /^\/workspace\/auto-memory\/?$/,
+    mapping: {
+      method: '_qwen/workspace/auto-memory',
+      extractParams: () => ({}),
+    },
+  },
+  // GET /workspace/auto-memory/file?path=... → _qwen/workspace/auto-memory/file
+  {
+    httpMethod: 'GET',
+    pattern: /^\/workspace\/auto-memory\/file\/?$/,
+    mapping: {
+      method: '_qwen/workspace/auto-memory/file',
+      extractParams: (_s, _b, _m, q) => ({ ...strParam(q, 'path') }),
+    },
+  },
   // POST /workspace/memory → _qwen/workspace/memory/write
   {
     httpMethod: 'POST',

@@ -9,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
+  DaemonAutoMemoryFile,
+  DaemonWorkspaceAutoMemoryStatus,
   DaemonWorkspaceMemoryFile,
   DaemonWorkspaceMemoryStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -24,6 +26,26 @@ const memory = vi.hoisted(() => ({
   readMemoryFile: vi.fn(),
   writeMemory: vi.fn(),
   reload: vi.fn(),
+}));
+
+// `entries` is derived from the status, as the real hook does.
+const autoMemory = vi.hoisted(() => ({
+  status: undefined as DaemonWorkspaceAutoMemoryStatus | undefined,
+  loading: false,
+  error: undefined as unknown,
+  readAutoMemoryFile: vi.fn(),
+  openAutoMemoryFolder: vi.fn(),
+  reload: vi.fn(),
+}));
+
+const settingsState = vi.hoisted(() => ({
+  settings: [] as unknown[],
+  setValue: vi.fn(),
+  reload: vi.fn(),
+}));
+
+const connectionState = vi.hoisted(() => ({
+  capabilities: { features: [] as string[] },
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
@@ -42,6 +64,21 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
       reload: memory.reload,
       writeMemory: memory.writeMemory,
     }),
+    useAutoMemory: () => ({
+      status: autoMemory.status,
+      entries: autoMemory.status?.entries ?? [],
+      loading: autoMemory.loading,
+      error: autoMemory.error,
+      readAutoMemoryFile: autoMemory.readAutoMemoryFile,
+      openAutoMemoryFolder: autoMemory.openAutoMemoryFolder,
+      reload: autoMemory.reload,
+    }),
+    useSettings: () => ({
+      settings: settingsState.settings,
+      setValue: settingsState.setValue,
+      reload: settingsState.reload,
+    }),
+    useConnection: () => connectionState,
   };
 });
 
@@ -111,6 +148,18 @@ beforeEach(() => {
   memory.readMemoryFile.mockReset();
   memory.writeMemory.mockReset();
   memory.reload.mockReset().mockResolvedValue(undefined);
+  autoMemory.status = undefined;
+  autoMemory.loading = false;
+  autoMemory.error = undefined;
+  autoMemory.readAutoMemoryFile.mockReset();
+  autoMemory.openAutoMemoryFolder.mockReset();
+  autoMemory.reload.mockReset().mockResolvedValue(undefined);
+  settingsState.settings = [];
+  settingsState.setValue.mockReset().mockResolvedValue(undefined);
+  settingsState.reload.mockReset().mockResolvedValue(undefined);
+  // The suite exercises the Auto tab, so the default daemon advertises
+  // the matching capability; the gate test overrides this per case.
+  connectionState.capabilities.features = ['workspace_auto_memory'];
 });
 
 afterEach(() => {
@@ -278,5 +327,171 @@ describe('MemoryMessage', () => {
       mode: 'replace',
       content: 'a\r\nb\r\n',
     });
+  });
+});
+
+describe('MemoryMessage auto tab', () => {
+  const PROJECT_ENTRY: DaemonAutoMemoryFile = {
+    kind: 'auto_memory_file',
+    scope: 'project',
+    path: '/workspace/.qwen/memory/notes.md',
+    title: 'Build notes',
+    bytes: 512,
+    modifiedAt: '2026-10-14T12:00:00.000Z',
+  };
+  const AUTO_STATUS: DaemonWorkspaceAutoMemoryStatus = {
+    v: 1,
+    workspaceCwd: '/workspace',
+    initialized: true,
+    userDir: '/home/u/.qwen/memories',
+    userDirExists: false,
+    projectDir: '/workspace/.qwen/memory',
+    projectDirs: ['/workspace/.qwen/memory'],
+    entries: [PROJECT_ENTRY],
+    totalBytes: 512,
+    fileCount: 1,
+  };
+
+  function mountDialog() {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MemoryMessage />
+        </I18nProvider>,
+      );
+    });
+  }
+
+  it('opens the auto-memory panel and switches back to file tabs', async () => {
+    autoMemory.status = AUTO_STATUS;
+
+    mountDialog();
+    await flush();
+
+    // The third tab carries the auto-memory panel.
+    act(() => button('Auto memory').click());
+    await flush();
+    expect(container.textContent).toContain('Project memory');
+    expect(container.textContent).toContain('Build notes');
+    const editButton = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent === 'Edit',
+    );
+    expect(editButton).toBeUndefined();
+
+    act(() => button('Workspace').click());
+    await flush();
+    expect(container.textContent).toContain('QWEN.md');
+    expect(button('Edit')).toBeDefined();
+  });
+
+  it('hides the Auto tab when the daemon lacks the workspace_auto_memory tag', async () => {
+    connectionState.capabilities.features = [];
+    // A populated status, so a mounted panel WOULD render its scope
+    // header and toggle labels — the absence assertions can fail.
+    autoMemory.status = AUTO_STATUS;
+
+    mountDialog();
+    await flush();
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    expect(buttons.some((item) => item.textContent === 'Auto memory')).toBe(
+      false,
+    );
+    expect(container.textContent).not.toContain('Project memory');
+    // The panel's toggle label, distinct from the tab label above.
+    expect(container.textContent).not.toContain('Auto-memory');
+  });
+
+  it('drops the Auto panel and re-activates a file tab when the tag goes away', async () => {
+    autoMemory.status = AUTO_STATUS;
+    mountDialog();
+    await flush();
+    act(() => button('Auto memory').click());
+    await flush();
+    expect(container.textContent).toContain('Project memory');
+
+    // Capabilities refetch (e.g. token rebind) without the tag.
+    connectionState.capabilities.features = [];
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MemoryMessage />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    expect(container.textContent).not.toContain('Project memory');
+    const active = Array.from(container.querySelectorAll('nav button')).filter(
+      (item) => item.className.includes('memoryCardActive'),
+    );
+    expect(active.map((item) => item.textContent)).toEqual(['Workspace']);
+  });
+
+  it('keeps an unsaved edit across a round trip through the Auto tab', async () => {
+    autoMemory.status = AUTO_STATUS;
+    memory.files = [
+      {
+        kind: 'memory_file',
+        path: '/workspace/QWEN.md',
+        scope: 'workspace',
+        bytes: 9,
+      },
+    ];
+    memory.status = { ...memory.status!, files: memory.files };
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'existing\n',
+      truncated: false,
+    });
+
+    mountDialog();
+    await flush();
+    act(() => button('Edit').click());
+    await flush();
+    type(container.querySelector('textarea')!, 'existing\ntyped\n');
+
+    act(() => button('Auto memory').click());
+    await flush();
+    act(() => button('Workspace').click());
+    await flush();
+
+    const editor = container.querySelector('textarea');
+    expect(editor?.value).toBe('existing\ntyped\n');
+  });
+
+  // R2-14: the dialog's `/memory refresh` signal must reach the Auto panel.
+  // Keyed on a CHANGE, not the value: a signal set before the tab is opened
+  // must not double-fetch on entry, and only a later bump re-fetches.
+  it('reloads the auto panel only when refreshSignal changes while open', async () => {
+    autoMemory.status = AUTO_STATUS;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MemoryMessage refreshSignal={1} />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+    // A refresh issued before the tab opened must not fire on entry.
+    act(() => button('Auto memory').click());
+    await flush();
+    expect(autoMemory.reload).not.toHaveBeenCalled();
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MemoryMessage refreshSignal={2} />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+    expect(autoMemory.reload).toHaveBeenCalledTimes(1);
   });
 });

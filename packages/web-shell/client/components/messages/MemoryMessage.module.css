@@ -148,6 +148,128 @@
   opacity: 0.6;
 }
 
+.autoSection {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.autoToggles {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.autoToggleRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.autoToggleText {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.autoToggleLabel {
+  font-weight: 500;
+}
+
+.autoToggleDesc {
+  color: var(--muted-foreground);
+}
+
+.autoScope {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.autoScopeHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.autoScopeTitle {
+  flex: 0 0 auto;
+  font-weight: 500;
+}
+
+.autoScopeMeta {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+}
+
+.autoScopePath {
+  flex: 1 1 auto;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.autoScopeDir {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.autoList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.autoEntry {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.autoEntry:hover,
+.autoEntryActive {
+  background: var(--secondary);
+}
+
+.autoEntryActive {
+  border-color: var(--agent-blue-500);
+}
+
+.autoEntryTitle {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.autoEntryDesc {
+  flex: 1 1 100%;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.autoEntryMeta {
+  color: var(--muted-foreground);
+}
+
 @media (max-width: 760px) {
   .page {
     min-height: 0;

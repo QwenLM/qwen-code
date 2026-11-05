@@ -205,6 +205,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   memory_import_v1: NO_MANAGED_EQUIVALENT(
     'issue #15075: no Managed memory CRUD',
   ),
+  workspace_auto_memory: NO_MANAGED_EQUIVALENT(
+    'issue #15075: no Managed memory CRUD',
+  ),
   workspace_agents: NO_MANAGED_EQUIVALENT(
     'Managed agent definitions are tenant resources, not workspace files',
   ),
