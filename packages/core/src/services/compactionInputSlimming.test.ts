@@ -8,6 +8,10 @@ import type { Content } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ToolNames } from '../tools/tool-names.js';
 import {
+  isUserPromptSubmitContextPartText,
+  wrapUserPromptSubmitContext,
+} from '../utils/transcript-records.js';
+import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
   DEFAULT_MAX_RECENT_FILES,
   DEFAULT_MAX_RECENT_IMAGES,
@@ -645,6 +649,95 @@ describe('compactionInputSlimming', () => {
         expect(kept).toBe(prompt);
       },
     );
+
+    const slimText = (text: string, maxTextChars: number) =>
+      slimCompactionInput([{ role: 'user', parts: [{ text }] }], undefined, {
+        maxTextChars,
+      });
+
+    it('closes a reminder cut inside the IDE context merged before the prompt', () => {
+      // The IDE context is prepended to the prompt's own part, so the part
+      // ends with the prompt, not with the reminder's closing tag.
+      const original = `<system-reminder>\nopen files ${'x'.repeat(8_000)}\n</system-reminder>\n\nfix the bug`;
+
+      const [part] = slimText(original, 500).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 500) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</system-reminder>',
+      );
+    });
+
+    it('cuts after a reminder that closes before the cap without closing it twice', () => {
+      const original = `<system-reminder>\nopen files\n</system-reminder>\n\n${'q'.repeat(8_000)}`;
+
+      const [part] = slimText(original, 500).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 500) + SLIM_TEXT_TRUNCATION_MARKER,
+      );
+    });
+
+    it('closes cut hook context again, keeping the marker inside it', () => {
+      const original = wrapUserPromptSubmitContext('h'.repeat(20_000));
+
+      const [part] = slimText(original, 4_000).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 4_000) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</qwen:user-prompt-submit-context>',
+      );
+      expect(isUserPromptSubmitContextPartText(part!.text!)).toBe(true);
+    });
+
+    it.each([
+      ['a reminder', '<system-reminder>', '</system-reminder>'],
+      [
+        'hook context',
+        '<qwen:user-prompt-submit-context>',
+        '</qwen:user-prompt-submit-context>',
+      ],
+    ])(
+      'leaves %s whole when only its closing tag runs past the cap',
+      (_label, open, close) => {
+        const body = 'n'.repeat(4_000 - open.length - 10);
+        const part = { text: `${open}\n${body}\n${close}\n` };
+
+        const { slimmedHistory, stats } = slimCompactionInput(
+          [{ role: 'user', parts: [part] }],
+          undefined,
+          { maxTextChars: 4_000 },
+        );
+
+        expect(slimmedHistory[0]!.parts![0]).toBe(part);
+        expect(stats.textPartsTruncated).toBe(0);
+      },
+    );
+
+    it('leaves a part an earlier pass cut and closed unchanged', () => {
+      const original = `<system-reminder>\nopen files ${'x'.repeat(8_000)}\n</system-reminder>\n\nfix the bug`;
+      const [once] = slimText(original, 500).slimmedHistory[0]!.parts!;
+
+      const { slimmedHistory, stats } = slimCompactionInput(
+        [{ role: 'user', parts: [once!] }],
+        undefined,
+        { maxTextChars: 500 },
+      );
+
+      expect(slimmedHistory[0]!.parts![0]).toBe(once);
+      expect(stats.textPartsTruncated).toBe(0);
+    });
+
+    it('keeps a reminder whole and cuts the prompt after it when only its closing tag runs past the cap', () => {
+      const reminder = `<system-reminder>\n${'n'.repeat(500 - 20)}\n</system-reminder>`;
+
+      const [part] = slimText(`${reminder}\n\nfix the bug`, 500)
+        .slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(reminder + SLIM_TEXT_TRUNCATION_MARKER);
+    });
 
     it('truncates oversized text parts and tool-result outputs with maxTextChars', () => {
       const history: Content[] = [

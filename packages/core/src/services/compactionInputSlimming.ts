@@ -9,9 +9,13 @@ import type { ChatCompressionSettings } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
-  isWrappedSystemReminderPart,
   SYSTEM_REMINDER_CLOSE,
+  SYSTEM_REMINDER_OPEN,
 } from '../core/environmentContext.js';
+import {
+  USER_PROMPT_SUBMIT_CONTEXT_CLOSE,
+  USER_PROMPT_SUBMIT_CONTEXT_OPEN,
+} from '../utils/transcript-records.js';
 
 /**
  * Prepares `historyToCompress` for the side-query summary model by
@@ -479,33 +483,62 @@ function transformPart(
     typeof nextPart.text === 'string' &&
     nextPart.text.length > maxTextChars
   ) {
-    stats.textPartsTruncated++;
-    // Cut like other text, a reminder would lose its closing tag and read as
-    // open over the text after it, so its body is cut and the tag closed
-    // again.
-    if (isWrappedSystemReminderPart(nextPart)) {
-      return {
-        ...nextPart,
-        text: truncateReminderForSlimming(nextPart.text, maxTextChars),
-      };
+    const text = truncateTextPartForSlimming(nextPart.text, maxTextChars);
+    if (text !== nextPart.text) {
+      stats.textPartsTruncated++;
+      // Spread rather than rebuilding a bare `{ text }` so sibling properties
+      // (`thought`, `thoughtSignature`, ...) survive truncation — the
+      // converter pipeline keys reasoning parts off those flags (#10380).
+      return { ...nextPart, text };
     }
-    // Spread rather than rebuilding a bare `{ text }` so sibling properties
-    // (`thought`, `thoughtSignature`, ...) survive truncation — the converter
-    // pipeline keys reasoning parts off those flags (#10380).
-    return {
-      ...nextPart,
-      text: truncateTextForSlimming(nextPart.text, maxTextChars),
-    };
   }
   return nextPart;
 }
 
-function truncateReminderForSlimming(
+/**
+ * Blocks a text part can open with. Left open by a cut, one reads as open
+ * over every part after it.
+ */
+const TEXT_PART_ENVELOPES = [
+  { open: SYSTEM_REMINDER_OPEN, close: SYSTEM_REMINDER_CLOSE },
+  {
+    open: USER_PROMPT_SUBMIT_CONTEXT_OPEN,
+    close: USER_PROMPT_SUBMIT_CONTEXT_CLOSE,
+  },
+] as const;
+
+/**
+ * Cuts a text part like other text, except where the part opens with an
+ * envelope the cut lands in: a cut inside the body closes the envelope again
+ * after the marker, and a cut that would remove only the closing tag keeps
+ * the envelope whole. The envelope can lead the part without ending it, as
+ * the IDE context does when prepended to the prompt. The writers escape tags
+ * inside the body, so the first closing tag is the envelope's own.
+ */
+function truncateTextPartForSlimming(
   value: string,
   maxTextChars: number,
 ): string {
-  const body = value.trimEnd().slice(0, -SYSTEM_REMINDER_CLOSE.length);
-  return `${truncateTextForSlimming(body, maxTextChars)}\n${SYSTEM_REMINDER_CLOSE}`;
+  const envelope = TEXT_PART_ENVELOPES.find(({ open }) =>
+    value.startsWith(open),
+  );
+  const closeAt = envelope
+    ? value.indexOf(envelope.close, envelope.open.length)
+    : -1;
+  if (
+    !envelope ||
+    closeAt === -1 ||
+    closeAt + envelope.close.length <= maxTextChars
+  ) {
+    return truncateTextForSlimming(value, maxTextChars);
+  }
+  if (closeAt > maxTextChars) {
+    return `${truncateTextForSlimming(value, maxTextChars)}\n${envelope.close}`;
+  }
+  const closedAt = closeAt + envelope.close.length;
+  return value.slice(closedAt).trim() === ''
+    ? value
+    : value.slice(0, closedAt) + SLIM_TEXT_TRUNCATION_MARKER;
 }
 
 function truncateTextForSlimming(value: string, maxTextChars: number): string {
