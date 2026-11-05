@@ -68,6 +68,10 @@ final class WorkspaceMigrationAdmission {
         requirePhysicalOpen(jdbc, tenant, storage, lockClause(jdbc, true));
     }
 
+    static void requirePhysicalOpenForRead(JdbcTemplate jdbc, String tenant, String storage) {
+        requirePhysicalOpen(jdbc, tenant, storage, "");
+    }
+
     private static void requirePhysicalOpen(JdbcTemplate jdbc, String tenant, String storage, String lock) {
         if (storage == null) {
             return;
