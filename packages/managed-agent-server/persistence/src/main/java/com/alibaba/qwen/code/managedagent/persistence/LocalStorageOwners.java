@@ -111,11 +111,13 @@ final class LocalStorageOwners {
         // scan below reaches their primary records: storage admission locks an
         // alias record before its primary record (WorkspaceMigrationAdmission
         // .owner), and two recoveries of aliases sharing this storage take
-        // them in one order. The list comes from a committed read (committedRead)
-        // rather than this transaction's snapshot. An alias registered after that read is
-        // locked by the scan alone, which never locks its alias record; a
-        // recovery of another alias that already saw it can then deadlock with
-        // this one.
+        // them in one order. On a pooled DataSource the list comes from a
+        // committed read (committedRead) rather than this transaction's
+        // snapshot; on the single-connection offline entry it is that
+        // transaction's first snapshot instead. An alias registered after that
+        // read is locked by the scan alone, which never locks its alias record;
+        // a recovery of another alias that already saw it can then deadlock
+        // with this one.
         java.util.List<String> listed = committedRead(jdbc, current -> current.queryForList(
                 "SELECT alias_key FROM ma_storage WHERE physical_key = ? ORDER BY alias_key LIMIT 129", String.class, physical),
                 "Physical recovery alias list is unavailable");

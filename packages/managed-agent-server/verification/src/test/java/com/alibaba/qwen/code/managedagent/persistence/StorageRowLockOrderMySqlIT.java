@@ -1,12 +1,19 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.RowMapper;
@@ -17,7 +24,12 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -25,6 +37,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 /**
  * A storage row has a primary record and an alias record, and a locking read
@@ -213,7 +226,8 @@ class StorageRowLockOrderMySqlIT {
         try {
             var singleJdbc = new ManagedSchemaJdbcTemplate(single);
             new TransactionTemplate(new DataSourceTransactionManager(single)).executeWithoutResult(status -> {
-                singleJdbc.update("UPDATE ma_storage SET gmt_modified = 42 WHERE alias_key = ?", alias);
+                assertThat(singleJdbc.update("UPDATE ma_storage SET gmt_modified = 42 WHERE alias_key = ?", alias))
+                        .as("the caller's write").isEqualTo(1);
                 assertThat(LocalStorageOwners.lockCovered(singleJdbc, TENANT, STORAGE)).isEqualTo(PHYSICAL);
                 status.setRollbackOnly();
             });
@@ -222,6 +236,48 @@ class StorageRowLockOrderMySqlIT {
         }
         assertThat(jdbc.queryForObject("SELECT gmt_modified FROM ma_storage WHERE alias_key = ?", Long.class, alias))
                 .as("the rollback discarded the caller's write").isNotEqualTo(42L);
+    }
+
+    @Test
+    void migrationAbortClearsTheFenceThroughTheAliasIndex(@TempDir Path temp) throws Exception {
+        // owner() locked the row through uk_ma_storage_business_key; clearing
+        // the fence through uk_ma_storage_alias would lock the row through a
+        // second index inside the same transaction.
+        String tenant = "lock-order-migration-tenant";
+        String storage = "lock-order-migration-storage";
+        temp = temp.toRealPath();
+        Path source = Files.createDirectory(temp.resolve("source")).toRealPath();
+        Files.createDirectory(temp.resolve("history"));
+        Files.createDirectory(temp.resolve("runtime"), PosixFilePermissions.asFileAttribute(
+                PosixFilePermissions.fromString("rwx------")));
+        var properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount(tenant, storage, source.toString())));
+        var manager = new DataSourceTransactionManager(database.source());
+        var guard = new WorkspaceStorageGuard(jdbc, manager, properties, path -> new StorageIdentityReader.Identity(
+                path.toRealPath().toString(), "test-host", "device", path.getFileName().toString(), "2026-10-02T00:00:00Z"));
+        guard.register(tenant, storage, UUID.randomUUID().toString());
+        String fence = UUID.randomUUID().toString();
+        var request = new ObjectMapper().createObjectNode().put("version", 1)
+                .put("migrationOperationId", UUID.randomUUID().toString()).put("tenantId", tenant).put("storageId", storage)
+                .put("fenceOperationId", fence).put("captureOperationId", UUID.randomUUID().toString())
+                .put("mountRevision", 1).put("sourceRoot", source.toString())
+                .put("targetRoot", temp.resolve("target").toString()).put("bundleRoot", temp.resolve("bundle").toString())
+                .put("fileHistoryRoot", temp.resolve("history").toString())
+                .put("stateDirectory", temp.resolve("runtime").toString()).put("nodeExecutable", "/test/node")
+                .put("cliEntry", "/test/cli.js");
+        var cleared = new CapturingJdbc(database.source(), "fence_operation_id = NULL WHERE");
+        var operation = new WorkspaceMigrationStore(cleared, manager, guard, new InMemoryRuntimeBindingRepository(),
+                request.toString().getBytes(StandardCharsets.UTF_8), true,
+                new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker());
+        operation.retire(mock(RuntimeBrokerService.class));
+        guard.fence(tenant, storage, 1, fence);
+        operation.abort();
+
+        assertThat(operation.inspect().path("state").asText()).isEqualTo("ABORTED");
+        assertThat(cleared.sql).as("abort cleared the fence").isNotNull();
+        String plan = jdbc.queryForObject("EXPLAIN FORMAT=JSON " + cleared.sql, String.class, cleared.arguments);
+        assertThat(plan).as(plan).containsPattern("\"key\":\\s*\"uk_ma_storage_business_key\"");
     }
 
     private void insertLocal(String tenant, String physical) {
@@ -252,7 +308,7 @@ class StorageRowLockOrderMySqlIT {
         }
     }
 
-    /** Records the first query containing {@code marker}. */
+    /** Records the first query or update containing {@code marker}. */
     private static final class CapturingJdbc extends ManagedSchemaJdbcTemplate {
         private final String marker;
         private volatile String sql;
@@ -279,6 +335,12 @@ class StorageRowLockOrderMySqlIT {
         public List<java.util.Map<String, Object>> queryForList(String sql, Object... args) {
             capture(sql, args);
             return super.queryForList(sql, args);
+        }
+
+        @Override
+        public int update(String sql, Object... args) {
+            capture(sql, args);
+            return super.update(sql, args);
         }
 
         private void capture(String sql, Object[] args) {
