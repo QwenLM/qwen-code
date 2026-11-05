@@ -24005,6 +24005,110 @@ describe('DaemonSessionProvider', () => {
     },
   );
 
+  it('re-opens the capacity latch after a rewind rebuild frees the window', async () => {
+    // A rewind rebuild frees retention capacity, which must re-open the
+    // capacity latch so the surviving prefix stays pageable. The latch's ref
+    // fields (`capacityReached` / `hasMore` / `rejectedPage`) flip
+    // synchronously and the React state publish follows on the same drain; a
+    // regression that keeps the latch closed across a rewind — e.g. dropping
+    // the truncation reconciliation on the rebuild's `store.reset()` — turns
+    // this red even though the pre-rewind latch assertions stay green.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const chunk = (
+      id: number,
+      kind: 'user_message_chunk' | 'agent_message_chunk',
+      recordId: string,
+    ): DaemonEvent => ({
+      v: 1,
+      id,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: kind,
+          content: { type: 'text', text: recordId },
+          _meta: {
+            'qwen.session.recordId': recordId,
+            qwenTranscript: { sourceRecordIds: [recordId] },
+          },
+        },
+      },
+    });
+    const turn = (id: number, name: string) => [
+      chunk(id, 'user_message_chunk', `${name}-user`),
+      chunk(id + 1, 'agent_message_chunk', `${name}-answer`),
+    ];
+    const rewind = createDeferred<void>();
+    const session = createMockSession({
+      sessionId: 'rewind-deferral',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [...turn(1, 'root'), ...turn(3, 'target')],
+        liveJournal: [],
+      },
+      async *events(opts) {
+        await rewind.promise;
+        yield {
+          v: 1,
+          id: 100,
+          type: 'session_rewound',
+          data: {
+            sessionId: 'rewind-deferral',
+            promptId: 'native-target',
+            targetTurnIndex: 1,
+            filesChanged: [],
+            filesFailed: [],
+            replay: turn(50, 'root'),
+          },
+        };
+        yield* createIdleEvents()(opts);
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: turn(10, 'older-page'),
+      hasMore: false,
+    });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 2,
+      maxBlocks: 5,
+    });
+    // Saturate the window and latch the capacity rejection, as in the
+    // rewind-reopen matrix above.
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+    expect(history).toMatchObject({ capacityReached: true, hasMore: false });
+
+    // Commit the rewind and drain the batched dispatch. The rewind rebuild
+    // frees retention capacity, which must re-open the capacity latch — a
+    // regression that keeps the latch closed across a rewind (e.g. clearing
+    // the reconciliation callback on the rebuild's `store.reset()`) turns this
+    // red even though the pre-rewind latch assertions above stay green.
+    await act(async () => {
+      rewind.resolve();
+      await flushTranscriptDispatch();
+    });
+    expect(blocks.map((block) => block.sourceRecordIds?.[0])).toEqual([
+      'root-user',
+      'root-answer',
+    ]);
+    expect(history).toMatchObject({ capacityReached: false, hasMore: true });
+  });
+
   it('grows the latched rejected-page footprint by a re-anchoring trim’s evicted band and keeps the latch closed', async () => {
     // A byte-budget rejection stores the rejected page's footprint. A later
     // re-anchoring eviction trim re-serves the evicted band on the next fetch,
