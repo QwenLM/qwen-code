@@ -278,26 +278,38 @@ describe('isDestructiveCommand — git commit --amend', () => {
     "exec bash <<'EOF'\ngit commit --amend --no-edit\nEOF",
     "fish <<'EOF'\ngit commit --amend --no-edit\nEOF",
     "su root -c 'git commit --amend --no-edit'",
+    // git expands an `alias.*` it is handed itself, so the subcommand word is
+    // not the program that runs (#16075 review, R4-1).
+    "git -c alias.x='commit --amend' x",
+    'git --config-env=alias.x=CMD x --no-edit',
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0='commit --amend' git x",
   ])('blocks amend through an execution wrapper: %s', (command) => {
     expectBlocked(command, 'amend the commit', 'amend');
   });
 
   it('fails closed when eval nesting exceeds the unwrap depth cap', () => {
     // The cap is 8; a benign chain deeper than that is still refused rather
-    // than allowed, so pathological nesting cannot hide an amend.
+    // than allowed, so pathological nesting cannot hide an amend. The payload
+    // must be benign — a real amend reaches depth 9 and returns true on its
+    // own, which left the cap unheld (#16075 review, R5-5).
     const deep = Array.from({ length: 9 }).reduce<string>(
       (inner) => `eval '${inner}'`,
-      'git commit --amend --no-edit',
+      'echo hi',
     );
     expectBlocked(deep, 'amend the commit', 'amend');
   });
 
   // `sh -c -- '…'` puts an option terminator before the program; reading `--`
-  // as the program answered "not an amend" (#16075 review, R5-3).
+  // as the program answered "not an amend" (#16075 review, R5-3). Quote
+  // removal makes every spelling of that word the terminator (#16075 review,
+  // R6-1).
   it.each([
     "sh -c -- 'git commit --amend --no-edit'",
     "bash -c -- 'git commit --amend --no-edit'",
     "dash -c -- 'git commit --amend --no-edit'",
+    "sh -c \\-- 'git commit --amend --no-edit'",
+    "sh -c '--' 'git commit --amend --no-edit'",
+    "sh -c $'--' 'git commit --amend --no-edit'",
   ])('blocks amend behind an option terminator: %s', (command) => {
     expectBlocked(command, 'amend the commit', 'amend');
   });
@@ -378,6 +390,11 @@ describe('isDestructiveCommand — git commit --amend', () => {
     "grep -rn '${IFS}' packages/core/src",
     'find . -name bash',
     'ls | xargs sh',
+    // Position, not presence: a program word in argument position runs nothing
+    // (#16075 review, R5-4).
+    "echo bash <<< 'git commit --amend --no-edit'",
+    "grep -rn sh <<< 'git commit --amend'",
+    "echo bash -c 'git commit --amend'",
     "git commit -m 'fix: tidy' # --amend is blocked in AUTO mode",
     "bash --version; cat > notes.md <<'EOF'\ngit commit --amend --no-edit\nEOF",
   ])('allows inert text that mentions amend: %s', (command) => {

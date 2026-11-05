@@ -2466,6 +2466,46 @@ const AMEND_COMMIT_FLAGS_WITH_VALUE =
 
 const AMEND_UNWRAP_DEPTH_LIMIT = 8;
 
+/** An `alias.*` git expands itself, so the subcommand word is not what runs. */
+const AMEND_GIT_ALIAS_CONFIG = /^alias\.[^=]+=/;
+
+const AMEND_FIND_EXEC_MARKERS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
+
+/** A redirection operator as its own word; its target is the next word. */
+const AMEND_REDIRECT_WORD = /^\d*(?:>>?|<<?|<<<|>&|<&|&>|&>>)$/;
+
+/**
+ * Offsets whose token can be the program of a wrapper that carries its command
+ * in argument position: `xargs`'s first operand, the word after `find`'s
+ * `-exec`/`-ok`, and the word after a leading redirection's target.
+ *
+ * Every other offset above the prefix is an argument, where `echo git commit
+ * --amend >> CHANGELOG.md` and `echo bash -c '…'` are data rather than
+ * invocations (#16075 review, R5-4).
+ */
+function amendWrapperProgramOffsets(tokens: string[]): Set<number> {
+  const offsets = new Set<number>();
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    if (AMEND_FIND_EXEC_MARKERS.has(token)) {
+      offsets.add(index + 1);
+      continue;
+    }
+    if (amendExecutableBasename(token) === 'xargs') {
+      // `-I{}` and `-n1` carry their value in the flag itself, so the program is
+      // the first operand that does not start with `-`.
+      let operand = index + 1;
+      while (operand < tokens.length && tokens[operand]!.startsWith('-')) {
+        operand++;
+      }
+      offsets.add(operand);
+      continue;
+    }
+    if (AMEND_REDIRECT_WORD.test(token)) offsets.add(index + 2);
+  }
+  return offsets;
+}
+
 function amendExecutableBasename(token: string): string {
   return (token.split(/[\\/]/).pop() ?? token)
     .toLowerCase()
@@ -2533,6 +2573,16 @@ function isGitAmendInvocationAt(tokens: string[], start: number): boolean {
       break;
     }
     if (!token.startsWith('-')) break;
+    // git expands an `alias.*` it is handed here, so the subcommand word that
+    // follows is not the program that runs (#16075 review, R4-1).
+    if (
+      AMEND_GIT_ALIAS_CONFIG.test(token.replace(/^--config-env=/, '')) ||
+      (AMEND_GIT_GLOBAL_FLAGS_WITH_VALUE.test(token) &&
+        index + 1 < tokens.length &&
+        AMEND_GIT_ALIAS_CONFIG.test(tokens[index + 1]!))
+    ) {
+      return true;
+    }
     index +=
       AMEND_GIT_GLOBAL_FLAGS_WITH_VALUE.test(token) && index + 1 < tokens.length
         ? 2
@@ -2611,7 +2661,20 @@ function nestedAmendPayloads(tokens: string[]): {
   const payloads: string[] = [];
   let unclassifiable = false;
 
+  // git expands an `alias.*` handed to it through `GIT_CONFIG_*`; the value is
+  // arbitrary text, so a defined alias is unclassifiable (#16075 review, R4-1).
+  for (const token of tokens) {
+    if (/^GIT_CONFIG_KEY_\d+=alias\./.test(token)) unclassifiable = true;
+  }
+
+  // Only the program word and the wrapper positions that carry a command in
+  // argument position can run a payload. `echo bash -c '…'` runs `echo`, and
+  // `xargs -I{} sh -c '…'` runs `sh` (#16075 review, R5-4).
+  const wrapperOffsets = amendWrapperProgramOffsets(tokens);
+  const prefixLength = tokens.length - skipAmendPrefixes(tokens).length;
+
   for (let index = 0; index < tokens.length; index++) {
+    if (index > prefixLength && !wrapperOffsets.has(index)) continue;
     const program = amendExecutableBasename(tokens[index]!);
 
     if (program === 'env') {
@@ -2873,24 +2936,26 @@ function tokensContainGitAmend(segment: string, depth: number): boolean {
   // prefix: `xargs git commit --amend`, `find . -exec git commit --amend …`,
   // and a leading redirection (`> log git commit --amend`), where the program
   // is not at index 0. Try every offset so those are seen without teaching this
-  // function each wrapper. Quoted mentions stay inert because they arrive as a
-  // single token, and `-m --amend` stays inert because the invocation check
-  // consumes flag values. The basename prefilter keeps this linear: the scan
-  // runs for every shell tool call before the classifier, and copying the token
-  // tail at each offset made a 40k-token command take seconds.
+  // function each wrapper, and so a command glued onto the previous one by
+  // comment removal is still read as a command. Quoted mentions stay inert
+  // because they arrive as a single token, and `-m --amend` stays inert because
+  // the invocation check consumes flag values. The basename prefilter keeps
+  // this linear: the scan runs for every shell tool call before the classifier,
+  // and copying the token tail at each offset made a 40k-token command take
+  // seconds.
   for (let offset = 1; offset < tokens.length; offset++) {
     if (amendExecutableBasename(tokens[offset]!) !== 'git') continue;
     if (isGitAmendInvocationAt(tokens, offset)) return true;
   }
 
   // A here-string is one word handed to the program on its left; when that
-  // program is a shell, that word is the program it runs.
+  // program is a shell, that word is the program it runs. The consumer is the
+  // program word, not any word in the command: `echo bash <<< '…'` feeds
+  // `echo`, which writes the word out (#16075 review, R5-4).
   const hereString = hereStringProgram(segment);
   if (
     hereString !== null &&
-    tokens.some((token) =>
-      AMEND_SHELL_PROGRAMS.has(amendExecutableBasename(token)),
-    ) &&
+    AMEND_SHELL_PROGRAMS.has(amendExecutableBasename(tokens[0]!)) &&
     commandContainsGitAmendAtDepth(hereString, depth + 1)
   ) {
     return true;
