@@ -157,11 +157,14 @@ public class ManagedSessionStore
         return writerLifecycle.lockPublicationWriter(tenant, workspace, session, writer, generation, token);
     }
 
-    /** As above; {@code publicationGuard} false skips the tenant publication guard (ordinary apply lane). */
-    PublicationWriter lockPublicationWriter(String tenant, String workspace,
-            String session, String writer, long generation, String token, boolean publicationGuard) {
+    /**
+     * As above; {@code placement} and {@code publicationGuard} false skip those tenant guards, for a lane
+     * that did not take them before the Session root (ordinary publication lanes).
+     */
+    PublicationWriter lockPublicationWriter(String tenant, String workspace, String session, String writer,
+            long generation, String token, boolean placement, boolean publicationGuard) {
         return writerLifecycle.lockPublicationWriter(tenant, workspace, session, writer, generation, token,
-                publicationGuard);
+                placement, publicationGuard);
     }
 
     @Transactional

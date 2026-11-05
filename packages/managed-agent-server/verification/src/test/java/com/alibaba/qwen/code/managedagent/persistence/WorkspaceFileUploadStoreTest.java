@@ -440,6 +440,7 @@ class WorkspaceFileUploadStoreTest {
         String id = UUID.randomUUID().toString();
         if (runtimeFirst) {
             authority.claim(binding, runtime);
+            authority.beginRewind(binding, runtime);
         }
         try (var process = mockStatic(WorkspaceFileProcess.class)) {
             process.when(() -> WorkspaceFileProcess.upload(anyString(), anyString(), any())).thenAnswer(call -> {
@@ -452,23 +453,21 @@ class WorkspaceFileUploadStoreTest {
             assertSharedMembers(runtimeFirst ? 2 : 1);
             if (!runtimeFirst) {
                 authority.claim(binding, runtime);
+                authority.beginRewind(binding, runtime);
             }
-            authority.assertHeld(binding, runtime);
+            assertThat(authority.isHeld(binding, runtime)).isTrue();
+            assertThat(authority.hasPendingRewind(runtime)).isTrue();
             assertSharedMembers(2);
-            assertThat(authority.beginRewind(binding, runtime)).isFalse();
             if (runtimeFirst) {
                 assertThat(uploads.query("tenant", "actor", id).state()).isEqualTo("completed");
                 assertThat(uploads.query("tenant", "actor", id).state()).isEqualTo("completed");
                 assertSharedMembers(1);
-                authority.assertHeld(binding, runtime);
-                assertThat(authority.beginRewind(binding, runtime)).isTrue();
-                assertThatThrownBy(() -> upload(UUID.randomUUID().toString(), "rewind.bin", revision, new byte[0]))
-                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_busy"));
-                assertSharedMembers(1);
+                assertThat(authority.hasPendingRewind(runtime)).isTrue();
                 authority.endRewind(binding, runtime);
                 authority.release(binding, runtime);
             } else {
                 authority.release(binding, runtime);
+                assertThat(authority.hasPendingRewind(runtime)).isFalse();
                 authority.release(binding, runtime);
                 assertSharedMembers(1);
                 assertThatThrownBy(() -> guard.fence("tenant", storage(), 1, UUID.randomUUID().toString()))
@@ -627,8 +626,9 @@ class WorkspaceFileUploadStoreTest {
                 seed.getToken(), seed.getLeaseId(), seed.getEpoch());
         var ready = bindings.compareAndSet(claimed, claimed.withAttestation(lease,
                 new RuntimeResourceHandle("local-process", 1, Map.of("provider", "local-process")), Instant.now(), Instant.now()));
-        return bindings.admitSession(sessions, new RuntimeSessionRecord(new RuntimeSession(id, id, "bootstrap", scope),
+        var acquiring = bindings.admitSession(sessions, new RuntimeSessionRecord(new RuntimeSession(id, id, "bootstrap", scope),
                 ready.getBindingId(), ready.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        return sessions.compareAndSet(acquiring, acquiring.withState(RuntimeSessionRecord.State.READY, Instant.now()));
     }
 
     private void assertSharedMembers(long expected) {

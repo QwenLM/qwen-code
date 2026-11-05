@@ -150,11 +150,10 @@ final class JournalCommit {
             return replay(existing, request, validated.recordDigest(),
                     writerToken);
         }
-        // The storage's alias and directory rows order this commit against
-        // migration and physical fences; migration prepare checks idleness on
-        // committed data after locking them, so the guard adds nothing here.
+        // Physical fencing and migration require stopped writers. Ordinary
+        // commits only read storage state and need not block member updates.
         if (authority == null && csiOriginal == null) {
-            fencing.requireSessionStorageOpenForAdmission(tenantId, request.workspaceId(), sessionId);
+            fencing.requireSessionStorageOpenForRead(tenantId, request.workspaceId(), sessionId);
         } else {
             fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
         }

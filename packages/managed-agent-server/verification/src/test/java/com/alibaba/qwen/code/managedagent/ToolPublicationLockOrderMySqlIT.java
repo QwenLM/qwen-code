@@ -179,13 +179,15 @@ class ToolPublicationLockOrderMySqlIT {
     }
 
     /**
-     * A placement owner pauses after the tenant placement guard. Each publication path must wait for
-     * placement before it retains the publication tenant row, or the owner's retention request closes a
-     * placement/retention cycle. Standalone admission and renew are the shapes the HTTP controller uses.
+     * A placement owner pauses after the tenant placement guard. An ordinary publication path takes the
+     * Session root instead and never requests placement, so it completes while the owner holds it; a
+     * placement request after its root would close a cycle with every owner that locks this root behind
+     * placement (design 2026-11-04-managed-publication-placement). Standalone admission and renew are the
+     * shapes the HTTP controller uses.
      */
     @ParameterizedTest
     @ValueSource(strings = {"receipt", "admission-and-receipt", "admission", "renew", "ambient-renew"})
-    void publicationTakesPlacementBeforeRetention(String operation) throws Exception {
+    void ordinaryPublicationDoesNotWaitForAPlacementOwner(String operation) throws Exception {
         String url = System.getProperty("mysql.url");
         if (url == null || !url.matches("jdbc:mysql://[^/]+/[^?]+(?:\\?.*)?")) {
             throw new IllegalArgumentException("A MySQL test database URL is required");
@@ -546,9 +548,7 @@ class ToolPublicationLockOrderMySqlIT {
     }
 
     /** Runs the subject while a placement holder holds the tenant guard by name, then releases it.
-     *  Ordinary authorization no longer acquires tenant-wide rows after #13800, so the
-     *  placement owner is the placement acquisition itself — the contention point is the
-     *  row, not the API. */
+     *  The subject must complete while the row is held, without requesting placement. */
     private static JsonNode contend(OwnerPauseDataSource source, JdbcTemplate admin, String schema,
             PublicationJournalFixture journal, Callable<JsonNode> subject) throws Exception {
         var transaction = new TransactionTemplate(journal.manager);
@@ -560,24 +560,17 @@ class ToolPublicationLockOrderMySqlIT {
                     WorkspaceLifecycleStore.lockPlacement(journal.jdbc, "tenant-1")));
             assertThat(source.ownerPlacement.await(10, TimeUnit.SECONDS)).isTrue();
             var result = subjects.submit(subject);
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-            int waiting;
-            while ((waiting = MySqlLockProbe.lockWaits(admin, schema)) == 0 && !result.isDone()) {
-                assertThat(System.nanoTime()).isLessThan(deadline);
-                // InnoDB refreshes its transaction table only after 100 ms without a read.
-                Thread.sleep(200);
+            JsonNode value;
+            try {
+                value = result.get(10, TimeUnit.SECONDS);
+            } catch (java.util.concurrent.TimeoutException waiting) {
+                throw new AssertionError("Ordinary publication waited for the placement owner; "
+                        + MySqlLockProbe.describeLockWaits(admin, schema), waiting);
             }
-            if (waiting == 0 && result.isDone()) {
-                result.get(30, TimeUnit.SECONDS);
-            }
-            assertThat(waiting).as("Publication waits for the placement owner").isPositive();
-            assertThat(source.subjectPlacementLocks.get())
-                    .as(() -> "Placement precedes retention in the contending transaction; "
-                            + MySqlLockProbe.describeLockWaits(admin, schema))
-                    .containsExactly("placement");
+            assertThat(source.subjectPlacementLocks.get()).as("An ordinary lane never requests placement").isNull();
             source.releaseOwner.countDown();
             owner.get(30, TimeUnit.SECONDS);
-            return result.get(30, TimeUnit.SECONDS);
+            return value;
         } finally {
             source.releaseOwner.countDown();
             source.enabled = false;

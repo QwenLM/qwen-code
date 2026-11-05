@@ -767,6 +767,17 @@ type InboundTaskState =
 
 const MAX_INBOUND_TASK_ATTEMPTS = 3;
 /**
+ * Polls of one notification window that may fail with a 5xx while reading a
+ * thread (~30 minutes at the default 60s poll, plus the in-call retries). The
+ * window stays unread through the first 29; on the 30th, threads that still
+ * fail are skipped like a permanent failure and the window can be marked
+ * read. The budget belongs to the window, not to a thread, so threads that
+ * fail in turn cannot keep mark-as-read and the cursor frozen indefinitely.
+ */
+const MAX_TRANSIENT_FAILURE_POLLS = 30;
+/** Bounds the per-window key sets of a window held for very long. */
+const MAX_WINDOW_KEYS = 8192;
+/**
  * The poll cursor does not advance while an inbound task is recoverable, so a
  * slow or stuck turn makes GitHub return the same notifications on every poll.
  * Filtered notifications are skipped before any dedupe, so journaling each one
@@ -1072,7 +1083,8 @@ function isWatchFailFastError(err: unknown): boolean {
  * must not stop the others from being watched. A 403 aborts the pass only
  * when it is provably a shared rate limit; a per-repo permission 403 (a
  * fine-grained token lacking access to one repo) is isolated to that PR,
- * since bindings come from sessions, not the token's grants (R1-11).
+ * since bindings come from sessions, not the token's grants (R1-11). The
+ * notification lane stops a poll on the same answers (classifyThreadFailure).
  */
 function isWatchPassAbortError(err: unknown): boolean {
   const e = err as {
@@ -1085,6 +1097,24 @@ function isWatchPassAbortError(err: unknown): boolean {
   // retry-after, no limit wording) stays per-PR so it cannot starve the other
   // watched PRs.
   return e.status === 403 && isRateLimitAnswer(err);
+}
+
+/**
+ * How a failure reading one notification's thread is handled. A rate-limit or
+ * credential answer (`shared`, the answers that also abort the PR watch pass)
+ * applies to every thread, so the poll stops and holds the window until GitHub
+ * answers again. A 5xx (`transient`; Octokit also reports network failures as
+ * 500) belongs to this thread. Another 4xx (a deleted, transferred or
+ * inaccessible thread) or a local exception without a status comes back the
+ * same on every retry (`permanent`).
+ */
+function classifyThreadFailure(
+  err: unknown,
+): 'shared' | 'transient' | 'permanent' {
+  const e = err as { status?: unknown };
+  if (typeof e.status !== 'number') return 'permanent';
+  if (isWatchPassAbortError(err)) return 'shared';
+  return e.status >= 500 ? 'transient' : 'permanent';
 }
 
 function parseTriggerKind(metadata: string | undefined): string | undefined {
@@ -1245,10 +1275,37 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private prWatchStateLoaded = false;
   private inboundRecoveryPending = true;
   private recoverableInboundTasks = 0;
+  /**
+   * The inbound task store as this process last read or wrote it, for a check
+   * in the poll's error path that must not read the disk again.
+   */
+  private inboundTaskSnapshot: InboundTaskRecord[] = [];
   private activeInboundTaskIdsByMessage = new Map<string, string>();
   private cancelledInboundTaskIds = new Set<string>();
   private pendingCursorUpdatedAt: string | undefined;
   private inboundPersistenceBlocked = false;
+  /**
+   * Set when reading a notification failed this poll with a 5xx or a shared
+   * failure (rate limit, credentials): the cursor and mark-as-read must not
+   * move past it, or the thread would never be listed again and its comment
+   * would be lost silently.
+   */
+  private notificationRetryPending = false;
+  /** Polls since the window was last marked read that a 5xx kept it unread. */
+  private transientHoldPolls = 0;
+  /** Polls since the window was last marked read stopped by a shared failure. */
+  private sharedHoldPolls = 0;
+  /**
+   * Failing polls per thread since the window was last marked read. Only the
+   * log throttle reads it; the retry decision is the window's budget.
+   */
+  private transientNotificationFailures = new Map<string, number>();
+  /**
+   * Journal rows already written for the current window. A held window
+   * re-reads the same threads and comments on every poll, and rows that say
+   * nothing new (a repeated skip) are written once per window.
+   */
+  private windowJournalKeys = new Set<string>();
 
   constructor(
     name: string,
@@ -2034,6 +2091,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   protected async pollOnce(): Promise<void> {
     this.inboundPersistenceBlocked = false;
+    this.notificationRetryPending = false;
     this.publicationAuditBlocked = false;
     this.publicationAuditKeysCache = undefined;
 
@@ -2203,6 +2261,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     let reasonFilterJournaled = 0;
     let reasonFilterCollapsed = 0;
+    let transientHeld = false;
+    let sharedHeld = false;
     for (const notification of notifications) {
       if (!notification.subject.url) continue;
       const extracted = this.extractFromSubjectUrl(notification.subject.url);
@@ -2251,6 +2311,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         reason,
       };
 
+      const failureKey = `${chatId}|${threadId}`;
+      // A notification at or before the cursor belongs to a window that
+      // already committed; it is listed again only because its mark-as-read
+      // did not apply. A 5xx reading it neither holds the new window nor
+      // spends its budget; a rate limit still stops the poll.
+      const stale = notification.updated_at <= this.cursor.lastProcessedAt;
       try {
         switch (reason) {
           case 'mention':
@@ -2276,12 +2342,104 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             await this.processCommentLane(ctx, false);
         }
       } catch (err) {
-        process.stderr.write(
-          `[Channel:${this.name}] API error processing ${threadId}, skipping: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
-        );
+        const failure = classifyThreadFailure(err);
+        let failures = 0;
+        // Past the bound a new thread's count is not kept, so it is not known
+        // which of its polls are milestones.
+        let counted = false;
+        if (failure === 'transient' && !stale) {
+          failures =
+            (this.transientNotificationFailures.get(failureKey) ?? 0) + 1;
+          counted =
+            this.transientNotificationFailures.has(failureKey) ||
+            this.transientNotificationFailures.size < MAX_WINDOW_KEYS;
+          if (counted) {
+            this.transientNotificationFailures.set(failureKey, failures);
+          }
+        }
+        const transientPoll = this.transientHoldPolls + 1;
+        const retry =
+          failure === 'shared' ||
+          (failure === 'transient' &&
+            !stale &&
+            transientPoll < MAX_TRANSIENT_FAILURE_POLLS);
+        if (retry) {
+          this.notificationRetryPending = true;
+          if (failure === 'shared') sharedHeld = true;
+          else transientHeld = true;
+        }
+        // A held window re-reads the thread every poll. Report a thread's
+        // first and every tenth failing poll in the window (once, if its count
+        // is not kept), a shared failure on the first and every tenth poll it
+        // stops, and each other outcome once per window under a key of its
+        // own.
+        const heldPolls =
+          failure === 'shared' ? this.sharedHoldPolls + 1 : transientPoll;
+        // A local error (no HTTP status) raised while the task store or the
+        // publication audit is failing is not this thread's fault, and that
+        // failure already holds the window: report it as retried.
+        const storeHeld =
+          failure === 'permanent' &&
+          typeof (err as { status?: unknown }).status !== 'number' &&
+          (this.inboundPersistenceBlocked || this.publicationAuditBlocked);
+        // A thread whose own task has not settled (an error inside its run
+        // leaves it running) holds the window as well: the cursor waits for
+        // that task, so the thread is read again.
+        const taskHeld =
+          !retry && !storeHeld && this.threadTaskHoldsCursor(chatId, threadId);
+        const held = retry || storeHeld || taskHeld;
+        const milestone = (n: number) => n === 1 || n % 10 === 0;
+        const report =
+          failure === 'shared'
+            ? milestone(heldPolls)
+            : retry
+              ? counted
+                ? milestone(failures)
+                : this.journalOncePerWindow(`failing\0${failureKey}`)
+              : this.journalOncePerWindow(
+                  `${storeHeld || taskHeld ? 'held' : stale ? 'stale' : 'skip'}\0${failureKey}`,
+                );
+        if (report) {
+          const error = sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            200,
+          );
+          process.stderr.write(
+            failure === 'shared'
+              ? `[Channel:${this.name}] API error processing ${threadId} (rate limit or credentials), keeping notifications unread and stopping this poll: ${error}\n`
+              : retry
+                ? `[Channel:${this.name}] API error processing ${threadId} (${heldPolls}/${MAX_TRANSIENT_FAILURE_POLLS}), keeping it unread for the next poll: ${error}\n`
+                : storeHeld
+                  ? `[Channel:${this.name}] error processing ${threadId} while channel state cannot be persisted, keeping it unread for the next poll: ${error}\n`
+                  : taskHeld
+                    ? `[Channel:${this.name}] error processing ${threadId} while its task is unfinished, keeping it unread for the next poll: ${error}\n`
+                    : `[Channel:${this.name}] API error processing ${threadId}, skipping: ${error}\n`,
+          );
+          let detail: Record<string, number> | undefined;
+          if (failure === 'transient' && !stale) {
+            detail = retry ? { failures, heldPolls } : { failures };
+          } else if (failure === 'shared') {
+            detail = { heldPolls };
+          }
+          this.recordChannelEvent({
+            type: 'inbound',
+            outcome: held ? 'failed' : 'skipped',
+            reason: 'github_api_error',
+            triggerKind: reason,
+            repository: chatId,
+            thread: threadId,
+            number: issueNumber,
+            error,
+            ...(detail ? { detail } : {}),
+          });
+        }
+        // The same limit would answer every remaining thread.
+        if (failure === 'shared') break;
         continue;
       }
     }
+    if (transientHeld) this.transientHoldPolls += 1;
+    if (sharedHeld) this.sharedHoldPolls += 1;
     if (reasonFilterCollapsed > 0) {
       // One counted row instead of a row per notification: the threads differ,
       // so this carries no single repository/thread, and the page renders the
@@ -2305,6 +2463,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (
         !this.inboundPersistenceBlocked &&
         !this.publicationAuditBlocked &&
+        !this.notificationRetryPending &&
         !this.hasCursorBlockingTasks() &&
         this.pendingCursorUpdatedAt
       ) {
@@ -2314,6 +2473,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           this.cursor.lastProcessedAt = committedAt;
         }
         this.pendingCursorUpdatedAt = undefined;
+        // A new window starts: its hold budget, streaks and once-per-window
+        // journal keys start again.
+        this.transientHoldPolls = 0;
+        this.sharedHoldPolls = 0;
+        this.transientNotificationFailures.clear();
+        this.windowJournalKeys.clear();
       }
     } finally {
       // Bound the comment-time map EVERY poll, independent of dispatch: fetch
@@ -2333,6 +2498,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
   }
 
+  /**
+   * True the first time `key` is seen in the current notification window (it
+   * resets when the window is marked read), so a held window that re-reads the
+   * same thread or comment every poll journals the repeat once.
+   */
+  private journalOncePerWindow(key: string): boolean {
+    if (this.windowJournalKeys.has(key)) return false;
+    // Past the bound a new key is journaled without being remembered, so only
+    // the overflow repeats instead of every key at once.
+    if (this.windowJournalKeys.size < MAX_WINDOW_KEYS) {
+      this.windowJournalKeys.add(key);
+    }
+    return true;
+  }
+
   private async processCommentLane(
     ctx: NotificationContext,
     onlyMentioned: boolean,
@@ -2345,6 +2525,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const key = comment.node_id || String(comment.id);
       const senderId = (comment.user?.login || 'unknown').toLowerCase();
       if (this.cursor.dispatchedComments?.includes(key)) {
+        if (!this.journalOncePerWindow(`duplicate\0${key}`)) continue;
         this.recordChannelEvent({
           type: 'inbound',
           outcome: 'skipped',
@@ -2364,6 +2545,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ? testBotMention(body, this.botUsername)
         : false;
       if (onlyMentioned && !hasMention) {
+        if (!this.journalOncePerWindow(`mention_required\0${key}`)) continue;
         this.recordChannelEvent({
           type: 'inbound',
           outcome: 'skipped',
@@ -2709,47 +2891,43 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const { chatId, threadId, issueNumber } = ctx;
     const bodyKey = `${chatId}|${threadId}`;
     if (this.cursor.dispatchedBodies?.includes(bodyKey)) return;
-    try {
-      const issue = await this.fetchIssueMeta(ctx);
-      const body = issue.body || '';
+    // Fetch and dispatch failures reach pollOnce, which keeps the
+    // notification unread when GitHub may answer differently next poll.
+    const issue = await this.fetchIssueMeta(ctx);
+    const body = issue.body || '';
 
-      if (issue.user?.login === this.botUsername) return;
+    if (issue.user?.login === this.botUsername) return;
 
-      const isMentioned = this.botUsername
-        ? testBotMention(body, this.botUsername)
-        : false;
-      if (requireMention && !isMentioned) return;
+    const isMentioned = this.botUsername
+      ? testBotMention(body, this.botUsername)
+      : false;
+    if (requireMention && !isMentioned) return;
 
-      const text = this.botUsername
-        ? stripBotMention(body, this.botUsername)
-        : body;
+    const text = this.botUsername
+      ? stripBotMention(body, this.botUsername)
+      : body;
 
-      const envelope: Envelope = {
-        channelName: this.name,
-        senderId: (issue.user?.login || 'unknown').toLowerCase(),
-        senderName: issue.user?.login || 'unknown',
-        chatId,
-        threadId,
-        messageId: `issue-body-${issueNumber}`,
-        text,
-        isGroup: true,
-        isMentioned,
-        isReplyToBot: false,
-        metadata: this.buildRouteMetadata(ctx),
-      };
+    const envelope: Envelope = {
+      channelName: this.name,
+      senderId: (issue.user?.login || 'unknown').toLowerCase(),
+      senderName: issue.user?.login || 'unknown',
+      chatId,
+      threadId,
+      messageId: `issue-body-${issueNumber}`,
+      text,
+      isGroup: true,
+      isMentioned,
+      isReplyToBot: false,
+      metadata: this.buildRouteMetadata(ctx),
+    };
 
-      const dispatched = await this.dispatchEnvelope(envelope, issueNumber, {
-        dispatchedBodies: [bodyKey],
-      });
-      // Same contract as the direct lane: a refused dispatch (audit
-      // freeze) claimed no task, so the key must not be recorded.
-      if (dispatched) {
-        this.recordDispatchedBody(bodyKey);
-      }
-    } catch (err) {
-      process.stderr.write(
-        `[Channel:${this.name}] failed to fetch issue for first contact: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
-      );
+    const dispatched = await this.dispatchEnvelope(envelope, issueNumber, {
+      dispatchedBodies: [bodyKey],
+    });
+    // Same contract as the direct lane: a refused dispatch (audit
+    // freeze) claimed no task, so the key must not be recorded.
+    if (dispatched) {
+      this.recordDispatchedBody(bodyKey);
     }
   }
 
@@ -3495,14 +3673,29 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * they settle instead of freezing the cursor forever.
    */
   private hasCursorBlockingTasks(): boolean {
-    return this.readInboundTasks().some(
+    return this.readInboundTasks().some((task) =>
+      this.isCursorBlockingTask(task),
+    );
+  }
+
+  private isCursorBlockingTask(task: InboundTaskRecord): boolean {
+    return (
+      this.isRecoverableInboundTask(task) &&
+      task.backpressure !== true &&
+      !(
+        this.watchReconcileBlocked &&
+        task.envelope?.messageId?.startsWith('watch:') === true
+      )
+    );
+  }
+
+  /** Whether one of the thread's own tasks holds the cursor, as last seen. */
+  private threadTaskHoldsCursor(chatId: string, threadId: string): boolean {
+    return this.inboundTaskSnapshot.some(
       (task) =>
-        this.isRecoverableInboundTask(task) &&
-        task.backpressure !== true &&
-        !(
-          this.watchReconcileBlocked &&
-          task.envelope?.messageId?.startsWith('watch:') === true
-        ),
+        task.source.chatId === chatId &&
+        task.source.threadId === threadId &&
+        this.isCursorBlockingTask(task),
     );
   }
 
@@ -3699,6 +3892,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     try {
       const records = update(this.readInboundTasks());
       this.writeInboundTasks(records);
+      this.inboundTaskSnapshot = records;
       this.recoverableInboundTasks = records.filter((record) =>
         this.isRecoverableInboundTask(record),
       ).length;
@@ -3719,9 +3913,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (!Array.isArray(parsed) || !parsed.every(isInboundTaskRecord)) {
         throw new Error('invalid GitHub inbound task state');
       }
+      this.inboundTaskSnapshot = parsed;
       return parsed;
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.inboundTaskSnapshot = [];
+        return [];
+      }
       this.inboundPersistenceBlocked = true;
       process.stderr.write(
         `[Channel:${this.name}] failed to read GitHub inbound tasks: ${sanitizeLogText(
