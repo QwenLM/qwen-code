@@ -1003,10 +1003,10 @@ CREATE TABLE ma_runtime_session (
         (binding_id, runtime_generation, session_state),
     INDEX idx_runtime_session_id (runtime_session_id),
     execution_storage_key CHAR(64) COMMENT 'Physical storage coordination key for active execution membership.',
-    is_execution_exclusive TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether this execution membership requires exclusive storage access.',
+    is_rewind_pending TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether this Runtime Session has an active or unconfirmed rewind.',
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_runtime_session_id PRIMARY KEY (id),
-    CONSTRAINT ck_ma_runtime_session_boolean_values CHECK ((is_execution_exclusive >= 0 AND is_execution_exclusive <= 1))
+    CONSTRAINT ck_ma_runtime_session_boolean_values CHECK ((is_rewind_pending >= 0 AND is_rewind_pending <= 1))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Runtime execution Sessions attached to a binding and originating Harness Session.';
 
 CREATE TABLE ma_tool_execution (
@@ -1082,10 +1082,8 @@ CREATE TABLE ma_storage_owner (
     INDEX idx_execution_lease_maintenance (maintenance_id),
     physical_key CHAR(64) COMMENT 'Canonical physical storage identity shared by logical aliases.',
     member_count BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Number of Runtime Session memberships and running uploads on this storage.',
-    exclusive_member_key CHAR(64) COMMENT 'Identity of the execution member holding exclusive rewind access.',
     CONSTRAINT uk_ma_storage_owner_physical UNIQUE (physical_key),
     CONSTRAINT ck_ma_storage_owner_members CHECK (member_count >= 0),
-    CONSTRAINT ck_ma_storage_owner_exclusive CHECK (exclusive_member_key IS NULL OR member_count >= 1),
     CONSTRAINT uk_ma_storage_owner_business_key UNIQUE (storage_key),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_storage_owner_id PRIMARY KEY (id)

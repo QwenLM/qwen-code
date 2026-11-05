@@ -13,6 +13,7 @@ import {
   fitHookLine,
   fitHookLines,
   getProjectHooksForApproval,
+  getProjectHooksForApprovalFromRawWorkspace,
   getProjectHooksHeadlessWarning,
   getProjectHooksRoot,
   getSeparatedHookSettings,
@@ -212,6 +213,25 @@ describe('hook-approvals (hash-bound approval store)', () => {
     },
   );
 
+  it.each([
+    [undefined, [false, false]],
+    ['rejected', [true, true]],
+    ['approved', [false, false]],
+  ] as const)(
+    'explicit trust keeps the gate clear on re-apply unless rejected (%#)',
+    async (decision, gate) => {
+      if (decision) await loadHookApprovals().setState(subject(), decision);
+      const config = {
+        setProjectHooksPendingApproval: vi.fn(),
+        isExplicitlyTrustedFolder: () => true,
+      };
+      applyProjectHooksApproval(config, subject());
+      expect(config.setProjectHooksPendingApproval).toHaveBeenCalledWith(
+        ...gate,
+      );
+    },
+  );
+
   it('roots the project hooks at the folder holding .qwen/settings.json', () => {
     expect(
       getProjectHooksRoot({
@@ -322,6 +342,45 @@ describe('hook-approvals (hash-bound approval store)', () => {
     expect(rejected).toContain(HOOK_APPROVALS_FILENAME);
     expect(rejected).not.toContain('Run qwen interactively');
   });
+
+  it('raw-workspace fallback hashes identically to the trusted path', () => {
+    const settings = {
+      merged: {},
+      getProjectHooks: () => hooks,
+      workspace: {
+        path: '/r/.qwen/settings.json',
+        originalSettings: { hooks },
+      },
+    };
+    const trusted = getProjectHooksForApproval(settings);
+    const raw = getProjectHooksForApprovalFromRawWorkspace(settings);
+    expect(raw).toBeDefined();
+    expect(hashProjectHooks(raw!)).toBe(hashProjectHooks(trusted!));
+    expect(raw!.root).toBe(trusted!.root);
+  });
+
+  it('raw-workspace fallback gates nothing when no hook would run', () => {
+    expect(
+      getProjectHooksForApprovalFromRawWorkspace({
+        merged: {},
+        workspace: {
+          path: '/r/.qwen/settings.json',
+          originalSettings: {
+            hooks: { Stop: [{ hooks: [{ type: 'nope', command: 'x' }] }] },
+          },
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      getProjectHooksForApprovalFromRawWorkspace({
+        merged: {},
+        workspace: {
+          path: '/r/.qwen/settings.json',
+          originalSettings: {},
+        },
+      }),
+    ).toBeUndefined();
+  });
 });
 
 describe('summarizeProjectHooks', () => {
@@ -381,7 +440,7 @@ describe('summarizeProjectHooks', () => {
         hook('echo $AWS_SECRET_ACCESS_KEY', '${AWS_SECRET_ACCESS_KEY}'),
       ),
     ).toEqual([
-      'Stop  echo $AWS_SECRET_ACCESS_KEY [resolves ${VAR} from the approved project env; env: AUTH=${AWS_SECRET_ACCESS_KEY}; matcher: ${AWS_SECRET_ACCESS_KEY}]',
+      'Stop  echo $AWS_SECRET_ACCESS_KEY [resolves ${VAR} from the environment (project .env/settings.env or shell); env: AUTH=${AWS_SECRET_ACCESS_KEY}; matcher: ${AWS_SECRET_ACCESS_KEY}]',
     ]);
   });
 

@@ -8,6 +8,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/utils/envVarResolver.js';
 import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
 import { atomicWriteFile } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
@@ -104,6 +105,39 @@ export function getProjectHooksForApproval(settings: {
   };
 }
 
+/**
+ * The same approval subject built from the raw workspace file, for daemon
+ * surfaces where the settings layer withheld the whole workspace scope
+ * (feature on, folder untrusted). The hash inputs are identical to the
+ * trusted path — raw hooks, raw settings.env, project .env files — so a
+ * decision recorded here clears the gate after the folder is trusted.
+ */
+export function getProjectHooksForApprovalFromRawWorkspace(settings: {
+  merged: Settings;
+  workspace: {
+    path: string;
+    originalSettings: { hooks?: unknown; env?: unknown };
+  };
+}): ProjectHooksApproval | undefined {
+  const hooks = settings.workspace.originalSettings.hooks;
+  if (!isRecord(hooks)) return undefined;
+  const resolved = resolveEnvVarsInObject(hooks);
+  if (summarizeProjectHooks(resolved, hooks).length === 0) return undefined;
+  const root = getProjectHooksRoot(settings);
+  return {
+    root,
+    hooks,
+    resolved,
+    env: {
+      // The review subject covers the project's env regardless of the
+      // folder's current trust state; otherwise a decision recorded while
+      // untrusted would hash differently once the folder is trusted.
+      files: readProjectEnvFiles(settings.merged, root, true),
+      settings: settings.workspace.originalSettings.env ?? null,
+    },
+  };
+}
+
 /** The separated hook scopes `loadCliConfig` takes, with the block it gates. */
 export function getSeparatedHookSettings(
   settings: Parameters<typeof getProjectHooksForApproval>[0] & {
@@ -119,6 +153,14 @@ export function getSeparatedHookSettings(
     systemHooks: settings.getSystemHooks(),
     userHooks: settings.getUserHooks(),
     projectHooks,
+    // Display-only: when the settings layer withheld the workspace scope,
+    // the listing still shows the raw block as disabled (untrusted). This
+    // never feeds execution — getProjectHooks() reads projectHooks only.
+    projectHooksDisplayOnly: structuredClone(
+      settings.workspace?.originalSettings?.hooks as
+        | Record<string, unknown>
+        | undefined,
+    ),
     ...(projectHooksApproval ? { projectHooksApproval } : {}),
   };
 }
@@ -206,7 +248,9 @@ function describeHook(
         typeof raw['command'] === 'string' &&
         /\$\{?\w/.test(raw['command'])
       ) {
-        details.push('resolves ${VAR} from the approved project env');
+        details.push(
+          'resolves ${VAR} from the environment (project .env/settings.env or shell)',
+        );
       }
       add('env', envList(raw['env']));
       if (raw['shell']) add('shell', displayText(raw['shell']));
@@ -414,12 +458,20 @@ export function getProjectHooksApprovalState(
 export function applyProjectHooksApproval(
   config: {
     setProjectHooksPendingApproval(pending: boolean, rejected?: boolean): void;
+    isExplicitlyTrustedFolder?(): boolean;
   },
   approval: ProjectHooksApproval | undefined,
 ): HookApprovalState | undefined {
   const state = getProjectHooksApprovalState(approval);
+  // Explicit folder trust is the co-equal authority (same rule as the
+  // startup gate): re-applying the store must not re-pend a trusted
+  // folder's hooks on a `/hooks` reload or a YOLO exit. Only an explicit
+  // rejection of the exact block still wins over trust.
+  const trusted = config.isExplicitlyTrustedFolder?.() === true;
   config.setProjectHooksPendingApproval(
-    state !== undefined && state !== 'approved',
+    state !== undefined &&
+      state !== 'approved' &&
+      !(trusted && state !== 'rejected'),
     state === 'rejected',
   );
   return state;
