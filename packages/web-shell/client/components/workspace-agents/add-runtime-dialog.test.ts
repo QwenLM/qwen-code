@@ -166,6 +166,7 @@ describe('connectExistingWith', () => {
       connected: true,
       saved: false,
       saveError: 'disk full',
+      workspaceCwd: '/remote',
     }));
     const run = async (action: () => Promise<unknown>) => {
       await action();
@@ -174,8 +175,27 @@ describe('connectExistingWith', () => {
 
     expect(await connectExistingWith(run, connect)(input)).toEqual({
       saveError: 'disk full',
+      workspaceCwd: '/remote',
     });
     expect(connect).toHaveBeenCalledWith(input);
+  });
+
+  it.each([
+    ['without a workspace', { connected: true }],
+    ['with one that is not a path', { connected: true, workspaceCwd: 1 }],
+    ['with no body', null],
+  ])('reads an answer %s as from no workspace', async (_label, answer) => {
+    const run = async (action: () => Promise<unknown>) => {
+      await action();
+      return true;
+    };
+
+    expect(
+      await connectExistingWith(
+        run,
+        vi.fn(async () => answer),
+      )(input),
+    ).toEqual({});
   });
 
   it('passes on a connect that failed, whatever it answered', async () => {

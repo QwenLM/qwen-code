@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DaemonUnavailableError } from '../../daemon/availability';
 import { I18nProvider } from '../../i18n';
 import {
@@ -530,6 +530,23 @@ it.each([
 it('keeps a notice that was not on screen when the dialog was closed', async () => {
   await renderDialog({
     onConnectExisting: vi.fn(async () => ({ saveError: 'disk full' })),
+  });
+  await chooseTab('I have its address and token');
+  await connectExisting();
+  expect(notSavedNotice()).toBe(NOT_SAVED_THERE);
+
+  await chooseTab('Run one command there');
+  await click('Close');
+  await reopen();
+  await chooseTab('I have its address and token');
+
+  expect(notSavedNotice()).toBe(NOT_SAVED_THERE);
+});
+
+it('drops a join command created before a remote connect, whose token that connect replaces', async () => {
+  // The coordinator keeps one enrollment token; the connect issues its own.
+  await renderDialog({
+    onConnectExisting: vi.fn(async () => ({})),
     onCreateJoinToken: vi.fn(async () => ({
       token: 'join-token',
       workspaceId: 'ws_1',
@@ -537,16 +554,15 @@ it('keeps a notice that was not on screen when the dialog was closed', async () 
     })),
   });
   await click('Create join command');
+  expect(button('Close (the link keeps working)')).toBeDefined();
   await chooseTab('I have its address and token');
   await connectExisting();
-  expect(notSavedNotice()).toBe(NOT_SAVED_THERE);
-
   await chooseTab('Run one command there');
-  await click('Close (the link keeps working)');
-  await reopen();
-  await chooseTab('I have its address and token');
 
-  expect(notSavedNotice()).toBe(NOT_SAVED_THERE);
+  expect(document.body.textContent).not.toContain(
+    'QWEN_AGENT_HOST_ENROLLMENT_TOKEN=',
+  );
+  expect(button('Create join command')).toBeDefined();
 });
 
 it('drops a notice that was on screen when the dialog was closed', async () => {
@@ -688,6 +704,336 @@ it('does not put the remote’s notice on a join command’s connected result, f
 
   expect(document.body.textContent).toContain('machine-b is connected');
   expect(notSavedNotices()).toEqual([]);
+});
+
+describe('the remote the address-and-token form connected', () => {
+  // The coordinator itself is always listed, here from the same path.
+  const local: RuntimeSummary = {
+    id: 'local',
+    kind: 'local',
+    label: 'This computer',
+    provider: 'qwen',
+    status: 'online',
+    workspaceCwd: '/remote',
+  };
+  const remote: RuntimeSummary = {
+    id: 'host_a',
+    kind: 'external',
+    label: 'machine-a',
+    provider: 'qwen',
+    status: 'online',
+    workspaceCwd: '/remote',
+  };
+  const other: RuntimeSummary = {
+    ...remote,
+    id: 'host_b',
+    label: 'machine-b',
+    workspaceCwd: '/b',
+  };
+  // Joined before and offline: not new until it comes back.
+  const asleep: RuntimeSummary = {
+    ...remote,
+    id: 'host_z',
+    label: 'machine-z',
+    status: 'offline',
+  };
+  const later: RuntimeSummary = {
+    ...remote,
+    id: 'host_c',
+    label: 'machine-c',
+    workspaceCwd: '/c',
+  };
+  const props = () => ({
+    onConnectExisting: vi.fn(
+      async (): Promise<RuntimeJoinOutcome> => ({
+        saveError: 'disk full',
+        workspaceCwd: '/remote',
+      }),
+    ),
+    onCreateJoinToken: vi.fn(async () => ({
+      token: 'join-token',
+      workspaceId: 'ws_1',
+      expiresAt: Date.now() + 10 * 60_000,
+    })),
+  });
+  type Dialog = ReturnType<typeof props>;
+  const roster = (dialog: Dialog, ...runtimes: RuntimeSummary[]) =>
+    renderDialog({ ...dialog, runtimes: [local, asleep, ...runtimes] });
+  const commandShown = () =>
+    document.body.textContent?.includes(
+      "QWEN_AGENT_HOST_ENROLLMENT_TOKEN='join-token'",
+    );
+  const shown = () =>
+    /(machine-\w+) is connected/.exec(document.body.textContent ?? '')?.[1];
+  /** Connects the remote (the roster after it misses it), then a command. */
+  async function connectThenCommand(
+    dialog: Dialog,
+    ...before: RuntimeSummary[]
+  ) {
+    await roster(dialog, ...before);
+    await chooseTab('I have its address and token');
+    await connectExisting();
+    await chooseTab('Run one command there');
+    await click('Create join command');
+    expect(commandShown()).toBe(true);
+  }
+  async function doneAndReopen() {
+    await click('Done');
+    await reopen();
+  }
+
+  it('is shown with its notice after a join command was created, and the command keeps waiting', async () => {
+    const dialog = props();
+    await connectThenCommand(dialog);
+
+    await roster(dialog, remote);
+    expect(shown()).toBe('machine-a');
+    expect(notSavedNotices()).toEqual([NOT_SAVED_THERE]);
+
+    await doneAndReopen();
+    expect(commandShown()).toBe(true);
+    expect(shown()).toBeUndefined();
+    expect(notSavedNotices()).toEqual([]);
+    await roster(dialog, remote, other);
+    expect(shown()).toBe('machine-b');
+    expect(notSavedNotices()).toEqual([]);
+    await doneAndReopen();
+    expect(commandShown()).toBe(false);
+  });
+
+  it('is shown after the command’s computer when that one is listed first, with its notice', async () => {
+    const dialog = props();
+    await connectThenCommand(dialog);
+
+    await roster(dialog, other, remote);
+    expect(shown()).toBe('machine-b');
+    expect(notSavedNotices()).toEqual([]);
+
+    await doneAndReopen();
+    expect(shown()).toBe('machine-a');
+    expect(notSavedNotices()).toEqual([NOT_SAVED_THERE]);
+    await doneAndReopen();
+    expect(shown()).toBeUndefined();
+    expect(commandShown()).toBe(false);
+  });
+
+  it('does not replace a result on screen when another computer shows up', async () => {
+    const dialog = props();
+    await connectThenCommand(dialog);
+    await roster(dialog, other);
+    expect(shown()).toBe('machine-b');
+
+    await roster(dialog, other, remote);
+    expect(shown()).toBe('machine-b');
+    expect(notSavedNotices()).toEqual([]);
+
+    await doneAndReopen();
+    await roster(dialog, other, remote, {
+      ...remote,
+      id: 'host_n',
+      label: 'machine-n',
+    });
+    expect(shown()).toBe('machine-a');
+    expect(notSavedNotices()).toEqual([NOT_SAVED_THERE]);
+  });
+
+  it('keeps the command waiting when it expired while the remote’s result was open, if its computer came', async () => {
+    const dialog = props();
+    await connectThenCommand(dialog);
+    await roster(dialog, remote, other);
+    expect(shown()).toBe('machine-a');
+
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 11 * 60_000);
+      await doneAndReopen();
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(shown()).toBe('machine-b');
+  });
+
+  it('ends with the remote’s result once the command expired with no one else come', async () => {
+    const dialog = props();
+    dialog.onCreateJoinToken.mockResolvedValue({
+      token: 'join-token',
+      workspaceId: 'ws_1',
+      expiresAt: Date.now() - 1,
+    });
+    await roster(dialog);
+    await chooseTab('I have its address and token');
+    await connectExisting();
+    await chooseTab('Run one command there');
+    await click('Create join command');
+    await roster(dialog, remote);
+    expect(notSavedNotices()).toEqual([NOT_SAVED_THERE]);
+
+    await doneAndReopen();
+    await roster(dialog, remote, other);
+
+    expect(shown()).toBeUndefined();
+  });
+
+  it('is waited for alone once a remote connect dropped the join command, past other computers', async () => {
+    const dialog = props();
+    await roster(dialog);
+    await click('Create join command');
+    await chooseTab('I have its address and token');
+    await connectExisting();
+
+    await roster(dialog, other);
+    expect(shown()).toBeUndefined();
+    await roster(dialog, other, remote);
+    expect(shown()).toBe('machine-a');
+    expect(notSavedNotices()).toEqual([NOT_SAVED_THERE]);
+
+    await doneAndReopen();
+    await roster(dialog, other, remote, later);
+    expect(shown()).toBeUndefined();
+  });
+
+  it('is the remote connected last, not an earlier one that shows up first', async () => {
+    const dialog = props();
+    dialog.onConnectExisting
+      .mockResolvedValueOnce({ workspaceCwd: '/remote' })
+      .mockResolvedValueOnce({
+        saveError: 'r2 disk full',
+        workspaceCwd: '/r2',
+      });
+    await roster(dialog);
+    await chooseTab('I have its address and token');
+    await connectExisting();
+    await connectExisting();
+
+    await roster(dialog, remote);
+    expect(shown()).toBeUndefined();
+    await roster(dialog, remote, {
+      ...remote,
+      id: 'host_r2',
+      label: 'machine-r2',
+      workspaceCwd: '/r2',
+    });
+    expect(shown()).toBe('machine-r2');
+    expect(notSavedNotices()).toEqual([
+      NOT_SAVED_THERE.replace('disk full', 'r2 disk full'),
+    ]);
+  });
+
+  it('is kept by a join command when the computers online before serve other workspaces', async () => {
+    const prior: RuntimeSummary = {
+      ...other,
+      id: 'host_p',
+      label: 'machine-p',
+    };
+    const dialog = props();
+    await connectThenCommand(dialog, prior);
+
+    await roster(dialog, prior, remote);
+    expect(shown()).toBe('machine-a');
+    expect(notSavedNotices()).toEqual([NOT_SAVED_THERE]);
+    await doneAndReopen();
+    expect(commandShown()).toBe(true);
+  });
+
+  describe('when a computer online before it connected serves its workspace', () => {
+    // The remote may be that one, back under its saved id.
+    const before: RuntimeSummary = {
+      ...remote,
+      id: 'host_x',
+      label: 'machine-x',
+    };
+
+    it('is not kept by a join command', async () => {
+      const dialog = props();
+      await connectThenCommand(dialog, before);
+
+      await roster(dialog, before, {
+        ...remote,
+        id: 'host_s',
+        label: 'machine-s',
+      });
+
+      // The command's computer, as it would be without a remote.
+      expect(shown()).toBe('machine-s');
+      expect(notSavedNotices()).toEqual([]);
+      await doneAndReopen();
+      expect(commandShown()).toBe(false);
+    });
+
+    it('is not waited for past the first computer that shows up', async () => {
+      const dialog = props();
+      await roster(dialog, before);
+      await chooseTab('I have its address and token');
+      await connectExisting();
+
+      await roster(dialog, before, other);
+      expect(shown()).toBe('machine-b');
+      expect(notSavedNotices()).toEqual([]);
+
+      await doneAndReopen();
+      await roster(dialog, before, other, later);
+      expect(shown()).toBeUndefined();
+    });
+  });
+
+  it('is the first new runtime when its answer does not name its workspace', async () => {
+    // An older daemon's answer.
+    const dialog = props();
+    dialog.onConnectExisting.mockResolvedValue({ saveError: 'disk full' });
+    await roster(dialog);
+    await chooseTab('I have its address and token');
+    await connectExisting();
+
+    await roster(dialog, other, remote);
+
+    expect(shown()).toBe('machine-b');
+    expect(notSavedNotices()).toEqual([NOT_SAVED_THERE]);
+  });
+
+  it('is not told apart from another computer by an answer without its workspace', async () => {
+    const dialog = props();
+    dialog.onConnectExisting.mockResolvedValue({ saveError: 'disk full' });
+    await connectThenCommand(dialog);
+
+    await roster(dialog, remote);
+
+    // Taken for the command's computer, as before.
+    expect(shown()).toBe('machine-a');
+    expect(notSavedNotices()).toEqual([]);
+  });
+
+  it('is not waited for again once it showed up', async () => {
+    // The next computer serving that path is the join command's.
+    const dialog = props();
+    await connectThenCommand(dialog);
+    await roster(dialog, remote);
+    await doneAndReopen();
+
+    await roster(dialog, remote, {
+      ...remote,
+      id: 'host_s',
+      label: 'machine-s',
+    });
+    expect(shown()).toBe('machine-s');
+    expect(notSavedNotices()).toEqual([]);
+    await doneAndReopen();
+    expect(commandShown()).toBe(false);
+  });
+
+  it('leaves nothing to wait for once its own connected result is closed', async () => {
+    const dialog = props();
+    await roster(dialog);
+    await chooseTab('I have its address and token');
+    await connectExisting();
+    await roster(dialog, remote);
+    expect(shown()).toBe('machine-a');
+    expect(notSavedNotices()).toEqual([NOT_SAVED_THERE]);
+
+    await doneAndReopen();
+    await roster(dialog, remote, other);
+
+    expect(shown()).toBeUndefined();
+  });
 });
 
 it('does not let a connected result replace a join still in flight', async () => {

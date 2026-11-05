@@ -25,7 +25,7 @@ import {
 import { registerAgentHostRuntimeRoutes } from './agent-host-connection.js';
 import {
   agentHostConnectionsPath,
-  findAgentHostConnection,
+  findAgentHostConnectionChecked,
   saveAgentHostConnection,
 } from '../agent-host-connections.js';
 
@@ -93,6 +93,8 @@ afterEach(async () => {
 });
 
 it('forgets and stops a connection whose record is readable', async () => {
+  const another = { ...record, workspaceId: 'ws_2', workspaceCwd: '/other' };
+  await saveAgentHostConnection(another);
   await saveAgentHostConnection(record);
   stopConnection.mockReturnValue(true);
 
@@ -101,8 +103,15 @@ it('forgets and stops a connection whose record is readable', async () => {
   expect(response.status).toBe(200);
   expect(response.body).toEqual({ disconnected: true });
   expect(stopConnection).toHaveBeenCalledTimes(1);
-  // Gone from the disk, or the restore loop would bring it back.
-  expect(await findAgentHostConnection(record)).toBeUndefined();
+  // Gone from a file that still reads, or the restore loop would bring it
+  // back; the other workspace's record stays.
+  expect(await findAgentHostConnectionChecked(record)).toEqual({
+    kind: 'absent',
+  });
+  expect(await findAgentHostConnectionChecked(another)).toEqual({
+    kind: 'found',
+    record: another,
+  });
 });
 
 it('refuses for a corrupt file it cannot replace, says how to get past it, and stops once it is gone', async () => {

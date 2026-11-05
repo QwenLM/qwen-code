@@ -32,6 +32,8 @@ export interface RuntimeSummary {
   /** Program ids the runtime reported it can run. */
   programs?: readonly string[];
   status: 'online' | 'offline';
+  /** The workspace it serves, on its own machine. */
+  workspaceCwd?: string;
 }
 
 export interface JoinToken {
@@ -126,6 +128,46 @@ export function findReplacementRuntime(
   );
 }
 
+/**
+ * A wait for a computer to show up. `known`: runtimes online when it
+ * started; one that is online now and was not is new. Online, not present:
+ * a machine that joined before reuses its saved identity and comes back
+ * under the same id. It waits for the computer the join command on screen
+ * is for, for the remote the address-and-token form connected (`remote`),
+ * or for both, when a join command is created before that remote shows up.
+ * A remote connect drops the join command (see `submitExisting`), so one
+ * still on screen was created after it.
+ */
+interface RuntimeWatch {
+  at: number;
+  known: ReadonlySet<string>;
+  /**
+   * `workspaceCwd`: the workspace the remote answered from, which tells it
+   * apart from other computers that show up; without it (an older daemon),
+   * the first new runtime is taken for it. `mayBeOnline`: a computer online
+   * when it connected already served that workspace, so the remote may be
+   * that one, back under its saved id, and never show up as new.
+   */
+  remote?: { workspaceCwd?: string; mayBeOnline?: true };
+}
+
+/** Whether `watch` waits for a remote it can tell apart, still to show up. */
+function awaitsRemote(watch: RuntimeWatch | undefined): boolean {
+  return watch?.remote?.workspaceCwd !== undefined && !watch.remote.mayBeOnline;
+}
+
+/** Whether `runtime`, new during `watch`, is the remote it waits for. */
+function isWatchedRemote(
+  watch: RuntimeWatch,
+  runtime: RuntimeSummary,
+): boolean {
+  return (
+    watch.remote !== undefined &&
+    (watch.remote.workspaceCwd === undefined ||
+      runtime.workspaceCwd === watch.remote.workspaceCwd)
+  );
+}
+
 function onlineIds(runtimes: readonly RuntimeSummary[]): Set<string> {
   return new Set(
     runtimes
@@ -209,10 +251,14 @@ function CommandLine({ text }: { text: string }) {
 /**
  * A join that went through, as the dialog sees it: whether the computer that
  * joined saved the connection. A `saveError` means it will not reconnect
- * after a restart or a workspace reload. `false` is a connect that failed
- * and was already reported elsewhere; a failed join throws instead.
+ * after a restart or a workspace reload. `workspaceCwd`, from a remote
+ * connect: the workspace the remote answered from, which its runtime
+ * reports too. `false` is a connect that failed and was already reported
+ * elsewhere; a failed join throws instead.
  */
-export type RuntimeJoinOutcome = false | { saveError?: string };
+export type RuntimeJoinOutcome =
+  | false
+  | { saveError?: string; workspaceCwd?: string };
 
 /**
  * Reads a `hosts/connect` answer, which `hosts/remote-connect` passes on. An
@@ -249,7 +295,15 @@ export function connectExistingWith(
         answer = await connect(input);
         return answer;
       });
-      return ok && joinOutcome(answer);
+      const workspaceCwd = (
+        answer as { workspaceCwd?: unknown } | null | undefined
+      )?.workspaceCwd;
+      return (
+        ok && {
+          ...joinOutcome(answer),
+          ...(typeof workspaceCwd === 'string' ? { workspaceCwd } : {}),
+        }
+      );
     } finally {
       onBusy?.(false);
     }
@@ -325,15 +379,7 @@ export function AddRuntimeDialog({
       : ['command', 'existing'];
   const [address, setAddress] = useState(serverUrl);
   const [join, setJoin] = useState<JoinToken>();
-  // Runtimes online when we started waiting; one that is online now and was
-  // not is the one that joined. Online, not present: a machine that joined
-  // before reuses its saved identity and comes back under the same id.
-  const [watch, setWatch] = useState<{
-    at: number;
-    known: ReadonlySet<string>;
-    /** Set when the address-and-token form started this wait. */
-    fromExisting?: true;
-  }>();
+  const [watch, setWatch] = useState<RuntimeWatch>();
   // What went wrong, kept with the form whose attempt it was (a join command
   // or a join), and shown only while that form is on screen. `joinSent`: the
   // join's came back from a join that was sent, not from checking the form.
@@ -355,9 +401,8 @@ export function AddRuntimeDialog({
   // Why a computer that joined could not save the connection, one per
   // machine: this one (`here`, from the join form, shown on its joined
   // result) and the remote (`there`, from the address-and-token form, shown
-  // under that form, and on the connected result of the wait that form
-  // started). An attempt replaces only its own, and a close drops only what
-  // was on screen.
+  // under that form, and on the remote's connected result). An attempt
+  // replaces only its own, and a close drops only what was on screen.
   const [notSaved, setNotSaved] = useState<{ here?: string; there?: string }>(
     {},
   );
@@ -370,6 +415,19 @@ export function AddRuntimeDialog({
   const [now, setNow] = useState(() => Date.now());
   const replacementHostId = replacementTarget?.id;
 
+  // New runtimes, in roster order: a computer that enrolls is listed last.
+  const fresh = useMemo(
+    () =>
+      watch
+        ? runtimes.filter(
+            (runtime) =>
+              runtime.kind === 'external' &&
+              runtime.status === 'online' &&
+              !watch.known.has(runtime.id),
+          )
+        : [],
+    [runtimes, watch],
+  );
   const connected = useMemo(() => {
     if (!watch) return undefined;
     if (replacementHostId) {
@@ -380,13 +438,19 @@ export function AddRuntimeDialog({
         join?.replacementHostId,
       );
     }
-    return runtimes.find(
-      (runtime) =>
-        runtime.kind === 'external' &&
-        runtime.status === 'online' &&
-        !watch.known.has(runtime.id),
-    );
-  }, [replacementHostId, runtimes, watch, join?.replacementHostId]);
+    // Waiting for that remote alone, no other computer is the one waited
+    // for. Otherwise the first listed, as before: a computer that enrolls
+    // is listed last, so a result on screen stays when another one enrolls
+    // meanwhile.
+    return awaitsRemote(watch) && !join
+      ? fresh.find((runtime) => isWatchedRemote(watch, runtime))
+      : fresh[0];
+  }, [replacementHostId, runtimes, watch, join, fresh]);
+  // Whose the connected result is: the remote's carries its notice.
+  const connectedRemote =
+    watch !== undefined &&
+    connected !== undefined &&
+    isWatchedRemote(watch, connected);
   // A connected result waits while a request is in flight: it would replace
   // the form that sent it, and its Create-agent button leave the page.
   const showsConnected = connected !== undefined && !busy;
@@ -412,12 +476,14 @@ export function AddRuntimeDialog({
     try {
       if (!safeHost(address)) throw new Error(t('collab.runtime.badAddress'));
       setJoin(await onCreateJoinToken(replacementHostId));
-      setWatch({
+      setWatch((previous) => ({
         at: Date.now(),
         known: replacementHostId
           ? new Set(runtimes.map((runtime) => runtime.id))
           : onlineIds(runtimes),
-      });
+        // A remote connected from the other form that has not shown up yet.
+        ...(awaitsRemote(previous) ? { remote: previous!.remote } : {}),
+      }));
     } catch (cause) {
       setError(
         'command',
@@ -435,6 +501,9 @@ export function AddRuntimeDialog({
     inFlight.current = true;
     setBusy(true);
     setNotSaved((current) => ({ ...current, there: undefined }));
+    // The coordinator keeps one enrollment token, and a remote connect
+    // issues its own: a join command created before may no longer work.
+    setJoin(undefined);
     const known = onlineIds(runtimes);
     try {
       const outcome = await onConnectExisting({
@@ -445,10 +514,25 @@ export function AddRuntimeDialog({
         allowHttp: data.get('allowHttp') === 'on',
       });
       if (outcome) {
-        setWatch({ at: Date.now(), known, fromExisting: true });
-        if (outcome.saveError !== undefined) {
-          const there = outcome.saveError;
-          setNotSaved((current) => ({ ...current, there }));
+        const { saveError, workspaceCwd } = outcome;
+        const mayBeOnline =
+          workspaceCwd !== undefined &&
+          runtimes.some(
+            (runtime) =>
+              runtime.kind === 'external' &&
+              known.has(runtime.id) &&
+              runtime.workspaceCwd === workspaceCwd,
+          );
+        setWatch({
+          at: Date.now(),
+          known,
+          remote: {
+            ...(workspaceCwd !== undefined ? { workspaceCwd } : {}),
+            ...(mayBeOnline ? { mayBeOnline: true as const } : {}),
+          },
+        });
+        if (saveError !== undefined) {
+          setNotSaved((current) => ({ ...current, there: saveError }));
         }
       }
     } finally {
@@ -521,12 +605,11 @@ export function AddRuntimeDialog({
   // An expired link is no use to copy; offer a new one instead.
   const live = join && minutesLeft > 0 ? join : undefined;
   // `here` belongs to the joined result, `there` to its form and to the
-  // connected result of the wait it started: the joined result takes the
-  // dialog over first.
+  // remote's connected result: the joined result takes the dialog over
+  // first.
   const shownHere = joined !== undefined ? notSaved.here : undefined;
   const shownThere =
-    !joined &&
-    (showsConnected ? watch?.fromExisting === true : method === 'existing')
+    !joined && (showsConnected ? connectedRemote : method === 'existing')
       ? notSaved.there
       : undefined;
   // Whose error is on screen: not over the joined result, nor under another
@@ -555,8 +638,26 @@ export function AddRuntimeDialog({
     // A joined result is shown over a connected one, which then stays for
     // the next opening.
     if (!next && showsConnected && !joined) {
-      setJoin(undefined);
-      setWatch(undefined);
+      // What the wait still waits for: the remote, when this is another
+      // computer, and a join command's computer, when this is the remote
+      // and the command still works or another computer came meanwhile.
+      const remoteLeft = awaitsRemote(watch) && !connectedRemote;
+      const commandLeft =
+        connectedRemote &&
+        join !== undefined &&
+        (join.expiresAt > Date.now() ||
+          fresh.some((runtime) => runtime.id !== connected?.id));
+      if (watch && connected && (remoteLeft || commandLeft)) {
+        setWatch({
+          at: watch.at,
+          known: new Set([...watch.known, connected.id]),
+          ...(remoteLeft ? { remote: watch.remote } : {}),
+        });
+        if (!commandLeft) setJoin(undefined);
+      } else {
+        setJoin(undefined);
+        setWatch(undefined);
+      }
     }
     if (!next && joined) {
       setJoined(undefined);
