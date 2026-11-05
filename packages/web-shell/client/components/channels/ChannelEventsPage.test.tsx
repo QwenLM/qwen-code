@@ -550,6 +550,111 @@ describe('ChannelEventsPage', () => {
     expect(event?.defaultPrevented).toBe(false);
   });
 
+  it('opens the associated session in the workspace the event names', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'gh-bot',
+          type: 'task',
+          outcome: 'running',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+          sessionId: 'session-bound',
+          sessionWorkspaceCwd: '/work/other',
+        },
+      ],
+    };
+    await renderPage();
+
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open session"]',
+    );
+    expect(button).toBeTruthy();
+    let detail: unknown;
+    const listener = (event: Event) => {
+      detail = (event as CustomEvent).detail;
+    };
+    window.addEventListener('qwen:open-session', listener);
+    try {
+      await act(async () => {
+        button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+    } finally {
+      window.removeEventListener('qwen:open-session', listener);
+    }
+    expect(detail).toEqual({
+      sessionId: 'session-bound',
+      workspaceCwd: '/work/other',
+    });
+  });
+
+  it('falls back to the selected workspace for records without an owner', async () => {
+    // Outbound rows written before sessionWorkspaceCwd existed carry only
+    // the sessionId; the reply session lives in the journal's workspace.
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'gh-bot',
+          type: 'outbound',
+          outcome: 'posted',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+          sessionId: 'session-reply',
+        },
+      ],
+    };
+    await renderPage();
+
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open session"]',
+    );
+    expect(button).toBeTruthy();
+    let detail: unknown;
+    const listener = (event: Event) => {
+      detail = (event as CustomEvent).detail;
+    };
+    window.addEventListener('qwen:open-session', listener);
+    try {
+      await act(async () => {
+        button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+    } finally {
+      window.removeEventListener('qwen:open-session', listener);
+    }
+    expect(detail).toEqual({
+      sessionId: 'session-reply',
+      workspaceCwd: '/workspace/demo',
+    });
+  });
+
+  it('does not offer a session jump for events without a session', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'gh-bot',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+        },
+      ],
+    };
+    await renderPage();
+
+    expect(
+      container.querySelector('button[aria-label="Open session"]'),
+    ).toBeNull();
+  });
+
   it('shows how many further notifications a collapsed skip stands for', async () => {
     eventsState.current.data = {
       truncated: false,
