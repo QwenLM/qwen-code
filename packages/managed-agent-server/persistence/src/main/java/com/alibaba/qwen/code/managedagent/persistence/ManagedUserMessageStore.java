@@ -192,7 +192,10 @@ public class ManagedUserMessageStore
         if (!agents.supportsUserMessageQueue()) {
             return;
         }
-        ManagedSessionStore.lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        // The Session row is the first lock, as in Turn admission, which the
+        // submitter below runs in this transaction without the tenant guard:
+        // it orders this dispatch against lifecycle and other admissions of
+        // the Session, and the storage fence is checked by Turn admission.
         lock(tenant, session);
         reconcile(tenant, session);
         Snapshot snapshot = snapshot(tenant, session);

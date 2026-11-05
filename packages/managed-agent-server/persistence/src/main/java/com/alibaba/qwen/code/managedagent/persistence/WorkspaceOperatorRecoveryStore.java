@@ -80,6 +80,15 @@ public final class WorkspaceOperatorRecoveryStore {
                         saved.getRequest().getScope().getTenantId());
                 return null;
             });
+            // Publication lanes read a session-class binding below its Session
+            // root without placement, so every move out of READY holds that
+            // root; it precedes the storage rows, which Sessions lock after
+            // their root (design 2026-11-04-managed-publication-placement).
+            if ("session".equals(saved.getRequest().getScope().getIsolationClass())
+                    && saved.getRequest().getIsolationKey() != null) {
+                jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
+                        saved.getRequest().getScope().getTenantId(), saved.getRequest().getIsolationKey());
+            }
             LocalStorageOwners.key(jdbc, saved.getRequest().getScope().getTenantId(),
                     saved.getRequest().getStorageId());
             List<Boolean> valid = jdbc.query("SELECT binding_state, record_version,"
