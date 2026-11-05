@@ -17,18 +17,24 @@ import { git } from '../review/lib/git.js';
 import { pushTargetFor } from './prepare.js';
 import {
   MAX_PUSHES,
-  assertOwnedBySession,
+  assertWatching,
+  TASK_OPTION,
+  taskArg,
   autofixPrPaths,
+  statePaths,
   isBranchName,
   isCommandSafeName,
-  repoRoot,
+  trustAnchor,
+  resolveWatchRoot,
   requireState,
   withWatchLock,
   writeState,
   type AutofixPrPaths,
   type AutofixPrState,
 } from './state.js';
+import { assertNoFixInFlight } from './fix.js';
 import {
+  checkoutHoldsWork,
   hasUncommittedChanges,
   isAncestor,
   networkGitEnv,
@@ -209,11 +215,11 @@ function pushRef(
   }
 }
 
-export function runPush(prNumber: number): PushOutcome {
-  const root = repoRoot();
+export function runPush(prNumber: number, task?: string): PushOutcome {
+  const root = resolveWatchRoot(prNumber);
   const paths = autofixPrPaths(root, prNumber);
   return withWatchLock(paths, prNumber, () =>
-    pushLocked(paths, prNumber, root),
+    pushLocked(paths, prNumber, root, task),
   );
 }
 
@@ -221,12 +227,30 @@ function pushLocked(
   paths: AutofixPrPaths,
   prNumber: number,
   root: string,
+  task: string | undefined,
 ): PushOutcome {
   const state = requireState(paths.statePath, prNumber);
-  assertOwnedBySession(state);
+  assertWatching(state, task);
+  assertNoFixInFlight(paths, prNumber);
+  // An in-place watch works in the checkout the state names, not the
+  // worktree path the PR number alone derives.
+  paths = statePaths(root, state);
   const worktree = paths.worktreePath;
-  requireWorktree(paths, prNumber, root);
-  if (hasUncommittedChanges(worktree)) {
+  requireWorktree(
+    paths,
+    prNumber,
+    root,
+    false,
+    trustAnchor(state),
+    state.inPlace === true,
+  );
+  // An in-place checkout holds the watch's own files under .qwen/tmp:
+  // they are not the user's work.
+  const dirty =
+    state.inPlace === true
+      ? (checkoutHoldsWork(worktree) ?? true)
+      : hasUncommittedChanges(worktree);
+  if (dirty) {
     throw new Error(
       `${worktree} has uncommitted changes; commit them, or discard what should not be pushed, before pushing.`,
     );
@@ -342,12 +366,14 @@ export const pushCommand: CommandModule = {
   describe:
     "Push the worktree's commits to the PR branch: fast-forward only, leased on the known head, never to the default branch",
   builder: (yargs) =>
-    yargs.positional('pr', {
-      type: 'number',
-      demandOption: true,
-      describe: 'PR number',
-    }),
+    yargs
+      .positional('pr', {
+        type: 'number',
+        demandOption: true,
+        describe: 'PR number',
+      })
+      .option('task', TASK_OPTION),
   handler: (argv) => {
-    writeStdoutLine(JSON.stringify(runPush(Number(argv['pr']))));
+    writeStdoutLine(JSON.stringify(runPush(Number(argv['pr']), taskArg(argv))));
   },
 };

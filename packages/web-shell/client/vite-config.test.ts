@@ -223,14 +223,21 @@ describe('Web Shell client source proxy bypass', () => {
 });
 
 describe('Web Shell daemon API proxy coverage', () => {
-  it.each(['/standalone', '/live'])('proxies %s API routes', (prefix) => {
+  // Without its own entry the SPA fallback answers these with index.html in
+  // dev and the page fails JSON parsing on open.
+  it.each([
+    { prefix: '/standalone', url: '/standalone/status' },
+    { prefix: '/live', url: '/live/status' },
+    // The only unqualified route in this namespace is the watches listing.
+    { prefix: '/autofix-pr', url: '/autofix-pr/watches' },
+  ])('proxies $prefix API routes', ({ prefix, url }) => {
     const proxy = loadConfig().server?.proxy?.[prefix];
     expect(proxy).not.toBeTypeOf('string');
     expect(proxy).toBeDefined();
     const options = proxy as ProxyOptions;
     const request = {
       method: 'GET',
-      url: `${prefix}/status`,
+      url,
       headers: { accept: '*/*' },
     } as unknown as IncomingMessage;
 

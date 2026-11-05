@@ -31,6 +31,22 @@ import type {
 } from '../../src/daemon/ui/index.js';
 
 describe('daemon UI normalizer and transcript reducer', () => {
+  it('treats config option updates as state metadata rather than chat or progress', () => {
+    expect(
+      normalizeDaemonEvent({
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session',
+          update: {
+            sessionUpdate: 'config_option_update',
+            configOptions: [{ id: 'workflow_mode', currentValue: 'on' }],
+          },
+        },
+      }),
+    ).toEqual([]);
+  });
+
   it('retains tool prompt ownership after byte eviction and journal-only replay', () => {
     const event = {
       v: 1 as const,

@@ -345,6 +345,7 @@ class Session {
       getActiveTurnAbortSignal: () => this.activeTurnAbortController?.signal,
       settings: this.settings,
       permissionMode: this.config.getApprovalMode(),
+      waitForInitialization: () => this.waitForInitialization(),
       onInterrupt: () => this.handleInterrupt(),
       onContinueLastTurn: () => this.requestContinueLastTurn(),
     });
@@ -416,7 +417,7 @@ class Session {
     try {
       // Dispatch the initialize request first
       // This registers SDK MCP servers in the control context
-      await this.dispatcher?.dispatch(request);
+      await this.dispatcher?.dispatch(request, true);
 
       // Get sendSdkMcpMessage callback from SdkMcpController
       // This callback is used by McpClientManager to send MCP messages
@@ -468,7 +469,7 @@ class Session {
 
   /**
    * Handle control request asynchronously (fire-and-forget from main loop).
-   * Errors are handled internally and responses sent by dispatcher.
+   * Errors are handled internally.
    */
   private handleControlRequestAsync(request: CLIControlRequest): void {
     const dispatcher = this.getDispatcher();
@@ -477,9 +478,43 @@ class Session {
       return;
     }
 
+    if (
+      request.request.subtype === 'initialize' &&
+      this.initializationResolve !== null
+    ) {
+      this.outputAdapter.send({
+        type: 'control_response',
+        response: {
+          subtype: 'error',
+          request_id: request.request_id,
+          error: 'Session initialization is in progress. Try again when ready.',
+        },
+      });
+      return;
+    }
+
     // Fire-and-forget: dispatch runs concurrently
     // The dispatcher's pendingIncomingRequests tracks completion
-    void dispatcher.dispatch(request).catch((error) => {
+    void (async () => {
+      if (request.request.subtype === 'initialize') {
+        try {
+          await this.waitForInitialization();
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.outputAdapter.send({
+            type: 'control_response',
+            response: {
+              subtype: 'error',
+              request_id: request.request_id,
+              error: `Session initialization failed: ${message}`,
+            },
+          });
+          return;
+        }
+      }
+      await dispatcher.dispatch(request);
+    })().catch((error) => {
       debugLogger.error('[Session] Control request dispatch error:', error);
       // Error response is already sent by dispatcher.dispatch()
     });
@@ -509,6 +544,7 @@ class Session {
 
   private async processUserMessage(userMessage: CLIUserMessage): Promise<void> {
     const input = extractUserMessageText(userMessage);
+    const promptParts = splitUserMessageBlocks(userMessage);
     const humanInput = readHumanInputFromSdkMessage(userMessage);
     if (!input) {
       debugLogger.debug('[Session] No text content in user message');
@@ -524,6 +560,8 @@ class Session {
     try {
       await runNonInteractive(this.config, this.settings, input, promptId, {
         ...(humanInput ? { humanInput } : {}),
+        ...(promptParts ? { promptParts } : {}),
+        ...(isToolMessage(userMessage) ? { fromTool: true } : {}),
         modSession: this.modSession,
         abortController: turnAbortController,
         adapter: this.outputAdapter,
@@ -1072,6 +1110,47 @@ class Session {
       this.cleanupSignalHandlers();
     }
   }
+}
+
+/**
+ * Whether a user message answers a tool call or carries tool blocks, so no
+ * person typed it.
+ */
+function isToolMessage(message: CLIUserMessage): boolean {
+  if (message.parent_tool_use_id != null) return true;
+  const content = message.message.content;
+  return (
+    Array.isArray(content) &&
+    content.some(
+      (block) =>
+        !!block &&
+        typeof block === 'object' &&
+        'type' in block &&
+        (block.type === 'tool_result' || block.type === 'tool_use'),
+    )
+  );
+}
+
+/**
+ * The text blocks and the other blocks of a message that has both kinds, the
+ * other blocks serialized as `extractUserMessageText` does.
+ */
+function splitUserMessageBlocks(
+  message: CLIUserMessage,
+): { text: string; blocks: string[] } | undefined {
+  const content = message.message.content;
+  if (!Array.isArray(content)) return undefined;
+  const text: string[] = [];
+  const blocks: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue;
+    if ('type' in block && block.type === 'text' && 'text' in block) {
+      if (typeof block.text === 'string' && block.text) text.push(block.text);
+    } else {
+      blocks.push(JSON.stringify(block));
+    }
+  }
+  return blocks.length ? { text: text.join('\n'), blocks } : undefined;
 }
 
 function extractUserMessageText(message: CLIUserMessage): string | null {

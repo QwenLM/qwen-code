@@ -47,8 +47,6 @@ import {
 
 const TUI_ONLY_SETTINGS = new Set([
   'experimental.mods',
-  // Only headless reads it until ACP moves to the shared agent loop.
-  'experimental.unifiedAgentLoop',
   'general.vimMode',
   'general.terminalBell',
   'general.notificationMode',

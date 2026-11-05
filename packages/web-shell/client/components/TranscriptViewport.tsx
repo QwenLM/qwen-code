@@ -575,6 +575,7 @@ export const TranscriptViewport = forwardRef<
                     onEditUserMessage: undefined,
                     onSubmitUserMessageEdit: undefined,
                     onShowContextDetail: undefined,
+                    onOpenMemoryFile: undefined,
                     onBranchSession: undefined,
                     onRetryClick: undefined,
                     onRetryFailedPrompt: undefined,

@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback, useContext, useMemo } from 'react';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionArchiveState } from '@qwen-code/sdk/daemon';
 import { WEB_SHELL_SESSION_SOURCE_TYPE } from '../constants/sessions';
@@ -8,6 +8,7 @@ import {
   useWebShellSessions,
 } from '../session-catalog/session-catalog-hooks';
 import type { SessionCatalogQuery } from '../session-catalog/session-catalog-store';
+import { McpAppGeneratedUiOwnerContext } from '../mcpAppHostContext';
 
 interface ScopedSessionsOptions {
   autoLoad?: boolean;
@@ -24,6 +25,7 @@ export function useScopedSessions(
   workspaceCwd: string | undefined,
   options: ScopedSessionsOptions = {},
 ) {
+  const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
   const {
     autoLoad = false,
     enabled = true,
@@ -82,14 +84,24 @@ export function useScopedSessions(
     async (sessionIds: string[]) => {
       if (!workspaceCwd) return primaryDeleteSessions(sessionIds);
       try {
-        return await workspace.client
+        const invalidateDeleted =
+          generatedUiOwner?.captureSessionDeletion(workspaceCwd);
+        const result = await workspace.client
           .workspaceByCwd(workspaceCwd)
           .deleteSessionsData(sessionIds);
+        invalidateDeleted?.([...result.removed, ...result.notFound]);
+        return result;
       } finally {
         controller.invalidateWorkspace(workspaceCwd);
       }
     },
-    [controller, primaryDeleteSessions, workspace.client, workspaceCwd],
+    [
+      controller,
+      generatedUiOwner,
+      primaryDeleteSessions,
+      workspace.client,
+      workspaceCwd,
+    ],
   );
   const deleteSession = useCallback(
     async (sessionId: string) => {
@@ -118,6 +130,15 @@ export function useScopedSessions(
     loading: scoped.loading,
     error: scoped.error,
     reload: reloadScoped,
+    // Page-completeness markers, mirrored from the primary branch so a
+    // workspace-locked split call site can read them off the union without a
+    // TS2339: the prune guard needs them to tell "not in this page" from
+    // "gone".
+    nextCursor: scoped.nextCursor,
+    liveMergeFailed: scoped.liveMergeFailed,
+    truncated: scoped.truncated,
+    // Same reason: a stale-retained scoped page is not proof of absence.
+    stale: scoped.stale,
     deleteSession,
     deleteSessions,
     releaseSession: primaryReleaseSessionAction ? releaseSession : undefined,

@@ -24,6 +24,15 @@ import {
   observe,
   sameProcess,
 } from './process-observer.js';
+import {
+  sha,
+  save,
+  until,
+  inventory,
+  inventoryEntry,
+  cells,
+  type Entry,
+} from './npm-distribution-fixture.js';
 
 const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -39,49 +48,6 @@ const node = fs.realpathSync(
 const npm = fs.realpathSync(
   process.env['QWEN_INSTALLED_NPM'] ?? 'NODE26_NPM_REQUIRED',
 );
-const sha = (file: string) =>
-  createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-const save = (file: string, value: unknown) =>
-  fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-async function until(check: () => boolean | Promise<boolean>, budget = 15_000) {
-  const deadline = Date.now() + budget;
-  while (Date.now() < deadline) {
-    if (await check()) return true;
-    await sleep(100);
-  }
-  return false;
-}
-type Entry = {
-  symlink: string | false;
-  sha256?: string;
-  bytes?: number;
-  mode?: string;
-};
-function inventory(directory: string): Record<string, Entry> {
-  const result: Record<string, Entry> = {};
-  const walk = (folder: string) => {
-    for (const name of fs.readdirSync(folder).sort()) {
-      const file = path.join(folder, name);
-      const stat = fs.lstatSync(file);
-      const relative = path.relative(directory, file);
-      if (stat.isSymbolicLink())
-        result[relative] = { symlink: fs.readlinkSync(file) };
-      else if (stat.isDirectory()) walk(file);
-      else {
-        assert.ok(stat.isFile());
-        result[relative] = {
-          symlink: false,
-          sha256: sha(file),
-          bytes: stat.size,
-          mode: `0o${(stat.mode & 0o777).toString(8)}`,
-        };
-      }
-    }
-  };
-  walk(directory);
-  return result;
-}
 const checkout = () => ({
   head: execFileSync('git', ['rev-parse', 'HEAD'], {
     cwd: root,
@@ -427,6 +393,13 @@ beforeAll(async () => {
       metadata,
       unpacked,
     });
+    const publishedFiles = path.resolve(base, 'published-files.json');
+    save(publishedFiles, tarMap);
+    save(path.join(base, 'AUDITED-ARTIFACT.json'), {
+      source: initialCheckout,
+      tarball: { ...pack.tarball, path: path.resolve(pack.tarball.path) },
+      files: { path: publishedFiles, sha256: sha(publishedFiles) },
+    });
     const prefix = path.join(base, 'install');
     await command(
       'install',
@@ -510,17 +483,6 @@ beforeAll(async () => {
     });
   }
 }, 1_560_000);
-function inventoryEntry(file: string): Entry {
-  const stat = fs.lstatSync(file);
-  return stat.isSymbolicLink()
-    ? { symlink: fs.readlinkSync(file) }
-    : {
-        symlink: false,
-        sha256: sha(file),
-        bytes: stat.size,
-        mode: `0o${(stat.mode & 0o777).toString(8)}`,
-      };
-}
 function guard() {
   assert.deepEqual(checkout(), initialCheckout);
   assert.equal(sha(node), inputs.actualNode26.sha256);
@@ -532,26 +494,6 @@ function guard() {
 afterAll(() => {
   if (receipt) guard();
 });
-async function cells(session: InteractiveSession) {
-  const rows = await session.viewportCells();
-  const row = rows.find((entry) =>
-    entry.text.includes('const R3_HIGHLIGHT_VALUE = 42;'),
-  );
-  if (!row) return undefined;
-  const keyword = row.cells[row.text.indexOf('const')];
-  const number = row.cells[row.text.indexOf('42;')];
-  return {
-    text: row.text,
-    attrs: row.cells,
-    highlighted: Boolean(
-      keyword &&
-        number &&
-        keyword.fg >= 0 &&
-        number.fg >= 0 &&
-        keyword.fg !== number.fg,
-    ),
-  };
-}
 it('actual installed Node26 hands strict OpenTUI to private Bun144 and exits naturally', async () => {
   process.env['QWEN_E2E_RENDERER'] = 'opentui';
   guard();

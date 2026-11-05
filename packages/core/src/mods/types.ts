@@ -10,6 +10,7 @@ import type {
   ModToolCheckResult,
   ModToolResult,
 } from './tool-events.js';
+import type { ModRenderInput, ModRenderSite } from './render-tree.js';
 
 export const MOD_MAX_BYTES = 262_144;
 export const MOD_MAX_DEPTH = 512;
@@ -88,6 +89,51 @@ export interface ModSessionFacts {
   usage: ModSessionUsage;
 }
 
+/** What a main-loop turn cost, in the API's spelling, and the last model. */
+export interface ModTurnUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  model: string;
+}
+
+export interface ModTurnStart {
+  text: string;
+  turnId: string;
+  /** Set when `text` kept only its head and tail to fit the Mod payload. */
+  isTextTruncated?: true;
+}
+
+/** Where a submitted prompt came from, in Claude Code's `PromptOrigin`. */
+export type ModPromptOrigin = { kind: 'composer' } | { kind: 'sdk' };
+
+export interface ModPromptSubmit {
+  text: string;
+  wait: boolean;
+  origin: ModPromptOrigin;
+}
+
+/**
+ * How a submitted prompt fared: what arrived beneath the hooks, or why it
+ * did not enter. `byHook` tells a hook's own drop from one that answered
+ * without passing the prompt on.
+ */
+export type ModPromptSubmitted =
+  | { text: string; context?: string[] }
+  | { drop: string; byHook: boolean };
+
+export interface ModTurnComplete {
+  answer: string;
+  durationMs: number;
+  isAborted: boolean;
+  turnId: string;
+  reason: 'answer' | 'aborted' | 'error';
+  usage?: ModTurnUsage;
+  /** Set when `answer` kept only its head and tail to fit the Mod payload. */
+  isAnswerTruncated?: true;
+}
+
 export type ModRequest =
   | {
       type: 'load';
@@ -95,6 +141,10 @@ export type ModRequest =
       cwd: string;
       surface: 'terminal' | null;
       version: string;
+      /** The render sites this host draws; `ui.render` runs only where one is offered. */
+      sites?: readonly ModRenderSite[];
+      /** Whether the host raises `prompt.submit`; its hooks are skipped otherwise. */
+      prompts?: boolean;
     }
   | {
       type: 'command';
@@ -112,7 +162,12 @@ export type ModRequest =
       input: ModToolCheckInput;
       verdict: ModToolCheckResult;
     }
-  | { type: 'end'; sessionId: string; reason: 'clear' | 'resume' | 'other' };
+  | { type: 'end'; sessionId: string; reason: 'clear' | 'resume' | 'other' }
+  | { type: 'turn-start'; input: ModTurnStart }
+  | { type: 'prompt-submit'; input: ModPromptSubmit }
+  | { type: 'turn-complete'; input: ModTurnComplete }
+  | { type: 'render'; input: ModRenderInput }
+  | { type: 'turn-abort-result'; id: number; error?: string };
 
 export type ModReply =
   | { type: 'result'; json: string }
@@ -126,6 +181,8 @@ export type ModReply =
       result?: ModToolCheckResult;
       error?: string;
     }
+  | { type: 'turn-abort'; id: number; turnId: string }
+  | { type: 'invalidate'; plugin: string; event: string }
   | ({ type: 'log'; plugin: string } & ModLog);
 
 export type ModWorkerRequest = ModRequest & {

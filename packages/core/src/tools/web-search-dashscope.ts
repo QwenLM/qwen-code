@@ -8,7 +8,10 @@ import OpenAI from 'openai';
 import type { Config } from '../config/config.js';
 import { resolveRequestTimeout } from '../core/openaiContentGenerator/constants.js';
 import { buildSessionAwareFetch } from '../core/outbound-session-id.js';
-import { withDashScopeSourceConfig } from '../core/dashscope-source-config.js';
+import {
+  withDashScopeSourceConfig,
+  withoutDashScopeSourceConfig,
+} from '../core/dashscope-source-config.js';
 import { buildRuntimeFetchOptions } from '../utils/runtimeFetchOptions.js';
 import { delay } from '../utils/retry.js';
 import { createDebugLogger, type DebugLogger } from '../utils/debugLogger.js';
@@ -263,7 +266,7 @@ export class DashScopeWebSearchBackend implements WebSearchBackend {
       fetch: buildSessionAwareFetch(
         runtimeOptions?.fetch,
         this.config,
-        backend.customHeaders,
+        withoutDashScopeSourceConfig(backend.customHeaders),
       ),
     });
 

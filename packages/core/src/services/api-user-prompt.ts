@@ -6,6 +6,7 @@
 
 import type { Content } from '@google/genai';
 import {
+  AUTO_MEMORY_SNAPSHOT_METADATA,
   getStartupContextLength,
   isSystemReminderContent,
   SYSTEM_REMINDER_OPEN,
@@ -42,6 +43,7 @@ function isWrappedText(text: string, open: string, close: string): boolean {
 function isDeliveredNotificationTurn(content: Content): boolean {
   let sawEnvelope = false;
   for (const part of content.parts ?? []) {
+    if (part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true) continue;
     if (!('text' in part) || typeof part.text !== 'string') return false;
     if (
       isWrappedText(part.text, TASK_NOTIFICATION_OPEN, TASK_NOTIFICATION_CLOSE)
@@ -178,6 +180,8 @@ export function isApiUserPrompt(
   }
 
   return content.parts.some((part) => {
+    if (part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true)
+      return false;
     if (!('text' in part) || !part.text) return false;
     return !(
       options?.excludeClearedMediaPlaceholders &&

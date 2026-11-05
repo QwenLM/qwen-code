@@ -8,8 +8,14 @@ import {
   ACP_PERMISSION_RESPONSE_TIMEOUT_MS,
   ACP_START_TIMEOUT_MS,
   AcpBridge,
+  CHANNEL_TOOL_BIND_TIMEOUT_MS,
 } from './AcpBridge.js';
-import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
+import {
+  CHANNEL_LOOP_MCP_SERVER_NAME,
+  CHANNEL_LOOP_MCP_TOOLS,
+  SESSION_MCP_RUNTIME_ADD_METHOD,
+  SESSION_MCP_RUNTIME_REMOVE_METHOD,
+} from './ChannelLoopTools.js';
 import {
   ACP_PRIVATE_PARENT_CAPABILITY_ENV,
   ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
@@ -22,6 +28,7 @@ import {
   ChannelPromptCancelledError,
   type ChannelLoopToolHandler,
   type ChannelPromptImage,
+  type ChannelToolDefinition,
 } from './ChannelAgentBridge.js';
 
 const child = vi.hoisted(() => {
@@ -131,7 +138,8 @@ type TestableAcpBridge = AcpBridge & {
   toolCallKindsBySession: Map<string, Map<string, string>>;
   channelLoopMcpServer: unknown;
   channelLoopToolHandlers: ChannelLoopToolHandler[];
-  channelLoopMcpRegistered: boolean;
+  channelLoopMcpBoundSessions: Set<string>;
+  channelLoopMcpBindings: Map<string, Promise<boolean>>;
   handleExtMethod(
     method: string,
     params: Record<string, unknown>,
@@ -139,7 +147,7 @@ type TestableAcpBridge = AcpBridge & {
   handleSessionUpdate(params: Record<string, unknown>): void;
   requestPermission(params: Record<string, unknown>): Promise<unknown>;
   handleClientMcpMessage(params: Record<string, unknown>): Promise<unknown>;
-  registerChannelLoopMcpServer(): Promise<void>;
+  registerChannelLoopMcpServer(sessionId: string): Promise<boolean>;
   resolveChannelLoopToolHandler(sessionId: string): ChannelLoopToolHandler;
 };
 
@@ -207,7 +215,7 @@ describe('AcpBridge', () => {
     ).toBe(capability);
   });
 
-  it('registers the channel loop MCP server once across concurrent calls', async () => {
+  it('binds the channel loop MCP server to one session once across concurrent calls', async () => {
     const pending: Array<() => void> = [];
     const extMethod = vi.fn(
       () => new Promise<void>((resolve) => pending.push(resolve)),
@@ -219,16 +227,58 @@ describe('AcpBridge', () => {
     bridge.connection = { extMethod };
     bridge.channelLoopMcpServer = {};
 
-    const first = bridge.registerChannelLoopMcpServer();
-    const second = bridge.registerChannelLoopMcpServer();
+    const first = bridge.registerChannelLoopMcpServer('s-1');
+    const second = bridge.registerChannelLoopMcpServer('s-1');
 
     expect(extMethod).toHaveBeenCalledTimes(1);
+    expect(extMethod).toHaveBeenCalledWith(
+      SESSION_MCP_RUNTIME_ADD_METHOD,
+      expect.objectContaining({
+        sessionId: 's-1',
+        name: CHANNEL_LOOP_MCP_SERVER_NAME,
+        config: expect.objectContaining({ type: 'sdk' }),
+      }),
+    );
     pending.splice(0).forEach((resolve) => resolve());
-    await Promise.all([first, second]);
-    expect(bridge.channelLoopMcpRegistered).toBe(true);
+    await expect(first).resolves.toBe(true);
+    await expect(second).resolves.toBe(true);
+    expect(bridge.channelLoopMcpBoundSessions.has('s-1')).toBe(true);
   });
 
-  it('waits for pending channel loop MCP registration before creating a session', async () => {
+  it('binds each new session through the session-scoped runtime add', async () => {
+    const extMethod = vi.fn().mockResolvedValue({});
+    const newSession = vi
+      .fn()
+      .mockResolvedValueOnce({ sessionId: 's-1' })
+      .mockResolvedValueOnce({ sessionId: 's-2' });
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod, newSession };
+    bridge.channelLoopMcpServer = {};
+
+    await expect(bridge.newSession('/tmp', { sourceId: 'qq' })).resolves.toBe(
+      's-1',
+    );
+    await expect(bridge.newSession('/tmp', { sourceId: 'qq' })).resolves.toBe(
+      's-2',
+    );
+
+    expect(extMethod.mock.calls).toEqual([
+      [
+        SESSION_MCP_RUNTIME_ADD_METHOD,
+        expect.objectContaining({ sessionId: 's-1' }),
+      ],
+      [
+        SESSION_MCP_RUNTIME_ADD_METHOD,
+        expect.objectContaining({ sessionId: 's-2' }),
+      ],
+    ]);
+  });
+
+  it('waits for the pending bind before resolving session creation', async () => {
     const pending: Array<() => void> = [];
     const extMethod = vi.fn(
       () => new Promise<void>((resolve) => pending.push(resolve)),
@@ -242,41 +292,250 @@ describe('AcpBridge', () => {
     bridge.connection = { extMethod, newSession };
     bridge.channelLoopMcpServer = {};
 
-    const registration = bridge.registerChannelLoopMcpServer();
-    const session = bridge.newSession('/tmp');
-    await Promise.resolve();
+    let settled = false;
+    const session = bridge.newSession('/tmp').then((sessionId) => {
+      settled = true;
+      return sessionId;
+    });
+    await vi.waitFor(() => expect(extMethod).toHaveBeenCalledTimes(1));
+    expect(settled).toBe(false);
 
-    expect(newSession).not.toHaveBeenCalled();
     pending.splice(0).forEach((resolve) => resolve());
-    await registration;
-
     await expect(session).resolves.toBe('s-1');
     expect(newSession).toHaveBeenCalledTimes(1);
   });
 
-  it('retries channel loop MCP registration when the runtime skips registration', async () => {
+  it('leaves a session unbound when the runtime add rejects', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     const extMethod = vi
       .fn()
-      .mockResolvedValueOnce({ skipped: true, reason: 'budget_warning_only' })
-      .mockResolvedValueOnce({});
+      .mockRejectedValueOnce(new Error('runtime add failed'));
+    const newSession = vi.fn().mockResolvedValue({ sessionId: 's-1' });
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
       cwd: '/tmp',
     }) as unknown as TestableAcpBridge;
-    bridge.connection = { extMethod };
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod, newSession };
     bridge.channelLoopMcpServer = {};
+    let output = '';
+    try {
+      await expect(bridge.newSession('/tmp')).resolves.toBe('s-1');
+      output = stderr.mock.calls.join('');
+    } finally {
+      stderr.mockRestore();
+    }
 
-    await bridge.registerChannelLoopMcpServer();
-
-    expect(bridge.channelLoopMcpRegistered).toBe(false);
-
-    await bridge.registerChannelLoopMcpServer();
-
-    expect(extMethod).toHaveBeenCalledTimes(2);
-    expect(bridge.channelLoopMcpRegistered).toBe(true);
+    expect(bridge.channelLoopMcpBoundSessions.has('s-1')).toBe(false);
+    expect(output).toContain('runtime add failed');
   });
 
-  it('sanitizes skipped channel loop MCP registration reasons', async () => {
+  it('does not let a stale failed bind erase a newer successful bind', async () => {
+    const pending: Array<{
+      resolve: (value: unknown) => void;
+      reject: (error: unknown) => void;
+    }> = [];
+    let addCalls = 0;
+    const extMethod = vi.fn((method: string) => {
+      if (method !== SESSION_MCP_RUNTIME_ADD_METHOD) {
+        return Promise.resolve({});
+      }
+      addCalls += 1;
+      if (addCalls === 1) {
+        return new Promise((resolve, reject) =>
+          pending.push({ resolve, reject }),
+        );
+      }
+      return Promise.resolve({});
+    });
+    const newSession = vi.fn().mockResolvedValue({ sessionId: 's-1' });
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod, newSession };
+    bridge.channelLoopMcpServer = {};
+
+    const firstSession = bridge.newSession('/tmp');
+    await vi.waitFor(() => expect(addCalls).toBe(1));
+
+    await bridge.discardSession('s-1');
+    await expect(bridge.newSession('/tmp')).resolves.toBe('s-1');
+    expect(bridge.channelLoopMcpBoundSessions.has('s-1')).toBe(true);
+
+    pending[0]!.reject(new Error('connection closed'));
+    await expect(firstSession).resolves.toBe('s-1');
+
+    expect(bridge.channelLoopMcpBoundSessions.has('s-1')).toBe(true);
+  });
+
+  it('bounds session creation when the runtime add never settles', async () => {
+    vi.useFakeTimers();
+    try {
+      const extMethod = vi.fn((method: string) =>
+        method === SESSION_MCP_RUNTIME_ADD_METHOD
+          ? new Promise(() => {})
+          : Promise.resolve({}),
+      );
+      const newSession = vi.fn().mockResolvedValue({ sessionId: 's-1' });
+      const bridge = new AcpBridge({
+        cliEntryPath: '/tmp/qwen',
+        cwd: '/tmp',
+      }) as unknown as TestableAcpBridge;
+      bridge.child = { killed: false, exitCode: null };
+      bridge.connection = { extMethod, newSession };
+      bridge.channelLoopMcpServer = {};
+
+      const session = bridge.newSession('/tmp');
+      await vi.advanceTimersByTimeAsync(CHANNEL_TOOL_BIND_TIMEOUT_MS);
+
+      await expect(session).resolves.toBe('s-1');
+      expect(bridge.channelLoopMcpBoundSessions.has('s-1')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a discarded session closed when the runtime remove rejects', async () => {
+    const extMethod = vi.fn((method: string) =>
+      method === SESSION_MCP_RUNTIME_REMOVE_METHOD
+        ? Promise.reject(new Error('remove failed'))
+        : Promise.resolve({}),
+    );
+    const newSession = vi.fn().mockResolvedValue({ sessionId: 's-1' });
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod, newSession };
+    bridge.channelLoopMcpServer = {};
+
+    await bridge.newSession('/tmp');
+    await expect(bridge.discardSession('s-1')).resolves.toBeUndefined();
+    expect(bridge.knownSessionIds.has('s-1')).toBe(false);
+    expect(extMethod).toHaveBeenCalledWith('qwen/control/session/close', {
+      sessionId: 's-1',
+    });
+  });
+
+  it('forwards the carried session id to the MCP server alongside the bound one', async () => {
+    const handleMessage = vi.fn().mockResolvedValue(undefined);
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.channelLoopMcpServer = { handleMessage };
+
+    await bridge.handleClientMcpMessage({
+      server: CHANNEL_LOOP_MCP_SERVER_NAME,
+      payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      sessionId: 's-carried',
+    });
+
+    expect(handleMessage).toHaveBeenCalledWith(
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { sessionId: undefined, carriedSessionId: 's-carried' },
+    );
+  });
+
+  it('leaves a session unbound when the runtime skips the binding', async () => {
+    const extMethod = vi
+      .fn()
+      .mockResolvedValueOnce({ skipped: true, reason: 'budget_warning_only' });
+    const newSession = vi.fn().mockResolvedValue({ sessionId: 's-1' });
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod, newSession };
+    bridge.channelLoopMcpServer = {};
+
+    await expect(bridge.newSession('/tmp')).resolves.toBe('s-1');
+
+    expect(bridge.channelLoopMcpBoundSessions.has('s-1')).toBe(false);
+    expect(bridge.knownSessionIds.has('s-1')).toBe(true);
+  });
+
+  it('re-attempts a skipped channel loop binding on the next prompt', async () => {
+    const extMethod = vi
+      .fn()
+      .mockResolvedValueOnce({ skipped: true, reason: 'budget_warning_only' })
+      .mockResolvedValue({});
+    const newSession = vi.fn().mockResolvedValue({ sessionId: 's-1' });
+    const prompt = vi.fn().mockResolvedValue({ stopReason: 'end_turn' });
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod, newSession, prompt };
+    bridge.channelLoopMcpServer = {};
+
+    await expect(bridge.newSession('/tmp')).resolves.toBe('s-1');
+    expect(bridge.channelLoopMcpBoundSessions.has('s-1')).toBe(false);
+
+    await bridge.prompt('s-1', 'question');
+
+    await vi.waitFor(() => expect(extMethod).toHaveBeenCalledTimes(2));
+    expect(extMethod).toHaveBeenLastCalledWith(
+      SESSION_MCP_RUNTIME_ADD_METHOD,
+      expect.objectContaining({ sessionId: 's-1' }),
+    );
+    expect(bridge.channelLoopMcpBoundSessions.has('s-1')).toBe(true);
+  });
+
+  it('binds a resumed session through the session-scoped runtime add', async () => {
+    const extMethod = vi.fn().mockResolvedValue({});
+    const unstable_resumeSession = vi.fn().mockResolvedValue({});
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod, unstable_resumeSession };
+    bridge.channelLoopMcpServer = {};
+
+    await expect(
+      bridge.loadSession('s-resume', '/tmp', { sourceId: 'qq' }),
+    ).resolves.toBe('s-resume');
+
+    expect(extMethod).toHaveBeenCalledWith(
+      SESSION_MCP_RUNTIME_ADD_METHOD,
+      expect.objectContaining({ sessionId: 's-resume' }),
+    );
+    expect(bridge.channelLoopMcpBoundSessions.has('s-resume')).toBe(true);
+  });
+
+  it('unbinds a discarded session through the runtime remove', async () => {
+    const extMethod = vi.fn().mockResolvedValue({});
+    const newSession = vi.fn().mockResolvedValue({ sessionId: 's-1' });
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod, newSession };
+    bridge.channelLoopMcpServer = {};
+
+    await bridge.newSession('/tmp');
+    await bridge.discardSession('s-1');
+
+    expect(extMethod).toHaveBeenCalledWith(
+      SESSION_MCP_RUNTIME_REMOVE_METHOD,
+      expect.objectContaining({ sessionId: 's-1' }),
+    );
+    expect(extMethod).toHaveBeenCalledWith('qwen/control/session/close', {
+      sessionId: 's-1',
+    });
+    expect(bridge.channelLoopMcpBoundSessions.has('s-1')).toBe(false);
+  });
+
+  it('sanitizes skipped session binding reasons', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -293,7 +552,7 @@ describe('AcpBridge', () => {
 
     let output = '';
     try {
-      await bridge.registerChannelLoopMcpServer();
+      await bridge.registerChannelLoopMcpServer('s-1');
       output = stderr.mock.calls.join('');
     } finally {
       stderr.mockRestore();
@@ -2070,5 +2329,511 @@ describe('AcpBridge', () => {
     });
     expect(bridge.knownSessionIds.size).toBe(0);
     expect(bridge.sessionBindingTokens.size).toBe(0);
+  });
+});
+
+describe('AcpBridge channel tool diagnostics', () => {
+  const DIAG_ENV = 'QWEN_CHANNEL_TOOL_DIAG';
+
+  type DiagnosticsBridge = {
+    channelLoopMcpBoundSessions: Set<string>;
+    knownSessionIds: Set<string>;
+    sessionOwners: Map<string, string>;
+    channelLoopMcpServer: unknown;
+    handleClientMcpMessage(
+      params: Record<string, unknown>,
+    ): Promise<Record<string, unknown>>;
+  };
+
+  function diagBridge(handleMessage: ReturnType<typeof vi.fn>) {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as DiagnosticsBridge;
+    bridge.channelLoopMcpServer = { handleMessage };
+    bridge.knownSessionIds.add('s-known');
+    bridge.sessionOwners.set('s-known', 'qqbot-main');
+    return bridge;
+  }
+
+  function frame(
+    bridge: DiagnosticsBridge,
+    payload: Record<string, unknown>,
+    sessionId?: string,
+  ) {
+    return bridge.handleClientMcpMessage({
+      server: CHANNEL_LOOP_MCP_SERVER_NAME,
+      payload,
+      ...(sessionId === undefined ? {} : { sessionId }),
+    });
+  }
+
+  async function capture(run: () => Promise<void>): Promise<string> {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const previous = process.env[DIAG_ENV];
+    process.env[DIAG_ENV] = '1';
+    try {
+      await run();
+      return stderr.mock.calls.map((call) => String(call[0])).join('');
+    } finally {
+      stderr.mockRestore();
+      if (previous === undefined) delete process.env[DIAG_ENV];
+      else process.env[DIAG_ENV] = previous;
+    }
+  }
+
+  it('writes nothing while the switch is off', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const previous = process.env[DIAG_ENV];
+    delete process.env[DIAG_ENV];
+    try {
+      const bridge = diagBridge(
+        vi.fn().mockResolvedValue({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { tools: [] },
+        }),
+      );
+      await frame(
+        bridge,
+        { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+        's-known',
+      );
+      expect(stderr.mock.calls.join('')).not.toContain('channel-tool-diag');
+    } finally {
+      stderr.mockRestore();
+      if (previous !== undefined) process.env[DIAG_ENV] = previous;
+    }
+  });
+
+  it('skips methods it does not explain', async () => {
+    const bridge = diagBridge(vi.fn().mockResolvedValue(undefined));
+    const output = await capture(async () => {
+      await frame(
+        bridge,
+        { jsonrpc: '2.0', method: 'notifications/initialized' },
+        's-known',
+      );
+    });
+    expect(output).not.toContain('channel-tool-diag');
+  });
+
+  it('prints the listed tool count for a bound session and its owner', async () => {
+    const bridge = diagBridge(
+      vi.fn().mockResolvedValue({
+        jsonrpc: '2.0',
+        id: 1,
+        result: { tools: [{ name: 'a' }, { name: 'b' }] },
+      }),
+    );
+    bridge.channelLoopMcpBoundSessions.add('s-known');
+    const output = await capture(async () => {
+      await frame(
+        bridge,
+        { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+        's-known',
+      );
+    });
+    expect(output).toContain('method=tools/list');
+    expect(output).toContain('tools=2');
+    expect(output).toContain('bound=true');
+    expect(output).toContain('known=true');
+    expect(output).toContain('owner=qqbot-main');
+  });
+
+  it('prints the tool name and result error state for a tools/call', async () => {
+    const bridge = diagBridge(
+      vi.fn().mockResolvedValue({
+        jsonrpc: '2.0',
+        id: 1,
+        result: { isError: true, content: [{ type: 'text', text: 'bad' }] },
+      }),
+    );
+    bridge.channelLoopMcpBoundSessions.add('s-known');
+    const output = await capture(async () => {
+      await frame(
+        bridge,
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'qq_recall_message', arguments: {} },
+        },
+        's-known',
+      );
+    });
+    expect(output).toContain('tool=qq_recall_message');
+    expect(output).toContain('isError=true');
+    expect(output).toContain('rpcError=none');
+  });
+
+  it('prints the JSON-RPC error arm of a failed tools/call', async () => {
+    const bridge = diagBridge(
+      vi.fn().mockResolvedValue({
+        jsonrpc: '2.0',
+        id: 1,
+        error: { code: -32603, message: 'cron must be a non-empty string.' },
+      }),
+    );
+    bridge.channelLoopMcpBoundSessions.add('s-known');
+    const output = await capture(async () => {
+      await frame(
+        bridge,
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'channel_loop_create', arguments: {} },
+        },
+        's-known',
+      );
+    });
+    expect(output).toContain('tool=channel_loop_create');
+    expect(output).toContain('isError=true');
+    expect(output).toContain('rpcError=');
+    expect(output).toContain('cron must be a non-empty string.');
+  });
+
+  it('resolves an owner for a known-but-unbound session from the carried id', async () => {
+    const bridge = diagBridge(
+      vi.fn().mockResolvedValue({
+        jsonrpc: '2.0',
+        id: 1,
+        result: { tools: [] },
+      }),
+    );
+    const output = await capture(async () => {
+      await frame(
+        bridge,
+        { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+        's-known',
+      );
+    });
+    expect(output).toContain('bound=false');
+    expect(output).toContain('known=true');
+    expect(output).toContain('owner=qqbot-main');
+  });
+
+  it('does not grant an owner to an id in neither ledger', async () => {
+    const bridge = diagBridge(
+      vi.fn().mockResolvedValue({
+        jsonrpc: '2.0',
+        id: 1,
+        result: { tools: [] },
+      }),
+    );
+    bridge.sessionOwners.set('s-unknown', 'qqbot-main');
+    const output = await capture(async () => {
+      await frame(
+        bridge,
+        { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+        's-unknown',
+      );
+    });
+    expect(output).toContain('known=false');
+    expect(output).toContain('owner=<none>');
+  });
+
+  it('sanitizes and caps an attacker-influenced tool name', async () => {
+    const bridge = diagBridge(
+      vi.fn().mockResolvedValue({
+        jsonrpc: '2.0',
+        id: 1,
+        result: { isError: false },
+      }),
+    );
+    bridge.channelLoopMcpBoundSessions.add('s-known');
+    const output = await capture(async () => {
+      await frame(
+        bridge,
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: `\u001b[31m${'x'.repeat(200)}`,
+            arguments: {},
+          },
+        },
+        's-known',
+      );
+    });
+    expect(output).not.toContain('\u001b');
+    expect(output.length).toBeLessThan(600);
+  });
+});
+
+// One bridge can serve several channels, and each channel registers the same
+// tool names, so registration must scope tools by owner instead of dropping
+// the second channel's copy. A session sees channel tools only after this
+// bridge bound the channel_loop server to it.
+describe('AcpBridge adapter channel tools', () => {
+  type Internals = {
+    registerChannelTool(tool: ChannelToolDefinition): void;
+    sessionOwners: Map<string, string>;
+    channelLoopMcpBoundSessions: Set<string>;
+    knownSessionIds: Set<string>;
+    child: { killed: boolean; exitCode: number | null } | null;
+    connection: {
+      extMethod: ReturnType<typeof vi.fn>;
+      newSession: ReturnType<typeof vi.fn>;
+    } | null;
+    newSession(cwd: string, options?: { sourceId?: string }): Promise<string>;
+    registerChannelLoopToolHandler(handler: ChannelLoopToolHandler): void;
+    handleClientMcpMessage(
+      params: Record<string, unknown>,
+    ): Promise<Record<string, unknown>>;
+  };
+
+  function internals(bridge: AcpBridge): Internals {
+    return bridge as unknown as Internals;
+  }
+
+  let calls: string[] = [];
+
+  function tool(name: string, owner: string | undefined, marker: string) {
+    return {
+      name,
+      description: marker,
+      inputSchema: { type: 'object', properties: {} },
+      ...(owner === undefined ? {} : { owner }),
+      handler: async () => {
+        calls.push(marker);
+        return marker;
+      },
+    };
+  }
+
+  /** Register tools, then bind sessions through the real session-scoped add. */
+  async function bridged(
+    tools: ChannelToolDefinition[],
+    sessions: Array<{ sessionId: string; sourceId?: string }>,
+  ): Promise<Internals> {
+    const bridge = internals(
+      new AcpBridge({ cliEntryPath: '/tmp/qwen', cwd: '/tmp' }),
+    );
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn().mockResolvedValue({}),
+      newSession: vi.fn(),
+    };
+    for (const entry of tools) bridge.registerChannelTool(entry);
+    for (const session of sessions) {
+      bridge.connection.newSession.mockResolvedValueOnce({
+        sessionId: session.sessionId,
+      });
+      await bridge.newSession(
+        '/tmp',
+        session.sourceId === undefined
+          ? undefined
+          : { sourceId: session.sourceId },
+      );
+    }
+    return bridge;
+  }
+
+  const frame = (
+    bridge: Internals,
+    payload: Record<string, unknown>,
+    sessionId?: string,
+  ) =>
+    bridge.handleClientMcpMessage({
+      server: CHANNEL_LOOP_MCP_SERVER_NAME,
+      payload,
+      ...(sessionId === undefined ? {} : { sessionId }),
+    });
+
+  const listTools = async (bridge: Internals, sessionId?: string) => {
+    const response = (await frame(
+      bridge,
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      sessionId,
+    )) as { payload: { result: { tools: Array<{ description: string }> } } };
+    return response.payload.result.tools.map((entry) => entry.description);
+  };
+
+  const callTool = async (
+    bridge: Internals,
+    name: string,
+    sessionId?: string,
+  ) => {
+    const response = (await frame(
+      bridge,
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name, arguments: {} },
+      },
+      sessionId,
+    )) as {
+      payload: {
+        result?: { content?: Array<{ text: string }>; isError?: boolean };
+        error?: { message: string };
+      };
+    };
+    return response.payload;
+  };
+
+  it('resolves a bound session to its own channel tool and handler', async () => {
+    calls = [];
+    const bridge = await bridged(
+      [
+        tool('shared_tool', 'bot-a', 'owned-a'),
+        tool('shared_tool', 'bot-b', 'owned-b'),
+        tool('shared_tool', undefined, 'global'),
+      ],
+      [
+        { sessionId: 's-a', sourceId: 'bot-a' },
+        { sessionId: 's-b', sourceId: 'bot-b' },
+      ],
+    );
+
+    // Each channel's session sees its own copy; the ownerless twin is shadowed.
+    expect(await listTools(bridge, 's-a')).toEqual(['owned-a']);
+    expect(await listTools(bridge, 's-b')).toEqual(['owned-b']);
+
+    expect(await callTool(bridge, 'shared_tool', 's-a')).toMatchObject({
+      result: { content: [{ type: 'text', text: 'owned-a' }] },
+    });
+    expect(await callTool(bridge, 'shared_tool', 's-b')).toMatchObject({
+      result: { content: [{ type: 'text', text: 'owned-b' }] },
+    });
+    expect(calls).toEqual(['owned-a', 'owned-b']);
+  });
+
+  it('offers an ownerless tool to a bound session whose channel registered none', async () => {
+    calls = [];
+    const bridge = await bridged(
+      [tool('shared_tool', undefined, 'global')],
+      [{ sessionId: 's-plain', sourceId: 'bot-plain' }],
+    );
+
+    expect(await listTools(bridge, 's-plain')).toEqual(['global']);
+    expect(await callTool(bridge, 'shared_tool', 's-plain')).toMatchObject({
+      result: { content: [{ type: 'text', text: 'global' }] },
+    });
+    expect(calls).toEqual(['global']);
+  });
+
+  it('exposes nothing and fails the call for an unbound session', async () => {
+    calls = [];
+    const bridge = await bridged(
+      [tool('qq_recall_message', 'qqbot-main', 'qq-moderation')],
+      [{ sessionId: 's-qq', sourceId: 'qqbot-main' }],
+    );
+
+    // The bound session resolves...
+    expect(await listTools(bridge, 's-qq')).toEqual(['qq-moderation']);
+
+    // ...but a frame with no session, or a forged/stale one, resolves to
+    // nothing — no channel tools, and no process-wide single-owner fallback.
+    expect(await listTools(bridge)).toEqual([]);
+    expect(await listTools(bridge, 's-forged')).toEqual([]);
+
+    expect(await callTool(bridge, 'qq_recall_message')).toMatchObject({
+      result: { isError: true },
+    });
+    expect(
+      await callTool(bridge, 'qq_recall_message', 's-forged'),
+    ).toMatchObject({ result: { isError: true } });
+    expect(calls).toEqual([]);
+  });
+
+  it('does not let one bound session see or run another channel tool', async () => {
+    calls = [];
+    const bridge = await bridged(
+      [
+        tool('qq_tool', 'qqbot-main', 'qq'),
+        tool('feishu_tool', 'feishu-main', 'feishu'),
+      ],
+      [
+        { sessionId: 's-qq', sourceId: 'qqbot-main' },
+        { sessionId: 's-feishu', sourceId: 'feishu-main' },
+      ],
+    );
+
+    expect(await listTools(bridge, 's-qq')).toEqual(['qq']);
+    expect(await listTools(bridge, 's-feishu')).toEqual(['feishu']);
+
+    expect(await callTool(bridge, 'feishu_tool', 's-qq')).toMatchObject({
+      error: { message: 'Unknown channel loop tool: feishu_tool' },
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it('binds sessions that already exist when a channel registers tools later', async () => {
+    calls = [];
+    const bridge = internals(
+      new AcpBridge({ cliEntryPath: '/tmp/qwen', cwd: '/tmp' }),
+    );
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn().mockResolvedValue({}),
+      newSession: vi.fn().mockResolvedValue({ sessionId: 's-late' }),
+    };
+    await bridge.newSession('/tmp', { sourceId: 'late-channel' });
+    expect(bridge.channelLoopMcpBoundSessions.has('s-late')).toBe(false);
+
+    bridge.registerChannelTool(tool('late_tool', 'late-channel', 'late'));
+    await vi.waitFor(() =>
+      expect(bridge.channelLoopMcpBoundSessions.has('s-late')).toBe(true),
+    );
+
+    expect(await listTools(bridge, 's-late')).toEqual(['late']);
+  });
+
+  it('offers the built-in loop tools to a bound session with a loop handler', async () => {
+    const bridge = await bridged(
+      [tool('qq_tool', 'qqbot-main', 'qq')],
+      [{ sessionId: 's-qq', sourceId: 'qqbot-main' }],
+    );
+    bridge.registerChannelLoopToolHandler({
+      create: vi.fn(),
+      list: vi.fn(),
+      cancel: vi.fn(),
+    });
+    const response = (await frame(
+      bridge,
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/list',
+      },
+      's-qq',
+    )) as { payload: { result: { tools: Array<{ name: string }> } } };
+    const names = response.payload.result.tools.map((entry) => entry.name);
+    expect(names).toHaveLength(CHANNEL_LOOP_MCP_TOOLS.length + 1);
+    expect(names).toContain('qq_tool');
+    for (const loopTool of CHANNEL_LOOP_MCP_TOOLS) {
+      expect(names).toContain(loopTool.name);
+    }
+  });
+
+  it('rejects a name the built-in loop tools own', () => {
+    const bridge = internals(
+      new AcpBridge({ cliEntryPath: '/tmp/qwen', cwd: '/tmp' }),
+    );
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      bridge.registerChannelTool({
+        name: 'channel_loop_create',
+        description: 'shadow the loop tool',
+        inputSchema: { type: 'object', properties: {} },
+        handler: async () => 'nope',
+      });
+      const channelTools = (
+        bridge as unknown as {
+          channelTools: Array<{ name: string }>;
+        }
+      ).channelTools;
+      expect(channelTools).toEqual([]);
+    } finally {
+      stderr.mockRestore();
+    }
   });
 });

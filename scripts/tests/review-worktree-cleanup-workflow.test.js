@@ -53,14 +53,18 @@ const branchFamily = toPosix(reviewBranch(probePr)).slice(
 const ciYaml = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
 // Every ci.yml job that checks out on the shared self-hosted pool inherits a
 // possibly dirty workspace. Match the pool itself, not just the output
-// reference that usually names it: jobs can also hard-code the shared label
+// references that usually name it: jobs can also hard-code the shared label
 // array, and a checkout on either form inherits the same leftovers.
+// lint_and_static reads lint_runner (every PR reaches the pool), the other
+// lanes ubuntu_runner — both name the same shared workspace.
 // Include retained recovery steps on hosted jobs too, so rerouting cannot
 // silently restore an untested sweep. Select by properties, not job name.
 const ciCleanSteps = Object.entries(ciYaml.jobs)
   .filter(
     ([, job]) =>
-      (/ubuntu_runner|ecs-qwen/.test(JSON.stringify(job['runs-on'] ?? '')) ||
+      (/ubuntu_runner|lint_runner|ecs-qwen/.test(
+        JSON.stringify(job['runs-on'] ?? ''),
+      ) ||
         (job.steps ?? []).some(
           (s) => s.name === 'Clean stale .qwen before checkout',
         )) &&

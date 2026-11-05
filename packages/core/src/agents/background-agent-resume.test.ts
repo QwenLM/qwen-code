@@ -805,6 +805,68 @@ describe('BackgroundAgentResumeService', () => {
     },
   );
 
+  it('never resumes or revives a run whose record says it is never continued', async () => {
+    const sessionId = 'session-blocked';
+    const reason = 'A background fix of /autofix-pr is never continued.';
+    for (const [agentId, status] of [
+      ['blocked-running', 'running'],
+      ['blocked-done', 'completed'],
+    ] as const) {
+      seedMeta(sessionId, agentId, agentId, {
+        status,
+        isBackgrounded: true,
+        resumeBlockedReason: reason,
+      });
+      writeJsonl(
+        getAgentJsonlPath(tempDir, sessionId, agentId),
+        rec(`${agentId}-u1`, null, sessionId, T0, 'user', {
+          agentId,
+          cwd: tempDir,
+          message: userText('Fix it'),
+        }),
+      );
+    }
+    const { service, subagentManager } = createService();
+    await service.loadPausedBackgroundAgents(sessionId);
+    expect(registry.get('blocked-running')).toMatchObject({
+      status: 'paused',
+      resumeBlockedReason: reason,
+    });
+    expect(registry.get('blocked-done')).toMatchObject({
+      status: 'completed',
+      resumeBlockedReason: reason,
+    });
+    expect(
+      await service.resumeBackgroundAgent('blocked-running', 'go on'),
+    ).toBeUndefined();
+    expect(
+      await service.reviveCompletedBackgroundAgent('blocked-done', 'go on'),
+    ).toBeUndefined();
+    // Registered in this process without the reason: the record still holds.
+    const live = 'blocked-live';
+    seedMeta(sessionId, live, live, {
+      status: 'completed',
+      isBackgrounded: true,
+      resumeBlockedReason: reason,
+    });
+    const metaPath = getAgentMetaPath(tempDir, sessionId, live);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, live);
+    writeJsonl(
+      outputFile,
+      rec('live-u1', null, sessionId, T0, 'user', {
+        agentId: live,
+        cwd: tempDir,
+        message: userText('Fix it'),
+      }),
+    );
+    register(live, 'Live task', { status: 'completed', outputFile, metaPath });
+    expect(
+      await service.reviveCompletedBackgroundAgent(live, 'go on'),
+    ).toBeUndefined();
+    expect(registry.get(live)?.resumeBlockedReason).toBe(reason);
+    expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+  });
+
   it('keeps damaged and unsafe retained entries visible but non-continuable', async () => {
     const sessionId = 'session-unsafe';
     const missingId = 'missing-transcript';

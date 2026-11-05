@@ -109,8 +109,8 @@ export const goalCommand: SlashCommand = {
 
     // Starting or re-driving an autonomous Goal ingests workspace context
     // (QWEN.md, files) without per-tool confirmation, so it requires a trusted
-    // workspace — the same boundary the legacy hook path enforces. `status`,
-    // `clear`, and `pause` only read or reduce work, so they stay available.
+    // workspace. `status`, `clear`, and `pause` only read or reduce work, so
+    // they stay available.
     const requiresTrustedFolder =
       operation.kind === 'set' ||
       operation.kind === 'edit' ||
