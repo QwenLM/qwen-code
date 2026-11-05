@@ -20,7 +20,7 @@ export function getQwenOAuthConfig(): {
   return {
     baseUrl: 'https://pre-auth.qwen.ai',
     clientId: 'qwen-code-cli',
-    webOrigin: 'https://pre4-chat.qwen.ai',
+    webOrigin: 'https://pre-chat.qwen.ai',
   };
 }
 

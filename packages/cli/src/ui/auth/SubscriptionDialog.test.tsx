@@ -15,9 +15,9 @@ const flow = vi.hoisted(() => ({
   deviceAuth: {
     device_code: 'test-device',
     user_code: 'BCDF-GHJK',
-    verification_uri: 'https://pre4-chat.qwen.ai/authorize',
+    verification_uri: 'https://pre-chat.qwen.ai/authorize',
     verification_uri_complete:
-      'https://pre4-chat.qwen.ai/authorize?user_code=BCDF-GHJK&client=qwen-code',
+      'https://pre-chat.qwen.ai/authorize?user_code=BCDF-GHJK&client=qwen-code',
     expires_in: 600,
     interval: 5,
     expiresAt: Date.now() + 600_000,

@@ -93,7 +93,7 @@ const subscription = vi.hoisted(() => ({
   email: 'real@example.com',
   deviceAuth: {
     verification_uri_complete:
-      'https://pre4-chat.qwen.ai/authorize?user_code=REAL-CODE&client=qwen-code',
+      'https://pre-chat.qwen.ai/authorize?user_code=REAL-CODE&client=qwen-code',
   },
   checking: false,
   connecting: false,

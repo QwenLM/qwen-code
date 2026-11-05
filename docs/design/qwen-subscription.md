@@ -66,7 +66,7 @@ Logout/upgrade commands use native status rows and Done/Retry actions. Command r
 | Identity/membership    | `GET /api/oauth/userinfo`     |
 | Revocation             | `POST /api/oauth/revoke`      |
 
-Preproduction uses auth origin `https://pre-auth.qwen.ai` and OAuth `client_id=qwen-code-cli`. Browser authorization is `https://pre4-chat.qwen.ai/authorize?user_code=<code>&client=qwen-code`; the browser client parameter is distinct from OAuth client_id. Plans use `https://pre4-chat.qwen.ai/?memberPlan=qwen_code`, shared by upgrade and purchase actions, without device-code parameters. This website entry was checked against qwen-chat-fe feat/qcode_authorize commit 127d20ad8 on 2026-10-29 and requires a signed-in web account.
+Preproduction uses auth origin `https://pre-auth.qwen.ai` and OAuth `client_id=qwen-code-cli`. Browser authorization is `https://pre-chat.qwen.ai/authorize?user_code=<code>&client=qwen-code`; the browser client parameter is distinct from OAuth client_id. Plans use `https://pre-chat.qwen.ai/?memberPlan=qwen_code`, shared by upgrade and purchase actions, without device-code parameters. Both browser entries require a signed-in web account.
 
 Core owns private atomic storage, restoration, cross-process refresh locking and revocation. Hosts share sessions only with the same effective `QWEN_HOME`. Subscription storage is separate from legacy OAuth. Refresh replaces the complete token pair; tokens and device codes never enter GUI responses.
 

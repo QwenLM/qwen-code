@@ -66,7 +66,7 @@ VS Code 打开订阅授权时在 WebShellWithProviders 上设置 `viewHidden`，
 | 身份/会员       | `GET /api/oauth/userinfo`     |
 | 撤销            | `POST /api/oauth/revoke`      |
 
-预发认证域名为 `https://pre-auth.qwen.ai`，OAuth `client_id=qwen-code-cli`。浏览器授权链接为 `https://pre4-chat.qwen.ai/authorize?user_code=<code>&client=qwen-code`；网页 client 与 OAuth client_id 不同。购买统一使用 `https://pre4-chat.qwen.ai/?memberPlan=qwen_code`，不带设备码参数。此网页入口已于 2026-10-29 对照 qwen-chat-fe 的 feat/qcode_authorize 提交 127d20ad8 确认，需要网页登录。
+预发认证域名为 `https://pre-auth.qwen.ai`，OAuth `client_id=qwen-code-cli`。浏览器授权链接为 `https://pre-chat.qwen.ai/authorize?user_code=<code>&client=qwen-code`；网页 client 与 OAuth client_id 不同。购买统一使用 `https://pre-chat.qwen.ai/?memberPlan=qwen_code`，不带设备码参数。这两个网页入口都需要登录网页账号。
 
 Core 负责私有权限的原子存储、恢复、跨进程刷新锁和撤销。宿主只在有效 `QWEN_HOME` 相同时共享会话。会员与旧 OAuth 分开存储；刷新替换完整 Token 对；Token 和设备码不进入 GUI 响应。
 
