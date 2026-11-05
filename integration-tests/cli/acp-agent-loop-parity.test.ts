@@ -13,7 +13,13 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -31,6 +37,7 @@ import {
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
 import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
+import { approveProjectHooks } from '../project-hook-approval.js';
 
 // The agent trusts a client that presents the capability it was started with.
 const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
@@ -275,6 +282,8 @@ const allowOnce = () => ({
       });
       const dir = rig.testDir!;
       scenario.prepare?.(rig);
+      // Snapshot the fixture's home writes before the child can touch it.
+      const homeBefore = readdirSync(join(dir, '.qwen-home')).sort();
       let streamingIndex = 0;
       server = await startFakeOpenAIServer(
         ({ body }) =>
@@ -293,6 +302,7 @@ const allowOnce = () => ({
         ? CONTAINER_SANDBOX_NO_PROXY
         : '127.0.0.1,localhost';
       const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+      if (scenario.settings?.['hooks']) approveProjectHooks(qwenHome, dir);
       const env: NodeJS.ProcessEnv = {
         ...process.env,
         OPENAI_API_KEY: 'fake-key',
@@ -303,9 +313,9 @@ const allowOnce = () => ({
         no_proxy: noProxy,
         QWEN_HOME: qwenHome,
         // TestRig keeps QWEN_RUNTIME_DIR inside the workspace; leaving it
-        // there makes the session runtime write `tmp/<hash>` into the test
-        // directory, which then differs between the two surfaces' request
-        // snapshots. Give both surfaces the same scratch runtime.
+        // there lets the session runtime write `tmp/<hash>` into the directory
+        // each run's request snapshot encodes, so give each run its own
+        // scratch runtime outside the workspace.
         QWEN_RUNTIME_DIR: qwenHome,
       };
       delete env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'];
@@ -507,10 +517,11 @@ const allowOnce = () => ({
           await removeScratchDir(qwenHome);
         }
       }
-      // The scratch runtime is what keeps the session runtime's `tmp/<hash>`
-      // out of the workspace, so pin its absence rather than relying on the
-      // snapshot diff, which only trips on the losing side of a race.
-      expect(existsSync(join(dir, '.qwen-home', 'tmp'))).toBe(false);
+      // The scratch runtime keeps the session runtime's `tmp/<hash>` and
+      // `usage/` out of the workspace. Comparing against the pre-run listing
+      // avoids copying TestRig's seeded names, and a leak fails here directly
+      // rather than only when the request equality loses a race.
+      expect(readdirSync(join(dir, '.qwen-home')).sort()).toEqual(homeBefore);
       return {
         requests: modelRequests(server, dir),
         dateReminders: streamingMessages(server).filter((messages) =>
@@ -993,6 +1004,71 @@ const allowOnce = () => ({
       );
       expect(JSON.stringify(shared.requests[1])).not.toContain('readme body');
       expect(Date.now() - started).toBeLessThan(30_000);
+    }, 120_000);
+
+    it("blocks a write in plan mode with the scheduler's notice, as other surfaces do", async () => {
+      const written: boolean[] = [];
+      const { current, shared } = await both({
+        name: 'a write in plan mode',
+        prompts: ['Write the file.'],
+        settings: { tools: { approvalMode: 'plan' } },
+        reply: (messages, dir) => {
+          if (toolResults(messages) === 0)
+            return {
+              toolCalls: [write(join(dir, 'out.txt'), 'no\n', 'call_no')],
+            };
+          // The batch has settled by the time its results are sent back.
+          written.push(existsSync(join(dir, 'out.txt')));
+          return { content: 'Understood.' };
+        },
+      });
+      // The notice is the text of the blocked call's failed update.
+      const notice = (run: Run) => {
+        const failed = run.updates.filter(
+          (update) =>
+            (update as JsonObject)['toolCallId'] === 'call_no' &&
+            (update as JsonObject)['status'] === 'failed',
+        ) as JsonObject[];
+        expect(failed).toHaveLength(1);
+        const content = failed[0]['content'] as JsonObject[];
+        expect(content).toHaveLength(1);
+        return (content[0]['content'] as JsonObject)['text'] as string;
+      };
+      /** Puts a placeholder wherever a string value is the notice. */
+      const withoutNotice = (value: unknown, text: string): unknown =>
+        JSON.parse(JSON.stringify(value), (_key, child: unknown) =>
+          child === text ? '<PLAN MODE NOTICE>' : child,
+        );
+      const currentNotice = notice(current);
+      const sharedNotice = notice(shared);
+
+      expect(currentNotice).toMatch(
+        /^Plan mode is active\. The tool "write_file" cannot be executed because it modifies the system\. .*exit_plan_mode/,
+      );
+      expect(sharedNotice).toMatch(
+        /^Tool blocked by plan mode: "write_file" is not a read-only tool\. .*call exit_plan_mode/,
+      );
+      expect(shared.stopReasons).toEqual(current.stopReasons);
+      // Both loops block the write before it runs and ask nothing; only the
+      // notice the model and the client see differs.
+      expect(current.permissions).toEqual([]);
+      expect(shared.permissions).toEqual([]);
+      expect(current.requests).toHaveLength(2);
+      expect(withoutNotice(shared.requests, sharedNotice)).toEqual(
+        withoutNotice(current.requests, currentNotice),
+      );
+      expect(withoutNotice(shared.updates, sharedNotice)).toEqual(
+        withoutNotice(current.updates, currentNotice),
+      );
+      // The model gets the notice as the call's result on each loop.
+      expect(JSON.stringify(current.requests[1])).toContain(
+        JSON.stringify(currentNotice),
+      );
+      expect(JSON.stringify(shared.requests[1])).toContain(
+        JSON.stringify(sharedNotice),
+      );
+      // One reading per run, current first, and neither wrote the file.
+      expect(written).toEqual([false, false]);
     }, 120_000);
 
     it('sends the date reminder with a prompt, as other surfaces do', async () => {

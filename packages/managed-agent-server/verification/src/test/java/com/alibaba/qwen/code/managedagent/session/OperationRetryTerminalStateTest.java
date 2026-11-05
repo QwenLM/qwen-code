@@ -28,9 +28,14 @@ import org.springframework.beans.factory.ObjectProvider;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -2963,12 +2968,19 @@ class OperationRetryTerminalStateTest {
         // Every renewal succeeds, so the renewals counted below are real
         // renewals of a held lease, not ticks of one already lost (review
         // round 1, R1-7).
+        List<Long> renewedAt = new CopyOnWriteArrayList<>();
+        CountDownLatch enoughRenewals = new CountDownLatch(8);
         when(sessions.renewLifecycleOperation(eq("tenant"), eq("session"),
                 eq("op-action"), anyString(), eq(3L),
-                eq(Duration.ofMillis(30)))).thenReturn(true);
-        // The Harness answers 200 after outlasting the 30ms lease.
+                eq(Duration.ofMillis(30)))).thenAnswer(ignored -> {
+                    renewedAt.add(System.nanoTime());
+                    enoughRenewals.countDown();
+                    return true;
+                });
+        // The Harness answers 200 once the call has outlasted the 30ms lease
+        // by several renewals, however slowly a loaded runner schedules them.
         doAnswer(invocation -> {
-            Thread.sleep(150);
+            assertThat(enoughRenewals.await(30, TimeUnit.SECONDS)).isTrue();
             return null;
         }).when(harness).resolveAction("tenant", "session", "action-1", body);
 
@@ -2979,16 +2991,21 @@ class OperationRetryTerminalStateTest {
         try {
             coordinator.dispatch("tenant", "session", "op-action");
 
-            // The renewal period is a third of the lease (10ms here), so
-            // the 150ms call leaves room for about 14 renewals. A period
-            // equal to the lease renews on the expiry boundary, where
-            // scheduler jitter lets the lease lapse mid-call, yet still fits
-            // about five renewals into the window; eight sits above that and
-            // well below the expected count (review round 3, R3-2; review
-            // round 1, R1-7).
             verify(sessions, atLeast(8)).renewLifecycleOperation(
                     eq("tenant"), eq("session"), eq("op-action"), anyString(),
                     eq(3L), eq(Duration.ofMillis(30)));
+            // The renewal period is a third of the lease (10ms here). A period
+            // equal to the lease renews on the expiry boundary, where scheduler
+            // jitter lets the lease lapse mid-call (review round 3, R3-2). Load
+            // only stretches a fixed-delay gap, so the shortest one bounds the
+            // period (review round 1, R1-7).
+            long shortestGapNanos = Long.MAX_VALUE;
+            for (int index = 1; index < renewedAt.size(); index++) {
+                shortestGapNanos = Math.min(shortestGapNanos,
+                        renewedAt.get(index) - renewedAt.get(index - 1));
+            }
+            assertThat(shortestGapNanos)
+                    .isLessThan(TimeUnit.MILLISECONDS.toNanos(20));
             // The answer is still recorded budget-exempt afterwards.
             verify(sessions).retryOperation(eq("tenant"), eq("session"),
                     eq("op-action"), anyString(), eq(3L), anyLong(),

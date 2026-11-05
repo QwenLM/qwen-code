@@ -68,7 +68,10 @@ import {
 import type { DirectUserAdmission, QueuedGoalTurn } from './useMessageQueue.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
-import { framePasteExpansion } from '../utils/paste-placeholders.js';
+import {
+  framePasteExpansion,
+  REWRITE_CHANGED_PASTE,
+} from '../utils/paste-placeholders.js';
 
 // --- MOCKS ---
 const pendingToolPersistence = vi.hoisted(() => ({
@@ -200,6 +203,23 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 const mockUseReactToolScheduler = useReactToolScheduler as Mock;
+const mockRunModelRound = vi.hoisted(() => vi.fn());
+const mockRunToolBatch = vi.hoisted(() => vi.fn());
+vi.mock(
+  '@qwen-code/qwen-code-core/core/agent-loop.js',
+  async (importOriginal) => {
+    const actual =
+      (await importOriginal()) as typeof import('@qwen-code/qwen-code-core/core/agent-loop.js');
+    mockRunModelRound.mockImplementation(actual.runModelRound);
+    mockRunToolBatch.mockImplementation(actual.runToolBatch);
+    return {
+      ...actual,
+      runModelRound: mockRunModelRound,
+      runToolBatch: mockRunToolBatch,
+    };
+  },
+);
+
 vi.mock('./useReactToolScheduler.js', async (importOriginal) => {
   const actualSchedulerModule = (await importOriginal()) as any;
   return {
@@ -612,6 +632,8 @@ describe('useLlmStream', () => {
       },
       rerenderWithToolCalls: (toolCalls: TrackedToolCall[]) =>
         rerender({ ...baseProps, toolCalls }),
+      rerenderWithClient: (nextClient: any) =>
+        rerender({ ...baseProps, client: nextClient }),
     };
   };
 
@@ -14931,6 +14953,49 @@ describe('useLlmStream', () => {
           expect(userRows()[0].text).toBe(`look ${placeholder}`);
         });
 
+        it('refuses a rewrite that changed a paste and hands the prompt back', async () => {
+          const { submitPrompt } = installModTurn();
+          submitPrompt.mockImplementationOnce(async (text) => ({
+            text: text.replace('line2', '[redacted]'),
+          }));
+          const onPromptReturned = vi.fn();
+          const { result } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            false,
+            onPromptReturned,
+          );
+
+          await act(async () => {
+            await result.current.submitQuery(
+              composed(`look ${placeholder}`),
+              SendMessageType.UserQuery,
+              undefined,
+              {
+                submittedPrompt: `look ${placeholder}`,
+                displayText: `look ${placeholder}`,
+                pasteExpansions: pastes,
+              },
+            );
+          });
+
+          expect(handleAtCommandSpy).not.toHaveBeenCalled();
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          expect(userRows()).toEqual([]);
+          expect(mockAddItem).toHaveBeenCalledWith(
+            { type: MessageType.ERROR, text: REWRITE_CHANGED_PASTE },
+            expect.any(Number),
+          );
+          expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+            `look ${placeholder}`,
+            pastes,
+          );
+        });
+
         it('hands back a dropped prompt with its pastes collapsed', async () => {
           const { submitPrompt } = installModTurn();
           submitPrompt.mockResolvedValueOnce({ drop: 'Prompt dropped' });
@@ -24870,5 +24935,1246 @@ describe('useLlmStream', () => {
     // findLastIndex should land on 'second' (index 2), not the steer (index 4).
     // turnCount = history.length - 2 = 3.
     expect(event.turnCount).toBe(3);
+  });
+
+  describe('shared agent loop round (experimental.unifiedAgentLoop)', () => {
+    const toolRequest = (callId: string) => ({
+      type: ServerLlmEventType.ToolCallRequest,
+      value: {
+        callId,
+        name: 'read_file',
+        args: { file_path: `/test/dir/${callId}.txt` },
+        isClientInitiated: false,
+        prompt_id: 'prompt-shared',
+      },
+    });
+
+    beforeEach(() => {
+      (
+        mockConfig as unknown as { isUnifiedAgentLoopEnabled: () => boolean }
+      ).isUnifiedAgentLoopEnabled = () => true;
+      mockRunModelRound.mockClear();
+    });
+
+    it('sends the round through runModelRound with the same request', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'Hello.' };
+        })(),
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'Say hello.',
+          SendMessageType.UserQuery,
+          'prompt-shared',
+        );
+      });
+
+      expect(mockRunModelRound).toHaveBeenCalledTimes(1);
+      const [, round, signal] = mockRunModelRound.mock.calls[0];
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        round.parts,
+        signal,
+        'prompt-shared',
+        round.options,
+      );
+      expect(round).toMatchObject({
+        promptId: 'prompt-shared',
+        options: { type: SendMessageType.UserQuery },
+      });
+      expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    });
+
+    it('schedules the calls the round collected, without those a retry replaced', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield toolRequest('dropped');
+          yield { type: ServerLlmEventType.Retry, isContinuation: false };
+          yield toolRequest('kept_a');
+          yield toolRequest('kept_b');
+        })(),
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read the files.');
+      });
+
+      expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
+      expect(
+        mockScheduleToolCalls.mock.calls[0][0].map(
+          (request: { callId: string }) => request.callId,
+        ),
+      ).toEqual(['kept_a', 'kept_b']);
+    });
+
+    it('schedules the calls the round collected, without those a model fallback replaced', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield toolRequest('dropped');
+          yield {
+            type: ServerLlmEventType.ModelFallback,
+            fromModel: 'primary-model',
+            toModel: 'fallback-model',
+            fallbackIndex: 1,
+          };
+          yield toolRequest('kept');
+        })(),
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
+      expect(
+        mockScheduleToolCalls.mock.calls[0][0].map(
+          (request: { callId: string }) => request.callId,
+        ),
+      ).toEqual(['kept']);
+    });
+
+    it('schedules nothing when the round ends on a stop reason', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield toolRequest('before_stop');
+          yield {
+            type: ServerLlmEventType.MaxSessionTurns,
+          };
+        })(),
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      expect(mockRunModelRound).toHaveBeenCalledTimes(1);
+      expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    });
+
+    const completedCall = (
+      request: ToolCallRequestInfo,
+      nativeAttemptsObserved = false,
+    ) => ({
+      status: 'success' as const,
+      request,
+      response: {
+        callId: request.callId,
+        responseParts: [
+          {
+            functionResponse: {
+              id: request.callId,
+              name: request.name,
+              response: { output: `${request.callId} done` },
+            },
+          },
+        ],
+        resultDisplay: `${request.callId} done`,
+        error: undefined,
+        errorType: undefined,
+      },
+      nativeAttemptsObserved,
+    });
+    const completeBatches = (nativeAttemptsObserved = false) =>
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          void onBatchComplete?.(
+            requests.map((request) =>
+              completedCall(request, nativeAttemptsObserved),
+            ),
+          );
+        },
+      );
+    const rounds = (...events: unknown[][]) => {
+      for (const roundEvents of events) {
+        mockSendMessageStream.mockReturnValueOnce(
+          (async function* () {
+            for (const event of roundEvents) yield event;
+          })(),
+        );
+      }
+    };
+    const sentIds = (call: number) =>
+      (mockSendMessageStream.mock.calls[call][0] as Part[]).map(
+        (part) => part.functionResponse?.id,
+      );
+
+    describe('shared deferred tool-result recording', () => {
+      afterEach(async () => {
+        const actual = await vi.importActual<
+          typeof import('@qwen-code/qwen-code-core/core/agent-loop.js')
+        >('@qwen-code/qwen-code-core/core/agent-loop.js');
+        mockRunToolBatch.mockImplementation(actual.runToolBatch);
+      });
+      const callId = 'nov5-late';
+      const metadata = {
+        persistedOutputFiles: ['nov5-attachment.txt'],
+        artifacts: [],
+      };
+      const packet = (): Part[] => [
+        {
+          functionResponse: {
+            id: callId,
+            name: 'read_file',
+            response: { output: 'NOV5_SECRET_RESULT' },
+          },
+        },
+        { text: 'NOV5_SECRET_COMPANION' },
+        { inlineData: { mimeType: 'image/png', data: 'Tk9WNQ==' } },
+      ];
+
+      async function rig(eligible = true) {
+        const actualLoop = await vi.importActual<
+          typeof import('@qwen-code/qwen-code-core/core/agent-loop.js')
+        >('@qwen-code/qwen-code-core/core/agent-loop.js');
+        const { ChatRecordingService } = await vi.importActual<
+          typeof import('@qwen-code/qwen-code-core/services/chatRecordingService.js')
+        >('@qwen-code/qwen-code-core/services/chatRecordingService.js');
+        let sessionId = 'nov5-original';
+        mockConfig.getSessionId = () => sessionId;
+        mockConfig.getDisableAllHooks = () => true;
+        mockConfig.getResumedSessionData = () => undefined;
+        mockConfig.getCliVersion = () => 'nov5-test';
+        const writes: unknown[] = [];
+        const timeline: string[] = [];
+        let releaseReceipt!: () => void;
+        const receiptGate = new Promise<void>((resolve) => {
+          releaseReceipt = resolve;
+        });
+        const recorder = new ChatRecordingService(mockConfig, undefined, true);
+        recorder.activate({
+          sessionId,
+          appendJsonLine: async (value: unknown) => {
+            const record = value as { subtype?: string };
+            if (record.subtype === 'tool_result_admission') {
+              timeline.push('receipt-enter');
+              await receiptGate;
+              timeline.push('receipt-ack');
+            }
+            writes.push(structuredClone(record));
+          },
+          assertOwnedAndUnchanged: async () => {},
+          release: async () => {},
+        } as unknown as Parameters<typeof recorder.activate>[0]);
+        const record = vi.spyOn(recorder, 'recordToolResult');
+        const admission = vi.spyOn(recorder, 'recordToolResultAdmission');
+        const successor = {
+          recordToolResult: vi.fn(),
+          recordToolResultAdmission: vi.fn(),
+        };
+        let currentRecorder: unknown = recorder;
+        mockConfig.getChatRecordingService = vi.fn(
+          () => currentRecorder,
+        ) as Mock;
+        recorder.recordAssistantTurn({
+          model: 'test',
+          message: [toolRequest(callId).value].map((request) => ({
+            functionCall: {
+              id: request.callId,
+              name: request.name,
+              args: request.args,
+            },
+          })),
+        });
+        await recorder.flush();
+
+        expect(writes).toContainEqual(
+          expect.objectContaining({ type: 'assistant' }),
+        );
+
+        let releaseBatch!: () => void;
+        const batchGate = new Promise<void>((resolve) => {
+          releaseBatch = resolve;
+        });
+        const closures: Mock[] = [];
+        let batchFinalized = false;
+        mockRunToolBatch.mockImplementation(
+          async (...args: Parameters<typeof actualLoop.runToolBatch>) => {
+            expect(args[1].deferRecording).toBe(true);
+            const result = await actualLoop.runToolBatch(...args);
+            expect(record).not.toHaveBeenCalled();
+            for (const response of result.responses ?? []) {
+              const original = response.record;
+              expect(original).toBeTypeOf('function');
+              const closure = vi.fn(() => {
+                timeline.push('record');
+                original?.();
+              });
+              closures.push(closure);
+              response.record = closure;
+            }
+            batchFinalized = true;
+            await batchGate;
+            return result;
+          },
+        );
+        mockScheduleToolCalls.mockImplementation(
+          (
+            requests: ToolCallRequestInfo[],
+            _signal: AbortSignal,
+            _model: string | undefined,
+            onBatchComplete?: (calls: unknown[]) => Promise<void>,
+          ) => {
+            void onBatchComplete?.(
+              requests.map((request) => ({
+                ...completedCall(request),
+                response: {
+                  ...completedCall(request).response,
+                  responseParts: packet(),
+                  ...metadata,
+                },
+              })),
+            );
+          },
+        );
+        rounds([toolRequest(callId)]);
+        const { result, client } = renderTestHook();
+        client.getHistoryFunctionResponseIds = vi.fn(() => new Set([callId]));
+        client.getSynthesizedRepairCallIds = vi.fn(() => new Set([callId]));
+        const apply = vi.fn((_parts: Part[]) => {
+          timeline.push('apply');
+        });
+        const replace = vi.fn(
+          async (_id: string, prepare: () => Promise<Part[]>) => {
+            if (!eligible) return false;
+            apply(await prepare());
+            return true;
+          },
+        );
+        Object.assign(client, { replaceSynthesizedToolResponseAsync: replace });
+        await act(async () => {
+          await result.current.submitQuery('Read nov5 fixture.');
+        });
+        await waitFor(() => expect(batchFinalized).toBe(true));
+        expect(mockRunToolBatch).toHaveBeenCalledOnce();
+        expect(mockScheduleToolCalls).toHaveBeenCalledOnce();
+        return {
+          recorder,
+          writes,
+          record,
+          admission,
+          timeline,
+          closures,
+          releaseBatch,
+          releaseReceipt,
+          apply,
+          replace,
+          client,
+          hook: result,
+          swap: () => {
+            sessionId = 'nov5-successor';
+            currentRecorder = successor;
+          },
+          successor,
+        };
+      }
+
+      const currentPacketWrites = (writes: unknown[]) =>
+        (
+          writes as Array<{
+            type: string;
+            uuid: string;
+            subtype?: string;
+            systemPayload?: { recordUuids: string[]; decision: unknown };
+          }>
+        ).filter((record) => record.type === 'tool_result');
+      const assertExactlyOneCompletion = (writes: unknown[]) => {
+        const records = currentPacketWrites(writes);
+        if (records.length !== 1)
+          throw new Error(
+            `Expected exactly one completion; found ${records.length}`,
+          );
+        return records[0];
+      };
+      function useFreshResult(h: Awaited<ReturnType<typeof rig>>) {
+        h.client.getHistoryFunctionResponseIds = vi.fn(() => new Set<string>());
+        h.client.getSynthesizedRepairCallIds = vi.fn(() => new Set<string>());
+      }
+      function continueThroughRealRecorder(h: Awaited<ReturnType<typeof rig>>) {
+        // The host and batch are real. This model-send boundary is a stub;
+        // its receipt uses the real recorder. This is not full LlmChat E2E.
+        mockSendMessageStream.mockImplementationOnce(
+          (
+            parts: Part[],
+            _signal: AbortSignal,
+            _promptId: string,
+            options: {
+              toolResultParts?: readonly Part[];
+              type: SendMessageType;
+            },
+          ) =>
+            (async function* () {
+              h.timeline.push('send-enter');
+              expect(options).toMatchObject({
+                type: SendMessageType.ToolResult,
+                toolResultParts: packet(),
+              });
+              expect(parts).toEqual(packet());
+              try {
+                await h.recorder.recordToolResultAdmission(
+                  options.toolResultParts!,
+                );
+              } catch (error) {
+                h.timeline.push('receipt-rejected');
+                throw error;
+              }
+              h.timeline.push('model-stream');
+              yield {
+                type: ServerLlmEventType.Content,
+                value: 'nov5 completed',
+              };
+            })(),
+        );
+      }
+
+      it('records the real shared normal completion once before the bound receipt and model stream', async () => {
+        const h = await rig();
+        useFreshResult(h);
+        continueThroughRealRecorder(h);
+        try {
+          await act(async () => {
+            h.releaseBatch();
+          });
+          await waitFor(() => expect(h.timeline).toContain('receipt-enter'));
+          expect(h.timeline).toEqual(['record', 'send-enter', 'receipt-enter']);
+          expect(h.record).toHaveBeenCalledOnce();
+          expect(h.record.mock.calls[0][0]).toEqual(packet());
+          expect(h.record.mock.calls[0][1]).toMatchObject(metadata);
+          expect(h.closures[0]).toHaveBeenCalledOnce();
+          expect(h.timeline).not.toContain('model-stream');
+          const completion = assertExactlyOneCompletion(h.writes);
+          await act(async () => {
+            h.releaseReceipt();
+          });
+          await waitFor(() => expect(h.timeline).toContain('model-stream'));
+          await h.recorder.flush();
+          expect(assertExactlyOneCompletion(h.writes).uuid).toBe(
+            completion.uuid,
+          );
+          expect(h.writes).toContainEqual(
+            expect.objectContaining({
+              subtype: 'tool_result_admission',
+              systemPayload: {
+                recordUuids: [completion.uuid],
+                decision: 'admitted',
+              },
+            }),
+          );
+          expect(h.timeline).toEqual([
+            'record',
+            'send-enter',
+            'receipt-enter',
+            'receipt-ack',
+            'model-stream',
+          ]);
+          expect(h.replace).not.toHaveBeenCalled();
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        } finally {
+          h.releaseBatch();
+          h.releaseReceipt();
+          await h.recorder.close();
+        }
+      });
+
+      it.each([false, true])(
+        'records a shared completion before cancellation retention; applicable hook=%s',
+        async (hooked) => {
+          const h = await rig();
+          useFreshResult(h);
+          mockConfig.getDisableAllHooks = () => !hooked;
+          mockConfig.getMessageBus = vi.fn(() => ({
+            request: vi.fn(),
+          })) as Config['getMessageBus'];
+          mockConfig.hasHooksForEvent = vi.fn(
+            (event: string) => hooked && event === 'UserPromptSubmit',
+          );
+          try {
+            act(() => {
+              h.hook.current.cancelOngoingRequest();
+            });
+            await act(async () => {
+              h.releaseBatch();
+            });
+            await waitFor(() => expect(h.timeline).toContain('receipt-enter'));
+            expect(h.record).toHaveBeenCalledOnce();
+            expect(h.record.mock.calls[0][1]).toMatchObject(metadata);
+            expect(h.closures[0]).toHaveBeenCalledOnce();
+            expect(h.client.addHistory).not.toHaveBeenCalled();
+            const completion = assertExactlyOneCompletion(h.writes);
+            await act(async () => {
+              h.releaseReceipt();
+            });
+            await waitFor(() =>
+              expect(h.client.addHistory).toHaveBeenCalledOnce(),
+            );
+            await h.recorder.flush();
+            expect(currentPacketWrites(h.writes)).toHaveLength(1);
+            const kept = vi.mocked(h.client.addHistory).mock.calls[0][0];
+            if (hooked) {
+              expect(JSON.stringify(kept)).not.toContain('NOV5_SECRET');
+              expect(JSON.stringify(kept)).not.toContain('Tk9WNQ==');
+              expect(h.writes).toContainEqual(
+                expect.objectContaining({
+                  subtype: 'tool_result_admission',
+                  systemPayload: {
+                    recordUuids: [completion.uuid],
+                    decision: {
+                      withheld:
+                        'The tool had already completed; its output was discarded.',
+                    },
+                  },
+                }),
+              );
+            } else {
+              expect(kept).toEqual({ role: 'user', parts: packet() });
+              expect(h.writes).toContainEqual(
+                expect.objectContaining({
+                  subtype: 'tool_result_admission',
+                  systemPayload: {
+                    recordUuids: [completion.uuid],
+                    decision: 'admitted',
+                  },
+                }),
+              );
+            }
+            expect(h.replace).not.toHaveBeenCalled();
+            expect(mockSendMessageStream).toHaveBeenCalledOnce();
+          } finally {
+            h.releaseBatch();
+            h.releaseReceipt();
+            await h.recorder.close();
+          }
+        },
+      );
+
+      it.each([0, 2])(
+        'negative control detects a shared recording closure that writes %i completions',
+        async (multiplicity) => {
+          const h = await rig();
+          useFreshResult(h);
+          continueThroughRealRecorder(h);
+          expect(h.closures).toHaveLength(1);
+          const original = h.closures[0].getMockImplementation()!;
+          // Test-boundary fault injection only: do not alter production source.
+          h.closures[0].mockImplementation(() => {
+            for (let index = 0; index < multiplicity; index++) original();
+          });
+          try {
+            await act(async () => {
+              h.releaseReceipt();
+              h.releaseBatch();
+            });
+            await waitFor(() =>
+              expect(
+                h.timeline.some(
+                  (event) =>
+                    event === 'model-stream' || event === 'receipt-rejected',
+                ),
+              ).toBe(true),
+            );
+            await h.recorder.flush();
+            expect(h.closures[0]).toHaveBeenCalledOnce();
+            expect(currentPacketWrites(h.writes)).toHaveLength(multiplicity);
+            expect(() => assertExactlyOneCompletion(h.writes)).toThrow(
+              `Expected exactly one completion; found ${multiplicity}`,
+            );
+            if (multiplicity === 0) {
+              expect(h.writes).not.toContainEqual(
+                expect.objectContaining({ subtype: 'tool_result_admission' }),
+              );
+            }
+          } finally {
+            h.releaseBatch();
+            h.releaseReceipt();
+            await h.recorder.close();
+          }
+        },
+      );
+
+      it('records a real shared late packet once with attachment metadata, before receipt acknowledgement and replacement', async () => {
+        const h = await rig();
+        try {
+          await act(async () => {
+            h.releaseBatch();
+          });
+          await waitFor(() => expect(h.timeline).toContain('receipt-enter'));
+          expect(h.apply).not.toHaveBeenCalled();
+          expect(h.record).toHaveBeenCalledOnce();
+          expect(h.record.mock.calls[0][0]).toEqual(packet());
+          expect(h.record.mock.calls[0][1]).toMatchObject(metadata);
+          expect(h.closures).toHaveLength(1);
+          expect(h.closures[0]).toHaveBeenCalledOnce();
+          expect(h.timeline).toEqual(['record', 'receipt-enter']);
+          await act(async () => {
+            h.releaseReceipt();
+          });
+          await waitFor(() => expect(h.apply).toHaveBeenCalledOnce());
+          await h.recorder.flush();
+          expect(h.record).toHaveBeenCalledOnce();
+          expect(h.admission).toHaveBeenCalledOnce();
+          expect(h.apply).toHaveBeenCalledWith(packet());
+          const records = h.writes as Array<{
+            type: string;
+            uuid: string;
+            subtype?: string;
+            systemPayload?: { recordUuids: string[]; decision: unknown };
+          }>;
+          const completed = records.filter(
+            (record) => record.type === 'tool_result',
+          );
+          expect(completed).toHaveLength(1);
+          const receipts = records.filter(
+            (record) => record.subtype === 'tool_result_admission',
+          );
+          expect(receipts).toHaveLength(1);
+          expect(receipts[0].systemPayload).toEqual({
+            recordUuids: [completed[0].uuid],
+            decision: 'admitted',
+          });
+          expect(h.timeline).toEqual([
+            'record',
+            'receipt-enter',
+            'receipt-ack',
+            'apply',
+          ]);
+          expect(mockSendMessageStream).toHaveBeenCalledOnce();
+        } finally {
+          h.releaseBatch();
+          h.releaseReceipt();
+          await h.recorder.close();
+        }
+      });
+
+      it('does not invoke a shared recording closure or receipt when late replacement is refused', async () => {
+        const h = await rig(false);
+        try {
+          await act(async () => {
+            h.releaseBatch();
+          });
+          await waitFor(() => expect(h.replace).toHaveBeenCalledOnce());
+          await waitFor(() =>
+            expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([callId]),
+          );
+          expect(h.closures).toHaveLength(1);
+          expect(h.closures[0]).not.toHaveBeenCalled();
+          expect(h.record).not.toHaveBeenCalled();
+          expect(h.admission).not.toHaveBeenCalled();
+          expect(h.apply).not.toHaveBeenCalled();
+          expect(mockSendMessageStream).toHaveBeenCalledOnce();
+        } finally {
+          h.releaseBatch();
+          h.releaseReceipt();
+          await h.recorder.close();
+        }
+      });
+
+      it('does not resolve a deferred shared recording into the successor recorder after a session swap', async () => {
+        const h = await rig();
+        try {
+          h.swap();
+          await act(async () => {
+            h.releaseBatch();
+          });
+          await waitFor(() =>
+            expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([callId]),
+          );
+          expect(h.closures).toHaveLength(1);
+          expect(h.closures[0]).not.toHaveBeenCalled();
+          expect(h.record).not.toHaveBeenCalled();
+          expect(h.admission).not.toHaveBeenCalled();
+          expect(h.successor.recordToolResult).not.toHaveBeenCalled();
+          expect(h.successor.recordToolResultAdmission).not.toHaveBeenCalled();
+          expect(h.apply).not.toHaveBeenCalled();
+          expect(mockSendMessageStream).toHaveBeenCalledOnce();
+        } finally {
+          h.releaseBatch();
+          h.releaseReceipt();
+          await h.recorder.close();
+        }
+      });
+    });
+
+    it('runs the calls as one batch of the shared loop and sends their results as the next round', async () => {
+      completeBatches();
+      rounds(
+        [toolRequest('read_a'), toolRequest('read_b')],
+        [{ type: ServerLlmEventType.Content, value: 'Both read.' }],
+      );
+      const { result, client } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read the files.');
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
+      expect(sentIds(1)).toEqual(['read_a', 'read_b']);
+      expect(mockSendMessageStream.mock.calls[1][3]).toMatchObject({
+        type: SendMessageType.ToolResult,
+      });
+      expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(2);
+      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+        'read_a',
+        'read_b',
+      ]);
+    });
+
+    it('does not count a call the Mod tool middleware already counted', async () => {
+      completeBatches(true);
+      rounds(
+        [toolRequest('read_a')],
+        [{ type: ServerLlmEventType.Content, value: 'Read.' }],
+      );
+      const { result, client } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+    });
+
+    it('answers a replayed call in the batch and runs only the others', async () => {
+      completeBatches();
+      const replayed = {
+        ...toolRequest('replayed'),
+        value: { ...toolRequest('replayed').value, providerCallId: 'replayed' },
+      };
+      const client = mockConfig.getLlmClient();
+      client.getHistoryToolCallFingerprints = vi
+        .fn()
+        .mockReturnValue(
+          new Map([
+            [
+              'replayed',
+              getToolCallFingerprint(replayed.value.name, replayed.value.args),
+            ],
+          ]),
+        );
+      rounds(
+        [replayed, toolRequest('fresh')],
+        [{ type: ServerLlmEventType.Content, value: 'Done.' }],
+      );
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the files.');
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(
+        mockScheduleToolCalls.mock.calls[0][0].map(
+          (request: { callId: string }) => request.callId,
+        ),
+      ).toEqual(['fresh']);
+      expect(sentIds(1)).toEqual(['replayed', 'fresh']);
+    });
+
+    const recordedCallIds = () => {
+      const recordToolResult = vi.fn();
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+        recordThought: vi.fn(),
+        initialize: vi.fn(),
+        recordMessage: vi.fn(),
+        recordMessageTokens: vi.fn(),
+        recordToolCalls: vi.fn(),
+        getConversationFile: vi.fn(),
+        recordToolResult,
+      });
+      return () =>
+        recordToolResult.mock.calls.map(
+          (call) => (call[1] as { callId: string }).callId,
+        );
+    };
+
+    it('records and counts once a call whose result history already has, and does not send it', async () => {
+      completeBatches();
+      const recorded = recordedCallIds();
+      rounds(
+        [toolRequest('read_a'), toolRequest('read_b')],
+        [{ type: ServerLlmEventType.Content, value: 'Read.' }],
+      );
+      const client = mockConfig.getLlmClient();
+      client.getHistoryFunctionResponseIds = vi
+        .fn()
+        .mockReturnValue(new Set(['read_a']));
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the files.');
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(sentIds(1)).toEqual(['read_b']);
+      // History's response stays the only one: the batch's result for
+      // read_a is dropped, so it is not recorded either.
+      expect(recorded()).toEqual(['read_b']);
+      expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(2);
+    });
+
+    it('records once the result that replaces a placeholder', async () => {
+      completeBatches();
+      const recorded = recordedCallIds();
+      rounds([toolRequest('read_a')]);
+      const client = mockConfig.getLlmClient();
+      client.getHistoryFunctionResponseIds = vi
+        .fn()
+        .mockReturnValue(new Set(['read_a']));
+      client.getSynthesizedRepairCallIds = vi
+        .fn()
+        .mockReturnValue(new Set(['read_a']));
+      const { apply } = installLateRepairMock(client);
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      await waitFor(() => {
+        expect(apply).toHaveBeenCalledExactlyOnceWith(
+          'read_a',
+          completedCall(toolRequest('read_a').value as ToolCallRequestInfo)
+            .response.responseParts,
+        );
+      });
+      expect(
+        client.replaceSynthesizedToolResponseAsync,
+      ).toHaveBeenCalledExactlyOnceWith('read_a', expect.any(Function));
+      const recordToolResult = vi.mocked(
+        mockConfig.getChatRecordingService()!.recordToolResult,
+      );
+      expect(recordToolResult).toHaveBeenCalledOnce();
+      expect(recordToolResult.mock.invocationCallOrder[0]).toBeLessThan(
+        apply.mock.invocationCallOrder[0],
+      );
+      expect(recorded()).toEqual(['read_a']);
+      expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it("sends the replay answers when the batch's executed calls were all cancelled", async () => {
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          void onBatchComplete?.(
+            requests.map((request) => ({
+              ...completedCall(request),
+              status: 'cancelled' as const,
+            })),
+          );
+        },
+      );
+      const replayed = {
+        ...toolRequest('replayed'),
+        value: { ...toolRequest('replayed').value, providerCallId: 'replayed' },
+      };
+      const client = mockConfig.getLlmClient();
+      client.getHistoryToolCallFingerprints = vi
+        .fn()
+        .mockReturnValue(
+          new Map([
+            [
+              'replayed',
+              getToolCallFingerprint(replayed.value.name, replayed.value.args),
+            ],
+          ]),
+        );
+      rounds(
+        [replayed, toolRequest('declined')],
+        [{ type: ServerLlmEventType.Content, value: 'Done.' }],
+      );
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the files.');
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(sentIds(1)).toEqual(['replayed', 'declined']);
+    });
+
+    it('holds a batch that completes during another model stream and handles it against history as it is when that stream ends', async () => {
+      const recorded = recordedCallIds();
+      let completeBatch: (() => Promise<void>) | undefined;
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          completeBatch = () =>
+            onBatchComplete?.(
+              requests.map((request) => completedCall(request)),
+            ) ?? Promise.resolve();
+        },
+      );
+      let endSecondStream!: () => void;
+      const secondStreamHeld = new Promise<void>((resolve) => {
+        endSecondStream = resolve;
+      });
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield toolRequest('read_a');
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'Thinking.' };
+            await secondStreamHeld;
+          })(),
+        );
+      const client = mockConfig.getLlmClient();
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+      expect(completeBatch).toBeDefined();
+      let secondSubmission!: Promise<void>;
+      await act(async () => {
+        secondSubmission = result.current.submitQuery('Something else.');
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      await act(async () => {
+        await completeBatch!();
+      });
+      // While the batch waited, the other stream's repair answered read_a
+      // with a placeholder.
+      client.getHistoryFunctionResponseIds = vi
+        .fn()
+        .mockReturnValue(new Set(['read_a']));
+      client.getSynthesizedRepairCallIds = vi
+        .fn()
+        .mockReturnValue(new Set(['read_a']));
+      const { apply } = installLateRepairMock(client);
+      expect(recorded()).toEqual([]);
+      expect(apply).not.toHaveBeenCalled();
+
+      await act(async () => {
+        endSecondStream();
+        await secondSubmission;
+      });
+
+      await waitFor(() => {
+        expect(apply).toHaveBeenCalledExactlyOnceWith(
+          'read_a',
+          completedCall(toolRequest('read_a').value as ToolCallRequestInfo)
+            .response.responseParts,
+        );
+      });
+      expect(
+        client.replaceSynthesizedToolResponseAsync,
+      ).toHaveBeenCalledExactlyOnceWith('read_a', expect.any(Function));
+      const recordToolResult = vi.mocked(
+        mockConfig.getChatRecordingService()!.recordToolResult,
+      );
+      expect(recordToolResult).toHaveBeenCalledOnce();
+      expect(recordToolResult.mock.invocationCallOrder[0]).toBeLessThan(
+        apply.mock.invocationCallOrder[0],
+      );
+      expect(recorded()).toEqual(['read_a']);
+      // The placeholder took the result: no continuation sends it again.
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+
+    const cancelBatches = () =>
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          void onBatchComplete?.(
+            requests.map((request) => ({
+              ...completedCall(request),
+              status: 'cancelled' as const,
+            })),
+          );
+        },
+      );
+
+    it('counts a cancelled call as the current path does: not when history already answered it', async () => {
+      cancelBatches();
+      rounds([toolRequest('read_a'), toolRequest('read_b')]);
+      const client = mockConfig.getLlmClient();
+      client.getHistoryFunctionResponseIds = vi
+        .fn()
+        .mockReturnValue(new Set(['read_a']));
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the files.');
+      });
+
+      await waitFor(() => {
+        expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+      });
+      expect(client.recordCompletedToolCall).toHaveBeenCalledWith('read_file', {
+        file_path: '/test/dir/read_b.txt',
+      });
+    });
+
+    it('commits the tool group when the scheduler completes the batch and keeps its results in that session', async () => {
+      const outputDir = await fs.mkdtemp(
+        path.join(tmpdir(), 'qwen-shared-finalizer-'),
+      );
+      let releaseFinalizer!: () => void;
+      const persistenceEntered = vi.fn();
+      pendingToolPersistence.directory = outputDir;
+      pendingToolPersistence.wait = new Promise<void>((resolve) => {
+        releaseFinalizer = resolve;
+      });
+      pendingToolPersistence.entered = persistenceEntered;
+      try {
+        let sessionId = 'old-session';
+        mockConfig.getSessionId = () => sessionId;
+        const oldRecorder = { recordToolResult: vi.fn() };
+        let recorder = oldRecorder;
+        mockConfig.getChatRecordingService = vi.fn(() => recorder) as Mock;
+        mockConfig.getToolOutputBatchBudget = () => 200_000;
+        mockConfig.getToolResultBytesWritten = () => 0;
+        mockConfig.trackToolResultBytes = vi.fn();
+        mockConfig.getExecutionEnvironment = () => undefined;
+        mockConfig.storage = {
+          getToolResultsDir: () => outputDir,
+          getProjectTempDir: () => outputDir,
+        } as Config['storage'];
+        let schedulerCallbackReturned = false;
+        mockScheduleToolCalls.mockImplementation(
+          (
+            requests: ToolCallRequestInfo[],
+            _signal: AbortSignal,
+            _modelOverride: string | undefined,
+            onBatchComplete?: (calls: unknown[]) => Promise<void>,
+          ) => {
+            void onBatchComplete?.(
+              requests.map((request) => {
+                const call = completedCall(request);
+                call.response.responseParts[0].functionResponse!.response = {
+                  output: 'a'.repeat(220_000),
+                };
+                return call;
+              }),
+            )?.then(() => {
+              schedulerCallbackReturned = true;
+            });
+          },
+        );
+        // No continuation follows: the swapped session drops the result.
+        rounds([toolRequest('read_a')]);
+        const { result, client } = renderTestHook();
+        const toolGroups = () =>
+          mockAddItem.mock.calls.filter(
+            ([item]) => (item as { type?: string }).type === 'tool_group',
+          );
+
+        await act(async () => {
+          await result.current.submitQuery('Read the file.');
+        });
+        await waitFor(() => expect(persistenceEntered).toHaveBeenCalled());
+        // The finalize persists the result; the group is already in history.
+        expect(schedulerCallbackReturned).toBe(true);
+        expect(toolGroups()).toHaveLength(1);
+
+        // A /clear swaps the session while the result is persisted.
+        sessionId = 'new-session';
+        const newRecorder = { recordToolResult: vi.fn() };
+        recorder = newRecorder;
+        client.getChat = vi.fn(() => ({ addHistory: vi.fn() }));
+        await act(async () => {
+          releaseFinalizer();
+        });
+
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        });
+        expect(newRecorder.recordToolResult).not.toHaveBeenCalled();
+        expect(oldRecorder.recordToolResult).not.toHaveBeenCalled();
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+        expect(toolGroups()).toHaveLength(1);
+      } finally {
+        releaseFinalizer();
+        pendingToolPersistence.directory = '';
+        pendingToolPersistence.wait = undefined;
+        pendingToolPersistence.entered = undefined;
+      }
+    });
+
+    it('does not count a replay as answered when the batch fails before sending it', async () => {
+      completeBatches();
+      const replayed = {
+        ...toolRequest('replayed'),
+        value: { ...toolRequest('replayed').value, providerCallId: 'replayed' },
+      };
+      const client = mockConfig.getLlmClient();
+      client.getHistoryToolCallFingerprints = vi
+        .fn()
+        .mockReturnValue(
+          new Map([
+            [
+              'replayed',
+              getToolCallFingerprint(replayed.value.name, replayed.value.args),
+            ],
+          ]),
+        );
+      // The first batch's finalize throws.
+      let budgetCalls = 0;
+      mockConfig.getToolOutputBatchBudget = () => {
+        if (budgetCalls++ === 0) throw new Error('finalize failed');
+        return Number.POSITIVE_INFINITY;
+      };
+      rounds(
+        [replayed, toolRequest('read_a')],
+        [replayed],
+        [{ type: ServerLlmEventType.Content, value: 'Done.' }],
+      );
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      // The fallback sends the executed result only; the next replay of the
+      // same id is answered, not taken for a repeated duplicate.
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      expect(sentIds(1)).toEqual(['read_a']);
+      expect(sentIds(2)).toEqual(['replayed']);
+    });
+
+    const holdBatches = () => {
+      const pending: Array<() => void> = [];
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          pending.push(() => {
+            void onBatchComplete?.(
+              requests.map((request) => completedCall(request)),
+            );
+          });
+        },
+      );
+      return pending;
+    };
+
+    it('continues a batch that settles after a re-render with the state of that render', async () => {
+      const pending = holdBatches();
+      rounds([toolRequest('read_a')]);
+      const { result, client, rerenderWithClient } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+      await waitFor(() => expect(pending).toHaveLength(1));
+      // The TUI takes a new client (an auth refresh) while the tool runs.
+      const nextSendMessageStream = vi.fn(() =>
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'Read.' };
+        })(),
+      );
+      rerenderWithClient({
+        ...client,
+        sendMessageStream: nextSendMessageStream,
+      });
+      await act(async () => {
+        pending[0]();
+      });
+
+      await waitFor(() => {
+        expect(nextSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      expect(
+        (nextSendMessageStream.mock.calls[0] as unknown[])[3],
+      ).toMatchObject({ type: SendMessageType.ToolResult });
+    });
+
+    it('ends a batch that settles while its chat cannot be read without holding the turn', async () => {
+      const pending = holdBatches();
+      rounds([toolRequest('read_a')]);
+      const { result, client } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+      await waitFor(() => expect(pending).toHaveLength(1));
+      const getChat = client.getChat;
+      client.getChat = vi.fn(() => {
+        throw new Error('Chat not initialized');
+      });
+      try {
+        await act(async () => {
+          pending[0]();
+        });
+
+        await waitFor(() => {
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+        });
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+        expect(
+          mockAddItem.mock.calls.filter(
+            ([item]) => (item as { type?: string }).type === 'tool_group',
+          ),
+        ).toHaveLength(1);
+      } finally {
+        client.getChat = getChat;
+      }
+    });
+
+    it('ends the round on a cancel without scheduling its calls', async () => {
+      const after = vi.fn();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield toolRequest('cancelled');
+          yield { type: ServerLlmEventType.UserCancelled };
+          after();
+          yield toolRequest('after_cancel');
+        })(),
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      expect(after).not.toHaveBeenCalled();
+      expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    });
   });
 });
