@@ -302,6 +302,15 @@ const allowOnce = () => ({
         ? CONTAINER_SANDBOX_NO_PROXY
         : '127.0.0.1,localhost';
       const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+      // Project hooks need both authorities available: enable the trust
+      // feature (the inherited rig trust store grants the workspace; no
+      // trust-store file here because the request snapshot encodes this
+      // directory's tree) and record the approval an interactive user
+      // would give for scenarios that declare hooks.
+      writeFileSync(
+        join(qwenHome, 'settings.json'),
+        JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+      );
       if (scenario.settings?.['hooks']) approveProjectHooks(qwenHome, dir);
       const env: NodeJS.ProcessEnv = {
         ...process.env,

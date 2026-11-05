@@ -523,6 +523,7 @@ describe('useLlmStream', () => {
     goalQueueRef?: Parameters<typeof useLlmStream>[24],
     modelSwitchedFromQuotaError = false,
     onPromptReturned?: Parameters<typeof useLlmStream>[25],
+    midTurnDrainRef?: Parameters<typeof useLlmStream>[19],
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -599,7 +600,7 @@ describe('useLlmStream', () => {
           () => {},
           80,
           24,
-          undefined, // midTurnDrainRef
+          midTurnDrainRef,
           logger,
           availableTerminalHeightRef,
           undefined, // terminalWidthRef
@@ -5423,6 +5424,45 @@ describe('useLlmStream', () => {
       expectedRevision: permit.revision,
       reason: goalPauseReasonForFailure(''),
     });
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('leaves history alone when a quota switch stops a turn outside a Goal turn', async () => {
+    const completedTool = {
+      request: {
+        callId: 'quota-tool',
+        name: 'testTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-quota-switch',
+      },
+      status: 'success',
+      responseSubmittedToLlm: false,
+      response: {
+        callId: 'quota-tool',
+        responseParts: [{ text: 'quota-tool response' }],
+        errorType: undefined,
+      },
+      tool: { displayName: 'MockTool' },
+      invocation: {
+        getDescription: () => 'quota-tool',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+    const client = new MockedLlmClientClass(mockConfig);
+    const { completeToolRound } = renderTestHook(
+      [],
+      client,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+    await completeToolRound([completedTool]);
+
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['quota-tool']);
+    expect(client.addHistory).not.toHaveBeenCalled();
     expect(mockSendMessageStream).not.toHaveBeenCalled();
   });
 
@@ -25133,13 +25173,28 @@ describe('useLlmStream', () => {
         { inlineData: { mimeType: 'image/png', data: 'Tk9WNQ==' } },
       ];
 
-      async function rig(eligible = true) {
+      async function rig(
+        eligible = true,
+        terminal?: 'terminate' | 'quota' | 'capacity',
+      ) {
         const actualLoop = await vi.importActual<
           typeof import('@qwen-code/qwen-code-core/core/agent-loop.js')
         >('@qwen-code/qwen-code-core/core/agent-loop.js');
         const { ChatRecordingService } = await vi.importActual<
           typeof import('@qwen-code/qwen-code-core/services/chatRecordingService.js')
         >('@qwen-code/qwen-code-core/services/chatRecordingService.js');
+        const request = toolRequest(callId);
+        if (terminal === 'capacity') {
+          request.value.name = 'agent';
+          mockBackgroundTaskRegistry.getMaxConcurrentBackgroundAgents.mockReturnValue(
+            1,
+          );
+          mockBackgroundTaskRegistry.canStartBackgroundAgent.mockReturnValue(
+            false,
+          );
+        }
+        const resultParts = packet();
+        resultParts[0].functionResponse!.name = request.value.name;
         let sessionId = 'nov5-original';
         mockConfig.getSessionId = () => sessionId;
         mockConfig.getDisableAllHooks = () => true;
@@ -25178,7 +25233,7 @@ describe('useLlmStream', () => {
         ) as Mock;
         recorder.recordAssistantTurn({
           model: 'test',
-          message: [toolRequest(callId).value].map((request) => ({
+          message: [request.value].map((request) => ({
             functionCall: {
               id: request.callId,
               name: request.name,
@@ -25230,15 +25285,36 @@ describe('useLlmStream', () => {
                 ...completedCall(request),
                 response: {
                   ...completedCall(request).response,
-                  responseParts: packet(),
+                  responseParts: resultParts,
+                  ...(terminal === 'terminate' ? { terminateTurn: true } : {}),
+                  ...(terminal === 'capacity'
+                    ? {
+                        resultDisplay: {
+                          type: 'task_execution',
+                          status: 'background',
+                        },
+                      }
+                    : {}),
                   ...metadata,
                 },
               })),
             );
           },
         );
-        rounds([toolRequest(callId)]);
-        const { result, client } = renderTestHook();
+        rounds([request]);
+        const independentQueue = [{ text: 'NOV5_SECRET_COMPANION' }];
+        const drainIndependent = vi.fn(() => independentQueue.splice(0));
+        const { result, client } = renderTestHook(
+          [],
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          terminal === 'quota',
+          undefined,
+          terminal ? { current: drainIndependent } : undefined,
+        );
         client.getHistoryFunctionResponseIds = vi.fn(() => new Set([callId]));
         client.getSynthesizedRepairCallIds = vi.fn(() => new Set([callId]));
         const apply = vi.fn((_parts: Part[]) => {
@@ -25252,14 +25328,19 @@ describe('useLlmStream', () => {
           },
         );
         Object.assign(client, { replaceSynthesizedToolResponseAsync: replace });
-        await act(async () => {
-          await result.current.submitQuery('Read nov5 fixture.');
+        let submission!: Promise<void>;
+        act(() => {
+          submission = result.current.submitQuery('Read nov5 fixture.');
         });
         await waitFor(() => expect(batchFinalized).toBe(true));
         expect(mockRunToolBatch).toHaveBeenCalledOnce();
         expect(mockScheduleToolCalls).toHaveBeenCalledOnce();
         return {
           recorder,
+          submission,
+          independentQueue,
+          drainIndependent,
+          resultParts,
           writes,
           record,
           admission,
@@ -25382,6 +25463,9 @@ describe('useLlmStream', () => {
         } finally {
           h.releaseBatch();
           h.releaseReceipt();
+          await act(async () => {
+            await h.submission;
+          });
           await h.recorder.close();
         }
       });
@@ -25452,6 +25536,108 @@ describe('useLlmStream', () => {
           } finally {
             h.releaseBatch();
             h.releaseReceipt();
+            await act(async () => {
+              await h.submission;
+            });
+            await h.recorder.close();
+          }
+        },
+      );
+
+      it.each([
+        ['terminate', false],
+        ['terminate', true],
+        ['quota', false],
+        ['quota', true],
+        ['capacity', false],
+        ['capacity', true],
+      ] as const)(
+        'confirms the shared %s terminal receipt before history; applicable hook=%s',
+        async (terminal, hooked) => {
+          const h = await rig(true, terminal);
+          useFreshResult(h);
+          mockConfig.getDisableAllHooks = () => !hooked;
+          mockConfig.getMessageBus = vi.fn(() => ({
+            request: vi.fn(),
+          })) as Config['getMessageBus'];
+          mockConfig.hasHooksForEvent = vi.fn(
+            (event: string) => hooked && event === 'UserPromptSubmit',
+          );
+          try {
+            await act(async () => {
+              h.releaseBatch();
+            });
+            await waitFor(() => expect(h.timeline).toContain('receipt-enter'));
+            expect(h.client.addHistory).not.toHaveBeenCalled();
+            expect(h.record).toHaveBeenCalledOnce();
+            expect(h.record.mock.calls[0][0]).toEqual(h.resultParts);
+            expect(h.record.mock.calls[0][1]).toMatchObject(metadata);
+            expect(h.closures[0]).toHaveBeenCalledOnce();
+            const completion = assertExactlyOneCompletion(h.writes);
+            await act(async () => {
+              h.releaseReceipt();
+            });
+            await waitFor(() =>
+              expect(h.client.addHistory).toHaveBeenCalledOnce(),
+            );
+            await h.recorder.flush();
+            const kept = vi.mocked(h.client.addHistory).mock.calls[0][0];
+            if (hooked && terminal !== 'terminate') {
+              expect(JSON.stringify(kept)).not.toContain('NOV5_SECRET');
+              expect(JSON.stringify(kept)).not.toContain('Tk9WNQ==');
+            } else {
+              expect(kept).toEqual({ role: 'user', parts: h.resultParts });
+            }
+            expect(currentPacketWrites(h.writes)).toHaveLength(1);
+            expect(h.writes).toContainEqual(
+              expect.objectContaining({
+                subtype: 'tool_result_admission',
+                systemPayload: {
+                  recordUuids: [completion.uuid],
+                  decision:
+                    hooked && terminal !== 'terminate'
+                      ? {
+                          withheld:
+                            'The tool had already completed; its output was discarded.',
+                        }
+                      : 'admitted',
+                },
+              }),
+            );
+            const { buildApiHistoryFromConversation } = await vi.importActual<
+              typeof import('@qwen-code/qwen-code-core/services/session-api-history.js')
+            >('@qwen-code/qwen-code-core/services/session-api-history.js');
+            const recovered = buildApiHistoryFromConversation({
+              messages: h.writes as Array<
+                import('@qwen-code/qwen-code-core/services/chatRecordingService.js').ChatRecord
+              >,
+            });
+            const recoveredParts = recovered.flatMap(
+              (content) => content.parts ?? [],
+            );
+            expect(
+              recoveredParts.filter(
+                (part) => part.functionResponse?.id === callId,
+              ),
+            ).toHaveLength(1);
+            if (hooked && terminal !== 'terminate') {
+              expect(JSON.stringify(recovered)).not.toContain('NOV5_SECRET');
+              expect(JSON.stringify(recovered)).not.toContain('Tk9WNQ==');
+            } else {
+              for (const part of h.resultParts)
+                expect(recoveredParts).toContainEqual(part);
+            }
+            expect(h.drainIndependent).not.toHaveBeenCalled();
+            expect(h.independentQueue).toEqual([
+              { text: 'NOV5_SECRET_COMPANION' },
+            ]);
+            expect(mockSendMessageStream).toHaveBeenCalledOnce();
+          } finally {
+            h.releaseBatch();
+            h.releaseReceipt();
+            await act(async () => {
+              await h.submission;
+            });
             await h.recorder.close();
           }
         },
@@ -25496,6 +25682,9 @@ describe('useLlmStream', () => {
           } finally {
             h.releaseBatch();
             h.releaseReceipt();
+            await act(async () => {
+              await h.submission;
+            });
             await h.recorder.close();
           }
         },
@@ -25551,6 +25740,9 @@ describe('useLlmStream', () => {
         } finally {
           h.releaseBatch();
           h.releaseReceipt();
+          await act(async () => {
+            await h.submission;
+          });
           await h.recorder.close();
         }
       });
@@ -25574,34 +25766,45 @@ describe('useLlmStream', () => {
         } finally {
           h.releaseBatch();
           h.releaseReceipt();
+          await act(async () => {
+            await h.submission;
+          });
           await h.recorder.close();
         }
       });
 
-      it('does not resolve a deferred shared recording into the successor recorder after a session swap', async () => {
-        const h = await rig();
-        try {
-          h.swap();
-          await act(async () => {
+      it.each([undefined, 'terminate', 'quota', 'capacity'] as const)(
+        'does not resolve a deferred shared %s recording into the successor recorder after a session swap',
+        async (terminal) => {
+          const h = await rig(true, terminal);
+          try {
+            h.swap();
+            await act(async () => {
+              h.releaseBatch();
+            });
+            await waitFor(() =>
+              expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([callId]),
+            );
+            expect(h.closures).toHaveLength(1);
+            expect(h.closures[0]).not.toHaveBeenCalled();
+            expect(h.record).not.toHaveBeenCalled();
+            expect(h.admission).not.toHaveBeenCalled();
+            expect(h.successor.recordToolResult).not.toHaveBeenCalled();
+            expect(
+              h.successor.recordToolResultAdmission,
+            ).not.toHaveBeenCalled();
+            expect(h.apply).not.toHaveBeenCalled();
+            expect(mockSendMessageStream).toHaveBeenCalledOnce();
+          } finally {
             h.releaseBatch();
-          });
-          await waitFor(() =>
-            expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([callId]),
-          );
-          expect(h.closures).toHaveLength(1);
-          expect(h.closures[0]).not.toHaveBeenCalled();
-          expect(h.record).not.toHaveBeenCalled();
-          expect(h.admission).not.toHaveBeenCalled();
-          expect(h.successor.recordToolResult).not.toHaveBeenCalled();
-          expect(h.successor.recordToolResultAdmission).not.toHaveBeenCalled();
-          expect(h.apply).not.toHaveBeenCalled();
-          expect(mockSendMessageStream).toHaveBeenCalledOnce();
-        } finally {
-          h.releaseBatch();
-          h.releaseReceipt();
-          await h.recorder.close();
-        }
-      });
+            h.releaseReceipt();
+            await act(async () => {
+              await h.submission;
+            });
+            await h.recorder.close();
+          }
+        },
+      );
     });
 
     it('runs the calls as one batch of the shared loop and sends their results as the next round', async () => {
@@ -25647,6 +25850,180 @@ describe('useLlmStream', () => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
       });
       expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+    });
+
+    const completeBatchesWith = (
+      response: (request: ToolCallRequestInfo) => Record<string, unknown>,
+    ) =>
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          void onBatchComplete?.(
+            requests.map((request) => {
+              const call = completedCall(request);
+              return {
+                ...call,
+                response: { ...call.response, ...response(request) },
+              };
+            }),
+          );
+        },
+      );
+
+    it('ends the turn on a tool that ends it, outside a Goal turn too, with its results in history', async () => {
+      completeBatchesWith(() => ({ terminateTurn: true }));
+      rounds([toolRequest('read_a')]);
+      const client = mockConfig.getLlmClient();
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      await waitFor(() => {
+        expect(client.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: 'read_a' }),
+            }),
+          ],
+        });
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['read_a']);
+    });
+
+    it('stops without a continuation when the model was switched after a quota error', async () => {
+      completeBatches();
+      rounds([toolRequest('read_a')]);
+      const client = mockConfig.getLlmClient();
+      const { result } = renderTestHook(
+        [],
+        client,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      await waitFor(() => {
+        expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['read_a']);
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+      // The results answer the calls in history, outside a Goal turn too.
+      expect(client.addHistory).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({ id: 'read_a' }),
+          }),
+        ],
+      });
+    });
+
+    it('stops without a continuation when a background agent took the last background slot', async () => {
+      mockBackgroundTaskRegistry.getMaxConcurrentBackgroundAgents.mockReturnValue(
+        1,
+      );
+      mockBackgroundTaskRegistry.canStartBackgroundAgent.mockReturnValue(false);
+      completeBatchesWith(() => ({
+        resultDisplay: { type: 'task_execution', status: 'background' },
+      }));
+      rounds([
+        {
+          ...toolRequest('agent_a'),
+          value: { ...toolRequest('agent_a').value, name: 'agent' },
+        },
+      ]);
+      const client = mockConfig.getLlmClient();
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Start the agent.');
+      });
+
+      await waitFor(() => {
+        expect(client.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: 'agent_a' }),
+            }),
+          ],
+        });
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('continues when the last background slot is free again by the time it sends', async () => {
+      mockBackgroundTaskRegistry.getMaxConcurrentBackgroundAgents.mockReturnValue(
+        1,
+      );
+      // Spent when the batch ends, free when the completion step sends.
+      mockBackgroundTaskRegistry.canStartBackgroundAgent
+        .mockReturnValueOnce(false)
+        .mockReturnValue(true);
+      completeBatchesWith(() => ({
+        resultDisplay: { type: 'task_execution', status: 'background' },
+      }));
+      rounds(
+        [
+          {
+            ...toolRequest('agent_a'),
+            value: { ...toolRequest('agent_a').value, name: 'agent' },
+          },
+        ],
+        [{ type: ServerLlmEventType.Content, value: 'Started.' }],
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Start the agent.');
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(sentIds(1)).toEqual(['agent_a']);
+      expect(
+        mockBackgroundTaskRegistry.canStartBackgroundAgent,
+      ).toHaveBeenCalledTimes(2);
+    });
+
+    it('continues past a background agent launch while background slots remain', async () => {
+      completeBatchesWith(() => ({
+        resultDisplay: { type: 'task_execution', status: 'background' },
+      }));
+      rounds(
+        [
+          {
+            ...toolRequest('agent_a'),
+            value: { ...toolRequest('agent_a').value, name: 'agent' },
+          },
+        ],
+        [{ type: ServerLlmEventType.Content, value: 'Started.' }],
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Start the agent.');
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(sentIds(1)).toEqual(['agent_a']);
     });
 
     it('answers a replayed call in the batch and runs only the others', async () => {
@@ -25907,6 +26284,158 @@ describe('useLlmStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
     });
 
+    it('sends the results of batches that settled during one stream in one continuation', async () => {
+      const completions: Array<() => Promise<void>> = [];
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          completions.push(
+            () =>
+              onBatchComplete?.(
+                requests.map((request) => completedCall(request)),
+              ) ?? Promise.resolve(),
+          );
+        },
+      );
+      let endThirdStream!: () => void;
+      const thirdStreamHeld = new Promise<void>((resolve) => {
+        endThirdStream = resolve;
+      });
+      rounds([toolRequest('read_a')], [toolRequest('read_b')]);
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'Thinking.' };
+          await thirdStreamHeld;
+        })(),
+      );
+      rounds([{ type: ServerLlmEventType.Content, value: 'Both read.' }]);
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read a.');
+      });
+      await act(async () => {
+        await result.current.submitQuery('Read b.');
+      });
+      let thirdSubmission!: Promise<void>;
+      await act(async () => {
+        thirdSubmission = result.current.submitQuery('Something else.');
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      expect(completions).toHaveLength(2);
+      // Both batches settle while the third stream is active.
+      await act(async () => {
+        await Promise.all(completions.map((complete) => complete()));
+      });
+
+      await act(async () => {
+        endThirdStream();
+        await thirdSubmission;
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(4);
+      });
+      // In the order the batches settled.
+      expect(sentIds(3)).toEqual(['read_a', 'read_b']);
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(4);
+    });
+
+    it('decides its stops when no model stream is active, as the session is then', async () => {
+      let completeBatch: (() => Promise<void>) | undefined;
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          completeBatch = () =>
+            onBatchComplete?.(
+              requests.map((request) => {
+                const call = completedCall(request);
+                return {
+                  ...call,
+                  response: {
+                    ...call.response,
+                    resultDisplay: {
+                      type: 'task_execution',
+                      status: 'background',
+                    },
+                  },
+                };
+              }),
+            ) ?? Promise.resolve();
+        },
+      );
+      let endSecondStream!: () => void;
+      const secondStreamHeld = new Promise<void>((resolve) => {
+        endSecondStream = resolve;
+      });
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              ...toolRequest('agent_a'),
+              value: { ...toolRequest('agent_a').value, name: 'agent' },
+            };
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'Thinking.' };
+            await secondStreamHeld;
+          })(),
+        );
+      const client = mockConfig.getLlmClient();
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Start the agent.');
+      });
+      let secondSubmission!: Promise<void>;
+      await act(async () => {
+        secondSubmission = result.current.submitQuery('Something else.');
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      await act(async () => {
+        await completeBatch!();
+      });
+      // The last background slot is taken before the other stream ends.
+      mockBackgroundTaskRegistry.getMaxConcurrentBackgroundAgents.mockReturnValue(
+        1,
+      );
+      mockBackgroundTaskRegistry.canStartBackgroundAgent.mockReturnValue(false);
+
+      await act(async () => {
+        endSecondStream();
+        await secondSubmission;
+      });
+
+      await waitFor(() => {
+        expect(client.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: 'agent_a' }),
+            }),
+          ],
+        });
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+
     const cancelBatches = () =>
       mockScheduleToolCalls.mockImplementation(
         (
@@ -25999,8 +26528,11 @@ describe('useLlmStream', () => {
             ([item]) => (item as { type?: string }).type === 'tool_group',
           );
 
+        // The submission drains the batch that settled during its stream,
+        // so it ends once the batch does.
+        let submission!: Promise<void>;
         await act(async () => {
-          await result.current.submitQuery('Read the file.');
+          submission = result.current.submitQuery('Read the file.');
         });
         await waitFor(() => expect(persistenceEntered).toHaveBeenCalled());
         // The finalize persists the result; the group is already in history.
@@ -26014,6 +26546,7 @@ describe('useLlmStream', () => {
         client.getChat = vi.fn(() => ({ addHistory: vi.fn() }));
         await act(async () => {
           releaseFinalizer();
+          await submission;
         });
 
         await act(async () => {
