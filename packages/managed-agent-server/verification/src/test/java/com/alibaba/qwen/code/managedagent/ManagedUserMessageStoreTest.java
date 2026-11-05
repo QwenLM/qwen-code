@@ -162,6 +162,29 @@ class ManagedUserMessageStoreTest {
     }
 
     @Test
+    void startsTheNextQueuedTurnWhileTheTenantPlacementGuardIsHeld() throws Exception {
+        Message first = command("guarded", submit("guarded")).messages().getFirst();
+        try (var holder = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
+            holder.setAutoCommit(false);
+            com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.lockPlacementDomain(holder, TENANT);
+            try {
+                messages.startNext(TENANT, session, (tenant, actor, key, target, input) -> {
+                    var admission = store.insertTurnCommand(tenant, "queue-test", key, "digest", target,
+                            first.input(), "sha256:" + "0".repeat(64), actor);
+                    return new com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission(
+                            target, admission.turnId(), "ACCEPTED", false);
+                });
+            } finally {
+                holder.rollback();
+            }
+        }
+        assertThat(query().messages()).singleElement().satisfies(message -> {
+            assertThat(message.state()).isEqualTo("claimed");
+            assertThat(message.turnId()).isNotBlank();
+        });
+    }
+
+    @Test
     void editsInPlaceAndRejectsStaleRevisionBeforeWithdrawing() {
         Message first = command("first", submit("first")).messages().getFirst();
         command("second", submit("second"));

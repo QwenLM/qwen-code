@@ -60,7 +60,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -136,6 +135,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     private final ScheduledExecutorService renewalScheduler;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final RuntimeBindingRegistry bindingRegistry;
+    private final RuntimeProvisionFailureHandler provisionFailureHandler;
     private final RuntimeExecutionState executionState;
     private final RuntimeExecutionDispatcher executionDispatcher;
     private final RuntimeExecutionReconciler executionReconciler;
@@ -327,6 +327,8 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         this.holdInventory = new RuntimeHoldInventory(executionRepository, sessionRepository);
         this.bindingRegistry = new RuntimeBindingRegistry(bindingRepository, provisioner,
                 sessionRepository, sessionResolver, this.brokerOwnerId, this.operationLeaseDuration, clock);
+        this.provisionFailureHandler = new RuntimeProvisionFailureHandler(bindingRepository, provisioner,
+                clock, this::blockRecoveryQuietly);
         this.executionState = new RuntimeExecutionState(bindingRepository, sessionRepository, executionRepository,
                 this.brokerOwnerId, this.dispatchLeaseDuration, clock);
         this.executionDispatcher = new RuntimeExecutionDispatcher(bindingRegistry, executionState,
@@ -1705,14 +1707,13 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                 deferred.put("payloadDigest", payloadDigest);
                 deferred.put("publicationId", publicationId);
             }
-            try {
-                immutable = Map.copyOf(deferred);
-            } catch (NullPointerException nullValue) {
+            if (deferred.containsValue(null)) {
                 // immutableMap admits null values; keep the rejection on the
                 // stage channel as a 400 rather than a synchronous NPE.
                 return CompletableFuture.failedFuture(invalid("runtime_reference_invalid",
                         "Deferred execution reference is invalid"));
             }
+            immutable = Map.copyOf(deferred);
         }
         return createExecutionReceipt(harnessSessionId, runtimeSessionId, key, immutable, false);
     }
@@ -2992,6 +2993,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         // after the failure keeps that answer.
         AtomicReference<RuntimeBrokerException> nonRetryable =
                 new AtomicReference<>();
+        AtomicBoolean localCapacityRefused = new AtomicBoolean();
         // The deadline fires independently of provisioning progress, so a
         // parked ensureResource, provision or attestation call cannot hold
         // the binding open forever. Releasing the claim first fences any
@@ -3028,6 +3030,8 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         mapFailure(safeStage(() -> provisioner.ensureResource(request,
                 seed, claimed.getResourceHandle())), "runtime_provision_failed",
                 "Runtime provisioning failed")
+                .whenComplete((handle, error) -> localCapacityRefused.set(
+                        RuntimeProvisionFailureHandler.isLocalCapacityRefusal(request, error)))
                 .thenCompose(handle -> {
                     if (handle == null) {
                         throw unavailable("runtime_provision_failed",
@@ -3044,7 +3048,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                         throw unavailable("runtime_provision_fenced",
                                 "Runtime provisioning claim expired");
                     }
-                    return provisionAndAttest(request, seed)
+                    return provisionAndAttest(request, seed, localCapacityRefused)
                             .thenApply(lease -> new DurableProvision(lease,
                                     handle));
                 })
@@ -3059,45 +3063,17 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                     RuntimeBindingRecord currentClaim = renewal.stopAndGet();
                     try {
                         if (error != null) {
-                            boolean retryable = !(cause instanceof RuntimeBrokerException
-                                    brokerFailure) || brokerFailure.isRetryable();
-                            if (currentClaim != null) {
-                                if ("local-process".equals(request.getProvisionerKind())
-                                        && cause instanceof RuntimeBrokerException refusal
-                                        && refusal.getStatusCode() == 503 && refusal.isRetryable()
-                                        && "runtime_local_capacity".equals(refusal.getCode())
-                                        && refusal.getCause() instanceof RejectedExecutionException) {
-                                    // Worker admission failed before launch. Only a newly saved non-durable
-                                    // placeholder can be cleared; real resource identities must survive retry.
-                                    if (claimed.getResourceHandle() == null && currentClaim.getResourceHandle() != null
-                                            && !provisioner.supportsStartupRecovery(currentClaim.getResourceHandle())
-                                            && bindingRepository.compareAndSet(currentClaim,
-                                                    currentClaim.withResourceHandle(null, clock.instant())) == null) {
-                                        throw unavailable("runtime_provision_fenced", "Runtime provisioning claim expired");
-                                    }
-                                } else if (request.isManagedContext() && !retryableExternalWorkspaceProvision(request, cause) || !retryable) {
-                                    // A retry cannot succeed once the binding
-                                    // is blocked, so say so.
-                                    if (blockRecoveryQuietly(currentClaim, cause)
-                                            && retryable) {
-                                        throw conflict(
-                                                "runtime_broker_recovery_blocked",
-                                                "Managed Runtime recovery is blocked.",
-                                                cause);
-                                    }
-                                } else if (currentClaim
-                                        .getResourceHandle() == null
-                                        // The external ensureResource commits
-                                        // nothing before the handle is returned.
-                                        && !ExternalRuntimeKinds.isExternal(request.getProvisionerKind())) {
-                                    blockRecoveryQuietly(currentClaim, cause);
+                            if (request.isManagedContext()
+                                    && retryableExternalWorkspaceProvision(request, cause)) {
+                                // A retryable external-workspace failure keeps the
+                                // binding recoverable instead of blocking it.
+                                if (cause instanceof RuntimeBrokerException brokerFailure) {
+                                    throw new CompletionException(brokerFailure);
                                 }
+                                throw unavailable("runtime_provision_failed",
+                                        "Runtime provisioning failed", cause);
                             }
-                            if (cause instanceof RuntimeBrokerException) {
-                                throw new CompletionException(cause);
-                            }
-                            throw unavailable("runtime_provision_failed",
-                                    "Runtime provisioning failed", cause);
+                            throw provisionFailureHandler.failure(claimed, currentClaim, cause, localCapacityRefused.get());
                         }
                         if (currentClaim == null) {
                             releaseQuietly(request, outcome.lease());
@@ -3135,8 +3111,11 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     }
 
     private CompletionStage<RuntimeLease> provisionAndAttest(
-            RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, AtomicBoolean localCapacityRefused) {
         return safeStage(() -> provisioner.provision(request, seed))
+                // Attestation errors after this stage are not pre-start admission evidence.
+                .whenComplete((lease, error) -> localCapacityRefused.set(
+                        RuntimeProvisionFailureHandler.isLocalCapacityRefusal(request, error)))
                 .thenCompose(lease -> {
                     if (lease == null) {
                         throw unavailable("runtime_provision_failed",

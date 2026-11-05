@@ -398,6 +398,23 @@ public class ManagedWorkspaceRegistry
         return resolve(tenantId, actorId, selection, false, false);
     }
 
+    void lockSelectionForCreation(String tenantId, WorkspaceSelection selection) {
+        jdbc.queryForList("SELECT workspace_id FROM ma_workspace WHERE "
+                + selectionPredicate(selection) + " FOR UPDATE",
+                selectionArguments(tenantId, selection));
+    }
+
+    // Default switches lock the tenant/workspace key before the row. Keep the
+    // same lookup order: default_tenant would lock its secondary index first
+    // and deadlock with a switch that already holds the row.
+    private static String selectionPredicate(WorkspaceSelection selection) {
+        return selection == null ? "tenant_id = ? AND is_default = TRUE" : "tenant_id = ? AND workspace_id = ?";
+    }
+
+    private static Object[] selectionArguments(String tenantId, WorkspaceSelection selection) {
+        return selection == null ? new Object[] {tenantId} : new Object[] {tenantId, selection.workspaceId()};
+    }
+
     private ResolvedBinding resolve(String tenantId, String actorId, WorkspaceSelection selection,
             boolean lock, boolean requireOwner) {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
@@ -419,11 +436,11 @@ public class ManagedWorkspaceRegistry
                 "SELECT workspace_id, workspace_generation, storage_id, display_name,"
                         + " config_ref, policy_ref, state, workspace_kind FROM"
                         + " ma_workspace WHERE "
-                        + (selection == null ? "tenant_id = ? AND is_default = TRUE" : "tenant_id = ? AND workspace_id = ?")
+                        + selectionPredicate(selection)
                         + (lock ? " FOR UPDATE" : ""),
                 (result, row) -> new RegistryRow(workspaceRow(tenantId, result.getString("workspace_id"), result),
                         result.getString("workspace_kind")),
-                selection == null ? new Object[] {tenantId} : new Object[] {tenantId, selection.workspaceId()});
+                selectionArguments(tenantId, selection));
         if (records.isEmpty()) {
             if (selection == null) {
                 throw workspaceRequired();
