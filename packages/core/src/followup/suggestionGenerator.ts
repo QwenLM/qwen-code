@@ -384,11 +384,13 @@ export function getFilterReason(suggestion: string): string | null {
   // Thai, Lao, Khmer and Myanmar are also written without spaces between
   // words, but their words are longer than CJK characters, so count words
   // with a dictionary-based segmenter instead of using CJK character bounds.
+  // Only where the whitespace count cannot decide: a suggestion with spaces
+  // (e.g. Thai plus a path or command) keeps the whitespace bounds.
   const hasSpacelessScript =
     /[\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u.test(
       suggestion,
     );
-  if (hasSpacelessScript && !hasCJK) {
+  if (hasSpacelessScript && !hasCJK && wordCount < 2) {
     if (suggestion.length < 2) return 'too_few_words';
     const words = countSegmentedWords(suggestion);
     // Without a segmenter, fall back to a character bound sized for these

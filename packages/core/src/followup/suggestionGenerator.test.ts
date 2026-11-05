@@ -264,6 +264,27 @@ describe('shouldFilterSuggestion', () => {
     ).toBeNull();
   });
 
+  // Thai mixed with paths or commands: few whitespace words, but many
+  // segments and over the 60-character fallback.
+  const MIXED_WITH_SPACES = [
+    'รันเทสต์ใน packages/core/src/followup และ packages/cli/src/ui ให้หน่อย',
+    'รัน npx vitest run src/followupแล้วรายงานผลให้ฟังหน่อยนะครับ',
+  ];
+
+  it('keeps whitespace bounds for these scripts when the suggestion has spaces', () => {
+    for (const suggestion of MIXED_WITH_SPACES) {
+      expect(getFilterReason(suggestion)).toBeNull();
+    }
+    _setWordSegmenterForTest(null);
+    try {
+      for (const suggestion of MIXED_WITH_SPACES) {
+        expect(getFilterReason(suggestion)).toBeNull();
+      }
+    } finally {
+      _setWordSegmenterForTest(undefined);
+    }
+  });
+
   it('falls back to a character bound for these scripts without full ICU', () => {
     _setWordSegmenterForTest(null);
     try {
@@ -273,6 +294,38 @@ describe('shouldFilterSuggestion', () => {
     } finally {
       _setWordSegmenterForTest(undefined);
     }
+  });
+
+  it('does not create a segmenter on a small-icu build', () => {
+    // process.config.variables is frozen, but process.config itself is
+    // reconfigurable (see withIcuSmall in packages/cli/src/startup/icu-check.test.ts).
+    const original = Object.getOwnPropertyDescriptor(process, 'config')!;
+    const withIcuSmall = (value: unknown, fn: () => void) => {
+      const variables = {
+        ...(original.value as { variables: Record<string, unknown> }).variables,
+        icu_small: value,
+      };
+      Object.defineProperty(process, 'config', {
+        ...original,
+        value: { ...(original.value as object), variables },
+      });
+      _setWordSegmenterForTest(undefined);
+      try {
+        fn();
+      } finally {
+        Object.defineProperty(process, 'config', original);
+        _setWordSegmenterForTest(undefined);
+      }
+    };
+    // 76 characters, 11 words: only the segmenter lets it through.
+    const long =
+      'ปรับปรุงประสิทธิภาพการประมวลผลฐานข้อมูลอิเล็กทรอนิกส์ของมหาวิทยาลัยเทคโนโลยี';
+    withIcuSmall(true, () => {
+      expect(getFilterReason(long)).toBe('too_many_words');
+    });
+    withIcuSmall(false, () => {
+      expect(getFilterReason(long)).toBeNull();
+    });
   });
 
   it('filters too many words', () => {
