@@ -609,6 +609,12 @@ management is available (`channel_management`), and each Channel keeps its
 journal under `~/.qwen/channels/<workspace>/` with one rotated file, so it
 never grows without bound.
 
+Rows that refer to a concrete session carry an **Open session** button:
+outbound rows open the Channel's own reply session, and GitHub task rows for
+bound-session delivery open the PR-bound session that received the event —
+including when that session lives in another registered workspace. Rows
+without a session (polls, skipped inbound messages) show no button.
+
 ## Running
 
 ```bash

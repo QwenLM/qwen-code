@@ -8657,6 +8657,72 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
+    it('journals the bound target session and its workspace on task rows', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // A workspace different from the channel's own proves the journal
+      // carries the BINDING's owner, not the channel cwd.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [makeBinding({ workspaceCwd: '/work/bound' })],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const journalPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'channel-events.jsonl',
+      );
+      const events = readFileSync(journalPath, 'utf-8')
+        .split('\n')
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const taskEvents = events.filter((event) => event['type'] === 'task');
+      expect(taskEvents.length).toBeGreaterThan(0);
+      for (const event of taskEvents) {
+        expect(event).toMatchObject({
+          sessionId: 'bound-session',
+          sessionWorkspaceCwd: '/work/bound',
+        });
+      }
+      // The acceptance and the delivered mark both name the target.
+      expect(taskEvents.map((event) => event['outcome'])).toEqual(
+        expect.arrayContaining(['accepted', 'running']),
+      );
+    });
+
+    it('keeps public-path task rows free of a session identity', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // No binding matches this PR, and the complete snapshot proves
+      // absence, so the event takes the public channel path.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const journalPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'channel-events.jsonl',
+      );
+      const events = readFileSync(journalPath, 'utf-8')
+        .split('\n')
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const taskEvents = events.filter((event) => event['type'] === 'task');
+      expect(taskEvents.length).toBeGreaterThan(0);
+      for (const event of taskEvents) {
+        expect(event).not.toHaveProperty('sessionId');
+        expect(event).not.toHaveProperty('sessionWorkspaceCwd');
+      }
+    });
+
     it('strips the aggregate no-reply instruction for bound delivery', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
       mockOctokit.paginate

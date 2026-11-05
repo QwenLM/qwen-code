@@ -200,6 +200,17 @@
   color: var(--muted-foreground);
 }
 
+.sessionButton {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  color: var(--muted-foreground);
+}
+
+.sessionButton:hover {
+  color: var(--foreground);
+}
+
 .error {
   grid-column: 1 / -1;
   color: var(--destructive);
