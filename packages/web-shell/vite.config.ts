@@ -235,6 +235,7 @@ export default defineConfig(({ command }) => ({
       // it the SPA fallback answers with index.html and the dialog fails JSON
       // parsing in dev.
       '/daemon/status': daemonProxy,
+      '/remote-access': daemonProxy,
       '/standalone/sessions': daemonProxy,
       '/session': daemonProxy,
       '/permission': daemonProxy,
@@ -265,6 +266,10 @@ export default defineConfig(({ command }) => ({
       // Todos page (`GET /todos`, `POST /todos/update`). Same reason as the
       // routes above — the SPA fallback would return index.html in dev.
       '/todos': daemonProxy,
+      // PR watches page (`GET /autofix-pr/watches`). Same reason as the routes
+      // above. The workspace-qualified form is already reached by the
+      // `/workspace` prefix; only the primary's unqualified route needs this.
+      '/autofix-pr': daemonProxy,
       // Token-usage dashboard (Daemon Status "统计" tab). Same reason as the
       // routes above — without it the SPA fallback returns index.html in dev and
       // the tab fails JSON parsing on `GET /usage/dashboard`.

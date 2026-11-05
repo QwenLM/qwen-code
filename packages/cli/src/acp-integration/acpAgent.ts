@@ -270,6 +270,15 @@ import {
   parseCallerSuppliedSessionId,
 } from '../config/session-id.js';
 import { loadMcpApprovals } from '../config/mcpApprovals.js';
+import { normalizeProjectRoot } from '../config/approval-project-root.js';
+import {
+  getProjectHooksForApproval,
+  getProjectHooksForApprovalFromRawWorkspace,
+  getProjectHooksApprovalState,
+  getSeparatedHookSettings,
+  hashProjectHooks,
+  summarizeProjectHooks,
+} from '../config/hook-approvals.js';
 import { assembleMcpServers } from '../config/mcpServers.js';
 import { recomputeMcpGating } from '../config/hot-reload.js';
 import {
@@ -342,6 +351,8 @@ import {
   getConfiguredModelReasoning,
   getDefaultReasoningConfig,
   getGptReasoningOverrideState,
+  getModelConfiguration,
+  hasTieredManifestReasoning,
   isReasoningSelectionSupported,
   PERSIST_REASONING_SELECTION_META_KEY,
   parseReasoningSelection,
@@ -4480,11 +4491,7 @@ class QwenAgent implements Agent {
           },
           cwd,
           undefined,
-          {
-            systemHooks: settings.getSystemHooks(),
-            userHooks: settings.getUserHooks(),
-            projectHooks: settings.getProjectHooks(),
-          },
+          getSeparatedHookSettings(settings),
           buildDisabledSkillNamesProvider(settings),
           undefined,
           undefined,
@@ -6174,6 +6181,12 @@ class QwenAgent implements Agent {
                 replayState: replayPage.replay,
                 goalBootstrap: replayGoalBootstrap(projection),
                 suppressRestoreAskUserQuestion,
+                ...(replayPage.branchPointsByAssistantUuid
+                  ? {
+                      branchPointsByAssistantUuid:
+                        replayPage.branchPointsByAssistantUuid,
+                    }
+                  : {}),
                 // The restore gate already drained active turns and blocks
                 // new ones (and a drain timeout rejects before replay), so
                 // a trailing unmatched call here is genuinely abandoned —
@@ -6418,6 +6431,12 @@ class QwenAgent implements Agent {
                     replayState: projection.replay!.replay,
                     goalBootstrap: replayGoalBootstrap(projection),
                     suppressRestoreAskUserQuestion,
+                    ...(projection.replay!.branchPointsByAssistantUuid
+                      ? {
+                          branchPointsByAssistantUuid:
+                            projection.replay!.branchPointsByAssistantUuid,
+                        }
+                      : {}),
                     ...(restoreOptions.replay.kind === 'recent'
                       ? {
                           limits: {
@@ -7130,7 +7149,7 @@ class QwenAgent implements Agent {
           ].map((sources) => [sources, sources?.['reasoning']] as const);
           try {
             if (modelReasoning && !modelReasoning.toggleOnly) {
-              clearReasoningRequestOverrides(generation);
+              clearReasoningRequestOverrides(generation, config);
             }
             applyReasoningSelection(config, selected, defaultReasoning);
             if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
@@ -9258,6 +9277,7 @@ class QwenAgent implements Agent {
           systemPrompt: 0,
           builtinTools: 0,
           mcpTools: 0,
+          instructionFiles: 0,
           memoryFiles: 0,
           skills: 0,
           messages: 0,
@@ -9266,6 +9286,7 @@ class QwenAgent implements Agent {
         },
         builtinTools: [] as Array<{ name: string; tokens: number }>,
         mcpTools: [] as Array<{ name: string; tokens: number }>,
+        instructionFiles: [] as Array<{ path: string; tokens: number }>,
         memoryFiles: [] as Array<{ path: string; tokens: number }>,
         skills: [] as Array<{
           name: string;
@@ -9281,6 +9302,7 @@ class QwenAgent implements Agent {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       workspaceCwd: this.workspaceCwd(config),
+      workspaceRoot: this.sessionWorkspaceRoot(config),
       usage: {
         modelName: usage.modelName,
         totalTokens: usage.totalTokens,
@@ -9288,6 +9310,7 @@ class QwenAgent implements Agent {
         breakdown: usage.breakdown,
         builtinTools: usage.builtinTools,
         mcpTools: usage.mcpTools,
+        instructionFiles: usage.instructionFiles,
         memoryFiles: usage.memoryFiles,
         skills: usage.skills,
         isEstimated: usage.isEstimated,
@@ -9554,6 +9577,23 @@ class QwenAgent implements Agent {
               },
             }
           : {}),
+        ...(statsModel?.timingSamples?.length
+          ? {
+              timingSamples: statsModel.timingSamples.map((sample) => ({
+                ...sample,
+              })),
+            }
+          : {}),
+        ...(statsModel?.failures
+          ? {
+              failures: {
+                byKind: { ...statsModel.failures.byKind },
+                recent: statsModel.failures.recent.map((failure) => ({
+                  ...failure,
+                })),
+              },
+            }
+          : {}),
       };
     }
     const sources: ServeSessionStatsStatus['sources'] = [];
@@ -9730,6 +9770,9 @@ class QwenAgent implements Agent {
               ? { sequential: row.sequential }
               : {}),
             enabled: row.enabled,
+            ...(row.disabledReason
+              ? { disabledReason: row.disabledReason }
+              : {}),
           }),
         );
       return {
@@ -9739,6 +9782,7 @@ class QwenAgent implements Agent {
         disabled: listing.allDisabled,
         hooks,
         events: IDLE_HOOK_EVENTS,
+        ...this.projectHooksApprovalCell(),
       };
     } catch (error) {
       let disabled = false;
@@ -9756,6 +9800,49 @@ class QwenAgent implements Agent {
         events: IDLE_HOOK_EVENTS,
         errors: [this.errorCell('hooks', error)],
       };
+    }
+  }
+
+  /**
+   * The pending project-hooks decision for daemon clients. Reads the stored
+   * decision fresh so a cold ACP child (or one whose in-memory flag predates
+   * a decision made elsewhere) reports the same truth the gate will apply.
+   * Falls back to the raw workspace block when the trust gate withheld the
+   * whole workspace scope; approving there does not bypass folder trust.
+   */
+  private projectHooksApprovalCell(): {
+    pendingApproval?: boolean;
+    pendingApprovalHooks?: string[];
+    pendingApprovalHash?: string;
+  } {
+    try {
+      // The prompt exists for hooks the gate actually withholds. A block
+      // the execution accessor serves (stored approval, or explicit folder
+      // trust) must not render a card claiming it stays disabled — and a
+      // "keep disabled" click there would stop hooks that are running.
+      if (
+        this.config.isExplicitlyTrustedFolder() ||
+        this.config.getProjectHooks() !== undefined
+      ) {
+        return {};
+      }
+      const approval =
+        getProjectHooksForApproval(this.settings) ??
+        getProjectHooksForApprovalFromRawWorkspace(this.settings);
+      if (!approval || getProjectHooksApprovalState(approval) !== 'pending') {
+        return {};
+      }
+      return {
+        pendingApproval: true,
+        pendingApprovalHooks: summarizeProjectHooks(
+          approval.resolved,
+          approval.hooks,
+        ),
+        pendingApprovalHash: hashProjectHooks(approval),
+      };
+    } catch {
+      // A settings read failure must not take the whole status cell down.
+      return {};
     }
   }
 
@@ -10931,6 +11018,73 @@ class QwenAgent implements Agent {
           string,
           unknown
         >;
+      case SERVE_CONTROL_EXT_METHODS.projectHooksApprove: {
+        // Dedicated approval route, NOT session/request_permission: permission
+        // requests are auto-answered by automation clients, a trust decision
+        // must be an explicit user act. The daemon already persisted the
+        // hash-bound decision for the exact block the user reviewed; this
+        // child only applies it, and only to the block the daemon persisted:
+        // a workspace file that changed since the decision keeps its
+        // in-memory hooks pending instead of running a block nobody
+        // reviewed.
+        const decision = params['decision'];
+        if (decision !== 'approve' && decision !== 'reject') {
+          throw RequestError.invalidParams(
+            undefined,
+            'decision must be approve or reject.',
+          );
+        }
+        const decisionHash = params['hash'];
+        if (decisionHash !== undefined && typeof decisionHash !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'hash must be the hash string from the approval status.',
+          );
+        }
+        // Apply to every live config, not just the bootstrap one: each
+        // session holds its own Config and the registry reads its flags.
+        // Scope by the admission-bound workspace root, not the live cwd:
+        // session/cd moves getTargetDir() into subdirectories (or out of
+        // the workspace), and the decision belongs to the workspace the
+        // daemon recorded it for.
+        const decisionRoot = normalizeProjectRoot(cwd);
+        const configs = new Set(
+          [
+            this.config,
+            ...this.getActiveSessions().map((session) => session.getConfig()),
+          ].filter(
+            (config) =>
+              normalizeProjectRoot(this.sessionWorkspaceRoot(config)) ===
+              decisionRoot,
+          ),
+        );
+        // Fail closed when the persisted hash names a different block than
+        // the one this child holds: the decision was made for hooks that are
+        // no longer current, so the card stays up for the new block.
+        for (const config of configs) {
+          const subject = config.getProjectHooksApprovalSubject();
+          if (decisionHash !== undefined) {
+            // A hash-bound decision applies only to a config holding the
+            // exact block it names; anything else stays pending for the
+            // block it actually has.
+            if (
+              subject === undefined ||
+              hashProjectHooks(subject) !== decisionHash
+            ) {
+              continue;
+            }
+          }
+          config.setProjectHooksPendingApproval(
+            decision !== 'approve',
+            decision === 'reject',
+          );
+          await config.getHookSystem()?.reload();
+        }
+        return { decision, reloaded: true } as unknown as Record<
+          string,
+          unknown
+        >;
+      }
       case SERVE_STATUS_EXT_METHODS.sessionHooks: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -13337,6 +13491,9 @@ class QwenAgent implements Agent {
         // Pick up what the daemon just persisted so this process stops
         // serving a stale merged view.
         this.settings.reloadScopeFromDisk(SettingScope.User);
+        if (params['scope'] === 'workspace') {
+          this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        }
 
         // UI-language-only switches do not change the system instruction;
         // refresh sessions only when the output language moved.
@@ -15060,7 +15217,14 @@ class QwenAgent implements Agent {
           // persisted to the workspace settings file and must not clobber the
           // global file (which would silently affect every other workspace and
           // session).
-          updateOutputLanguageFile(normalizedValue);
+          // The rule file is a best-effort mirror of the setting that
+          // `setValue` already persisted above, so a filesystem failure here
+          // must not fail the route and discard a change that did land.
+          try {
+            updateOutputLanguageFile(normalizedValue);
+          } catch (err) {
+            debugLogger.warn('Failed to write output-language.md:', err);
+          }
         }
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
@@ -16379,13 +16543,7 @@ class QwenAgent implements Agent {
       // sessions pass [] because their workspace is a read-only capability.
       agentHostReadOnly ? [] : undefined,
       // Pass separated hooks for proper source attribution
-      agentHostReadOnly
-        ? {}
-        : {
-            systemHooks: settings.getSystemHooks(),
-            userHooks: settings.getUserHooks(),
-            projectHooks: settings.getProjectHooks(),
-          },
+      agentHostReadOnly ? {} : getSeparatedHookSettings(settings),
       // CRITICAL: close over the per-request `settings` (LoadedSettings
       // instance), NOT over the `mergedSettings` snapshot built above.
       // `LoadedSettings.setValue` replaces `_merged`, so a closure over the
@@ -16445,6 +16603,11 @@ class QwenAgent implements Agent {
           }
         : undefined,
       agentHostReadOnly ? undefined : buildEnabledSkillNamesProvider(settings),
+      // Live per-request settings, for the same reason as the skill provider
+      // above: the YOLO-exit re-gate reads the block the session holds now.
+      agentHostReadOnly
+        ? undefined
+        : () => getProjectHooksForApproval(settings),
     );
     workflowAncestorTrustSession.config = config;
     // /clear rotates the recording ID while the ACP transport keeps its ID.
@@ -16809,7 +16972,7 @@ class QwenAgent implements Agent {
       return;
     }
     if (generation && modelReasoning && !modelReasoning.toggleOnly) {
-      clearReasoningRequestOverrides(generation);
+      clearReasoningRequestOverrides(generation, config);
     }
     if (
       selection === REASONING_EFFORT_NONE ||
@@ -17650,7 +17813,8 @@ class QwenAgent implements Agent {
       activeRuntimeSnapshot ||
       (currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
         !modelReasoning?.profile &&
-        !deepSeekState) ||
+        !deepSeekState &&
+        !hasTieredManifestReasoning(reasoningModel)) ||
       !isReasoningSelectionSupported(
         reasoningModel,
         REASONING_EFFORT_DEFAULT,
@@ -17815,11 +17979,21 @@ class QwenAgent implements Agent {
         generation,
         resolveReasoningForModel(config, generation),
       );
-    return completeModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
+    if (
+      completeModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
       !reasoning?.profile &&
       !deepSeekState
-      ? undefined
-      : reasoning;
+    ) {
+      // Keep an already-resolved declaration; the new tiered Qwen families
+      // fall back to their manifest only when nothing resolved, so routed
+      // selectors neither hide the controls nor replace a declaration.
+      if (reasoning) return reasoning;
+      const wireModel = getRequestModel(generation ?? {});
+      return hasTieredManifestReasoning(wireModel)
+        ? getModelConfiguration(wireModel)?.reasoning
+        : undefined;
+    }
+    return reasoning;
   }
 
   private buildSelectableModelOptions(config: Config) {

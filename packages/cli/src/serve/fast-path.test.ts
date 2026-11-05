@@ -59,6 +59,7 @@ const originalQwenHome = process.env['QWEN_HOME'];
 const originalHome = process.env['HOME'];
 const originalUserProfile = process.env['USERPROFILE'];
 const originalQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+const originalConversationsDir = process.env['QWEN_CONVERSATIONS_DIR'];
 const originalMcpApprovalsPath = process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
 const originalSystemSettingsPath =
   process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
@@ -367,6 +368,11 @@ afterEach(() => {
   } else {
     process.env['QWEN_RUNTIME_DIR'] = originalQwenRuntimeDir;
   }
+  if (originalConversationsDir === undefined) {
+    delete process.env['QWEN_CONVERSATIONS_DIR'];
+  } else {
+    process.env['QWEN_CONVERSATIONS_DIR'] = originalConversationsDir;
+  }
   if (originalMcpApprovalsPath === undefined) {
     delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
   } else {
@@ -531,6 +537,27 @@ describe('CLI entry import boundary', () => {
 });
 
 describe('serve fast path argument parsing', () => {
+  it.each([
+    ['--conversations-dir', '/persistent/Qwen Conversations '],
+    ['--conversations-dir=/persistent/Qwen Conversations '],
+  ])('preserves the Conversations root in %j', (...args) => {
+    expect(parseServeFastPathArgs(['serve', ...args])).toMatchObject({
+      kind: 'serve',
+      options: { conversationsDir: '/persistent/Qwen Conversations ' },
+    });
+  });
+
+  it.each([
+    ['--conversations-dir'],
+    ['--conversations-dir='],
+    ['--conversations-dir', ''],
+    ['--conversations-dir=/one', '--conversations-dir=/two'],
+  ])('defers incomplete or repeated Conversations options %j', (...args) => {
+    expect(parseServeFastPathArgs(['serve', ...args])).toEqual({
+      kind: 'fallback',
+    });
+  });
+
   it('parses the common daemon startup flags without loading the full CLI parser', () => {
     const parsed = parseServeFastPathArgs([
       'serve',
@@ -679,6 +706,10 @@ describe('serve fast path argument parsing', () => {
     const sampleArgvByOption = new Map<string, string[]>([
       ['managed', ['--managed']],
       ['managed-data-dir', ['--managed-data-dir', '/tmp/qwen-managed-data']],
+      [
+        'managed-web-config',
+        ['--managed-web-config', '/etc/qwen-web/gateway.json'],
+      ],
       ['port', ['--port', '0']],
       ['hostname', ['--hostname', '127.0.0.1']],
       ['token', ['--token', 'token']],
@@ -697,6 +728,10 @@ describe('serve fast path argument parsing', () => {
       ['max-journal-events', ['--max-journal-events', '10000']],
       ['max-journal-bytes', ['--max-journal-bytes', '8388608']],
       ['workspace', ['--workspace', process.cwd()]],
+      [
+        'conversations-dir',
+        ['--conversations-dir', '/persistent/conversations'],
+      ],
       ['memory-project-scope', ['--memory-project-scope', 'workspace']],
       ['require-auth', ['--require-auth']],
       ['enable-session-shell', ['--enable-session-shell']],
@@ -802,6 +837,7 @@ describe('serve fast path argument parsing', () => {
       'channel',
       'managed',
       'managed-data-dir',
+      'managed-web-config',
       'profile',
       'hosted-harness-capability-digest',
       'experimental-paired-engines',
@@ -1122,6 +1158,69 @@ describe('serve fast path argument parsing', () => {
 });
 
 describe('serve fast path environment bootstrap', () => {
+  it.each(['', '/persistent/Qwen Conversations '])(
+    'preserves a user .env Conversations root %j despite a project .env',
+    async (root) => {
+      const qwenHome = useTempQwenHome();
+      delete process.env['QWEN_CONVERSATIONS_DIR'];
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-conversations-')),
+      );
+      writeFileSync(
+        join(qwenHome, '.env'),
+        `QWEN_CONVERSATIONS_DIR=${JSON.stringify(root)}\n`,
+      );
+      writeFileSync(
+        join(tempWorkspace, '.env'),
+        'QWEN_CONVERSATIONS_DIR=/project/root\nFAST_PATH_REFERENCED_TOKEN=loaded\n',
+      );
+      delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+      preResolveServeFastPathHomeEnvOverrides();
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
+      await bootstrapServeFastPathEnvironment(tempWorkspace);
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
+      expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('loaded');
+    },
+  );
+
+  it('keeps an empty launch root instead of replacing it from home .env', async () => {
+    const qwenHome = useTempQwenHome();
+    process.env['QWEN_CONVERSATIONS_DIR'] = '';
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-conversations-empty-')),
+    );
+    writeFileSync(
+      join(qwenHome, '.env'),
+      'QWEN_CONVERSATIONS_DIR=/home/root\n',
+    );
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+    expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe('');
+  });
+
+  it.each(['.env', '.qwen/.env'])(
+    'rejects a Conversations root from project %s and settings.env',
+    (file) => {
+      useTempQwenHome();
+      delete process.env['QWEN_CONVERSATIONS_DIR'];
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-conversations-project-')),
+      );
+      const envPath = join(tempWorkspace, file);
+      mkdirSync(dirname(envPath), { recursive: true });
+      writeFileSync(
+        envPath,
+        'QWEN_CONVERSATIONS_DIR=/project/root\nFAST_PATH_REFERENCED_TOKEN=loaded\n',
+      );
+      delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+      loadServeFastPathEnvironment(
+        { env: { QWEN_CONVERSATIONS_DIR: '/settings/root' } },
+        tempWorkspace,
+      );
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBeUndefined();
+      expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('loaded');
+    },
+  );
+
   it('keeps the lite settings directory name in sync with core QWEN_DIR', () => {
     expect(SETTINGS_DIRECTORY_NAME).toBe(QWEN_DIR);
   });

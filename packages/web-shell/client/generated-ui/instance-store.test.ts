@@ -331,6 +331,29 @@ describe('Generated UI active leases', () => {
     expect(second.requestMessage).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the review outcome when the lease ends before the review settles', async () => {
+    const { store } = setup();
+    const host = slot();
+    const pending = deferred<{
+      isError?: boolean;
+      _meta?: { 'qwen-code/message-review'?: 'cancelled' };
+    }>();
+    host.requestMessage.mockReturnValue(pending.promise);
+    const entry = store.attach(host.value)!;
+    const request = entry.messages.requestMessage(messageRequest());
+
+    store.release(host.value.key, host.value.token);
+    pending.resolve({
+      isError: false,
+      _meta: { 'qwen-code/message-review': 'cancelled' },
+    });
+
+    expect(await request).toEqual({
+      isError: true,
+      _meta: { 'qwen-code/message-review': 'cancelled' },
+    });
+  });
+
   it('refreshes the owner after recovery and revokes the former signal', async () => {
     const { store } = setup();
     const owner = source();

@@ -13,6 +13,9 @@ import type {
   DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
   DaemonCapabilities,
+  DaemonChannelEvent,
+  DaemonChannelEventsQuery,
+  DaemonChannelEventsSnapshot,
   DaemonChannelMutationResult,
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
@@ -111,6 +114,7 @@ import type {
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
   DaemonRevisionRequest,
+  SetUserLanguageResult,
 } from '@qwen-code/sdk/daemon';
 
 // ── Resource Hook Types (shared by workspace hooks) ────────────────
@@ -535,6 +539,11 @@ export interface DaemonAutofixPrWatchList {
   unreadable?: Array<{ pr: number; error: string }>;
 }
 
+/** One entry of a Channel's event journal (`GET .../channels/events`). */
+export type DaemonChannelEventEntry = DaemonChannelEvent;
+
+export type DaemonChannelEventList = DaemonChannelEventsSnapshot;
+
 export interface DaemonWorkspacePathSuggestion {
   name: string;
   path: string;
@@ -562,6 +571,11 @@ export type DaemonWorkspaceDirectoryPickerResult =
     };
 
 export interface DaemonWorkspaceActions {
+  setUiLanguage(
+    language: string,
+    scope: 'user' | 'workspace',
+    workspaceCwd?: string,
+  ): Promise<SetUserLanguageResult>;
   // Sessions
   listSessions(
     options?: DaemonSessionListPageOptions,
@@ -778,6 +792,12 @@ export interface DaemonWorkspaceActions {
   /** The `/autofix-pr` watches of a workspace's clone; `workspaceId` as for
    * `listScheduledTasks`. Only to a daemon advertising `autofix_pr_watches`. */
   listAutofixPrWatches(workspaceId?: string): Promise<DaemonAutofixPrWatchList>;
+
+  /** The provider workspace's Channel event journal, newest last. A scoped
+   * workspace reads its own through its client. */
+  listChannelEvents(
+    query?: DaemonChannelEventsQuery,
+  ): Promise<DaemonChannelEventList>;
 
   // Goals (session-scoped runtimes, listed workspace-wide)
   listGoals(): Promise<DaemonGoalList>;

@@ -46,6 +46,7 @@ import { createVimBuffer } from './vim-buffer.js';
 import type {
   OpenTuiCancelSettled,
   OpenTuiComposerHandle,
+  OpenTuiComposerSlot,
 } from './input-submission.js';
 import { useOpenTuiLiveTurn, type OpenTuiLiveTurn } from './live-turn.js';
 import { cpLen, cpSlice, getCachedStringWidth } from '../utils/textUtils.js';
@@ -3778,6 +3779,35 @@ describe('OpenTuiInputPrompt editing ownership and recall', () => {
       );
     },
   );
+
+  it('puts a prompt handed back through the mounted handle ahead of the draft', async () => {
+    const composerHandle: OpenTuiComposerSlot = { current: null };
+    renderPrompt({ composerHandle });
+    await waitFor(() => expect(composerHandle.current).not.toBeNull());
+    await typeText('typed since');
+    act(() =>
+      composerHandle.current!.restoreSubmission!({
+        text: 'dropped prompt',
+        displayText: 'dropped prompt',
+      }),
+    );
+    await waitFor(() =>
+      expect(currentEditor().plainText).toBe('dropped prompt\ntyped since'),
+    );
+  });
+
+  it('takes back a prompt handed back while no composer was mounted', async () => {
+    const composerHandle: OpenTuiComposerSlot = {
+      current: null,
+      returned: { text: 'dropped prompt', displayText: 'dropped prompt' },
+    };
+    renderPrompt({ composerHandle });
+    await waitFor(() =>
+      expect(currentEditor().plainText).toBe('dropped prompt'),
+    );
+    expect(composerHandle.returned).toBeUndefined();
+    expect(composerHandle.current).not.toBeNull();
+  });
 
   it.each(['return', 'tab'])(
     'same-text history %s discards restored source ownership',

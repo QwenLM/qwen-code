@@ -23,7 +23,7 @@ import {
   NO_FOLLOW,
   readGateCursor,
   readRegularFile,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
   TASK_OPTION,
   taskArg,
@@ -252,10 +252,15 @@ export function runFixStart(args: FixStartArgs): AutofixPrFixAttempt & {
   marker: string;
 } {
   assertAttemptId(args.attempt);
-  const paths = autofixPrPaths(repoRoot(), args.pr);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   return withWatchLock(paths, args.pr, () => {
     const state = requireState(paths.statePath, args.pr);
     assertWatching(state);
+    if (state.inPlace) {
+      throw new Error(
+        `PR #${args.pr} is an in-place watch: its fixes run in the foreground, in the user's checkout, never in the background.`,
+      );
+    }
     const task = state.watch?.task;
     if (!task) {
       throw new Error(
@@ -317,7 +322,7 @@ export type FixEndResult =
 
 export function runFixEnd(args: FixEndArgs): FixEndResult {
   assertAttemptId(args.attempt);
-  const paths = autofixPrPaths(repoRoot(), args.pr);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   return withWatchLock(paths, args.pr, () => {
     const state = requireState(paths.statePath, args.pr);
     assertWatching(state, args.task);

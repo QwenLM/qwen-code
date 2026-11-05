@@ -9,6 +9,15 @@ set -eo pipefail
 
 step="${1:?usage: run-release-step.sh <step>}"
 
+commit_release_version() {
+  git add package.json pnpm-lock.yaml packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json
+  if git diff --staged --quiet; then
+    echo "No version changes to commit"
+  else
+    git commit -m "chore(release): ${RELEASE_TAG}"
+  fi
+}
+
 publish_package() {
   local directory="$1"
   (
@@ -121,14 +130,48 @@ case "${step}" in
     npm run release:version "${RELEASE_VERSION}"
     ;;
 
+  commit-release-branch)
+    commit_release_version
+    ;;
+
+  pack-release)
+    handoff="${RUNNER_TEMP:?}/release-publish-build"
+    rm -rf -- "$handoff"
+    mkdir -p "$handoff"
+    "$0" pack-build
+    mv "${RUNNER_TEMP}/release-build.tgz" "$handoff/"
+    tar -czf "$handoff/audio-prebuilds.tgz" packages/audio-capture/prebuilds
+    release_commit="$(git rev-parse HEAD)"
+    if [[ "$release_commit" != "${RELEASE_SHA:?}" ]]; then
+      git bundle create "$handoff/version.bundle" "${RELEASE_SHA}..refs/heads/${BRANCH_NAME:?}"
+    fi
+    echo "release_commit=$release_commit" >> "${GITHUB_OUTPUT:?}"
+    ;;
+
+  restore-release)
+    handoff="${RUNNER_TEMP:?}/release-publish-build"
+    [[ "${RELEASE_COMMIT:?}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+    [[ "${RELEASE_SHA:?}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+    branch="release/${RELEASE_TAG:?}"
+    git check-ref-format "refs/heads/$branch"
+    if [[ "$RELEASE_COMMIT" == "$RELEASE_SHA" ]]; then
+      git switch -c "$branch" "$RELEASE_SHA"
+    else
+      git bundle verify "$handoff/version.bundle"
+      git fetch "$handoff/version.bundle" "refs/heads/$branch:refs/heads/$branch"
+      [[ "$(git rev-parse "$branch")" == "$RELEASE_COMMIT" ]] || exit 1
+      [[ "$(git rev-list --parents -n 1 "$RELEASE_COMMIT")" == "$RELEASE_COMMIT $RELEASE_SHA" ]] || exit 1
+      git switch "$branch"
+    fi
+    tar -xzf "$handoff/release-build.tgz"
+    tar -xzf "$handoff/audio-prebuilds.tgz"
+    test -s dist/cli.js
+    test -s dist/review-sources.sha256
+    ;;
+
   push-release-branch)
     release_branch_name="${BRANCH_NAME:?}"
-    git add package.json pnpm-lock.yaml packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json
-    if git diff --staged --quiet; then
-      echo "No version changes to commit"
-    else
-      git commit -m "chore(release): ${RELEASE_TAG}"
-    fi
+    commit_release_version
     if [[ "${IS_DRY_RUN}" == "false" ]]; then
       # Keep the write credential unavailable until the push step needs it.
       export GH_TOKEN="${CI_BOT_PAT}"
@@ -278,6 +321,8 @@ case "${step}" in
         "quality:${QUALITY_RESULT}" \
         "integration_none:${INTEGRATION_NONE_RESULT}" \
         "integration_docker:${INTEGRATION_DOCKER_RESULT}" \
+        "audio_capture_prebuilds:${AUDIO_PREBUILDS_RESULT}" \
+        "build_release:${BUILD_RELEASE_RESULT}" \
         "publish:${PUBLISH_RESULT}"; do
         name="${job%%:*}"
         result="${job#*:}"

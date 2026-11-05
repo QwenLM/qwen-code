@@ -29,10 +29,12 @@ import {
   isSkillListingReminder,
   computeThresholds,
   getStartupContextLength,
-  isMediaPolicyToolHiddenFromModel,
   estimateContextTextTokens,
   resolveSlimmingConfig,
   formatContextFileDisplayPath,
+  getAllMemoryFilenames,
+  isSubpath,
+  Storage,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -98,10 +100,28 @@ function parseMemoryFiles(
   memoryContent: string,
   workingDir: string,
   extensionOwners: ReadonlyMap<string, string> = new Map(),
+  admissionRoot: string = workingDir,
 ): ContextMemoryDetail[] {
   if (!memoryContent || memoryContent.trim().length === 0) return [];
 
   const results: ContextMemoryDetail[] = [];
+  // The preview resolves the owning workspace from the session's admission
+  // root (status.workspaceRoot), which stays put when session/cd relocates
+  // the live cwd. Gate on that same root — not the live working dir — so a
+  // row is a link exactly when the client can read it; a global memory file
+  // is read through the workspace-independent memory route. Normalize both
+  // sides of the global-dir comparison: getGlobalQwenDir() returns an
+  // absolute QWEN_HOME verbatim, trailing separator included, while
+  // path.dirname() never produces one.
+  const root = path.resolve(admissionRoot);
+  const globalDir = path.resolve(Storage.getGlobalQwenDir());
+  const memoryFilenames = new Set(getAllMemoryFilenames());
+  const openablePath = (absolutePath: string): string | undefined =>
+    isSubpath(root, absolutePath) ||
+    (path.resolve(path.dirname(absolutePath)) === globalDir &&
+      memoryFilenames.has(path.basename(absolutePath)))
+      ? absolutePath
+      : undefined;
   // Use backreference (\1) to ensure start/end path markers match
   const regex =
     /--- Context from: (.+?) ---\n([\s\S]*?)--- End of Context from: \1 ---/g;
@@ -116,12 +136,14 @@ function parseMemoryFiles(
     // global memory files don't render as `../../..` chains.
     const absolutePath = path.resolve(workingDir, filePath);
     const owner = extensionOwners.get(absolutePath);
+    const openPath = openablePath(absolutePath);
     results.push({
       // An extension's file is named by its extension rather than by a path
       // under the install directory, which is what makes the row actionable:
       // the reader can disable or migrate that extension.
       path: owner ?? formatContextFileDisplayPath(absolutePath, workingDir),
       tokens: estimateContextTextTokens(content),
+      ...(openPath !== undefined ? { absolutePath: openPath } : {}),
     });
   }
 
@@ -425,12 +447,8 @@ export async function collectContextData(
 
   const toolRegistry = config.getToolRegistry();
   const allTools = toolRegistry ? toolRegistry.getAllTools() : [];
-  // Match what's actually sent to the model: deferred tools — MCP tools and
-  // low-frequency built-ins like web_fetch / monitor / cron_* — are absent
-  // from the prompt unless session setup has revealed them. See
-  // client.ts which calls getFunctionDeclarations() with no args. The
-  // per-tool loop below applies the same filter so allToolsTokens stays
-  // aligned with the breakdown sum.
+  // Match client.ts's declaration source: registered tools can be hidden, and
+  // code mode can generate schemas that differ from the registered originals.
   const toolDeclarations = toolRegistry
     ? toolRegistry.getFunctionDeclarations()
     : [];
@@ -439,37 +457,34 @@ export async function collectContextData(
 
   const builtinTools: ContextToolDetail[] = [];
   const mcpTools: ContextToolDetail[] = [];
-  for (const tool of allTools) {
-    if (toolRegistry?.isDeferredAndHidden(tool.name)) {
-      continue;
-    }
-    // Same alignment rule for omni media-policy tools: fixed-only tools
-    // (declared descriptor, modelAccess not enabled) are stripped from
-    // getFunctionDeclarations() and cost the model zero prompt tokens, so
-    // listing them here would make the breakdown sum exceed allToolsTokens.
-    if (isMediaPolicyToolHiddenFromModel(config, tool)) {
-      continue;
-    }
-    const toolJsonStr = JSON.stringify(tool.schema);
+  for (const declaration of toolDeclarations) {
+    const tool = allTools.find((tool) => tool.name === declaration.name);
+    const toolJsonStr = JSON.stringify(declaration);
     const tokens = estimateContextTextTokens(toolJsonStr);
     if (tool instanceof DiscoveredMCPTool) {
       mcpTools.push({
         name: `${tool.serverName}__${tool.serverToolName || tool.name}`,
         tokens,
       });
-    } else if (tool.name !== ToolNames.SKILL) {
+    } else if (declaration.name !== ToolNames.SKILL) {
       builtinTools.push({
-        name: tool.name,
+        name: declaration.name!,
         tokens,
       });
     }
   }
 
   const memoryContent = config.getUserMemory();
-  const memoryFiles = parseMemoryFiles(
+  const instructionFiles = parseMemoryFiles(
     memoryContent,
     config.getWorkingDir(),
     extensionContextFileOwners(config, config.getWorkingDir()),
+    config.storage.getProjectRoot(),
+  );
+  const memoryFiles: ContextMemoryDetail[] = [];
+  const instructionFilesTokens = instructionFiles.reduce(
+    (sum, f) => sum + f.tokens,
+    0,
   );
   const catalog = config.getAutoMemoryContext?.() ?? '';
   // Older snapshots remain in the request too; suppression hides all of them.
@@ -497,8 +512,11 @@ export async function collectContextData(
   const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);
 
   const skillTool = allTools.find((tool) => tool.name === ToolNames.SKILL);
-  const skillToolDefinitionTokens = skillTool
-    ? estimateContextTextTokens(JSON.stringify(skillTool.schema))
+  const skillDeclaration = toolDeclarations.find(
+    (declaration) => declaration.name === ToolNames.SKILL,
+  );
+  const skillToolDefinitionTokens = skillDeclaration
+    ? estimateContextTextTokens(JSON.stringify(skillDeclaration))
     : 0;
 
   const loadedContentNames: ReadonlyMap<string, string> =
@@ -610,6 +628,7 @@ export async function collectContextData(
   const rawOverhead =
     systemPromptTokens +
     allToolsTokens +
+    instructionFilesTokens +
     memoryFilesTokens +
     skillListing.tokens +
     loadedBodiesTokens +
@@ -631,6 +650,7 @@ export async function collectContextData(
   let displaySystemPrompt: number;
   let displayBuiltinTools: number;
   let displayMcpTools: number;
+  let displayInstructionFiles: number;
   let displayMemoryFiles: number;
   let displaySkills: number;
   let displayStartupContext: number;
@@ -639,6 +659,7 @@ export async function collectContextData(
   let freeSpace: number;
   let detailBuiltinTools: ContextToolDetail[];
   let detailMcpTools: ContextToolDetail[];
+  let detailInstructionFiles: ContextMemoryDetail[];
   let detailMemoryFiles: ContextMemoryDetail[];
   let detailSkills: ContextSkillDetail[];
 
@@ -681,6 +702,7 @@ export async function collectContextData(
     displayStartupContext = startupContextTokens;
     displayBuiltinTools = clampedBuiltinTools;
     displayMcpTools = clampedMcpTools;
+    displayInstructionFiles = instructionFilesTokens;
     displayMemoryFiles = memoryFilesTokens;
     // Include the conversation: a `/model` switch, `/restore` or a resume
     // zeroes the provider count while leaving `this.history` intact, and such a
@@ -690,6 +712,7 @@ export async function collectContextData(
     freeSpace = Math.max(0, contextWindowSize - rawContent - autocompactBuffer);
     detailBuiltinTools = builtinTools;
     detailMcpTools = scaleTokens(mcpTools, mcpDetailShare);
+    detailInstructionFiles = instructionFiles;
     detailMemoryFiles = memoryFiles;
     detailSkills = skills;
   } else {
@@ -720,6 +743,7 @@ export async function collectContextData(
     displaySystemPrompt = Math.floor(systemPromptTokens * scale);
     displayBuiltinTools = Math.floor(clampedBuiltinTools * scale);
     displayMcpTools = Math.floor(clampedMcpTools * scale);
+    displayInstructionFiles = Math.floor(instructionFilesTokens * scale);
     displayMemoryFiles = Math.floor(memoryFilesTokens * scale);
     displaySkills = Math.floor(clampedSkills * scale);
     displayStartupContext = Math.floor(startupContextTokens * scale);
@@ -728,6 +752,7 @@ export async function collectContextData(
       displaySystemPrompt +
       displayBuiltinTools +
       displayMcpTools +
+      displayInstructionFiles +
       displayMemoryFiles +
       displaySkills +
       displayStartupContext;
@@ -758,6 +783,7 @@ export async function collectContextData(
 
     detailBuiltinTools = scaleTokens(builtinTools, scale);
     detailMcpTools = scaleTokens(mcpTools, scale * mcpDetailShare);
+    detailInstructionFiles = scaleTokens(instructionFiles, scale);
     detailMemoryFiles = scaleTokens(memoryFiles, scale);
     detailSkills =
       scale < 1
@@ -796,6 +822,7 @@ export async function collectContextData(
     systemPrompt: displaySystemPrompt,
     builtinTools: displayBuiltinTools,
     mcpTools: displayMcpTools,
+    instructionFiles: displayInstructionFiles,
     memoryFiles: displayMemoryFiles,
     skills: displaySkills,
     startupContext: displayStartupContext,
@@ -816,6 +843,7 @@ export async function collectContextData(
     breakdown,
     builtinTools: showDetails ? detailBuiltinTools : [],
     mcpTools: showDetails ? detailMcpTools : [],
+    instructionFiles: showDetails ? detailInstructionFiles : [],
     memoryFiles: showDetails ? detailMemoryFiles : [],
     skills: showDetails
       ? detailSkills.filter(
@@ -832,6 +860,10 @@ export async function collectContextData(
  * Format token count for display (e.g. 1234 -> "1.2k", 123456 -> "123.5k")
  */
 function fmtTokens(tokens: number): string {
+  // 999,950 rounds to 1000.0k, so it belongs in the next unit.
+  if (tokens >= 999_950) {
+    return `${(tokens / 1_000_000).toFixed(1)}m`;
+  }
   if (tokens >= 1000) {
     return `${(tokens / 1000).toFixed(1)}k`;
   }
@@ -875,12 +907,15 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     breakdown,
     builtinTools,
     mcpTools,
+    instructionFiles = [],
     memoryFiles,
     skills,
     isEstimated,
     showDetails,
   } = data;
   const hasTokenCount = totalTokens > 0;
+  const memoryLabel =
+    breakdown.instructionFiles === undefined ? 'Memory files' : 'Auto memory';
 
   const lines: string[] = [];
   lines.push('## Context Usage');
@@ -953,8 +988,17 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       fmtCategoryRow('MCP tools', breakdown.mcpTools, contextWindowSize),
     );
   }
+  if (breakdown.instructionFiles !== undefined) {
+    lines.push(
+      fmtCategoryRow(
+        'Instruction files',
+        breakdown.instructionFiles,
+        contextWindowSize,
+      ),
+    );
+  }
   lines.push(
-    fmtCategoryRow('Memory files', breakdown.memoryFiles, contextWindowSize),
+    fmtCategoryRow(memoryLabel, breakdown.memoryFiles, contextWindowSize),
   );
   lines.push(fmtCategoryRow('Skills', breakdown.skills, contextWindowSize));
   if ((breakdown.startupContext ?? 0) > 0) {
@@ -1008,9 +1052,19 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
         );
       }
     }
+    if (instructionFiles.length > 0) {
+      lines.push('', '**Instruction files**');
+      for (const file of [...instructionFiles].sort(
+        (a, b) => b.tokens - a.tokens,
+      )) {
+        lines.push(
+          fmtCategoryRow(file.path, file.tokens, contextWindowSize, '  └ '),
+        );
+      }
+    }
     if (sortedMemory.length > 0) {
       lines.push('');
-      lines.push('**Memory files**');
+      lines.push('**' + memoryLabel + '**');
       for (const file of sortedMemory) {
         lines.push(
           fmtCategoryRow(file.path, file.tokens, contextWindowSize, '  └ '),

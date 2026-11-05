@@ -14,7 +14,11 @@ import type {
 } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { SkillManager } from '../skills/skill-manager.js';
-import { skillRestrictionNames, type SkillConfig } from '../skills/types.js';
+import {
+  AUTO_MEMORY_SKILL_NAME,
+  skillRestrictionNames,
+  type SkillConfig,
+} from '../skills/types.js';
 import {
   logSkillLaunch,
   recordSkillInvocation,
@@ -674,9 +678,43 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
    * skill loads, but the scheduler short-circuits at L4 when
    * `finalPermission === 'allow'`. The L3 default must be `'ask'` so
    * the classifier projection added in this PR can be reached.
+   *
+   * The exception is a bundled reference that is plain guidance shipped with
+   * the build: loading it adds text to the context and nothing else.
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    return 'ask';
+    return (await this.loadsBundledReference()) ? 'allow' : 'ask';
+  }
+
+  /**
+   * Whether this call loads the bundled `auto-memory` reference.
+   *
+   * The resident memory policy tells the model to load it before saving, and
+   * private memory writes are allowed without asking, so asking here would
+   * put an approval in front of every memory save. Only the bundled copy
+   * qualifies: a same-named project, user or extension skill takes precedence
+   * when the name is resolved, and it is ordinary user content that keeps
+   * the `'ask'` default. So does a copy that grants tools or registers hooks.
+   */
+  private async loadsBundledReference(): Promise<boolean> {
+    const name = this.params.skill;
+    if (name !== AUTO_MEMORY_SKILL_NAME) return false;
+    if (this.isSkillHidden(name)) return false;
+    if (this.config.getDisabledSkillNames().has(name.toLowerCase())) {
+      return false;
+    }
+    try {
+      const skill = await this.skillManager.loadSkill(name);
+      return (
+        skill?.level === 'bundled' &&
+        this.config.isSkillEnabled(skill) &&
+        !skill.allowedTools?.length &&
+        skill.hooks === undefined
+      );
+    } catch (error) {
+      debugLogger.warn(`Cannot resolve skill "${name}": ${error}`);
+      return false;
+    }
   }
 
   /**
