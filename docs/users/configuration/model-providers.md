@@ -359,7 +359,7 @@ Two base URLs matter:
 - Chat Completions: `https://inference.generativeai.<region>.oci.oraclecloud.com/openai/v1`
 - Responses: `https://inference.generativeai.<region>.oci.oraclecloud.com/v1` with `wireApi: "responses"`
 
-Regions that serve the OpenAI-compatible endpoints include `us-chicago-1`, `us-ashburn-1`, `us-phoenix-1`, `eu-frankfurt-1` and `uk-london-1`; see [OCI OpenAI-Compatible Endpoints](https://docs.oracle.com/en-us/iaas/Content/generative-ai/openai-compatible-api.htm) and the [regions page](https://docs.oracle.com/en-us/iaas/Content/generative-ai/agentic-regions.htm) for the current list and models.
+With an API key, the OpenAI-compatible endpoints are available in `us-chicago-1`, `us-ashburn-1`, `us-phoenix-1`, `eu-frankfurt-1`, `ap-hyderabad-1` and `ap-osaka-1`; see [OCI OpenAI-Compatible Endpoints](https://docs.oracle.com/en-us/iaas/Content/generative-ai/openai-compatible-api.htm) and [API Keys](https://docs.oracle.com/en-us/iaas/Content/generative-ai/api-keys.htm) for the current region list and the models API keys cover.
 
 ```json
 {
