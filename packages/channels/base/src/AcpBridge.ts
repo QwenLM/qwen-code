@@ -457,11 +457,17 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
 
     const chunks: string[] = [];
     let slashCommandOutput = '';
+    // A turn notice rides the reply, so it keeps its own buffer that response
+    // boundaries never clear.
+    let turnNotice = '';
     const onChunk = (sid: string, chunk: string) => {
       if (sid === sessionId) chunks.push(chunk);
     };
     const onSlashCommandOutput = (sid: string, chunk: string) => {
       if (sid === sessionId) slashCommandOutput = chunk;
+    };
+    const onTurnNotice = (sid: string, notice: string) => {
+      if (sid === sessionId) turnNotice = notice;
     };
     const clearChunks = (sid: string) => {
       if (sid === sessionId) {
@@ -471,6 +477,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     };
     this.on('textChunk', onChunk);
     this.on('slashCommandOutput', onSlashCommandOutput);
+    this.on('turnNotice', onTurnNotice);
     this.on('responseBoundary', clearChunks);
 
     const prompt: Array<Record<string, unknown>> = [];
@@ -512,14 +519,17 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
             result?._meta?.[CHANNEL_TASK_RESULT_PARTIAL_META_KEY] === true,
         });
       }
-      return options?.outputMode === 'per_task' &&
+      const body =
+        options?.outputMode === 'per_task' &&
         typeof taskResult === 'string' &&
         taskResult.trim()
-        ? taskResult
-        : chunks.join('') || slashCommandOutput;
+          ? taskResult
+          : chunks.join('') || slashCommandOutput;
+      return turnNotice ? `${turnNotice}\n\n${body}` : body;
     } finally {
       this.off('textChunk', onChunk);
       this.off('slashCommandOutput', onSlashCommandOutput);
+      this.off('turnNotice', onTurnNotice);
       this.off('responseBoundary', clearChunks);
     }
   }
@@ -682,7 +692,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
             // A notice emitted ahead of a turn has to ride the reply: channel
             // delivery returns only prompt()'s text, and the slash-command slot
             // is shadowed as soon as the turn produces model text.
-            this.emit('textChunk', sessionId, `${content.text}\n\n`);
+            this.emit('turnNotice', sessionId, content.text);
             break;
           }
           this.emit(

@@ -1527,6 +1527,77 @@ describe('AcpBridge', () => {
     );
   });
 
+  it('keeps the turn notice when a tool call clears the response chunks', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Only the first 5 skills were loaded.',
+            },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        });
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            kind: 'read',
+            title: 'Read',
+            status: 'in_progress',
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'Model text');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Only the first 5 skills were loaded.\n\nModel text',
+    );
+  });
+
+  it('keeps the turn notice on the per_task reply', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Only the first 5 skills were loaded.',
+            },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        });
+        return {
+          stopReason: 'end_turn',
+          _meta: { 'qwen.channel.taskResult': 'Task done' },
+        };
+      }),
+    };
+
+    await expect(
+      bridge.prompt('s-1', 'question', { outputMode: 'per_task' }),
+    ).resolves.toBe('Only the first 5 skills were loaded.\n\nTask done');
+  });
+
   it('clears slash-command output at response boundaries', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

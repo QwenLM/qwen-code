@@ -37057,6 +37057,32 @@ describe('Session', () => {
         });
       });
 
+      it('tags the stacked-skill overflow notice for channel replies', async () => {
+        const notice =
+          'Only the first 5 skills were loaded. Additional /skill tokens were treated as prompt text.';
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Expanded prompt' }],
+          stackedSkillOverflow: notice,
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/skill a /skill b' }],
+        });
+
+        expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(1, {
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: notice },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        });
+      });
+
       it('forwards the structured compression result and records it for replay', async () => {
         const compression = {
           phase: 'done' as const,
