@@ -28,7 +28,14 @@ export type OutputBudgetWireKey = 'max_tokens' | 'max_completion_tokens';
 export function outputBudgetWireKey(
   model: string | undefined,
 ): OutputBudgetWireKey {
-  const bare = normalize(model ?? '').replace(/^(?:[a-z][a-z-]*\.)+/, '');
+  // `normalize()` keeps the right half of a colon (`authType:model`) unless
+  // it recognises that half as a tag, and it knows neither OpenRouter's
+  // `:batch` nor the Bedrock build tag (`-1:0`), so both are dropped first
+  // (the same `:batch` pre-strip reasoning-effort.ts applies). The dotted
+  // publisher prefix is dropped after, since `normalize()` keeps it.
+  const bare = normalize(
+    (model ?? '').replace(/:batch(?=:|$)/gi, '').replace(/:\d+$/, ''),
+  ).replace(/^(?:[a-z][a-z-]*\.)+/, '');
   return MAX_COMPLETION_TOKENS_FAMILIES.test(bare)
     ? 'max_completion_tokens'
     : 'max_tokens';

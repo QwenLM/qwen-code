@@ -1143,3 +1143,64 @@ describe('resolveMetadataKey dotted-id guard', () => {
     expect(() => resolveMetadataKeySrc(config)).toThrow(/must not contain/);
   });
 });
+
+describe('output budget key written by the installer', () => {
+  // The provider-setup "Max output tokens" field becomes a samplingParams
+  // entry, and samplingParams passes through to the wire verbatim, so on
+  // Chat Completions it has to use the key the model family accepts (GPT-5 /
+  // o-series reject `max_tokens`, #16343). The Responses wire reads
+  // `max_tokens` and maps it to `max_output_tokens`, so it keeps that key.
+  const budgetsOf = (
+    modelIds: string[],
+    extra: Partial<ProviderSetupInputs> = {},
+  ) =>
+    modelsOf(
+      buildInstallPlanSrc(customProvider, {
+        ...customInputs(modelIds),
+        protocol: AuthType.USE_OPENAI,
+        advancedConfig: { maxTokens: 32000 },
+        ...extra,
+      }),
+    ).map((model) => model.generationConfig?.samplingParams);
+
+  it('writes max_completion_tokens for GPT-5 / o-series ids on Chat Completions and max_tokens for the rest', () => {
+    expect(
+      budgetsOf(['openai.gpt-5.5', 'o3', 'gpt-4.1', 'xai.grok-4.3']),
+    ).toEqual([
+      { max_completion_tokens: 32000 },
+      { max_completion_tokens: 32000 },
+      { max_tokens: 32000 },
+      { max_tokens: 32000 },
+    ]);
+  });
+
+  it('keeps max_tokens for every family on the Responses wire', () => {
+    expect(
+      budgetsOf(['openai.gpt-5.5', 'gpt-4.1'], { wireApi: 'responses' }),
+    ).toEqual([{ max_tokens: 32000 }, { max_tokens: 32000 }]);
+  });
+
+  it('clears an installed max_completion_tokens on replaceExisting like max_tokens', () => {
+    const inputs = {
+      ...customInputs(['openai.gpt-5.5']),
+      protocol: AuthType.USE_OPENAI,
+    };
+    const existing = modelsOf(
+      buildInstallPlanSrc(customProvider, {
+        ...inputs,
+        advancedConfig: { maxTokens: 32000 },
+      }),
+    );
+    expect(existing[0]!.generationConfig?.samplingParams).toEqual({
+      max_completion_tokens: 32000,
+    });
+    const cleared = modelsOf(
+      buildInstallPlanSrc(
+        customProvider,
+        { ...inputs, advancedConfig: { replaceExisting: true } },
+        existing,
+      ),
+    )[0]!;
+    expect(cleared.generationConfig?.samplingParams).toBeUndefined();
+  });
+});

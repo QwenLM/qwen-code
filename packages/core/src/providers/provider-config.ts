@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { AuthType } from '../core/contentGenerator.js';
+import { outputBudgetWireKey } from '../core/openaiContentGenerator/output-budget-key.js';
 import {
   resolveModelProtocol,
   tryResolveModelProtocol,
@@ -106,6 +107,7 @@ function buildGenerationConfig(
 function buildAdvancedGenerationConfig(
   advCfg: ProviderSetupInputs['advancedConfig'] | undefined,
   protocol: AuthType,
+  modelId: string,
 ): ProviderModelConfig['generationConfig'] | undefined {
   const cfg: ProviderModelConfig['generationConfig'] = {};
   let hasAny = false;
@@ -132,7 +134,17 @@ function buildAdvancedGenerationConfig(
     hasAny = true;
   }
   if (advCfg?.maxTokens && advCfg.maxTokens > 0) {
-    cfg.samplingParams = { max_tokens: advCfg.maxTokens };
+    // On Chat Completions the budget has to travel under the key the model
+    // family accepts (GPT-5 / o-series reject `max_tokens`). The Responses
+    // wire and the other protocols read `max_tokens` and translate it.
+    const key =
+      protocol === AuthType.USE_OPENAI
+        ? outputBudgetWireKey(modelId)
+        : 'max_tokens';
+    cfg.samplingParams =
+      key === 'max_completion_tokens'
+        ? { max_completion_tokens: advCfg.maxTokens }
+        : { max_tokens: advCfg.maxTokens };
     hasAny = true;
   }
   return hasAny ? cfg : undefined;
@@ -214,6 +226,7 @@ function buildModelConfigs(
       const genConfig = buildAdvancedGenerationConfig(
         inputs.advancedConfig,
         protocol,
+        id,
       );
       return {
         id,
@@ -228,7 +241,7 @@ function buildModelConfigs(
     const advCfg = inputs.advancedConfig;
     const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
     models = inputs.modelIds.map((id) => {
-      const genConfig = buildAdvancedGenerationConfig(advCfg, protocol);
+      const genConfig = buildAdvancedGenerationConfig(advCfg, protocol, id);
       return {
         id,
         name: displayName(id),
@@ -416,6 +429,7 @@ export function buildInstallPlan(
               ...preservedGeneration.samplingParams,
             };
             delete preservedGeneration.samplingParams.max_tokens;
+            delete preservedGeneration.samplingParams['max_completion_tokens'];
             if (!Object.keys(preservedGeneration.samplingParams).length)
               delete preservedGeneration.samplingParams;
           }

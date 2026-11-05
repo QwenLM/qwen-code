@@ -357,15 +357,19 @@ describe('DefaultOpenAICompatibleProvider', () => {
     describe('GPT-5 / o-series budget key', () => {
       // These families reject `max_tokens` on Chat Completions and only take
       // `max_completion_tokens`; the clamp must emit that key and never both.
-      it.each(['gpt-5.5', 'gpt-5.6-luna', 'o3', 'openai.gpt-5.5', 'openai.o3'])(
-        'sets the default budget as max_completion_tokens for %s',
-        (model) => {
-          const result = build(hello(model));
-          expect(typeof result.max_completion_tokens).toBe('number');
-          expect(result.max_completion_tokens).toBeGreaterThan(0);
-          expect(result).not.toHaveProperty('max_tokens');
-        },
-      );
+      it.each([
+        'gpt-5.5',
+        'gpt-5.6-luna',
+        'o3',
+        'openai.gpt-5.5',
+        'openai.o3',
+        'openai/gpt-5.5-pro:batch',
+      ])('sets the default budget as max_completion_tokens for %s', (model) => {
+        const result = build(hello(model));
+        expect(typeof result.max_completion_tokens).toBe('number');
+        expect(result.max_completion_tokens).toBeGreaterThan(0);
+        expect(result).not.toHaveProperty('max_tokens');
+      });
 
       it('re-keys a budget that arrived as max_tokens for a GPT-5 id', () => {
         const result = build(hello('gpt-5.5', { max_tokens: 500 }));

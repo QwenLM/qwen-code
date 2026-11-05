@@ -4293,6 +4293,8 @@ describe('ContentGenerationPipeline', () => {
         'openai.gpt-6.1-sol',
         'openai.o3',
         'openai/gpt-5.4',
+        'openai/gpt-5.5-pro:batch',
+        'o3:batch',
       ])(
         'sends the clamped budget as max_completion_tokens for %s',
         async (model) => {
@@ -4311,8 +4313,10 @@ describe('ContentGenerationPipeline', () => {
         'gpt-4o',
         'gpt-oss-120b',
         'openai.gpt-oss-120b',
+        'openai.gpt-oss-120b-1:0',
         'openai.gpt-4.1',
         'xai.grok-4.3',
+        'google/gemini-2.5-flash:batch',
         'meta.llama-3.3-70b-instruct',
         'qwen3-coder-plus',
         'deepseek-chat',
@@ -4335,6 +4339,31 @@ describe('ContentGenerationPipeline', () => {
           temperature: 1,
           max_completion_tokens: 1000,
         });
+        expect(body).not.toHaveProperty('max_tokens');
+      });
+
+      it('treats samplingParams.max_tokens: null as unset and does not forward it next to max_completion_tokens', async () => {
+        const body = await executeAs(
+          'openai.gpt-5.5',
+          { max_tokens: null, temperature: 1 },
+          { maxOutputTokens: 1000 },
+        );
+        expect(body).toMatchObject({
+          temperature: 1,
+          max_completion_tokens: 1000,
+        });
+        expect(body).not.toHaveProperty('max_tokens');
+      });
+
+      it('clamps an installer-written samplingParams.max_completion_tokens to the window without adding max_tokens', async () => {
+        // buildAdvancedGenerationConfig() writes this shape for a GPT-5 /
+        // o-series entry installed on Chat Completions.
+        const body = await executeAs(
+          'openai.gpt-5.5',
+          { max_completion_tokens: 32000 },
+          { maxOutputTokens: 1000 },
+        );
+        expect(body.max_completion_tokens).toBe(1000);
         expect(body).not.toHaveProperty('max_tokens');
       });
 
