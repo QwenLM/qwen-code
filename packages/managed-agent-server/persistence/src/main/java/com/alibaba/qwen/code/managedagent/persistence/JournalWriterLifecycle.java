@@ -122,7 +122,13 @@ final class JournalWriterLifecycle {
         if (csiOriginal != null) {
             csiOriginal.requireAdmission();
         }
-        fencing.requireSessionStorageOpen(tenant, workspace, session);
+        if (!placement && csiOriginal == null) {
+            // Physical maintenance is offline; ordinary publication must not
+            // wait for unrelated membership updates.
+            fencing.requireSessionStorageOpenForRead(tenant, workspace, session);
+        } else {
+            fencing.requireSessionStorageOpen(tenant, workspace, session);
+        }
         JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenant, session);
         storeRows.requireHeadScope(head, tenant, workspace, session);
         Timestamp now = storeRows.databaseNow();
