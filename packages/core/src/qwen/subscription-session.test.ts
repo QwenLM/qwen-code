@@ -312,6 +312,10 @@ it.each(['response', 'network failure'])(
   async (outcome) => {
     const session = new QwenSubscriptionSession();
     await session.signIn(() => {});
+    const identity = session.getIdentity();
+    modelFetch.mockResolvedValueOnce(modelResponse(['old-account-model']));
+    await session.getModels();
+    modelFetch.mockClear();
     let finishAuthorization!: (value: typeof rotated) => void;
     client.pollForToken.mockImplementationOnce(
       () =>
@@ -343,13 +347,13 @@ it.each(['response', 'network failure'])(
     );
     const authorization = session.signIn(onDevice);
     await vi.waitFor(() => expect(onDevice).toHaveBeenCalledOnce());
-    expect(session.isSignedIn()).toBe(false);
-    await expect(session.getModels()).rejects.toMatchObject({
-      code: 'session_changed',
-    });
+    expect(session.getIdentity()).toBe(identity);
+    expect(await session.getAccessToken()).toBe(tokens.access_token);
+    expect(readCachedSubscriptionModels()).toEqual(['old-account-model']);
     expect(modelFetch).toHaveBeenCalledOnce();
     finishAuthorization(rotated);
     await authorization;
+    expect(session.getIdentity()).not.toBe(identity);
     if (outcome === 'response')
       finishCatalog(modelResponse(['old-account-model']));
     else failCatalog(new TypeError('offline'));
@@ -488,14 +492,18 @@ it('preserves credentials on transient refresh failure', async () => {
   expect(await session.getUserInfo()).toEqual(user);
 });
 
-it('keeps saved tokens when identity lookup fails so retry does not authorize again', async () => {
+it('keeps newly exchanged tokens when identity lookup fails so retry does not authorize again', async () => {
+  const session = new QwenSubscriptionSession();
+  await session.signIn(() => {});
+  client.pollForToken.mockResolvedValueOnce(rotated);
   client.getUserInfo.mockRejectedValueOnce(
     new SubscriptionOAuthError('invalid_response', 503),
   );
-  const session = new QwenSubscriptionSession();
   await expect(session.signIn(() => {})).rejects.toMatchObject({ status: 503 });
-  expect(await new QwenSubscriptionSession().getUserInfo()).toEqual(user);
-  expect(client.pollForToken).toHaveBeenCalledTimes(1);
+  const restored = new QwenSubscriptionSession();
+  expect(await restored.getAccessToken()).toBe(rotated.access_token);
+  expect(await restored.getUserInfo()).toEqual(user);
+  expect(client.pollForToken).toHaveBeenCalledTimes(2);
 });
 
 it('revokes the rotated refresh token and clears local credentials even on network failure', async () => {
@@ -537,6 +545,46 @@ it('does not resurrect an in-flight login after another session signs out', asyn
   expect(await new QwenSubscriptionSession().getUserInfo()).toBeNull();
 });
 
+it.each(['new sign-in', 'invalid refresh grant'])(
+  'handles a %s while reauthorizing',
+  async (event) => {
+    const session = new QwenSubscriptionSession();
+    await session.signIn(() => {});
+    let finish!: (value: typeof rotated) => void;
+    client.pollForToken.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const authorization = session.signIn(() => {});
+    const outcome = authorization.catch((error: unknown) => error);
+    await vi.waitFor(() =>
+      expect(client.pollForToken).toHaveBeenCalledTimes(2),
+    );
+
+    const other = new QwenSubscriptionSession();
+    if (event === 'new sign-in') {
+      await other.signIn(() => {});
+      finish(rotated);
+      expect(await outcome).toMatchObject({ code: 'session_changed' });
+      expect(await other.getAccessToken()).toBe(tokens.access_token);
+    } else {
+      await expire();
+      client.refreshToken.mockRejectedValueOnce(
+        new SubscriptionOAuthError('invalid_grant', 400),
+      );
+      await expect(other.getAccessToken()).rejects.toMatchObject({
+        code: 'invalid_grant',
+      });
+      expect(other.isSignedIn()).toBe(false);
+      finish(rotated);
+      await expect(outcome).resolves.toEqual(user);
+      expect(await other.getAccessToken()).toBe(rotated.access_token);
+    }
+  },
+);
+
 it('does not write tokens when login was cancelled before polling completed', async () => {
   const abort = new AbortController();
   client.pollForToken.mockImplementationOnce(async () => {
@@ -550,17 +598,16 @@ it('does not write tokens when login was cancelled before polling completed', as
   expect(client.getUserInfo).not.toHaveBeenCalled();
 });
 
-it.each(['cancel', 'device failure', 'denied'])(
-  'clears the previous account and model cache before authorization %s',
+it.each(['cancel', 'device failure', 'access_denied', 'expired_token'])(
+  'preserves the previous account and model cache after authorization %s',
   async (failure) => {
     const session = new QwenSubscriptionSession();
     await session.signIn(() => {});
+    const identity = session.getIdentity();
     modelFetch.mockResolvedValue(modelResponse(['served']));
     await session.getModels();
     const abort = new AbortController();
     client.requestDeviceAuthorization.mockImplementationOnce(async () => {
-      expect(session.isSignedIn()).toBe(false);
-      expect(readCachedSubscriptionModels()).toEqual([]);
       if (failure === 'device failure') {
         throw new SubscriptionOAuthError(
           'network_error',
@@ -577,10 +624,10 @@ it.each(['cancel', 'device failure', 'denied'])(
         abort.abort();
         return rotated;
       });
-    } else if (failure === 'denied') {
+    } else if (failure !== 'device failure') {
       client.pollForToken.mockRejectedValueOnce(
         new SubscriptionOAuthError(
-          'access_denied',
+          failure,
           400,
           undefined,
           undefined,
@@ -588,15 +635,14 @@ it.each(['cancel', 'device failure', 'denied'])(
         ),
       );
     }
-    await expect(session.signIn(() => {}, abort.signal)).rejects.toThrow();
-    expect(session.isSignedIn()).toBe(false);
-    await expect(session.getAccessToken()).rejects.toMatchObject({
-      code: 'session_changed',
-    });
-    expect(readCachedSubscriptionModels()).toEqual([]);
-    await expect(session.getModels()).rejects.toMatchObject({
-      code: 'session_changed',
-    });
+    await expect(session.signIn(() => {}, abort.signal)).rejects.toMatchObject(
+      failure === 'cancel'
+        ? { name: 'AbortError' }
+        : { code: failure === 'device failure' ? 'network_error' : failure },
+    );
+    expect(session.getIdentity()).toBe(identity);
+    expect(await session.getAccessToken()).toBe(tokens.access_token);
+    expect(readCachedSubscriptionModels()).toEqual(['served']);
     expect(client.revokeToken).not.toHaveBeenCalled();
   },
 );

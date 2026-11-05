@@ -42,6 +42,7 @@ import {
 
 const credentialSchema = z.object({
   revision: z.string().min(1),
+  signInAttempt: z.string().min(1).optional(),
   baseUrl: z.string(),
   clientId: z.string(),
   models: subscriptionModelIdsSchema.optional(),
@@ -243,16 +244,15 @@ export class QwenSubscriptionSession {
     onDevice: (device: SubscriptionDeviceAuthorization) => void,
     signal?: AbortSignal,
   ): Promise<SubscriptionUserInfo> {
-    // Establish a revision before polling so logout or a newer login invalidates this attempt.
-    const revision = randomUUID();
+    // Track the attempt separately so the active login remains usable while polling.
+    const signInAttempt = randomUUID();
     const device = await this.locked(async (assertCanCommit) => {
       const previous = await this.read();
       const credentials = {
-        ...this.config,
-        revision,
         ...(previous && this.matches(previous)
-          ? { retryAfter: previous.retryAfter }
-          : {}),
+          ? previous
+          : { ...this.config, revision: signInAttempt }),
+        signInAttempt,
       };
       await this.write(credentials, assertCanCommit);
       return this.requestWithCooldown(
@@ -272,12 +272,12 @@ export class QwenSubscriptionSession {
     const expiresAt = Date.now() + tokens.expires_in * 1000;
     return this.locked(async (assertCanCommit) => {
       const current = await this.read();
-      if (current?.revision !== revision) {
+      if (current?.signInAttempt !== signInAttempt) {
         throw new SubscriptionOAuthError('session_changed');
       }
       const credentials = {
         ...this.config,
-        revision,
+        revision: signInAttempt,
         tokens: { ...tokens, expiresAt },
       };
       await this.write(credentials, assertCanCommit);
@@ -348,8 +348,14 @@ export class QwenSubscriptionSession {
         error instanceof SubscriptionOAuthError &&
         error.code === 'invalid_grant'
       ) {
-        assertCanCommit();
-        await fs.rm(this.filePath, { force: true });
+        if (credentials.signInAttempt) {
+          delete credentials.tokens;
+          delete credentials.models;
+          await this.write(credentials, assertCanCommit);
+        } else {
+          assertCanCommit();
+          await fs.rm(this.filePath, { force: true });
+        }
       }
       throw error;
     }
