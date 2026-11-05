@@ -8,7 +8,15 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { GIT_TIMEOUT_MS, gitOpt, gitProbe, gitRaw } from '../review/lib/git.js';
 import { shellQuotePath } from '../review/lib/shell-quote.js';
 import { redirectedAncestor, sanitizedGitEnv } from '../review/lib/worktree.js';
@@ -341,7 +349,7 @@ export function requireWorktree(
       // The branch checked out in another worktree is the one cause no
       // command of the watch can clear: `cleanup` cannot delete the branch
       // either while that checkout holds it.
-      const holder = worktreeHolding(worktreePath, paths.branch);
+      const holder = branchHolder(worktreePath, worktreePath, paths.branch);
       throw new SwitchBackRefused(
         holder
           ? `${checkedOut}, and git could not switch it back: ${paths.branch} is checked out in ${holder.path}${freeing(holder, worktreePath)}; until then neither a round nor \`qwen autofix-pr cleanup ${prNumber}\` can use or remove the branch.`
@@ -359,23 +367,41 @@ export function requireWorktree(
  * out: `main` for the clone's own checkout, which git never removes;
  * `stale` once it is no checkout any more (its directory or its `.git`
  * deleted by hand), which git still counts until the record is pruned. */
-interface Holder {
+export interface Holder {
   path: string;
   main: boolean;
   stale: boolean;
   locked: boolean;
 }
 
-/** Another worktree of the clone with `branch` checked out, or null. */
-function worktreeHolding(worktreePath: string, branch: string): Holder | null {
+/** A directory's real path; for one that is gone, its parent's real path
+ * and its name. */
+function canonical(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    try {
+      return join(realpathSync(dirname(path)), basename(path));
+    } catch {
+      return resolve(path);
+    }
+  }
+}
+
+/** A worktree of the clone `cwd` is in, other than `self` (the watch's own,
+ * which may be gone), with `branch` checked out; or null. */
+export function branchHolder(
+  cwd: string,
+  self: string,
+  branch: string,
+): Holder | null {
   // NUL-separated from git 2.36 on, so that a path keeps a newline in it;
   // an older git has only the line form.
-  const z = gitOpt('-C', worktreePath, 'worktree', 'list', '--porcelain', '-z');
-  const out =
-    z ?? gitOpt('-C', worktreePath, 'worktree', 'list', '--porcelain');
+  const z = gitOpt('-C', cwd, 'worktree', 'list', '--porcelain', '-z');
+  const out = z ?? gitOpt('-C', cwd, 'worktree', 'list', '--porcelain');
   if (out === null) return null;
   const end = z === null ? '\n' : '\0';
-  const self = realpathSync(worktreePath);
+  const own = canonical(self);
   // git lists the main worktree first.
   for (const [index, entry] of out.split(end.repeat(2)).entries()) {
     const fields = entry.split(end);
@@ -385,11 +411,7 @@ function worktreeHolding(worktreePath: string, branch: string): Holder | null {
         ?.slice(name.length + 1);
     const path = value('worktree');
     if (!path || value('branch') !== `refs/heads/${branch}`) continue;
-    try {
-      if (realpathSync(path) === self) continue;
-    } catch {
-      // Gone since git listed it: still what holds the branch for git.
-    }
+    if (canonical(path) === own) continue;
     return {
       path,
       main: index === 0,
@@ -406,14 +428,14 @@ function worktreeHolding(worktreePath: string, branch: string): Holder | null {
  * drops a stale record but not a locked one, and `git worktree remove`
  * refuses a locked worktree, one whose `.git` is gone, and the clone's own
  * checkout. Each command runs as printed from any directory: the path in it
- * is quoted, and it names the watch's worktree, the one path here that git
- * has just been run in, to run in. */
-function freeing(
+ * is quoted, and it names `anchor`, a directory of the clone git has just
+ * been run in, to run in. */
+export function freeing(
   { path, main, stale, locked }: Holder,
-  worktreePath: string,
+  anchor: string,
 ): string {
   if (main) return '. Switch that checkout to another branch';
-  const git = `git -C ${shellQuotePath(worktreePath)} worktree`;
+  const git = `git -C ${shellQuotePath(anchor)} worktree`;
   const quoted = shellQuotePath(path);
   const gone =
     'worktree git still records although nothing is checked out there any more';

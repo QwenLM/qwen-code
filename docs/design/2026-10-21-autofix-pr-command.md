@@ -813,8 +813,12 @@ is a refusal, unless `--take-over` first moves the watch to this session, as
 `prepare --take-over` does: `/autofix-pr stop <n>` passes it, so a watch
 another session left behind can be stopped without discarding its work.
 `--force` overrides these checks and also discards an
-unreadable state file. A branch that cannot be deleted is an error, and the
-state file stays. Running `cleanup` from inside the worktree it would remove
+unreadable state file. A branch another checkout has (`git worktree list`)
+cannot be deleted, `--force` or not: all three are kept and the watch ends
+as above, and the report names that checkout (`heldBy`) and says how to
+free it, before anything is removed — removing the worktree first would
+leave the watch with its state file and branch and no worktree. Any other
+branch that cannot be deleted is an error, and the state file stays. Running `cleanup` from inside the worktree it would remove
 is a refusal. The gate cursor is not removed: it belongs to the scheduled
 task, which outlives a watch, and without it the next fire would report
 everything again. Delete the task to stop the gate. The report names the
