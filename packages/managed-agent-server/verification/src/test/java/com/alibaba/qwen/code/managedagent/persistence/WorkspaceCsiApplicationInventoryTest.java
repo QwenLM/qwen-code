@@ -788,7 +788,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.TABLES.size());
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(809);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(810);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -1400,6 +1400,12 @@ class WorkspaceCsiApplicationInventoryTest {
             assertThat(image.table(table).rows()).hasSize(baseline.table(table).rows().size() + 1);
             if (table.equals("ma_resource")) {
                 assertThat(added.getFirst().number("last_verified_at")).isEqualTo(millis);
+            }
+            if (table.equals("ma_session_journal_tx")) {
+                // A cut commits a releaseActivation, for which the database
+                // generates is_activation_record = 0, read back as "false".
+                assertThat(fixture.path("requests").get(32).path("operation").textValue()).isEqualTo("releaseActivation");
+                assertThat(added.getFirst().text("is_activation_record")).isEqualTo("false");
             }
         }
         delta.put("writtenAt", "2040-01-01T00:00:00.123001Z");
