@@ -1850,7 +1850,7 @@ it('preserves subscription success styles through history projection and folding
     {
       type: 'info',
       presentation: 'subscription-success',
-      text: '✓ Signed in successfully · builder@example.com\n✓ Current plan: Qwen Pro. Qwen Code is ready.\n  Model: qwen3.8-max. Run /upgrade to upgrade your plan or /usage to view usage.\n  Common commands: /usage   /upgrade   /status   /logout',
+      text: '✓ Signed in successfully · builder@example.com\n✓ Current plan: Qwen Pro. Qwen Code is ready.\n  Model: qwen3.8-max. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.\n  Common commands: /usage   /upgrade   /model   /status   /logout',
     },
     {},
   );
@@ -1872,13 +1872,16 @@ it('preserves subscription success styles through history projection and folding
   ).toBe(C.text);
   expect(
     getByText(
-      'Model: qwen3.8-max. Run /upgrade to upgrade your plan or /usage to view usage.',
+      'Model: qwen3.8-max. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.',
     ).getAttribute('data-fg'),
   ).toBe(C.dim);
   expect(
-    getByText('Common commands: /usage   /upgrade   /status   /logout', {
-      normalizer: (text) => text.trim(),
-    }).getAttribute('data-fg'),
+    getByText(
+      'Common commands: /usage   /upgrade   /model   /status   /logout',
+      {
+        normalizer: (text) => text.trim(),
+      },
+    ).getAttribute('data-fg'),
   ).toBe(C.dim);
 });
 

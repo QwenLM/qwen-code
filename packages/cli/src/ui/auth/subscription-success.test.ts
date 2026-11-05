@@ -26,8 +26,8 @@ it.each(['plus', 'pro'])(
     expect(message.split('\n')).toEqual([
       '✓ 登录成功 · builder@example.com',
       `✓ 当前套餐：Qwen ${plan === 'plus' ? 'Plus' : 'Pro'}，已可使用 Qwen Code`,
-      '  模型：qwen3.8-flash，输入 /upgrade 升级套餐，/usage 查看用量。',
-      '  常用命令：/usage   /upgrade   /status   /logout',
+      '  模型：qwen3.8-flash，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。',
+      '  常用命令：/usage   /upgrade   /model   /status   /logout',
     ]);
   },
 );
@@ -47,8 +47,8 @@ it('uses the actual selected model and account in the English summary', async ()
   ).toEqual([
     '✓ Signed in successfully · other@example.com',
     '✓ Current plan: Qwen Pro. Qwen Code is ready.',
-    '  Model: server-returned-model. Run /upgrade to upgrade your plan or /usage to view usage.',
-    '  Common commands: /usage   /upgrade   /status   /logout',
+    '  Model: server-returned-model. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.',
+    '  Common commands: /usage   /upgrade   /model   /status   /logout',
   ]);
 });
 

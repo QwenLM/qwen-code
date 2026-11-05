@@ -183,12 +183,12 @@ const EN: Messages = {
   'subscription.connectFailed':
     'Could not connect Qwen Subscription. Please try again.',
   'subscription.connected': (v) =>
-    `✓ Signed in successfully · ${v?.email ?? ''}  \n✓ Current plan: Qwen ${v?.plan ?? ''}. Qwen Code is ready.${v?.model ? `  \nModel: ${v.model}. Run /upgrade to upgrade your plan or /usage to view usage.` : ''}${v?.url ? `  \nIf the browser didn't open, visit:  \n${v.url}` : ''}  \nCommon commands: /usage   /upgrade   /status   /logout`,
+    `✓ Signed in successfully · ${v?.email ?? ''}  \n✓ Current plan: Qwen ${v?.plan ?? ''}. Qwen Code is ready.${v?.model ? `  \nModel: ${v.model}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.` : ''}${v?.url ? `  \nIf the browser didn't open, visit:  \n${v.url}` : ''}  \nCommon commands: /usage   /upgrade   /model   /status   /logout`,
   'subscription.signedIn': (v) => `Signed in successfully · ${v?.email ?? ''}`,
   'subscription.modelSummary': (v) =>
-    `Model: ${v?.model ?? ''}. Run /upgrade to upgrade your plan or /usage to view usage.`,
+    `Model: ${v?.model ?? ''}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.`,
   'subscription.commonCommands':
-    'Common commands: /usage   /upgrade   /status   /logout',
+    'Common commands: /usage   /upgrade   /model   /status   /logout',
   'subscription.loginRequired':
     'Your login credentials are no longer valid. Run /auth to sign in again.',
   'subscription.signedInWithPlan': (v) =>
@@ -5038,12 +5038,12 @@ const ZH: Messages = {
   'subscription.modelsUnavailable': '无法加载模型。已保留登录态，请重试。',
   'subscription.connectFailed': '无法连接 Qwen 订阅，请重试。',
   'subscription.connected': (v) =>
-    `✓ 登录成功 · ${v?.email ?? ''}  \n✓ 当前套餐：Qwen ${v?.plan ?? ''}，已可使用 Qwen Code${v?.model ? `  \n模型：${v.model}，输入 /upgrade 升级套餐，/usage 查看用量。` : ''}${v?.url ? `  \n如果浏览器未打开，请访问：  \n${v.url}` : ''}  \n常用命令：/usage   /upgrade   /status   /logout`,
+    `✓ 登录成功 · ${v?.email ?? ''}  \n✓ 当前套餐：Qwen ${v?.plan ?? ''}，已可使用 Qwen Code${v?.model ? `  \n模型：${v.model}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。` : ''}${v?.url ? `  \n如果浏览器未打开，请访问：  \n${v.url}` : ''}  \n常用命令：/usage   /upgrade   /model   /status   /logout`,
   'subscription.signedIn': (v) => `登录成功 · ${v?.email ?? ''}`,
   'subscription.modelSummary': (v) =>
-    `模型：${v?.model ?? ''}，输入 /upgrade 升级套餐，/usage 查看用量。`,
+    `模型：${v?.model ?? ''}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。`,
   'subscription.commonCommands':
-    '常用命令：/usage   /upgrade   /status   /logout',
+    '常用命令：/usage   /upgrade   /model   /status   /logout',
   'subscription.loginRequired': '登录凭证已失效，请运行 /auth 重新登录。',
   'subscription.signedInWithPlan': (v) =>
     `已登录为 ${v?.email ?? ''}（Qwen ${v?.plan ?? ''}）`,

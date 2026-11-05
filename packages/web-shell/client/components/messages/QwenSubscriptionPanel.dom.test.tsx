@@ -121,7 +121,7 @@ it('does not flash Sign out while the VS Code login activates the subscription',
   expect(onActivated).toHaveBeenCalledOnce();
   expect(onActivated).toHaveBeenCalledWith(
     expect.stringContaining(
-      'Common commands: /usage   /upgrade   /status   /logout',
+      'Common commands: /usage   /upgrade   /model   /status   /logout',
     ),
   );
   expect(container.textContent).not.toContain('Sign out');
@@ -1117,7 +1117,7 @@ it.each(['close', 'Escape'])(
     expect(success.textContent).toContain('Qwen Pro');
     expect(success.textContent).toContain('actual-model');
     expect(success.textContent).toContain(
-      'Common commands: /usage   /upgrade   /status   /logout',
+      'Common commands: /usage   /upgrade   /model   /status   /logout',
     );
     expect(document.body.textContent).not.toContain('Start Using');
     expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);

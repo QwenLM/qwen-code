@@ -55,14 +55,16 @@ describe('InfoMessage', () => {
       <InfoMessage
         presentation="subscription-success"
         text={
-          '✓ Signed in successfully · user@example.com\n✓ Current plan: Qwen Plus. Qwen Code is ready.\n  Model: qwen3.8-flash\n  Common commands: /usage   /upgrade   /status   /logout'
+          '✓ Signed in successfully · user@example.com\n✓ Current plan: Qwen Plus. Qwen Code is ready.\n  Model: qwen3.8-flash\n  Common commands: /usage   /upgrade   /model   /status   /logout'
         }
       />,
     );
     expect(lastFrame()).toContain('Signed in successfully · user@example.com');
     expect(lastFrame()).toContain('Current plan: Qwen Plus');
     expect(lastFrame()).toContain('Model: qwen3.8-flash');
-    expect(lastFrame()).toContain('/usage   /upgrade   /status   /logout');
+    expect(lastFrame()).toContain(
+      '/usage   /upgrade   /model   /status   /logout',
+    );
     unmount();
   });
 

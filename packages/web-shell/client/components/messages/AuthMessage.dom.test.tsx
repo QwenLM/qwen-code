@@ -975,7 +975,7 @@ describe('subscription development entry', () => {
       );
       expect(completion.onModelActivated).not.toHaveBeenCalled();
       expect(completion.onMessage).toHaveBeenCalledExactlyOnceWith(
-        '✓ Signed in successfully · user@example.test  \n✓ Current plan: Qwen Pro. Qwen Code is ready.  \nModel: qwen3.8-max. Run /upgrade to upgrade your plan or /usage to view usage.  \nCommon commands: /usage   /upgrade   /status   /logout',
+        '✓ Signed in successfully · user@example.test  \n✓ Current plan: Qwen Pro. Qwen Code is ready.  \nModel: qwen3.8-max. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.  \nCommon commands: /usage   /upgrade   /model   /status   /logout',
       );
     },
   );
@@ -1035,8 +1035,8 @@ describe('subscription development entry', () => {
       expect(completion.onClose).toHaveBeenCalledOnce();
       expect(completion.onMessage).toHaveBeenCalledExactlyOnceWith(
         language === 'zh-CN'
-          ? `✓ 登录成功 · user@example.test  \n✓ 当前套餐：Qwen ${memberType === 'pro' ? 'Pro' : 'Plus'}，已可使用 Qwen Code  \n模型：qwen3.8-max，输入 /upgrade 升级套餐，/usage 查看用量。  \n常用命令：/usage   /upgrade   /status   /logout`
-          : `✓ Signed in successfully · user@example.test  \n✓ Current plan: Qwen ${memberType === 'pro' ? 'Pro' : 'Plus'}. Qwen Code is ready.  \nModel: qwen3.8-max. Run /upgrade to upgrade your plan or /usage to view usage.  \nCommon commands: /usage   /upgrade   /status   /logout`,
+          ? `✓ 登录成功 · user@example.test  \n✓ 当前套餐：Qwen ${memberType === 'pro' ? 'Pro' : 'Plus'}，已可使用 Qwen Code  \n模型：qwen3.8-max，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。  \n常用命令：/usage   /upgrade   /model   /status   /logout`
+          : `✓ Signed in successfully · user@example.test  \n✓ Current plan: Qwen ${memberType === 'pro' ? 'Pro' : 'Plus'}. Qwen Code is ready.  \nModel: qwen3.8-max. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.  \nCommon commands: /usage   /upgrade   /model   /status   /logout`,
       );
       expect(
         completion.onModelActivated.mock.invocationCallOrder[0],
@@ -1055,8 +1055,8 @@ describe('subscription development entry', () => {
       expect(container!.querySelectorAll('br')).toHaveLength(3);
       expect(container!.textContent).toContain(
         language === 'zh-CN'
-          ? '模型：qwen3.8-max，输入 /upgrade 升级套餐，/usage 查看用量。'
-          : 'Model: qwen3.8-max. Run /upgrade to upgrade your plan or /usage to view usage.',
+          ? '模型：qwen3.8-max，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。'
+          : 'Model: qwen3.8-max. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.',
       );
     },
   );
@@ -1254,8 +1254,8 @@ describe('subscription development entry', () => {
         expect(success.textContent).toContain('qwen3.8-max');
         expect(success.textContent).toContain(
           language === 'en'
-            ? 'Common commands: /usage   /upgrade   /status   /logout'
-            : '常用命令：/usage   /upgrade   /status   /logout',
+            ? 'Common commands: /usage   /upgrade   /model   /status   /logout'
+            : '常用命令：/usage   /upgrade   /model   /status   /logout',
         );
         expect(completion.onMessage).not.toHaveBeenCalled();
         expect(completion.onClose).not.toHaveBeenCalled();

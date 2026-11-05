@@ -976,18 +976,20 @@ it.each([true, false])(
       'qwen3.8-max',
     );
     const ui = renderWithProviders(
-      <HistoryItemDisplay
-        item={{
-          id: 1,
-          type: 'info',
-          text,
-          ...(subscriptionPresentation
-            ? { presentation: 'subscription-success' as const }
-            : {}),
-        }}
-        terminalWidth={100}
-        isPending={false}
-      />,
+      <Box width={140}>
+        <HistoryItemDisplay
+          item={{
+            id: 1,
+            type: 'info',
+            text,
+            ...(subscriptionPresentation
+              ? { presentation: 'subscription-success' as const }
+              : {}),
+          }}
+          terminalWidth={140}
+          isPending={false}
+        />
+      </Box>,
     );
     try {
       const frame = ui.lastFrame() ?? '';
@@ -1002,10 +1004,12 @@ it.each([true, false])(
         );
         expect(frame).toContain(
           inkChalk.hex(theme.text.secondary)(
-            'Model: qwen3.8-max. Run /upgrade to upgrade your plan or /usage to view usage.',
+            'Model: qwen3.8-max. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.',
           ),
         );
-        expect(frame).toContain('/usage   /upgrade   /status   /logout');
+        expect(frame).toContain(
+          '/usage   /upgrade   /model   /status   /logout',
+        );
       } else {
         expect(stripAnsi(frame)).toMatch(/[●•]/u);
         expect(frame).not.toContain(check);

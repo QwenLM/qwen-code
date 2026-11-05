@@ -1770,10 +1770,10 @@ export default {
   'Signed in successfully · {{email}}': '登录成功 · {{email}}',
   'Current plan: Qwen {{plan}}. Qwen Code is ready.':
     '当前套餐：Qwen {{plan}}，已可使用 Qwen Code',
-  'Model: {{model}}. Run /upgrade to upgrade your plan or /usage to view usage.':
-    '模型：{{model}}，输入 /upgrade 升级套餐，/usage 查看用量。',
-  'Common commands: /usage   /upgrade   /status   /logout':
-    '常用命令：/usage   /upgrade   /status   /logout',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.':
+    '模型：{{model}}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。',
+  'Common commands: /usage   /upgrade   /model   /status   /logout':
+    '常用命令：/usage   /upgrade   /model   /status   /logout',
   'Signed in as {{email}} (Qwen {{plan}})':
     '已登录为 {{email}}（Qwen {{plan}}）',
   'Qwen {{plan}} is active · usage is included with your plan':
