@@ -930,6 +930,91 @@ describe('qwen-triage: token isolation contract', () => {
       'notify must not remain in the agent job',
     );
   });
+
+  it('restores workspace ownership with the full fallback chain', () => {
+    // The header names TWO workspace controls for this job; the .git reset
+    // is pinned by qwen-runner-checkout-workflow.test.js, and this pins the
+    // other one. Without the sudo fallback a root-owned .git on the pool
+    // survives the restore, the reset step then dies, and the job never
+    // reaches the drafts download — silently.
+    assertUnconditional(
+      publishTriageJob.steps,
+      publishTriageJob.steps.find(
+        (s) => s.name === 'Restore workspace ownership',
+      ),
+      'qwen-triage publish-triage',
+    );
+  });
+});
+
+describe('qwen-triage: publisher import closure', () => {
+  // The pool argument in the publish-triage header rests on the publisher
+  // importing only node builtins plus relative helpers that the sparse
+  // checkout carries. Nothing else pins that: the unit suite imports the
+  // module from a full checkout where resolution always succeeds. A new
+  // bare specifier (or a helper missing from the sparse list) would stay
+  // green everywhere and die ERR_MODULE_NOT_FOUND in the real job, so the
+  // closure is scanned here and matched against the sparse-checkout list.
+  const scriptsDir = dirname(fileURLToPath(import.meta.url));
+  const specifiersOf = (file) => {
+    const src = readFileSync(file, 'utf8');
+    const found = [];
+    const staticRe =
+      /(?:^|\n)\s*(?:import|export)\s+(?:[^'"\n]*?\sfrom\s+)?['"]([^'"]+)['"]/g;
+    const dynamicRe = /\b(?:import|require)\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+    for (const re of [staticRe, dynamicRe]) {
+      let m;
+      while ((m = re.exec(src)) !== null) found.push(m[1]);
+    }
+    return found;
+  };
+
+  it('imports only node builtins and relative helpers, all carried by the sparse checkout', () => {
+    const entry = join(scriptsDir, 'triage-publish.mjs');
+    const closure = new Set();
+    const queue = [entry];
+    while (queue.length > 0) {
+      const file = queue.shift();
+      const rel = file.slice(scriptsDir.length + 1);
+      if (closure.has(rel)) continue;
+      closure.add(rel);
+      for (const spec of specifiersOf(file)) {
+        if (spec.startsWith('node:')) continue;
+        assert.ok(
+          spec.startsWith('./') || spec.startsWith('../'),
+          `publisher closure must stay bare-specifier-free; found "${spec}" in ${rel} — a reused pool workspace has no node_modules to resolve it`,
+        );
+        const resolved = join(dirname(file), spec);
+        assert.ok(
+          existsSync(resolved),
+          `relative import "${spec}" in ${rel} must exist`,
+        );
+        queue.push(resolved);
+      }
+    }
+    // The runtime also reads the owner policy next to the scripts; it is
+    // not an import, so pin its presence in the sparse list separately.
+    const publisherSrc = readFileSync(entry, 'utf8');
+    assert.match(publisherSrc, /\.\.\/issue-owners\.json/);
+    const checkout = publishTriageJob.steps.find((s) =>
+      /^Checkout/.test(s.name),
+    );
+    const sparse = String(checkout.with['sparse-checkout'])
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .sort();
+    const expected = [
+      ...[...closure].map((rel) => `/.github/scripts/${rel}`),
+      '/.github/issue-owners.json',
+    ].sort();
+    assert.deepEqual(
+      sparse,
+      expected,
+      'the sparse checkout must carry exactly the import closure plus the owner policy',
+    );
+    assert.equal(checkout.with['sparse-checkout-cone-mode'], false);
+  });
 });
 
 describe('qwen-triage: git exec-vector cleanup', () => {

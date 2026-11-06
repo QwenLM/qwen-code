@@ -170,7 +170,11 @@ CI 里由新 job `publish-triage` 运行该脚本：`needs: triage`、
 `persist-credentials: false`（`publish-verify` 的模式）。由于该 job 可能落在
 持久池上，checkout 之前先采取与 agent job 相同的 workspace 防护：属主恢复 +
 `Recreate runner Git metadata` 步骤，使早前 run 种下的 git 元数据无法在随后
-用 PAT 发布的 job 里执行（由 `qwen-runner-checkout-workflow.test.js` 钉住）。
+用 PAT 发布的 job 里执行（重置步骤的位置由
+`qwen-runner-checkout-workflow.test.js` 钉住，其 qwen-triage job 列表改为从
+「路由到池且含 checkout 的 job」派生；属主恢复的兜底链与 publisher 无
+bare-specifier 的 import 闭包由
+`.github/scripts/qwen-triage-workflow.test.mjs` 钉住）。
 它下载 drafts artifact（按兄弟 lane 的规矩剥离符号链接与非常规文件），持 bot
 PAT 运行脚本。PAT 从不进入 triage job 的 agent 环境；publisher 从不执行 agent 提供的
 代码，只处理数据。
@@ -260,7 +264,9 @@ stream-json`。显式环境携带只读 `GH_TOKEN`、`BOT_LOGIN`、draft 目录�
   `QWEN_HOME` 路径）；`QWEN_HOME` env 字面量 pin 移入 `env -i` 列表；新增
   publish job 与 drafts artifact 剥离的断言。verify lane 的 runuser 计数 pin
   不受影响（本改动不在该区间加步骤）。
-- `scripts/tests/qwen-runner-checkout-workflow.test.js` —— 预期无需改动：
+- `scripts/tests/qwen-runner-checkout-workflow.test.js` —— 新增
+  `publish-triage` 覆盖：qwen-triage 条目改为从「路由到池且含 checkout 的
+  job」派生（手工列表正是当初漏掉 `publish-triage` 的原因）；
   `Recreate runner Git metadata` 仍紧邻 checkout 之前。
 - `scripts/tests/triage-publish.test.js` —— publisher 新单测（校验 fail-closed
   用例、去重、幂等、解析器、逐动作失败报告），对 stub 的 `gh` 运行。

@@ -13,12 +13,28 @@ import { join } from 'node:path';
 import { parse } from 'yaml';
 import { expect, it } from 'vitest';
 
+// The qwen-triage entries are DERIVED, not hand-typed: every pool-routed job
+// that checks out must reset the workspace git metadata first. A hand-typed
+// list missed publish-triage once (the write-PAT job ran on the pool with
+// agent-planted hooks executable while this suite stayed green); deriving
+// the set means the next pool-routed checkout job reddens here with no edit
+// to this file. The checkout intersection is load-bearing: authorize and
+// publish-tmux are pool-routed but never check out, so they have no reset
+// step to pin. Same derivation shape as e2e-workflow.test.js's pool gate.
+const triagePoolCheckoutJobs = Object.entries(
+  parse(readFileSync('.github/workflows/qwen-triage.yml', 'utf8')).jobs,
+)
+  .filter(([, job]) => String(job['runs-on'] ?? '').includes('ecs-qwen'))
+  .filter(([, job]) =>
+    (job.steps ?? []).some((step) =>
+      /^actions\/checkout@/.test(String(step.uses ?? '')),
+    ),
+  )
+  .map(([name]) => ['qwen-triage', name]);
+
 const jobs = [
   ['desktop-release', 'prepare'],
-  ...['triage', 'publish-triage', 'tmux-testing', 'verify'].map((name) => [
-    'qwen-triage',
-    name,
-  ]),
+  ...triagePoolCheckoutJobs,
   ...[
     'test',
     'lint_and_static',
