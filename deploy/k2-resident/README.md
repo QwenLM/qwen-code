@@ -51,12 +51,19 @@ not enable CSI execution.
 Render the exact storage/namespace protection objects with the existing Java
 protection operator, passing `<reviewed-registration-json> <policy-name>
 <binding-name>`. This prints a Kubernetes JSON List and
-does not contact the cluster or database. From the server package, invoke the
-built operator with:
+does not contact the cluster or database. From the reference distribution,
+invoke it with:
 
 ```bash
-java -Dloader.main=com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiProtectionMain \
-  -cp target/qwen-managed-agent-server-0.1.0-alpha-csi-runtime.jar \
+bin/qwen-managed-agent-admin csi-protection \
+  /absolute/path/registration.json resident-protection resident-binding
+```
+
+From a module build, run the same entry from the repository root:
+
+```bash
+java -Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceCsiProtectionMain \
+  -cp packages/managed-agent-server/server/target/qwen-managed-agent-server-<version>-exec.jar \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   /absolute/path/registration.json resident-protection resident-binding
 ```
@@ -105,12 +112,20 @@ audit actor with a current Workspace `OWNER` grant:
 ```
 
 The operator must already control the trusted maintenance host and deployment
-credentials; the actor field alone does not authenticate anyone. From the server
-package, use its existing fat jar and configuration:
+credentials; the actor field alone does not authenticate anyone. From the
+reference distribution:
 
 ```bash
-java -Dloader.main=com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaceRetirementMain \
-  -cp target/qwen-managed-agent-server-0.1.0-alpha.jar \
+bin/qwen-managed-agent-admin resident-retirement \
+  inspect /absolute/path/retirement.json \
+  --spring.config.additional-location=file:/absolute/path/application.yaml
+```
+
+From a module build, run from the repository root with the same arguments:
+
+```bash
+java -Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.ResidentWorkspaceRetirementMain \
+  -cp packages/managed-agent-server/server/target/qwen-managed-agent-server-<version>-exec.jar \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   inspect /absolute/path/retirement.json \
   --spring.config.additional-location=file:/absolute/path/application.yaml

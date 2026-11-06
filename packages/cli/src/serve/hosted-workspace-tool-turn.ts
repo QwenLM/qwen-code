@@ -31,6 +31,7 @@ import {
 } from './hosted-file-history.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { PDF_MAX_PAGES_PER_READ } from '@qwen-code/qwen-code-core/utils/pdf.js';
 import {
   checkHostedGlobPattern,
   HOSTED_GLOB_TOO_COMPLEX,
@@ -257,6 +258,13 @@ import {
   type HostedApprovalSettings,
   type HostedApprovalWaiters,
 } from './hosted-tool-approval.js';
+import {
+  HOSTED_USER_QUESTION_TOOL,
+  HOSTED_QUESTION_POLICY,
+  HostedQuestionInputError,
+  hostedQuestions,
+  readHostedQuestionDecision,
+} from './hosted-user-question.js';
 
 export {
   HOSTED_WORKSPACE_FILE_PROFILE,
@@ -589,22 +597,37 @@ const pathProperty = {
   description:
     'Path relative to the saved Session working directory in its remote Workspace. Never use the Harness host path.',
 };
-export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
-  {
-    name: 'read_file',
-    description:
-      'Read a file in the remote Workspace. Read before editing an existing file.',
-    parametersJsonSchema: {
-      type: 'object',
-      properties: {
-        file_path: pathProperty,
-        offset: { type: 'integer', minimum: 0 },
-        limit: { type: 'integer', minimum: 1 },
+const HOSTED_READ_FILE_TOOL = {
+  name: 'read_file',
+  description:
+    'Read a file in the remote Workspace. Read before editing an existing file.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      file_path: pathProperty,
+      offset: { type: 'integer', minimum: 0 },
+      limit: { type: 'integer', minimum: 1 },
+    },
+    required: ['file_path'],
+    additionalProperties: false,
+  },
+};
+const HOSTED_PAGED_READ_FILE_TOOL: FunctionDeclaration = {
+  ...HOSTED_READ_FILE_TOOL,
+  parametersJsonSchema: {
+    ...HOSTED_READ_FILE_TOOL.parametersJsonSchema,
+    properties: {
+      ...HOSTED_READ_FILE_TOOL.parametersJsonSchema.properties,
+      pages: {
+        type: ['string', 'null'],
+        description: `Optional PDF page range to extract as text, such as '3' or '1-5'. Pages start at 1; at most ${PDF_MAX_PAGES_PER_READ} pages per request. Open-ended ranges are unsupported. Omit or set to null for other files.`,
       },
-      required: ['file_path'],
-      additionalProperties: false,
     },
   },
+};
+// Resident/CSI keeps this restricted schema; ordinary reads use the paged one.
+export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
+  HOSTED_READ_FILE_TOOL,
   {
     name: 'write_file',
     description:
@@ -708,7 +731,7 @@ const HOSTED_GLOB_TOOL: FunctionDeclaration = {
     additionalProperties: false,
   },
 };
-// #15076: `todo_write`, declared only on `files/3`. The Harness persists
+// `todo_write` is declared on `files/3` and `shell/1`. The Harness persists
 // the Session list without writing a Workspace file. `web_fetch` is not part
 // of this declaration: `main` adds it to the same files lane under its own argument
 // and destination checks, so this array appends only the todo tool.
@@ -757,16 +780,10 @@ export const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
 };
 // #13753 I3: the read profile of a snapshot child, which reads a frozen copy
 // of its parent's Workspace. Nothing here writes, and the turn refuses any
-// call it does not declare. A missing read_file stops the module loading:
-// spreading a failed lookup would silently declare a tool with no name.
-const HOSTED_READ_FILE_TOOL = HOSTED_WORKSPACE_FILE_TOOLS.find(
-  (tool) => tool.name === 'read_file',
-);
-if (HOSTED_READ_FILE_TOOL === undefined)
-  throw new Error('Hosted Workspace file tools no longer declare read_file.');
+// call it does not declare.
 export const HOSTED_WORKSPACE_READ_TOOLS: FunctionDeclaration[] = [
   {
-    ...HOSTED_READ_FILE_TOOL,
+    ...HOSTED_PAGED_READ_FILE_TOOL,
     description:
       "Read a file in this read-only snapshot of the parent's Workspace, taken when this child started. Files cannot be changed and commands cannot run here.",
   },
@@ -1617,6 +1634,14 @@ function recordedFor(
 
 export { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
 
+// A3 packaged fault arm: the replacement holds the first sibling approval it
+// asks (the pending sibling after an earlier decided one) so the runner can
+// crash inside the mixed-sibling approval gap. Test-gated, never set in
+// production; read once, fires once per process.
+const holdPendingSiblingSession =
+  process.env['QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL'];
+let holdPendingSiblingFired = false;
+
 export class HostedToolRecoveryRequiredError extends Error {
   constructor(cause: unknown) {
     super(
@@ -1633,6 +1658,26 @@ export class HostedToolRecoveryRequiredError extends Error {
  */
 export const HOSTED_AGENT_WAIT_ABANDONED_TEXT =
   'The turn was cancelled before the child agent finished; the child keeps running and its committed result is retained.';
+
+/**
+ * The tool names whose never-started proof is the child-run ledger
+ * (admitLaunch commits the record before dispatch): one membership fact
+ * for every arm that either reads that ledger or must decline without
+ * it. A future child-run-backed tool joins HERE, never as another
+ * inline two-name literal.
+ */
+export const CHILD_LEDGER_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'agent',
+  'workflow',
+]);
+
+/**
+ * The answer a settlement writes for a child-ledger call it cannot
+ * prove anything about: the ledger is unavailable in this generation,
+ * so the fold names the unknown instead of claiming the call never ran.
+ */
+export const HOSTED_CHILD_LEDGER_UNKNOWN_TEXT =
+  'The child run for this call kept its own ledger, which this recovery does not hold; its outcome is unknown and its record is retained.';
 
 /**
  * The never-admitted answer for a sibling call the dead batch never
@@ -1794,6 +1839,7 @@ interface HostedPreparedRequest {
   command: boolean;
   skill: boolean;
   planExit?: boolean;
+  question?: boolean;
   todo?: boolean;
 }
 
@@ -1940,6 +1986,7 @@ export class HostedWorkspaceToolTurn {
       profile?: string;
       context?: HostedWorkspaceContextSlot;
       foregroundOnly?: boolean;
+      childDepth?: number;
       childRuns?: HostedChildRunSession;
       monitors?: HostedMonitorSession;
       backgroundLane?: HostedShellTurnOptions;
@@ -2002,7 +2049,7 @@ export class HostedWorkspaceToolTurn {
         ? launchEnabled
         : () => launchEnabled !== false;
     this.childSnapshot = extras?.childAgents?.snapshot;
-    this.childDepth = extras?.childAgents?.depth ?? 0;
+    this.childDepth = extras?.childDepth ?? extras?.childAgents?.depth ?? 0;
     this.childWorkspaces = extras?.childAgents?.childWorkspaces === true;
     this.childSnapshots =
       this.childWorkspaces && extras?.childAgents?.childSnapshots === true;
@@ -2058,13 +2105,29 @@ export class HostedWorkspaceToolTurn {
     return !this.mcp || this.profile === 'hosted-workspace-shell/1';
   }
 
-  /**
-   * #15076: whether this Session's profile declares `todo_write`. Only the
-   * `/3` profiles do; every earlier profile keeps its exact vocabulary, so
-   * the turn refuses the name there.
-   */
   private declaresTodoTool(): boolean {
-    return this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3;
+    return (
+      this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE
+    );
+  }
+
+  private questionsAdmitted(): boolean {
+    return (
+      this.approval !== undefined &&
+      !this.hooks &&
+      !this.mcp &&
+      !this.foregroundOnly &&
+      !this.residentWorkspace &&
+      this.childDepth === 0 &&
+      !this.memberPlanMode &&
+      [
+        HOSTED_WORKSPACE_FILE_PROFILE,
+        HOSTED_WORKSPACE_FILE_PROFILE_V2,
+        HOSTED_WORKSPACE_FILE_PROFILE_V3,
+        HOSTED_WORKSPACE_SHELL_PROFILE,
+      ].includes(this.profile ?? HOSTED_WORKSPACE_FILE_PROFILE)
+    );
   }
 
   /**
@@ -2175,8 +2238,6 @@ export class HostedWorkspaceToolTurn {
     // board commands — resolved once, both declarations follow it.
     const memberCommands = await this.memberCommandsDeclared();
     const skill = this.skills?.declaration();
-    // #15076: only a `/3` profile declares `todo_write`, so every earlier
-    // profile keeps the exact array it has always declared.
     const todoTool = this.declaresTodoTool();
     this.advertised = [
       ...[
@@ -2188,7 +2249,10 @@ export class HostedWorkspaceToolTurn {
       ]
         .filter((tool) => tool.name !== 'monitor' || this.monitorsAdmitted())
         .map((declaration) => {
-          let tool = declaration;
+          let tool =
+            declaration.name === 'read_file'
+              ? HOSTED_PAGED_READ_FILE_TOOL
+              : declaration;
           if (
             tool.name === 'run_shell_command' &&
             !this.backgroundShellAdmitted()
@@ -2299,6 +2363,8 @@ export class HostedWorkspaceToolTurn {
           : tool,
       );
     }
+    if (this.questionsAdmitted())
+      this.advertised.push(HOSTED_USER_QUESTION_TOOL);
     if (this.publicPlanMode) this.advertised.push(HOSTED_PUBLIC_PLAN_TOOL);
     if (this.publicChildren && this.extensionAgents.length)
       this.advertised = this.advertised.map((tool) =>
@@ -3593,6 +3659,7 @@ export class HostedWorkspaceToolTurn {
           command: false,
           skill: item.call.name === 'skill' && this.skills !== undefined,
           planExit: this.publicPlanMode && item.call.name === 'exit_plan_mode',
+          question: item.call.name === 'ask_user_question',
         });
       }
       this.logicalRound = plan.round;
@@ -3620,6 +3687,8 @@ export class HostedWorkspaceToolTurn {
       this.publicPlanMode &&
       batch?.requests.length === 1 &&
       batch.requests[0].planExit === true;
+    const singleQuestion =
+      batch?.requests.length === 1 && batch.requests[0].question === true;
     if (
       !batch ||
       batch.uncaptured ||
@@ -3628,12 +3697,14 @@ export class HostedWorkspaceToolTurn {
       (!commandStep &&
         isHostedWorkspaceShellProfile(this.profile) &&
         !singlePlanExit &&
+        !singleQuestion &&
         !this.publicChildren) ||
       (!commandStep && (this.hooks || this.mcp)) ||
       batch.requests.some(
         (request) =>
           !(
             singlePlanExit ||
+            singleQuestion ||
             (commandStep && request.call.name === 'skill') ||
             (this.publicChildren &&
               ['agent', 'run_shell_command'].includes(request.call.name)) ||
@@ -3877,6 +3948,17 @@ export class HostedWorkspaceToolTurn {
         ) {
           validationError = HOSTED_PUBLIC_PLAN_REFUSAL;
           input = { ...call.args };
+        } else if (call.name === 'ask_user_question') {
+          input = { ...call.args };
+          try {
+            hostedQuestions(input);
+            if (source.length !== 1 || !this.questionsAdmitted())
+              validationError =
+                'ask_user_question must be the only call in a supported root Session batch.';
+          } catch (cause) {
+            if (!(cause instanceof HostedQuestionInputError)) throw cause;
+            validationError = cause.message;
+          }
         } else if (planExit) {
           input = { ...call.args };
           if (!this.planning)
@@ -4215,9 +4297,7 @@ export class HostedWorkspaceToolTurn {
           } else if (
             !sharedExtensionWorkspace &&
             !agentBackground &&
-            calls.some(
-              (other) => other.name !== 'agent' && other.name !== 'workflow',
-            )
+            calls.some((other) => !CHILD_LEDGER_TOOL_NAMES.has(other.name))
           ) {
             // The same one-batch candidacy: a sibling outside a child
             // launch holds the mount for exactly the wait the foreground
@@ -4281,9 +4361,7 @@ export class HostedWorkspaceToolTurn {
             validationError = `Hosted workflow run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
           } else if (
             !agentBackground &&
-            calls.some(
-              (other) => other.name !== 'agent' && other.name !== 'workflow',
-            )
+            calls.some((other) => !CHILD_LEDGER_TOOL_NAMES.has(other.name))
           ) {
             validationError =
               'Hosted workflow run_in_background=false cannot share a batch with a tool other than agent or workflow; the sibling would hold the Workspace mount the child needs.';
@@ -4583,6 +4661,7 @@ export class HostedWorkspaceToolTurn {
           command,
           skill,
           planExit,
+          question: call.name === 'ask_user_question',
           todo: call.name === 'todo_write',
         };
       });
@@ -4947,6 +5026,7 @@ export class HostedWorkspaceToolTurn {
           request.team ||
           request.command ||
           request.planExit ||
+          request.question ||
           request.skill ||
           request.todo ||
           request.workflow
@@ -5403,6 +5483,53 @@ export class HostedWorkspaceToolTurn {
           );
           continue;
         }
+        if (request.question) {
+          const actionId = this.nativeBatch?.actionIds.get(index);
+          const action = actionId && this.session.authority.action(actionId);
+          if (!action)
+            throw new HostedToolRecoveryRequiredError(
+              'Question Action is missing.',
+            );
+          const options = await readHostedActionOptions(this.session, action);
+          if (options.v !== 4)
+            throw new HostedToolRecoveryRequiredError(
+              'Question Action has incompatible options.',
+            );
+          const answers = await readHostedQuestionDecision(
+            this.session,
+            action,
+            options,
+          );
+          const answerText = answers
+            .map((answer, ordinal) => {
+              const question = options.questions[ordinal];
+              const selected = question.options.filter((option) =>
+                answer.optionIds?.includes(option.id),
+              );
+              return [
+                question.prompt,
+                ...selected.map(
+                  (option) => `Selected ${option.id}: ${option.label}`,
+                ),
+                ...(answer.text !== undefined
+                  ? [`Custom answer: ${answer.text}`]
+                  : []),
+              ].join('\n');
+            })
+            .join('\n\n');
+          const converted = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [{ text: `User provided the following answers:\n\n${answerText}` }],
+          );
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new HostedToolRecoveryRequiredError(
+              'Question result exceeds the Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
+          responses.push(...converted);
+          continue;
+        }
         if (request.planExit) {
           if (await hostedPublicPlanActive(this.session, this.promptId))
             throw new HostedToolRecoveryRequiredError(
@@ -5664,7 +5791,7 @@ export class HostedWorkspaceToolTurn {
                   error:
                     `Tool execution settled as ${result.executionStatus}, but its output exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte durable Session limit and was omitted.` +
                     (request.call.name === 'read_file'
-                      ? ' Request a smaller offset/limit range.'
+                      ? hostedReadRangeGuidance(this.residentWorkspace)
                       : ''),
                   executionStatus: result.executionStatus,
                   outputOmitted: true,
@@ -8444,6 +8571,7 @@ export class HostedWorkspaceToolTurn {
         continue;
       }
       const humanOnly =
+        request.question === true ||
         asks.has(index) ||
         decision === 'ask' ||
         (this.publicPlanMode &&
@@ -8853,31 +8981,49 @@ export class HostedWorkspaceToolTurn {
         ? undefined
         : await this.captureNativeBatch('approval', requestId, ordinal);
     if (ordinal >= 0 && !continuationRef) this.nativeBatch!.uncaptured = true;
-    const options: HostedActionOptions = {
-      ...(continuationRef
-        ? {
-            v: 3 as const,
-            continuationRef,
-            ...(HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
-              ? { inputRef }
-              : {}),
-          }
-        : HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
-          ? { v: 2 as const, inputRef }
-          : { v: 1 as const }),
+    const question = call.name === 'ask_user_question';
+    if (question && !continuationRef)
+      throw new HostedToolRecoveryRequiredError(
+        'Question continuation is unavailable.',
+      );
+    const identity = {
       requestId,
       turnId: this.promptId,
       functionCallId: call.callId,
       toolName: call.name,
-      policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
       inputRevision: 1,
       createdAt,
       expiresAt: createdAt + approval.settings.timeoutMs,
-      options: HOSTED_APPROVAL_OPTIONS,
-      ...(requiresHumanDecision
-        ? { requiresHumanDecision: true as const }
-        : {}),
     };
+    const options: HostedActionOptions = question
+      ? {
+          ...identity,
+          v: 4,
+          policyRevision: HOSTED_QUESTION_POLICY,
+          requiresHumanDecision: true,
+          inputRef,
+          continuationRef: continuationRef!,
+          questions: hostedQuestions(call.args),
+        }
+      : {
+          ...(continuationRef
+            ? {
+                v: 3 as const,
+                continuationRef,
+                ...(HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
+                  ? { inputRef }
+                  : {}),
+              }
+            : HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
+              ? { v: 2 as const, inputRef }
+              : { v: 1 as const }),
+          ...identity,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+          options: HOSTED_APPROVAL_OPTIONS,
+          ...(requiresHumanDecision
+            ? { requiresHumanDecision: true as const }
+            : {}),
+        };
     const optionsRef = await this.session.resources.publish(
       'managed-action-options',
       Buffer.from(JSON.stringify(options)),
@@ -8886,7 +9032,7 @@ export class HostedWorkspaceToolTurn {
     await this.harness.commitDurableWait(
       {
         requestId,
-        kind: 'permission',
+        kind: question ? 'question' : 'permission',
         source: 'tool_call',
         optionsRef,
         inputRevision: '1',
@@ -8896,6 +9042,24 @@ export class HostedWorkspaceToolTurn {
       },
       { turnId: this.promptId, promptId: this.promptId },
     );
+    if (
+      holdPendingSiblingSession ===
+        this.session.authority.sessionHeader.sessionKey.sessionId &&
+      !holdPendingSiblingFired
+    ) {
+      holdPendingSiblingFired = true;
+      writeStderrLineSafe(
+        `qwen serve: E2E holding pending sibling approval for Session ${holdPendingSiblingSession} call ${call.callId}`,
+      );
+      // Reject on abort so a leaked flag cannot park a real Session
+      // un-cancelably; the runner SIGKILLs this generation after the barrier.
+      await new Promise<never>((_resolve, reject) => {
+        const release = (): void =>
+          reject(signal.reason ?? new Error('aborted'));
+        if (signal.aborted) release();
+        else signal.addEventListener('abort', release, { once: true });
+      });
+    }
     await approval.waiters.wait(
       requestId,
       options.expiresAt,
@@ -8923,6 +9087,10 @@ export class HostedWorkspaceToolTurn {
       );
     await this.harness.resolveDurableWait();
     const action = authority.action(requestId)!;
+    if (action.state === 'decided' && options.v === 4) {
+      await readHostedQuestionDecision(this.session, action, options);
+      return undefined;
+    }
     if (action.state === 'decided')
       return hostedActionAllowed(action, options.policyRevision)
         ? undefined
@@ -9150,6 +9318,12 @@ export class HostedWorkspaceToolTurn {
   }
 
   async close(): Promise<void> {}
+}
+
+export function hostedReadRangeGuidance(resident: boolean): string {
+  return resident
+    ? ' Request a smaller offset/limit range.'
+    : ' Request a smaller offset/limit range for text, or a smaller pages range for PDFs.';
 }
 
 const HOSTED_GLOB_TRUNCATION_HINT =

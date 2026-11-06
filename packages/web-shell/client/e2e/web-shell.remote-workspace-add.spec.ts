@@ -129,7 +129,7 @@ async function gotoSourceShell(page: Page): Promise<string> {
 }
 
 function addWorkspaceDialog(page: Page) {
-  return page.locator('[data-web-shell-dialog-title="Add Workspace"]');
+  return page.locator('[data-web-shell-dialog-title="Add workspace"]');
 }
 
 async function openFolderBrowser(page: Page): Promise<void> {
@@ -215,7 +215,15 @@ test('Settings adds a verified computer and returns to Connections @smoke', asyn
     .getByRole('button', { name: /^Connections/ })
     .click();
   await page.getByLabel('Daemon address').fill(REMOTE_ORIGIN);
-  await page.getByRole('button', { name: 'Add connection' }).click();
+  await Promise.all([
+    page.waitForURL(
+      (url) =>
+        url.origin === new URL(sourceUrl).origin &&
+        url.pathname === '/settings' &&
+        url.searchParams.get('settings') === 'Connections',
+    ),
+    page.getByRole('button', { name: 'Add connection' }).click(),
+  ]);
 
   // `?fanout=` names the hosts this document may reach; the shell keeps it in
   // the URL so the next load's CSP still covers them, so compare without it.

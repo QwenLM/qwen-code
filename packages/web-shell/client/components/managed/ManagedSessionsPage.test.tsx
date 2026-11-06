@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isShellResultDisplay } from '@qwen-code/sdk/daemon';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import { getManagedClientId } from './managed-session-storage';
+import { webcrypto } from 'node:crypto';
+import { pendingQuestion } from './managed-question.test-fixtures';
 import * as pendingStorage from './managed-pending-storage';
 import { I18nProvider } from '../../i18n';
 import type {
@@ -288,6 +290,7 @@ describe('ManagedSessionsPage', () => {
     await act(async () => root.unmount());
     container.remove();
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   async function render(
@@ -314,6 +317,254 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
   }
+
+  it('opens only the host Session without catalog, creation, cancellation or daemon calls', async () => {
+    provider = { ...provider, canCancel: false };
+    mocks.client.listSessions.mockRejectedValue(new Error('catalog forbidden'));
+    mocks.client.createSession.mockRejectedValue(
+      new Error('creation forbidden'),
+    );
+    await render('s1', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    expect(
+      container.querySelector('[data-testid="messages"]')?.textContent,
+    ).toContain('Persisted answer');
+    expect(mocks.client.getSession).toHaveBeenCalledWith(
+      's1',
+      expect.any(Object),
+    );
+    expect(mocks.client.getTranscript).toHaveBeenCalledWith(
+      's1',
+      expect.any(Object),
+    );
+    expect(mocks.client.subscribeEvents).toHaveBeenCalledWith(
+      's1',
+      expect.any(Object),
+    );
+    expect(container.querySelector('nav')).toBeNull();
+    expect(container.textContent).not.toContain('New session');
+    expect(mocks.editorProps?.disabled).toBe(false);
+    await act(async () => {
+      mocks.editorProps!.onSubmit(
+        'host follow-up',
+        undefined,
+        undefined,
+        () => {},
+      );
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ text: 'host follow-up' }),
+      expect.any(Object),
+    );
+    expect(mocks.client.listSessions).not.toHaveBeenCalled();
+    expect(mocks.client.createSession).not.toHaveBeenCalled();
+    expect(mocks.client.cancel).not.toHaveBeenCalled();
+    expect(mocks.useWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('waits for an explicit host ID and clears the old conversation when it is removed', async () => {
+    const host = { hostSessionOnly: true };
+    await render(undefined, 'en', provider, undefined, true, host);
+    expect(
+      container.querySelector('[data-managed-host-waiting]'),
+    ).not.toBeNull();
+    expect(container.querySelector('form')).toBeNull();
+    expect(mocks.client.getSession).not.toHaveBeenCalled();
+    expect(mocks.client.listSessions).not.toHaveBeenCalled();
+    await render('s1', 'en', provider, undefined, true, host);
+    const streamSignal = mocks.client.subscribeEvents.mock.calls[0][1]
+      .signal as AbortSignal;
+    expect(container.textContent).toContain('Persisted answer');
+    await render(undefined, 'en', provider, undefined, true, host);
+    expect(streamSignal.aborted).toBe(true);
+    expect(container.textContent).not.toContain('Persisted answer');
+    expect(container.querySelector('form')).toBeNull();
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(mocks.client.createSession).not.toHaveBeenCalled();
+    expect(mocks.client.listSessions).not.toHaveBeenCalled();
+  });
+
+  it('tears down the old host scope and ignores its late transcript', async () => {
+    let resolveOld!: (value: ManagedAgentSessionTranscript) => void;
+    mocks.client.getTranscript.mockImplementationOnce(
+      () =>
+        new Promise<ManagedAgentSessionTranscript>((resolve) => {
+          resolveOld = resolve;
+        }),
+    );
+    await render('s1', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    const oldSignal = mocks.client.getSession.mock.calls[0][1]
+      .signal as AbortSignal;
+    const next = { ...provider, storageKey: 'tenant-b:actor-b' };
+    await render('s2', 'en', next, undefined, true, { hostSessionOnly: true });
+    expect(oldSignal.aborted).toBe(true);
+    await act(async () => {
+      resolveOld({ events: [event(1, 'Private old scope')], lastEventId: 1 });
+      await flush();
+    });
+    expect(container.textContent).not.toContain('Private old scope');
+    expect(mocks.editorProps?.composerScopeKey).toContain(
+      'tenant-b:actor-b:s2',
+    );
+    expect(mocks.client.listSessions).not.toHaveBeenCalled();
+    expect(mocks.client.createSession).not.toHaveBeenCalled();
+  });
+
+  it('uses the host capability to keep a single-turn session read-only', async () => {
+    sessionStorage.setItem(
+      `qwen-managed-turn-cancel:${JSON.stringify([provider.storageKey, 's1'])}`,
+      JSON.stringify({
+        sessionId: 's1',
+        turnId: 'p1',
+        idempotencyKey: 'old-cancel',
+      }),
+    );
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        agentId: 'qwen-code',
+        phase: 'runtime_starting',
+        capabilities: { canSend: false, canCancel: true },
+        workspace: { workspaceId: 'host-workspace', cwdRelative: '.' },
+        runtimeReady: false,
+        runtimeState: 'unknown',
+      }),
+    );
+    await render(
+      's1',
+      'en',
+      { ...provider, canCancel: false },
+      undefined,
+      true,
+      { hostSessionOnly: true },
+    );
+    expect(container.textContent).toContain('Persisted answer');
+    expect(mocks.editorProps?.disabled).toBe(true);
+    expect(mocks.editorProps?.isRunning).toBe(false);
+    expect(mocks.editorProps?.onCancel).toBeUndefined();
+    expect(mocks.editorProps?.currentModel).toBe('');
+    expect(mocks.editorProps?.visibleToolbarActions).not.toContain('model');
+    expect(container.textContent).not.toContain('The model is fixed');
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      mocks.editorProps!.onSubmit('blocked', undefined, undefined, () => {});
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    expect(mocks.client.cancel).not.toHaveBeenCalled();
+    expect(mocks.client.queryCancelOperation).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'refreshes a preparing empty worktree session until ready (home: %s) and keeps attachments unavailable during preparation',
+    async (home) => {
+      vi.useFakeTimers();
+      const worktree = {
+        id: 'worktree-a',
+        sessionId: 's1',
+        workspaceId: 'ws-a',
+        state: 'preparing' as const,
+        branch: 'worktree-managed-a',
+        baseCommit: 'a'.repeat(40),
+        cwdRelative: '.qwen-managed-session-worktrees/a',
+        operationId: 'op-a',
+        revision: 1,
+      };
+      let current = summary('s1', {
+        phase: 'created',
+        activeTurnId: undefined,
+        worktree,
+        workspace: {
+          workspaceId: 'ws-a',
+          cwdRelative: worktree.cwdRelative,
+          state: 'changing',
+        },
+        capabilities: {
+          canSend: false,
+          canCancel: false,
+          inputAttachments: true,
+          workspaceTurns: true,
+        },
+      });
+      mocks.client.getSession.mockImplementation(async () => current);
+      mocks.client.getTranscript.mockResolvedValue({
+        events: [],
+        lastEventId: 0,
+      });
+      await render('s1', 'en', provider, home ? null : undefined);
+      expect(container.textContent).toContain('Preparing worktree');
+      if (home) {
+        expect(container.textContent).not.toContain(worktree.branch);
+        expect(container.textContent).not.toContain('Base commit');
+      }
+      expect(mocks.editorProps!.attachmentsEnabled).toBe(false);
+      expect(mocks.editorProps!.fileReferenceActions).toBeUndefined();
+      current = {
+        ...current,
+        worktree: { ...worktree, state: 'ready', revision: 2 },
+        workspace: { ...current.workspace!, state: 'ready' },
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          inputAttachments: true,
+          workspaceTurns: true,
+        },
+      };
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+        await flush();
+      });
+      if (home) {
+        expect(container.querySelector('[data-managed-worktree]')).toBeNull();
+        expect(container.textContent).not.toContain(worktree.branch);
+      } else {
+        expect(container.textContent).toContain('Worktree ready');
+        expect(container.textContent).toContain(worktree.branch);
+      }
+      expect(mocks.editorProps!.attachmentsEnabled).toBe(true);
+      expect(mocks.client.getTranscript).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['blocked', 'failed'] as const)(
+    'keeps %s worktree attention visible in Home without branch details',
+    async (state) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          capabilities: { canSend: false, canCancel: false },
+          worktree: {
+            id: 'worktree-a',
+            sessionId: 's1',
+            workspaceId: 'ws-a',
+            state,
+            branch: 'worktree-managed-a',
+            baseCommit: 'a'.repeat(40),
+            cwdRelative: '.qwen-managed-worktrees/a',
+            operationId: 'operation-a',
+            revision: 1,
+            errorCode: 'worktree_identity_conflict',
+          },
+        }),
+      );
+      await render('s1', 'en', provider, null);
+      const status = container.querySelector(
+        `[data-managed-worktree="${state}"]`,
+      )!;
+      expect(status.textContent).toContain(
+        state === 'blocked'
+          ? 'Worktree needs attention'
+          : 'Worktree preparation failed',
+      );
+      expect(status.textContent).toContain('worktree_identity_conflict');
+      expect(status.textContent).not.toContain('worktree-managed-a');
+      expect(status.textContent).not.toContain('Base commit');
+      expect(mocks.editorProps!.disabled).toBe(true);
+    },
+  );
 
   it('leaves MCP management to Plugins and refreshes the selected composer catalog on return', async () => {
     const query = vi.fn();
@@ -1100,7 +1351,7 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.editorProps?.skills).toEqual(skills);
     expect(mocks.editorProps?.fileReferenceActions).toBeDefined();
     expect(query).toHaveBeenCalledWith(
-      { workspaceId: 'ws', cwdRelative: '.', directory: '.', query: '' },
+      { sessionId: 's1', directory: '.', query: '' },
       expect.objectContaining({ clientId: expect.any(String) }),
     );
   });
@@ -2107,7 +2358,7 @@ describe('ManagedSessionsPage', () => {
       await act(async () =>
         slot
           .querySelector<HTMLButtonElement>(
-            '[aria-label="New task: Project B"]',
+            '[aria-label="New session: Project B"]',
           )!
           .click(),
       );
@@ -3027,6 +3278,71 @@ describe('ManagedSessionsPage', () => {
     ).toBe('null');
   });
 
+  it('shows a question without approval buttons and retains its answers until confirmed', async () => {
+    vi.stubGlobal('crypto', webcrypto);
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      }),
+    );
+    const question = { ...pendingQuestion(), sessionId: 's1' };
+    const respond = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('unconfirmed'))
+      .mockResolvedValue(undefined);
+    const listPending = vi.fn().mockResolvedValue([question]);
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    await act(async () => flush());
+    const card = container.querySelector('[data-testid="managed-approval"]')!;
+    expect(card.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(card.textContent).not.toContain('Yes, allow once');
+    expect(card.textContent).not.toContain('Tool arguments are unavailable');
+    await act(async () => {
+      for (const [index, input] of card
+        .querySelectorAll('textarea')
+        .entries()) {
+        Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )!.set!.call(input, `Custom answer ${index}`);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    });
+    const submitQuestion = () =>
+      card
+        .querySelector('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    await act(async () => {
+      submitQuestion();
+      await flush();
+    });
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+    await act(async () => flush());
+    expect(card.querySelector('textarea')?.value).toBe('Custom answer 0');
+    expect(container.textContent).toContain('Retry the same answers');
+    await act(async () => {
+      submitQuestion();
+      await flush();
+    });
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(2));
+    await act(async () => flush());
+    expect(respond.mock.calls[0]).toEqual(respond.mock.calls[1]);
+    expect(respond.mock.calls[0][1]).toEqual({
+      kind: 'question',
+      answers: [
+        { questionId: 'q1', text: 'Custom answer 0' },
+        { questionId: 'q2', text: 'Custom answer 1' },
+      ],
+    });
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+  });
+
   it.each([
     ['write_file', { file_path: 'notes.md', content: 'approval-write-body' }],
     [
@@ -3148,13 +3464,13 @@ describe('ManagedSessionsPage', () => {
     provider = { ...provider, actions: { listPending, respond } };
     await render('s1');
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
-      'Pending approvals could not be loaded',
+      'Pending requests could not be loaded',
     );
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).toBeNull();
     const retry = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent === 'Retry loading approvals',
+      (button) => button.textContent === 'Retry loading requests',
     );
     expect(retry).toBeDefined();
     await act(async () => {
@@ -3218,7 +3534,7 @@ describe('ManagedSessionsPage', () => {
       container.querySelector('[data-testid="managed-approval"]'),
     ).not.toBeNull();
     const alert = container.querySelector('[role="alert"]')?.textContent ?? '';
-    expect(alert).toContain('Pending approvals could not be refreshed');
+    expect(alert).toContain('Pending requests could not be refreshed');
     expect(alert).not.toContain('could not be loaded');
   });
 
@@ -3297,7 +3613,7 @@ describe('ManagedSessionsPage', () => {
     // The latched refusal got its own re-probe affordance, rendered with no
     // `loadError` in play, so a grant raised while the page is open can stick.
     const again = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent?.includes('Retry loading approvals'),
+      (button) => button.textContent?.includes('Retry loading requests'),
     ) as HTMLButtonElement;
     expect(again).toBeTruthy();
     await act(async () => {
@@ -3777,6 +4093,38 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it('marks the managed home conversation as empty only without messages or failure', async () => {
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
+    await render('s1', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    expect(
+      container
+        .querySelector('[data-managed-home]')
+        ?.getAttribute('data-managed-empty'),
+    ).toBe('true');
+
+    await act(async () => root.unmount());
+    container.remove();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      id === 's1' ? { ...summary(id), failure: 'runtime lost' } : summary(id),
+    );
+    await render('s1', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    expect(
+      container
+        .querySelector('[data-managed-home]')
+        ?.getAttribute('data-managed-empty'),
+    ).toBeNull();
+  });
+
   it('renders Chinese Managed labels and states without English fallback overriding them', async () => {
     await render('s1', 'zh-CN');
     expect(container.querySelector('nav')?.getAttribute('aria-label')).toBe(
@@ -3798,7 +4146,7 @@ describe('ManagedSessionsPage', () => {
     await render();
     await input('Do the work');
     await click('Send');
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    expect(container.textContent).toContain('not confirmed as submitted');
     expect(container.querySelector('textarea')?.disabled).toBe(true);
     await click('Retry the same request');
     const [first, retry] = mocks.client.createSession.mock.calls;
@@ -3811,6 +4159,33 @@ describe('ManagedSessionsPage', () => {
     expect(onSelect).toHaveBeenLastCalledWith('created');
   });
 
+  it('keeps an uncertain create with its original page when viewing another session', async () => {
+    mocks.client.createSession.mockRejectedValueOnce(
+      new TypeError('Network failed'),
+    );
+    await render();
+    await input('CHECK_CREATE');
+    await click('Send');
+    const original = mocks.client.createSession.mock.calls[0];
+
+    await render('s1');
+    expect(container.textContent).not.toContain('not confirmed as submitted');
+    expect(container.textContent).not.toContain('Retry the same request');
+    expect(container.textContent).toContain(
+      'Another conversation has an unconfirmed request',
+    );
+    expect(container.querySelector('textarea')?.disabled).toBe(true);
+    expect(mocks.client.createSession).toHaveBeenCalledTimes(1);
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    await click('Open the original conversation');
+    expect(onSelect).toHaveBeenLastCalledWith(undefined);
+
+    await render();
+    await click('Retry the same request');
+    expect(mocks.client.createSession.mock.calls[1]).toEqual(original);
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+  });
+
   it('discards a permanently failing pending prompt and restores the draft', async () => {
     mocks.client.createSession.mockRejectedValue(
       new TypeError('Network failed'),
@@ -3818,7 +4193,7 @@ describe('ManagedSessionsPage', () => {
     await render();
     await input('Do the work');
     await click('Send');
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    expect(container.textContent).toContain('not confirmed as submitted');
     const textarea = () => container.querySelector('textarea');
     expect(textarea()?.disabled).toBe(true);
     expect(container.querySelectorAll('p[role="alert"]')).toHaveLength(1);
@@ -3833,9 +4208,7 @@ describe('ManagedSessionsPage', () => {
       discard!.click();
       await flush();
     });
-    expect(container.textContent).not.toContain(
-      'request outcome is unconfirmed',
-    );
+    expect(container.textContent).not.toContain('not confirmed as submitted');
     expect(textarea()?.disabled).toBe(false);
     expect(textarea()?.value).toBe('Do the work');
     expect(mocks.client.createSession).toHaveBeenCalledTimes(1);
@@ -3852,9 +4225,7 @@ describe('ManagedSessionsPage', () => {
     await act(async () => root.unmount());
     root = createRoot(container);
     await render();
-    expect(container.textContent).not.toContain(
-      'request outcome is unconfirmed',
-    );
+    expect(container.textContent).not.toContain('not confirmed as submitted');
   });
 
   it('sends the edited draft under a fresh idempotency key after a discard', async () => {
@@ -3864,7 +4235,7 @@ describe('ManagedSessionsPage', () => {
     await render();
     await input('Do the work');
     await click('Send');
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    expect(container.textContent).toContain('not confirmed as submitted');
     const originalKey =
       mocks.client.createSession.mock.calls[0]?.[1].idempotencyKey;
 
@@ -3891,15 +4262,21 @@ describe('ManagedSessionsPage', () => {
     await render('s1');
     await input('For session A only');
     await click('Send');
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    expect(container.textContent).toContain('not confirmed as submitted');
 
     await click('Task s2Completed');
     await render('s2');
-    // The composer is wedged on the other session's pending record: the
-    // explanation stays, but the destructive escape is offered only where
-    // the draft can be restored.
-    expect(container.querySelector('textarea')?.disabled).toBe(true);
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    // The pending belongs to s1: a foreign session only offers a redirect to
+    // the owning conversation, never the retry/discard escape (the draft that
+    // would be restored lives over there).
+    expect(container.textContent).toContain(
+      'Another conversation has an unconfirmed request',
+    );
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (item) => item.textContent === 'Open the original conversation',
+      ),
+    ).toBe(true);
     expect(
       [...container.querySelectorAll('button')].some(
         (item) => item.textContent === 'Discard this request',
@@ -3910,9 +4287,7 @@ describe('ManagedSessionsPage', () => {
     await click('Task s1Completed');
     await render('s1');
     await click('Discard this request');
-    expect(container.textContent).not.toContain(
-      'request outcome is unconfirmed',
-    );
+    expect(container.textContent).not.toContain('not confirmed as submitted');
     expect(container.querySelector('textarea')?.value).toBe(
       'For session A only',
     );
@@ -3931,7 +4306,7 @@ describe('ManagedSessionsPage', () => {
     );
   }
 
-  it('preserves another session draft when retrying a restored pending prompt', async () => {
+  it('preserves another session draft when opening the owner of a restored pending prompt', async () => {
     seedPending({
       idempotencyKey: 'restored-a',
       sessionId: 's1',
@@ -3942,12 +4317,10 @@ describe('ManagedSessionsPage', () => {
     expect(container.querySelector('textarea')?.value).toBe(
       'Saved draft for session B',
     );
-    await click('Retry the same request');
-    expect(mocks.client.submitPrompt).toHaveBeenCalledWith(
-      's1',
-      { text: 'For session A' },
-      expect.objectContaining({ idempotencyKey: 'restored-a' }),
-    );
+    await click('Open the original conversation');
+    // Redirecting only navigates to the owning session; it does not resubmit
+    // from the foreign session, and the foreign draft stays intact.
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
     expect(container.querySelector('textarea')?.value).toBe(
       'Saved draft for session B',
     );
@@ -3955,7 +4328,7 @@ describe('ManagedSessionsPage', () => {
   });
 
   it.each(['  For session A  ', 'A newer different draft'])(
-    'only clears matching accepted storage after restoring a foreign retry: %s',
+    'leaves both drafts untouched when opening the pending owner from a foreign session: %s',
     async (storedDraft) => {
       seedPending({
         idempotencyKey: 'restored-a',
@@ -3976,22 +4349,18 @@ describe('ManagedSessionsPage', () => {
       mocks.restoreEditorDraft.mockReturnValue('Saved draft for session B');
       await render('s2');
 
-      await click('Retry the same request');
+      await click('Open the original conversation');
 
-      expect(localStorage.getItem(ownerKey)).toBe(
-        storedDraft === '  For session A  ' ? null : storedDraft,
-      );
+      // A redirect is not a retry: nothing is submitted and neither draft is
+      // cleared; the owner's draft is only reconciled when it retries there.
+      expect(localStorage.getItem(ownerKey)).toBe(storedDraft);
       expect(localStorage.getItem(foreignKey)).toBe(
         'Saved draft for session B',
       );
       expect(container.querySelector('textarea')?.value).toBe(
         'Saved draft for session B',
       );
-      expect(mocks.client.submitPrompt).toHaveBeenCalledWith(
-        's1',
-        { text: 'For session A' },
-        expect.objectContaining({ idempotencyKey: 'restored-a' }),
-      );
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
       expect(onSelect).toHaveBeenLastCalledWith('s1');
     },
   );
@@ -4028,7 +4397,7 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.clearEditor).toHaveBeenCalledOnce();
   });
 
-  it('preserves the visible foreign draft when retrying a live retained commit', async () => {
+  it('preserves the visible foreign draft when opening the owner of a live retained commit', async () => {
     mocks.client.submitPrompt.mockRejectedValueOnce(
       new TypeError('Lost response'),
     );
@@ -4038,17 +4407,16 @@ describe('ManagedSessionsPage', () => {
     mocks.restoreEditorDraft.mockReturnValue('Saved draft for session B');
     await render('s2');
 
-    await click('Retry the same request');
+    await click('Open the original conversation');
 
-    expect(mocks.client.submitPrompt).toHaveBeenCalledTimes(2);
-    expect(mocks.client.submitPrompt.mock.calls[1]).toEqual(
-      mocks.client.submitPrompt.mock.calls[0],
-    );
+    // Only the original send was submitted; the redirect does not retry, and
+    // the foreign draft stays visible.
+    expect(mocks.client.submitPrompt).toHaveBeenCalledTimes(1);
     expect(container.querySelector('textarea')?.value).toBe(
       'Saved draft for session B',
     );
     expect(onSelect).toHaveBeenLastCalledWith('s1');
-    expect(mocks.commitAccepted).toHaveBeenCalledTimes(1);
+    expect(mocks.commitAccepted).not.toHaveBeenCalled();
   });
 
   it('clears the owning editor after a restored pending prompt is accepted', async () => {
@@ -4083,7 +4451,7 @@ describe('ManagedSessionsPage', () => {
     await render();
     await input('Keep this prompt');
     await click('Send');
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    expect(container.textContent).toContain('not confirmed as submitted');
 
     // A real remount empties the text state: the composer is fed from the
     // persisted pending record alone.
@@ -4096,9 +4464,7 @@ describe('ManagedSessionsPage', () => {
     // The restore is the only way the draft survives the discard now.
     expect(container.querySelector('textarea')?.value).toBe('Keep this prompt');
     expect(container.querySelector('textarea')?.disabled).toBe(false);
-    expect(container.textContent).not.toContain(
-      'request outcome is unconfirmed',
-    );
+    expect(container.textContent).not.toContain('not confirmed as submitted');
   });
 
   it('moves focus to the session list when a discard has no composer to focus', async () => {
@@ -4115,13 +4481,11 @@ describe('ManagedSessionsPage', () => {
     await render(undefined, 'en', bindingProvider);
     // The workspace-binding creator replaces the composer form entirely.
     expect(container.querySelector('textarea')).toBeNull();
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    expect(container.textContent).toContain('not confirmed as submitted');
 
     await focusAndClickDiscard();
 
-    expect(container.textContent).not.toContain(
-      'request outcome is unconfirmed',
-    );
+    expect(container.textContent).not.toContain('not confirmed as submitted');
     expect(document.activeElement).not.toBe(document.body);
     expect(document.activeElement).toBe(container.querySelector('nav'));
   });
@@ -4137,7 +4501,7 @@ describe('ManagedSessionsPage', () => {
     });
     await render('s1');
     expect(container.querySelector('textarea')?.disabled).toBe(true);
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    expect(container.textContent).toContain('not confirmed as submitted');
 
     await focusAndClickDiscard();
 
@@ -4291,9 +4655,7 @@ describe('ManagedSessionsPage', () => {
 
     // The unconfirmed row unmounted with the click; the persistent visually
     // hidden status region still announces the outcome.
-    expect(container.textContent).not.toContain(
-      'request outcome is unconfirmed',
-    );
+    expect(container.textContent).not.toContain('not confirmed as submitted');
     expect(
       Array.from(
         container.querySelectorAll('[role="status"], [aria-live]'),
@@ -4715,13 +5077,51 @@ describe('ManagedSessionsPage', () => {
         new Error('History unavailable'),
       );
       await render('s1', 'en', provider, undefined, interactive);
-      expect(
-        [...container.querySelectorAll('[role="alert"]')].map(
-          (element) => element.textContent,
-        ),
-      ).toEqual(['History unavailable']);
+      // The alert wraps both the sentence and its retry button, so its
+      // textContent carries the button label too; assert the sentence and the
+      // single-alert property separately rather than the concatenation.
+      const alerts = [...container.querySelectorAll('[role="alert"]')];
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]!.textContent).toContain(
+        'Managed sessions could not be loaded.',
+      );
+      expect(alerts[0]!.textContent).not.toContain('History unavailable');
+      expect(container.textContent).not.toContain('History unavailable');
+      expect(container.querySelector('nav [role="alert"]')).not.toBeNull();
     },
   );
+
+  it('keeps an HTTP list failure retryable and does not present it as an empty list', async () => {
+    mocks.client.listSessions
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(
+          500,
+          'internal',
+          'Managed Agent request failed (500)',
+          'request-list-500',
+        ),
+      )
+      .mockResolvedValueOnce({ sessions: [] });
+
+    await render(undefined);
+
+    const alert = container.querySelector<HTMLElement>('nav [role="alert"]');
+    expect(alert?.textContent).toContain(
+      'Managed sessions could not be loaded.',
+    );
+    expect(alert?.textContent).toContain(
+      'HTTP 500 · internal · Request ID: request-list-500',
+    );
+    expect(container.textContent).not.toContain('No managed tasks yet.');
+
+    await click('Retry loading sessions');
+
+    expect(mocks.client.listSessions).toHaveBeenCalledTimes(2);
+    expect(container.textContent).not.toContain(
+      'Managed sessions could not be loaded.',
+    );
+    expect(container.textContent).toContain('No managed tasks yet.');
+  });
 
   it.each(['History unavailable', 'Not found'])(
     'keeps distinct detail errors alongside an inactive navigation alert: %s',
@@ -4733,11 +5133,16 @@ describe('ManagedSessionsPage', () => {
         new JavaManagedAgentHttpError(404, 'session_not_found', detailError),
       );
       await render('s1', 'en', provider, undefined, false);
-      expect(
-        [...container.querySelectorAll('[role="alert"]')]
-          .map((element) => element.textContent)
-          .sort(),
-      ).toEqual([...new Set(['History unavailable', detailError])].sort());
+      // The list-failure alert also wraps its retry button, so match the
+      // sentences it must carry instead of the concatenated textContent.
+      const alertTexts = [...container.querySelectorAll('[role="alert"]')].map(
+        (element) => element.textContent ?? '',
+      );
+      expect(alertTexts).toHaveLength(2);
+      expect(alertTexts.join('\n')).toContain(
+        'Managed sessions could not be loaded.',
+      );
+      expect(alertTexts.join('\n')).toContain(detailError);
     },
   );
 

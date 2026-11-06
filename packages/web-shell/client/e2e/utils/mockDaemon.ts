@@ -1252,7 +1252,7 @@ async function handleDaemonRoute(
   resolvePeer?: (origin: string) => DaemonPeer | undefined,
 ): Promise<void> {
   if (method === 'GET' && path === '/health') {
-    await json(route, { ok: true, healthy: true });
+    await json(route, { status: 'ok' });
     return;
   }
   if (method === 'GET' && path === '/capabilities') {
@@ -2428,6 +2428,46 @@ async function handleDaemonRoute(
       const configId = readStringField(body, 'configId');
       const value = readStringField(body, 'value');
       const persist = getRecordValue(body, 'persist');
+      if (configId === 'workflow_mode') {
+        const currentConfigOptions = Array.isArray(scenario.state.configOptions)
+          ? scenario.state.configOptions
+          : [];
+        const workflow = currentConfigOptions.find(
+          (option) => isRecord(option) && option['id'] === configId,
+        );
+        const metadata = getRecordValue(
+          getRecordValue(workflow, '_meta'),
+          'qwen.workflowMode',
+        );
+        if (
+          (value !== 'on' && value !== 'off') ||
+          (isRecord(body) && 'persist' in body) ||
+          !isRecord(metadata) ||
+          typeof metadata['available'] !== 'boolean' ||
+          (value === 'on' && !metadata['available'])
+        ) {
+          await badRequest(route, 'Unsupported workflow mode request.');
+          return;
+        }
+        const configOptions = currentConfigOptions.map((option) =>
+          isRecord(option) && option['id'] === configId
+            ? {
+                ...option,
+                currentValue: value,
+                _meta: {
+                  ...(isRecord(option['_meta']) ? option['_meta'] : {}),
+                  'qwen.workflowMode': {
+                    ...metadata,
+                    effective: value === 'on' && metadata['available'],
+                  },
+                },
+              }
+            : option,
+        );
+        scenario.state.configOptions = configOptions;
+        await json(route, { configOptions, persisted: true });
+        return;
+      }
       if (
         configId !== 'reasoning_effort' ||
         !value ||

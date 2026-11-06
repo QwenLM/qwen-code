@@ -1326,6 +1326,13 @@ function hasUnmodeledTextMeta(meta: unknown): boolean {
       if (typeof value !== 'string') return true;
       continue;
     }
+    if (key === 'agent') {
+      // Identity stamp SubAgentTracker pairs with the same two keys. Merging
+      // never reads it, so an unenrolled key would split every streamed
+      // subagent delta in the live view only.
+      if (typeof value !== 'object' || value === null) return true;
+      continue;
+    }
     if (key === 'qwenTranscript') {
       if (typeof value !== 'object' || value === null) return true;
       const transcript = value as Record<string, unknown>;

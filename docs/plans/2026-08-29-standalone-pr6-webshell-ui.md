@@ -613,3 +613,14 @@ plus repair-and-reload transition, because the Repair UI depends on it; any
 other typed gap discovered in the provider surface is raised as a
 follow-up. It does not change daemon lifecycle behavior, the SDK contract,
 or the PR5 provider switching semantics.
+
+**Superseded in part by #13679 (2026-10):** `SessionOverviewPanel` now does
+list standalone (no-workspace) conversations, merged from the standalone
+client catalog behind the `standalone_sessions_v1` capability, and its
+rename, export, archive, and delete actions route standalone rows to the
+standalone client routes — a workspace-qualified call for them would land on
+the daemon's internal Conversations workspace and skip the standalone
+lifecycle (working directory, deletion journal, live-runtime guard). The
+host-locked shell (`workspaceCwd` set) keeps the standalone catalog hidden,
+matching the sidebar's scope gate. `ResumeDialog` and Split View remain
+workspace-scoped.

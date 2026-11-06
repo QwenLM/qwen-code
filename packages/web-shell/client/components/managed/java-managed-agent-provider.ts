@@ -115,6 +115,7 @@ export function createJavaManagedAgentProvider(
       planMode?: boolean;
       skills?: import('./managed-agent-provider').ManagedSessionSkill[];
       extensionPins?: import('./managed-extension-types').ManagedExtensionPin[];
+      worktree?: { baseRef?: string };
     },
     command: ManagedAgentCommandOptions,
   ) {
@@ -126,6 +127,9 @@ export function createJavaManagedAgentProvider(
         requestId: managedRequestId(),
         idempotencyKey: command.idempotencyKey,
         agentId: request.agentId,
+        ...(request.worktree === undefined
+          ? {}
+          : { worktree: request.worktree }),
         ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
         ...(request.skills?.length ? { skills: request.skills } : {}),
         ...(request.extensionPins === undefined
@@ -209,6 +213,7 @@ export function createJavaManagedAgentProvider(
         { sessionId, cursor: request.cursor, limit: 100 },
         request.signal,
       ),
+    exportConsistency: 'live',
     storageKey: storageKey(options),
     workspaceFiles: {
       query: (request, command) =>
@@ -649,7 +654,10 @@ export function createJavaManagedAgentProvider(
           ).values(),
         ];
       },
-      async respond(action, optionId, command) {
+      async respond(action, response, command) {
+        if ((action.kind === 'question') !== (typeof response !== 'string')) {
+          throw new Error('Action response kind does not match the request');
+        }
         const accepted = await client.respondAction(
           {
             requestId: managedRequestId(),
@@ -657,10 +665,11 @@ export function createJavaManagedAgentProvider(
             sessionId: action.sessionId,
             actionId: action.actionId,
             response: {
-              kind: 'permission',
               inputRevision: action.inputRevision,
               policyRevision: action.policyRevision,
-              optionId,
+              ...(typeof response === 'string'
+                ? { kind: 'permission' as const, optionId: response }
+                : response),
             },
           },
           command.signal,
@@ -802,6 +811,8 @@ export function createJavaManagedAgentProvider(
                 approvalMode,
                 planMode,
                 skills,
+                extensionPins,
+                worktree,
               },
               command,
             ) =>
@@ -814,10 +825,33 @@ export function createJavaManagedAgentProvider(
                   approvalMode,
                   planMode,
                   skills,
+                  extensionPins,
+                  worktree,
                 },
                 command,
               ),
             createSession: createWorkspaceSession,
+          },
+          sessionWorktrees: {
+            options: (request, options) =>
+              client.worktreeOptions(request, options.signal),
+            list: (workspaceId, options) =>
+              client.listSessionWorktrees(workspaceId, options.signal),
+            inspect: (workspaceId, worktreeId, options) =>
+              client.inspectSessionWorktree(
+                workspaceId,
+                worktreeId,
+                options.signal,
+              ),
+            cleanup: (workspaceId, worktreeId, options) =>
+              client.cleanupSessionWorktree(
+                {
+                  workspaceId,
+                  worktreeId,
+                  idempotencyKey: options.idempotencyKey,
+                },
+                options.signal,
+              ),
           },
         }
       : {}),
@@ -850,6 +884,12 @@ export function createJavaManagedAgentProvider(
         },
         request.signal,
       );
+      if (
+        !Number.isSafeInteger(transcript.coveredSequence) ||
+        transcript.coveredSequence < 0
+      ) {
+        throw new Error('Invalid message transcript coverage.');
+      }
       const itemEvents = transcript.items.flatMap(projectJavaAgentItem);
       const tailEvents = transcript.events.flatMap((event) => {
         const projected = projectJavaAgentEvent(event);
@@ -860,7 +900,8 @@ export function createJavaManagedAgentProvider(
           (left, right) => left.id - right.id,
         ),
         olderCursor: transcript.olderCursor ?? undefined,
-        lastEventId: transcript.lastSequence,
+        lastEventId: transcript.coveredSequence,
+        history: 'items',
       };
     },
     async createSession(request, command) {
@@ -1004,6 +1045,7 @@ function toSessionSummary(
     ...(session.recovery ? { recovery: session.recovery } : {}),
     title: session.title || session.sessionId,
     workspace: session.workspace,
+    ...(session.worktree ? { worktree: session.worktree } : {}),
     createdAt: session.createdAt,
     admittedAt: session.activeTurn?.submittedAt ?? session.createdAt,
     updatedAt: session.updatedAt,
@@ -1140,7 +1182,7 @@ function requireContextCompressionOperation(
 }
 
 function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
-  if (action.kind !== 'permission' || action.state !== 'requested') return [];
+  if (action.state !== 'requested') return [];
   return [
     {
       actionId: action.actionId,
@@ -1151,8 +1193,14 @@ function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
       inputRevision: action.inputRevision,
       policyRevision: action.policyRevision,
       expiresAt: action.expiresAt,
-      options: action.options.map(({ id, label }) => ({ id, label })),
-      ...(action.inputPreview ? { inputPreview: action.inputPreview } : {}),
+      ...(action.kind === 'question'
+        ? { kind: 'question' as const, questions: action.questions }
+        : {
+            options: action.options.map(({ id, label }) => ({ id, label })),
+            ...(action.inputPreview
+              ? { inputPreview: action.inputPreview }
+              : {}),
+          }),
     },
   ];
 }

@@ -88,7 +88,9 @@ const mocks = vi.hoisted(() => {
           setText: (text: string) => void;
           submitDraft?: (text: string) => Promise<void>;
           invalidateImportedInput?: () => void;
+          restoreSubmission?: (submission: { text: string }) => void;
         } | null;
+        returned?: { text: string };
       };
     } | null,
     seedPromptCount: null as ((count: number) => void) | null,
@@ -770,6 +772,33 @@ describe('startOpenTuiUI fallback contract', () => {
     });
   });
 
+  it('hands a prompt the live turn returns to the composer, or keeps it until one mounts', async () => {
+    await withEntryApp(() => {
+      const handle = mocks.state.appProps!.composerHandle!;
+      const onPromptReturned = (
+        mocks.state.liveOptions as {
+          onPromptReturned: (submission: { text: string }) => void;
+        }
+      ).onPromptReturned;
+      handle.current = null;
+      onPromptReturned({ text: 'held' });
+      expect(handle.returned).toEqual({ text: 'held' });
+
+      handle.returned = undefined;
+      const restoreSubmission = vi.fn();
+      handle.current = {
+        getText: () => '',
+        setText: vi.fn(),
+        restoreSubmission,
+      };
+      onPromptReturned({ text: 'dropped' });
+      expect(restoreSubmission).toHaveBeenCalledExactlyOnceWith({
+        text: 'dropped',
+      });
+      expect(handle.returned).toBeUndefined();
+    });
+  });
+
   it('flushes the assistant synchronously before renderer unmount and writer shutdown', async () => {
     await startOpenTuiUI(
       buildConfig(),
@@ -791,6 +820,7 @@ describe('startOpenTuiUI fallback contract', () => {
   });
 
   it('reads live composer text for Ctrl+D and only arms exit after it becomes empty', async () => {
+    const config = buildConfig();
     await withEntryApp(() => {
       let text = 'draft';
       const handle = mocks.state.appProps?.composerHandle;
@@ -813,31 +843,60 @@ describe('startOpenTuiUI fallback contract', () => {
       press();
       expect(exitSession).not.toHaveBeenCalled();
       press();
-      expect(exitSession).toHaveBeenCalledTimes(1);
-    });
+      expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
+    }, config);
   });
 
-  it.each(['stream-c', 'confirmation-d'] as const)(
-    'arms before cleanup and exits on the second key: %s',
+  it.each(['c', 'd'] as const)(
+    'exits idle keyboard confirmation with code 0: %s',
+    async (name) => {
+      const config = buildConfig();
+      await withEntryApp(() => {
+        act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
+        expect(exitSession).not.toHaveBeenCalled();
+        expect(mocks.state.interrupt).not.toHaveBeenCalled();
+        act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
+        expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
+      }, config);
+    },
+  );
+
+  it.each([
+    'stream-c',
+    'stream-d',
+    'confirmation-c',
+    'confirmation-d',
+  ] as const)(
+    'preserves cancellation before confirmed graceful exit: %s',
     async (mode) => {
+      const config = buildConfig();
       const confirm = vi.fn(async () => {});
       mocks.state.streaming = true;
-      if (mode === 'confirmation-d')
+      const parked = mode.startsWith('confirmation');
+      if (parked)
         mocks.state.waitingCalls = [
           { callId: 'parked', confirmationDetails: { onConfirm: confirm } },
         ];
-      await withEntryApp(() => {
-        const name = mode === 'stream-c' ? 'c' : 'd';
+      await withEntryApp((rerender) => {
+        const name = mode.endsWith('c') ? 'c' : 'd';
         act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
         expect(exitSession).not.toHaveBeenCalled();
-        expect(confirm).not.toHaveBeenCalled();
-        expect(mocks.state.interrupt).toHaveBeenCalledTimes(
-          mode === 'stream-c' ? 1 : 0,
+        expect(confirm).toHaveBeenCalledTimes(
+          mode === 'confirmation-c' ? 1 : 0,
         );
+        expect(mocks.state.interrupt).toHaveBeenCalledTimes(parked ? 0 : 1);
+        if (mode === 'stream-d') {
+          mocks.state.streaming = false;
+          act(rerender);
+          act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
+          expect(exitSession).not.toHaveBeenCalled();
+        }
         act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
-        expect(exitSession).toHaveBeenCalledTimes(1);
-        expect(confirm).not.toHaveBeenCalled();
-      });
+        expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
+        expect(confirm).toHaveBeenCalledTimes(
+          mode === 'confirmation-c' ? 1 : 0,
+        );
+      }, config);
     },
   );
 

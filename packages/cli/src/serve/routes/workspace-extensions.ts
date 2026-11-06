@@ -27,6 +27,7 @@ import {
   qualifySkillName,
   validateSkillName,
 } from '@qwen-code/qwen-code-core';
+import { isNpmPackage } from '@qwen-code/qwen-code-core/extension/npm.js';
 import express, {
   type Application,
   type Request,
@@ -1312,7 +1313,8 @@ export function registerWorkspaceExtensionRoutes(
             return;
           }
         }
-        const npmSource = sourceValue.startsWith('@');
+        const npmSource =
+          sourceValue.startsWith('@') || isNpmPackage(sourceValue);
         const remoteSource =
           npmSource ||
           sourceValue.startsWith('https://') ||

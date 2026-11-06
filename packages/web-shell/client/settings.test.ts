@@ -176,6 +176,7 @@ describe('settings presentation aliases', () => {
       'builtin:live-setup',
       'builtin:local-control',
       'builtin:connections',
+      'builtin:archived-sessions',
       'builtin:model-management',
     ]) {
       expect(WEB_SHELL_SETTING_ITEM_IDS).toContain(id);
