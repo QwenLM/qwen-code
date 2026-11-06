@@ -17,7 +17,7 @@ const flow = vi.hoisted(() => ({
     user_code: 'BCDF-GHJK',
     verification_uri: 'https://chat.qwen.ai/authorize',
     verification_uri_complete:
-      'https://chat.qwen.ai/authorize?user_code=BCDF-GHJK&client=qwen-code',
+      'https://chat.qwen.ai/authorize?user_code=BCDF-GHJK&client=cli&entry=qwen_code&paywallScene=cli',
     expires_in: 600,
     interval: 5,
     expiresAt: Date.now() + 600_000,
@@ -51,7 +51,7 @@ it('shows the real authorization link and cancels without signing out', async ()
     <SubscriptionDialog onBack={onBack} onSwitchProvider={vi.fn()} />,
   );
   try {
-    expect(ui.lastFrame()).toContain('client=qwen-code');
+    expect(ui.lastFrame()).toContain('client=cli');
     expect(ui.lastFrame()).not.toContain('LOCAL-MOCK');
     await settle(100);
     ui.stdin.write('\u001b');
@@ -228,14 +228,14 @@ it('keeps a first membership query error visible and retries only the query', as
 
 it('retries activation after failure without leaving the dialog', async () => {
   flow.state = { status: 'ready', plan: 'Pro' };
-  flow.connectionError =
-    'Could not connect Qwen Subscription. Please try again.';
+  flow.connectionError = '';
   const ui = renderWithProviders(
     <SubscriptionDialog onBack={vi.fn()} onSwitchProvider={vi.fn()} />,
   );
   try {
     expect(ui.lastFrame()).toContain('Retry');
     expect(ui.lastFrame()).not.toContain('› Connect');
+    expect(ui.lastFrame()).not.toContain('Loading models from provider');
     await settle(100);
     ui.stdin.write('\u001b[13u');
     await vi.waitFor(() => expect(flow.connect).toHaveBeenCalledOnce());
