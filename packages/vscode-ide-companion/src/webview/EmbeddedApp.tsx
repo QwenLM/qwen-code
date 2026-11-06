@@ -440,7 +440,11 @@ export function EmbeddedApp() {
   const daemonClient = useMemo(
     () =>
       daemonBaseUrl
-        ? new DaemonClient({ baseUrl: daemonBaseUrl, token: daemonToken })
+        ? new DaemonClient({
+            baseUrl: daemonBaseUrl,
+            token: daemonToken,
+            subscriptionPaywallScene: 'plugin',
+          })
         : null,
     [daemonBaseUrl, daemonToken],
   );
