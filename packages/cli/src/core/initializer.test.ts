@@ -21,6 +21,7 @@ vi.mock('./theme.js', () => ({
 
 vi.mock('../i18n/index.js', () => ({
   initializeI18n: (...args: unknown[]) => mockInitializeI18n(...args),
+  t: (message: string) => message,
   resolveLanguageSetting: (settingsLang?: string) =>
     process.env['QWEN_CODE_LANG'] || settingsLang || 'auto',
 }));
@@ -45,6 +46,8 @@ describe('initializeApp', () => {
     getModelsConfig: ReturnType<typeof vi.fn>;
     getIdeMode: ReturnType<typeof vi.fn>;
     getMemoryFileCount: ReturnType<typeof vi.fn>;
+    getAuthType: ReturnType<typeof vi.fn>;
+    getModel: ReturnType<typeof vi.fn>;
   };
   let mockSettings: {
     merged: Record<string, unknown>;
@@ -61,6 +64,8 @@ describe('initializeApp', () => {
       }),
       getIdeMode: vi.fn().mockReturnValue(false),
       getMemoryFileCount: vi.fn().mockReturnValue(0),
+      getAuthType: vi.fn(),
+      getModel: vi.fn().mockReturnValue('saved-model'),
     };
 
     mockSettings = {
@@ -112,6 +117,28 @@ describe('initializeApp', () => {
     // initializeApp does not clear the selected auth type on failure
     expect(mockSettings.setValue).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [null, 'Run /auth to sign in again'],
+    [
+      'The selected model, saved-model, is no longer available. Run /model to choose another model.',
+      'Run /model to choose another model',
+    ],
+  ])(
+    'uses a startup notice for a configured subscription (%s)',
+    async (error, hint) => {
+      mockConfig
+        .getModelsConfig()
+        .getCurrentAuthType.mockReturnValue('qwen-subscription');
+      mockPerformInitialAuth.mockResolvedValue(error);
+      const result = await initializeApp(
+        mockConfig as never,
+        mockSettings as never,
+      );
+      expect(result.authNotice).toContain(hint);
+      expect(result.authError).toBe(error);
+    },
+  );
 
   it('should return themeError when theme validation fails', async () => {
     mockValidateTheme.mockReturnValue('Theme not found');

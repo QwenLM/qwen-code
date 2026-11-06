@@ -13,11 +13,14 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { type LoadedSettings } from '../config/settings.js';
 import { performInitialAuth } from './auth.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { subscriptionModelUnavailable } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { validateTheme } from './theme.js';
-import { initializeI18n, resolveLanguageSetting } from '../i18n/index.js';
+import { initializeI18n, resolveLanguageSetting, t } from '../i18n/index.js';
 
 export interface InitializationResult {
   authError: string | null;
+  authNotice?: string;
   themeError: string | null;
   shouldOpenAuthDialog: boolean;
   memoryFileCount: number;
@@ -68,6 +71,16 @@ export async function initializeApp(
   // over settings.security.auth.selectedType
   const authType = config.getModelsConfig().getCurrentAuthType();
   const authError = await performInitialAuth(config, authType);
+  const authNotice =
+    authType === AuthType.QWEN_SUBSCRIPTION && !config.getAuthType()
+      ? authError?.includes(subscriptionModelUnavailable(config.getModel()))
+        ? authError
+        : authError === null
+          ? t(
+              'Your login credentials are no longer valid. Run /auth to sign in again.',
+            )
+          : undefined
+      : undefined;
 
   const themeError = validateTheme(settings);
 
@@ -80,6 +93,7 @@ export async function initializeApp(
 
   return {
     authError,
+    ...(authNotice ? { authNotice } : {}),
     themeError,
     shouldOpenAuthDialog,
     memoryFileCount: config.getMemoryFileCount(),
