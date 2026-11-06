@@ -742,6 +742,41 @@ describe('createRuntimeContentGeneratorView modalities source', () => {
       sessionSources.modalities,
     );
   });
+
+  it('does not hand the session’s source to a model switch within one auth type', async () => {
+    // `modelId === undefined` with the *same* auth type keeps the session's
+    // map; a provider switch under it must not, since the session's
+    // `modalities` value was resolved for the other provider's entry.
+    const config = configWithProviders([{ id: 'agent-model' }]);
+    const view = await createRuntimeContentGeneratorView(
+      config,
+      config,
+      undefined,
+      { authType: 'anthropic' },
+    );
+
+    expect(view.configSources?.['modalities']?.['kind']).not.toBe('settings');
+  });
+
+  it('falls back the same-provider route to the session’s source, or computed', async () => {
+    // No registry entry and no provider switch: the builder kept the parent's
+    // settings-declared modalities, so the session's source describes it.
+    const config = {
+      ...configWithProviders([]),
+      getAuthType: () => 'openai',
+      getModelsConfig: () => ({ getResolvedModel: () => undefined }),
+    } as unknown as Config;
+    const view = await createRuntimeContentGeneratorView(
+      config,
+      config,
+      'unregistered-model',
+      { authType: 'openai' },
+    );
+
+    expect(view.configSources?.['modalities']).toEqual(
+      sessionSources.modalities,
+    );
+  });
 });
 
 describe('resolveCredentialField', () => {

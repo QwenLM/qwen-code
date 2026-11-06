@@ -22,7 +22,10 @@ export function unsupportedModalityReason(
 ): string {
   const opening = `Model '${model}' does not support ${modality} input`;
   if (sourceKind === 'computed') {
-    return `${opening}: its input modalities were inferred from the model name. Declare "generationConfig": { "modalities": { "${modality}": true } } on this provider entry to enable it.`;
+    // `computed` is also what an env-only setup and a built-in model produce,
+    // where there is no provider entry to edit; name both layers instead of
+    // sending every operator to a key their configuration may not have.
+    return `${opening}: its input modalities were inferred from the model name. Declare "generationConfig": { "modalities": { "${modality}": true } } on its modelProviders entry, or "model.generationConfig.modalities" in settings, to enable it.`;
   }
   if (sourceKind === 'settings') {
     return `${opening}: the "model.generationConfig.modalities" setting is set without ${modality}. Check it and re-select the model with /model.`;

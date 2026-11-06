@@ -27,7 +27,8 @@ import {
   AUTH_ENV_MAPPINGS,
   MODEL_GENERATION_CONFIG_FIELDS,
 } from './constants.js';
-import { resolveModelProtocol } from './modelRegistry.js';
+import { tryResolveModelProtocol } from './modelRegistry.js';
+import type { ProviderProtocolConfig } from './types.js';
 import type { ModelConfig, ResolvedModelConfig } from './types.js';
 import type {
   ContentGeneratorConfigSource,
@@ -230,7 +231,11 @@ export function resolveAgentModalitiesSource(
 ): ContentGeneratorConfigSource {
   const providers = base.getModelProvidersConfig?.();
   if (resolvedModel && providers) {
-    const declared = findProviderEntry(providers, resolvedModel);
+    const declared = findProviderEntry(
+      providers,
+      resolvedModel,
+      base.getModelsConfig?.()?.getProviderProtocolConfig?.(),
+    );
     if (declared?.generationConfig?.modalities !== undefined) {
       return {
         kind: 'modelProviders',
@@ -256,6 +261,7 @@ const COMPUTED: ContentGeneratorConfigSource = { kind: 'computed' };
 function findProviderEntry(
   providers: Record<string, ModelConfig[]>,
   resolvedModel: ResolvedModelConfig,
+  protocolMap?: ProviderProtocolConfig,
 ): ModelConfig | undefined {
   for (const [providerId, entries] of Object.entries(providers)) {
     if (!Array.isArray(entries)) continue;
@@ -265,10 +271,13 @@ function findProviderEntry(
         (candidate.baseUrl ?? undefined) === resolvedModel.registryBaseUrl,
     );
     if (!entry) continue;
-    // A provider that maps to no protocol still owns the entry; the agent's
-    // resolved authType is what that mapping produced.
+    // The registry resolves this entry's protocol with the user's map, so a
+    // custom provider id routed through `providerProtocol` must be matched the
+    // same way. The lenient resolver keeps an invalid entry from aborting view
+    // creation — the registry already rejected it at startup.
     const protocol =
-      resolveModelProtocol(providerId, entry) ?? resolvedModel.authType;
+      tryResolveModelProtocol(providerId, entry, protocolMap) ??
+      resolvedModel.authType;
     if (protocol === resolvedModel.authType) return entry;
   }
   return undefined;
