@@ -9,7 +9,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Part } from '@google/genai';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   openManagedSession,
   type ManagedSession,
@@ -1209,6 +1209,526 @@ it.each([
   'uses only the original Shell publication after Broker %s',
   (mode) => shellReceiptScenario(mode),
 );
+
+describe('Shell publication grant renewal', () => {
+  it.each([
+    'direct',
+    'recovered',
+    'not_started',
+    'in-flight',
+    'timer-failure',
+    'rejection-before-settlement',
+    'stale-and-live',
+  ] as const)(
+    'renews only live grants across %s and a delayed receipt',
+    async (mode) => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const shellCalls = calls.map((call, index) => ({
+        ...call,
+        name: 'run_shell_command',
+        args: { command: `printf ${index}` },
+      }));
+      const manifest = await session.resources.publish(
+        'managed-tool-result-manifest',
+        Buffer.from('{}'),
+      );
+      const envelope = {
+        executionStatus: 'success' as const,
+        responseParts: [{ text: 'done' }],
+        capture: {
+          manifest,
+          captureStatus: 'complete' as const,
+          captureReason: null,
+          previewTruncated: false,
+          deliveryStatus: 'pending' as const,
+        },
+      };
+      const firstResult =
+        mode === 'not_started'
+          ? {
+              executionStatus: 'not_started' as const,
+              responseParts: [],
+              capture: null,
+              error: { message: 'Command was not dispatched.' },
+            }
+          : envelope;
+      let startExecution!: () => void;
+      const executionStarted = new Promise<void>((resolve) => {
+        startExecution = resolve;
+      });
+      let settleExecution!: () => void;
+      const executionGate = new Promise<void>((resolve) => {
+        settleExecution = resolve;
+      });
+      let startReceipt!: () => void;
+      const receiptStarted = new Promise<void>((resolve) => {
+        startReceipt = resolve;
+      });
+      let commitReceipt!: () => void;
+      const receiptGate = new Promise<void>((resolve) => {
+        commitReceipt = resolve;
+      });
+      let delayRenewal = false;
+      let failRenewal = false;
+      let finishRenewal!: () => void;
+      const renewalGate = new Promise<void>((resolve) => {
+        finishRenewal = resolve;
+      });
+      let delayQueuedRenewal = false;
+      let startQueuedRenewal!: () => void;
+      const queuedRenewalStarted = new Promise<void>((resolve) => {
+        startQueuedRenewal = resolve;
+      });
+      let finishQueuedRenewal!: () => void;
+      const queuedRenewalGate = new Promise<void>((resolve) => {
+        finishQueuedRenewal = resolve;
+      });
+      const bindings = new Map<
+        string,
+        { publicationId: string; executionCallId: string }
+      >();
+      const settled = new Set<string>();
+      broker.prepareV3.mockImplementation(async () => ({
+        executionCallId: `shell-${broker.prepareV3.mock.calls.length}`,
+        runtimeBindingId: 'binding-1',
+        bindingGeneration: '1',
+      }));
+      broker.executeV3.mockImplementation(
+        async (id, _payload, publicationId) => {
+          if (id === 'shell-1') {
+            if (
+              mode === 'rejection-before-settlement' ||
+              mode === 'stale-and-live'
+            )
+              settled.add(publicationId);
+            startExecution();
+            await executionGate;
+          }
+          settled.add(publicationId);
+          if (id === 'shell-1' && mode === 'recovered')
+            throw new HostedWorkspaceBrokerRejection(
+              409,
+              'runtime_broker_execution_unknown',
+            );
+          return id === 'shell-1' ? firstResult : envelope;
+        },
+      );
+      const request = vi.fn(async (route: string, body: unknown) => {
+        if (route === '/grants') {
+          const grant = body as {
+            operation: string;
+            publicationId: string;
+            binding: { publicationId: string; executionCallId: string };
+          };
+          if (grant.operation === 'reserve')
+            bindings.set(grant.binding.publicationId, grant.binding);
+          if (
+            grant.operation === 'renew' &&
+            bindings.get(grant.publicationId)?.executionCallId === 'shell-1'
+          ) {
+            if (delayRenewal) await renewalGate;
+            if (failRenewal)
+              throw new ManagedSessionStoreHttpError(
+                503,
+                'unavailable',
+                'Store down.',
+              );
+          }
+          if (
+            grant.operation === 'renew' &&
+            delayQueuedRenewal &&
+            bindings.get(grant.publicationId)?.executionCallId === 'shell-2'
+          ) {
+            startQueuedRenewal();
+            await queuedRenewalGate;
+            if (mode === 'stale-and-live')
+              throw new ManagedSessionStoreHttpError(
+                503,
+                'unavailable',
+                'Store down.',
+              );
+          }
+          if (grant.operation === 'renew' && settled.has(grant.publicationId))
+            throw new ManagedSessionStoreHttpError(
+              400,
+              'invalid_request',
+              'Runtime cannot authorize publication',
+            );
+          return {
+            state:
+              grant.operation === 'close_not_started' ? 'NOT_STARTED' : 'OPEN',
+          };
+        }
+        const binding = bindings.get(route.split('/')[2]!);
+        if (route.endsWith('/finished'))
+          return {
+            binding,
+            result:
+              binding?.executionCallId === 'shell-1' ? firstResult : envelope,
+          };
+        if (route.endsWith('/admissions/prepare'))
+          return session.resources.publish(
+            'managed-tool-outcome',
+            Buffer.from(JSON.stringify(body)),
+          );
+        throw new Error('Unexpected publication route ' + route);
+      });
+      const append = session.authority.appendExecutionEvent.bind(
+        session.authority,
+      );
+      vi.spyOn(session.authority, 'appendExecutionEvent').mockImplementation(
+        async (...args) => {
+          if (
+            args[0].operation === 'recordToolResult' &&
+            args[0].commandId === 'shell-1'
+          ) {
+            startReceipt();
+            await receiptGate;
+          }
+          return append(...args);
+        },
+      );
+      turn = new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        harness,
+        'prompt',
+        commit,
+        messageFitsInline,
+        {
+          owner: {
+            owner: async () => ({ writerId: 'worker', writerGeneration: 1 }),
+            request,
+            rememberAdmission: vi.fn(),
+          },
+          captureBytes: 1024 * 1024,
+        },
+      );
+      const execution = turn.execute(
+        shellCalls,
+        shellCalls.map((call) => ({
+          functionCall: { id: call.callId, name: call.name, args: call.args },
+        })),
+        'model',
+        new AbortController().signal,
+      );
+      const executionOutcome = execution.catch((cause: unknown) => cause);
+      const renewalIds = () =>
+        request.mock.calls
+          .filter(
+            ([route, body]) =>
+              route === '/grants' &&
+              (body as { operation: string }).operation === 'renew',
+          )
+          .map(([, body]) => (body as { publicationId: string }).publicationId);
+      try {
+        await executionStarted;
+        const publicationIds = [...bindings.keys()];
+        request.mockClear();
+        delayRenewal = mode === 'in-flight';
+        failRenewal = mode === 'timer-failure';
+        delayQueuedRenewal =
+          mode === 'rejection-before-settlement' || mode === 'stale-and-live';
+        await vi.advanceTimersByTimeAsync(10_000);
+        if (delayQueuedRenewal) await queuedRenewalStarted;
+        expect(renewalIds()).toEqual(
+          delayRenewal ? [publicationIds[0]] : publicationIds,
+        );
+        expect(broker.executeV3).toHaveBeenCalledOnce();
+        if (failRenewal) {
+          expect(stderr).toHaveBeenCalledOnce();
+          expect(stderr).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `Tool publication renewal failed: AggregateError: ${publicationIds[0]}:`,
+            ),
+          );
+          failRenewal = false;
+          stderr.mockClear();
+          request.mockClear();
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(renewalIds()).toEqual(publicationIds);
+        }
+        settleExecution();
+        await receiptStarted;
+        expect(broker.acknowledgeV3).not.toHaveBeenCalled();
+        if (delayRenewal) {
+          finishRenewal();
+          await vi.advanceTimersByTimeAsync(0);
+          expect.soft(renewalIds()).toEqual(publicationIds);
+        }
+        if (delayQueuedRenewal) {
+          commitReceipt();
+          await vi.waitFor(() => {
+            expect(broker.acknowledgeV3).toHaveBeenCalledOnce();
+          });
+          await vi.advanceTimersByTimeAsync(0);
+          expect(broker.executeV3).toHaveBeenCalledOnce();
+          finishQueuedRenewal();
+        } else {
+          request.mockClear();
+          await vi.advanceTimersByTimeAsync(20_000);
+          expect
+            .soft(renewalIds())
+            .toEqual([publicationIds[1], publicationIds[1]]);
+          expect(broker.executeV3).toHaveBeenCalledOnce();
+          commitReceipt();
+        }
+        if (mode === 'stale-and-live') {
+          const failure = await executionOutcome;
+          expect(failure).toBeInstanceOf(HostedToolRecoveryRequiredError);
+          const aggregate = (failure as HostedToolRecoveryRequiredError).cause;
+          expect(aggregate).toBeInstanceOf(AggregateError);
+          expect((aggregate as AggregateError).errors).toHaveLength(1);
+          expect((aggregate as AggregateError).message).toContain(
+            `${publicationIds[1]}:`,
+          );
+          expect((aggregate as AggregateError).message).not.toContain(
+            publicationIds[0],
+          );
+          expect(stderr).toHaveBeenCalledOnce();
+          expect(stderr).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `Tool publication renewal failed: AggregateError: ${publicationIds[1]}:`,
+            ),
+          );
+          expect(broker.executeV3).toHaveBeenCalledOnce();
+          expect(broker.cancel.mock.calls.map(([id]) => id)).toEqual([
+            'shell-1',
+            'shell-2',
+          ]);
+          expect(broker.release).not.toHaveBeenCalled();
+          await expect(turn.finish()).rejects.toBeInstanceOf(
+            HostedToolRecoveryRequiredError,
+          );
+          expect(vi.getTimerCount()).toBe(0);
+          return;
+        }
+        const responses = await execution;
+        expect(responses.map((part) => part.functionResponse?.id)).toEqual(
+          shellCalls.map((call) => call.callId),
+        );
+        expect(broker.executeV3).toHaveBeenCalledTimes(2);
+        if (delayQueuedRenewal)
+          expect(broker.acknowledgeV3.mock.calls.map(([id]) => id)).toEqual([
+            'shell-1',
+            'shell-2',
+          ]);
+        expect(broker.cancel).not.toHaveBeenCalled();
+        expect(stderr).not.toHaveBeenCalledWith(
+          expect.stringContaining('Tool publication renewal failed'),
+        );
+        await turn.consumeResults();
+        await turn.finish();
+        expect(broker.release).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        settleExecution();
+        commitReceipt();
+        finishRenewal();
+        finishQueuedRenewal();
+        await execution.catch(() => undefined);
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('keeps cancelled-before-dispatch bindings available for close_not_started cleanup', async () => {
+    const call = {
+      ...calls[0],
+      name: 'run_shell_command',
+      args: { command: 'printf hi' },
+    };
+    broker.prepareV3.mockResolvedValue({
+      executionCallId: 'cancelled-shell',
+      runtimeBindingId: 'binding-1',
+      bindingGeneration: '1',
+    });
+    broker.executeV3.mockResolvedValue({
+      executionStatus: 'cancelled',
+      responseParts: [],
+      capture: null,
+    });
+    const request = vi.fn(async (route: string, body: unknown) => {
+      if (route.endsWith('/finished'))
+        throw new ManagedSessionStoreHttpError(
+          409,
+          'not_finished',
+          'No producer ran.',
+        );
+      expect(route).toBe('/grants');
+      return {
+        state:
+          (body as { operation: string }).operation === 'close_not_started'
+            ? 'NOT_STARTED'
+            : 'OPEN',
+      };
+    });
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      {
+        owner: {
+          owner: async () => ({ writerId: 'worker', writerGeneration: 1 }),
+          request,
+          rememberAdmission: vi.fn(),
+        },
+        captureBytes: 1024 * 1024,
+      },
+    );
+    await expect(
+      turn.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'model',
+        new AbortController().signal,
+      ),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(broker.cancel).toHaveBeenCalledWith('cancelled-shell');
+    expect(request).toHaveBeenCalledWith(
+      '/grants',
+      expect.objectContaining({
+        operation: 'close_not_started',
+        publicationId: broker.prepareV3.mock.calls[0]?.[3],
+      }),
+      broker.executeV3.mock.calls[0]?.[3],
+    );
+    expect(broker.acknowledgeV3).not.toHaveBeenCalled();
+    expect(broker.release).not.toHaveBeenCalled();
+    await expect(turn.finish()).rejects.toBeInstanceOf(
+      HostedToolRecoveryRequiredError,
+    );
+  });
+
+  it.each([
+    { status: 400, multiple: false, label: 'HTTP 400' },
+    { status: 503, multiple: false, label: 'HTTP 503' },
+    { status: 503, multiple: true, label: 'multiple live failures' },
+  ])(
+    'attempts later renewals after $label but fails closed before dispatch',
+    async ({ status, multiple }) => {
+      if (multiple)
+        vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      let startRenewal!: () => void;
+      const renewalStarted = new Promise<void>((resolve) => {
+        startRenewal = resolve;
+      });
+      let finishRenewal!: () => void;
+      const renewalGate = new Promise<void>((resolve) => {
+        finishRenewal = resolve;
+      });
+      const shellCalls = calls.map((call, index) => ({
+        ...call,
+        name: 'run_shell_command',
+        args: { command: `printf ${index}` },
+      }));
+      broker.prepareV3.mockImplementation(async () => ({
+        executionCallId: `shell-${broker.prepareV3.mock.calls.length}`,
+        runtimeBindingId: 'binding-1',
+        bindingGeneration: '1',
+      }));
+      const renewals: string[] = [];
+      const request = vi.fn(async (route: string, body: unknown) => {
+        expect(route).toBe('/grants');
+        const grant = body as { operation: string; publicationId: string };
+        if (grant.operation === 'renew') {
+          renewals.push(grant.publicationId);
+          if (multiple && renewals.length === 1) {
+            startRenewal();
+            await renewalGate;
+          }
+          if (renewals.length === 1 || multiple)
+            throw new ManagedSessionStoreHttpError(
+              status,
+              status === 400 ? 'invalid_request' : 'unavailable',
+              'Store down.',
+            );
+        }
+        return {
+          state:
+            grant.operation === 'close_not_started' ? 'NOT_STARTED' : 'OPEN',
+        };
+      });
+      turn = new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        harness,
+        'prompt',
+        commit,
+        messageFitsInline,
+        {
+          owner: {
+            owner: async () => ({ writerId: 'worker', writerGeneration: 1 }),
+            request,
+            rememberAdmission: vi.fn(),
+          },
+          captureBytes: 1024 * 1024,
+        },
+      );
+      const execution = turn.execute(
+        shellCalls,
+        shellCalls.map((call) => ({
+          functionCall: { id: call.callId, name: call.name, args: call.args },
+        })),
+        'model',
+        new AbortController().signal,
+      );
+      const executionOutcome = execution.catch((cause: unknown) => cause);
+      try {
+        if (multiple) {
+          await renewalStarted;
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(broker.executeV3).not.toHaveBeenCalled();
+          finishRenewal();
+        }
+        const failure = await executionOutcome;
+        expect(failure).toBeInstanceOf(HostedToolRecoveryRequiredError);
+        const publicationIds = broker.prepareV3.mock.calls.map(
+          (call) => call[3],
+        );
+        expect(renewals).toEqual(publicationIds);
+        if (multiple) {
+          const aggregate = (failure as HostedToolRecoveryRequiredError).cause;
+          expect(aggregate).toBeInstanceOf(AggregateError);
+          expect((aggregate as AggregateError).errors).toHaveLength(2);
+          expect((aggregate as AggregateError).errors).toEqual(
+            publicationIds.map((id) =>
+              expect.objectContaining({
+                message: expect.stringContaining(`${id}:`),
+              }),
+            ),
+          );
+          expect(stderr).toHaveBeenCalledOnce();
+          for (const id of publicationIds) {
+            expect((aggregate as AggregateError).message).toContain(`${id}:`);
+            expect(stderr).toHaveBeenCalledWith(
+              expect.stringContaining(`${id}:`),
+            );
+          }
+        }
+        expect(broker.executeV3).not.toHaveBeenCalled();
+        expect(broker.cancel).toHaveBeenCalledTimes(2);
+        expect(broker.release).not.toHaveBeenCalled();
+        await expect(turn.finish()).rejects.toBeInstanceOf(
+          HostedToolRecoveryRequiredError,
+        );
+      } finally {
+        finishRenewal();
+        await execution.catch(() => undefined);
+        if (multiple) vi.useRealTimers();
+      }
+    },
+  );
+});
 
 it('publishes foreground SSH Shell output through its original capture and ACK', async () => {
   await shellReceiptScenario('normal', true);
