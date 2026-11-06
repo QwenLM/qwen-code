@@ -15,17 +15,14 @@ interface CapturedNotification {
 }
 
 /**
- * The guides `BrowserNotificationControl` renders for a `navigator.platform`.
- * Mirrors the component's rule: iOS/iPadOS get none, Windows and macOS get
- * their own, and anything unrecognized keeps both rather than losing help.
+ * The guide headings `BrowserNotificationControl` may render. The e2e suite
+ * runs on desktop Chromium only, so `navigator.platform` is unrecognized here
+ * and the component keeps both guides. Enumerating the headings that may
+ * appear keeps this spec from re-deriving the component's platform rule as a
+ * second copy that would drift silently; which guide applies to which
+ * platform is pinned by the component test.
  */
-function platformGuidesFor(platform: string): string[] {
-  const appleMobile = /iPhone|iPad|iPod/i.test(platform);
-  if (appleMobile) return [];
-  if (/^Win/i.test(platform)) return ['Windows'];
-  if (/Mac/i.test(platform)) return ['macOS'];
-  return ['macOS', 'Windows'];
-}
+const KNOWN_GUIDES = ['macOS', 'Windows'];
 
 declare global {
   interface Window {
@@ -365,12 +362,20 @@ for (const kind of ['approval', 'question'] as const) {
     // OS's steps do not apply and listing them was the bug this spec pins. A
     // platform the component cannot identify keeps both, which is what CI's
     // Linux Chromium reports.
-    const browserPlatform = await page.evaluate(() => navigator.platform);
-    const expectedSystems = platformGuidesFor(browserPlatform);
-    await expect
-      .poll(() => help.locator('details').count())
-      .toBe(expectedSystems.length);
-    for (const system of expectedSystems) {
+    const rendered = await help.locator('details').count();
+    expect(rendered).toBeGreaterThan(0);
+    expect(rendered).toBeLessThanOrEqual(KNOWN_GUIDES.length);
+    const present = [];
+    for (const system of KNOWN_GUIDES) {
+      if (
+        (await help.locator('details').filter({ hasText: system }).count()) > 0
+      )
+        present.push(system);
+    }
+    // Every rendered guide is one this spec knows how to drive; an unrecognized
+    // heading would otherwise be counted and then silently skipped below.
+    expect(present).toHaveLength(rendered);
+    for (const system of present) {
       const guide = help.locator('details').filter({ hasText: system });
       const summary = guide.locator('summary');
       await expect(guide).not.toHaveAttribute('open');

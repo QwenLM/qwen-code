@@ -253,6 +253,10 @@ it.each([
   ['Win32', 0, ['Windows']],
   ['MacIntel', 0, ['macOS']],
   ['iPhone', 5, []],
+  // An Apple device name says mobile even when the touch count does not: a
+  // device reporting `iPhone` with no touch points was still a phone, and the
+  // name fallback is what keeps the guides off it.
+  ['iPhone', 0, []],
   // An iPad in desktop mode reports `MacIntel` but has a touch screen, and
   // the macOS steps do not apply to it.
   ['MacIntel', 5, []],
@@ -279,6 +283,13 @@ it.each(['iPhone', 'Linux armv8l'])(
     );
   },
 );
+
+it('does not point at steps it does not render when only the name says mobile', () => {
+  operatingSystemGuides('iPhone', 0);
+  expect(document.querySelector(popup)!.textContent).not.toMatch(
+    /follow the steps below/i,
+  );
+});
 
 it("pairs each guide heading with that system's steps", () => {
   const guides = operatingSystemGuides('Linux x86_64');
