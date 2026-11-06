@@ -16,6 +16,8 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 
+import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.statement;
+
 /** Original-connection parent fence for the private file-only CSI profile. */
 public final class JdbcCsiFilesRetirementGuard {
     private JdbcCsiFilesRetirementGuard() {
@@ -563,12 +565,6 @@ public final class JdbcCsiFilesRetirementGuard {
                         row, "workspace_generation"), com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "canonical_cwd"),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(
                         row, "capability_digest"), com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "isolation_class"));
-    }
-
-    private static PreparedStatement statement(Connection connection, String sql) throws SQLException {
-        PreparedStatement statement = connection.prepareStatement(sql);
-        statement.setQueryTimeout(10);
-        return statement;
     }
 
     private static void requireTransaction(Connection connection) throws SQLException {
