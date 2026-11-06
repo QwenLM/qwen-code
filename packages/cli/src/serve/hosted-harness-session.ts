@@ -58,7 +58,16 @@ import {
 import {
   reconcileHostedTurnCleanup,
   hasHostedCleanupDebt,
+  hasBlockingHostedCleanupDebt,
+  oweHostedTurnCleanup,
+  type HostedCleanupHold,
+  type HostedCleanupResult,
 } from './hosted-turn-cleanup.js';
+import {
+  acquireHostedQuestionRuntime,
+  questionWaitDefinitionAdmitted,
+  waitForHostedQuestion,
+} from './hosted-question-wait.js';
 import { inspectHostedRecovery } from './hosted-recovery-status.js';
 import {
   HostedHarnessInstance,
@@ -752,6 +761,7 @@ interface HostedSession {
   lifecycle?: ManagedSessionLifecycleAuthority;
   lifecycleKind?: 'close' | 'delete';
   cleanupBlocked?: boolean;
+  cleanupHolds?: Map<string, HostedCleanupHold>;
   recoveryCleanupOnly?: boolean;
   lifecycleProtocolVersion?: 1 | 2;
   /** Fetched Workspace instructions; undefined until the first fetch. */
@@ -2551,14 +2561,40 @@ function runSettleProjection(
     });
 }
 
+function retainHostedCleanupHolds(
+  session: HostedSession,
+  result: HostedCleanupResult | undefined,
+): void {
+  if (!result) return;
+  session.cleanupHolds ??= new Map();
+  for (const promptId of result.states.keys())
+    session.cleanupHolds.delete(promptId);
+  for (const [promptId, hold] of result.held) {
+    session.cleanupHolds.set(promptId, hold);
+    session.heldRuntimeTurns.add(hold.runtimeSessionId);
+  }
+}
+
 async function retryHostedCleanup(
   session: HostedSession,
   options: HostedWorkspaceBrokerOptions,
 ): Promise<void> {
   if (unsettledPromptId(session)) return;
   try {
-    if (hasHostedCleanupDebt(session.managed))
-      await reconcileHostedTurnCleanup(session.managed, options);
+    session.cleanupHolds?.clear();
+    if (hasHostedCleanupDebt(session.managed)) {
+      retainHostedCleanupHolds(
+        session,
+        await reconcileHostedTurnCleanup(session.managed, options),
+      );
+      if (
+        await hasBlockingHostedCleanupDebt(
+          session.managed,
+          session.cleanupHolds,
+        )
+      )
+        throw new Error('Original Runtime cleanup is still owed.');
+    }
     if (session.cleanupBlocked) liftRecoveryBlock(session);
     session.cleanupBlocked = false;
   } catch (cause) {
@@ -3560,6 +3596,7 @@ async function executeHostedTurn(
     ? { text, parts: [{ text }], attachments: [] }
     : await readHostedInput(session.managed, promptId, text);
   const harness = createManagedHarnessHandle(session.managed);
+  let questionRecoveryBroker: HostedWorkspaceBroker | undefined;
   if (resumeModel) {
     await harness.adoptPreparedContinuation(promptId, true);
     session.workspaceContext = resumeModel.workspaceContext ?? undefined;
@@ -3607,6 +3644,32 @@ async function executeHostedTurn(
   }
   if (resumeApproval) {
     const plan = resumeApproval.plan;
+    if (plan.runtime.provisionerKind) {
+      if (
+        !brokerOptions ||
+        session.mcp ||
+        session.hooks ||
+        session.foregroundOnly ||
+        (await ensureMemberPlanMode(session)) ||
+        !questionWaitDefinitionAdmitted(
+          session.definition,
+          session.childDepth ?? 0,
+        )
+      )
+        throw new HostedToolRecoveryRequiredError(
+          'Original question Session is not qualified.',
+        );
+      questionRecoveryBroker = new HostedWorkspaceBroker(
+        brokerOptions,
+        authority.sessionHeader.sessionKey,
+        plan.runtime.runtimeSessionId,
+      );
+      questionRecoveryBroker.runtime = {
+        bindingId: plan.runtime.bindingId,
+        generation: plan.runtime.generation,
+        workspaceGeneration: plan.runtime.workspaceGeneration,
+      };
+    }
     if (plan.stage === 'approval') {
       const actionId = plan.actionId!;
       const original = authority.action(actionId)!;
@@ -3618,25 +3681,56 @@ async function executeHostedTurn(
             ? await hostedApprovalForTurn(session, promptId)
             : undefined;
         onResumeReady?.();
-        await session.waiters.wait(
-          actionId,
-          options.expiresAt,
-          abort.signal,
-          () =>
-            authority.action(actionId)?.state !== 'requested' ||
-            authority.writesStopped,
-          liveApproval?.readSettings
-            ? hostedLiveApprovalPoll(
-                session.managed,
-                session.waiters,
-                options,
-                liveApproval.readSettings,
-                abort.signal,
-                false,
-                liveApproval.isBlocked,
-              )
-            : undefined,
-        );
+        if (
+          questionRecoveryBroker &&
+          original.state === 'requested' &&
+          !abort.signal.aborted &&
+          Date.now() < options.expiresAt
+        ) {
+          const history = await readHostedFileHistory(session.managed);
+          if (history?.pendingTurn || history?.pendingUndo)
+            throw new Error('Question file history is still owed.');
+          await oweHostedTurnCleanup(
+            session.managed,
+            promptId,
+            questionRecoveryBroker,
+          );
+          const acquired = await acquireHostedQuestionRuntime(
+            questionRecoveryBroker,
+            plan.runtime,
+            abort.signal,
+            options.expiresAt,
+          );
+          if (acquired)
+            await waitForHostedQuestion({
+              session: session.managed,
+              broker: questionRecoveryBroker,
+              brokerOptions: brokerOptions!,
+              waiters: session.waiters,
+              requestId: actionId,
+              expiresAt: options.expiresAt,
+              signal: abort.signal,
+            });
+        } else
+          await session.waiters.wait(
+            actionId,
+            options.expiresAt,
+            abort.signal,
+            () =>
+              authority.action(actionId)?.state !== 'requested' ||
+              authority.writesStopped,
+            liveApproval?.readSettings
+              ? hostedLiveApprovalPoll(
+                  session.managed,
+                  session.waiters,
+                  options,
+                  liveApproval.readSettings,
+                  abort.signal,
+                  false,
+                  liveApproval.isBlocked,
+                )
+              : undefined,
+          );
       } catch (cause) {
         throw new HostedToolRecoveryRequiredError(cause);
       }
@@ -3867,6 +3961,7 @@ async function executeHostedTurn(
                 session.shell,
                 await hostedApprovalForTurn(session, promptId),
                 {
+                  recoveryBroker: questionRecoveryBroker,
                   mcp: session.mcp,
                   hooks: session.hooks,
                   skills: session.skills,
@@ -4144,7 +4239,9 @@ async function executeHostedTurn(
         onTurnResult?.(turnResult);
         await session.managed.sink.write(turnResult);
         try {
-          await toolTurn?.cleanup();
+          session.cleanupHolds?.delete(promptId);
+          retainHostedCleanupHolds(session, await toolTurn?.cleanup());
+          if (toolTurn?.runtimeHeld) session.heldRuntimeTurns.add(promptId);
         } catch (cause) {
           if (!session.blocked) {
             session.cleanupBlocked = true;
@@ -4572,16 +4669,21 @@ export function registerHostedHarnessSessionRoutes(
     if (session.fileHistoryOwed === promptId)
       session.fileHistoryOwed = undefined;
     if (brokerOptions) {
-      await reconcileHostedTurnCleanup(
-        session.managed,
-        brokerOptions,
-        promptId,
+      session.cleanupHolds?.delete(promptId);
+      retainHostedCleanupHolds(
+        session,
+        await reconcileHostedTurnCleanup(
+          session.managed,
+          brokerOptions,
+          promptId,
+        ),
       );
       const lease = session.runtimeLeaseHeld;
       if (
         lease?.promptId === promptId &&
         session.runtimeLeaseOwedByTerminalRoute &&
-        (await releaseHeldRuntime(session, brokerOptions, lease)) &&
+        (await releaseHeldRuntime(session, brokerOptions, lease)) !==
+          'pending' &&
         session.runtimeLeaseHeld === lease
       ) {
         session.runtimeLeaseHeld = undefined;
@@ -4595,7 +4697,10 @@ export function registerHostedHarnessSessionRoutes(
         .findLast((event) => event.kind === 'input.accepted')?.payload[
         'turnId'
       ] === promptId &&
-      !hasHostedCleanupDebt(session.managed) &&
+      !(await hasBlockingHostedCleanupDebt(
+        session.managed,
+        session.cleanupHolds,
+      )) &&
       !session.fileHistoryOwed &&
       !session.runtimeLeaseOwedByTerminalRoute
     )
@@ -6622,10 +6727,10 @@ export function registerHostedHarnessSessionRoutes(
             try {
               if (
                 runtime.broker &&
-                !(await releaseHeldRuntime(session, brokerOptions, {
+                (await releaseHeldRuntime(session, brokerOptions, {
                   promptId: turn.turnId,
                   runtimeSessionId: runtime.broker.runtimeSessionId,
-                }))
+                })) === 'pending'
               )
                 return 'busy';
               await retryHostedCleanup(session, brokerOptions);
@@ -8110,7 +8215,12 @@ export function registerHostedHarnessSessionRoutes(
             ...brokerOptions,
             lifecycleAuthority: () => session.lifecycle,
           });
-        if (hasHostedCleanupDebt(session.managed))
+        if (
+          await hasBlockingHostedCleanupDebt(
+            session.managed,
+            session.cleanupHolds,
+          )
+        )
           throw new Error('Runtime cleanup remains owed.');
       }
       session.monitorWake?.close();
@@ -8147,6 +8257,13 @@ export function registerHostedHarnessSessionRoutes(
           await session.shell?.publisher?.close();
           await session.backgroundLane?.publisher?.close();
           await session.mcp?.closeResources();
+          if (brokerOptions)
+            await retryHostedCleanup(session, {
+              ...brokerOptions,
+              lifecycleAuthority: () => session.lifecycle,
+            });
+          if (hasHostedCleanupDebt(session.managed))
+            throw new Error('Runtime cleanup remains owed after drain.');
         }
         res.json({
           protocolVersion: 2,
@@ -9677,18 +9794,21 @@ export function registerHostedHarnessSessionRoutes(
     options: HostedWorkspaceBrokerOptions,
     lease: NonNullable<HostedSession['runtimeLeaseHeld']>,
     drain = false,
-  ): Promise<boolean> => {
+  ): Promise<'released' | 'held' | 'pending'> => {
     const { promptId, runtimeSessionId } = lease;
-    const states = await reconcileHostedTurnCleanup(
+    session.cleanupHolds?.delete(promptId);
+    const result = await reconcileHostedTurnCleanup(
       session.managed,
       options,
       promptId,
       drain,
     );
-    if (states.get(promptId) === 'owed') return false;
+    retainHostedCleanupHolds(session, result);
+    if (result.held.has(promptId)) return 'held';
+    if (result.states.get(promptId) === 'owed') return 'pending';
     if (
       runtimeSessionId !== hostedRuntimeSessionId(promptId) ||
-      !states.has(promptId)
+      !result.states.has(promptId)
     ) {
       try {
         await new HostedWorkspaceBroker(
@@ -9707,7 +9827,7 @@ export function registerHostedHarnessSessionRoutes(
     }
     if (!hasHostedCleanupDebt(session.managed))
       await retryHostedCleanup(session, options);
-    return true;
+    return 'released';
   };
 
   // A recovery load may hold the Runtime Session. On the cancellation
@@ -9727,8 +9847,8 @@ export function registerHostedHarnessSessionRoutes(
     )
       return;
     void releaseHeldRuntime(session, brokerOptions, lease).then(
-      (confirmed) => {
-        if (confirmed && session.runtimeLeaseHeld === lease) {
+      (outcome) => {
+        if (outcome !== 'pending' && session.runtimeLeaseHeld === lease) {
           session.runtimeLeaseHeld = undefined;
           session.runtimeLeaseOwedByTerminalRoute = false;
         }
@@ -9769,8 +9889,8 @@ export function registerHostedHarnessSessionRoutes(
       lease,
       true,
     ).then(
-      (confirmed) => {
-        if (!confirmed)
+      (outcome) => {
+        if (outcome !== 'released')
           throw new Error('Original Runtime cleanup is still owed.');
         if (session.runtimeLeaseHeld === lease) {
           session.runtimeLeaseHeld = undefined;
@@ -12852,6 +12972,9 @@ export function registerHostedHarnessSessionRoutes(
         for (const loop of session.backgroundLane?.monitorLoops?.values() ?? [])
           await loop.stop(stopSettle);
         if (heldDrainFailed !== null) throw heldDrainFailed;
+        if (brokerOptions) await retryHostedCleanup(session, brokerOptions);
+        if (hasHostedCleanupDebt(session.managed))
+          throw new Error('Runtime cleanup remains owed after drain.');
         // The drains above stopped the Session's background Shells and
         // watches, and their exits settled through this publisher; it
         // closes last.

@@ -122,6 +122,8 @@ import {
   HOSTED_TOOL_APPROVAL_POLICY,
   HostedApprovalWaiters,
   endHostedAction,
+  readHostedActionOptions,
+  resolveHostedAction,
 } from './hosted-tool-approval.js';
 import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
 import * as stdio from '../utils/stdioHelpers.js';
@@ -156,6 +158,8 @@ import type { HistoryMaintenance } from '@qwen-code/qwen-code-core/managed-runti
 import { HostedTeamSession } from './hosted-team-session.js';
 import { teamMemberPreamble } from './hosted-member-chain.js';
 import { hostedWakeContinuationId } from './hosted-wake-continuation.js';
+import { findHostedApprovalContinuation } from './hosted-approval-continuation.js';
+import { HOSTED_QUESTION_POLICY } from './hosted-user-question.js';
 
 const wakeDeps = vi.hoisted(() => ({
   last: undefined as unknown,
@@ -23899,6 +23903,431 @@ describe('Hosted Harness tool approvals', () => {
   });
 
   const files = 'hosted-workspace-files/1';
+  const questionResponse = {
+    answers: [{ questionId: 'q1', optionIds: ['q1o2'] }],
+    inputRevision: 1,
+    policyRevision: HOSTED_QUESTION_POLICY,
+  };
+
+  async function parkedQuestion(
+    pinned = true,
+    terminal?: 'cancelled' | 'expired' | 'decided',
+    timeoutMs = 60_000,
+  ) {
+    const runtime = {
+      bindingId: 'question-original-binding',
+      generation: '7',
+      workspaceGeneration: '3',
+    };
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'activeHoldRuntimeSessionIds',
+    ).mockResolvedValue([]);
+    const claims = new WeakMap<HostedWorkspaceBroker, string>();
+    const calls: string[] = [];
+    let provisionerKind = pinned ? 'local-process' : undefined;
+    const warm = vi.mocked(HostedWorkspaceBroker.prototype.warm);
+    warm.mockImplementation(async function (this: HostedWorkspaceBroker) {
+      calls.push('warm');
+      this.runtime = { ...runtime };
+      this.provisionerKind = provisionerKind;
+    });
+    const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+    acquire.mockImplementation(async function (this: HostedWorkspaceBroker) {
+      calls.push('acquire');
+      this.runtime = { ...runtime };
+      this.provisionerKind = provisionerKind;
+      claims.set(this, randomUUID());
+    });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockImplementation(
+      function (this: HostedWorkspaceBroker) {
+        return claims.get(this);
+      },
+    );
+    const releaseMount = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+      .mockImplementation(async function (this: HostedWorkspaceBroker, claim) {
+        expect(claim).toBe(claims.get(this));
+        calls.push('releaseMount');
+      });
+    const wait = vi
+      .spyOn(HostedApprovalWaiters.prototype, 'wait')
+      .mockRejectedValueOnce(
+        new HostedToolRecoveryRequiredError('question writer interrupted'),
+      );
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const call = {
+        name: 'ask_user_question',
+        callId: 'question-original-call',
+        args: {
+          questions: [
+            {
+              question: 'Which target?',
+              header: 'Target',
+              options: [
+                { label: 'A', description: 'First target' },
+                { label: 'B', description: 'Second target' },
+              ],
+            },
+          ],
+        },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      await toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      throw new Error('Interrupted question unexpectedly continued.');
+    });
+    const original = await app(true);
+    const created = await headers(supertest(original).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: files,
+        approvalMode: 'yolo',
+        approvalTimeoutMs: timeoutMs,
+      })
+      .expect(200);
+    const originalRequest = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', created.body.clientId as string);
+    const prompt = [{ type: 'text', text: 'Ask for the target' }];
+    await originalRequest(
+      supertest(original).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await waitFor(async () => {
+      const status = await originalRequest(
+        supertest(original).get(`/session/${SESSION_ID}/status`),
+      );
+      expect(status.body).toMatchObject({
+        hasActivePrompt: false,
+        recoveryBlocked: true,
+      });
+    });
+    const managed = (wakeDeps.last as { session: { managed: ManagedSession } })
+      .session.managed;
+    const saved = await findHostedApprovalContinuation(managed, PROMPT_ID);
+    expect(saved?.plan.stage).toBe('approval');
+    expect(saved?.plan.runtime).toEqual({
+      ...runtime,
+      runtimeSessionId: PROMPT_ID,
+      ...(pinned ? { provisionerKind: 'local-process' } : {}),
+    });
+    const requestId = saved!.plan.actionId!;
+    const options = await readHostedActionOptions(
+      managed,
+      managed.authority.action(requestId)!,
+    );
+    if (terminal === 'decided')
+      expect(
+        (
+          await resolveHostedAction(
+            managed,
+            new HostedApprovalWaiters(),
+            requestId,
+            questionResponse,
+          )
+        ).status,
+      ).toBe(200);
+    else if (terminal) await endHostedAction(managed, requestId, terminal);
+    await managed.close();
+    provisionerKind = 'local-process';
+    wait.mockRestore();
+    state.model.mockReset();
+    state.model.mockImplementation(
+      async ({ resumeFromToolResults, signal }) => {
+        signal.throwIfAborted();
+        expect(JSON.stringify(resumeFromToolResults)).toContain('q1o2');
+        calls.push('model');
+        return { text: 'question recovered', model: 'test-model' };
+      },
+    );
+    warm.mockClear();
+    acquire.mockClear();
+    releaseMount.mockClear();
+    calls.length = 0;
+    const replacement = await app(true);
+    return {
+      runtime,
+      calls,
+      warm,
+      acquire,
+      releaseMount,
+      requestId,
+      expiresAt: options.expiresAt,
+      replacement,
+      async load() {
+        const loaded = await headers(
+          supertest(replacement).post(`/session/${SESSION_ID}/load`),
+        )
+          .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+          .expect(200);
+        return (request: supertest.Test) =>
+          headers(request).set(
+            'X-Qwen-Client-Id',
+            loaded.body.clientId as string,
+          );
+      },
+    };
+  }
+
+  it.each([true, false])(
+    'cold question recovery preserves owner acquisition order (pinned: %s)',
+    async (pinned) => {
+      const f = await parkedQuestion(pinned);
+      const authorize = await f.load();
+      if (pinned)
+        await waitFor(() =>
+          expect(f.calls).toEqual(['acquire', 'releaseMount']),
+        );
+      else expect(f.calls).toEqual([]);
+      expect(f.warm).not.toHaveBeenCalled();
+      expect(state.model).not.toHaveBeenCalled();
+      await authorize(
+        supertest(f.replacement).post(
+          `/session/${SESSION_ID}/actions/${f.requestId}/resolve`,
+        ),
+      )
+        .send(questionResponse)
+        .expect(200);
+      await waitFor(async () => {
+        const status = await authorize(
+          supertest(f.replacement).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      });
+      expect(f.calls).toEqual(
+        pinned
+          ? ['acquire', 'releaseMount', 'acquire', 'model']
+          : ['warm', 'acquire', 'model'],
+      );
+      for (const [expected] of f.acquire.mock.calls)
+        expect(expected).toEqual({
+          runtimeBindingId: f.runtime.bindingId,
+          generation: f.runtime.generation,
+        });
+      expect(
+        f.acquire.mock.contexts.every(
+          (broker) =>
+            (broker as HostedWorkspaceBroker).runtimeSessionId === PROMPT_ID,
+        ),
+      ).toBe(true);
+      if (pinned)
+        expect(f.acquire.mock.contexts[0]).toBe(f.acquire.mock.contexts[1]);
+      expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
+      if (!pinned) {
+        const managed = (
+          wakeDeps.last as { session: { managed: ManagedSession } }
+        ).session.managed;
+        const final = managed.authority
+          .eventsInSequenceRange(1, managed.authority.committedSequence)
+          .findLast((event) => event.kind === 'hosted.batch.planned')!;
+        const planRef = assertManagedSessionDurableRef(
+          final.payload['planRef'],
+          'final question plan',
+        );
+        const plan = JSON.parse(
+          (await managed.resources.read(planRef)).toString(),
+        ) as { runtime: object };
+        expect(plan.runtime).not.toHaveProperty('provisionerKind');
+      }
+      await authorize(
+        supertest(f.replacement).post(`/session/${SESSION_ID}/detach`),
+      ).expect(204);
+    },
+  );
+
+  it.each(['cancelled', 'expired'] as const)(
+    'cold question recovery settles %s without acquiring a Runtime',
+    async (terminal) => {
+      const f = await parkedQuestion(true, terminal);
+      const authorize = await f.load();
+      await waitFor(async () => {
+        const status = await authorize(
+          supertest(f.replacement).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      });
+      expect(f.calls).toEqual([]);
+      expect(f.warm).not.toHaveBeenCalled();
+      expect(f.acquire).not.toHaveBeenCalled();
+      expect(f.releaseMount).not.toHaveBeenCalled();
+      expect(state.model).not.toHaveBeenCalled();
+      await authorize(
+        supertest(f.replacement).post(`/session/${SESSION_ID}/detach`),
+      ).expect(204);
+    },
+  );
+
+  it.each(['cancelled', 'expired', 'decided-then-cancelled'] as const)(
+    'cold question recovery stops a busy owner safely (%s)',
+    async (outcome) => {
+      const decided = outcome === 'decided-then-cancelled';
+      const f = await parkedQuestion(
+        true,
+        decided ? 'decided' : undefined,
+        5000,
+      );
+      f.acquire.mockRejectedValue(
+        new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
+      );
+      const authorize = await f.load();
+      await waitFor(() => expect(f.acquire).toHaveBeenCalled());
+      if (outcome === 'expired')
+        vi.spyOn(Date, 'now').mockReturnValue(f.expiresAt + 1);
+      else
+        await authorize(
+          supertest(f.replacement).post(`/session/${SESSION_ID}/cancel`),
+        )
+          .send({ promptId: PROMPT_ID })
+          .expect(204);
+      await waitFor(async () => {
+        const status = await authorize(
+          supertest(f.replacement).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      });
+      expect(f.acquire).toHaveBeenCalledOnce();
+      expect(f.warm).not.toHaveBeenCalled();
+      expect(f.releaseMount).not.toHaveBeenCalled();
+      if (decided) {
+        expect(state.model).toHaveBeenCalledOnce();
+        expect(state.model.mock.calls[0][0].signal.aborted).toBe(true);
+      } else expect(state.model).not.toHaveBeenCalled();
+      expect(f.calls).not.toContain('model');
+      expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
+      const managed = (
+        wakeDeps.last as { session: { managed: ManagedSession } }
+      ).session.managed;
+      expect(managed.authority.action(f.requestId)?.state).toBe(
+        decided ? 'decided' : outcome,
+      );
+      const results = (await managed.sink.project()).filter(
+        (item) => item.type === 'tool_result',
+      );
+      expect(results).toHaveLength(1);
+      expect(JSON.stringify(results)).not.toContain('q1o2');
+      expect(
+        managed.authority
+          .eventsInSequenceRange(1, managed.authority.committedSequence)
+          .findLast(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === PROMPT_ID,
+          )?.payload,
+      ).toMatchObject({ outcome: 'cancelled', stopReason: 'cancelled' });
+      await managed.close();
+    },
+  );
+
+  it('cold question recovery settles cancellation after the original owner is acquired', async () => {
+    const f = await parkedQuestion(true, 'decided');
+    const acquire = f.acquire.getMockImplementation()!;
+    f.acquire.mockImplementation(async function (
+      this: HostedWorkspaceBroker,
+      expected,
+    ) {
+      await acquire.call(this, expected);
+      (
+        wakeDeps.last as { session: { active: { abort: AbortController } } }
+      ).session.active.abort.abort();
+    });
+    const authorize = await f.load();
+    const managed = (wakeDeps.last as { session: { managed: ManagedSession } })
+      .session.managed;
+    try {
+      await waitFor(async () => {
+        const status = await authorize(
+          supertest(f.replacement).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.hasActivePrompt).toBe(false);
+      });
+      const status = await authorize(
+        supertest(f.replacement).get(`/session/${SESSION_ID}/status`),
+      );
+      expect(status.body.recoveryBlocked).toBe(false);
+      expect(f.acquire).toHaveBeenCalledOnce();
+      expect(f.warm).not.toHaveBeenCalled();
+      expect(f.calls).not.toContain('model');
+      expect(
+        managed.authority
+          .eventsInSequenceRange(1, managed.authority.committedSequence)
+          .findLast(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === PROMPT_ID,
+          )?.payload,
+      ).toMatchObject({ outcome: 'cancelled', stopReason: 'cancelled' });
+    } finally {
+      await managed.close();
+    }
+  });
+
+  it.each([
+    'bindingId',
+    'generation',
+    'workspaceGeneration',
+    'provisionerKind',
+  ])(
+    'cold question recovery blocks changed %s without warming a substitute',
+    async (changed) => {
+      const f = await parkedQuestion();
+      f.acquire.mockImplementation(async function (
+        this: HostedWorkspaceBroker,
+      ) {
+        this.runtime = {
+          ...f.runtime,
+          ...(changed !== 'provisionerKind' ? { [changed]: 'changed' } : {}),
+        };
+        this.provisionerKind =
+          changed === 'provisionerKind' ? 'ssh' : 'local-process';
+      });
+      const authorize = await f.load();
+      await waitFor(async () => {
+        const status = await authorize(
+          supertest(f.replacement).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: true,
+        });
+      });
+      expect(f.acquire).toHaveBeenCalledExactlyOnceWith({
+        runtimeBindingId: f.runtime.bindingId,
+        generation: f.runtime.generation,
+      });
+      expect(f.warm).not.toHaveBeenCalled();
+      expect(f.releaseMount).not.toHaveBeenCalled();
+      expect(state.model).not.toHaveBeenCalled();
+      expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
+      await (
+        wakeDeps.last as { session: { managed: ManagedSession } }
+      ).session.managed.close();
+    },
+  );
 
   it('loads a failed initial extension selection for management while keeping the first Prompt blocked', async () => {
     vi.spyOn(
