@@ -85,8 +85,9 @@ export function useLaunchEditor() {
           throw new Error(`Editor exited with status ${status}`);
         }
       } finally {
-        if (wasRaw) setRawMode?.(true);
+        // Before the raw-mode restore, which can throw.
         restoreProgramStatus();
+        if (wasRaw) setRawMode?.(true);
       }
     },
     [settings.merged.general?.preferredEditor, setRawMode, stdin],

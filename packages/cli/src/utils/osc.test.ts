@@ -326,7 +326,7 @@ describe('oscProgramStatus', () => {
     );
   });
 
-  it('encodes UTF-8 and removes control characters and newlines', () => {
+  it('encodes UTF-8 and turns control characters and newlines into spaces', () => {
     const seq = oscProgramStatus({
       state: 'error',
       msg: '失败\nline\x07two\u2028',

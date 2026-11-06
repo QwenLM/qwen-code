@@ -26,7 +26,9 @@ and pi already emit it; Qwen Code does not.
 - Report a single root record with all five states: `idle`, `working`,
   `blocked` (with `kind=permission|question|auth`), `done`, `error`.
 - Interactive Ink UI only. Non-interactive (`-p`, JSON, stream-JSON) and ACP
-  never mount `AppContainer`, so they never emit.
+  never mount `AppContainer`, so they never emit. Neither does the OpenTUI
+  renderer (`QWEN_TUI_RENDERER=opentui`, the default in the bun standalone
+  install): it has its own shell and does not mount `AppContainer`.
 - No new setting and no dependency.
 
 Out of scope: child records (`id=`), `progress`, feature probing, focus-based
@@ -153,3 +155,4 @@ implements OSC 7501 natively (tmux#5713), it works with no change here.
 - Child records for background subagents and arena runs.
 - `progress` for operations with a known size.
 - Revisit tmux once its minimal implementation ships.
+- Report status from the OpenTUI renderer.

@@ -8,11 +8,14 @@
 import { renderHook } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockSpawnSync, mockRelease, mockRestore } = vi.hoisted(() => ({
-  mockSpawnSync: vi.fn(),
-  mockRelease: vi.fn(),
-  mockRestore: vi.fn(),
-}));
+const { mockSpawnSync, mockRelease, mockRestore, mockSetRawMode } = vi.hoisted(
+  () => ({
+    mockSpawnSync: vi.fn(),
+    mockRelease: vi.fn(),
+    mockRestore: vi.fn(),
+    mockSetRawMode: vi.fn(),
+  }),
+);
 
 vi.mock('child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('child_process')>();
@@ -27,7 +30,7 @@ vi.mock('ink', async (importOriginal) => {
   const actual = await importOriginal<typeof import('ink')>();
   return {
     ...actual,
-    useStdin: () => ({ stdin: { isRaw: true }, setRawMode: vi.fn() }),
+    useStdin: () => ({ stdin: { isRaw: true }, setRawMode: mockSetRawMode }),
   };
 });
 
@@ -47,6 +50,7 @@ describe('useLaunchEditor', () => {
     mockSpawnSync.mockReset();
     mockRelease.mockClear();
     mockRestore.mockClear();
+    mockSetRawMode.mockReset();
   });
 
   it('releases the program status while the editor owns the terminal', async () => {
@@ -69,6 +73,17 @@ describe('useLaunchEditor', () => {
     await expect(result.current('/tmp/file.txt')).rejects.toThrow(
       'Editor exited with status 1',
     );
+    expect(mockRestore).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores the program status when restoring raw mode throws', async () => {
+    mockSpawnSync.mockReturnValue({ status: 0, error: null });
+    mockSetRawMode.mockImplementation((raw: boolean) => {
+      if (raw) throw new Error('EIO');
+    });
+    const { result } = renderHook(() => useLaunchEditor());
+
+    await expect(result.current('/tmp/file.txt')).rejects.toThrow('EIO');
     expect(mockRestore).toHaveBeenCalledTimes(1);
   });
 });

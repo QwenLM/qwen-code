@@ -206,7 +206,7 @@ const PROGRAM_STATUS_MAX_MSG_BYTES = 2048;
 
 /**
  * Encode a `msg` value: control characters (including newlines, which the
- * spec forbids after decoding) are dropped, and the text is shortened by
+ * spec forbids after decoding) are replaced with spaces, and the text is shortened by
  * whole code points until it fits the spec limit.
  */
 function encodeProgramStatusMsg(msg: string): string {

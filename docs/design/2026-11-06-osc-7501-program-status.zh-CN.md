@@ -18,7 +18,7 @@ Issue：[#13870](https://github.com/QwenLM/qwen-code/issues/13870)。
 ## 目标与范围
 
 - 上报一条 root record，覆盖全部五种状态：`idle`、`working`、`blocked`（带 `kind=permission|question|auth`）、`done`、`error`。
-- 只在交互式 Ink UI 中上报。非交互模式（`-p`、JSON、stream-JSON）和 ACP 不会挂载 `AppContainer`，因此不会发送。
+- 只在交互式 Ink UI 中上报。非交互模式（`-p`、JSON、stream-JSON）和 ACP 不会挂载 `AppContainer`，因此不会发送。OpenTUI 渲染器（`QWEN_TUI_RENDERER=opentui`，bun standalone 安装的默认值）有自己的 shell，也不挂载 `AppContainer`，同样不会发送。
 - 不新增设置项，不引入依赖。
 
 不在范围内：子 record（`id=`）、`progress`、特性探测、基于焦点重置 `done`、tmux passthrough。
@@ -102,3 +102,4 @@ ESC ] 7501 ; state=<state>[:kind=<kind>]:app=qwen-code[:msg=<base64>] ESC \
 - 为后台子 agent 和 arena 运行上报子 record。
 - 对大小已知的操作上报 `progress`。
 - tmux 精简版发布后重新评估 tmux 支持。
+- 让 OpenTUI 渲染器也上报状态。

@@ -132,6 +132,11 @@ interface TurnTracker {
   streamingState: StreamingState;
   /** Id of the last history item when the current or last turn started. */
   startId: number;
+  /**
+   * Failure items already pending when the turn started. A terminal API
+   * error stays pending across a Goal turn, so it is not that turn's.
+   */
+  pendingFailuresAtStart: readonly HistoryItemWithoutId[];
   outcome: TurnOutcome;
 }
 
@@ -148,12 +153,13 @@ function isTurnFailure(item: HistoryItemWithoutId): boolean {
  * Work out how the last turn ended. A turn is a stretch where streaming
  * state is not idle; it ended in `error` if it added a failure item to
  * history or left an error pending (API errors wait in the pending area
- * with a Ctrl+Y retry hint until the next submit), `idle` if the user
+ * with a Ctrl+Y retry hint until the next submit; one already pending when
+ * the turn started is not counted), `idle` if the user
  * cancelled it, and `done` otherwise.
  *
  * The outcome is decided once, when the turn ends, and held until the next
- * turn starts or history is cleared. Errors added while idle (a failed
- * slash command) and history compaction must not rewrite it. The turn is
+ * turn starts or history is cleared. Errors added while idle and history
+ * compaction must not rewrite it. The turn is
  * bounded by item id, not array index, because compaction drops items.
  */
 export function useTurnOutcome(
@@ -165,6 +171,7 @@ export function useTurnOutcome(
   const [tracker, setTracker] = useState<TurnTracker>({
     streamingState,
     startId: 0,
+    pendingFailuresAtStart: [],
     outcome: 'idle',
   });
 
@@ -178,11 +185,16 @@ export function useTurnOutcome(
       current = {
         streamingState,
         startId: history[history.length - 1]?.id ?? 0,
+        pendingFailuresAtStart: pendingItems.filter(isTurnFailure),
         outcome: 'idle',
       };
     } else if (isIdle) {
       const failed =
-        pendingItems.some(isTurnFailure) ||
+        pendingItems.some(
+          (item) =>
+            isTurnFailure(item) &&
+            !tracker.pendingFailuresAtStart.includes(item),
+        ) ||
         history.some(
           (item) => item.id > tracker.startId && isTurnFailure(item),
         );

@@ -362,6 +362,46 @@ describe('useTurnOutcome', () => {
     expect(result.current).toBe('idle');
   });
 
+  it('does not count an error left pending by an earlier turn', () => {
+    const stale = {
+      type: MessageType.ERROR,
+      text: '[API Error: 400]',
+    } as HistoryItemWithoutId;
+    const { result, rerender } = setup();
+    rerender({ state: StreamingState.Idle, history: [user], pending: [stale] });
+    rerender({
+      state: StreamingState.Responding,
+      history: [user],
+      pending: [stale],
+    });
+    rerender({
+      state: StreamingState.Idle,
+      history: [user, reply],
+      pending: [stale],
+    });
+    expect(result.current).toBe('done');
+  });
+
+  it('counts a new pending error even when an earlier one is still pending', () => {
+    const stale = {
+      type: MessageType.ERROR,
+      text: '[API Error: 400]',
+    } as HistoryItemWithoutId;
+    const fresh = {
+      type: MessageType.ERROR,
+      text: '[API Error: 500]',
+    } as HistoryItemWithoutId;
+    const { result, rerender } = setup();
+    rerender({ state: StreamingState.Idle, history: [user], pending: [stale] });
+    rerender({
+      state: StreamingState.Responding,
+      history: [user],
+      pending: [stale],
+    });
+    rerender({ state: StreamingState.Idle, history: [user], pending: [fresh] });
+    expect(result.current).toBe('error');
+  });
+
   it('returns to idle when history is cleared', () => {
     const { result, rerender } = setup();
     rerender({ state: StreamingState.Responding, history: [user] });
