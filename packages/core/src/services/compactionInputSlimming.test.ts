@@ -699,6 +699,7 @@ describe('compactionInputSlimming', () => {
         '<qwen:user-prompt-submit-context>',
         '</qwen:user-prompt-submit-context>',
       ],
+      ['a task notification', '<task-notification>', '</task-notification>'],
     ])(
       'leaves %s whole when only its closing tag runs past the cap',
       (_label, open, close) => {
@@ -737,6 +738,109 @@ describe('compactionInputSlimming', () => {
         .slimmedHistory[0]!.parts!;
 
       expect(part!.text).toBe(reminder + SLIM_TEXT_TRUNCATION_MARKER);
+    });
+
+    it('closes a cut task notification again', () => {
+      // A background agent's whole result rides inside one notification.
+      const original = `<task-notification>\n<task-id>a1</task-id>\n<result>${'n'.repeat(20_000)}</result>\n</task-notification>`;
+
+      const [part] = slimText(original, 4_000).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 4_000) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</task-notification>',
+      );
+    });
+
+    const toolResult = (key: 'output' | 'error', value: string): Content => ({
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: 'c1',
+            name: 'read_file',
+            response: { [key]: value },
+          },
+        },
+      ],
+    });
+    const slimResult = (history: Content[], maxTextChars: number) =>
+      slimCompactionInput(history, undefined, { maxTextChars });
+    const responseOf = (history: Content[]) =>
+      history[0]!.parts![0]!.functionResponse!.response!;
+
+    it.each(['output', 'error'] as const)(
+      'closes a reminder appended to a tool %s again when the cut lands inside it',
+      (key) => {
+        // The scheduler appends skill and rule reminders after the tool's own
+        // text, so the envelope ends the string instead of opening it.
+        const original = `${'o'.repeat(3_500)}\n\n<system-reminder>\n${'s'.repeat(2_000)}\n</system-reminder>`;
+
+        const { slimmedHistory } = slimResult(
+          [toolResult(key, original)],
+          4_000,
+        );
+
+        expect(responseOf(slimmedHistory)[key]).toBe(
+          original.slice(0, 4_000) +
+            SLIM_TEXT_TRUNCATION_MARKER +
+            '\n</system-reminder>',
+        );
+      },
+    );
+
+    it('closes only the appended reminder of a tool output that quotes the tags', () => {
+      // A file the tool read is not escaped, so its own tags come before the
+      // envelope's opening, which is found from the end.
+      const file = `const OPEN = '<system-reminder>';\nconst CLOSE = '</system-reminder>';\n${'f'.repeat(3_400)}`;
+      const original = `${file}\n\n<system-reminder>\n${'s'.repeat(2_000)}\n</system-reminder>`;
+
+      const { slimmedHistory } = slimResult(
+        [toolResult('output', original)],
+        4_000,
+      );
+
+      expect(responseOf(slimmedHistory)['output']).toBe(
+        original.slice(0, 4_000) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</system-reminder>',
+      );
+    });
+
+    it.each([
+      [
+        'an opening tag the tool output quotes',
+        `const OPEN = '<system-reminder>';\n${'f'.repeat(8_000)}`,
+      ],
+      [
+        'a reminder appended after the cut',
+        `${'o'.repeat(5_000)}\n\n<system-reminder>\nskills\n</system-reminder>`,
+      ],
+      [
+        'a quoted opening tag when the reminder is appended after the cut',
+        `const OPEN = '<system-reminder>';\n${'f'.repeat(5_000)}\n\n<system-reminder>\nskills\n</system-reminder>`,
+      ],
+    ])('adds no closing tag for %s', (_label, original) => {
+      const { slimmedHistory } = slimResult(
+        [toolResult('output', original)],
+        4_000,
+      );
+
+      expect(responseOf(slimmedHistory)['output']).toBe(
+        original.slice(0, 4_000) + SLIM_TEXT_TRUNCATION_MARKER,
+      );
+    });
+
+    it('leaves a tool output whole when only its reminder’s closing tag runs past the cap', () => {
+      const head = `${'o'.repeat(3_000)}\n\n<system-reminder>\n`;
+      const original = `${head}${'s'.repeat(4_000 - head.length - 6)}\n</system-reminder>\n`;
+      const history = [toolResult('output', original)];
+
+      const { slimmedHistory, stats } = slimResult(history, 4_000);
+
+      expect(slimmedHistory[0]!.parts![0]).toBe(history[0]!.parts![0]);
+      expect(stats.textPartsTruncated).toBe(0);
     });
 
     it('truncates oversized text parts and tool-result outputs with maxTextChars', () => {

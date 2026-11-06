@@ -28,6 +28,14 @@ export const AUTO_MEMORY_SNAPSHOT_METADATA =
 
 export const SYSTEM_REMINDER_OPEN = '<system-reminder>';
 export const SYSTEM_REMINDER_CLOSE = '</system-reminder>';
+/**
+ * Envelope the background registries wrap a notification's `modelText` in
+ * (agents, monitors, shells, workflows, the dropped-notification tally). See
+ * `turn-interruption.ts` for its trust model: role-gated, emitter escaping not
+ * uniform.
+ */
+export const TASK_NOTIFICATION_OPEN = '<task-notification>';
+export const TASK_NOTIFICATION_CLOSE = '</task-notification>';
 const MAX_DEFERRED_TOOL_DESC_LEN = 160;
 const COMPRESSED_PREFIX_LENGTH = Symbol('compressedPrefixLength');
 

@@ -11,6 +11,8 @@ import { ToolNames } from '../tools/tool-names.js';
 import {
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
 } from '../core/environmentContext.js';
 import {
   USER_PROMPT_SUBMIT_CONTEXT_CLOSE,
@@ -407,7 +409,8 @@ function transformPart(
   // Truncate oversized tool-result text on the payload-overflow compaction
   // path so the side-query itself fits under the gateway byte limit that
   // rejected the main request (#10380). Mirrors `estimatePartChars`, which
-  // bills exactly these carriers for tool results.
+  // bills exactly these carriers for tool results. The scheduler appends
+  // reminders after a tool's own text, so a cut can land inside one.
   const maxTextChars = options?.maxTextChars;
   const fr = nextPart.functionResponse;
   if (maxTextChars !== undefined && fr?.response) {
@@ -416,8 +419,10 @@ function transformPart(
     const newResponse: Record<string, unknown> = { ...response };
     for (const key of ['output', 'error'] as const) {
       const value = response[key];
-      if (typeof value === 'string' && value.length > maxTextChars) {
-        newResponse[key] = truncateTextForSlimming(value, maxTextChars);
+      if (typeof value !== 'string' || value.length <= maxTextChars) continue;
+      const cut = truncateKeepingEnvelopes(value, maxTextChars);
+      if (cut !== value) {
+        newResponse[key] = cut;
         stats.textPartsTruncated++;
         touched = true;
       }
@@ -483,7 +488,7 @@ function transformPart(
     typeof nextPart.text === 'string' &&
     nextPart.text.length > maxTextChars
   ) {
-    const text = truncateTextPartForSlimming(nextPart.text, maxTextChars);
+    const text = truncateKeepingEnvelopes(nextPart.text, maxTextChars);
     if (text !== nextPart.text) {
       stats.textPartsTruncated++;
       // Spread rather than rebuilding a bare `{ text }` so sibling properties
@@ -496,46 +501,82 @@ function transformPart(
 }
 
 /**
- * Blocks a text part can open with. Left open by a cut, one reads as open
+ * Blocks the writers wrap whole. One opens a text part (the IDE context before
+ * the prompt, hook context, a task notification) or ends a tool result (the
+ * reminders appended after its output). Left open by a cut, one reads as open
  * over every part after it.
  */
-const TEXT_PART_ENVELOPES = [
+const ENVELOPES = [
   { open: SYSTEM_REMINDER_OPEN, close: SYSTEM_REMINDER_CLOSE },
   {
     open: USER_PROMPT_SUBMIT_CONTEXT_OPEN,
     close: USER_PROMPT_SUBMIT_CONTEXT_CLOSE,
   },
+  { open: TASK_NOTIFICATION_OPEN, close: TASK_NOTIFICATION_CLOSE },
 ] as const;
 
+/** Where an envelope's body starts and where its closing tag starts. */
+interface EnvelopeSpan {
+  bodyAt: number;
+  closeAt: number;
+  close: string;
+}
+
 /**
- * Cuts a text part like other text, except where the part opens with an
- * envelope the cut lands in: a cut inside the body closes the envelope again
- * after the marker, and a cut that would remove only the closing tag keeps
- * the envelope whole. The envelope can lead the part without ending it, as
- * the IDE context does when prepended to the prompt. The writers escape tags
- * inside the body, so the first closing tag is the envelope's own.
+ * The envelopes at the start and at the end of `value`, the two places a
+ * writer puts one. The writers escape tags inside an envelope's body, so the
+ * first closing tag after a leading opening, and the last opening tag before
+ * a trailing closing tag, are the envelope's own. The text around them, such
+ * as a file a tool read or what the user typed, is not escaped, so a tag
+ * inside it is never taken for an envelope.
  */
-function truncateTextPartForSlimming(
-  value: string,
-  maxTextChars: number,
-): string {
-  const envelope = TEXT_PART_ENVELOPES.find(({ open }) =>
-    value.startsWith(open),
+function envelopesAtEnds(value: string): EnvelopeSpan[] {
+  const spans: EnvelopeSpan[] = [];
+  const leading = ENVELOPES.find(({ open }) => value.startsWith(open));
+  if (leading) {
+    const closeAt = value.indexOf(leading.close, leading.open.length);
+    if (closeAt !== -1) {
+      spans.push({
+        bodyAt: leading.open.length,
+        closeAt,
+        close: leading.close,
+      });
+    }
+  }
+  const text = value.trimEnd();
+  const trailing = ENVELOPES.find(({ close }) => text.endsWith(close));
+  if (trailing) {
+    const closeAt = text.length - trailing.close.length;
+    const openAt = text.lastIndexOf(trailing.open, closeAt);
+    if (openAt !== -1) {
+      spans.push({
+        bodyAt: openAt + trailing.open.length,
+        closeAt,
+        close: trailing.close,
+      });
+    }
+  }
+  return spans;
+}
+
+/**
+ * Cuts text like other text, except where the cut lands in an envelope at its
+ * start or its end: a cut inside the body closes the envelope again after the
+ * marker, and a cut that would remove only the closing tag keeps the envelope
+ * whole. An envelope can open a part without ending it, as the IDE context
+ * does before the prompt, or end a tool result without opening it. A cut
+ * before an envelope's body leaves nothing of it to close.
+ */
+function truncateKeepingEnvelopes(value: string, maxTextChars: number): string {
+  const span = envelopesAtEnds(value).find(
+    ({ bodyAt, closeAt, close }) =>
+      bodyAt <= maxTextChars && closeAt + close.length > maxTextChars,
   );
-  const closeAt = envelope
-    ? value.indexOf(envelope.close, envelope.open.length)
-    : -1;
-  if (
-    !envelope ||
-    closeAt === -1 ||
-    closeAt + envelope.close.length <= maxTextChars
-  ) {
-    return truncateTextForSlimming(value, maxTextChars);
+  if (!span) return truncateTextForSlimming(value, maxTextChars);
+  if (span.closeAt > maxTextChars) {
+    return `${truncateTextForSlimming(value, maxTextChars)}\n${span.close}`;
   }
-  if (closeAt > maxTextChars) {
-    return `${truncateTextForSlimming(value, maxTextChars)}\n${envelope.close}`;
-  }
-  const closedAt = closeAt + envelope.close.length;
+  const closedAt = span.closeAt + span.close.length;
   return value.slice(closedAt).trim() === ''
     ? value
     : value.slice(0, closedAt) + SLIM_TEXT_TRUNCATION_MARKER;
