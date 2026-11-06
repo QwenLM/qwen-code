@@ -1304,13 +1304,32 @@ user or system settings. The member is omitted entirely when no channel
 resolves, and older daemons never send it; a settings read failure degrades
 to its absence rather than failing the journal read. Each event records what a Channel did — an inbound
 message it accepted or skipped (with the machine reason: `reason_filter`,
-`mention_required`, `duplicate`, a sender-gate rejection, `github_api_error`),
+`mention_required`, `duplicate`, a sender-gate rejection, `github_api_error`,
+`no_role_matched`),
 a GitHub thread whose handling failed and that it will read again (`failed`
 with `github_api_error`: a GitHub error, or a local error while the channel
 cannot read or write its own state or one of the thread's tasks is unfinished),
 a publication
 outcome, an inbound task transition, or a poll result — and never carries
-message text. A GitHub poll that filters more than 20 notifications journals
+message text. `outcome` is an open string: besides the task states it includes
+the publication outcomes `posted`, `suppressed`, `posting`, `failed` and
+`failed_ambiguous` (the write may have landed, so it is never retried publicly),
+the private-delivery terminals `delivered` and `retired` (with a reason such as
+`preflight_rejected`, `watch_no_candidate`, `bound_no_candidate` or
+`dead_letter`), and `degraded` for
+a dependency the poll survived. A `task` event about a PR-bound session carries
+that session's `sessionId`, including the rows written while the delivery is
+cleared and the retire that follows, which name the session the event lost.
+`detail` is optional on every event: a binding-scan `degraded` row carries
+`detail.streak` (a count of binding scans, which a gone-session retry can
+advance more than once per poll) and, on the `bindings_partial` rows only,
+`detail.sessions` — a session count, not a PR count: the session rows this scan
+listed plus the sessions retention keeps routing under a partial answer,
+bounded by the retention cap,
+while the watch-guard rows (`watch_reconcile_blocked`,
+`watch_pending_unreconciled`, `watch_reconcile_recovered`) carry `reason`; a
+blocking row also carries `error` when the watch state could not be read or
+reconciliation failed (the recovered row carries no error). A GitHub poll that filters more than 20 notifications journals
 the first 20 individually and one further `reason_filter` row whose
 `detail.filtered` counts the rest, so a pinned poll cursor cannot flood the
 journal with repeats of the same batch. While the cursor is held, a comment the
