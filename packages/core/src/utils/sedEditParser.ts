@@ -210,6 +210,21 @@ function hasPosixBracketExpression(pattern: string): boolean {
   for (let i = 0; i < pattern.length; i++) {
     const char = pattern[i]!;
     if (char === '\\') {
+      // An escaped `[` outside a bracket expression is a literal, so
+      // `\[[:alpha:]]` is a literal `[` followed by an ordinary `[:alpha:]`
+      // class to BSD sed. GNU sed rejects the whole pattern as a malformed
+      // bracket expression, so the simulation cannot match both; declining
+      // lets the real sed decide. Only the POSIX-shaped lookalike is declined
+      // — a plain `\[` is a literal in every sed and keeps its fast path —
+      // and an escaped `[` inside a class is just a member.
+      if (
+        !inBracketExpression &&
+        pattern[i + 1] === '[' &&
+        pattern[i + 2] === '[' &&
+        /[:.=]/u.test(pattern[i + 3] ?? '')
+      ) {
+        return true;
+      }
       i++;
       continue;
     }

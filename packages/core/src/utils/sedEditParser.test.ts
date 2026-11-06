@@ -248,6 +248,23 @@ describe('sedEditParser', () => {
     expect(parseSedEditCommand("sed -i 's/[[=a=]]/X/g' file.txt")).toBeNull();
   });
 
+  it('rejects an escaped `[` followed by a POSIX-looking opener', () => {
+    // `\[[:alpha:]]` is a literal `[` and an ordinary class to BSD sed, but
+    // GNU sed rejects it as a malformed bracket expression. A simulation has
+    // to match both, so it declines and lets whichever sed is installed decide.
+    expect(
+      parseSedEditCommand(String.raw`sed -i 's/\[[:alpha:]]/X/g' f.txt`),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand(String.raw`sed -i 's/\[[.a.]]/X/g' f.txt`),
+    ).toBeNull();
+    // A doubled backslash leaves a real `[[:alpha:]]` bracket expression,
+    // which the existing POSIX guard rejects on its own.
+    expect(
+      parseSedEditCommand("sed -i 's/\\[[:alpha:]]/X/g' f.txt"),
+    ).toBeNull();
+  });
+
   it('keeps plain bracket classes whose first member is `:`, `.` or `=`', () => {
     // Not POSIX constructs: the `:`/`.`/`=` is a literal class member, and the
     // translator handles them exactly like sed.
