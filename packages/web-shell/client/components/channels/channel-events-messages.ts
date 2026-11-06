@@ -45,6 +45,8 @@ export const CHANNEL_EVENTS_MESSAGES_EN: Record<string, ChannelEventsMessage> =
       `${v?.count ?? 0} notification${v?.count === 1 ? '' : 's'}`,
     'channelEvents.moreFiltered': (v) =>
       `${v?.count ?? 0} more filtered this poll`,
+    'channelEvents.openTarget': (v) => `Open ${v?.target ?? ''} on GitHub`,
+    'channelEvents.openSession': 'Open session',
   };
 
 export const CHANNEL_EVENTS_MESSAGES_ZH: Record<string, ChannelEventsMessage> =
@@ -81,4 +83,6 @@ export const CHANNEL_EVENTS_MESSAGES_ZH: Record<string, ChannelEventsMessage> =
     'channelEvents.duration': (v) => `${v?.ms ?? 0} 毫秒`,
     'channelEvents.notifications': (v) => `${v?.count ?? 0} 条通知`,
     'channelEvents.moreFiltered': (v) => `本轮另有 ${v?.count ?? 0} 条被过滤`,
+    'channelEvents.openTarget': (v) => `在 GitHub 上打开 ${v?.target ?? ''}`,
+    'channelEvents.openSession': '打开会话',
   };

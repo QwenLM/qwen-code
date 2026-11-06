@@ -1329,8 +1329,8 @@ class ManagedAgentMySqlIT {
                                 chain.get(0).required("occurredAt").longValue()));
         assertThat(count(jdbc, "ma_public_event", tenant, session)).isEqualTo(1);
         // A second connection holds the record row, so the next commit
-        // blocks at its UPDATE while retaining the placement guard that
-        // deletion admission also needs.
+        // blocks at its UPDATE while retaining the Session row it locked
+        // first, which deletion admission also needs.
         try (java.sql.Connection holder = dataSource.getConnection()) {
             holder.setAutoCommit(false);
             try (var lock =
@@ -1391,12 +1391,12 @@ class ManagedAgentMySqlIT {
                     "SELECT COUNT(*) FROM"
                             + " information_schema.PROCESSLIST WHERE DB = DATABASE()"
                             + " AND COMMAND = 'Query' AND TIME >= 1 AND INFO LIKE"
-                            + " 'INSERT INTO ma_tenant_guard%'";
+                            + " 'SELECT%FROM ma_session WHERE ma_session.session_kind%FOR UPDATE'";
             while (jdbc.queryForObject(admissionBlocked, Integer.class) == 0) {
                 assertThat(deletion)
                         .as(
                                 "deletion admission must wait for"
-                                        + " the record commit's placement guard")
+                                        + " the record commit's Session row")
                         .isNotDone();
                 assertThat(commit).isNotDone();
                 assertThat(System.nanoTime()).isLessThan(deadline);

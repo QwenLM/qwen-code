@@ -17625,82 +17625,211 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
-  it('keeps a refreshed model catalog when an older same-session load settles', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(null, { status: 204 })),
-    );
-    const catalog = (modelId: string): DaemonSessionContextStatus => ({
-      v: 1,
-      sessionId: 'session-a',
-      workspaceCwd: '/mock-workspace',
-      state: {
-        models: {
-          currentModelId: 'catalog-a0',
-          availableModels: [{ modelId }],
-        },
-      },
-    });
-    const initial = createMockSession({
-      sessionId: 'session-a',
-      context: vi.fn(async () => catalog('catalog-a0')),
-    });
-    sdkMocks.sessions.push(initial);
-    let actions: DaemonSessionActions | undefined;
-    let connection: DaemonConnectionState | undefined;
-    function Harness() {
-      actions = useDaemonActions();
-      connection = useDaemonConnection();
-      return null;
-    }
-    await renderWithProvider(<Harness />, { autoConnect: true });
-    expect(connection?.models?.map((m) => m.id)).toEqual(['catalog-a0']);
-    const goal = createDeferred<GoalStateResponse>();
-    const subscribed = createDeferred<void>();
-    const context = vi
-      .fn()
-      .mockResolvedValueOnce(catalog('catalog-a'))
-      .mockResolvedValue(catalog('catalog-b'));
-    const replacement = createMockSession({
-      sessionId: 'session-a',
-      context,
-      goal: vi.fn(() => goal.promise),
-      events: createPendingEvents(subscribed),
-    });
-    replacement.client = initial.client;
-    sdkMocks.MockDaemonSessionClient.load.mockResolvedValueOnce(replacement);
-    const originalWorkspace = sdkMocks.workspaceByCwd.getMockImplementation()!;
-    const reloadModelProviders = vi.fn(async () => ({
-      status: 'applied' as const,
-    }));
-    sdkMocks.workspaceByCwd.mockImplementation((cwd) => ({
-      ...originalWorkspace(cwd),
-      reloadModelProviders,
-      workspaceProviders: sdkMocks.workspaceProviders,
-    }));
-    let reload: Promise<void> | undefined;
-    act(() => {
-      reload = requireActions(actions).reloadSession(
-        new AbortController().signal,
+  it.each(['', 'bailian', 'qwen3.8-max', 'standalone'])(
+    'synchronizes an observer model after logout without a provider reload (model: %s)',
+    async (testCase) => {
+      const standalone = testCase === 'standalone';
+      const modelId = standalone ? 'qwen3.8-max' : testCase;
+      if (standalone)
+        sdkMocks.capabilities.mockResolvedValue({
+          workspaceCwd: '/primary',
+          features: ['standalone_sessions_v1'],
+        });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(null, { status: 204 })),
       );
-    });
-    await act(async () => {
-      await flushPromises();
-    });
-    expect(context).toHaveBeenCalledOnce();
-    await act(async () => {
-      await requireActions(actions).refreshModels();
-    });
-    expect(connection?.models?.map((m) => m.id)).toEqual(['catalog-b']);
-    await act(async () => {
-      goal.resolve({ snapshot: { v: 2, goal: null, activity: 'idle' } });
-      await reload;
-      await subscribed.promise;
-      await flushPromises();
-    });
-    expect(connection?.models?.map((m) => m.id)).toEqual(['catalog-b']);
-    expect(connection?.currentModel).toBe('catalog-a0');
-  });
+      const changed = createDeferred<void>();
+      let signedOut = false;
+      const context = vi.fn(
+        async (): Promise<DaemonSessionContextStatus> => ({
+          v: 1,
+          sessionId: 'observer',
+          workspaceCwd: '/mock-workspace',
+          state: {
+            models: {
+              currentModelId: signedOut ? modelId : 'qwen3.8-max',
+              availableModels: (signedOut
+                ? modelId && modelId !== 'qwen3.8-max'
+                  ? [modelId]
+                  : []
+                : ['qwen3.8-max']
+              ).map((id) => ({ modelId: id })),
+            },
+          },
+        }),
+      );
+      const session = createMockSession({
+        sessionId: 'observer',
+        ...(standalone
+          ? {
+              session: {
+                sessionId: 'observer',
+                workspaceCwd: '/mock-workspace',
+                sourceType: 'standalone',
+                context: { kind: 'standalone' },
+                projectlessOutputDirectory: '/output/observer',
+                workingDirectory: { state: 'ready' },
+              },
+            }
+          : {}),
+        context,
+        async *events(opts) {
+          await changed.promise;
+          yield {
+            v: 1,
+            id: 1,
+            type: 'model_switched',
+            data: {
+              sessionId: 'observer',
+              modelId,
+              subscriptionSignedOut: true,
+            },
+          } as DaemonEvent;
+          yield* createIdleEvents()(opts);
+        },
+      });
+      sdkMocks.sessions.push(session);
+      const originalWorkspace =
+        sdkMocks.workspaceByCwd.getMockImplementation()!;
+      const reload = vi.fn();
+      sdkMocks.workspaceByCwd.mockImplementation((cwd) => ({
+        ...originalWorkspace(cwd),
+        reloadModelProviders: reload,
+        workspaceProviders: sdkMocks.workspaceProviders,
+      }));
+      let connection: DaemonConnectionState | undefined;
+      let transcript: readonly DaemonTranscriptBlock[] = [];
+      function Harness() {
+        connection = useDaemonConnection();
+        transcript = useDaemonTranscriptBlocks();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        ...(standalone
+          ? {
+              sessionId: 'observer',
+              sessionContext: { kind: 'standalone' as const },
+            }
+          : {}),
+      });
+      expect(connection?.currentModel).toBe('qwen3.8-max');
+      sdkMocks.workspaceByCwd.mockClear();
+      sdkMocks.workspaceProviders.mockResolvedValue({
+        v: 1,
+        initialized: true,
+        workspaceCwd: '/mock-workspace',
+        providers: [],
+      });
+      await act(async () => {
+        signedOut = true;
+        changed.resolve();
+        await flushPromises();
+      });
+      expect(connection?.currentModel).toBe(modelId || undefined);
+      expect(connection?.models?.map((model) => model.id)).toEqual(
+        modelId && modelId !== 'qwen3.8-max' ? [modelId] : [],
+      );
+      expect(connection?.providers?.current?.authType).toBeUndefined();
+      expect(connection?.sessionId).toBe('observer');
+      expect(reload).not.toHaveBeenCalled();
+      if (standalone) expect(sdkMocks.workspaceByCwd).not.toHaveBeenCalled();
+      expect(
+        transcript.some(
+          (block) =>
+            block.kind === 'status' && block.source === 'model_switched',
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it.each([false, true])(
+    'keeps a refreshed model catalog when an older same-session load settles (read only: %s)',
+    async (readOnly) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(null, { status: 204 })),
+      );
+      const catalog = (modelId: string): DaemonSessionContextStatus => ({
+        v: 1,
+        sessionId: 'session-a',
+        workspaceCwd: '/mock-workspace',
+        state: {
+          models: {
+            currentModelId: readOnly ? modelId : 'catalog-a0',
+            availableModels: [{ modelId }],
+          },
+        },
+      });
+      const initial = createMockSession({
+        sessionId: 'session-a',
+        context: vi.fn(async () => catalog('catalog-a0')),
+      });
+      sdkMocks.sessions.push(initial);
+      let actions: DaemonSessionActions | undefined;
+      let connection: DaemonConnectionState | undefined;
+      function Harness() {
+        actions = useDaemonActions();
+        connection = useDaemonConnection();
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      expect(connection?.models?.map((m) => m.id)).toEqual(['catalog-a0']);
+      const goal = createDeferred<GoalStateResponse>();
+      const subscribed = createDeferred<void>();
+      const context = vi
+        .fn()
+        .mockResolvedValueOnce(catalog('catalog-a'))
+        .mockResolvedValue(catalog('catalog-b'));
+      const replacement = createMockSession({
+        sessionId: 'session-a',
+        context,
+        goal: vi.fn(() => goal.promise),
+        events: createPendingEvents(subscribed),
+      });
+      replacement.client = initial.client;
+      sdkMocks.MockDaemonSessionClient.load.mockResolvedValueOnce(replacement);
+      const originalWorkspace =
+        sdkMocks.workspaceByCwd.getMockImplementation()!;
+      const reloadModelProviders = vi.fn(async () => ({
+        status: 'applied' as const,
+      }));
+      sdkMocks.workspaceByCwd.mockImplementation((cwd) => ({
+        ...originalWorkspace(cwd),
+        reloadModelProviders,
+        workspaceProviders: sdkMocks.workspaceProviders,
+      }));
+      let reload: Promise<void> | undefined;
+      act(() => {
+        reload = requireActions(actions).reloadSession(
+          new AbortController().signal,
+        );
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(context).toHaveBeenCalledOnce();
+      await act(async () => {
+        await requireActions(actions).refreshModels(
+          undefined,
+          readOnly ? { reloadProviders: false } : undefined,
+        );
+      });
+      expect(connection?.models?.map((m) => m.id)).toEqual(['catalog-b']);
+      await act(async () => {
+        goal.resolve({ snapshot: { v: 2, goal: null, activity: 'idle' } });
+        await reload;
+        await subscribed.promise;
+        await flushPromises();
+      });
+      expect(connection?.models?.map((m) => m.id)).toEqual(['catalog-b']);
+      expect(connection?.currentModel).toBe(
+        readOnly ? 'catalog-b' : 'catalog-a0',
+      );
+      expect(reloadModelProviders).toHaveBeenCalledTimes(readOnly ? 0 : 1);
+    },
+  );
 
   it('keeps the current transcript when a same-session reload is aborted', async () => {
     vi.stubGlobal(
@@ -24995,6 +25124,110 @@ describe('DaemonSessionProvider', () => {
       expect(blocks).toHaveLength(4);
     },
   );
+
+  it('re-opens the capacity latch after a rewind rebuild frees the window', async () => {
+    // A rewind rebuild frees retention capacity, which must re-open the
+    // capacity latch so the surviving prefix stays pageable. The latch's ref
+    // fields (`capacityReached` / `hasMore` / `rejectedPage`) flip
+    // synchronously and the React state publish follows on the same drain; a
+    // regression that keeps the latch closed across a rewind — e.g. dropping
+    // the truncation reconciliation on the rebuild's `store.reset()` — turns
+    // this red even though the pre-rewind latch assertions stay green.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const chunk = (
+      id: number,
+      kind: 'user_message_chunk' | 'agent_message_chunk',
+      recordId: string,
+    ): DaemonEvent => ({
+      v: 1,
+      id,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: kind,
+          content: { type: 'text', text: recordId },
+          _meta: {
+            'qwen.session.recordId': recordId,
+            qwenTranscript: { sourceRecordIds: [recordId] },
+          },
+        },
+      },
+    });
+    const turn = (id: number, name: string) => [
+      chunk(id, 'user_message_chunk', `${name}-user`),
+      chunk(id + 1, 'agent_message_chunk', `${name}-answer`),
+    ];
+    const rewind = createDeferred<void>();
+    const session = createMockSession({
+      sessionId: 'rewind-deferral',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [...turn(1, 'root'), ...turn(3, 'target')],
+        liveJournal: [],
+      },
+      async *events(opts) {
+        await rewind.promise;
+        yield {
+          v: 1,
+          id: 100,
+          type: 'session_rewound',
+          data: {
+            sessionId: 'rewind-deferral',
+            promptId: 'native-target',
+            targetTurnIndex: 1,
+            filesChanged: [],
+            filesFailed: [],
+            replay: turn(50, 'root'),
+          },
+        };
+        yield* createIdleEvents()(opts);
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: turn(10, 'older-page'),
+      hasMore: false,
+    });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 2,
+      maxBlocks: 5,
+    });
+    // Saturate the window and latch the capacity rejection, as in the
+    // rewind-reopen matrix above.
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+    expect(history).toMatchObject({ capacityReached: true, hasMore: false });
+
+    // Commit the rewind and drain the batched dispatch. The rewind rebuild
+    // frees retention capacity, which must re-open the capacity latch — a
+    // regression that keeps the latch closed across a rewind (e.g. clearing
+    // the reconciliation callback on the rebuild's `store.reset()`) turns this
+    // red even though the pre-rewind latch assertions above stay green.
+    await act(async () => {
+      rewind.resolve();
+      await flushTranscriptDispatch();
+    });
+    expect(blocks.map((block) => block.sourceRecordIds?.[0])).toEqual([
+      'root-user',
+      'root-answer',
+    ]);
+    expect(history).toMatchObject({ capacityReached: false, hasMore: true });
+  });
 
   it('grows the latched rejected-page footprint by a re-anchoring trim’s evicted band and keeps the latch closed', async () => {
     // A byte-budget rejection stores the rejected page's footprint. A later

@@ -44,7 +44,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletionStage;
 
@@ -60,9 +59,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog residents;
     private final boolean resident;
     private final com.alibaba.qwen.code.managedagent.workspace.runtime.ManagedRuntimeCoordinator coordinator;
-    private static final Set<String> LIFECYCLE_FENCED = Set.of("CLOSING",
-            "CLOSED", "ARCHIVING", "ARCHIVED", "DELETING", "DELETED");
-    private final SshWorkspaceService ssh;
     private final RuntimeProvisioner primaryProvisioner;
     private final RuntimeBindingRepository extensionBindings;
     private final HttpRuntimeTransport extensionTransport;
@@ -148,7 +144,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             org.springframework.jdbc.core.JdbcTemplate jdbc,
             org.springframework.transaction.PlatformTransactionManager manager,
             RuntimeProvisioner residentProvisioner, SshWorkspaceService ssh) {
-        this.ssh = ssh;
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
         this.residents = new com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog(broker.getResidentWorkspaces());

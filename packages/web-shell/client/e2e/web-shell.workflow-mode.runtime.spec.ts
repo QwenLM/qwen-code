@@ -636,8 +636,10 @@ test('real browsers share owner mode while a turn runs and persist only that ses
       request.path.endsWith('/config-option'),
     ).length;
     const sidebar = firstClient.page.locator('[data-sidebar-shell]');
+    // A session created without a prompt has no display name, so the row
+    // carries the untitled label rather than an id prefix.
     await sidebar
-      .getByText(other.sessionId.slice(0, 8), { exact: true })
+      .getByText('Untitled session', { exact: true })
       .first()
       .click();
     await expect(await modeSwitch(firstClient.page)).toBeEnabled();

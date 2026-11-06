@@ -1401,6 +1401,12 @@ class WorkspaceCsiApplicationInventoryTest {
             if (table.equals("ma_resource")) {
                 assertThat(added.getFirst().number("last_verified_at")).isEqualTo(millis);
             }
+            if (table.equals("ma_session_journal_tx")) {
+                // A cut commits a releaseActivation, for which the database
+                // generates is_activation_record = 0, read back as "false".
+                assertThat(fixture.path("requests").get(32).path("operation").textValue()).isEqualTo("releaseActivation");
+                assertThat(added.getFirst().text("is_activation_record")).isEqualTo("false");
+            }
         }
         delta.put("writtenAt", "2040-01-01T00:00:00.123001Z");
         assertThatThrownBy(() -> WorkspaceCsiApplicationImage.expected(baseline,

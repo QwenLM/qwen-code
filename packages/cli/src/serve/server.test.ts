@@ -816,6 +816,9 @@ const EXPECTED_REGISTERED_FEATURES = [
   // they appear here in their registry-declaration order, not the
   // stage1 order.
   ...EXPECTED_STAGE1_FEATURES.flatMap((feature) => {
+    if (feature === 'workspace_skill_settings_batch_toggle') {
+      return [feature, 'user_skill_activation'];
+    }
     if (feature === 'session_create') {
       return [
         feature,
@@ -825,6 +828,9 @@ const EXPECTED_REGISTERED_FEATURES = [
     }
     if (feature === 'workspace_skills') {
       return [feature, 'workspace_skills_config_runtime'];
+    }
+    if (feature === 'workspace_skill_manage') {
+      return [feature, 'skill_archive_install', 'skill_zip_file_source'];
     }
     if (feature === 'session_artifacts') {
       return [
@@ -4079,7 +4085,9 @@ describe('createServeApp', () => {
         }
         if (
           feature === 'workspace_runtime' ||
-          feature === 'workspace_skills_config_runtime'
+          feature === 'workspace_skills_config_runtime' ||
+          feature === 'skill_archive_install' ||
+          feature === 'skill_zip_file_source'
         ) {
           expect(predicate({ workspaceRuntimeAvailable: true })).toBe(true);
           expect(predicate({ workspaceRuntimeAvailable: false })).toBe(false);
@@ -4376,6 +4384,27 @@ describe('createServeApp', () => {
               workspaceDirectoriesAvailable: true,
             }),
           ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'user_skill_activation') {
+          expect(predicate({ userSkillActivationAvailable: true })).toBe(true);
+          expect(predicate({ userSkillActivationAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              userSkillActivationAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              userSkillActivationAvailable: false,
+            }),
+          ).not.toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
           );
@@ -36882,6 +36911,84 @@ describe('createServeApp', () => {
         })),
       ).toEqual([pr]);
       await fsp.rm(sidecarPath, { force: true });
+    });
+
+    it('persists, preserves, and clears the binding role', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      try {
+        const set = await auth(
+          request(app).patch(
+            '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({ pr: { ...pr, role: 'fix' } });
+        expect(set.status).toBe(200);
+        expect(set.body.prs).toEqual([{ ...pr, role: 'fix' }]);
+        expect((await readSessionPrs(sidecarPath))?.[0]?.role).toBe('fix');
+
+        // An omitted role preserves the known one (a state refresh or
+        // rename must not silently untype the binding).
+        const preserve = await auth(
+          request(app).patch(
+            '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({ pr: { ...pr, state: 'open' } });
+        expect(preserve.status).toBe(200);
+        expect(preserve.body.prs).toEqual([
+          { ...pr, state: 'open', role: 'fix' },
+        ]);
+
+        // null is the explicit clear; the bridge never sees the null (the
+        // sidecar owns the clear, the live list reconciles from disk).
+        const clear = await auth(
+          request(app).patch(
+            '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({ pr: { ...pr, role: null } });
+        expect(clear.status).toBe(200);
+        expect(clear.body.prs).toEqual([{ ...pr, state: 'open' }]);
+        expect((await readSessionPrs(sidecarPath))?.[0]?.role).toBeUndefined();
+        for (const call of bridge.updateMetadataCalls) {
+          expect(
+            (call.metadata as { pr?: { role?: unknown } }).pr?.role,
+          ).not.toBeNull();
+        }
+      } finally {
+        await fsp.rm(sidecarPath, { force: true });
+      }
+    });
+
+    it('400 on an unknown binding role', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          role: 'triage',
+        },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      expect(res.body.field).toBe('pr');
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
     });
 
     it('echoes the sidecar list, not the bridge echo, when they disagree on the primary route', async () => {

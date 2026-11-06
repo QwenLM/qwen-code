@@ -33,11 +33,13 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
@@ -54,6 +56,8 @@ import java.util.function.Function;
 public final class RuntimeBrokerHttpServer implements AutoCloseable {
     public static final String ROUTE_PREFIX = "/internal/runtime-broker/v1";
     private static final int MAXIMUM_REQUEST_BYTES = 8 * 1024 * 1024;
+    private static final int MAXIMUM_HTTP_THREADS = 32;
+    private static final int MAXIMUM_QUEUED_REQUESTS = 64;
     private final RuntimeBrokerService service;
     private final byte[] authorization;
     private final HttpServer server;
@@ -96,11 +100,10 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 .getBytes(StandardCharsets.UTF_8);
         this.service = service;
         this.server = HttpServer.create(address, 0);
-        this.executor = Executors.newCachedThreadPool(task -> {
-            Thread thread = new Thread(task, "runtime-broker-http");
-            thread.setDaemon(true);
-            return thread;
-        });
+        this.executor = new ThreadPoolExecutor(MAXIMUM_HTTP_THREADS, MAXIMUM_HTTP_THREADS,
+                0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(MAXIMUM_QUEUED_REQUESTS),
+                Thread.ofPlatform().daemon().name("runtime-broker-http-", 0).factory(),
+                new ThreadPoolExecutor.AbortPolicy());
         server.setExecutor(executor);
         server.createContext(ROUTE_PREFIX, this::handle);
         if (nativeReadback != null) {
