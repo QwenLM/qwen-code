@@ -97,11 +97,11 @@
       },
       {
         "command": "qwen-code.logout",
-        "title": "Qwen Code: Logout"
+        "title": "%qwen-code.logout.title%"
       },
       {
         "command": "qwen-code.upgrade",
-        "title": "Qwen Code: Upgrade"
+        "title": "%qwen-code.upgrade.title%"
       },
       {
         "command": "qwen-code.focusChat",

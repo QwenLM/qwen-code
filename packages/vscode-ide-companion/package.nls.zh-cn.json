@@ -8,6 +8,8 @@
   "qwen-code.showNotices.title": "Qwen Code: 查看第三方声明",
   "qwen-code.openChat.title": "Qwen Code: 打开",
   "qwen-code.auth.title": "Qwen Code: 身份验证",
+  "qwen-code.logout.title": "Qwen Code: 退出登录",
+  "qwen-code.upgrade.title": "Qwen Code: 升级套餐",
   "qwen-code.focusChat.title": "Qwen Code: 聚焦聊天视图",
   "qwen-code.newConversation.title": "Qwen Code: 新建对话",
   "qwen-code.showLogs.title": "Qwen Code: 显示日志"

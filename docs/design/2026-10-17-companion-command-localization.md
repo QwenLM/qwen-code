@@ -4,7 +4,7 @@
 
 ## Problem and scope
 
-Issue #13967 asks for broader Companion localization. The maintainer explicitly welcomes a standalone manifest contribution: nine of twelve command titles are hardcoded English, while the three copy commands already use native VS Code NLS keys.
+Issue #13967 asks for broader Companion localization. The maintainer explicitly welcomes a standalone manifest contribution: nine of twelve command titles are hardcoded English, while the three copy commands already use native VS Code NLS keys. `qwen-code.logout` and `qwen-code.upgrade`, added to `main` later with literal English titles, are converted the same way.
 
 This change covers command titles in the existing English and Simplified Chinese catalogs, plus delivery of those catalogs in the extension package. Notifications, configuration descriptions, other locales, webview strings, language precedence and shared CLI translation sources remain follow-up work.
 
@@ -18,7 +18,7 @@ Affected files are the Companion manifest, two NLS catalogs, packaging whitelist
 
 ## Validation and acceptance
 
-- All twelve command-title references resolve to non-empty English and Simplified Chinese entries; the English titles match the baseline.
+- Every command-title reference resolves to non-empty English and Simplified Chinese entries; the English titles match the baseline. The test covers every manifest command, so a command added with a literal title fails it.
 - Both NLS catalogs appear in the vsce file list and generated VSIX archive.
 - Focused manifest tests preserve the focus-chat semantic assertion and existing visibility checks.
 - Attempt isolated VS Code display-language validation; distinguish real-host evidence from package-level checks if a language pack or host is unavailable.

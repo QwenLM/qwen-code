@@ -62,6 +62,8 @@ describe('package.json command metadata', () => {
       'qwen-code.showNotices.title': 'Qwen Code: View Third-Party Notices',
       'qwen-code.openChat.title': 'Qwen Code: Open',
       'qwen-code.auth.title': 'Qwen Code: Auth',
+      'qwen-code.logout.title': 'Qwen Code: Logout',
+      'qwen-code.upgrade.title': 'Qwen Code: Upgrade',
       'qwen-code.focusChat.title': 'Qwen Code: Focus Chat View',
       'qwen-code.newConversation.title': 'Qwen Code: New Conversation',
       'qwen-code.showLogs.title': 'Qwen Code: Show Logs',
