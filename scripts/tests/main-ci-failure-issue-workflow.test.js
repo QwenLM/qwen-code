@@ -826,10 +826,9 @@ printf '%s\\n' '1'
       );
     });
     it('reports a push run whose successor cannot report its result', () => {
-      // The gate admits failure and timeout/failure-backed cancelled runs, but
-      // a successor that ended skipped, or a plain concurrency/no-jobs
-      // cancellation, never reports itself. Crediting its mere existence would
-      // drop the only report of a real regression.
+      // The gate admits failure and cancelled runs, but a successor that ended
+      // skipped never re-enters this workflow. Crediting its mere existence
+      // would drop the only report of a real regression.
       const resolved = detect(
         '1',
         {
@@ -837,10 +836,10 @@ printf '%s\\n' '1'
           HEAD_BRANCH: 'main',
           HEAD_SHA: 'old-head',
         },
-        { mainTip: 'new-head', successor: 'completed cancelled' },
+        { mainTip: 'new-head', successor: 'completed skipped' },
       );
       expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
-      expect(resolved.stdout).toContain('completed cancelled');
+      expect(resolved.stdout).toContain('completed skipped');
       expect(resolved.stdout).toContain('does not own this result');
       expect(resolved.summary).toBe('');
     });
@@ -866,6 +865,55 @@ printf '%s\\n' '1'
       );
       expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
       expect(resolved.stdout).toContain('the newer push run owns its result');
+    });
+    it('lets a fail-open cancelled successor own the result (no duplicate)', () => {
+      // The successor's own gate reports a `timeout` and also fails open on an
+      // unclassifiable `unknown`. Crediting only `timeout` filed one incident
+      // twice: the successor reported the tip and this run reported its head.
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == *commits/main* ]]; then printf '%s\\n' 'new-head'; exit 0; fi
+if [[ "$*" == *actions/workflows/*/runs* ]]; then printf '%s\\n' 'completed cancelled 555 1'; exit 0; fi
+if [[ "$*" == *actions/runs/555/attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  exit 0
+fi
+if [[ "$*" == */check-runs/9001/annotations* ]]; then
+  printf '%s\\n' 'Some unrelated annotation.'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { EVENT_NAME: 'push', HEAD_BRANCH: 'main', HEAD_SHA: 'old-head' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('the newer push run owns its result');
+    });
+    it('reports this run when the cancelled successor cannot be read', () => {
+      // `unreadable` is a failed read of the successor, not its verdict: the
+      // successor's own gate may have read the same run as concurrency and
+      // skipped, so deferring here would drop the only report of the regression.
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == *commits/main* ]]; then printf '%s\\n' 'new-head'; exit 0; fi
+if [[ "$*" == *actions/workflows/*/runs* ]]; then printf '%s\\n' 'completed cancelled 555 1'; exit 0; fi
+if [[ "$*" == *actions/runs/555/attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  exit 0
+fi
+if [[ "$*" == */check-runs/9001/annotations* ]]; then
+  exit 1
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { EVENT_NAME: 'push', HEAD_BRANCH: 'main', HEAD_SHA: 'old-head' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('does not own this result');
     });
     it('does not let a concurrency-cancelled successor swallow the report', () => {
       // Same shape as the timeout case but the successor's cancelled job carries

@@ -198,11 +198,16 @@ jobs:
                       case "${successor_conclusion}" in
                         success | failure) successor_owns=true ;;
                         cancelled)
-                          # A timeout-backed cancelled successor reports itself;
-                          # a plain concurrency cancellation does not.
-                          if [[ -n "${successor_id}" &&
-                            "$(bash .github/scripts/ci/classify-cancelled-run.sh "${successor_id}" "${successor_attempt:-1}")" == 'timeout' ]]; then
-                            successor_owns=true
+                          # Defer only to a successor that reports itself: its
+                          # own gate files for `timeout` and for a fail-open
+                          # `unknown`, and skips concurrency/nothing-executed.
+                          # `unreadable` is a failed read, which says nothing
+                          # about the successor's verdict, so it keeps the
+                          # fail-open report here.
+                          if [[ -n "${successor_id}" ]]; then
+                            case "$(bash .github/scripts/ci/classify-cancelled-run.sh "${successor_id}" "${successor_attempt:-1}")" in
+                              timeout | unknown) successor_owns=true ;;
+                            esac
                           fi
                           ;;
                       esac

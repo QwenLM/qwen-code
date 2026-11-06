@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Classify a cancelled main CI run by positive annotation evidence (#16272) and
-# echo `timeout`, `concurrency`, `nothing-executed`, or `unknown`. Shared by the
-# current-run gate and the successor-ownership check in
+# echo `timeout`, `concurrency`, `nothing-executed`, `unknown`, or `unreadable`.
+# Shared by the current-run gate and the successor-ownership check in
 # main-ci-failure-issue.yml so the two cannot drift:
 #   timeout          - a job carries the execution-time annotation (a real
 #                      breakage that concludes cancelled, #16214); wins even
@@ -12,12 +12,16 @@
 #                      report (#16280 R1-2). Its own token because the caller
 #                      must not name an annotation this path never read (#16280
 #                      R3-2).
-#   unknown          - cancelled jobs ran steps but their annotations could not
-#                      be read or matched neither pattern, a job concluded
-#                      failure/timed_out under the cancelled run (#16280 R3-1),
-#                      or the jobs pages could not be certified complete;
-#                      callers fail open on this so an unclassifiable
-#                      cancellation cannot hide.
+#   unknown          - the run was read and its cancellation matched neither
+#                      pattern, or a job concluded failure/timed_out under the
+#                      cancelled run (#16280 R3-1). Callers fail open on this,
+#                      and it is the verdict a cancelled run reports for
+#                      itself.
+#   unreadable       - the job or annotation read failed, or the jobs pages
+#                      could not be certified complete. Callers fail open on
+#                      this too, but it says nothing about what the run
+#                      concluded, so the successor check must not defer to it
+#                      (#16280 R4-1).
 set -uo pipefail
 
 REPO="${REPO:?REPO must name the repository}"
@@ -28,15 +32,15 @@ pages="${RUNNER_TEMP}/cancel-jobs-${run_id}-${attempt}.json"
 
 if ! gh api "repos/${REPO}/actions/runs/${run_id}/attempts/${attempt}/jobs?per_page=100" \
   --paginate > "${pages}" 2>/dev/null; then
-  echo unknown
+  echo unreadable
   exit 0
 fi
 # Certify the merged pages against the total_count receipt, like the download
-# step: a partial list must read as unknown, not as a complete one that happens
-# to lack the timed-out job.
+# step: a partial list must read as unreadable, not as a complete one that
+# happens to lack the timed-out job.
 if ! jq -e -s '([.[].total_count] | max) as $t | ([.[].jobs[]?] | length) as $n | $t != null and $n == $t' \
   "${pages}" >/dev/null 2>&1; then
-  echo unknown
+  echo unreadable
   exit 0
 fi
 
@@ -71,7 +75,7 @@ while IFS=$'\t' read -r _ check_run_id steps_run; do
       "repos/${REPO}/check-runs/${check_run_id}/annotations" \
       --jq '[.[].message] | join("\n")' 2>/dev/null
   )"; then
-    echo unknown
+    echo unreadable
     exit 0
   fi
   if grep -qiE 'exceeded the maximum execution time' <<< "${annotations}"; then
