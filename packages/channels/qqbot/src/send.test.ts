@@ -5947,6 +5947,45 @@ describe('sendQQMedia', () => {
     );
   });
 
+  it('drops an anchor that expires during the upload, driven by the real sweep timer', async () => {
+    vi.useFakeTimers();
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+    const raw = ch as unknown as Record<string, unknown>;
+    try {
+      // The turn already streamed text under this anchor: (msg_id, msg_seq 1)
+      // is spent. The chat-level entry is the other holder the sweep evicts.
+      (raw['replyMsgId'] as Map<string, unknown>).set('test-chat-id', {
+        msgId: 'msg-anchor',
+        timestamp: Date.now(),
+      });
+      (raw['msgSeqMap'] as Map<string, number>).set('msg-anchor', 1);
+      (raw['startReplyMsgIdCleanup'] as () => void).call(ch);
+      // Production path, not a hand-deleted map: the 60 s sweep ticks while the
+      // upload is in flight and the 300 s anchor TTL passes.
+      // The sweep ticks every 60 s and evicts entries strictly older than the
+      // 300 s TTL, so advance past the first tick that lands beyond it.
+      mockUploadQQRichMedia.mockImplementation(async () => {
+        vi.advanceTimersByTime(421_000);
+        return { fileInfo: 'FILE-INFO', ttl: 86400 };
+      });
+
+      const result = await sendMedia(ch, input);
+
+      expect(result).toEqual({ ok: true });
+      // The fresh resolution finds no window, so the media goes out as an
+      // active message instead of replaying (msg_id, msg_seq 1).
+      expect(mockSendQQMessage).toHaveBeenCalledWith(
+        'https://api.sgroup.qq.com',
+        '/v2/users/test-chat-id/messages',
+        'test-token',
+        { msg_type: 7, media: { file_info: 'FILE-INFO' } },
+      );
+    } finally {
+      (raw['stopReplyMsgIdCleanup'] as () => void).call(ch);
+      vi.useRealTimers();
+    }
+  });
+
   it('fails when the reply window closes during the upload and active messages are disabled', async () => {
     const ch = makeChannel({ chatType: 'group', sessionAnchor: 'msg-anchor' });
     const raw = ch as unknown as Record<string, unknown>;
