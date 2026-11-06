@@ -152,7 +152,7 @@ export function StandaloneRecents({
     readWorkspaceExpanded(expansionId),
   );
   const [showAll, setShowAll] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState<{ cursor?: string }>();
   const [busySessionId, setBusySessionId] = useState<string>();
@@ -446,7 +446,6 @@ export function StandaloneRecents({
 
   if (!supported) return null;
   if (
-    archiveState === 'archived' &&
     !loadError &&
     !sessionError &&
     !loading &&

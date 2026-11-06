@@ -25,6 +25,7 @@ import {
   type RestoreToolResponseBinding,
 } from '../utils/restore-tool-response.js';
 import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
+import { t } from '../../i18n/index.js';
 import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import {
   InteractiveModToolScheduler,
@@ -170,6 +171,8 @@ export interface LivePromptOptions {
   submittedPrompt?: string;
   humanInput?: HumanPromptInput;
   workflowModeEligible?: boolean;
+  /** Context the Mods' `prompt.submit` hooks added; rides the first send. */
+  promptContext?: readonly string[];
   /**
    * PromptId minted by the backend (`nextLivePromptId`) at submit time so
    * the user item and this request share the checkpoint key. Omitted → one
@@ -680,7 +683,9 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
       throw err;
     })
     .then(async () => {
-      await getInteractiveModSession(config)?.initialize(['AbovePrompt']);
+      await getInteractiveModSession(config)?.initialize(['AbovePrompt'], {
+        prompts: true,
+      });
     });
   // Fire-and-forget callers (the entry) must not trip unhandled-rejection
   // handling; awaiters still receive the rejection.
@@ -769,6 +774,7 @@ export async function* livePromptEvents(
         return parseAndFormatApiError(
           error,
           config.getContentGeneratorConfig()?.authType,
+          t,
         );
       } catch {
         return error instanceof Error ? error.message : String(error);
@@ -878,6 +884,9 @@ export async function* livePromptEvents(
           ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
           ...(!options?.retry && options?.submittedPrompt
             ? { submittedPrompt: options.submittedPrompt }
+            : {}),
+          ...(!options?.retry && options?.promptContext?.length
+            ? { promptContext: options.promptContext }
             : {}),
         }
       : {

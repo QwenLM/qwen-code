@@ -42,6 +42,61 @@ const step = (block, name) => {
 };
 
 describe('SDK Java self-hosted workflow guards', () => {
+  it('runs both ordinary dependency host modes from the verified local reactor', () => {
+    const steps = parse(workflow).jobs['mysql-integration'].steps;
+    const verify = steps.find((candidate) =>
+      candidate.name.startsWith(
+        'Install and verify Managed Agent dependencies',
+      ),
+    );
+    const embedding = steps.find(
+      (candidate) =>
+        candidate.name === 'Verify ordinary and enabled embedding hosts',
+    );
+    expect(steps.indexOf(embedding)).toBeGreaterThan(steps.indexOf(verify));
+    expect(embedding['working-directory']).toBe(
+      'packages/managed-agent-server',
+    );
+    expect(embedding.env.MAVEN_ARGS).toBe(verify.env.MAVEN_ARGS);
+    expect(embedding.run).toBe(
+      'bash ../../.github/scripts/verify-managed-agent-embedding.sh',
+    );
+    const embeddingScript = readFileSync(
+      '.github/scripts/verify-managed-agent-embedding.sh',
+      'utf8',
+    );
+    expect(embeddingScript).toContain('set -euo pipefail');
+    expect(embeddingScript).toContain('-pl server -am -DskipTests');
+    expect(embeddingScript).toContain('-Dexpression=project.version');
+    const hostRuns = embeddingScript
+      .split('\n')
+      .filter((line) =>
+        line.includes('-f verification/src/test/embedding-host/pom.xml'),
+      );
+    expect(hostRuns).toHaveLength(2);
+    for (const line of hostRuns) {
+      expect(line).toContain('-Dmanaged-agent.version="${managed_version}"');
+      expect(line).toContain('-DfailIfNoTests=true');
+      expect(line).not.toContain('-DskipTests');
+    }
+    expect(hostRuns[0]).toContain('-Dtest=EmbeddingHostTest');
+    expect(hostRuns[0]).not.toContain('-Pembedded');
+    expect(hostRuns[1]).toContain('-Dtest=EnabledHostTest');
+    expect(hostRuns[1]).toContain('-Pembedded');
+    expect(
+      steps.find(
+        (candidate) =>
+          candidate.name === 'Upload Maven test reports on failure',
+      ).with.path,
+    ).toContain('embedding-host/target/surefire-reports/*');
+    expect(
+      readFileSync(
+        'packages/managed-agent-server/verification/src/test/embedding-host/pom.xml',
+        'utf8',
+      ),
+    ).toContain('<version>${managed-agent.version}</version>');
+  });
+
   it('builds native producer prerequisites before either Server test lane', () => {
     const jobs = parse(workflow).jobs;
     for (const name of ['mysql-integration', 'hosted-harness-mysql']) {
@@ -132,6 +187,80 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(existsSync('scripts/run-java-daemon-sdk-e2e.ts')).toBe(true);
     expect(scripts.build).toBeTruthy();
     expect(scripts.bundle).toBeTruthy();
+  });
+
+  it('gates every pool-capable Java job and calibrates its floor', () => {
+    const jobs = parse(workflow).jobs;
+    // Fail closed: only these two jobs are hosted by construction, so every
+    // other job — including one routed through a runs-on expression or a job
+    // output — must carry the gate. The allowlist is the thing a reviewer
+    // sees; rewording an expression can no longer walk a lane out of the
+    // corpus while the suite stays green.
+    const hostedOnly = new Set(['hosted-harness-mysql', 'hosted-failover-e2e']);
+    const gated = new Set();
+
+    for (const [name, definition] of Object.entries(jobs)) {
+      const steps = definition.steps ?? [];
+      const gateIndex = steps.findIndex(
+        (candidate) => candidate.name === 'Disk floor gate (self-hosted)',
+      );
+      if (hostedOnly.has(name)) {
+        // runner.environment is github-hosted there, so the step's `if:` is
+        // permanently false and a gate reads as protection without being any.
+        expect(gateIndex, name).toBe(-1);
+        continue;
+      }
+      expect(gateIndex, name).toBeGreaterThan(-1);
+      expect(steps[gateIndex - 1]?.uses, name).toMatch(/^actions\/checkout@/);
+      expect(steps[gateIndex].if, name).toBe(
+        "${{ runner.environment == 'self-hosted' }}",
+      );
+      expect(steps[gateIndex].run, name).toBe(
+        'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"',
+      );
+      // continue-on-error would neuter the gate while every other assertion
+      // stays true; the job must actually stop on a saturated host.
+      expect(steps[gateIndex]['continue-on-error'], name).toBeUndefined();
+      gated.add(name);
+    }
+
+    // A job that matches neither list fails here instead of shipping ungated.
+    expect(gated.size + hostedOnly.size).toBe(Object.keys(jobs).length);
+
+    // The shared 2 GiB default is a light-lane floor. These lanes install,
+    // build and fork JUnit, so they need the repo's build-sized figure; the
+    // broker lanes are refused by RocketMQ's own used-ratio rule long before
+    // free bytes run out, which no absolute floor can express (#16003).
+    const heavyFloors = {
+      test: 8388608,
+      'mysql-integration': 8388608,
+      'event-transport-broker': 8388608,
+      'event-transport-multi-node': 8388608,
+      'daemon-e2e': 8388608,
+    };
+    for (const [name, kib] of Object.entries(heavyFloors)) {
+      expect(
+        Number(jobs[name].env?.DISK_FLOOR_MIN_FREE_KB),
+        `${name}: DISK_FLOOR_MIN_FREE_KB`,
+      ).toBe(kib);
+    }
+    // Remaining on the shared default on purpose: its Maven run is a single
+    // migration pass, and raising the shared value would move every other
+    // lane's gate (run-release-docker-integration.sh depends on that split).
+    expect(
+      jobs['flyway-migrations'].env?.DISK_FLOOR_MIN_FREE_KB,
+    ).toBeUndefined();
+
+    for (const name of [
+      'event-transport-broker',
+      'event-transport-multi-node',
+    ]) {
+      expect(
+        Number(jobs[name].env?.DISK_FLOOR_MAX_USED_PCT),
+        `${name}: DISK_FLOOR_MAX_USED_PCT`,
+      ).toBe(90);
+    }
+    expect(jobs['test'].env?.DISK_FLOOR_MAX_USED_PCT).toBeUndefined();
   });
 
   it('serializes the host-shared Maven cache write-back on each physical ECS host', () => {
@@ -331,7 +460,24 @@ describe('SDK Java self-hosted workflow guards', () => {
         pruneMarkers.push([jobName, markersOf(prune)]);
       }
     }
-    const expected = ['qwen-managed-agent-server', 'qwencode-sdk'];
+    const expected = [
+      'qwen-managed-agent-adapters',
+      'qwen-managed-agent-contracts',
+      'qwen-managed-agent-control-plane',
+      'qwen-managed-agent-parent',
+      'qwen-managed-agent-persistence',
+      'qwen-managed-agent-runtime-broker',
+      'qwen-managed-agent-runtime-external',
+      'qwen-managed-agent-runtime-host',
+      'qwen-managed-agent-runtime-http',
+      'qwen-managed-agent-runtime-kubernetes',
+      'qwen-managed-agent-runtime-local',
+      'qwen-managed-agent-runtime-ssh',
+      'qwen-managed-agent-runtime-static',
+      'qwen-managed-agent-server',
+      'qwen-managed-agent-verification',
+      'qwencode-sdk',
+    ];
     expect(drops.length).toBeGreaterThan(0);
     expect(prunes.length).toBeGreaterThan(0);
     for (const [jobName, set] of [...drops, ...prunes]) {
@@ -458,6 +604,31 @@ describe('SDK Java self-hosted workflow guards', () => {
         mkdirSync(runnerTemp, { recursive: true });
         const hostRepo = join(home, '.m2', 'repository');
         const hostJars = [
+          ...[
+            'qwen-managed-agent-parent',
+            'qwen-managed-agent-contracts',
+            'qwen-managed-agent-control-plane',
+            'qwen-managed-agent-runtime-broker',
+            'qwen-managed-agent-runtime-external',
+            'qwen-managed-agent-runtime-host',
+            'qwen-managed-agent-runtime-http',
+            'qwen-managed-agent-runtime-kubernetes',
+            'qwen-managed-agent-runtime-local',
+            'qwen-managed-agent-runtime-ssh',
+            'qwen-managed-agent-runtime-static',
+            'qwen-managed-agent-persistence',
+            'qwen-managed-agent-adapters',
+            'qwen-managed-agent-server',
+            'qwen-managed-agent-verification',
+          ]
+            .filter((name) => name !== 'qwen-managed-agent-server')
+            .map((name) => [
+              'com',
+              'alibaba',
+              name,
+              '0.1.0-alpha',
+              'module.jar',
+            ]),
           ['com', 'alibaba', 'qwencode-sdk', '0.1.0-alpha', 'sdk.jar'],
           [
             'com',
@@ -497,8 +668,22 @@ describe('SDK Java self-hosted workflow guards', () => {
           expect(result.error, name).toBeUndefined();
           expect(result.status, name + result.stderr).toBe(0);
           for (const coordinate of [
-            'qwencode-sdk',
+            'qwen-managed-agent-parent',
+            'qwen-managed-agent-contracts',
+            'qwen-managed-agent-control-plane',
+            'qwen-managed-agent-runtime-broker',
+            'qwen-managed-agent-runtime-external',
+            'qwen-managed-agent-runtime-host',
+            'qwen-managed-agent-runtime-http',
+            'qwen-managed-agent-runtime-kubernetes',
+            'qwen-managed-agent-runtime-local',
+            'qwen-managed-agent-runtime-ssh',
+            'qwen-managed-agent-runtime-static',
+            'qwen-managed-agent-persistence',
+            'qwen-managed-agent-adapters',
             'qwen-managed-agent-server',
+            'qwen-managed-agent-verification',
+            'qwencode-sdk',
           ]) {
             expect(
               existsSync(
@@ -1103,8 +1288,8 @@ describe('SDK Java self-hosted workflow guards', () => {
       paths: [
         'packages/sdk-java/qwencode/target/surefire-reports/*.txt',
         'packages/sdk-java/qwencode/target/surefire-reports/*.dumpstream',
-        'packages/managed-agent-server/target/surefire-reports/*.txt',
-        'packages/managed-agent-server/target/surefire-reports/*.dumpstream',
+        'packages/managed-agent-server/verification/target/surefire-reports/*.txt',
+        'packages/managed-agent-server/verification/target/surefire-reports/*.dumpstream',
       ],
       testStep: 'Run Runtime Broker state tests',
     },
@@ -1112,10 +1297,11 @@ describe('SDK Java self-hosted workflow guards', () => {
       name: 'mysql-integration',
       artifact: 'sdk-java-test-reports-mysql-integration-java-21',
       paths: [
-        'packages/managed-agent-server/target/surefire-reports/*.txt',
-        'packages/managed-agent-server/target/surefire-reports/*.dumpstream',
-        'packages/managed-agent-server/target/failsafe-reports/*.txt',
-        'packages/managed-agent-server/target/failsafe-reports/*.dumpstream',
+        'packages/managed-agent-server/verification/src/test/embedding-host/target/surefire-reports/*',
+        'packages/managed-agent-server/verification/target/surefire-reports/*.txt',
+        'packages/managed-agent-server/verification/target/surefire-reports/*.dumpstream',
+        'packages/managed-agent-server/verification/target/failsafe-reports/*.txt',
+        'packages/managed-agent-server/verification/target/failsafe-reports/*.dumpstream',
       ],
       testStep:
         'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
@@ -1215,7 +1401,7 @@ describe('SDK Java self-hosted workflow guards', () => {
   );
 
   it('keeps the Broker matrix selector matched to every default test including nested packages', () => {
-    const cwd = 'packages/managed-agent-server/src/test/java';
+    const cwd = 'packages/managed-agent-server/verification/src/test/java';
     const prefix = 'com/alibaba/qwen/code/runtimebroker';
     const selected = [
       ...new Set(
@@ -1237,7 +1423,10 @@ describe('SDK Java self-hosted workflow guards', () => {
       true,
     );
     expect(
-      readFileSync('packages/managed-agent-server/pom.xml', 'utf8'),
+      readFileSync(
+        'packages/managed-agent-server/verification/pom.xml',
+        'utf8',
+      ),
     ).toContain('<failIfNoTests>true</failIfNoTests>');
   });
 
@@ -1260,7 +1449,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       "settings-path: '${{ runner.temp }}/setup-java-m2'",
     );
     // Two tail-anchored forms, no prefix match: mysql-integration appends
-    // a job-local -Dmaven.repo.local to its single Maven-bearing step
+    // a job-local -Dmaven.repo.local to both Maven-bearing steps
     // (pinned by the 'installs and verifies against one job-local Maven
     // repository' test), the EventTransport lanes to both of theirs, and
     // the test job to its self-hosted suite; the other jobs must carry no
@@ -1275,7 +1464,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
       {
         test: 6,
-        'mysql-integration': 1,
+        'mysql-integration': 2,
         'daemon-e2e': 1,
         'event-transport-broker': 2,
         'event-transport-multi-node': 2,
@@ -1670,6 +1859,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(mysql.strategy).toBeUndefined();
     expect(JSON.stringify(mysql)).not.toMatch(/mariadb|matrix\./i);
     expect(mysql.env).toEqual({
+      // The lane writes a database, two Maven runs and the JUnit forks into
+      // the same host volume, so it carries the heavy floor (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608',
       MYSQL_CONTAINER:
         'qwen-code-sdk-java-mysql-${{ github.run_id }}-${{ github.run_attempt }}',
     });
@@ -1955,11 +2147,20 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // multi-hour verify must not sit between the fast tier and its hold.
     const parsed = parse(workflow);
     const mavenSteps = parsed.jobs['mysql-integration'].steps.filter(
-      (s) => typeof s.run === 'string' && s.run.includes('mvn '),
+      (s) =>
+        typeof s.run === 'string' &&
+        (s.run.includes('mvn ') ||
+          s.run.includes('verify-managed-agent-embedding.sh')),
     );
     expect(mavenSteps.map((s) => s.name)).toEqual([
       'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
+      'Verify ordinary and enabled embedding hosts',
     ]);
+    expect(mavenSteps[1].run).not.toContain('sdk_java_lock_acquire');
+    expect(
+      readFileSync('.github/scripts/verify-managed-agent-embedding.sh', 'utf8'),
+    ).not.toContain('sdk_java_lock_acquire');
+    expect(mavenSteps[1].env.MAVEN_ARGS).toBe(mavenSteps[0].env.MAVEN_ARGS);
     const [step] = mavenSteps;
     expect(step.run).toContain(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
@@ -2074,7 +2275,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // artifact in the shared cache the next seed hardlinks from.
     expect(step.run).toContain('cd "${RUNNER_TEMP}/m2-repo"');
     expect(step.run).toContain(
-      "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \\) -prune -o -type f -links 1 -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?",
+      "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-runtime-external -o -path ./com/alibaba/qwen-managed-agent-runtime-host -o -path ./com/alibaba/qwen-managed-agent-runtime-http -o -path ./com/alibaba/qwen-managed-agent-runtime-local -o -path ./com/alibaba/qwen-managed-agent-runtime-kubernetes -o -path ./com/alibaba/qwen-managed-agent-runtime-ssh -o -path ./com/alibaba/qwen-managed-agent-runtime-static -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \\) -prune -o -type f -links 1 -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?",
     );
     expect(step.run).not.toMatch(/tar [^\n]*-xf/);
     expect(step.run).toContain(
