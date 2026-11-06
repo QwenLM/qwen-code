@@ -2111,10 +2111,13 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
      * here. Only the latest acquire's claim may hand the mount back, and a
      * lifecycle operation's window refuses it like the sibling release.
      * A Session with an active operation keeps its mount honestly, the
-     * same freeze the fleet promises while anything is unproven — every
-     * kind of unsettled row counts, background processes included (the
-     * drain excludes them because its sweep stops or settles them first,
-     * and this path runs no sweep). A settled execution whose capture
+     * same freeze the fleet promises while anything is unproven. An
+     * observe-only sweep first settles any background row whose exit it
+     * can prove — stopping nothing, because this handback is
+     * observe-and-hold (#13800), not a drain — and the busy check then
+     * re-reads without the exclusion, so a background row still live or
+     * unproven keeps the mount instead of being handed back over a
+     * running writer. A settled execution whose capture
      * never proved its writer stopped keeps the mount for good: the
      * operator-recovery family fences exactly that Workspace, and the
      * distinct refusal tells the caller that waiting settles nothing. The
@@ -2155,14 +2158,17 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
             } finally {
                 context.unlock();
             }
-            // R17-2: a Hook-configured Shell turn shares this broker and its
-            // finish() skips the release, so a background run that outlives the
-            // turn holds the Runtime. Sweep the unproven background rows (issuing
-            // each row's stop) before the busy check, mirroring the drain release,
-            // so a routine detach hands the mount back instead of wedging on
-            // runtime_session_busy. This stays a mount handback — the owner id is
-            // not tombstoned and remains re-acquirable (R13-1).
-            return executionRecovery.settleUnprovenBackgroundRows(context, true)
+            // R17-2 / R18-1: a Hook-configured Shell turn shares this broker and
+            // its finish() skips the release, so a background run that outlives
+            // the turn can hold the Runtime. Observe the unproven background rows
+            // before the busy check — a provable exit settles the row and
+            // un-wedges a routine detach — but stop nothing: this handback is
+            // observe-and-hold (#13800), not a drain. The excluded check clears
+            // only what the observation settled; the un-excluded re-read then
+            // refuses any row still live or unproven, so the mount is never
+            // handed back over a running writer. This stays a mount handback —
+            // the owner id is not tombstoned and remains re-acquirable (R13-1).
+            return executionRecovery.settleUnprovenBackgroundRows(context, false)
                     .thenCompose(ignored -> {
                         context.lock();
                         try {
@@ -2177,6 +2183,16 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                                             new java.util.HashSet<>(context.backgroundProcesses()))) {
                                 throw conflict("runtime_session_busy",
                                         "Runtime Session has an active operation");
+                            }
+                            // The observation settles only provable exits; a
+                            // background row still live or unproven keeps the
+                            // mount. Re-read without the exclusion so a row the
+                            // sweep could not settle is never handed back over.
+                            if (executionRepository.hasActiveByRuntimeSession(
+                                    context.binding().getBindingId(),
+                                    context.binding().getGeneration(), runtimeId)) {
+                                throw conflict("runtime_session_busy",
+                                        "Runtime Session has an active background process");
                             }
                             if (executionRepository.hasUnprovenCaptureByRuntimeSession(
                                     context.binding().getBindingId(),
