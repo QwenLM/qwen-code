@@ -52,7 +52,6 @@
 
 1. **drain 获取 Session root。** `requestHarnessDrain` 在 placement 之后、写 head 行之前锁 Session root（`ExecutionAdmissionPlacement.lockDrainRoot`）。placement → root 是所有 placement 持有者已经在用的顺序。调用方（`ManagedRuntimeCoordinator.requestWorkspaceClose`，经由 `SessionLifecycleCoordinator`）在独立事务中调用它，外层没有数据库事务。
 2. **不经 placement 的准入。** 在事务开始前、紧挨现有的 `findById`，`ExecutionAdmissionPlacement.free` 用独立连接上的普通读做判断，要求同时满足：
-
    - binding 不属于 CSI files profile，也不是常驻工作区；
    - `isolationClass = session`，且不共享 Runtime Session；
    - 没有 lifecycle authority（这种检查已经对 head 行加共享锁）；

@@ -84,7 +84,6 @@ kind does not change in place.
 2. **Placement-free admission.** Before the transaction, next to the existing
    `findById`, `ExecutionAdmissionPlacement.free` decides with plain reads on their own
    connection. It requires all of these:
-
    - the binding is outside the CSI files profile and not a Resident Workspace;
    - `isolationClass = session`, and it does not share Runtime Sessions;
    - no lifecycle authority (such a check already share-locks the head row);
