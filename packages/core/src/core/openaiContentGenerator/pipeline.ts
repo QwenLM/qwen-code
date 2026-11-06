@@ -1628,6 +1628,42 @@ export class ContentGenerationPipeline {
       delete typed['tool_choice'];
     }
 
+    // The subscription gateway uses budget fields, including after the generic
+    // Qwen disable path above has selected a chat-template switch.
+    if (
+      this.contentGeneratorConfig.authType === 'qwen-subscription' &&
+      (model === 'qwen3.8-max' || model === 'qwen3.8-flash') &&
+      (reasoningDisabled || effectiveReasoning !== undefined)
+    ) {
+      delete typed['reasoning'];
+      delete typed['reasoning_effort'];
+      const template = asObject(typed['chat_template_kwargs']);
+      if (template && 'enable_thinking' in template) {
+        const { enable_thinking: _enableThinking, ...rest } = template;
+        if (Object.keys(rest).length) typed['chat_template_kwargs'] = rest;
+        else delete typed['chat_template_kwargs'];
+      }
+      const enabled =
+        thinkingMandatory ||
+        (!reasoningDisabled && typed['enable_thinking'] !== false);
+      typed['enable_thinking'] = enabled;
+      if (!enabled) {
+        delete typed['thinking_budget'];
+      } else if (
+        effectiveReasoning &&
+        effectiveReasoning.effort &&
+        typed['thinking_budget'] === undefined
+      ) {
+        typed['thinking_budget'] = {
+          low: 4096,
+          medium: 16384,
+          high: 32768,
+          xhigh: 32768,
+          max: 32768,
+        }[effectiveReasoning.effort];
+      }
+    }
+
     return providerRequest;
   }
 

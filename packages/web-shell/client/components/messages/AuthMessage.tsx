@@ -8,6 +8,8 @@ import {
 } from 'react';
 import {
   useDaemonSessionOwnerGuard,
+  useActions,
+  useConnection,
   useWorkspaceActions,
   type DaemonAuthProviderBaseUrlOption,
   type DaemonAuthProviderCatalog,
@@ -16,6 +18,9 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
+import { isDesktopShell, openExternalUrl } from '../../utils/externalOpen';
+import { QwenSubscriptionFlow } from './QwenSubscriptionPanel';
+import { DialogShell } from '../dialogs/DialogShell';
 import { Checkbox } from '../ui/checkbox';
 import {
   Field,
@@ -35,6 +40,7 @@ import {
 import { isVoiceModelId } from '../../voice/voiceModels';
 import { Switch } from '../ui/switch';
 import styles from './AuthMessage.module.css';
+import { QwenSubscriptionEntry } from './QwenSubscriptionEntry';
 
 const TOS_PRIVACY_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
@@ -54,8 +60,10 @@ type AuthStep =
   | 'advancedConfig';
 
 interface AuthMessageProps {
+  dialog?: boolean;
   allowAdd?: boolean;
   onMessage: (text: string, type?: 'status' | 'error') => void;
+  onModelActivated?: (modelId: string) => void;
   onClose: () => void;
 }
 
@@ -146,8 +154,10 @@ function normalizeModelIds(value: string): string[] {
 
 export function AuthMessage({
   onMessage,
+  onModelActivated,
   onClose,
   allowAdd = true,
+  dialog = false,
 }: AuthMessageProps) {
   const allowAddRef = useRef(allowAdd);
   allowAddRef.current = allowAdd;
@@ -155,11 +165,28 @@ export function AuthMessage({
   const fieldId = useId();
   const openExternalLink = useExternalLinkOpener();
   const workspaceActions = useWorkspaceActions();
+  const sessionActions = useActions();
+  const connection = useConnection();
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const ownerRef = useRef(sessionOwnerGuard.capture());
   const ownerChanged = !ownerRef.current.isCurrent();
   if (ownerChanged) ownerRef.current = sessionOwnerGuard.capture();
   const saveOperationRef = useRef(0);
+  const [subscriptionReal, setSubscriptionReal] = useState(false);
+  const [subscriptionEnabled, setSubscriptionEnabled] = useState(false);
+  useEffect(() => {
+    const abort = new AbortController();
+    const owner = sessionOwnerGuard.capture();
+    setSubscriptionEnabled(false);
+    void workspaceActions
+      .getSubscriptionConfig({ signal: abort.signal })
+      .then((config) => {
+        if (!abort.signal.aborted && owner.isCurrent())
+          setSubscriptionEnabled(config.enabled);
+      })
+      .catch(() => undefined);
+    return () => abort.abort();
+  }, [workspaceActions, sessionOwnerGuard, ownerChanged]);
   const [view, setView] = useState<AuthView>('groups');
   const [groupIndex, setGroupIndex] = useState(0);
   const [providerIndex, setProviderIndex] = useState(0);
@@ -187,6 +214,7 @@ export function AuthMessage({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     workspaceActions
@@ -202,6 +230,8 @@ export function AuthMessage({
   }, [workspaceActions]);
 
   const groups = useMemo(() => catalog?.groups ?? [], [catalog]);
+  const hasSubscriptionEntry = allowAdd && subscriptionEnabled;
+  const groupOffset = hasSubscriptionEntry ? 1 : 0;
   const providers = useMemo(() => {
     const ids =
       groups.find((group: AuthGroup) => group.id === groupId)?.providerIds ??
@@ -249,6 +279,27 @@ export function AuthMessage({
   const [optionIndex, setOptionIndex] = useState(0);
 
   useEffect(() => {
+    const index =
+      view === 'groups'
+        ? groupIndex
+        : view === 'providers'
+          ? providerIndex
+          : optionIndex;
+    bodyRef.current
+      ?.querySelectorAll<HTMLButtonElement>('[data-web-shell-auth-option]')
+      [index]?.focus({ preventScroll: true });
+  }, [
+    view,
+    groupIndex,
+    providerIndex,
+    optionIndex,
+    currentStep,
+    loading,
+    hasSubscriptionEntry,
+    subscriptionReal,
+  ]);
+
+  useEffect(() => {
     if (currentStep === 'wireApi') {
       setOptionIndex(wireApi === 'responses' ? 1 : 0);
     }
@@ -257,6 +308,7 @@ export function AuthMessage({
   useEffect(() => {
     if (!ownerChanged) return;
     saveOperationRef.current += 1;
+    setSubscriptionReal(false);
     setSaving(false);
     setError(null);
   }, [ownerChanged]);
@@ -452,10 +504,21 @@ export function AuthMessage({
         modelIds: normalizeModelIds(models),
         advancedConfig,
       })
-      .then((result) => {
+      .then(async (result) => {
+        if (!isCurrent()) return;
+        let syncFailed = result.runtimeSync?.status === 'failed';
+        if (!syncFailed) {
+          try {
+            await sessionActions.refreshModels(undefined, {
+              reloadProviders: false,
+            });
+          } catch {
+            syncFailed = true;
+          }
+        }
         if (!isCurrent()) return;
         onMessage(
-          result.runtimeSync?.status === 'failed'
+          syncFailed
             ? `${result.message}\n\n${t('settings.models.runtimeSyncFailed')}`
             : result.message,
         );
@@ -482,6 +545,7 @@ export function AuthMessage({
     protocol,
     provider,
     saving,
+    sessionActions,
     t,
     workspaceActions,
   ]);
@@ -539,7 +603,11 @@ export function AuthMessage({
 
   const activate = useCallback(() => {
     if (view === 'groups') {
-      const group = groups[groupIndex];
+      if (hasSubscriptionEntry && groupIndex === 0) {
+        setSubscriptionReal(true);
+        return;
+      }
+      const group = groups[groupIndex - groupOffset];
       if (!group) return;
       if (group.id === 'custom') {
         const customProvider = group.providerIds
@@ -610,6 +678,8 @@ export function AuthMessage({
     currentStep,
     catalog,
     goNext,
+    hasSubscriptionEntry,
+    groupOffset,
     groupIndex,
     groups,
     optionIndex,
@@ -715,8 +785,10 @@ export function AuthMessage({
         <button
           type="button"
           key={option.value}
+          data-web-shell-auth-option
           disabled={saving}
           className={`${styles.option} ${selected === index ? styles.optionActive : ''}`}
+          onFocus={() => onSelect(index)}
           onClick={() => {
             onSelect(index);
             activateAtIndex(index);
@@ -1134,14 +1206,24 @@ export function AuthMessage({
     if (view === 'groups') {
       return (
         <>
+          {hasSubscriptionEntry && (
+            <QwenSubscriptionEntry
+              selected={groupIndex === 0}
+              onFocus={() => setGroupIndex(0)}
+              onClick={() => {
+                setGroupIndex(0);
+                setSubscriptionReal(true);
+              }}
+            />
+          )}
           {renderOptions(
             groups.map((group: AuthGroup) => ({
               value: group.id,
               label: t(group.label),
               description: t(group.description),
             })),
-            groupIndex,
-            setGroupIndex,
+            groupIndex - groupOffset,
+            (index) => setGroupIndex(index + groupOffset),
           )}
           <div className={styles.terms}>
             <div>{t('auth.termsTitle')}:</div>
@@ -1205,8 +1287,136 @@ export function AuthMessage({
     activate();
   };
 
-  return (
-    <div className={styles.panel}>
+  if (subscriptionReal)
+    return (
+      <QwenSubscriptionFlow
+        dialog={dialog}
+        desktopSuccess={dialog && isDesktopShell()}
+        transport={workspaceActions}
+        onActivate={async (signal) => {
+          const owner = sessionOwnerGuard.capture();
+          const result = await workspaceActions
+            .activateSubscription({
+              signal,
+            })
+            .finally(() => {
+              signal.throwIfAborted();
+              if (!owner.isCurrent()) throw new Error('Session changed.');
+            });
+          if (result.runtimeSync.status === 'failed')
+            throw new Error('Subscription runtime activation failed.');
+          if (connection.sessionId) {
+            await sessionActions.setModel(
+              `${result.modelId}(qwen-subscription)`,
+            );
+            signal.throwIfAborted();
+            if (!owner.isCurrent()) throw new Error('Session changed.');
+            await sessionActions.refreshModels(undefined, {
+              reloadProviders: false,
+            });
+            signal.throwIfAborted();
+            if (!owner.isCurrent()) throw new Error('Session changed.');
+          } else {
+            await sessionActions.refreshModels();
+            signal.throwIfAborted();
+            if (!owner.isCurrent()) throw new Error('Session changed.');
+            const providers = await workspaceActions.loadProviders();
+            signal.throwIfAborted();
+            if (!owner.isCurrent()) throw new Error('Session changed.');
+            if (
+              !providers.initialized ||
+              providers.current?.authType !== 'qwen-subscription' ||
+              ![
+                result.modelId,
+                `${result.modelId}(qwen-subscription)`,
+              ].includes(providers.current.modelId ?? '')
+            ) {
+              throw new Error(t('subscription.connectFailed'));
+            }
+            onModelActivated?.(`${result.modelId}(qwen-subscription)`);
+          }
+          return result.modelId;
+        }}
+        onActivated={(message) => {
+          if (message) onMessage(message);
+          onClose();
+        }}
+        onModelsUnavailable={onClose}
+        onClose={() => setSubscriptionReal(false)}
+        onOtherProviders={() => {
+          setSubscriptionReal(false);
+          setView('groups');
+        }}
+        onOpenExternal={(url) => {
+          if (isDesktopShell()) {
+            return openExternalUrl(url);
+          } else {
+            window.open(url, '_blank', 'noopener,noreferrer');
+          }
+        }}
+      />
+    );
+
+  const content = (
+    <div
+      className={styles.panel}
+      onKeyDown={(event) => {
+        if (
+          loading ||
+          saving ||
+          event.defaultPrevented ||
+          event.nativeEvent.isComposing ||
+          event.nativeEvent.keyCode === 229 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.altKey ||
+          event.shiftKey
+        )
+          return;
+        const options = Array.from(
+          bodyRef.current?.querySelectorAll<HTMLButtonElement>(
+            '[data-web-shell-auth-option]',
+          ) ?? [],
+        );
+        if (options.length === 0) return;
+        const target = event.target as HTMLElement;
+        const focusedOption = target.closest<HTMLButtonElement>(
+          '[data-web-shell-auth-option]',
+        );
+        if (
+          !focusedOption &&
+          target.closest('button, a, input, textarea, select')
+        )
+          return;
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          event.stopPropagation();
+          if (focusedOption) focusedOption.click();
+          else activate();
+        } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          event.stopPropagation();
+          const current =
+            view === 'groups'
+              ? groupIndex
+              : view === 'providers'
+                ? providerIndex
+                : optionIndex;
+          const index = Math.max(
+            0,
+            Math.min(
+              options.length - 1,
+              current + (event.key === 'ArrowDown' ? 1 : -1),
+            ),
+          );
+          if (view === 'groups') setGroupIndex(index);
+          else if (view === 'providers') setProviderIndex(index);
+          else setOptionIndex(index);
+          options[index]?.focus({ preventScroll: true });
+          options[index]?.scrollIntoView({ block: 'nearest' });
+        }
+      }}
+    >
       <div className={styles.steps}>
         {stepItems.map((label, index) => {
           const stepNumber = index + 1;
@@ -1223,7 +1433,9 @@ export function AuthMessage({
           );
         })}
       </div>
-      <div className={styles.body}>{body}</div>
+      <div ref={bodyRef} className={styles.body}>
+        {body}
+      </div>
       {error && (
         <div className={styles.error} role="alert">
           {error}
@@ -1252,5 +1464,12 @@ export function AuthMessage({
         </button>
       </div>
     </div>
+  );
+  return dialog ? (
+    <DialogShell title={t('auth.title')} size="lg" onClose={onClose}>
+      {content}
+    </DialogShell>
+  ) : (
+    content
   );
 }

@@ -97,7 +97,7 @@ public enum ManagedSchemaProjection {
             "scope_key, runtime_session_id, tenant_id, workspace_id, workspace_generation, "
                     + "canonical_cwd, capability_digest, isolation_class, harness_session_id, turn_kind, "
                     + "binding_id, runtime_generation, session_state, record_version, last_active_at, "
-                    + "execution_storage_key, is_execution_exclusive"),
+                    + "execution_storage_key, is_rewind_pending"),
     RUNTIME_SLOT(
             "request_key, tenant_id, workspace_id, workspace_generation, canonical_cwd, "
                     + "capability_digest, isolation_class, isolation_key, provisioner_kind, storage_id, "
@@ -143,7 +143,7 @@ public enum ManagedSchemaProjection {
                     + "last_sequence, event_count, events_digest, previous_commit_digest, commit_digest, "
                     + "writer_generation, writer_id, writer_token_hash, activation_epoch, "
                     + "latest_checkpoint_resource_id, record_encoding, record_bytes, byte_length, "
-                    + "record_digest, activation_lease_until, activation_renewal_seq, gmt_create"),
+                    + "record_digest, activation_lease_until, activation_renewal_seq, is_activation_record, gmt_create"),
     SESSION_RECORD(
             "session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, "
                     + "record_id, operation_hash, revision, record_resource_id, task_kind, task_state, "
@@ -162,7 +162,7 @@ public enum ManagedSchemaProjection {
                     + "mount_birth_time, mount_registration_id, storage_kind, csi_phase, csi_revision, "
                     + "csi_reservation_id, csi_registration_key, csi_registration_revision, "
                     + "csi_provision_request_id, maintenance_id, maintenance_generation, physical_key, "
-                    + "member_count, exclusive_member_key"),
+                    + "member_count"),
     TENANT_GUARD(
             "tenant_key, tenant_id, guard_domain"),
     TOOL_EXECUTION(
