@@ -31,7 +31,8 @@ const { actions, ownerGuard, ownerState, sessionState, sessionActions } =
       ownerState,
       sessionState: {
         sessionId: undefined as string | undefined,
-        workspaceCwd: '/workspace',
+        workspaceCwd: '/workspace' as string | undefined,
+        sessionContext: undefined as { kind: 'standalone' } | undefined,
         status: 'connected' as 'connected' | 'connecting',
       },
       sessionActions: { setModel: vi.fn(), refreshModels: vi.fn() },
@@ -64,6 +65,7 @@ beforeEach(() => {
   });
   sessionState.sessionId = undefined;
   sessionState.workspaceCwd = '/workspace';
+  sessionState.sessionContext = undefined;
   sessionState.status = 'connected';
   sessionActions.setModel.mockReset().mockResolvedValue({});
   sessionActions.refreshModels.mockReset().mockResolvedValue(undefined);
@@ -774,7 +776,8 @@ describe('subscription development entry', () => {
   async function openAuth(
     dialog = false,
     language: 'en' | 'zh-CN' = 'en',
-    getWorkspaceCwd?: () => string,
+    getWorkspaceCwd?: () => string | undefined,
+    standalone = false,
   ) {
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -785,12 +788,13 @@ describe('subscription development entry', () => {
     const activateSessionSubscriptionModel = vi
       .fn()
       .mockResolvedValue(undefined);
-    const rerender = () =>
+    const rerender = (nextStandalone = standalone) =>
       act(async () => {
         root!.render(
           <I18nProvider language={language}>
             <AuthMessage
               dialog={dialog}
+              standalone={nextStandalone}
               getWorkspaceCwd={getWorkspaceCwd}
               onMessage={onMessage}
               onModelActivated={onModelActivated}
@@ -1017,6 +1021,143 @@ describe('subscription development entry', () => {
     },
   );
 
+  it.each(['runtime', 'model', 'catalog'] as const)(
+    'closes desktop authorization with a saved-settings warning after %s sync fails',
+    async (stage) => {
+      Object.assign(window, { __TAURI__: { core: { invoke: vi.fn() } } });
+      try {
+        sessionState.sessionId =
+          stage === 'model' ? 'current-session' : undefined;
+        actions.getSubscriptionConfig.mockResolvedValue({
+          enabled: true,
+          plansUrl: 'https://plans.example',
+        });
+        actions.startSubscriptionLogin.mockResolvedValue({
+          id: 'paid',
+          status: 'ready',
+          userInfo: {
+            sub: 'user',
+            email: 'user@example.test',
+            member_type: 'pro',
+          },
+        });
+        const completion = await openAuth(true);
+        if (stage === 'runtime') {
+          actions.activateSubscription.mockResolvedValueOnce({
+            modelId: 'qwen3.8-max',
+            runtimeSync: { status: 'failed' },
+          });
+        } else if (stage === 'model') {
+          completion.activateSessionSubscriptionModel.mockRejectedValueOnce(
+            new Error('sync failed'),
+          );
+        } else {
+          sessionActions.refreshModels.mockRejectedValueOnce(
+            new Error('sync failed'),
+          );
+        }
+        await act(async () =>
+          document
+            .querySelector<HTMLButtonElement>(
+              'button[aria-label="Qwen Account with Subscription"]',
+            )!
+            .click(),
+        );
+        expect(completion.onClose).toHaveBeenCalledOnce();
+        expect(completion.onMessage).toHaveBeenCalledExactlyOnceWith(
+          expect.stringContaining(
+            'The change was saved, but running sessions could not be refreshed.',
+          ),
+        );
+        expect(completion.onModelActivated).not.toHaveBeenCalled();
+        expect(
+          document.querySelector('[data-subscription-success]'),
+        ).toBeNull();
+        expect(document.querySelector('[role="alert"]')).toBeNull();
+        expect(actions.startSubscriptionLogin).toHaveBeenCalledOnce();
+        expect(actions.activateSubscription).toHaveBeenCalledOnce();
+      } finally {
+        delete (window as Window & { __TAURI__?: unknown }).__TAURI__;
+      }
+    },
+  );
+
+  it.each(['save', 'credentials', 'navigation', 'target'] as const)(
+    'does not report saved-settings completion for desktop %s failure',
+    async (stage) => {
+      Object.assign(window, { __TAURI__: { core: { invoke: vi.fn() } } });
+      try {
+        sessionState.sessionId = 'current-session';
+        actions.getSubscriptionConfig.mockResolvedValue({
+          enabled: true,
+          plansUrl: 'https://plans.example',
+        });
+        actions.startSubscriptionLogin.mockResolvedValue({
+          id: 'paid',
+          status: 'ready',
+          userInfo: {
+            sub: 'user',
+            email: 'user@example.test',
+            member_type: 'pro',
+          },
+        });
+        const completion = await openAuth(true);
+        let failSync!: (error: unknown) => void;
+        if (stage === 'save') {
+          actions.activateSubscription.mockRejectedValueOnce(
+            new Error('save failed'),
+          );
+        } else if (stage === 'credentials') {
+          completion.activateSessionSubscriptionModel.mockRejectedValueOnce({
+            status: 401,
+            body: { code: 'invalid_token' },
+          });
+        } else if (stage === 'target') {
+          completion.activateSessionSubscriptionModel.mockRejectedValueOnce(
+            new DOMException('Subscription target changed.', 'AbortError'),
+          );
+        } else {
+          completion.activateSessionSubscriptionModel.mockReturnValueOnce(
+            new Promise<void>((_resolve, reject) => {
+              failSync = reject;
+            }),
+          );
+        }
+        await act(async () =>
+          document
+            .querySelector<HTMLButtonElement>(
+              'button[aria-label="Qwen Account with Subscription"]',
+            )!
+            .click(),
+        );
+        if (stage === 'navigation') {
+          sessionState.sessionId = 'other-session';
+          ownerState.version += 1;
+          await completion.rerender();
+          await act(async () => failSync(new Error('late sync failure')));
+        }
+        expect(completion.onClose).not.toHaveBeenCalled();
+        expect(completion.onMessage).not.toHaveBeenCalled();
+        expect(completion.onModelActivated).not.toHaveBeenCalled();
+        if (stage === 'save') {
+          expect(document.querySelector('[role="alert"]')?.textContent).toBe(
+            'save failed',
+          );
+          expect(document.body.textContent).toContain('Try again');
+          expect(document.body.textContent).not.toContain(
+            'Loading models from provider',
+          );
+        } else if (stage === 'credentials') {
+          expect(document.body.textContent).toContain(
+            'Your login credentials are no longer valid',
+          );
+        }
+      } finally {
+        delete (window as Window & { __TAURI__?: unknown }).__TAURI__;
+      }
+    },
+  );
+
   it('retries a failed runtime reload without starting a new login', async () => {
     sessionState.sessionId = 'current-session';
     sessionState.workspaceCwd = '/secondary';
@@ -1043,8 +1184,11 @@ describe('subscription development entry', () => {
       'button[aria-label="Qwen Account with Subscription"]',
     )!;
     await act(async () => entry.click());
-    expect(container!.textContent).toContain(
-      'Could not connect Qwen Subscription. Please try again.',
+    expect(container!.querySelector('[role="alert"]')?.textContent).toBe(
+      'Subscription runtime activation failed.',
+    );
+    expect(container!.textContent).not.toContain(
+      'Loading models from provider',
     );
     expect(completion.onMessage).not.toHaveBeenCalled();
     expect(completion.activateSessionSubscriptionModel).not.toHaveBeenCalled();
@@ -1095,6 +1239,115 @@ describe('subscription development entry', () => {
       'qwen3.8-max(qwen-subscription)',
     );
   });
+
+  it.each(['draft', 'connected', 'connecting'] as const)(
+    'activates a no-workspace %s using the provider catalog workspace',
+    async (target) => {
+      sessionState.workspaceCwd =
+        target === 'draft' ? undefined : '/private/standalone';
+      sessionState.sessionId = target === 'draft' ? undefined : 'standalone';
+      sessionState.sessionContext = { kind: 'standalone' };
+      sessionState.status =
+        target === 'connecting' ? 'connecting' : 'connected';
+      actions.getSubscriptionConfig.mockResolvedValue({
+        enabled: true,
+        plansUrl: 'https://plans.example',
+      });
+      actions.startSubscriptionLogin.mockResolvedValue({
+        id: 'paid',
+        status: 'ready',
+        userInfo: {
+          sub: 'user',
+          email: 'user@example.test',
+          member_type: 'pro',
+        },
+      });
+      const completion = await openAuth(false, 'en', () => undefined, true);
+      const entry = container!.querySelector<HTMLButtonElement>(
+        'button[aria-label="Qwen Account with Subscription"]',
+      )!;
+      await act(async () => entry.click());
+
+      expect(actions.activateSubscription).toHaveBeenCalledExactlyOnceWith({
+        workspaceCwd: '/workspace',
+        signal: expect.any(AbortSignal),
+      });
+      if (target === 'draft') {
+        expect(completion.onModelActivated).toHaveBeenCalledExactlyOnceWith(
+          'qwen3.8-max(qwen-subscription)',
+        );
+        expect(
+          completion.activateSessionSubscriptionModel,
+        ).not.toHaveBeenCalled();
+      } else {
+        expect(
+          completion.activateSessionSubscriptionModel,
+        ).toHaveBeenCalledExactlyOnceWith(
+          '/private/standalone',
+          'standalone',
+          'qwen3.8-max(qwen-subscription)',
+        );
+        expect(completion.onModelActivated).not.toHaveBeenCalled();
+      }
+      expect(completion.onClose).toHaveBeenCalledOnce();
+      expect(sessionActions.refreshModels).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['session', 'project'] as const)(
+    'ignores standalone activation after switching to another %s',
+    async (change) => {
+      sessionState.sessionContext = { kind: 'standalone' };
+      sessionState.workspaceCwd = '/private/standalone';
+      sessionState.sessionId = 'standalone';
+      actions.getSubscriptionConfig.mockResolvedValue({
+        enabled: true,
+        plansUrl: 'https://plans.example',
+      });
+      actions.startSubscriptionLogin.mockResolvedValue({
+        id: 'paid',
+        status: 'ready',
+        userInfo: {
+          sub: 'user',
+          email: 'user@example.test',
+          member_type: 'pro',
+        },
+      });
+      let finishActivation!: () => void;
+      actions.activateSubscription.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishActivation = () =>
+              resolve({
+                modelId: 'qwen3.8-max',
+                runtimeSync: { status: 'applied' },
+              });
+          }),
+      );
+      let composerWorkspace: string | undefined;
+      const completion = await openAuth(
+        false,
+        'en',
+        () => composerWorkspace,
+        true,
+      );
+      const entry = container!.querySelector<HTMLButtonElement>(
+        'button[aria-label="Qwen Account with Subscription"]',
+      )!;
+      await act(async () => entry.click());
+      expect(actions.activateSubscription).toHaveBeenCalledOnce();
+      if (change === 'session') sessionState.sessionId = 'other-standalone';
+      else composerWorkspace = '/workspace';
+      await completion.rerender(change !== 'project');
+      await act(async () => finishActivation());
+
+      expect(
+        completion.activateSessionSubscriptionModel,
+      ).not.toHaveBeenCalled();
+      expect(completion.onModelActivated).not.toHaveBeenCalled();
+      expect(completion.onClose).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     ['plus', 'en'],

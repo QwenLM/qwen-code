@@ -399,7 +399,9 @@ export function useSubscription({
               : error instanceof Error &&
                   error.message.includes(SUBSCRIPTION_MODELS_UNAVAILABLE)
                 ? SUBSCRIPTION_MODELS_UNAVAILABLE
-                : t('Could not connect Qwen Subscription. Please try again.'),
+                : error instanceof Error
+                  ? error.message
+                  : '',
         );
       }
     } finally {

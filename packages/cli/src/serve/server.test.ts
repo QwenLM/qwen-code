@@ -46044,6 +46044,61 @@ describe('Live conversation runtime lifecycle', () => {
     };
   }
 
+  it.each([
+    ['qwen3.8-max(qwen-subscription)', 'applied', 200],
+    ['qwen3.8-max(qwen-subscription)', 'failed', 500],
+    ['qwen3.8-max(qwen-subscription)', 'deferred', 500],
+    ['existing(openai)', 'applied', 200],
+  ] as const)(
+    'refreshes the standalone owner before selecting %s (reload=%s)',
+    async (modelId, status, expectedStatus) => {
+      const sessionId = 'standalone-subscription';
+      const reloadModelProviders = vi.fn(async () => ({ status }));
+      const setup = setupLiveRuntime({
+        summaryImpl: (id) => ({
+          sessionId: id,
+          workspaceCwd: setup.root.canonicalRoot,
+          createdAt: '2026-11-06T00:00:00.000Z',
+          sourceType: 'standalone',
+          clientCount: 0,
+          hasActivePrompt: false,
+        }),
+        setModelImpl: async () => {
+          if (modelId.includes('qwen-subscription')) {
+            expect(reloadModelProviders).toHaveBeenCalledOnce();
+          }
+          return {};
+        },
+      });
+      Object.assign(setup.liveRuntime.workspaceService, {
+        reloadModelProviders,
+      });
+      setup.registry.add(setup.liveRuntime);
+
+      const response = await request(setup.app)
+        .post(`/session/${sessionId}/model`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'standalone-client')
+        .send({ modelId });
+
+      expect(response.status).toBe(expectedStatus);
+      if (modelId.includes('qwen-subscription')) {
+        expect(reloadModelProviders).toHaveBeenCalledExactlyOnceWith({
+          route: 'POST /session/:id/model',
+          workspaceCwd: setup.root.canonicalRoot,
+          sessionId,
+          originatorClientId: 'standalone-client',
+        });
+      } else {
+        expect(reloadModelProviders).not.toHaveBeenCalled();
+      }
+      expect(setup.liveBridge.setModelCalls).toHaveLength(
+        expectedStatus === 200 ? 1 : 0,
+      );
+      expect(setup.primaryBridge.setModelCalls).toHaveLength(0);
+    },
+  );
+
   it('mounts and advertises standalone sessions only with complete runtime dependencies', async () => {
     const partial = createServeApp(baseOpts, undefined, {
       bridge: fakeBridge(),

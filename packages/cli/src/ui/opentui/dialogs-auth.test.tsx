@@ -1806,12 +1806,12 @@ describe('real subscription entry', () => {
 
   it('offers activation Retry only after failure and preserves cancellation', async () => {
     subscription.state = { status: 'ready', plan: 'Pro' };
-    subscription.connectionError =
-      'Could not connect Qwen Subscription. Please try again.';
+    subscription.connectionError = '';
     renderDialog();
     await press('return');
     expect(screen.getByText('Retry')).toBeTruthy();
     expect(screen.queryByText('Connect')).toBeNull();
+    expect(screen.queryByText('Loading models from provider…')).toBeNull();
     await press('return');
     expect(subscription.connect).toHaveBeenCalledOnce();
     await pressEsc();

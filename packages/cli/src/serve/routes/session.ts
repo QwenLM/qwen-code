@@ -13,6 +13,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { inspect } from 'node:util';
 import { z } from 'zod';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import {
   hashDaemonWorkspace,
   withDaemonSpan,
@@ -10667,6 +10669,22 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        if (
+          isStandaloneOwner(runtime, sessionId) &&
+          parseAcpModelOption(modelId).authType === AuthType.QWEN_SUBSCRIPTION
+        ) {
+          const sync = await runtime.workspaceService.reloadModelProviders({
+            route: 'POST /session/:id/model',
+            workspaceCwd: runtime.workspaceCwd,
+            sessionId,
+            originatorClientId: clientId,
+          });
+          if (sync.status !== 'applied') {
+            throw new Error(
+              'Unable to reload subscription models for this session.',
+            );
+          }
+        }
         const response = await runtime.bridge.setSessionModel(
           sessionId,
           {

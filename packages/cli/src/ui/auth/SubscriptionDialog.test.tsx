@@ -228,14 +228,14 @@ it('keeps a first membership query error visible and retries only the query', as
 
 it('retries activation after failure without leaving the dialog', async () => {
   flow.state = { status: 'ready', plan: 'Pro' };
-  flow.connectionError =
-    'Could not connect Qwen Subscription. Please try again.';
+  flow.connectionError = '';
   const ui = renderWithProviders(
     <SubscriptionDialog onBack={vi.fn()} onSwitchProvider={vi.fn()} />,
   );
   try {
     expect(ui.lastFrame()).toContain('Retry');
     expect(ui.lastFrame()).not.toContain('› Connect');
+    expect(ui.lastFrame()).not.toContain('Loading models from provider');
     await settle(100);
     ui.stdin.write('\u001b[13u');
     await vi.waitFor(() => expect(flow.connect).toHaveBeenCalledOnce());

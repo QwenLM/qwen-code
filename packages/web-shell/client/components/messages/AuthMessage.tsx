@@ -61,12 +61,13 @@ type AuthStep =
 
 interface AuthMessageProps {
   dialog?: boolean;
+  standalone?: boolean;
   allowAdd?: boolean;
   onMessage: (text: string, type?: 'status' | 'error') => void;
   onModelActivated?: (modelId: string) => void;
   getWorkspaceCwd?: () => string | undefined;
   activateSessionSubscriptionModel: (
-    workspaceCwd: string,
+    workspaceCwd: string | undefined,
     sessionId: string,
     modelId: string,
   ) => Promise<void>;
@@ -166,6 +167,7 @@ export function AuthMessage({
   onClose,
   allowAdd = true,
   dialog = false,
+  standalone = false,
 }: AuthMessageProps) {
   const allowAddRef = useRef(allowAdd);
   allowAddRef.current = allowAdd;
@@ -182,27 +184,43 @@ export function AuthMessage({
   const ownerChanged = !ownerRef.current.isCurrent();
   if (ownerChanged) ownerRef.current = sessionOwnerGuard.capture();
   const saveOperationRef = useRef(0);
+  const [catalog, setCatalog] = useState<DaemonAuthProviderCatalog>();
   const [subscriptionTarget, setSubscriptionTarget] = useState<{
     workspaceCwd: string | undefined;
     sessionId: string | undefined;
+    sessionWorkspaceCwd: string | undefined;
+    standalone: boolean;
   }>();
   const getSubscriptionContext = useCallback(() => {
     const current = connectionRef.current;
-    const workspaceCwd = getWorkspaceCwd
-      ? getWorkspaceCwd()
-      : current.workspaceCwd;
+    const workspaceCwd = standalone
+      ? catalog?.workspaceCwd
+      : getWorkspaceCwd
+        ? getWorkspaceCwd()
+        : current.workspaceCwd;
     const sessionId =
-      workspaceCwd === current.workspaceCwd ? current.sessionId : undefined;
-    return { workspaceCwd, sessionId };
-  }, [getWorkspaceCwd]);
+      (standalone && current.sessionContext?.kind === 'standalone') ||
+      (!standalone && workspaceCwd === current.workspaceCwd)
+        ? current.sessionId
+        : undefined;
+    return {
+      workspaceCwd,
+      sessionId,
+      sessionWorkspaceCwd: sessionId ? current.workspaceCwd : undefined,
+      standalone,
+    };
+  }, [catalog?.workspaceCwd, getWorkspaceCwd, standalone]);
   const {
     workspaceCwd: subscriptionWorkspace,
     sessionId: subscriptionSession,
+    sessionWorkspaceCwd: subscriptionSessionWorkspace,
   } = getSubscriptionContext();
   const subscriptionTargetChanged =
     subscriptionTarget !== undefined &&
     (subscriptionTarget.workspaceCwd !== subscriptionWorkspace ||
-      subscriptionTarget.sessionId !== subscriptionSession);
+      subscriptionTarget.sessionId !== subscriptionSession ||
+      subscriptionTarget.sessionWorkspaceCwd !== subscriptionSessionWorkspace ||
+      subscriptionTarget.standalone !== standalone);
   useEffect(() => {
     if (subscriptionTargetChanged) setSubscriptionTarget(undefined);
   }, [subscriptionTargetChanged]);
@@ -228,7 +246,6 @@ export function AuthMessage({
   const [providerIndex, setProviderIndex] = useState(0);
   const [setupBackView, setSetupBackView] = useState<AuthView>('providers');
   const [stepIndex, setStepIndex] = useState(0);
-  const [catalog, setCatalog] = useState<DaemonAuthProviderCatalog>();
   const [groupId, setGroupId] = useState<AuthGroupId>('qwencloud');
   const [provider, setProvider] = useState<DaemonAuthProviderDescriptor | null>(
     null,
@@ -1329,8 +1346,9 @@ export function AuthMessage({
         dialog={dialog}
         desktopSuccess={dialog && isDesktopShell()}
         transport={workspaceActions}
-        onActivate={async (signal) => {
-          const { workspaceCwd, sessionId } = subscriptionTarget;
+        onActivate={async (signal, onSettingsSaved) => {
+          const { workspaceCwd, sessionId, sessionWorkspaceCwd } =
+            subscriptionTarget;
           if (!workspaceCwd)
             throw new Error('Subscription activation requires a workspace.');
           const assertTarget = () => {
@@ -1338,7 +1356,9 @@ export function AuthMessage({
             const current = getSubscriptionContext();
             if (
               current.workspaceCwd !== workspaceCwd ||
-              current.sessionId !== sessionId
+              current.sessionId !== sessionId ||
+              current.sessionWorkspaceCwd !== sessionWorkspaceCwd ||
+              current.standalone !== subscriptionTarget.standalone
             )
               throw new DOMException(
                 'Subscription target changed.',
@@ -1351,12 +1371,13 @@ export function AuthMessage({
             signal,
           });
           assertTarget();
+          onSettingsSaved();
           if (result.runtimeSync.status === 'failed')
             throw new Error('Subscription runtime activation failed.');
           const modelId = `${result.modelId}(qwen-subscription)`;
           if (sessionId) {
             await activateSessionSubscriptionModel(
-              workspaceCwd,
+              sessionWorkspaceCwd,
               sessionId,
               modelId,
             );

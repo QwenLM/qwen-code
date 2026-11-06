@@ -713,11 +713,11 @@ it('does not repeat a membership request before Retry-After, then recovers', asy
   unmount();
 });
 
-it('activates a paid account, hides private errors, and permits retry', async () => {
+it('activates a paid account, displays activation errors, and permits retry', async () => {
   authorize({ ...free, member_type: 'pro' });
   const onActivate = vi
     .fn()
-    .mockRejectedValueOnce(new Error('private-token'))
+    .mockRejectedValueOnce(new Error('model configuration failed'))
     .mockResolvedValue(undefined);
   const hook = renderHook(() => useSubscription({ onActivate }));
   await act(async () => {
@@ -725,8 +725,9 @@ it('activates a paid account, hides private errors, and permits retry', async ()
   });
   expect(hook.result.current.state.status).toBe('ready');
   expect(onActivate).toHaveBeenCalledTimes(1);
-  expect(hook.result.current.connectionError).toContain('Could not connect');
-  expect(hook.result.current.connectionError).not.toContain('private-token');
+  expect(hook.result.current.connectionError).toBe(
+    'model configuration failed',
+  );
   await act(async () => {
     await hook.result.current.connect();
   });
@@ -891,7 +892,7 @@ it('reads the latest activation callback without retrying automatically on reren
     }),
   );
   const first = vi.fn().mockResolvedValue(undefined);
-  const latest = vi.fn().mockRejectedValue(new Error('private failure'));
+  const latest = vi.fn().mockRejectedValue(new Error('activation failed'));
   const retry = vi.fn().mockResolvedValue(undefined);
   const hook = renderHook(({ onActivate }) => useSubscription({ onActivate }), {
     initialProps: { onActivate: first },
@@ -900,7 +901,7 @@ it('reads the latest activation callback without retrying automatically on reren
   await act(async () => confirm({ ...free, member_type: 'pro' }));
   expect(first).not.toHaveBeenCalled();
   expect(latest).toHaveBeenCalledOnce();
-  expect(hook.result.current.connectionError).toContain('Could not connect');
+  expect(hook.result.current.connectionError).toBe('activation failed');
   hook.rerender({ onActivate: retry });
   await act(async () => {
     await vi.advanceTimersByTimeAsync(60000);

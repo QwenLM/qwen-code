@@ -20728,7 +20728,11 @@ export function App({
   ]);
 
   const activateSessionSubscriptionModel = useCallback(
-    async (workspaceCwd: string, sessionId: string, modelId: string) => {
+    async (
+      workspaceCwd: string | undefined,
+      sessionId: string,
+      modelId: string,
+    ) => {
       const key = getLogicalSessionKey(sessionId, workspaceCwd);
       const isTarget = () => {
         const current = connectionRef.current;
@@ -22527,6 +22531,7 @@ export function App({
           {modelManagementPolicy.allowAdd && showAuthDialog && (
             <AuthMessage
               dialog
+              standalone={isDesktopShell() && sessionIsStandalone}
               allowAdd={modelManagementPolicy.allowAdd}
               getWorkspaceCwd={getComposerWorkspaceCwd}
               onModelActivated={selectWelcomeModel}
