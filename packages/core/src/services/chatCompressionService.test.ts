@@ -41,6 +41,7 @@ import { logChatCompression } from '../telemetry/loggers.js';
 import { estimateContentTokens } from './tokenEstimation.js';
 import { getAutoMemorySnapshot } from '../memory/request-context.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
+import { getStartupContextLength } from '../core/environmentContext.js';
 import {
   content,
   fnCall,
@@ -548,7 +549,9 @@ describe('ChatCompressionService', () => {
     // (which would crash the turn AND bypass the COMPRESSION_FAILED breaker).
     // It degrades to a valid post-compact history; an auto-compaction trailing
     // functionCall is folded into the ack so a pending functionResponse keeps
-    // its match (and the trailing turn's text is dropped, per the composer).
+    // its match. Like the composer, the trailing turn's plain text is kept:
+    // with no pending tool result the side-query excluded this turn, so the
+    // summary cannot carry that text.
     vi.mocked(mockChat.getHistory).mockReturnValue([
       ...turns('go', 'thinking', 'go on'),
       content(
@@ -578,10 +581,11 @@ describe('ChatCompressionService', () => {
     expect(last.role).toBe('model');
     expect(last.parts?.some((p) => p.text)).toBe(true); // ack text
     expect(last.parts?.some((p) => !!p.functionCall)).toBe(true); // folded fc
-    const ackText = (last.parts ?? [])
-      .map((p) => (p as { text?: string }).text ?? '')
-      .join(' ');
-    expect(ackText).not.toContain('let me read it'); // trailing text dropped
+    expect(last.parts).toEqual([
+      { text: 'Got it. Thanks for the additional context!' },
+      { text: 'let me read it' },
+      fnCall('read_file', { file_path: '/x.ts' }),
+    ]);
   });
 
   it('silently ignores the deprecated chatCompression.contextPercentageThreshold = 0 (no longer disables compaction)', async () => {
@@ -1705,8 +1709,11 @@ describe('ChatCompressionService.compress cache sharing', () => {
         history[1].parts![0],
       );
       if (!cacheSharing) {
+        // The folded call is charged back because its result is pending.
         expect(result.info.newTokenCount).toBe(
-          11_500 + estimateContentTokens([expectedPending]),
+          11_500 +
+            estimateContentTokens([expectedPending]) +
+            estimateContentTokens([content('model', history[1].parts![0])]),
         );
       }
     },
@@ -2873,7 +2880,7 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
         11_500 + 3 * 1600,
       );
       expect(result.info.newTokenCount).toBeLessThan(16_600);
-      expect(result.newHistory).toHaveLength(pendingCall ? 4 : 3);
+      expect(result.newHistory).toHaveLength(2);
     },
   );
 
@@ -3039,6 +3046,175 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('ChatCompressionService.compress — folded post-compact shape (#14325)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe('restoration attachments folded into the summary entry', () => {
+    // composePostCompactHistory now always returns [user(summary +
+    // attachments), model(ack)], so the restoration cost has to be measured
+    // inside entry 0 rather than as trailing entries. Positional
+    // `extraHistory.slice(2)` would always be empty and both tests below go
+    // red.
+    let dir: string;
+    let history: Content[];
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'qwen-14325-restore-'));
+      const filePath = join(dir, 'big.ts');
+      writeFileSync(
+        filePath,
+        'export const MARKER_14325 = 1;\n' + '// pad\n'.repeat(1_000),
+        'utf8',
+      );
+      history = [
+        userText('inspect the file'),
+        content('model', fnCall('read_file', { file_path: filePath })),
+        content('user', {
+          functionResponse: {
+            name: 'read_file',
+            response: { output: 'file content read ok' },
+          } as unknown as NonNullable<
+            Content['parts']
+          >[number]['functionResponse'],
+        }),
+        modelText('I read the file.'),
+        ...turns('next user message', 'next model reply'),
+      ];
+    });
+    afterEach(() => {
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    const restorationTokens = (newHistory: Content[]) =>
+      estimateContentTokens(
+        [{ role: 'user', parts: (newHistory[0].parts ?? []).slice(1) }],
+        0,
+      );
+
+    it('adds the folded restoration blocks to newTokenCount on the usage-reported path', async () => {
+      spySideQuery('SUMMARY 14325', usage(170_000, 500));
+      const config = fakeConfig({ extra: { getTargetDir: () => dir } });
+      const result = await compressWith(fakeChat(history), config, {
+        trigger: 'auto',
+      });
+      expectCompressed(result);
+      const newHistory = result.newHistory!;
+      expect(newHistory).toHaveLength(2);
+      expect(JSON.stringify(newHistory[0])).toContain('MARKER_14325');
+      // Summary-only figure: 180000 - (170000 - 1000) + 500 = 11500.
+      const extra = restorationTokens(newHistory);
+      expect(extra).toBeGreaterThan(1_000);
+      expect(result.info.newTokenCount).toBe(11_500 + extra);
+    });
+
+    it('fails as inflated when the folded restoration blocks push the total past the original', async () => {
+      // Summary-only figure: 180000 - (1500 - 1000) + 500 = 180000, i.e.
+      // exactly the original; only the restoration cost can push it over.
+      spySideQuery('SUMMARY 14325', usage(1_500, 500));
+      const config = fakeConfig({ extra: { getTargetDir: () => dir } });
+      const result = await compressWith(fakeChat(history), config, {
+        trigger: 'auto',
+      });
+      expectNoNewHistory(
+        result,
+        CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+      );
+      expect(result.info.newTokenCount).toBeGreaterThan(181_000);
+    });
+
+    it.each([false, true])(
+      'counts the folded tool call only when the side-query included it (pending result: %s)',
+      async (pending) => {
+        const trailingTurn = content(
+          'model',
+          { text: 'Writing the updated file.' },
+          fnCall(
+            'write_file',
+            { file_path: join(dir, 'big.ts'), content: 'x'.repeat(40_000) },
+            'write-14325',
+          ),
+        );
+        const pendingMessage = content(
+          'user',
+          fnResponse('write_file', { output: 'ok' }, 'write-14325'),
+        );
+        const spy = spySideQuery('SUMMARY 14325', usage(170_000, 500));
+        const result = await compressWith(
+          fakeChat([...history, userText('update it'), trailingTurn]),
+          fakeConfig({ extra: { getTargetDir: () => dir } }),
+          {
+            trigger: 'auto',
+            ...(pending ? { pendingUserMessage: pendingMessage } : {}),
+          },
+        );
+        expectCompressed(result);
+        const newHistory = result.newHistory!;
+        expect(JSON.stringify(newHistory[0])).toContain('MARKER_14325');
+        expect(newHistory[1].parts).toEqual([
+          { text: 'Got it. Thanks for the additional context!' },
+          ...trailingTurn.parts!,
+        ]);
+        const sideQueryParts = spy.mock.calls[0][1].contents.flatMap(
+          (turn) => turn.parts ?? [],
+        );
+        expect(
+          sideQueryParts.some(
+            (part) => part.functionCall?.id === 'write-14325',
+          ),
+        ).toBe(pending);
+        expect(estimateContentTokens([trailingTurn], 0)).toBeGreaterThan(
+          10_000,
+        );
+        const restored: Content[] = [
+          { role: 'user', parts: newHistory[0].parts!.slice(1) },
+          ...(pending ? [trailingTurn] : []),
+        ];
+        const pendingTokens = pending
+          ? estimateContentTokens([pendingMessage], 0)
+          : 0;
+        expect(result.info.newTokenCount).toBe(
+          11_500 + pendingTokens + estimateContentTokens(restored, 0),
+        );
+      },
+    );
+  });
+
+  it('keeps the narration text of a trailing model[text + functionCall] turn the side-query excluded (auto, no pending tool result)', async () => {
+    // With no pending functionResponse the side-query drops the trailing
+    // model[functionCall] turn (sideQueryBase), so the summary never sees
+    // its text. The composed ack must carry that text next to the call.
+    const history: Content[] = [
+      ...turns('please migrate the schema', 'looking at it'),
+      userText('go ahead'),
+      content(
+        'model',
+        { text: 'NARRATION_14325: I need one decision before the schema' },
+        fnCall('ask_user_question', { question: 'which?' }, 'call-ask'),
+      ),
+    ];
+    const spy = spySideQuery('SUMMARY', usage(1_500, 50));
+    const result = await compressWith(fakeChat(history), fakeConfig(), {
+      trigger: 'auto',
+    });
+    expectCompressed(result);
+    expect(JSON.stringify(spy.mock.calls)).not.toContain('NARRATION_14325');
+    const ack = result.newHistory![result.newHistory!.length - 1];
+    expect(ack.role).toBe('model');
+    expect(ack.parts).toEqual([
+      { text: 'Got it. Thanks for the additional context!' },
+      { text: 'NARRATION_14325: I need one decision before the schema' },
+      {
+        functionCall: {
+          id: 'call-ask',
+          name: 'ask_user_question',
+          args: { question: 'which?' },
+        },
+      },
+    ]);
   });
 });
 
@@ -3300,6 +3476,19 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     expect(flat).toContain('<plan-mode-active>');
     expect(flat).toContain('<background-tasks>');
     expect(flat).toContain('agent-bg');
+    expect(result.newHistory![1].parts).toEqual([
+      { text: 'Got it. Thanks for the additional context!' },
+    ]);
+    // The fallback must freeze the 2-entry prefix so a later real prompt that
+    // looks like a restoration block is not counted as part of it.
+    const input = userText(
+      'Recently accessed file (full current content embedded):\n\n## /tmp/a.ts\n\n```\nconst a = 1;\n```',
+    );
+    expect(
+      getStartupContextLength([...result.newHistory!, input], {
+        includeCompressed: true,
+      }),
+    ).toBe(2);
   });
 });
 

@@ -23,6 +23,7 @@ import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 import { escapeXml } from '../utils/xml.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { markCompressedHistory } from '../core/environmentContext.js';
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5;
 
@@ -488,20 +489,6 @@ export function buildImageRestorationBlock(
 }
 
 /**
- * Assemble the complete post-compact history from the pre-compact
- * `history` and the summary text the side-query model produced.
- *
- * Output ordering:
- *   1. Summary as a user message (the side-query output)
- *   2. Synthetic model ack ("Got it. Thanks for the additional context.")
- *   3. File reference block (path-only list of large files), if any
- *   4. Per-embedded-file user message with full content
- *   5. Image restoration block, if any
- *
- * The ack message keeps role alternation correct: the next API call will
- * naturally append the model's continuation response.
- */
-/**
  * Trailer appended to the post-compact summary message. Mirrors claude-code's
  * "Resume directly" guidance for the resuming agent: it must NOT acknowledge
  * the summary, re-greet, or recap — it picks up from where the prior turn
@@ -651,6 +638,24 @@ function trailingFunctionCallContent(history: Content[]): Content | undefined {
 }
 
 /**
+ * Parts of a trailing model+functionCall turn that are carried into the
+ * post-compact ack: every functionCall part (ids intact) and every plain
+ * text part that is not a thought, in their original order. Thought parts
+ * and thought signatures are dropped; they are provider scratch state, not
+ * narration.
+ */
+export function trailingTurnPartsForAck(turn: Content): Part[] {
+  return (turn.parts ?? []).filter(
+    (p) =>
+      !!p.functionCall ||
+      (typeof p.text === 'string' &&
+        p.text.length > 0 &&
+        !p.thought &&
+        !p.thoughtSignature),
+  );
+}
+
+/**
  * Resolve and validate a file path against an optional workspace
  * root. Returns `true` if the file path lies under `workspaceRoot`
  * (or if no root was supplied — caller chose not to enforce). Used
@@ -797,6 +802,32 @@ export function buildStateReminderParts(options: {
   return parts;
 }
 
+/**
+ * Assemble the complete post-compact history from the pre-compact
+ * `history` and the summary text the side-query model produced.
+ *
+ * Output is always exactly two entries and always ends on a model entry
+ * (#14325), so `detectTurnInterruption` reports `none` for an idle
+ * post-compress session:
+ *
+ *   1. `user`: parts are, in order,
+ *        a. the summary text (with the resume trailer) — always `parts[0]`,
+ *           which `detectCompressedPrefixLength` matches on;
+ *        b. plan-mode reminder, if active;
+ *        c. background-subagent snapshot, if any;
+ *        d. file restoration blocks (path-only reference list and embedded
+ *           file contents), if any;
+ *        e. image restoration block (header text + image parts), if any.
+ *   2. `model`: the synthetic ack text ("Got it. Thanks for the additional
+ *      context!") as `parts[0]` — also matched positionally by
+ *      `detectCompressedPrefixLength` — followed, when the input history ends
+ *      on a model turn with a functionCall, by that turn's functionCall parts
+ *      (original ids kept, so a pending functionResponse still pairs) and its
+ *      plain, non-thought text parts in their original order.
+ *
+ * Callers that need the restoration cost must measure `out[0].parts[1..]`;
+ * there are no separate attachment entries.
+ */
 export async function composePostCompactHistory(
   history: Content[],
   summary: string,
@@ -844,39 +875,43 @@ export async function composePostCompactHistory(
     for (const part of imageBlock.parts ?? []) postAckParts.push(part);
   }
 
-  // Preserve trailing model+functionCall so a pending functionResponse
-  // has a matching call (Finding 3). Place it AFTER any merged
-  // attachments so role alternation holds:
-  //  - with attachments:  [user(sum), model(ack), user(attach), model(fc)]
-  //  - without:           [user(sum), model(ack + fc)] — fc lands in
-  //                       the ack's own model Content to avoid the
-  //                       model→model adjacency that would otherwise
-  //                       arise from a separate appended entry.
+  // Fold attachments into the summary user entry and always end on a
+  // model ack (issue #14325). A trailing user(attachments) entry after
+  // ack made detectTurnInterruption treat idle post-/compress history as
+  // interrupted_prompt. Folding into the summary also avoids consecutive
+  // same-role user entries (Finding 2) and matches the degraded fallback
+  // path in chatCompressionService.
+  //
+  // Shapes:
+  //  - no trailing fc:  [user(sum + attach?), model(ack)]
+  //  - with trailing fc: [user(sum + attach?), model(ack + fc + text)]
+  //    The trailing turn's plain text is kept next to its functionCall:
+  //    on auto-compaction with no pending tool result the side-query
+  //    excludes that turn (chatCompressionService `sideQueryBase`), so the
+  //    summary never saw its text and dropping it here would lose it.
   const trailingFc = trailingFunctionCallContent(history);
   const ackParts: Part[] = [
     { text: 'Got it. Thanks for the additional context!' },
   ];
 
-  const out: Content[] = [
-    { role: 'user', parts: [{ text: postProcessSummary(summary) }] },
-  ];
-
+  const summaryParts: Part[] = [{ text: postProcessSummary(summary) }];
   if (postAckParts.length > 0) {
-    out.push({ role: 'model', parts: ackParts });
-    out.push({ role: 'user', parts: postAckParts });
-    if (trailingFc) out.push(trailingFc);
-  } else if (trailingFc) {
-    // Fold the trailing functionCall into the ack's own Content so we don't
-    // produce model→model adjacency. Intentionally keep ONLY the
-    // functionCall parts: the trailing turn's text was already captured in
-    // the summary, and merging it into the ack would muddy both. (The
-    // with-attachments branch above keeps trailingFc as its own model turn,
-    // so text survives there — the asymmetry is deliberate, not a bug.)
-    const fcParts = (trailingFc.parts ?? []).filter((p) => !!p.functionCall);
-    out.push({ role: 'model', parts: [...ackParts, ...fcParts] });
+    summaryParts.push(...postAckParts);
+  }
+
+  const out: Content[] = [{ role: 'user', parts: summaryParts }];
+
+  if (trailingFc) {
+    out.push({
+      role: 'model',
+      parts: [...ackParts, ...trailingTurnPartsForAck(trailingFc)],
+    });
   } else {
     out.push({ role: 'model', parts: ackParts });
   }
 
+  // Freeze the 2-entry prefix now, so a later real prompt that happens to
+  // look like a legacy attachment block is not counted as part of it.
+  markCompressedHistory(out);
   return out;
 }
