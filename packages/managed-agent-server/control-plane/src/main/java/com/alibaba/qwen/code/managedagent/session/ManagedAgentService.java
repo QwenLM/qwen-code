@@ -103,6 +103,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private static final Pattern TURN_CURSOR = Pattern.compile(
             "^(0|[1-9][0-9]{0,18}):([A-Za-z0-9_-]{1,64})$");
     private static final int TURN_ID_MAX_LENGTH = 64;
+    /**
+     * How long a rename waits for a delivery the background coordinator
+     * claimed first. The coordinator scans {@code RENAME} rows a request has
+     * just admitted, so its claim can beat this request's own without any
+     * concurrent caller.
+     */
+    private static final java.time.Duration RENAME_CLAIM_SETTLE = java.time.Duration.ofSeconds(2);
     // Catch-up reads of a stream use pages of this size.
     static final int STREAM_PAGE = 100;
     // "text" is the spelling that clients used before the contract.
@@ -922,6 +929,14 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                     idempotencyKey, effectiveTitle, command.renameRevision(), 0);
             var delivery = store.claimRename(candidate, owner, renameLeaseDuration.get()).orElse(null);
             if (delivery == null) {
+                // The dispatcher can claim the row this request just admitted.
+                // Wait for that delivery to settle so one request never
+                // answers "already being delivered" for its own rename.
+                if (awaitRenameSettle(tenantId, idempotencyKey, sessionId,
+                        renameDigest(sessionId, title)) != null) {
+                    return new SessionMutationResult<>(publicSession(
+                            store.requireSession(tenantId, sessionId)), true);
+                }
                 throw dependencyUnavailable("hosted_harness_unavailable",
                         "The Session title is already being delivered.");
             }
@@ -985,6 +1000,35 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 actorId);
         return new SessionMutationResult<>(publicSession(
                 asLastVisible(replayed)), true);
+    }
+
+    /**
+     * Waits a bounded time for the delivery that won this rename's claim,
+     * and answers the recorded command once it completes. Returns null when
+     * the row is gone, the digest belongs to another request, or the
+     * delivery is still in flight when the wait expires.
+     */
+    private StoreModels.CommandRecord awaitRenameSettle(String tenantId, String idempotencyKey,
+            String sessionId, String digest) {
+        long deadline = System.nanoTime() + RENAME_CLAIM_SETTLE.toNanos();
+        while (System.nanoTime() < deadline) {
+            StoreModels.CommandRecord recorded = store
+                    .findCommand(tenantId, RENAME, idempotencyKey).orElse(null);
+            if (recorded == null || !recorded.sessionId().equals(sessionId)
+                    || !digest.equals(recorded.requestDigest())) {
+                return null;
+            }
+            if ("COMPLETED".equals(recorded.status())) {
+                return recorded;
+            }
+            try {
+                Thread.sleep(25);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return null;
+            }
+        }
+        return null;
     }
 
     // An archived Session stays closed, so unarchive needs neither the
