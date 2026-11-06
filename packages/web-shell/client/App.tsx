@@ -15383,9 +15383,13 @@ export function App({
   const liveGoalSnapshot =
     goalSnapshot?.goal?.status === 'complete' ? null : goalSnapshot;
 
-  // Auto-recap: fire when the user returns after being away for longer than
+  // Auto-recap: fire when the user returns having been away for at least
   // `general.sessionRecapAwayThresholdMinutes`, but only when
-  // `general.showSessionRecap` opted in — same contract as the terminal CLI.
+  // `general.showSessionRecap` opted in. The away window is the span the
+  // document spent `hidden`, so unlike the terminal CLI this handler does not
+  // defer a return that lands mid-turn: it clears `hiddenAtRef` before the
+  // streaming check, so a return while a turn is running is dropped rather
+  // than re-fired once the turn settles.
   const hiddenAtRef = useRef<number | null>(null);
   const lastRecapBlockCountRef = useRef(0);
   const autoRecapVersionRef = useRef(0);

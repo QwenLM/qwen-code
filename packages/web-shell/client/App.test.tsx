@@ -26974,6 +26974,48 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.recapSession).toHaveBeenCalledOnce();
   });
 
+  it('picks up a general.showSessionRecap change made while the tab is open', async () => {
+    // The listener reads showSessionRecap from its effect closure, so the
+    // dependency array is the only way a settings change reaches an already
+    // mounted tab. Without it the tab keeps the mount-time value for its whole
+    // lifetime: no reload, no error, just no recap.
+    testState.settings = [sessionRecapSetting(false)];
+    const recap = deferred<{ sessionId: string; recap: string | null }>();
+    mockSessionActions.recapSession.mockReturnValue(recap.promise);
+    testState.blocks = [{}, {}, {}, {}];
+    let hidden = true;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    let now = 1;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    const { rerender } = renderApp();
+    await flush();
+
+    // Away and back while the setting is off: no recap, as in the mount-time
+    // case above.
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    now += 10 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(mockSessionActions.recapSession).not.toHaveBeenCalled();
+
+    // The user turns the setting on in the running tab; the daemon write
+    // re-renders App with the new descriptor.
+    hidden = true;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    testState.settings = [sessionRecapSetting(true)];
+    rerender();
+    await flush();
+
+    now += 10 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(mockSessionActions.recapSession).toHaveBeenCalledOnce();
+  });
+
   it('shows an automatic recap when the session remains active', async () => {
     const { recap } = await triggerAutoRecap();
     await act(async () => {
