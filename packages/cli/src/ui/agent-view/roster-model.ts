@@ -72,6 +72,8 @@ export interface AgentRosterRow {
   queuedPromptPreview?: string;
   lastActivityAt?: string;
   lastHeartbeatAt?: string;
+  /** Latest pull request the session is bound to, e.g. "#221 merged". */
+  prLabel?: string;
 }
 
 export function isAgentRosterBlockingWait(row: AgentRosterRow): boolean {
@@ -209,6 +211,12 @@ function compareRosterRows(
     getStateGroupRank(left.stateGroup) - getStateGroupRank(right.stateGroup);
   if (groupDelta !== 0) {
     return groupDelta;
+  }
+
+  const failedDelta =
+    Number(left.taskState === 'failed') - Number(right.taskState === 'failed');
+  if (failedDelta !== 0) {
+    return failedDelta;
   }
 
   const ageDelta = left.ageMs - right.ageMs;

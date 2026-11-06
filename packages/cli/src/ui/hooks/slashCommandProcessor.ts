@@ -1142,7 +1142,8 @@ export const useSlashCommandProcessor = (
                 isIdleRef:
                   commandToExecute.kind === CommandKind.BUILT_IN &&
                   (commandToExecute.name === 'restore' ||
-                    commandToExecute.name === 'logout') &&
+                    commandToExecute.name === 'logout' ||
+                    commandToExecute.name === 'background') &&
                   isCurrentSubmission
                     ? {
                         get current() {

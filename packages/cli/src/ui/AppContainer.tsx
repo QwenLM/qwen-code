@@ -226,6 +226,7 @@ import type { AgentViewIdleGateState } from './commands/types.js';
 import { detachCurrentSessionToAgentView } from '../agent-view/managed-detach.js';
 import { buildCurrentQwenCliArgv } from '../agent-view/current-cli-argv.js';
 import { isAgentViewEnabled } from '../agent-view/feature.js';
+import { summarizeAgentViewTurn } from '../agent-view/worker-summary.js';
 import {
   readAgentViewWorkerSidebandEnv,
   readAgentViewWorkerControlEvents,
@@ -240,6 +241,7 @@ import {
   retainAnsweredAgentViewSoftQuestion,
 } from './agent-view/worker-ui-bridge.js';
 import { exitCleanly } from '../utils/processUtils.js';
+import { requestAgentViewRosterOnExit } from '../utils/relaunch.js';
 import {
   useMessageQueue,
   type QueuedUserSubmission,
@@ -2307,6 +2309,14 @@ export const AppContainer = (props: AppContainerProps) => {
     });
     config.getLlmClient()?.requestShutdown();
     await runExitCleanup();
+    const rosterArgv = buildCurrentQwenCliArgv([
+      'agents',
+      '--cwd',
+      config.getProjectRoot(),
+    ]);
+    if (await requestAgentViewRosterOnExit(rosterArgv)) {
+      process.exit(0);
+    }
     process.exit(runAgentViewRosterCommand(config.getProjectRoot()));
   }, [config, terminalHeight, terminalWidth]);
 
@@ -3310,6 +3320,39 @@ export const AppContainer = (props: AppContainerProps) => {
   const answeredAgentViewSoftQuestionRef = useRef<string | undefined>(
     undefined,
   );
+  const agentViewFirstPrompt = isAgentViewWorker
+    ? historyManager.history
+        .find((item) => item.type === 'user')
+        ?.text?.slice(0, 200)
+    : undefined;
+  const [agentViewTurnSummary, setAgentViewTurnSummary] = useState<
+    { forResult: string; text: string } | undefined
+  >(undefined);
+
+  useEffect(() => {
+    if (
+      !isAgentViewWorker ||
+      streamingState !== StreamingState.Idle ||
+      !agentViewLastResult ||
+      agentViewTurnSummary?.forResult === agentViewLastResult
+    ) {
+      return undefined;
+    }
+    const controller = new AbortController();
+    const forResult = agentViewLastResult;
+    void summarizeAgentViewTurn(config, controller.signal).then((text) => {
+      if (text && !controller.signal.aborted) {
+        setAgentViewTurnSummary({ forResult, text });
+      }
+    });
+    return () => controller.abort();
+  }, [
+    agentViewLastResult,
+    agentViewTurnSummary,
+    config,
+    isAgentViewWorker,
+    streamingState,
+  ]);
 
   useEffect(() => {
     if (readAgentViewWorkerSidebandEnv() === undefined) return;
@@ -3325,12 +3368,23 @@ export const AppContainer = (props: AppContainerProps) => {
       lastResult: agentViewLastResult,
       answeredSoftQuestion: answeredAgentViewSoftQuestionRef.current,
     });
+    const turnSummary =
+      agentViewTurnSummary &&
+      agentViewTurnSummary.forResult === agentViewLastResult
+        ? agentViewTurnSummary.text
+        : undefined;
+    const title = sessionName ?? agentViewFirstPrompt;
     void reportAgentViewWorkerState({
       ...report,
-      ...(report.summary || !sessionName ? {} : { summary: sessionName }),
+      ...(report.sessionState === 'idle' && turnSummary
+        ? { lastResult: turnSummary }
+        : {}),
+      ...(report.summary || !title ? {} : { summary: title }),
     });
   }, [
+    agentViewFirstPrompt,
     agentViewLastResult,
+    agentViewTurnSummary,
     initError,
     pendingToolCalls,
     sessionName,
@@ -3822,6 +3876,10 @@ export const AppContainer = (props: AppContainerProps) => {
   const pendingAgentViewControlPromptsRef = useRef<string[]>([]);
   const handleFinalSubmitRef = useRef(handleFinalSubmit);
   handleFinalSubmitRef.current = handleFinalSubmit;
+  // A newly attached terminal starts blank. refreshStatic is write-free in
+  // terminal-buffer mode, so repaint the way wake/SIGCONT does.
+  const wakeRepaintRef = useRef(wakeRepaint);
+  wakeRepaintRef.current = wakeRepaint;
   useEffect(() => {
     if (readAgentViewWorkerSidebandEnv() === undefined) return undefined;
 
@@ -3850,7 +3908,7 @@ export const AppContainer = (props: AppContainerProps) => {
       try {
         const events = await readAgentViewWorkerControlEvents();
         if (!disposed && events.some((event) => event.type === 'redraw')) {
-          refreshStatic();
+          wakeRepaintRef.current();
         }
         for (const event of events) {
           await applyAgentViewWorkerControlEventForUi(
@@ -3900,7 +3958,7 @@ export const AppContainer = (props: AppContainerProps) => {
         clearTimeout(timer);
       }
     };
-  }, [config, refreshStatic]);
+  }, [config]);
 
   const handleArenaModelsSelected = useCallback(
     (models: string[]) => {

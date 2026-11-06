@@ -22,6 +22,8 @@ interface TestKey {
   escape?: boolean;
   upArrow?: boolean;
   downArrow?: boolean;
+  pageUp?: boolean;
+  pageDown?: boolean;
   leftArrow?: boolean;
   rightArrow?: boolean;
   home?: boolean;
@@ -95,6 +97,28 @@ describe('AgentViewRoster', () => {
     expect(output).not.toContain('Waiting on approval');
     expect(output).toMatch(/> \* beta\s+What would you like to test\? 2m/);
     expect(output).toContain('check status');
+  });
+
+  it('lists failed sessions in their own Failed group', () => {
+    const { lastFrame } = renderRoster({
+      rows: [
+        row('done-one', {
+          state: 'completed',
+          stateGroup: 'done',
+          taskState: 'ready',
+        }),
+        row('broke-one', {
+          state: 'failed',
+          stateGroup: 'done',
+          taskState: 'failed',
+        }),
+      ],
+    });
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('1 completed - 1 failed');
+    expect(output.indexOf('Completed')).toBeLessThan(output.indexOf('Failed'));
+    expect(output.indexOf('Failed')).toBeLessThan(output.indexOf('broke-one'));
   });
 
   it('renders the Qwen header with model and directory details', () => {
@@ -317,6 +341,18 @@ describe('AgentViewRoster', () => {
     expect(onMoveSelection).toHaveBeenNthCalledWith(1, -1);
     expect(onMoveSelection).toHaveBeenNthCalledWith(2, 1);
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('moves selection a page at a time with PgUp and PgDn', () => {
+    const onMoveSelection = vi.fn();
+
+    renderRoster({ onMoveSelection });
+
+    press('', { pageDown: true });
+    press('', { pageUp: true });
+
+    expect(onMoveSelection).toHaveBeenNthCalledWith(1, 10);
+    expect(onMoveSelection).toHaveBeenNthCalledWith(2, -10);
   });
 
   it('renders notices as a bounded single line', () => {

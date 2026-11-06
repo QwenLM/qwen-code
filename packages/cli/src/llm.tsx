@@ -1162,6 +1162,35 @@ export async function main() {
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
 
+    {
+      const {
+        readAgentViewWorkerSidebandEnv,
+        reportAgentViewWorkerState,
+        sendAgentViewWorkerEvent,
+        startAgentViewWorkerHeartbeat,
+      } = await import('./agent-view/worker-sideband.js');
+      if (readAgentViewWorkerSidebandEnv()) {
+        await sendAgentViewWorkerEvent({
+          type: 'ready',
+          cwd: process.cwd(),
+          capabilities: ['ready', 'heartbeat', 'state'],
+          summary: config.getQuestion(),
+        }).catch((error) => {
+          debugLogger.debug(
+            `Agent View worker ready sideband failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
+        await reportAgentViewWorkerState({
+          sessionState: 'idle',
+          cwd: process.cwd(),
+          summary: config.getQuestion(),
+        });
+        startAgentViewWorkerHeartbeat();
+      }
+    }
+
     // The interactive UI segments text through Intl.Segmenter; on an ICU-less
     // Node the first segmentation segfaults the process (#11747). Probe here,
     // where interactivity is known, so headless and ACP runs (which never

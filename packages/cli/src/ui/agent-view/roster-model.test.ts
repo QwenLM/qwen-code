@@ -132,10 +132,10 @@ describe('buildAgentRosterRows', () => {
       'needs-input',
       'working-new',
       'working-old',
-      'failed-new',
       'completed',
       'stopped',
       'idle-old',
+      'failed-new',
     ]);
   });
 
@@ -235,7 +235,7 @@ describe('buildAgentRosterRows', () => {
       buildAgentRosterRows({ sessions, filter: 's:done', now }).map(
         (row) => row.sessionId,
       ),
-    ).toEqual(['completed', 'failed', 'idle', 'stopped']);
+    ).toEqual(['completed', 'idle', 'stopped', 'failed']);
   });
 
   it('matches the whole Working group with s:working, including starting', () => {

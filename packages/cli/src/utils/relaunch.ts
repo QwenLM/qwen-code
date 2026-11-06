@@ -9,6 +9,7 @@ import { isatty } from 'node:tty';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { JsInterpreterCommand } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import {
+  AGENT_VIEW_ROSTER_MESSAGE,
   RELAUNCH_EXIT_CODE,
   UPDATE_ON_EXIT_MESSAGE,
   UPDATE_RELAUNCH_EXIT_CODE,
@@ -72,11 +73,37 @@ export async function relaunchOnExitCode(
  * exits after a grace period instead of running on indefinitely. `graceMs` is
  * for tests.
  */
+let relaunchSupervised = false;
+
+/**
+ * Asks the relaunch supervisor to open the Agent View roster once this
+ * process exits. The supervisor owns the terminal handoff, which a nested
+ * spawnSync cannot do reliably on Windows: the blocked parent keeps reading
+ * console input. Resolves false when no supervisor is listening.
+ */
+export function requestAgentViewRosterOnExit(
+  argv: readonly string[],
+): Promise<boolean> {
+  if (!relaunchSupervised || !process.send || !process.connected) {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    try {
+      process.send!({ type: AGENT_VIEW_ROSTER_MESSAGE, argv }, (error) =>
+        resolve(!error),
+      );
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
 export function exitWhenSupervisorExits(graceMs = ORPHAN_GRACE_MS): void {
   const supervision = process.env[RELAUNCH_SUPERVISED_ENV];
   if (supervision !== '1' && supervision !== 'terminal') {
     return;
   }
+  relaunchSupervised = true;
   // Tools and subagents this process spawns are not the supervisor's children.
   delete process.env[RELAUNCH_SUPERVISED_ENV];
   // A process that never had a channel was not spawned by a supervisor, and
@@ -193,6 +220,7 @@ export async function relaunchAppInChildProcess(
 
   const runner = () => {
     let updateOnExitRequested = false;
+    let agentViewRosterArgv: string[] | undefined;
     const terminalHandoff =
       options?.interpreter?.runtime === 'bun' && isatty(0);
     const newEnv = {
@@ -224,6 +252,18 @@ export async function relaunchAppInChildProcess(
       ) {
         updateOnExitRequested = true;
       }
+      if (
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        message.type === AGENT_VIEW_ROSTER_MESSAGE &&
+        'argv' in message &&
+        Array.isArray(message.argv) &&
+        message.argv.length > 0 &&
+        message.argv.every((arg: unknown) => typeof arg === 'string')
+      ) {
+        agentViewRosterArgv = message.argv as string[];
+      }
     });
 
     // Allow the parent to clean up process.env after spawn copies it
@@ -243,6 +283,22 @@ export async function relaunchAppInChildProcess(
       });
       child.on('close', (code) => {
         removeSignalHandler();
+        if (agentViewRosterArgv) {
+          // The detached session asked for the roster: hand the terminal to
+          // it while stdin stays paused here.
+          const [rosterCommand, ...rosterArgs] = agentViewRosterArgv;
+          agentViewRosterArgv = undefined;
+          const roster = spawn(rosterCommand!, rosterArgs, {
+            stdio: 'inherit',
+            env: createChildEnv(),
+          });
+          roster.on('error', reject);
+          roster.on('close', (rosterCode) => {
+            process.stdin.resume();
+            resolve(rosterCode ?? 1);
+          });
+          return;
+        }
         // Resume stdin before the parent process exits.
         process.stdin.resume();
         const exitCode = code ?? 1;

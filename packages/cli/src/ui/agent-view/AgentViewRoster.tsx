@@ -75,6 +75,7 @@ export interface AgentViewRosterProps {
 }
 
 const TERMINAL_ESCAPE_GRACE_MS = 25;
+const ROSTER_PAGE_SIZE = 10;
 
 export type AgentViewPanel =
   | AgentViewSessionPanel
@@ -336,6 +337,16 @@ export function AgentViewRoster({
         Math.min(rows.length - 1, selectedIndexRef.current + 1),
       );
       onMoveSelection(1);
+      return;
+    }
+
+    if ((key.pageUp || key.pageDown) && !sessionPeekActive) {
+      const step = key.pageUp ? -ROSTER_PAGE_SIZE : ROSTER_PAGE_SIZE;
+      selectedIndexRef.current = Math.max(
+        0,
+        Math.min(rows.length - 1, selectedIndexRef.current + step),
+      );
+      onMoveSelection(step);
       return;
     }
 
@@ -922,8 +933,12 @@ function formatRosterSummary(rows: AgentRosterRow[]): string {
     (row) => row.stateGroup === 'needs_input',
   ).length;
   const working = rows.filter((row) => row.stateGroup === 'working').length;
-  const completed = rows.filter((row) => row.stateGroup === 'done').length;
-  return `${needsInput} awaiting input - ${working} working - ${completed} completed`;
+  const failed = rows.filter(
+    (row) => row.stateGroup === 'done' && row.taskState === 'failed',
+  ).length;
+  const completed =
+    rows.filter((row) => row.stateGroup === 'done').length - failed;
+  return `${needsInput} awaiting input - ${working} working - ${completed} completed - ${failed} failed`;
 }
 
 function getInputPlaceholder(): string {
@@ -1127,7 +1142,7 @@ function getStateGroupLabel(row: AgentRosterRow): string {
     case 'working':
       return 'Working';
     case 'done':
-      return 'Completed';
+      return row.taskState === 'failed' ? 'Failed' : 'Completed';
     default:
       return row.stateLabel;
   }
@@ -1156,7 +1171,9 @@ function RosterRow({
   const columns = formatRosterRowColumns({
     name,
     output,
-    ageLabel: row.ageLabel,
+    ageLabel: row.prLabel
+      ? `${cleanRowText(row.prLabel) ?? ''} ${row.ageLabel}`.trim()
+      : row.ageLabel,
   });
 
   return (

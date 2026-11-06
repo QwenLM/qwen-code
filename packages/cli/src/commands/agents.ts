@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Argv, CommandModule } from 'yargs';
 import { FatalError } from '@qwen-code/qwen-code-core/utils/errors.js';
@@ -349,7 +350,7 @@ function toRosterRows(
   if (snapshots.length === 0) {
     return [];
   }
-  return buildAgentRosterRows({
+  const rows = buildAgentRosterRows({
     sessions: snapshots.map((snapshot) => snapshot.state),
     launches: Object.fromEntries(
       snapshots.map((snapshot) => [snapshot.sessionId, snapshot.launch]),
@@ -366,6 +367,39 @@ function toRosterRows(
       )
       .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry)),
   });
+  for (const row of rows) {
+    const prLabel = readLatestPrLabel(row, transcriptStorageCache);
+    if (prLabel) row.prLabel = prLabel;
+  }
+  return rows;
+}
+
+function readLatestPrLabel(
+  row: AgentRosterRow,
+  storageCache: Map<string, Storage>,
+): string | undefined {
+  for (const cwd of new Set([row.activeCwd, row.projectCwd])) {
+    try {
+      const filePath = path.join(
+        getTranscriptStorage(cwd, storageCache).getProjectDir(),
+        'chats',
+        `${row.sessionId}.pr.json`,
+      );
+      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as {
+        prs?: Array<{ number?: unknown; state?: unknown }>;
+      };
+      const latest = parsed.prs?.at(-1);
+      if (typeof latest?.number !== 'number') continue;
+      const state =
+        latest.state === 'merged' || latest.state === 'closed'
+          ? ` ${latest.state}`
+          : '';
+      return `#${latest.number}${state}`;
+    } catch {
+      // No PR bound to this session (or an unreadable sidecar).
+    }
+  }
+  return undefined;
 }
 
 function getRosterEntryWithTitle(
