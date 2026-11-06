@@ -29,7 +29,6 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.HttpURLConnection;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.URI;
@@ -55,6 +54,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class HostedHarnessMySqlIT {
@@ -226,9 +226,7 @@ class HostedHarnessMySqlIT {
         startHarness(cli);
         // The Harness writes to the Store through Spring, so Spring's address
         // must be known before it starts.
-        try (ServerSocket socket = new ServerSocket(0, 0, InetAddress.getLoopbackAddress())) {
-            springPort = socket.getLocalPort();
-        }
+        springPort = reservePort();
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
                 ManagedAgentServerApplication.class).run(
                 "--server.address=127.0.0.1", "--server.port=" + springPort,

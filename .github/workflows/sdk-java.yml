@@ -65,6 +65,13 @@ jobs:
         include: >-
           ${{ fromJSON(inputs.tier == 'fast' && '[{"os":"ubuntu-latest","java":"21"}]' ||
           '[{"os":"ubuntu-latest","java":"11"},{"os":"ubuntu-latest","java":"17"},{"os":"ubuntu-latest","java":"21"},{"os":"macos-latest","java":"21"},{"os":"windows-latest","java":"21"}]') }}
+    env:
+      # The shared 2 GiB default is a build-sized floor for a light lane,
+      # not for this one: install, build and the JUnit forks together write
+      # far more, and a host with 2-4 GiB free passes the shared gate and
+      # then dies mid-suite (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608'
+
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -183,6 +190,16 @@ jobs:
         with:
           ref: '${{ inputs.ref || github.sha }}'
 
+      # Fail before the Maven, MySQL and RocketMQ steps when the workspace or
+      # RUNNER_TEMP filesystem is near full or out of inodes (#10035, #16003).
+      # The floor is absolute free KiB plus inodes; it cannot express the
+      # broker's used-ratio refusal (a large volume at 94% used still has ample
+      # free bytes), so the broker disk-threshold investigation stays out of
+      # scope here rather than being claimed as covered.
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
       # setup-java updates Maven files non-atomically. Keep them job-local
       # because runner instances on one ECS host share HOME.
       #
@@ -299,6 +316,13 @@ jobs:
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-external" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-host" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-http" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-local" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-kubernetes" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-ssh" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-static" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           # The suite resolves from the job-local copy above, so it does not
@@ -431,7 +455,7 @@ jobs:
           mkdir -p "${HOME}/.m2/repository" 9>&-
           cd "${RUNNER_TEMP}/m2-repo"
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-runtime-external -o -path ./com/alibaba/qwen-managed-agent-runtime-host -o -path ./com/alibaba/qwen-managed-agent-runtime-http -o -path ./com/alibaba/qwen-managed-agent-runtime-local -o -path ./com/alibaba/qwen-managed-agent-runtime-kubernetes -o -path ./com/alibaba/qwen-managed-agent-runtime-ssh -o -path ./com/alibaba/qwen-managed-agent-runtime-static -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
@@ -627,6 +651,10 @@ jobs:
         with:
           ref: '${{ inputs.ref || github.sha }}'
 
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
       - name: 'Check Flyway migration versions are unique'
         run: 'node scripts/check-flyway-migrations.js packages/managed-agent-server packages/sdk-java/qwencode'
 
@@ -650,6 +678,7 @@ jobs:
     # not as an expected duration.
     timeout-minutes: 310
     env:
+      DISK_FLOOR_MIN_FREE_KB: '8388608'
       MYSQL_CONTAINER: 'qwen-code-sdk-java-mysql-${{ github.run_id }}-${{ github.run_attempt }}'
     steps:
       - name: 'Restore workspace ownership'
@@ -773,6 +802,12 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ inputs.ref || github.sha }}'
+
+      # Fail on a saturated pool host before the two Maven suites and the
+      # per-leg MySQL container fill the shared disk (#16003).
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
@@ -939,6 +974,13 @@ jobs:
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-external" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-host" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-http" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-local" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-kubernetes" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-ssh" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-static" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           # Both Maven runs resolve from the job-local copy above, so they do
@@ -1045,7 +1087,7 @@ jobs:
           mkdir -p "${HOME}/.m2/repository" 9>&-
           cd "${RUNNER_TEMP}/m2-repo"
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-runtime-external -o -path ./com/alibaba/qwen-managed-agent-runtime-host -o -path ./com/alibaba/qwen-managed-agent-runtime-http -o -path ./com/alibaba/qwen-managed-agent-runtime-local -o -path ./com/alibaba/qwen-managed-agent-runtime-kubernetes -o -path ./com/alibaba/qwen-managed-agent-runtime-ssh -o -path ./com/alibaba/qwen-managed-agent-runtime-static -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
@@ -1097,7 +1139,7 @@ jobs:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     if: "${{ inputs.tier != 'fast' }}"
     runs-on: 'ubuntu-latest'
-    # The step ceilings today (204 + 20 + 50 + 20 = 294 — the FG8 letters
+    # The step ceilings today (205 + 20 + 50 + 20 = 295 — the FG8 letters
     # grew the shared failsafe fork to 3600 s, FG9 slice 3 to 3990 s, the
     # FG10b–f workflow relay letters to 4484 s, the FG12a MCP reply-loss
     # letter to 4499 s, the FG12c restart matrix to 4548 s, the FG13c Hook
@@ -1177,18 +1219,21 @@ jobs:
     # of fork plus wrap, 44 s left); the FG12d detach-unknown cell adds 55 s
     # (27.4 s measured), so the fork moves to 11591 s and Verify to 204
     # minutes, wrapping fork + 600 s plus margin (12191 s of fork plus wrap,
-    # 49 s left);
+    # 49 s left); the FG12d stopped-worker close cell adds 67 s (33.1 s
+    # measured), so the fork moves to 11658 s and Verify to 205 minutes,
+    # wrapping fork + 600 s plus margin (12258 s of fork plus wrap, 42 s
+    # left);
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus a 33-minute
     # allowance for the uncapped setup steps (Checkout.. cgroup delegation,
     # the report checks), which took under 10 minutes on every nightly from
-    # 10-14 to 10-30: 294 + 33. A Verify that timed out used to skip
+    # 10-14 to 10-30: 295 + 33. A Verify that timed out used to skip
     # admission, leaving that path 50 minutes spare; admission now runs
     # after it, so that path too can fill all four capped ceilings. The
     # allowance sits above the ~13-minute floor so that a slow setup (the
     # CLI install makes up to three attempts) still leaves the O4 gates
     # time to run. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 327
+    timeout-minutes: 328
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -1288,10 +1333,10 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 11591 s, so the step wraps to fork + 600 s plus margin (204 min,
-        # 49 s left before the step must move), including the provisional
+        # 11658 s, so the step wraps to fork + 600 s plus margin (205 min,
+        # 42 s left before the step must move), including the provisional
         # 180 s pool-fixture reservation pending CI measurement.
-        timeout-minutes: 204
+        timeout-minutes: 205
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
@@ -1640,6 +1685,17 @@ jobs:
     # 10 + 20 capped minutes plus the uncapped setup, which a loaded pool
     # host stretches (daemon-e2e measured its setup at up to 4x).
     timeout-minutes: 60
+    env:
+      # The shared 2 GiB default is a build-sized floor for a light lane,
+      # not for this one: install, build and the JUnit forks together write
+      # far more, and a host with 2-4 GiB free passes the shared gate and
+      # then dies mid-suite (#16003).
+      # The broker refuses writes on its own used-ratio rule at ~94% while
+      # the 952 GiB volume still reports tens of GiB free, so no absolute
+      # floor can catch it (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608'
+      DISK_FLOOR_MAX_USED_PCT: '90'
+
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -1757,6 +1813,11 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ inputs.ref || github.sha }}'
+
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
@@ -1837,6 +1898,13 @@ jobs:
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-external" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-host" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-http" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-local" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-kubernetes" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-ssh" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-static" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
@@ -1906,6 +1974,11 @@ jobs:
     # stretches (daemon-e2e measured its setup at up to 4x).
     timeout-minutes: 130
     env:
+      # The broker refuses writes on its own used-ratio rule at ~94% while
+      # the 952 GiB volume still reports tens of GiB free, so no absolute
+      # floor can catch it (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608'
+      DISK_FLOOR_MAX_USED_PCT: '90'
       MYSQL_CONTAINER: 'qwen-code-mq3-mysql-${{ github.run_id }}-${{ github.run_attempt }}'
     steps:
       - name: 'Restore workspace ownership'
@@ -2024,6 +2097,11 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ inputs.ref || github.sha }}'
+
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
@@ -2126,6 +2204,13 @@ jobs:
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-external" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-host" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-http" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-local" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-kubernetes" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-ssh" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-static" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
@@ -2271,6 +2356,13 @@ jobs:
     # stretched-setup tail above far more often than a 45 ceiling leaves room
     # for.
     timeout-minutes: "${{ inputs.tier == 'fast' && 90 || 45 }}"
+    env:
+      # The shared 2 GiB default is a build-sized floor for a light lane,
+      # not for this one: install, build and the JUnit forks together write
+      # far more, and a host with 2-4 GiB free passes the shared gate and
+      # then dies mid-suite (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608'
+
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -2388,6 +2480,10 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ inputs.ref || github.sha }}'
+
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22 (hosted)'

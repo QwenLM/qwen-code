@@ -20,6 +20,7 @@ import { CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS } from '@qwen-code/acp-bridge/channe
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
 import { isDaemonSessionPrInfo } from './session-pr.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
+import { DaemonSkillInstallError } from './DaemonSkillInstallError.js';
 import { DaemonAttachmentUploadError } from './DaemonAttachmentUploadError.js';
 import type {
   DaemonSseConnectReason,
@@ -37,6 +38,10 @@ import type {
   DaemonAuthProviderInstallRequest,
   DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
+  DaemonSubscriptionActivation,
+  DaemonSubscriptionConfig,
+  DaemonSubscriptionUserInfo,
+  DaemonSubscriptionFlow,
   DaemonBrand,
   DaemonCapabilities,
   DaemonCreateAgentRequest,
@@ -202,6 +207,8 @@ import type {
   DaemonChannelPairingRequestsSnapshot,
   DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
+  DaemonChannelEventsQuery,
+  DaemonChannelEventsSnapshot,
   DaemonChannelsSnapshot,
   DaemonChannelStartupRequest,
   DaemonChannelTypeCatalog,
@@ -231,9 +238,16 @@ import type {
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
   DaemonSkillBatchToggleResult,
+  DaemonUserSkillActivation,
+  DaemonUserSkillsActivationResult,
   DaemonSkillToggleResult,
   DaemonSkillRefreshResult,
   DaemonSkillInstallRequest,
+  DaemonSkillConfigInstallRequest,
+  DaemonSkillArchiveInstallRequest,
+  DaemonSkillArchiveInstallResult,
+  DaemonSkillInstallAttempt,
+  DaemonSkillInstallOptions,
   DaemonSkillMutationResult,
   DaemonSkillScope,
   DaemonSessionArtifactInput,
@@ -484,6 +498,21 @@ const MCP_RESTART_DEFAULT_TIMEOUT_MS =
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
 const urlEncode = encodeURIComponent;
 
+function channelEventsQuerySuffix(
+  query: DaemonChannelEventsQuery | undefined,
+): string {
+  const params = new URLSearchParams();
+  if (query?.limit !== undefined) params.set('limit', String(query.limit));
+  if (query?.types?.length) params.set('type', query.types.join(','));
+  // One parameter per name: a Channel name may contain a comma, so a joined
+  // list could not be split back into the names the caller asked for.
+  for (const channel of query?.channels ?? [])
+    params.append('channel', channel);
+  if (query?.since !== undefined) params.set('since', query.since);
+  const encoded = params.toString();
+  return encoded ? `?${encoded}` : '';
+}
+
 function transcriptPageSuffix(
   opts: DaemonSessionTranscriptPageOptions,
 ): string {
@@ -545,7 +574,7 @@ function stripTrailingSlashes(url: string): string {
   return end === url.length ? url : url.slice(0, end);
 }
 
-function createStandaloneSessionId(): string {
+function createDaemonRequestId(): string {
   if (typeof globalThis.crypto.randomUUID === 'function') {
     return globalThis.crypto.randomUUID();
   }
@@ -557,6 +586,27 @@ function createStandaloneSessionId(): string {
     byte.toString(16).padStart(2, '0'),
   ).join('');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+const SKILL_ARCHIVE_INSTALL_TIMEOUT_MS = 130_000;
+
+function parseSkillArchiveResult(
+  body: unknown,
+  attemptId: string,
+): DaemonSkillArchiveInstallResult {
+  const result = body as Partial<DaemonSkillArchiveInstallResult> | undefined;
+  if (
+    !result ||
+    typeof result !== 'object' ||
+    result.attemptId !== attemptId ||
+    typeof result.archiveSha256 !== 'string' ||
+    !/^[a-f0-9]{64}$/i.test(result.archiveSha256) ||
+    typeof result.skillName !== 'string' ||
+    (result.scope !== 'workspace' && result.scope !== 'global')
+  ) {
+    throw new Error('Skill archive installation returned an invalid result');
+  }
+  return result as DaemonSkillArchiveInstallResult;
 }
 
 /**
@@ -1926,6 +1976,31 @@ export class DaemonClient {
     );
   }
 
+  async approveWorkspaceHooks(
+    decision: 'approve' | 'reject',
+    hash?: string,
+  ): Promise<{ decision: 'approve' | 'reject'; reloaded: boolean }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/hooks/approve`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(
+          hash === undefined ? { decision } : { decision, hash },
+        ),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/hooks/approve');
+        }
+        return (await res.json()) as {
+          decision: 'approve' | 'reject';
+          reloaded: boolean;
+        };
+      },
+    );
+  }
+
   async sessionHooks(sessionId: string): Promise<DaemonSessionHooksStatus> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/hooks`,
@@ -2561,13 +2636,34 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonWorkspaceFileUploadResult> {
     const query = new URLSearchParams({ path: req.path });
-    const url = `${this.baseUrl}${uploadPath}?${query.toString()}`;
+    return this.binaryPost(
+      `${uploadPath}?${query.toString()}`,
+      label,
+      req,
+      (body) => {
+        if (!body || typeof body !== 'object' || !('path' in body)) {
+          throw new Error(`${label}: invalid upload response body`);
+        }
+        return body as DaemonWorkspaceFileUploadResult;
+      },
+      clientId,
+    );
+  }
+
+  private async binaryPost<T>(
+    uploadPath: string,
+    label: string,
+    req: Omit<DaemonWorkspaceFileUploadRequest, 'path'>,
+    parse: (body: unknown) => T,
+    clientId?: string,
+  ): Promise<T> {
+    const url = `${this.baseUrl}${uploadPath}`;
     const headers = this.headers(
       { 'Content-Type': 'application/octet-stream' },
       clientId,
     );
     if (req.onProgress) {
-      return await this.uploadWithProgress(url, label, req, headers);
+      return await this.uploadWithProgress(url, label, req, headers, parse);
     }
     return await this.fetchWithTimeout(
       url,
@@ -2588,22 +2684,20 @@ export class DaemonClient {
         }
         // Match the XHR path's parse-then-shape-check so the two transports
         // fail identically on malformed 2xx bodies.
-        if (!body || typeof body !== 'object' || !('path' in body)) {
-          throw new Error(`${label}: invalid upload response body`);
-        }
-        return body as DaemonWorkspaceFileUploadResult;
+        return parse(body);
       },
       req.timeoutMs,
       'rest',
     );
   }
 
-  private async uploadWithProgress(
+  private async uploadWithProgress<T>(
     url: string,
     label: string,
-    req: DaemonWorkspaceFileUploadRequest,
+    req: Omit<DaemonWorkspaceFileUploadRequest, 'path'>,
     headers: Record<string, string>,
-  ): Promise<DaemonWorkspaceFileUploadResult> {
+    parse: (body: unknown) => T,
+  ): Promise<T> {
     if (typeof XMLHttpRequest === 'undefined') {
       throw new Error(
         `${label}: upload progress requires XMLHttpRequest (browser only)`,
@@ -2618,85 +2712,82 @@ export class DaemonClient {
       effectiveTimeoutMs = req.timeoutMs;
     }
     const onProgress = req.onProgress;
-    return await new Promise<DaemonWorkspaceFileUploadResult>(
-      (resolve, reject) => {
-        if (req.signal?.aborted) {
-          reject(
-            req.signal.reason ??
-              new DOMException('The operation was aborted.', 'AbortError'),
-          );
+    return await new Promise<T>((resolve, reject) => {
+      if (req.signal?.aborted) {
+        reject(
+          req.signal.reason ??
+            new DOMException('The operation was aborted.', 'AbortError'),
+        );
+        return;
+      }
+      const xhr = new XMLHttpRequest();
+      let abortListener: (() => void) | undefined;
+      // Detach the abort listener once the request settles so a long-lived
+      // signal does not retain a reference to this XHR after completion.
+      const cleanup = () => {
+        if (abortListener && req.signal) {
+          req.signal.removeEventListener('abort', abortListener);
+        }
+      };
+      xhr.open('POST', url);
+      for (const [name, value] of Object.entries(headers)) {
+        xhr.setRequestHeader(name, value);
+      }
+      if (effectiveTimeoutMs > 0) xhr.timeout = effectiveTimeoutMs;
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && onProgress) {
+          onProgress({ loaded: event.loaded, total: event.total });
+        }
+      };
+      xhr.onload = () => {
+        cleanup();
+        let body: unknown;
+        try {
+          body = xhr.responseText ? JSON.parse(xhr.responseText) : undefined;
+        } catch {
+          body = xhr.responseText;
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          // Validate successful bodies consistently with fetch.
+          try {
+            resolve(parse(body));
+          } catch (error) {
+            reject(error);
+          }
           return;
         }
-        const xhr = new XMLHttpRequest();
-        let abortListener: (() => void) | undefined;
-        // Detach the abort listener once the request settles so a long-lived
-        // signal does not retain a reference to this XHR after completion.
-        const cleanup = () => {
-          if (abortListener && req.signal) {
-            req.signal.removeEventListener('abort', abortListener);
-          }
-        };
-        xhr.open('POST', url);
-        for (const [name, value] of Object.entries(headers)) {
-          xhr.setRequestHeader(name, value);
-        }
-        if (effectiveTimeoutMs > 0) xhr.timeout = effectiveTimeoutMs;
-        xhr.upload.onprogress = (event) => {
-          if (event.lengthComputable && onProgress) {
-            onProgress({ loaded: event.loaded, total: event.total });
-          }
-        };
-        xhr.onload = () => {
-          cleanup();
-          let body: unknown;
-          try {
-            body = xhr.responseText ? JSON.parse(xhr.responseText) : undefined;
-          } catch {
-            body = xhr.responseText;
-          }
-          if (xhr.status >= 200 && xhr.status < 300) {
-            // The fetch path rejects non-JSON 2xx bodies (`res.json()`
-            // throws); match it so the two transports fail identically.
-            if (!body || typeof body !== 'object' || !('path' in body)) {
-              reject(new Error(`${label}: invalid upload response body`));
-              return;
-            }
-            resolve(body as DaemonWorkspaceFileUploadResult);
-            return;
-          }
-          const detail =
-            body && typeof body === 'object' && 'error' in body
-              ? String((body as { error: unknown }).error)
-              : `HTTP ${xhr.status}`;
-          reject(new DaemonHttpError(xhr.status, body, `${label}: ${detail}`));
-        };
-        xhr.onerror = () => {
-          cleanup();
-          reject(new Error(`${label}: network request failed`));
-        };
-        xhr.ontimeout = () => {
-          cleanup();
-          reject(new DOMException('timeout', 'TimeoutError'));
-        };
-        xhr.onabort = () => {
-          cleanup();
-          reject(
-            req.signal?.reason ??
-              new DOMException('The operation was aborted.', 'AbortError'),
-          );
-        };
-        if (req.signal) {
-          abortListener = () => xhr.abort();
-          req.signal.addEventListener('abort', abortListener, { once: true });
-        }
-        try {
-          xhr.send(req.data as XMLHttpRequestBodyInit);
-        } catch (error) {
-          cleanup();
-          reject(error);
-        }
-      },
-    );
+        const detail =
+          body && typeof body === 'object' && 'error' in body
+            ? String((body as { error: unknown }).error)
+            : `HTTP ${xhr.status}`;
+        reject(new DaemonHttpError(xhr.status, body, `${label}: ${detail}`));
+      };
+      xhr.onerror = () => {
+        cleanup();
+        reject(new Error(`${label}: network request failed`));
+      };
+      xhr.ontimeout = () => {
+        cleanup();
+        reject(new DOMException('timeout', 'TimeoutError'));
+      };
+      xhr.onabort = () => {
+        cleanup();
+        reject(
+          req.signal?.reason ??
+            new DOMException('The operation was aborted.', 'AbortError'),
+        );
+      };
+      if (req.signal) {
+        abortListener = () => xhr.abort();
+        req.signal.addEventListener('abort', abortListener, { once: true });
+      }
+      try {
+        xhr.send(req.data as XMLHttpRequestBodyInit);
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    });
   }
 
   async uploadWorkspaceFile(
@@ -3162,7 +3253,7 @@ export class DaemonClient {
     }
     const { sessionId: requestedSessionId, ...request } = options;
     const sessionId = (
-      requestedSessionId ?? createStandaloneSessionId()
+      requestedSessionId ?? createDaemonRequestId()
     ).toLowerCase();
     let session: DaemonStandaloneSession;
     try {
@@ -4645,7 +4736,7 @@ export class DaemonClient {
     opts?: { signal?: AbortSignal; clientId?: string },
   ): AsyncGenerator<DaemonSessionBtwStreamEvent> {
     opts?.signal?.throwIfAborted();
-    const requestId = createStandaloneSessionId();
+    const requestId = createDaemonRequestId();
     const url = `${this.baseUrl}/session/${urlEncode(sessionId)}/btw/stream`;
     let resume = false;
     let terminal = false;
@@ -5616,6 +5707,20 @@ export class DaemonClient {
     );
   }
 
+  /** Save User Skill preferences by exact name; runtime propagation is asynchronous. */
+  setUserSkillsActivation(
+    skillNames: readonly string[],
+    activation: DaemonUserSkillActivation,
+    opts?: { clientId?: string },
+  ): Promise<DaemonUserSkillsActivationResult> {
+    return this.jsonRequest('/skills/activation', 'PUT /skills/activation', {
+      method: 'PUT',
+      body: { skillNames, ...activation },
+      clientId: opts?.clientId,
+      mode: 'rest',
+    });
+  }
+
   installWorkspaceSkill(
     request: DaemonSkillInstallRequest,
   ): Promise<DaemonSkillMutationResult> {
@@ -5637,13 +5742,113 @@ export class DaemonClient {
   }
 
   installWorkspaceConfigSkill(
-    request: DaemonSkillInstallRequest & { scope: 'global' },
+    request: DaemonSkillConfigInstallRequest & { scope: 'global' },
+    options?: DaemonSkillInstallOptions,
   ): Promise<DaemonSkillMutationResult> {
-    return this.jsonRequest('/workspace/config/skills/install', 'Skill', {
-      method: 'POST',
-      body: request,
-      mode: 'rest',
-    });
+    return this.installConfigSkillToPath(
+      '/workspace/config/skills/install',
+      request,
+      options,
+    );
+  }
+
+  installWorkspaceConfigSkillArchive(
+    request: DaemonSkillArchiveInstallRequest,
+  ): Promise<DaemonSkillArchiveInstallResult> {
+    return this.installSkillArchiveToPath(
+      '/workspace/config/skills/install-archive',
+      request,
+    );
+  }
+
+  getWorkspaceSkillInstallAttempt(
+    attemptId: string,
+    options?: DaemonSkillInstallOptions,
+  ): Promise<DaemonSkillInstallAttempt | undefined> {
+    return this.skillInstallAttemptAtPath(
+      `/workspace/config/skills/install-attempts/${urlEncode(attemptId)}`,
+      options,
+    );
+  }
+
+  /** @internal */
+  async installConfigSkillToPath(
+    path: string,
+    request: DaemonSkillConfigInstallRequest,
+    options?: DaemonSkillInstallOptions,
+  ): Promise<DaemonSkillMutationResult> {
+    if (request.source.type !== 'zip-file') {
+      return this.jsonRequest(path, 'Skill', {
+        ...options,
+        method: 'POST',
+        body: request,
+        mode: 'rest',
+      });
+    }
+    const attemptId = (
+      ('attemptId' in request ? request.attemptId : undefined) ??
+      createDaemonRequestId()
+    ).toLowerCase();
+    try {
+      const body = await this.jsonRequest(path, 'Skill archive', {
+        ...options,
+        timeoutMs: options?.timeoutMs ?? SKILL_ARCHIVE_INSTALL_TIMEOUT_MS,
+        method: 'POST',
+        body: { ...request, attemptId },
+        mode: 'rest',
+      });
+      return parseSkillArchiveResult(body, attemptId);
+    } catch (error) {
+      throw new DaemonSkillInstallError(attemptId, error);
+    }
+  }
+
+  /** @internal */
+  async installSkillArchiveToPath(
+    path: string,
+    request: DaemonSkillArchiveInstallRequest,
+  ): Promise<DaemonSkillArchiveInstallResult> {
+    const attemptId = (
+      request.attemptId ?? createDaemonRequestId()
+    ).toLowerCase();
+    const query = new URLSearchParams({ name: request.name, attemptId });
+    try {
+      return await this.binaryPost(
+        `${path}?${query}`,
+        `POST ${path}`,
+        {
+          ...request,
+          timeoutMs: request.timeoutMs ?? SKILL_ARCHIVE_INSTALL_TIMEOUT_MS,
+        },
+        (body) => parseSkillArchiveResult(body, attemptId),
+      );
+    } catch (error) {
+      throw new DaemonSkillInstallError(attemptId, error);
+    }
+  }
+
+  /** @internal */
+  async skillInstallAttemptAtPath(
+    path: string,
+    options?: DaemonSkillInstallOptions,
+  ): Promise<DaemonSkillInstallAttempt | undefined> {
+    try {
+      return await this.jsonRequest(path, 'Skill installation receipt', {
+        ...options,
+        mode: 'rest',
+      });
+    } catch (error) {
+      if (
+        error instanceof DaemonHttpError &&
+        error.status === 404 &&
+        error.body &&
+        typeof error.body === 'object' &&
+        'code' in error.body &&
+        error.body.code === 'skill_install_attempt_unknown'
+      )
+        return undefined;
+      throw error;
+    }
   }
 
   deleteWorkspaceConfigSkill(
@@ -6254,6 +6459,17 @@ export class DaemonClient {
     );
   }
 
+  workspaceChannelEvents(
+    query?: DaemonChannelEventsQuery,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelEventsSnapshot> {
+    return this.jsonRequest<DaemonChannelEventsSnapshot>(
+      `/workspace/channels/events${channelEventsQuerySuffix(query)}`,
+      'GET /workspace/channels/events',
+      { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
   upsertWorkspaceChannel(
     name: string,
     request: DaemonChannelUpsertRequest,
@@ -6668,6 +6884,7 @@ export class DaemonClient {
       'POST /language',
       {
         method: 'POST',
+        mode: 'rest',
         body: {
           language,
           syncOutputLanguage: opts?.syncOutputLanguage ?? false,
@@ -7151,6 +7368,99 @@ export class DaemonClient {
   }
 
   // -- Auth device-flow ---------------------------------------------------
+
+  async getSubscriptionConfig(
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<DaemonSubscriptionConfig> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription`,
+      { headers: this.headers({}), signal: opts.signal },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'GET /auth/subscription');
+        return (await res.json()) as DaemonSubscriptionConfig;
+      },
+    );
+  }
+
+  async startSubscriptionLogin(): Promise<DaemonSubscriptionFlow> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription/flows`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'POST /auth/subscription/flows');
+        return (await res.json()) as DaemonSubscriptionFlow;
+      },
+    );
+  }
+
+  async getSubscriptionLogin(
+    id: string,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<DaemonSubscriptionFlow> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription/flows/${urlEncode(id)}`,
+      { headers: this.headers({}), signal: opts.signal },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'GET /auth/subscription/flows/:id');
+        return (await res.json()) as DaemonSubscriptionFlow;
+      },
+    );
+  }
+
+  async cancelSubscriptionLogin(id: string): Promise<void> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription/flows/${urlEncode(id)}`,
+      { method: 'DELETE', headers: this.headers({}) },
+      async (res) => {
+        if (res.status !== 204 && res.status !== 404)
+          throw await this.failOnError(
+            res,
+            'DELETE /auth/subscription/flows/:id',
+          );
+      },
+    );
+  }
+
+  async getSubscriptionUserInfo(
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<DaemonSubscriptionUserInfo | null> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription/userinfo`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: '{}',
+        signal: opts.signal,
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'POST /auth/subscription/userinfo');
+        return (await res.json()) as DaemonSubscriptionUserInfo | null;
+      },
+    );
+  }
+
+  async signOutSubscription(): Promise<void> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription/revoke`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'POST /auth/subscription/revoke');
+      },
+    );
+  }
 
   /**
    * Start an OAuth device-flow login for the given provider. The daemon
@@ -7862,6 +8172,18 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  workspaceChannelEvents(
+    query?: DaemonChannelEventsQuery,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelEventsSnapshot> {
+    return this.channelRequest(
+      `/channels/events${channelEventsQuerySuffix(query)}`,
+      'GET /workspaces/:workspace/channels/events',
+      undefined,
+      opts,
+    );
+  }
+
   upsertWorkspaceChannel(
     name: string,
     request: DaemonChannelUpsertRequest,
@@ -8515,13 +8837,32 @@ export class WorkspaceDaemonClient {
   }
 
   installWorkspaceConfigSkill(
-    request: DaemonSkillInstallRequest & { scope: 'workspace' },
+    request: DaemonSkillConfigInstallRequest & { scope: 'workspace' },
+    options?: DaemonSkillInstallOptions,
   ): Promise<DaemonSkillMutationResult> {
-    return this.client.workspaceJsonRequest(
-      this.workspaceSelector,
-      '/config/skills/install',
-      'POST /workspaces/:workspace/config/skills/install',
-      { method: 'POST', body: request, mode: 'rest' },
+    return this.client.installConfigSkillToPath(
+      `/workspaces/${this.workspaceSelector}/config/skills/install`,
+      request,
+      options,
+    );
+  }
+
+  installWorkspaceConfigSkillArchive(
+    request: DaemonSkillArchiveInstallRequest,
+  ): Promise<DaemonSkillArchiveInstallResult> {
+    return this.client.installSkillArchiveToPath(
+      `/workspaces/${this.workspaceSelector}/config/skills/install-archive`,
+      request,
+    );
+  }
+
+  getWorkspaceSkillInstallAttempt(
+    attemptId: string,
+    options?: DaemonSkillInstallOptions,
+  ): Promise<DaemonSkillInstallAttempt | undefined> {
+    return this.client.skillInstallAttemptAtPath(
+      `/workspaces/${this.workspaceSelector}/config/skills/install-attempts/${urlEncode(attemptId)}`,
+      options,
     );
   }
 
@@ -8546,6 +8887,17 @@ export class WorkspaceDaemonClient {
 
   workspaceHooks(): Promise<DaemonWorkspaceHooksStatus> {
     return this.get('/hooks', 'GET /workspaces/:workspace/hooks');
+  }
+
+  approveWorkspaceHooks(
+    decision: 'approve' | 'reject',
+    hash?: string,
+  ): Promise<{ decision: 'approve' | 'reject'; reloaded: boolean }> {
+    return this.post(
+      '/hooks/approve',
+      'POST /workspaces/:workspace/hooks/approve',
+      hash === undefined ? { decision } : { decision, hash },
+    );
   }
 
   workspaceEnv(): Promise<DaemonWorkspaceEnvStatus> {
@@ -8598,6 +8950,18 @@ export class WorkspaceDaemonClient {
       'POST /workspaces/:workspace/memory',
       { ...req, scope: 'workspace' },
       clientId,
+    );
+  }
+
+  setUiLanguage(
+    language: string,
+    clientId?: string,
+  ): Promise<SetUserLanguageResult> {
+    return this.client.workspaceJsonRequest<SetUserLanguageResult>(
+      this.workspaceSelector,
+      '/language',
+      'POST /workspaces/:workspace/language',
+      { method: 'POST', body: { language }, clientId, mode: 'rest' },
     );
   }
 
@@ -9230,6 +9594,23 @@ export class WorkspaceDaemonClient {
       {},
       opts?.clientId,
       opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  activateSubscription(
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<DaemonSubscriptionActivation> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/auth/subscription',
+      'POST /workspaces/:workspace/auth/subscription',
+      {
+        method: 'POST',
+        body: {},
+        signal: opts.signal,
+        mode: 'rest',
+        timeoutMs: 65000,
+      },
     );
   }
 
