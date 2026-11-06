@@ -2632,9 +2632,10 @@ test('start and verify use server.env when the configuration does not resolve', 
     'PASS http://127.0.0.1:18081/actuator/health is UP',
   );
 
-  // Without the resolver's verdict, start still refuses what the server
-  // refuses wherever it reads the value, since a pool would drop every
-  // member over it, and leaves the rest to the preflight.
+  // Without the resolver's verdict, start takes only a plain http(s) URL, a
+  // rule of its own and narrower than the server's, since a pool would drop
+  // every member over a value the server refuses, and leaves the rest to
+  // the preflight.
   await host.stop();
   const env = path.join(host.etc, 'server.env');
   const base = await readFile(env, 'utf8');
@@ -2646,6 +2647,12 @@ test('start and verify use server.env when the configuration does not resolve', 
     'http://:@127.0.0.1:4172',
     ' http:\\\\@127.0.0.1:4172',
     'http://svc:2024#s3cret@127.0.0.1:4172',
+    // No host for java.net.URI, an authority it does not read, and a
+    // backslash it refuses; systemd reads a backslash in an
+    // EnvironmentFile as an escape, so the file doubles it.
+    'http://qwen_harness:4172',
+    'http:/@127.0.0.1:4172',
+    'http://127.0.0.1:4172\\\\@x',
   ]) {
     await writeFile(
       env,
@@ -2654,18 +2661,17 @@ test('start and verify use server.env when the configuration does not resolve', 
     assert.equal(await host.upgrade('start'), 1, harnessUrl);
     assert.match(
       host.output.at(-1),
-      /^start refused: The control plane reaches qwen-hosted-harness at "([^"]*\*\*\*@127\.0\.0\.1:4172\/?|http:\/\/127\.0\.0\.1:4172\/\?tenant=acme)", which carries (a query or a fragment|a user name or password|an @ before its host, which java\.net\.URI reads as user information); correct/,
+      /^start refused: The control plane reaches qwen-hosted-harness at "([^"]*\*\*\*@(127\.0\.0\.1:4172\/?|x)|http:\/\/127\.0\.0\.1:4172\/\?tenant=acme|http:\/\/qwen_harness:4172)", which (carries (a query or a fragment|a user name or password|an @ before its host)|is not a plain http or https URL, a host and port with a path, which is all start takes while the configuration does not resolve); correct/,
     );
     assert.ok(!host.output.join('\n').includes('s3cret'), harnessUrl);
     assert.ok(!host.output.includes(`Starting ${HARNESS}`), harnessUrl);
   }
-  // The rest goes to the preflight: a host with an underscore, and an @
-  // past a \, which ends the authority of an http(s) URL. systemd reads a
-  // backslash in an EnvironmentFile as an escape, so the file doubles it.
+  // The rest goes to the preflight, such as a plain URL with an @ in its
+  // path, which java.net.URI reads as the path.
   host.preflightStatus = 1;
   for (const harnessUrl of [
-    'http://qwen_harness:4172',
-    'http://127.0.0.1:4172\\\\@x',
+    'http://127.0.0.1:4172/@acme/harness',
+    'http://gateway.example.com/@acme/harness',
   ]) {
     await writeFile(
       env,
@@ -2807,13 +2813,20 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     [
       'http://@127.0.0.1:4170',
       'http://***@127.0.0.1:4170',
-      'carries an @ before its host, which java.net.URI reads as user information',
+      'carries an @ before its host',
     ],
-    // The URL parser trims the padding before it reads the authority.
+    // java.net.URI reads the padding untrimmed, so it reads no authority
+    // there; nor in http:/@…, whose @ follows a single slash. The refusal
+    // then says only that the server does not take the value.
     [
       ' http://@127.0.0.1:4170',
       '***@127.0.0.1:4170',
-      'carries an @ before its host, which java.net.URI reads as user information',
+      'the server does not take as an http or https base URL, reading it untrimmed as java.net.URI does',
+    ],
+    [
+      'http:/@127.0.0.1:4170',
+      'http:***@127.0.0.1:4170',
+      'the server does not take as an http or https base URL, reading it untrimmed as java.net.URI does',
     ],
     [
       'http://svc:2024#s3cret@127.0.0.1:4170',
@@ -2834,6 +2847,28 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     );
     // Each run prints afresh, so each is searched for the password.
     assert.ok(!host.output.join('\n').includes('s3cret'), harnessBaseUrl);
+  }
+  // Without a verdict, the plain-URL rule refuses before the Harness
+  // restarts what the URL parser would repair: the tabs it drops, and a
+  // backslash it reads as a slash, which java.net.URI refuses.
+  for (const harnessBaseUrl of [
+    'http:/\t/\t@127.0.0.1:4170',
+    'http://h\\@x',
+    'http:/@127.0.0.1:4170',
+    // A space java.net.URI refuses in a path.
+    'http://127.0.0.1:4170/a b',
+  ]) {
+    host.resolved = { harnessBaseUrl, harnessOrigin: undefined };
+    assert.equal(
+      await host.upgrade('start'),
+      1,
+      JSON.stringify(harnessBaseUrl),
+    );
+    assert.match(
+      host.output.at(-1),
+      /, which is not a plain http or https URL, a host and port with a path, which is all start takes while the configuration does not resolve; correct qwen\.managed-agent\.harness\.base-url\.$/,
+    );
+    assert.ok(!host.output.includes(`Starting ${HARNESS}`));
   }
   // Past those, the preflight's own verdict, which the resolver passes on:
   // java.net.URI reads no host in a name with an underscore, and padding
@@ -3240,6 +3275,115 @@ test('health reports neutralize terminal control bytes from the endpoint', async
       JSON.stringify(host.output),
     );
   }
+});
+
+test('no report prints a password a URL carries', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  // An @ the configuration puts in the path: every outcome masks up to it.
+  host.resolved = {
+    serverUrl: 'http://127.0.0.1:18080/s3cret@b',
+    healthUrl: 'http://127.0.0.1:18080/s3cret@b/actuator/health',
+  };
+  for (const [answer, outcome] of [
+    [
+      { status: 'UP' },
+      'is UP at http://***@b/actuator/health; its API is at http://***@b. Run verify',
+    ],
+    [
+      { status: 'DOWN' },
+      'did not report UP at http://***@b/actuator/health within 2s',
+    ],
+    [
+      () => {
+        host.units[SERVER].ActiveState = 'failed';
+        return { status: 'DOWN' };
+      },
+      'exited before it reported UP at http://***@b/actuator/health, and is stopped now',
+    ],
+  ]) {
+    await host.upgrade('stop');
+    host.responses['GET /s3cret@b/actuator/health'] = answer;
+    await host.upgrade('start', '--timeout', '2');
+    assert.ok(host.output.at(-1).includes(outcome), host.output.at(-1));
+    assert.ok(
+      !host.output.join('\n').includes('s3cret'),
+      JSON.stringify(host.output),
+    );
+  }
+  await host.upgrade('stop');
+  host.responses['GET /s3cret@b/actuator/health'] = { status: 'UP' };
+  assert.equal(await host.upgrade('start', '--timeout', '2'), 0);
+  assert.equal(await host.upgrade('verify'), 0);
+  assert.equal(
+    rowsOf(host.output).health,
+    'PASS http://***@b/actuator/health is UP',
+  );
+  host.responses['GET /s3cret@b/actuator/health'] = { status: 'DOWN' };
+  assert.equal(await host.upgrade('verify'), 1);
+  assert.equal(
+    rowsOf(host.output).health,
+    'FAIL http://***@b/actuator/health is not UP: HTTP 200, status DOWN',
+  );
+  // A --server-url with an @ left after the URL parser has read no user
+  // information is the rest of a password that starts with digits: the
+  // parser reads host svc, port 12, so the phase would dial the wrong host
+  // and print the password. Each phase refuses it before it dials.
+  host.resolved = {};
+  for (const phase of ['verify', 'start']) {
+    if (phase === 'start') {
+      await host.upgrade('stop');
+    }
+    assert.equal(
+      await host.upgrade(
+        phase,
+        '--server-url',
+        'https://svc:12/s3cret@cp.example.com:8443',
+      ),
+      1,
+    );
+    assert.equal(
+      host.output.at(-1),
+      `${phase} refused: --server-url "https://***@cp.example.com:8443" carries an @, as a user name or password would before its host.`,
+    );
+    assert.ok(!host.output.join('\n').includes('s3cret'), phase);
+    assert.equal(
+      host.requests.filter((request) => request.url.includes('svc')).length,
+      0,
+    );
+  }
+});
+
+test('check judges the --server-url its plan repeats', async (t) => {
+  const host = await rig(t);
+  for (const [serverUrl, shown, reason] of [
+    [
+      'https://ops:s3cret@cp.example.com',
+      'https://***@cp.example.com/',
+      'carries a user name or password, so fetch refuses it',
+    ],
+    [
+      'https://svc:12/s3cret@cp.example.com',
+      'https://***@cp.example.com',
+      'carries an @, as a user name or password would before its host',
+    ],
+  ]) {
+    assert.equal(await host.check('--server-url', serverUrl), 1);
+    assert.equal(
+      host.output.at(-1),
+      `check refused: --server-url "${shown}" ${reason}.`,
+    );
+    assert.ok(!host.output.join('\n').includes('s3cret'), serverUrl);
+  }
+  assert.equal(
+    await host.check('--server-url', 'https://cp.example.com:8443'),
+    0,
+  );
+  const plan = host.output.slice(host.output.indexOf('Plan:')).join('\n');
+  assert.ok(
+    plan.includes(' start --server-url https://cp.example.com:8443\n'),
+    plan,
+  );
 });
 
 test('verify sanitizes a malicious health body over a real socket', async (t) => {

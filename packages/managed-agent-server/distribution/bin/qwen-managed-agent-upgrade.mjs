@@ -1812,6 +1812,7 @@ function planFlags(options, names) {
       options.mysqldump !== 'mysqldump' ? options.mysqldump : undefined,
     'skip-database': options.skipDatabase || undefined,
     'runtime-state': options.runtimeState,
+    // check has refused a --server-url that would print a password.
     'server-url': options.serverUrl,
   };
   return names
@@ -1825,6 +1826,11 @@ function planFlags(options, names) {
 }
 
 async function phaseCheck(system, deployment, options) {
+  // The plan repeats --server-url, so check judges it as start and verify
+  // will.
+  if (options.serverUrl) {
+    refuseServerUrl(options.serverUrl);
+  }
   const rows = await compatibilityRows(system, deployment);
   const backup =
     deployment.problems.length === 0
@@ -2623,6 +2629,7 @@ async function listeners(
     }
   }
   if (options.serverUrl) {
+    refuseServerUrl(options.serverUrl);
     urls.server = options.serverUrl;
     urls.health = `${options.serverUrl}/actuator/health`;
   }
@@ -2641,27 +2648,42 @@ async function listeners(
     }
   }
   // fetch would fail on each probe until the timeout, so say why up front.
+  // --server-url has been judged already.
   for (const [name, url] of dialled) {
     const refusal = fetchRefusal(url);
     if (refusal) {
       throw new Refusal(
-        options.serverUrl
-          ? `--server-url ${quoted(withoutCredentials(options.serverUrl))} ${refusal}.`
-          : `The server's configuration puts ${name} at ${quoted(withoutCredentials(url))}, which ${refusal}. Bind it where fetch can reach it, or pass --server-url <${serves}>.`,
+        `The server's configuration puts ${name} at ${quoted(withoutCredentials(url))}, which ${refusal}. Bind it where fetch can reach it, or pass --server-url <${serves}>.`,
       );
     }
   }
-  // The paths are appended to --server-url, so a query or a fragment there
-  // would take them in: http://proxy.test/?a probes /?a/actuator/health, and
-  // fetch drops a fragment with the path after it. Past fetchRefusal the
-  // parser reads no user information in the URL, so a ? or # starts one of
-  // them, but the rest of a password that starts with digits may sit there.
-  if (options.serverUrl && /[?#]/.test(options.serverUrl)) {
+  return urls;
+}
+
+/**
+ * Refuses a --server-url no phase can dial as given, as check does for the
+ * later phases it prints. Past fetchRefusal the URL parser reads no user
+ * information, so a ? or # starts a query or a fragment, which would take in
+ * the paths appended to the URL: http://proxy.test/?a probes
+ * /?a/actuator/health, and fetch drops a fragment with the path after it.
+ * An @ left after that is the rest of a password that starts with digits,
+ * as in https://svc:12/s3cret@cp.example.com, which the parser reads as
+ * host svc and port 12: dialling it would reach the wrong host, and naming
+ * it would print the password.
+ */
+function refuseServerUrl(serverUrl) {
+  const reason =
+    fetchRefusal(`${serverUrl}/actuator/health`) ??
+    (/[?#]/.test(serverUrl)
+      ? 'carries a query or a fragment, where the /actuator/health and API paths appended to it would land'
+      : serverUrl.includes('@')
+        ? 'carries an @, as a user name or password would before its host'
+        : undefined);
+  if (reason) {
     throw new Refusal(
-      `--server-url ${quoted(withoutCredentials(options.serverUrl))} carries a query or a fragment, where the /actuator/health and API paths appended to it would land.`,
+      `--server-url ${quoted(withoutCredentials(serverUrl))} ${reason}.`,
     );
   }
-  return urls;
 }
 
 /**
@@ -2739,6 +2761,11 @@ function printable(text) {
 // A value a refusal or a row quotes, as JSON, which escapes C0 controls but
 // not DEL or C1 bytes, such as the CSI introducer U+009B: printable() takes
 // those, and bounds the text.
+/** A URL as a report prints it: user information masked, controls neutralized. */
+function shown(url) {
+  return printable(withoutCredentials(url));
+}
+
 function quoted(value) {
   return printable(JSON.stringify(value));
 }
@@ -2798,17 +2825,31 @@ async function health(system, url, budgetMs, capMs = PROBE_TIMEOUT_MS) {
       };
 }
 
-// Whether an http(s) URL holds an @ in its authority. java.net.URI reads user
-// information there even when it is empty, as in http://@host or
-// http://:@host, where the URL parser finds no user name or password. The
-// parser drops tabs and newlines and trims leading controls and spaces first,
-// and in an http(s) URL any run of / or \ starts the authority, which a /, \,
-// ? or # ends.
-function spellsUserInfo(url) {
-  // eslint-disable-next-line no-control-regex -- the parser trims these
-  const text = url.replace(/[\t\n\r]/g, '').replace(/^[\u0000-\u0020]+/, '');
-  return /^[a-zA-Z][a-zA-Z0-9+.-]*:[/\\]*[^/\\?#]*@/.test(text);
+// What a Harness base URL shows that the server's Harness connector refuses:
+// a user name or password, a query or a fragment, or an @ in an authority
+// that java.net.URI reads, which takes // right after the scheme and ends at
+// a /, ? or #. Each is a reason the server gives too; none predicts how the
+// JVM reads the rest.
+function harnessUrlReason(text, url) {
+  if (url.username || url.password) {
+    return 'carries a user name or password';
+  }
+  if (/[?#]/.test(text)) {
+    return 'carries a query or a fragment';
+  }
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#\\]*@/.test(text)) {
+    return 'carries an @ before its host';
+  }
+  return undefined;
 }
+
+// The Harness base URLs start takes when the server gives no verdict: an
+// http(s) URL whose authority is a host name, an IPv4 or bracketed IPv6
+// address and an optional port, and whose path holds only the characters a
+// URI path may, untrimmed. It is narrower than the server's rule, never
+// wider.
+const PLAIN_HTTP_URL =
+  /^https?:\/\/(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?(?:\/[A-Za-z0-9\-._~!$&'()*+,;=:@%/]*)?$/i;
 
 async function phaseStart(system, deployment, options) {
   refuseUnless(deployment);
@@ -2844,28 +2885,27 @@ async function phaseStart(system, deployment, options) {
   // information, a query or a fragment, read untrimmed as java.net.URI reads
   // it. The preflight fails any other after the Harness restarts, and a
   // pool, whose row the preflight skips, drops each member over it. 'true'
-  // and 'skip', for a disabled Harness that nothing reads, ask nothing more.
+  // and 'skip', for a disabled Harness that nothing reads, ask nothing more;
+  // 'false' refuses, with the reason when the value shows it.
   // Without a verdict, as when the configuration did not resolve, start
-  // still refuses user information, an empty one before an @ included, a
-  // query or a fragment, which the server refuses wherever it reads the
-  // value: a disabled Harness's value may then be refused for nothing, which
-  // costs an edit, where letting it through could start a pool that accepts
-  // no Session. The preflight judges the rest.
+  // takes only a plain http(s) URL, a rule of its own, narrower than the
+  // server's: a disabled Harness's value may then be refused for nothing,
+  // which costs an edit, where letting it through could start a pool that
+  // accepts no Session. The preflight judges the rest, such as reachability.
+  const reason = harnessUrl && harnessUrlReason(urls.harness, harnessUrl);
   const unusable = !harnessUrl
     ? fetchRefusal(urls.harness)
     : !['http:', 'https:'].includes(harnessUrl.protocol)
       ? 'is not an http or https URL'
       : ['true', 'skip'].includes(urls.harnessOrigin)
         ? undefined
-        : harnessUrl.username || harnessUrl.password
-          ? 'carries a user name or password'
-          : spellsUserInfo(urls.harness)
-            ? 'carries an @ before its host, which java.net.URI reads as user information'
-            : urls.harness.includes('?') || urls.harness.includes('#')
-              ? 'carries a query or a fragment'
-              : urls.harnessOrigin === 'false'
-                ? 'the server does not take as an http or https base URL, reading it untrimmed as java.net.URI does'
-                : undefined;
+        : urls.harnessOrigin === 'false'
+          ? (reason ??
+            'the server does not take as an http or https base URL, reading it untrimmed as java.net.URI does')
+          : (reason ??
+            (PLAIN_HTTP_URL.test(urls.harness)
+              ? undefined
+              : 'is not a plain http or https URL, a host and port with a path, which is all start takes while the configuration does not resolve'));
   if (unusable) {
     throw new Refusal(
       `The control plane reaches ${harness.name} at ${quoted(withoutCredentials(urls.harness))}, which ${unusable}; correct qwen.managed-agent.harness.base-url.`,
@@ -2948,17 +2988,17 @@ async function phaseStart(system, deployment, options) {
     // Ends the restarts systemd would go on with, so start can run again.
     runChecked(system, 'systemctl', ['stop', server.name]);
     throw new Refusal(
-      `${server.name} exited before it reported UP at ${printable(urls.health)}, and is stopped now; see journalctl -u ${server.name}, then run start again.`,
+      `${server.name} exited before it reported UP at ${shown(urls.health)}, and is stopped now; see journalctl -u ${server.name}, then run start again.`,
     );
   }
   if (!healthy) {
     // Left running: the journal may show a start that is merely slow.
     throw new Refusal(
-      `${server.name} did not report UP at ${printable(urls.health)} within ${options.timeout}s${answer ? ` (the last answer: ${answer})` : ''} and keeps running; see journalctl -u ${server.name}, then run verify, or run stop to start it again.`,
+      `${server.name} did not report UP at ${shown(urls.health)} within ${options.timeout}s${answer ? ` (the last answer: ${answer})` : ''} and keeps running; see journalctl -u ${server.name}, then run verify, or run stop to start it again.`,
     );
   }
   system.out(
-    `${server.name} is UP at ${printable(urls.health)}${urls.server ? `; its API is at ${printable(urls.server)}` : ''}. Run verify before reopening ingress.`,
+    `${server.name} is UP at ${shown(urls.health)}${urls.server ? `; its API is at ${shown(urls.server)}` : ''}. Run verify before reopening ingress.`,
   );
   return 0;
 }
@@ -3247,11 +3287,11 @@ async function phaseVerify(system, deployment, options) {
   const probe = await health(system, urls.health, budget, budget);
   rows.push(
     probe.up
-      ? row('health', 'PASS', `${printable(urls.health)} is UP`)
+      ? row('health', 'PASS', `${shown(urls.health)} is UP`)
       : row(
           'health',
           'FAIL',
-          `${printable(urls.health)} is not UP: ${probe.answer}`,
+          `${shown(urls.health)} is not UP: ${probe.answer}`,
         ),
   );
   if (unread) {
