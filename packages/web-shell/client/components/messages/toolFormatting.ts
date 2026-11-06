@@ -470,11 +470,17 @@ function getDescriptionFromTitle(
   return formatDescriptionPaths(title, workspaceCwd);
 }
 
+// Mirrors formatPermissionOmissionNote in core, which web-shell cannot import.
+const PERMISSION_OMISSION_NOTE_PATTERN = String.raw`\[\d+ files? omitted by permission rules\]`;
+const PERMISSION_OMISSION_NOTE_SUFFIX = new RegExp(
+  ` ${PERMISSION_OMISSION_NOTE_PATTERN}$`,
+);
+const GLOB_SUMMARY_PATTERN = new RegExp(
+  String.raw`^(?:Found (?:\d+|at least \d+) matching file\(s\)|No (?:permitted )?files found)(?: \(truncated\))?(?: ${PERMISSION_OMISSION_NOTE_PATTERN})?$`,
+);
+
 function parseGrepSummary(text: string): string | null {
-  const summary = text.replace(
-    / \[\d+ files? omitted by permission rules\]$/,
-    '',
-  );
+  const summary = text.replace(PERMISSION_OMISSION_NOTE_SUFFIX, '');
   if (
     summary === 'No matches found' ||
     summary === 'No permitted matches found' ||
@@ -491,11 +497,7 @@ function parseGrepSummary(text: string): string | null {
 }
 
 function parseGlobSummary(text: string): string | null {
-  return /^(?:Found (?:\d+|at least \d+) matching file\(s\)|No (?:permitted )?files found)(?: \(truncated\))?(?: \[\d+ files? omitted by permission rules\])?$/.test(
-    text,
-  )
-    ? text
-    : null;
+  return GLOB_SUMMARY_PATTERN.test(text) ? text : null;
 }
 
 function getDescriptionFromArgs(
