@@ -2166,7 +2166,9 @@ for (const theme of THEMES) {
       // row is required to fit — at this viewport the two rows together are
       // taller than the dialog body, so demanding both would fail on geometry
       // rather than on a regression.
-      await inheriting.scrollIntoViewIfNeeded();
+      await inheriting.evaluate((element) =>
+        element.scrollIntoView({ block: 'center', inline: 'nearest' }),
+      );
       await expect(inheriting).toBeInViewport({ ratio: 1 });
       await captureScreenshot(page, `github-channel-repositories-${theme}`);
     });
