@@ -1159,6 +1159,155 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  // reacquireWriter clears the grant for the whole /writers:acquire round
+  // trip. A seal that starts inside that window must wait for the acquire
+  // and seal the grant handed back, instead of reading the gap as "never
+  // held a writer" and leaving the late lease live.
+  it('holds a close open until the deferred acquire answers, then seals the late grant', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: true });
+    let renewal: Promise<unknown> | undefined;
+    let closing: Promise<void> | undefined;
+    try {
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.reacquire).toHaveBeenCalledTimes(1);
+      expect(rig.observed.acquiresAfterBoot).toBe(1);
+      // The parked acquire owns the grant-less window.
+      expect(rig.grant()).toBeUndefined();
+      let closed = false;
+      closing = rig.stores.close().then(() => {
+        closed = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(closed).toBe(false);
+      expect(rig.server.sealCount).toBe(0);
+      rig.releaseAcquire();
+      await closing;
+      expect(rig.server.sealCount).toBe(1);
+      expect(rig.journal.writerSealed).toBe(true);
+    } finally {
+      rig.releaseAcquire();
+      rig.release();
+      await closing?.catch(() => undefined);
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  // stopLocal() leaves the grant in place for the whole acquire round trip,
+  // so the late grant it waited for is the live one when the acquire
+  // answers. The grant belongs to a writer that was re-acquired after the
+  // stop began: nothing may adopt it, and the next renewal must not be
+  // scheduled against it.
+  it('holds a local stop open until the deferred acquire answers and does not resume renewal', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: true });
+    let renewal: Promise<unknown> | undefined;
+    let stopping: Promise<void> | undefined;
+    try {
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.observed.acquiresAfterBoot).toBe(1);
+      let stopped = false;
+      stopping = rig.stores.stopLocal().then(() => {
+        stopped = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      // The stop does not resolve before the parked acquire does.
+      expect(stopped).toBe(false);
+      const sealsWhileWaiting = rig.server.sealCount;
+      const renewalsWhileWaiting = rig.observed.ordinaryRenewals;
+      rig.releaseAcquire();
+      await stopping;
+      expect(stopped).toBe(true);
+      // A locally stopped client seals nothing: stopLocal is a local close,
+      // and the lease it waited for is left to lapse on the Store.
+      expect(rig.server.sealCount).toBe(sealsWhileWaiting);
+      // No renewal timer survives the stop, so the late grant is not kept
+      // alive.
+      await vi.advanceTimersByTimeAsync(rig.observed.bootLeaseUntil);
+      expect(rig.observed.ordinaryRenewals).toBe(renewalsWhileWaiting);
+    } finally {
+      rig.releaseAcquire();
+      rig.release();
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  // joinOriginalCsiWriter refuses while an acquire is parked: it stops the
+  // renewal timer and joins the current one, so handing back a writer it
+  // never joined would let the retirement fence a lease that is still being
+  // minted.
+  it('refuses the original CSI writer join while a deferred acquire is in flight', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: true });
+    let renewal: Promise<unknown> | undefined;
+    try {
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.observed.acquiresAfterBoot).toBe(1);
+      await expect(rig.stores.csiRetirement.joinWriter()).rejects.toThrow(
+        'unresolved authority',
+      );
+    } finally {
+      rig.releaseAcquire();
+      rig.release();
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  // A failed re-acquisition must put the expired grant back: dropping it
+  // would turn the next settlement into a writer-less client that fences a
+  // log the Store never actually took away.
+  it('restores the expired grant and surfaces the failure when the acquire is refused', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: false });
+    const originalFetch =
+      rig.server.fetch.getMockImplementation() ??
+      rig.server.fetch.bind(rig.server);
+    let refuseAcquire = false;
+    rig.server.fetch.mockImplementation(async (input, init) => {
+      if (refuseAcquire && requestUrl(input).endsWith('/writers:acquire'))
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_writer_conflict',
+              message: 'The writer lease was taken by another boot.',
+            },
+          },
+          409,
+        );
+      return originalFetch(input, init);
+    });
+    try {
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      refuseAcquire = true;
+      await expect(
+        rig.authority.renewActivation({ leaseDurationMs: 120_000 }),
+      ).rejects.toBeInstanceOf(ManagedSessionStoreHttpError);
+      expect(rig.observed.acquiresAfterBoot).toBe(1);
+      // The expired grant is back, not a writer-less client.
+      expect(rig.grant()?.leaseUntil).toBe(rig.observed.bootLeaseUntil);
+    } finally {
+      rig.release();
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('retries the frozen ownership release after a lost acknowledgement without reacquiring', async () => {
     const server = new FakeManagedSessionStore();
     const attempts: Array<Record<string, unknown>> = [];
