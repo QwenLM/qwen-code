@@ -204,8 +204,9 @@ function resolveAmendTarget(cwd: string, command: string): AmendTarget | null {
       if (flag === '-C') target = { cwd: value };
       else if (flag === '--git-dir') target = { cwd, gitDir: value };
       // --work-tree moves the checkout, not HEAD: the amended repository is
-      // still the one discovered from cwd.
-      else target = { cwd };
+      // still the one discovered from the segment's cwd, which a leading
+      // `cd` may have moved (#16075 R11-1).
+      else target = { cwd: perSegment[0]!.cwd };
     } else {
       // Several amending segments, or stacked relocations: ambiguous.
       return null;

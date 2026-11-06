@@ -662,6 +662,31 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
     ).toBeNull();
   });
 
+  it('resolves --work-tree against the segment cwd, not the caller cwd', () => {
+    // cwd=A (registered) but a leading `cd B` moves the shell, and
+    // --work-tree moves only the checkout: the amend rewrites B's
+    // unregistered HEAD, so the exemption must not apply (#16075 R11-1).
+    const result = isDestructiveCommand(
+      `cd ${repoB.dir} && git --work-tree ${repoB.dir} commit --amend --no-edit`,
+      'amend the commit',
+      repoA.dir,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.blocked).toBe(true);
+  });
+
+  it('keeps the --work-tree exemption for the repo a leading cd enters', () => {
+    // Mirror shape: cwd=B (unregistered), `cd A` then --work-tree A; the
+    // amended HEAD is A's registered commit, so the exemption survives.
+    expect(
+      isDestructiveCommand(
+        `cd ${repoA.dir} && git --work-tree ${repoA.dir} commit --amend --no-edit`,
+        'amend the commit',
+        repoB.dir,
+      ),
+    ).toBeNull();
+  });
+
   it.each([
     // Non-static targets refuse the exemption entirely (fail closed), even
     // when cwd's own HEAD is registered.
