@@ -94,6 +94,10 @@ jobs:
       # the workflow will pay for; the writer files it instead of dispatching
       # another whole-run rerun that would time out again.
       timeout_attempts_exhausted: '${{ steps.live.outputs.timeout_attempts_exhausted }}'
+      # 'true' when the timeout was read from a job annotation rather than
+      # guessed from a failed read. Only a read timeout authorizes the
+      # whole-matrix rerun; a guessed one is still reported.
+      timeout_annotations_readable: '${{ steps.live.outputs.timeout_annotations_readable }}'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -124,6 +128,10 @@ jobs:
           provisional=false
           cancellation_kind='none'
           timeout_attempts_exhausted=false
+          # 'true' only when the annotations were actually read and no time out
+          # message was among them. A timeout with this false is a guess from a
+          # failed read, so it is reported but never buys a whole-matrix rerun.
+          timeout_annotations_readable=false
           # Every attempt of a run that keeps exceeding a lane's
           # `timeout-minutes` reruns the whole matrix, and its own completion
           # re-enters here, so an unbounded retry never ends.
@@ -168,6 +176,7 @@ jobs:
             fi
             if grep -qiE 'exceeded the maximum execution time' <<< "${annotations}"; then
               cancellation_kind='timeout'
+              timeout_annotations_readable='true'
               echo "Run ${WORKFLOW_RUN_ID} was cancelled by a job timeout, not a supersede; reporting it."
             elif [[ "${annotations_readable}" != 'true' ]]; then
               echo "::warning::Could not read every cancelled job's annotations for run ${WORKFLOW_RUN_ID}; reporting it rather than assuming a supersede."
@@ -279,6 +288,7 @@ jobs:
           echo "provisional=${provisional}" >> "${GITHUB_OUTPUT}"
           echo "cancellation_kind=${cancellation_kind}" >> "${GITHUB_OUTPUT}"
           echo "timeout_attempts_exhausted=${timeout_attempts_exhausted}" >> "${GITHUB_OUTPUT}"
+          echo "timeout_annotations_readable=${timeout_annotations_readable}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Select the failure destination'
         id: 'destination'
@@ -292,6 +302,7 @@ jobs:
           RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
           CANCELLATION_KIND: '${{ steps.live.outputs.cancellation_kind }}'
           TIMEOUT_ATTEMPTS_EXHAUSTED: '${{ steps.live.outputs.timeout_attempts_exhausted }}'
+          TIMEOUT_ANNOTATIONS_READABLE: '${{ steps.live.outputs.timeout_annotations_readable }}'
         run: |-
           set -euo pipefail
           pr_number=''
@@ -350,8 +361,18 @@ jobs:
             # rerun_infra reruns this run; its own completion reports the
             # result. Suppress only the filing, not the dispatch.
             file_issue=false
-            rerun_pending=true
-            echo "Run timed out and has not exhausted its reruns; rerun_infra owns the outcome."
+            # A timeout inferred from an unreadable annotation list is still
+            # reported, but it must not buy a whole-matrix rerun: the read
+            # that would have told a timeout from a supersede failed, and
+            # replaying a superseded matrix is the expensive mistake. A
+            # timeout that WAS read from an annotation is unambiguous.
+            if [[ "${TIMEOUT_ANNOTATIONS_READABLE:-false}" == 'true' ]]; then
+              rerun_pending=true
+              echo "Run timed out and has not exhausted its reruns; rerun_infra owns the outcome."
+            else
+              file_issue=true
+              echo "::warning::Timeout inferred from an unreadable annotation list; filing it rather than rerunning the whole matrix."
+            fi
           fi
           echo "pr_number=${pr_number}" >> "${GITHUB_OUTPUT}"
           echo "file_issue=${file_issue}" >> "${GITHUB_OUTPUT}"

@@ -432,6 +432,7 @@ cat "\${RUNNER_TEMP}/pulls.json"
         HEAD_SHA: 'tested-head',
         CANCELLATION_KIND: 'timeout',
         TIMEOUT_ATTEMPTS_EXHAUSTED: 'false',
+        TIMEOUT_ANNOTATIONS_READABLE: 'true',
       });
 
       expect(resolved.output).toContain('file_issue=false');
@@ -457,6 +458,26 @@ cat "\${RUNNER_TEMP}/pulls.json"
       };
       expect(evaluate(String(jobs.rerun_infra.if), needs)).toBe(true);
       expect(evaluate(String(jobs.file_issue.if), needs)).toBe(false);
+    });
+
+    it('files rather than reruns a timeout it only guessed at', () => {
+      // The annotation read failed, so the timeout classification is a guess.
+      // Reporting it is right; buying a whole-matrix rerun on a guess is not,
+      // because the run it would replay may be a superseded one.
+      const resolved = resolve([], {
+        EVENT_NAME: 'push',
+        HEAD_BRANCH: 'main',
+        HEAD_SHA: 'tested-head',
+        CANCELLATION_KIND: 'timeout',
+        TIMEOUT_ATTEMPTS_EXHAUSTED: 'false',
+        TIMEOUT_ANNOTATIONS_READABLE: 'false',
+      });
+
+      expect(resolved.output).toContain('file_issue=true');
+      expect(resolved.output).toContain('rerun_pending=false');
+      expect(resolved.stdout).toContain(
+        'Timeout inferred from an unreadable annotation list',
+      );
     });
     it('degrades to no destination when the PR listing fails', () => {
       // The lookup must fail soft like its neighbouring reads: a transient
@@ -570,7 +591,7 @@ fi
         { mainTip: 'new-head' },
       );
       expect(resolved.output).toBe(
-        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       expect(resolved.stdout).toContain('::warning::');
       expect(resolved.stdout).not.toContain('main is now');
@@ -603,17 +624,17 @@ fi
     });
     it('reports the attempt that is still the latest', () => {
       expect(detect('1').output).toBe(
-        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       expect(detect('2', { RUN_ATTEMPT: '2' }).output).toBe(
-        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       // Stale-attempt supersession is independent of the tip comparison:
       // a bare event never reaches the push arm, and the nightly schedule
       // arm is exempt from it. Folding the attempt check inside that arm
       // would file an issue for an already-green rerun (#14768's shape).
       expect(detect('2').output).toBe(
-        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       expect(
         detect('2', {
@@ -622,7 +643,7 @@ fi
           HEAD_SHA: 'old-head',
         }).output,
       ).toBe(
-        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
     });
     it('skips a push run when main has advanced past its head', () => {
@@ -641,7 +662,7 @@ fi
         { mainTip: '3d65e23cf62e00da033dccb8f60f9cfdd9c1b76e' },
       );
       expect(resolved.output).toBe(
-        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       expect(resolved.stdout).toContain(
         'main is now 3d65e23cf62e00da033dccb8f60f9cfdd9c1b76e',
@@ -670,7 +691,7 @@ fi
         { mainTip: 'new-head', successor: 'none' },
       );
       expect(resolved.output).toBe(
-        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       expect(resolved.stdout).toContain('no newer push run');
       expect(resolved.calls).toContain(
@@ -691,7 +712,7 @@ fi
         { mainTip: 'new-head', successor: 'completed cancelled' },
       );
       expect(resolved.output).toBe(
-        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       expect(resolved.stdout).toContain('completed cancelled');
       expect(resolved.stdout).toContain('does not report');
@@ -724,7 +745,7 @@ fi
           { mainTip: 'new-head', successor },
         );
         expect(resolved.output).toBe(
-          'superseded=false\nprovisional=true\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+          'superseded=false\nprovisional=true\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
         );
         expect(resolved.stdout).toContain(
           `${successor}, so this report is provisional`,
@@ -743,7 +764,7 @@ fi
         { mainTip: 'new-head', failCall: 'newer-runs' },
       );
       expect(resolved.output).toBe(
-        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       expect(resolved.stdout).toContain(
         'Could not list the newer runs of workflow 12345',
@@ -764,7 +785,7 @@ fi
         { mainTip: 'new-head', successor: 'completed failure' },
       );
       expect(resolved.output).toBe(
-        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       expect(resolved.stdout).toContain('main is now new-head');
       expect(resolved.calls).toContain('commits/main');
@@ -784,7 +805,7 @@ fi
         { mainTip: 'new-head', successor: 'none' },
       );
       expect(resolved.output).toBe(
-        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       expect(resolved.stdout).toContain('no newer push run');
       expect(resolved.calls).toContain('commits/main');
@@ -800,7 +821,7 @@ fi
         { mainTip: 'tested-head' },
       );
       expect(resolved.output).toBe(
-        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       expect(resolved.stdout).not.toContain('::warning::');
       expect(resolved.calls).toContain('commits/main');
@@ -818,7 +839,7 @@ fi
         { mainTip: '' },
       );
       expect(resolved.output).toBe(
-        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
     });
     it('does not compare a scheduled run with the tip of main', () => {
@@ -835,7 +856,7 @@ fi
         { mainTip: 'new-head' },
       );
       expect(resolved.output).toBe(
-        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       expect(resolved.calls).not.toContain('commits/main');
     });
@@ -856,7 +877,7 @@ fi
           { mainTip: 'new-head' },
         );
         expect(resolved.output).toBe(
-          'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+          'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
         );
         expect(resolved.calls).not.toContain('commits/main');
       },
@@ -872,7 +893,7 @@ fi
         { mainTip: 'new-head', failCall: 'tip' },
       );
       expect(resolved.output).toBe(
-        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       expect(resolved.stdout).toContain('Could not read the tip of main');
       expect(resolved.calls).toContain('commits/main');
@@ -890,7 +911,7 @@ fi
         { mainTip: 'new-head' },
       );
       expect(resolved.output).toBe(
-        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       expect(resolved.calls).not.toContain('commits/main');
     });
@@ -900,7 +921,7 @@ fi
       const gh = `#!/usr/bin/env bash\nprintf '%s' '{"message":"Bad credentials"}'\nexit 1\n`;
       const resolved = detect('', {}, { ghScript: gh });
       expect(resolved.output).toBe(
-        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       expect(resolved.stdout).toContain('::warning::');
       expect(resolved.stdout).toContain('Could not read run 39237270547');
@@ -909,7 +930,7 @@ fi
       // -gt coerces an empty operand to 0, so a field-less event would read
       // as superseded and suppress every report.
       expect(detect('2', { RUN_ATTEMPT: '' }).output).toBe(
-        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
     });
 
@@ -949,7 +970,7 @@ esac
           },
         );
         expect(resolved.output).toBe(
-          'superseded=false\nprovisional=false\ncancellation_kind=timeout\ntimeout_attempts_exhausted=false\n',
+          'superseded=false\nprovisional=false\ncancellation_kind=timeout\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=true\n',
         );
         expect(resolved.stdout).toContain('cancelled by a job timeout');
       });
@@ -963,7 +984,7 @@ esac
           { ghScript: cancelledGh('The operation was canceled.') },
         );
         expect(resolved.output).toBe(
-          'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\n',
+          'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
         );
         expect(resolved.stdout).toContain('superseded it and owns the result');
       });
@@ -976,7 +997,7 @@ esac
           { ghScript: gh },
         );
         expect(resolved.output).toBe(
-          'superseded=false\nprovisional=false\ncancellation_kind=timeout\ntimeout_attempts_exhausted=false\n',
+          'superseded=false\nprovisional=false\ncancellation_kind=timeout\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
         );
         expect(resolved.stdout).toContain('::warning::');
       });
