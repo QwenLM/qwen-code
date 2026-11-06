@@ -1524,9 +1524,10 @@ jobs:
 
       # The pool reuses workspaces: an earlier agent run owned this directory
       # and could have planted .git hooks/config that checkout's git commands
-      # would execute — in the one job that holds the write PAT. Drop the
-      # metadata first, exactly as the triage/tmux/verify jobs do before
-      # their checkouts (pinned by qwen-runner-checkout-workflow.test.js).
+      # would execute — in the job that then publishes with the write PAT.
+      # Drop the metadata first, exactly as the triage/tmux/verify jobs do
+      # before their checkouts (pinned by
+      # qwen-runner-checkout-workflow.test.js).
       - name: 'Recreate runner Git metadata'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
