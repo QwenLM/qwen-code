@@ -7415,14 +7415,10 @@ export function WebShellSidebar({
                       styles.topRowActionsSearching,
                   )}
                 >
-                  {topRowSearchVisible && (
-                    <>
-                      {searchOpen &&
-                        inlineTopRowSearch &&
-                        renderSearchField(styles.topRowSearchField)}
-                      {renderSearchToggle(styles.searchToggle)}
-                    </>
-                  )}
+                  {topRowSearchVisible &&
+                    searchOpen &&
+                    inlineTopRowSearch &&
+                    renderSearchField(styles.topRowSearchField)}
                   {activityEnabled &&
                     (!railLayout || !collapsed || mobileOpen) && (
                       <button
@@ -7451,6 +7447,8 @@ export function WebShellSidebar({
                         )}
                       </button>
                     )}
+                  {topRowSearchVisible &&
+                    renderSearchToggle(styles.searchToggle)}
                 </div>
               </div>
               {topRowSearchVisible && searchOpen && !inlineTopRowSearch && (

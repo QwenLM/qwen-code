@@ -13,7 +13,16 @@ import {
   oweHostedTurnCleanup,
   reconcileHostedTurnCleanup,
   confirmReplacedHostedTurnOwner,
+  type HostedCleanupResult,
 } from './hosted-turn-cleanup.js';
+import {
+  acquireHostedQuestionRuntime,
+  BLOCK_MOUNT_RETRY_GAPS_MS,
+  RELEASE_MOUNT_VERDICT_BOUND_MS,
+  retryableMountHandback,
+  questionWaitDefinitionAdmitted,
+  waitForHostedQuestion,
+} from './hosted-question-wait.js';
 import { probeNeverStarted } from './hosted-never-started-reconcile.js';
 import { RESIDENT_WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
@@ -280,28 +289,6 @@ export {
 };
 
 const ACQUIRE_BUSY_POLL_MS = 250;
-// The owed handback's cadence: a quick backoff for the common late settle,
-// then a steady one-minute tail — the chain stays owed until the handback
-// lands, every timer unref'd so a blocked Session never holds the daemon's
-// event loop open, and every attempt re-reads the Broker's gate, never
-// bypasses it.
-const BLOCK_MOUNT_RETRY_GAPS_MS = [1000, 3000, 5000, 10000, 30000, 60000];
-// The block verdict never waits out a slow Broker round-trip: it proceeds
-// once the first handback attempt settles or this bound passes, whichever
-// is first — the attempt itself keeps running inside the retry chain.
-const RELEASE_MOUNT_VERDICT_BOUND_MS = 2000;
-// A reply that decided nothing earns a re-send — the holder-conditioned
-// clear is idempotent — and so do the busy refusal, whose executions settle
-// on their own clock, and the Broker's internal error. Every other refusal
-// is final: a superseded claim, a lifecycle drain, a writer that never
-// proved it stopped, a Session the Broker no longer holds.
-function retryableMountHandback(cause: unknown): boolean {
-  if (!(cause instanceof HostedWorkspaceBrokerRejection)) return true;
-  return (
-    (cause.status === 409 && cause.code === 'runtime_session_busy') ||
-    (cause.status === 500 && cause.code === 'runtime_broker_internal_error')
-  );
-}
 export function isRetryableWorkspaceAcquisition(
   cause: unknown,
 ): cause is HostedWorkspaceBrokerRejection & {
@@ -1854,6 +1841,8 @@ export class HostedWorkspaceToolTurn {
   }
 
   private readonly publicPlanMode: boolean;
+  private questionDefinition?: Promise<boolean>;
+  private questionChild = false;
   private planning: boolean;
   private residentWorkspace = false;
   private logicalRound = 0;
@@ -1866,6 +1855,7 @@ export class HostedWorkspaceToolTurn {
     inputRefs: Map<number, ManagedSessionDurableRef>;
     definitionRefs: Map<number, ManagedSessionDurableRef>;
     actionIds: Map<number, string>;
+    releaseQuestionMount: boolean;
     uncaptured?: boolean;
   };
   hookStopReason?: string;
@@ -2026,6 +2016,7 @@ export class HostedWorkspaceToolTurn {
        */
       memberPlanMode?: boolean;
       publicPlanMode?: boolean;
+      recoveryBroker?: HostedWorkspaceBroker;
     },
   ) {
     this.extensionConfig = extras?.extensionConfig;
@@ -2084,6 +2075,7 @@ export class HostedWorkspaceToolTurn {
         ? publicationOrShell
         : shell;
     this.broker =
+      extras?.recoveryBroker ??
       this.mcp?.broker ??
       this.hooks?.broker ??
       new HostedWorkspaceBroker(
@@ -2091,7 +2083,20 @@ export class HostedWorkspaceToolTurn {
         session.authority.sessionHeader.sessionKey,
         hostedRuntimeSessionId(promptId),
       );
-    this.warmed = this.mcp ? this.mcp.ensureReady() : this.broker.warm();
+    if (
+      extras?.recoveryBroker &&
+      (this.mcp ||
+        this.hooks ||
+        this.broker.harnessSessionId !==
+          session.authority.sessionHeader.sessionKey.sessionId ||
+        this.broker.runtimeSessionId !== hostedRuntimeSessionId(promptId))
+    )
+      throw new Error('Invalid question recovery Broker.');
+    this.warmed = extras?.recoveryBroker
+      ? Promise.resolve()
+      : this.mcp
+        ? this.mcp.ensureReady()
+        : this.broker.warm();
     // Warmup runs alongside inference; a text-only answer need not wait for it.
     void this.warmed.catch(() => undefined);
   }
@@ -2119,7 +2124,10 @@ export class HostedWorkspaceToolTurn {
       !this.mcp &&
       !this.foregroundOnly &&
       !this.residentWorkspace &&
-      this.childDepth === 0 &&
+      (this.childDepth === 0 ||
+        (this.childDepth === 1 &&
+          this.questionChild &&
+          this.broker.provisionerKind === 'local-process')) &&
       !this.memberPlanMode &&
       [
         HOSTED_WORKSPACE_FILE_PROFILE,
@@ -2128,6 +2136,18 @@ export class HostedWorkspaceToolTurn {
         HOSTED_WORKSPACE_SHELL_PROFILE,
       ].includes(this.profile ?? HOSTED_WORKSPACE_FILE_PROFILE)
     );
+  }
+
+  private async questionWaitAdmitted(): Promise<boolean> {
+    this.questionDefinition ??= this.session.resources
+      .read(this.session.authority.sessionHeader.definitionRef)
+      .then((bytes) =>
+        questionWaitDefinitionAdmitted(
+          JSON.parse(bytes.toString('utf8')) as Record<string, unknown>,
+          this.childDepth,
+        ),
+      );
+    return await this.questionDefinition;
   }
 
   /**
@@ -2188,6 +2208,10 @@ export class HostedWorkspaceToolTurn {
 
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
+    if (this.childDepth === 1) {
+      this.questionChild = await this.questionWaitAdmitted();
+      if (this.questionChild) await waitForTurn(this.warmed, signal);
+    }
     if (
       this.profile === HOSTED_WORKSPACE_FILE_PROFILE ||
       (this.profile === undefined &&
@@ -3574,7 +3598,8 @@ export class HostedWorkspaceToolTurn {
       );
     this.uncertain = true;
     try {
-      await waitForTurn(this.warmed, signal);
+      if (plan.runtime.provisionerKind) await this.warmed;
+      else await waitForTurn(this.warmed, signal);
       this.broker.runtime = {
         bindingId: plan.runtime.bindingId,
         generation: plan.runtime.generation,
@@ -3588,10 +3613,37 @@ export class HostedWorkspaceToolTurn {
           await oweHostedTurnCleanup(this.session, this.promptId, this.broker);
           this.cleanupOwed = true;
         }
-        await this.broker.acquire({
-          runtimeBindingId: plan.runtime.bindingId,
-          generation: plan.runtime.generation,
-        });
+        if (plan.runtime.provisionerKind) {
+          if (
+            this.foregroundOnly ||
+            this.memberPlanMode ||
+            !(await this.questionWaitAdmitted())
+          )
+            throw new Error('Original question Session is not qualified.');
+          if (
+            !(await acquireHostedQuestionRuntime(
+              this.broker,
+              plan.runtime,
+              signal,
+            ))
+          )
+            return this.refuseBatch(
+              plan.calls.map((item) => item.call),
+              plan.calls.map(() => APPROVAL_REFUSALS.cancelled),
+              undefined,
+              plan.model,
+              undefined,
+            );
+          if (this.childDepth === 1) this.questionChild = true;
+          if (!this.questionsAdmitted())
+            throw new Error('Original question Session is not qualified.');
+          this.context?.invalidate();
+        } else {
+          await this.broker.acquire({
+            runtimeBindingId: plan.runtime.bindingId,
+            generation: plan.runtime.generation,
+          });
+        }
         this.acquired = true;
         if (
           !this.broker.runtime ||
@@ -3671,6 +3723,20 @@ export class HostedWorkspaceToolTurn {
         { saved, requests, nextApprovalOrdinal },
       );
     } catch (cause) {
+      if (
+        plan.runtime.provisionerKind &&
+        this.acquired &&
+        !this.nativeBatch &&
+        signal.aborted &&
+        cause === signal.reason
+      )
+        return this.refuseBatch(
+          plan.calls.map((item) => item.call),
+          plan.calls.map(() => APPROVAL_REFUSALS.cancelled),
+          undefined,
+          plan.model,
+          undefined,
+        );
       throw new HostedToolRecoveryRequiredError(cause);
     }
   }
@@ -3792,7 +3858,15 @@ export class HostedWorkspaceToolTurn {
       definitionRef: header.definitionRef,
       rootSnapshotRef: header.rootSnapshotRef,
       sourceActivation: this.session.activation,
-      runtime: { runtimeSessionId: this.broker.runtimeSessionId, ...runtime },
+      runtime: {
+        runtimeSessionId: this.broker.runtimeSessionId,
+        bindingId: runtime.bindingId,
+        generation: runtime.generation,
+        workspaceGeneration: runtime.workspaceGeneration,
+        ...(singleQuestion && batch.releaseQuestionMount
+          ? { provisionerKind: 'local-process' as const }
+          : {}),
+      },
       batchId: batch.messageId,
       assistantRef: assistant.payload[
         'contentRef'
@@ -3954,7 +4028,7 @@ export class HostedWorkspaceToolTurn {
             hostedQuestions(input);
             if (source.length !== 1 || !this.questionsAdmitted())
               validationError =
-                'ask_user_question must be the only call in a supported root Session batch.';
+                'ask_user_question must be the only call in a supported Session batch.';
           } catch (cause) {
             if (!(cause instanceof HostedQuestionInputError)) throw cause;
             validationError = cause.message;
@@ -4754,10 +4828,10 @@ export class HostedWorkspaceToolTurn {
     )
       await waitForTurn(this.warmed, signal);
     // H4b: an agent-only batch runs entirely inside its own Sessions and
-    // needs no Runtime at all — holding the parent's mount across the
-    // child's wait is exactly the deadlock a shared Workspace creates
-    // (parent turn held, child tool call queued behind it forever). v1
-    // therefore takes the mount only for a batch with at least one
+    // needs no Runtime at all. A shared local Workspace admits multiple
+    // execution members; providers with exclusive mounts would block the
+    // child if the parent kept its mount while waiting. Take a mount only
+    // for a batch with at least one
     // non-agent tool; a workflow launch is a child launch of the same
     // shape (#13803). A session message (H4d-b) commits a record and
     // touches no Runtime either, and H4e-b1's team tools touch only
@@ -4883,6 +4957,13 @@ export class HostedWorkspaceToolTurn {
             item.actionId ? [[index, item.actionId] as const] : [],
           ),
         ),
+        releaseQuestionMount: restored
+          ? restored.saved.plan.runtime.provisionerKind === 'local-process'
+          : requests.length === 1 &&
+            requests[0].question === true &&
+            this.questionsAdmitted() &&
+            this.broker.provisionerKind === 'local-process' &&
+            (await this.questionWaitAdmitted()),
       };
       const asks = new Set<number>();
       if (this.hooks) {
@@ -8969,6 +9050,26 @@ export class HostedWorkspaceToolTurn {
     requiresHumanDecision = false,
   ): Promise<string | undefined> {
     const authority = this.session.authority;
+    const question = call.name === 'ask_user_question';
+    const releaseWhileWaiting =
+      question && this.nativeBatch?.releaseQuestionMount === true;
+    const originalRuntime =
+      releaseWhileWaiting && this.broker.runtime
+        ? {
+            ...this.broker.runtime,
+            runtimeSessionId: this.broker.runtimeSessionId,
+            provisionerKind: 'local-process' as const,
+          }
+        : undefined;
+    if (releaseWhileWaiting) {
+      const history = await readHostedFileHistory(this.session);
+      if (!originalRuntime || history?.pendingTurn || history?.pendingUndo)
+        throw new HostedToolRecoveryRequiredError(
+          'Question Runtime is not settled.',
+        );
+      await oweHostedTurnCleanup(this.session, this.promptId, this.broker);
+      this.cleanupOwed = true;
+    }
     const requestId = `tool_approval_${randomBytes(16).toString('hex')}`;
     const createdAt = Date.now();
     const ordinal =
@@ -8981,7 +9082,6 @@ export class HostedWorkspaceToolTurn {
         ? undefined
         : await this.captureNativeBatch('approval', requestId, ordinal);
     if (ordinal >= 0 && !continuationRef) this.nativeBatch!.uncaptured = true;
-    const question = call.name === 'ask_user_question';
     if (question && !continuationRef)
       throw new HostedToolRecoveryRequiredError(
         'Question continuation is unavailable.',
@@ -9060,25 +9160,43 @@ export class HostedWorkspaceToolTurn {
         else signal.addEventListener('abort', release, { once: true });
       });
     }
-    await approval.waiters.wait(
-      requestId,
-      options.expiresAt,
-      signal,
-      () =>
-        authority.action(requestId)?.state !== 'requested' ||
-        authority.writesStopped,
-      liveApproval && approval.readSettings
-        ? hostedLiveApprovalPoll(
-            this.session,
-            approval.waiters,
-            options,
-            () => this.readApprovalSettings(),
-            signal,
-            this.globProfile,
-            approval.isBlocked,
-          )
-        : undefined,
-    );
+    if (originalRuntime) {
+      try {
+        await waitForHostedQuestion({
+          session: this.session,
+          broker: this.broker,
+          brokerOptions: this.options,
+          waiters: approval.waiters,
+          requestId,
+          expiresAt: options.expiresAt,
+          signal,
+          released: () => {
+            this.acquired = false;
+          },
+        });
+      } catch (cause) {
+        throw new HostedToolRecoveryRequiredError(cause);
+      }
+    } else
+      await approval.waiters.wait(
+        requestId,
+        options.expiresAt,
+        signal,
+        () =>
+          authority.action(requestId)?.state !== 'requested' ||
+          authority.writesStopped,
+        liveApproval && approval.readSettings
+          ? hostedLiveApprovalPoll(
+              this.session,
+              approval.waiters,
+              options,
+              () => this.readApprovalSettings(),
+              signal,
+              this.globProfile,
+              approval.isBlocked,
+            )
+          : undefined,
+      );
     if (authority.action(requestId)?.state === 'requested')
       await endHostedAction(
         this.session,
@@ -9089,6 +9207,21 @@ export class HostedWorkspaceToolTurn {
     const action = authority.action(requestId)!;
     if (action.state === 'decided' && options.v === 4) {
       await readHostedQuestionDecision(this.session, action, options);
+      if (originalRuntime && !signal.aborted) {
+        try {
+          const acquired = await acquireHostedQuestionRuntime(
+            this.broker,
+            originalRuntime,
+            signal,
+          );
+          if (!acquired) return APPROVAL_REFUSALS.cancelled;
+          this.acquired = true;
+          this.context?.invalidate();
+          await this.fetchWorkspaceContext(signal);
+        } catch (cause) {
+          throw new HostedToolRecoveryRequiredError(cause);
+        }
+      }
       return undefined;
     }
     if (action.state === 'decided')
@@ -9175,7 +9308,8 @@ export class HostedWorkspaceToolTurn {
   async finish(): Promise<void> {
     if (this.uncertain)
       throw new HostedToolRecoveryRequiredError('Tool outcome is unknown.');
-    if (!this.acquired && !this.retiredOwnerResults) return;
+    if (!this.acquired && !this.retiredOwnerResults && !this.cleanupOwed)
+      return;
     try {
       if (this.hookStopReason)
         await this.harness.settleHookStoppedRuntimeContinuation();
@@ -9295,17 +9429,22 @@ export class HostedWorkspaceToolTurn {
   // deliberately does not touch it: the Session's ordered close (H3's
   // fifth slice) drains the stores, and background traffic keeps its
   // endpoint until then.
-  async cleanup(): Promise<void> {
+  async cleanup(): Promise<HostedCleanupResult | undefined> {
     if (this.hooks || this.mcp) return;
-    if (this.cleanupOwed)
-      await reconcileHostedTurnCleanup(
+    let result: HostedCleanupResult | undefined;
+    if (this.cleanupOwed) {
+      result = await reconcileHostedTurnCleanup(
         this.session,
         this.options,
         this.promptId,
       );
-    else if (this.acquired) await this.broker.release();
+      if (result.held.has(this.promptId)) this.held = true;
+      else if (result.states.get(this.promptId) === 'owed')
+        throw new Error('Original Runtime cleanup is still owed.');
+    } else if (this.acquired) await this.broker.release();
     this.acquired = false;
     this.cleanedUp = true;
+    return result;
   }
 
   /**
