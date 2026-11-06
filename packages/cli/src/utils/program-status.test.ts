@@ -13,7 +13,11 @@ import {
   resetProgramStatusForTest,
   restoreProgramStatus,
 } from './program-status.js';
-import { oscProgramStatus, oscProgramStatusClear } from './osc.js';
+import {
+  oscProgramStatus,
+  oscProgramStatusClear,
+  type ProgramStatus,
+} from './osc.js';
 
 describe('program status reporter', () => {
   const write = vi.fn();
@@ -66,6 +70,28 @@ describe('program status reporter', () => {
       [oscProgramStatus({ state: 'working' })],
       [oscProgramStatusClear()],
       [oscProgramStatus({ state: 'blocked', kind: 'question' })],
+    ]);
+  });
+
+  it('writes again when only the message changes', () => {
+    const shell: ProgramStatus = {
+      state: 'blocked',
+      kind: 'permission',
+      msg: 'Shell',
+    };
+    reportProgramStatus(shell, write);
+    reportProgramStatus({ ...shell, msg: 'Edit' }, write);
+    expect(write).toHaveBeenCalledTimes(2);
+  });
+
+  it('restores an unchanged record after release', () => {
+    reportProgramStatus({ state: 'working' }, write);
+    releaseProgramStatus(write);
+    restoreProgramStatus(write);
+    expect(write.mock.calls).toEqual([
+      [oscProgramStatus({ state: 'working' })],
+      [oscProgramStatusClear()],
+      [oscProgramStatus({ state: 'working' })],
     ]);
   });
 

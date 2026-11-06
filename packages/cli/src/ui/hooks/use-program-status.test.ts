@@ -123,6 +123,26 @@ describe('deriveProgramStatus', () => {
     ).toMatchObject({ state: 'blocked', kind: 'question' });
   });
 
+  it('keeps a running subagent without a pending confirmation working', () => {
+    const running = {
+      status: 'executing',
+      request: { callId: 'c3', name: 'agent', args: {} },
+      liveOutput: {
+        type: 'task_execution',
+        subagentName: 'reviewer',
+        status: 'running',
+        toolCalls: [],
+      },
+    } as unknown as TrackedToolCall;
+    expect(
+      deriveProgramStatus({
+        ...base,
+        streamingState: StreamingState.Responding,
+        pendingToolCalls: [running],
+      }),
+    ).toEqual({ state: 'working' });
+  });
+
   it('falls back to a generic permission when waiting without details', () => {
     expect(
       deriveProgramStatus({
@@ -235,18 +255,103 @@ describe('useTurnOutcome', () => {
   });
 
   it('ignores errors from earlier turns', () => {
+    const user2 = { ...user, id: 4 } as HistoryItem;
+    const reply2 = { ...reply, id: 5 } as HistoryItem;
     const { result, rerender } = setup();
     rerender({ state: StreamingState.Responding, history: [user] });
     rerender({ state: StreamingState.Idle, history: [user, error] });
     rerender({
       state: StreamingState.Responding,
-      history: [user, error, user],
+      history: [user, error, user2],
     });
     rerender({
       state: StreamingState.Idle,
-      history: [user, error, user, reply],
+      history: [user, error, user2, reply2],
     });
     expect(result.current).toBe('done');
+  });
+
+  it('latches error for a blocked prompt or a stop hook loop', () => {
+    for (const type of ['user_prompt_submit_blocked', 'stop_hook_loop']) {
+      const { result, rerender } = setup();
+      const failure = { id: 4, type } as HistoryItem;
+      rerender({ state: StreamingState.Responding, history: [user] });
+      rerender({ state: StreamingState.Idle, history: [user, failure] });
+      expect(result.current).toBe('error');
+    }
+  });
+
+  it('ignores pending items that are not errors', () => {
+    const { result, rerender } = setup();
+    rerender({ state: StreamingState.Responding, history: [user] });
+    rerender({
+      state: StreamingState.Idle,
+      history: [user, reply],
+      pending: [
+        { type: 'retry_countdown', text: 'Retrying in 3s' },
+      ] as HistoryItemWithoutId[],
+    });
+    expect(result.current).toBe('done');
+  });
+
+  it('keeps done when an error is added while idle', () => {
+    const { result, rerender } = setup();
+    rerender({ state: StreamingState.Responding, history: [user] });
+    rerender({ state: StreamingState.Idle, history: [user, reply] });
+    // e.g. a failed slash command after the turn ended
+    rerender({ state: StreamingState.Idle, history: [user, reply, error] });
+    expect(result.current).toBe('done');
+  });
+
+  it('keeps done when compaction shrinks history', () => {
+    const old = (id: number) => ({ id, type: 'gemini_thought' }) as HistoryItem;
+    const prompt = {
+      id: 10,
+      type: MessageType.USER,
+      text: 'go',
+    } as HistoryItem;
+    const answer = { id: 11, type: 'gemini', text: 'ok' } as HistoryItem;
+    const { result, rerender } = setup();
+    rerender({ state: StreamingState.Idle, history: [old(1), old(2), prompt] });
+    rerender({
+      state: StreamingState.Responding,
+      history: [old(1), old(2), prompt],
+    });
+    rerender({
+      state: StreamingState.Idle,
+      history: [old(1), old(2), prompt, answer],
+    });
+    expect(result.current).toBe('done');
+    // Compaction drops the old thoughts after the turn ended.
+    rerender({ state: StreamingState.Idle, history: [prompt, answer] });
+    expect(result.current).toBe('done');
+  });
+
+  it('keeps an error from a turn that compaction shrank mid-turn', () => {
+    const old = (id: number) => ({ id, type: 'gemini_thought' }) as HistoryItem;
+    const prompt = {
+      id: 10,
+      type: MessageType.USER,
+      text: 'go',
+    } as HistoryItem;
+    const turnError = {
+      id: 11,
+      type: MessageType.ERROR,
+      text: 'API error',
+    } as HistoryItem;
+    const { result, rerender } = setup();
+    rerender({ state: StreamingState.Idle, history: [old(1), old(2), prompt] });
+    rerender({
+      state: StreamingState.Responding,
+      history: [old(1), old(2), prompt],
+    });
+    rerender({
+      state: StreamingState.Responding,
+      history: [old(1), old(2), prompt, turnError],
+    });
+    // Compaction drops the old thoughts before the turn ends.
+    rerender({ state: StreamingState.Idle, history: [prompt, turnError] });
+    expect(result.current).toBe('error');
   });
 
   it('returns to idle when the user cancelled the turn', () => {
@@ -290,6 +395,93 @@ describe('useProgramStatus', () => {
       { state: 'idle', kind: undefined, msg: undefined },
       { state: 'working', kind: undefined, msg: undefined },
     ]);
+  });
+
+  const reports = () =>
+    vi.mocked(reportProgramStatus).mock.calls.map((c) => c[0]);
+
+  it('reports again when only the message changes', () => {
+    const { rerender } = renderHook((p) => useProgramStatus(p), {
+      initialProps: {
+        ...props,
+        streamingState: StreamingState.WaitingForConfirmation,
+        pendingToolCalls: [awaiting('exec')],
+      },
+    });
+    rerender({
+      ...props,
+      streamingState: StreamingState.WaitingForConfirmation,
+      pendingToolCalls: [subagentAwaiting('edit')],
+    });
+    expect(reports().map((r) => r.msg)).toEqual([
+      'Permission needed: Shell',
+      'Permission needed: write_file',
+    ]);
+  });
+
+  describe('turn outcome', () => {
+    const user = { id: 1, type: MessageType.USER, text: 'hi' } as HistoryItem;
+    const reply = { id: 2, type: 'gemini', text: 'hello' } as HistoryItem;
+
+    function runTurn(end: Partial<typeof props> & { history: HistoryItem[] }) {
+      const turnCancelledRef = { current: false };
+      const { rerender } = renderHook((p) => useProgramStatus(p), {
+        initialProps: { ...props, turnCancelledRef },
+      });
+      rerender({
+        ...props,
+        turnCancelledRef,
+        streamingState: StreamingState.Responding,
+        history: [user],
+      });
+      rerender({
+        ...props,
+        turnCancelledRef,
+        streamingState: StreamingState.Idle,
+        ...end,
+      });
+      return reports();
+    }
+
+    it('reports done straight after working', () => {
+      expect(runTurn({ history: [user, reply] }).map((r) => r.state)).toEqual([
+        'idle',
+        'working',
+        'done',
+      ]);
+    });
+
+    it('reports error for an API error left pending', () => {
+      expect(
+        runTurn({
+          history: [user],
+          pendingHistoryItems: [
+            { type: MessageType.ERROR, text: '[API Error: 400]' },
+          ] as HistoryItemWithoutId[],
+        }).at(-1),
+      ).toEqual({ state: 'error', kind: undefined, msg: 'Request failed' });
+    });
+
+    it('reports idle for a cancelled turn', () => {
+      const cancelled = { current: false };
+      const { rerender } = renderHook((p) => useProgramStatus(p), {
+        initialProps: { ...props, turnCancelledRef: cancelled },
+      });
+      rerender({
+        ...props,
+        turnCancelledRef: cancelled,
+        streamingState: StreamingState.Responding,
+        history: [user],
+      });
+      cancelled.current = true;
+      rerender({
+        ...props,
+        turnCancelledRef: cancelled,
+        streamingState: StreamingState.Idle,
+        history: [user, reply],
+      });
+      expect(reports().at(-1)?.state).toBe('idle');
+    });
   });
 
   it('resends on SIGCONT and finalizes on exit and unmount', () => {

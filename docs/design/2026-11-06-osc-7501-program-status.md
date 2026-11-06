@@ -72,17 +72,20 @@ user is already at the keyboard.
 
 ### Turn outcome
 
-`useTurnOutcome()` records the history length when streaming state leaves
-`Idle`. When it returns to `Idle`:
+`useTurnOutcome()` records the id of the last history item when streaming
+state leaves `Idle`. When it returns to `Idle`, it decides the outcome once:
 
 - `idle` if `turnCancelledRef` (now returned by `useLlmStream`) is set;
-- `error` if the turn added a `MessageType.ERROR` history item, or left one
-  in the pending items (API errors wait there with a Ctrl+Y retry hint until
-  the next submit);
+- `error` if the turn added a `MessageType.ERROR`, `user_prompt_submit_blocked`
+  or `stop_hook_loop` history item (any item with a later id), or left an
+  error in the pending items (API errors wait there with a Ctrl+Y retry hint
+  until the next submit);
 - `done` otherwise.
 
-The outcome holds until the next turn starts. If history shrinks below the
-turn start (for example `/clear`), it falls back to `idle`.
+The outcome holds until the next turn starts. History changes while idle do
+not touch it: a failed slash command does not turn `done` into `error`, and
+memory compaction, which drops old items, does not reset it. Only an empty
+history (`/clear`) falls back to `idle`.
 
 ### Message policy
 

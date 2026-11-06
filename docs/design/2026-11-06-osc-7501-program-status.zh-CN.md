@@ -58,13 +58,13 @@ ESC ] 7501 ; state=<state>[:kind=<kind>]:app=qwen-code[:msg=<base64>] ESC \
 
 ### 轮次结果
 
-`useTurnOutcome()` 在流式状态离开 `Idle` 时记下 history 长度。回到 `Idle` 时：
+`useTurnOutcome()` 在流式状态离开 `Idle` 时记下最后一条 history 条目的 id。回到 `Idle` 时一次性确定结果：
 
 - 如果 `turnCancelledRef`（现由 `useLlmStream` 返回）为真，结果为 `idle`；
-- 如果这一轮新增了 `MessageType.ERROR` 类型的 history 条目，或在 pending 条目里留下了错误（API 错误会带着 Ctrl+Y 重试提示停留在那里，直到下一次提交），结果为 `error`；
+- 如果这一轮新增了 `MessageType.ERROR`、`user_prompt_submit_blocked` 或 `stop_hook_loop` 类型的 history 条目（即 id 更大的条目），或在 pending 条目里留下了错误（API 错误会带着 Ctrl+Y 重试提示停留在那里，直到下一次提交），结果为 `error`；
 - 否则为 `done`。
 
-结果保持到下一轮开始。如果 history 缩短到轮次起点以下（例如 `/clear`），回到 `idle`。
+结果保持到下一轮开始。空闲时 history 的变化不会改动它：失败的斜杠命令不会把 `done` 改成 `error`，删除旧条目的内存压缩也不会把它重置。只有 history 被清空（`/clear`）时才回到 `idle`。
 
 ### msg 策略
 

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { useEffect, useState, type RefObject } from 'react';
 import type { AgentResultDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
   MessageType,
@@ -126,48 +126,79 @@ function findAwaitingConfirmation(
   return undefined;
 }
 
+type TurnOutcome = 'idle' | 'done' | 'error';
+
+interface TurnTracker {
+  streamingState: StreamingState;
+  /** Id of the last history item when the current or last turn started. */
+  startId: number;
+  outcome: TurnOutcome;
+}
+
+/** Items that mean the turn did not produce the result the user asked for. */
+function isTurnFailure(item: HistoryItemWithoutId): boolean {
+  return (
+    item.type === MessageType.ERROR ||
+    item.type === 'user_prompt_submit_blocked' ||
+    item.type === 'stop_hook_loop'
+  );
+}
+
 /**
  * Work out how the last turn ended. A turn is a stretch where streaming
- * state is not idle; it ended in `error` if it added an error message to
- * history or left one pending (API errors wait in the pending area with a
- * Ctrl+Y retry hint until the next submit), `idle` if the user cancelled
- * it, and `done` otherwise. The result is held until the next turn starts.
+ * state is not idle; it ended in `error` if it added a failure item to
+ * history or left an error pending (API errors wait in the pending area
+ * with a Ctrl+Y retry hint until the next submit), `idle` if the user
+ * cancelled it, and `done` otherwise.
+ *
+ * The outcome is decided once, when the turn ends, and held until the next
+ * turn starts or history is cleared. Errors added while idle (a failed
+ * slash command) and history compaction must not rewrite it. The turn is
+ * bounded by item id, not array index, because compaction drops items.
  */
 export function useTurnOutcome(
   streamingState: StreamingState,
   history: readonly HistoryItem[],
   pendingItems: readonly HistoryItemWithoutId[],
   turnCancelledRef: RefObject<boolean> | undefined,
-): 'idle' | 'done' | 'error' {
-  const [turnStart, setTurnStart] = useState<number | undefined>();
-  const previousStateRef = useRef(streamingState);
-  const historyLengthRef = useRef(history.length);
-  historyLengthRef.current = history.length;
+): TurnOutcome {
+  const [tracker, setTracker] = useState<TurnTracker>({
+    streamingState,
+    startId: 0,
+    outcome: 'idle',
+  });
 
-  useEffect(() => {
-    const previous = previousStateRef.current;
-    previousStateRef.current = streamingState;
-    if (
-      previous === StreamingState.Idle &&
-      streamingState !== StreamingState.Idle
-    ) {
-      setTurnStart(historyLengthRef.current);
+  // Update during render rather than in an effect, so the render where the
+  // turn ends already carries its outcome and no stale record is written.
+  let current = tracker;
+  if (streamingState !== tracker.streamingState) {
+    const wasIdle = tracker.streamingState === StreamingState.Idle;
+    const isIdle = streamingState === StreamingState.Idle;
+    if (wasIdle) {
+      current = {
+        streamingState,
+        startId: history[history.length - 1]?.id ?? 0,
+        outcome: 'idle',
+      };
+    } else if (isIdle) {
+      const failed =
+        pendingItems.some(isTurnFailure) ||
+        history.some(
+          (item) => item.id > tracker.startId && isTurnFailure(item),
+        );
+      current = {
+        ...tracker,
+        streamingState,
+        outcome: turnCancelledRef?.current ? 'idle' : failed ? 'error' : 'done',
+      };
+    } else {
+      current = { ...tracker, streamingState };
     }
-  }, [streamingState]);
+    setTracker(current);
+  }
 
-  return useMemo(() => {
-    if (turnStart === undefined || streamingState !== StreamingState.Idle) {
-      return 'idle';
-    }
-    // History shrank (e.g. /clear): the turn is gone, so is its result.
-    if (history.length < turnStart) return 'idle';
-    if (turnCancelledRef?.current) return 'idle';
-    const isError = (item: HistoryItemWithoutId) =>
-      item.type === MessageType.ERROR;
-    const failed =
-      pendingItems.some(isError) || history.slice(turnStart).some(isError);
-    return failed ? 'error' : 'done';
-  }, [turnStart, streamingState, history, pendingItems, turnCancelledRef]);
+  // History cleared (/clear): the turn is gone, so is its result.
+  return history.length === 0 ? 'idle' : current.outcome;
 }
 
 /**
