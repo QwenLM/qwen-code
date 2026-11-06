@@ -27,13 +27,17 @@ const debugLogger = createDebugLogger('INK_TOOL_EXECUTOR');
  * It runs inside the scheduler's completion callback, right after the
  * scheduler cleared its display list, so a tool group committed there lands
  * in the same render as the clear (#9420). The batch settles once the
- * promise `onSettled` returns does, which the scheduler's completion callback
- * does not wait for, or at once when it throws.
+ * promise `onSettled` returns does, or at once when it throws.
+ *
+ * The scheduler's completion callback returns once `schedulerHold` settles,
+ * so the scheduler starts no queued batch until the caller decided what
+ * follows this one. The batch does not wait for it.
  */
 export function createInkToolExecutor(
   schedule: ScheduleFn,
   modelOverride: string | undefined,
   onSettled: (calls: InteractiveToolCall[]) => void | Promise<void>,
+  schedulerHold?: Promise<void>,
 ): AgentLoopToolExecutor {
   return {
     run: (requests, signal, hooks) => {
@@ -76,6 +80,7 @@ export function createInkToolExecutor(
               debugLogger.error('Settling a shared tool batch failed:', error);
             })
             .then(() => resolve(settledCalls));
+          await schedulerHold?.catch(() => {});
         });
       });
     },
