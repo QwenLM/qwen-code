@@ -3238,6 +3238,7 @@ export type DaemonContinueSessionResult =
       interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
     };
 
+/** Local category estimates are independent of the reported totalTokens. */
 export interface DaemonContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
@@ -3249,13 +3250,14 @@ export interface DaemonContextCategoryBreakdown {
   /** Startup prelude outside the skill listing. Absent from older daemons. */
   startupContext?: number;
   /**
-   * Conversation tokens after the startup prelude. When `totalTokens` is 0
+   * Independent conversation estimate after the startup prelude, never derived
+   * from or capped by totalTokens. When `totalTokens` is 0
    * (no provider count yet: after a model switch, `/restore` or a resume) this
    * is a local estimate of the history rather than 0, so the rows include the
    * conversation. Older daemons report 0 there.
    */
   messages: number;
-  /** Provider total not accounted for by any category. Absent from older daemons. */
+  /** @deprecated Legacy residual; accepted from old daemons but no longer emitted or displayed. */
   unattributed?: number;
   /** Cached prefix tokens; an annotation that overlaps categories. Absent from older daemons. */
   cachedTokens?: number;
@@ -4072,6 +4074,19 @@ export type DaemonSkillToggleActivation =
   | 'deferred'
   | 'reconciling'
   | 'partial';
+
+export type DaemonUserSkillActivation =
+  | { state: 'enabled' }
+  | { state: 'disabled'; mode?: 'hard' | 'default' };
+
+export interface DaemonUserSkillsActivationResult {
+  scope: 'user';
+  state: 'enabled' | 'disabled';
+  mode?: 'hard' | 'default';
+  /** Queue disposition for this write, not effective Skill availability. */
+  propagation: 'queued' | 'deferred' | 'not_required';
+  results: Array<{ skillName: string; changed: boolean }>;
+}
 
 export interface DaemonSkillToggleMutationSkill {
   name: string;
