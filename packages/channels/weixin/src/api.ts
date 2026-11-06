@@ -12,6 +12,28 @@ import type {
   BaseInfo,
 } from './types.js';
 
+/**
+ * Parse JSON while preserving integer literals beyond JavaScript's safe range.
+ * Node 22 exposes each parsed number's source text to the reviver, so only
+ * plain integers that cannot be represented exactly are converted to strings.
+ */
+function parseJsonPreservingLargeIntegers<T>(rawJson: string): T {
+  return JSON.parse(
+    rawJson,
+    (_key, value: unknown, context?: { source?: string }) => {
+      if (
+        typeof value === 'number' &&
+        !Number.isSafeInteger(value) &&
+        typeof context?.source === 'string' &&
+        /^-?\d+$/.test(context.source)
+      ) {
+        return context.source;
+      }
+      return value;
+    },
+  ) as T;
+}
+
 // ── Error handling ────────────────────────────────────────────────
 
 /** Structured error from WeChat iLink Bot API. */
@@ -123,6 +145,7 @@ async function post<T>(
   token?: string,
   timeoutMs = 40000,
   signal?: AbortSignal,
+  preserveLargeIntegers = false,
 ): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -138,13 +161,14 @@ async function post<T>(
       body: JSON.stringify(body),
       signal: controller.signal,
     });
+    const rawBody = await resp.text();
     if (!resp.ok) {
       // Try to parse the API error body for ret/errcode/errmsg
       let ret: number | undefined;
       let errcode: number | undefined;
       let errmsg: string | undefined;
       try {
-        const errBody = (await resp.json()) as {
+        const errBody = JSON.parse(rawBody) as {
           ret?: number;
           errcode?: number;
           errmsg?: string;
@@ -160,7 +184,11 @@ async function post<T>(
         : `WeChat API error (HTTP ${resp.status})`;
       throw new WeixinApiError(message, resp.status, ret, errcode);
     }
-    return (await resp.json()) as T;
+    return (
+      preserveLargeIntegers
+        ? parseJsonPreservingLargeIntegers<T>(rawBody)
+        : (JSON.parse(rawBody) as T)
+    );
   } finally {
     clearTimeout(timeout);
   }
@@ -185,6 +213,7 @@ export async function getUpdates(
       token,
       timeoutMs,
       signal,
+      true,
     );
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AbortError') {
