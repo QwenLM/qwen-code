@@ -91,12 +91,15 @@ function makeConfig(workflows: () => WorkflowTask[]) {
 }
 
 describe('BackgroundTaskViewProvider approval surfacing', () => {
-  it('opens the detail view on a parked workflow approval exactly once', () => {
+  it('surfaces a parked workflow approval in list mode exactly once', () => {
     // A workflow approval can only be answered from the detail view; a
     // footer badge the user has to hunt for leaves the run blocked
-    // forever. The provider must promote the parked approval to a real
-    // prompt — and must not re-open the dialog every time the entry
-    // refreshes after the user closed it.
+    // forever. The provider must promote the parked approval to a
+    // selected row — and must not re-open the dialog every time the
+    // entry refreshes after the user closed it. Auto-open stays in list
+    // mode: detail would arm the tool confirmation, and a stray Enter
+    // aimed at the unmounted composer would approve the command
+    // (#16432 R1-2).
     let workflows: WorkflowTask[] = [workflowEntry()];
     const { config, fireApprovalRequest, fireApprovalChange } = makeConfig(
       () => workflows,
@@ -124,7 +127,7 @@ describe('BackgroundTaskViewProvider approval surfacing', () => {
     workflows = [workflowEntry(['wfap-1'])];
     act(() => fireApprovalRequest());
 
-    expect(result.current.state.dialogMode).toBe('detail');
+    expect(result.current.state.dialogMode).toBe('list');
     expect(result.current.state.selectedIndex).toBe(1);
     expect(result.current.state.dialogOpen).toBe(true);
 
@@ -136,7 +139,6 @@ describe('BackgroundTaskViewProvider approval surfacing', () => {
     expect(result.current.state.dialogMode).toBe('closed');
 
     // A genuinely new approval is a new prompt and surfaces again.
-    workflows = [workflowEntry(['wfap-1', 'wfap-2'])];
     act(() => {
       workflows = [
         {
@@ -145,7 +147,64 @@ describe('BackgroundTaskViewProvider approval surfacing', () => {
       ];
       fireApprovalRequest();
     });
-    expect(result.current.state.dialogMode).toBe('detail');
+    expect(result.current.state.dialogMode).toBe('list');
+  });
+
+  it('surfaces a later approval parked behind an already-surfaced one', () => {
+    // R1-1: a single-id latch keyed on the first pending entry's head
+    // masked every later approval while that head stayed parked. Each
+    // approvalId must get its own prompt, on its own entry's row.
+    const newer = {
+      ...workflowEntry(['wfap-new']),
+      id: 'wf-new',
+      runId: 'wf-new',
+      startTime: 300,
+    } as unknown as WorkflowTask;
+    const older = {
+      ...workflowEntry(),
+      id: 'wf-old',
+      runId: 'wf-old',
+      startTime: 50,
+    } as unknown as WorkflowTask;
+    let workflows: WorkflowTask[] = [newer, older];
+    const { config, fireApprovalRequest } = makeConfig(() => workflows);
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <BackgroundTaskViewProvider config={config}>
+        {children}
+      </BackgroundTaskViewProvider>
+    );
+    const { result } = renderHook(
+      () => ({
+        state: useBackgroundTaskViewState(),
+        actions: useBackgroundTaskViewActions(),
+      }),
+      { wrapper },
+    );
+
+    // Newest-first: newer workflow (300), agent (200), older workflow (50).
+    expect(result.current.state.dialogMode).toBe('list');
+    expect(result.current.state.selectedIndex).toBe(0);
+
+    // Back out without answering; wfap-new stays parked.
+    act(() => result.current.actions.closeDialog());
+    expect(result.current.state.dialogMode).toBe('closed');
+
+    // The older run parks its own approval: it must surface on its row,
+    // not stay hidden behind the latched head of the newer entry.
+    act(() => {
+      workflows = [
+        newer,
+        {
+          ...workflowEntry(['wfap-old']),
+          id: 'wf-old',
+          runId: 'wf-old',
+          startTime: 50,
+        } as unknown as WorkflowTask,
+      ];
+      fireApprovalRequest();
+    });
+    expect(result.current.state.dialogMode).toBe('list');
+    expect(result.current.state.selectedIndex).toBe(2);
   });
 
   it('exposes the state and actions contexts to consumers', () => {

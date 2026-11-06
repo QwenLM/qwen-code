@@ -176,23 +176,34 @@ export function BackgroundTaskViewProvider({
   }, [livePanelFocused, hasAgentEntries]);
 
   // A workflow approval can only be answered from the detail view, and the
-  // registry rejects the call outright when no host answers it. Open the
-  // dialog on the parked approval once (keyed by approvalId) so a blocked
-  // workflow surfaces as a real prompt instead of a footer badge. Keying on
-  // the id keeps closing the dialog from bouncing the user straight back in.
-  const surfacedApprovalRef = useRef<string | undefined>(undefined);
+  // registry rejects the call outright when no host answers it. Surface a
+  // parked approval once per approvalId so a blocked workflow shows up as a
+  // selected row instead of only a footer badge. The latch is a set, not a
+  // single id: a second approval parked behind an unsurfaced-or-still-parked
+  // head must still get its own prompt (#16432 R1-1). Auto-open lands in list
+  // mode, never detail: detail arms the tool confirmation with focus, and a
+  // stray Enter aimed at the composer the dialog just unmounted would approve
+  // the background command (#16432 R1-2). Entering detail stays an explicit
+  // user navigation.
+  const surfacedApprovalIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (dialogMode !== 'closed') return;
     const index = entries.findIndex(
-      (entry) => entry.kind === 'workflow' && entry.pendingApprovals.length > 0,
+      (entry) =>
+        entry.kind === 'workflow' &&
+        entry.pendingApprovals.some(
+          (a) => !surfacedApprovalIdsRef.current.has(a.approvalId),
+        ),
     );
     const entry = entries[index];
     if (entry?.kind !== 'workflow') return;
-    const approvalId = entry.pendingApprovals[0]?.approvalId;
-    if (!approvalId || surfacedApprovalRef.current === approvalId) return;
-    surfacedApprovalRef.current = approvalId;
+    const approval = entry.pendingApprovals.find(
+      (a) => !surfacedApprovalIdsRef.current.has(a.approvalId),
+    );
+    if (!approval) return;
+    surfacedApprovalIdsRef.current.add(approval.approvalId);
     setRawSelectedIndex(index);
-    setDialogMode('detail');
+    setDialogMode('list');
   }, [entries, dialogMode]);
 
   // rawSelectedIndex can fall out of range when entries shrink; clamp on read.
