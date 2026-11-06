@@ -1793,9 +1793,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           ? `Trigger: ${record.triggerKind}.`
           : undefined,
       });
-      if (this.hasPostedPublicationAudit(record.id)) {
+      if (this.hasConsumedPublicationAudit(record.id)) {
         process.stderr.write(
-          `[Channel:${this.name}] dropping pending GitHub delivery already recorded as posted: ${sanitizeLogText(
+          `[Channel:${this.name}] dropping pending GitHub delivery already recorded as consumed: ${sanitizeLogText(
             record.id,
             80,
           )}\n`,
@@ -1886,7 +1886,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
   }
 
-  private hasPostedPublicationAudit(pendingId: string): boolean {
+  private hasConsumedPublicationAudit(pendingId: string): boolean {
     try {
       return readFileSync(this.channelFilePath('github-audit.jsonl'), 'utf-8')
         .split('\n')
