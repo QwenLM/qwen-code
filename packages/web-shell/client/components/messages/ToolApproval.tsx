@@ -745,13 +745,18 @@ export function ToolApproval({
           // The dialog is a render-only surface, so the plan renders inert
           // (links as plain labels, images as alt text): a link or image in
           // the model's plan must not fire navigation or a network request.
-          // `data-approval-shortcuts-ignore` keeps the panel's approval
-          // hotkeys from reacting to events focused inside the plan subtree.
+          // `data-plan-interactive` (the same opt-out the diff rows below
+          // use) keeps digits and arrows from moving the approval selection
+          // when focus is on a focusable widget inside the plan (the
+          // footnote trigger, a copy button), while Escape still rejects.
+          // The portaled footnote popover renders outside this attribute,
+          // so the card marks itself `data-approval-shortcuts-ignore`
+          // instead (see FootnoteCard).
           <div
             className={`${styles.content} ${styles.planContent}`}
             id={commandId}
             title={contentDisplay}
-            data-approval-shortcuts-ignore
+            data-plan-interactive
           >
             <Markdown content={contentDisplay} inert />
           </div>

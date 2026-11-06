@@ -248,6 +248,7 @@ import {
   startToolExecutionSpan,
   endToolExecutionSpan,
   isShellProgressData,
+  isTodoWriteToolAvailable,
   logConversationFinishedEvent,
   ConversationFinishedEvent,
   GLOBAL_DUPLICATE_THRESHOLD,
@@ -16619,7 +16620,7 @@ export class Session implements SessionContext {
         text: getPlanModeSystemReminder(
           this.config.getSdkMode?.(),
           this.config.isSessionWorkflowTodoContextActive?.() === true,
-          this.config.isTodoWriteEnabled?.() === true,
+          isTodoWriteToolAvailable(this.config),
         ),
       });
     }

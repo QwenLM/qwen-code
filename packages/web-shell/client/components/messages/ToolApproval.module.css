@@ -185,6 +185,10 @@
 .planContent {
   min-height: 0;
   max-height: min(240px, 25vh);
+  /* .content sets white-space: pre-wrap for the raw <pre> renders; the plan
+     is rendered markdown, where every source line break would become a hard
+     visual break. The Markdown primitive's own spacing owns the layout. */
+  white-space: normal;
 }
 
 .code {

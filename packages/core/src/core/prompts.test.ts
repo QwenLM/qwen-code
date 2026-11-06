@@ -1790,7 +1790,8 @@ describe('getPlanModeSystemReminder', () => {
     expectText(result, [
       'Before converging, capture the plan as a structured Todo list',
       'call the todo_write tool with one Todo per plan step',
-      'blockedBy naming the steps that must complete first',
+      'a non-empty content',
+      'blockedBy listing the ids of the steps that must complete first',
       'by calling the exit_plan_mode tool',
     ]);
     // The Todo list is captured first, only then is the plan presented.
@@ -1821,7 +1822,7 @@ describe('getPlanModeSystemReminder', () => {
     // The Session Workflow variant is exactly the base reminder with one
     // Todo-capture sentence inserted before the presentation instruction.
     const inserted =
-      'Before converging, capture the plan as a structured Todo list: call the todo_write tool with one Todo per plan step (each with a stable id, status "pending", and blockedBy naming the steps that must complete first), so the plan can be reviewed as a task graph. Present your plan';
+      'Before converging, capture the plan as a structured Todo list: call the todo_write tool with one Todo per plan step (each with a stable id, a non-empty content, status "pending", and — when a step depends on others — blockedBy listing the ids of the steps that must complete first), so the plan can be reviewed as a task graph. Present your plan';
     expect(getPlanModeSystemReminder(false, true, true)).toBe(
       base.replace('Present your plan', inserted),
     );

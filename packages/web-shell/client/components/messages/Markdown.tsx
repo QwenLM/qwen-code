@@ -602,6 +602,7 @@ function CodeBlock({
   const { t } = useI18n();
   const appTheme = useTheme();
   const documentMode = useTranscriptRenderMode() === 'document';
+  const inert = useContext(MarkdownInertContext);
   const [html, setHtml] = useState<string | null>(null);
   const [copied, flashCopied] = useCopiedFlash();
 
@@ -681,8 +682,11 @@ function CodeBlock({
   // In document mode a mermaid fence falls through to the plain <pre> below,
   // holding its own source: the same degradation this component already applies
   // to syntax highlighting there, and what lets the export bundle drop mermaid
-  // and its graph dependencies (#11091).
-  if (lang === 'mermaid' && !isStreaming && !documentMode) {
+  // and its graph dependencies (#11091). Inert (approval) renders degrade the
+  // same way: mermaid's image shape assigns img.src from the diagram source
+  // before any sanitization, so the diagram must not mount from a
+  // model-supplied fence — the source stays visible as the text being approved.
+  if (lang === 'mermaid' && !isStreaming && !documentMode && !inert) {
     return <MermaidBlock code={code} />;
   }
 
@@ -741,7 +745,10 @@ const MarkdownSourceContext = createContext<MarkdownContentSource | undefined>(
 const MarkdownDocumentContext = createContext<string | undefined>(undefined);
 // Inert rendering (approval dialogs): links render as labels, images as alt
 // text, so model-supplied Markdown cannot trigger navigation or requests.
-const MarkdownInertContext = createContext(false);
+// Exported for the footnote card: its preview portaled out of the markdown
+// tree must degrade the same way, or a footnote's source link and image stay
+// live inside the approval dialog.
+export const MarkdownInertContext = createContext(false);
 
 interface PositionedCodeNode {
   readonly position?: {

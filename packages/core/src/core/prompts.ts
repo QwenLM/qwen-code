@@ -1403,6 +1403,27 @@ function getToolCallExamples(model?: string): string {
 }
 
 /**
+ * Whether the plan-mode reminder may tell the model to capture its plan with
+ * the built-in `todo_write` tool.
+ *
+ * The opt-in flag alone is not sufficient: the core-tools allowlist and deny
+ * rules can remove the tool from the registry while the flag stays true, and
+ * a reminder that names a tool the model cannot invoke is noise. The registry
+ * check uses `getAllToolNames`, which also covers lazy registrations that
+ * `getTool` would miss before the factory has run. Uses a structural type to
+ * avoid a hard dependency on the full Config class (as
+ * {@link resolveInteractionMode} does).
+ */
+export function isTodoWriteToolAvailable(config: {
+  isTodoWriteEnabled?(): boolean;
+  getToolRegistry?(): { getAllToolNames(): string[] } | undefined;
+}): boolean {
+  if (config.isTodoWriteEnabled?.() !== true) return false;
+  const names = config.getToolRegistry?.()?.getAllToolNames();
+  return names?.includes(ToolNames.TODO_WRITE) === true;
+}
+
+/**
  * Generates a system reminder message for plan mode operation.
  *
  * This function creates an internal system message that enforces plan mode constraints,
@@ -1475,7 +1496,7 @@ An exact one-off approval for an unknown shell command approves only that invoca
 
 ### When to Converge
 
-Your plan is ready when you have addressed all ambiguities and it covers: what to change, which files to modify, what existing code to reuse (with file paths), and how to verify the changes.${sessionWorkflow && !planOnly && todoWriteEnabled ? ` Before converging, capture the plan as a structured Todo list: call the ${ToolNames.TODO_WRITE} tool with one Todo per plan step (each with a stable id, status "pending", and blockedBy naming the steps that must complete first), so the plan can be reviewed as a task graph.` : ''} Present your plan ${planOnly ? 'directly' : `by calling the ${ToolNames.EXIT_PLAN_MODE} tool, which will prompt the user to confirm the plan`}. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan.
+Your plan is ready when you have addressed all ambiguities and it covers: what to change, which files to modify, what existing code to reuse (with file paths), and how to verify the changes.${sessionWorkflow && !planOnly && todoWriteEnabled ? ` Before converging, capture the plan as a structured Todo list: call the ${ToolNames.TODO_WRITE} tool with one Todo per plan step (each with a stable id, a non-empty content, status "pending", and — when a step depends on others — blockedBy listing the ids of the steps that must complete first), so the plan can be reviewed as a task graph.` : ''} Present your plan ${planOnly ? 'directly' : `by calling the ${ToolNames.EXIT_PLAN_MODE} tool, which will prompt the user to confirm the plan`}. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan.
 </system-reminder>`;
 }
 

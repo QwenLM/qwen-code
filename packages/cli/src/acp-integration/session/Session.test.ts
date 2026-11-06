@@ -48605,6 +48605,9 @@ describe('Session', () => {
         (
           mockConfig.isTodoWriteEnabled as ReturnType<typeof vi.fn>
         ).mockReturnValue(true);
+        mockToolRegistry.getAllToolNames = vi
+          .fn()
+          .mockReturnValue([core.ToolNames.TODO_WRITE]);
         const capture = captureFirstTurnMessage();
 
         await session.prompt({
@@ -48619,6 +48622,34 @@ describe('Session', () => {
         expect(reminderPart!.text).toContain(
           'Before converging, capture the plan as a structured Todo list',
         );
+      });
+
+      it('keeps the Todo sentence out when todo_write is not registered', async () => {
+        // The opt-in flag stays on, but a core-tools allowlist or deny rule
+        // removed the tool from the registry: the reminder must not name a
+        // tool the model cannot invoke.
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+        (
+          mockConfig.isSessionWorkflowTodoContextActive as ReturnType<
+            typeof vi.fn
+          >
+        ).mockReturnValue(true);
+        (
+          mockConfig.isTodoWriteEnabled as ReturnType<typeof vi.fn>
+        ).mockReturnValue(true);
+        mockToolRegistry.getAllToolNames = vi.fn().mockReturnValue([]);
+        const capture = captureFirstTurnMessage();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'research this' }],
+        });
+
+        const reminderPart = capture.parts.find(
+          (p) => p.text && p.text.includes('Plan mode is active'),
+        );
+        expect(reminderPart).toBeTruthy();
+        expect(reminderPart!.text).not.toContain('todo_write');
       });
 
       it('keeps the Todo sentence out when todo_write is disabled', async () => {

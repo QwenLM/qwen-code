@@ -13,6 +13,7 @@ import type {
 import {
   ApprovalMode,
   ToolErrorType,
+  ToolNames,
   MCPServerStatus,
   getMCPServerStatus,
   OutputFormat,
@@ -1209,6 +1210,9 @@ describe('buildInitialSystemReminders', () => {
       ...overrides,
     }) as unknown as Config;
 
+  const registryWith = (toolNames: string[]) =>
+    vi.fn().mockReturnValue({ getAllToolNames: () => toolNames });
+
   it('emits the base plan reminder in PLAN mode', () => {
     const parts = buildInitialSystemReminders(planConfig());
     expect(parts).toHaveLength(1);
@@ -1243,8 +1247,23 @@ describe('buildInitialSystemReminders', () => {
       planConfig({
         isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
         isTodoWriteEnabled: vi.fn().mockReturnValue(true),
+        getToolRegistry: registryWith([ToolNames.TODO_WRITE]),
       }),
     );
     expect(parts[0].text).toBe(getPlanModeSystemReminder(false, true, true));
+  });
+
+  it('keeps the Todo sentence out when the tool is not registered', () => {
+    // The opt-in flag alone is not enough: a core-tools allowlist or deny
+    // rule can remove todo_write from the registry while the flag stays on,
+    // and the reminder must not name a tool the model cannot invoke.
+    const parts = buildInitialSystemReminders(
+      planConfig({
+        isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
+        isTodoWriteEnabled: vi.fn().mockReturnValue(true),
+        getToolRegistry: registryWith([ToolNames.READ_FILE]),
+      }),
+    );
+    expect(parts[0].text).toBe(getPlanModeSystemReminder());
   });
 });

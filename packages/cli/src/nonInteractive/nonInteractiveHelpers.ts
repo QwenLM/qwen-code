@@ -23,6 +23,7 @@ import {
   getMCPServerStatus,
   getPlanModeSystemReminder,
   isShellProgressData,
+  isTodoWriteToolAvailable,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type {
@@ -121,7 +122,7 @@ export function buildInitialSystemReminders(config: Config): Part[] {
       text: getPlanModeSystemReminder(
         config.getSdkMode?.(),
         config.isSessionWorkflowTodoContextActive?.() === true,
-        config.isTodoWriteEnabled?.() === true,
+        isTodoWriteToolAvailable(config),
       ),
     });
   }

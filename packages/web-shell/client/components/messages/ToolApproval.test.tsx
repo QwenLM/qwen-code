@@ -1252,12 +1252,119 @@ describe('ToolApproval accessibility', () => {
   });
 
   it('exempts the plan subtree from approval shortcuts', () => {
+    // Digits and arrows stay with focusable widgets inside the plan (the
+    // footnote trigger) while Escape still rejects: the same split the diff
+    // rows use. A blanket data-approval-shortcuts-ignore would swallow
+    // Escape too; the portaled footnote card opts out separately.
     render(undefined, planRequest);
-    expect(
+    const planPanel = container!.querySelector('[class*="planContent"]')!;
+    expect(planPanel.hasAttribute('data-plan-interactive')).toBe(true);
+    expect(planPanel.hasAttribute('data-approval-shortcuts-ignore')).toBe(
+      false,
+    );
+  });
+
+  it('renders the plan footnote card inert: no live links or images', () => {
+    // The card portals out of the markdown tree, so it must read the inert
+    // context itself: a model-supplied footnote href or image URL must not
+    // become a live anchor or an img src in the approval dialog.
+    const plan = [
+      '## Plan',
+      '',
+      'Use the approach[^docs] for the rollout.',
+      '',
+      '[^docs]: [The approach docs](https://example.com/docs) Rollout details. ![Figure](https://example.com/figure.png)',
+    ].join('\n');
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+    const trigger = container!.querySelector<HTMLButtonElement>(
+      '[data-web-shell-footnote-trigger]',
+    )!;
+    expect(trigger).toBeTruthy();
+    act(() => trigger.click());
+    const card = document.body.querySelector('[data-web-shell-footnote-card]')!;
+    expect(card).toBeTruthy();
+    expect(card.querySelector('a[href]')).toBeNull();
+    expect(card.querySelector('img')).toBeNull();
+    // The note's title still renders, as plain text.
+    expect(card.textContent).toContain('The approach docs');
+  });
+
+  it('keeps a mermaid fence inert in the plan: source visible, no diagram', () => {
+    // Mermaid's image shape assigns img.src from the diagram source before
+    // any sanitization, so the diagram must not mount from a model-supplied
+    // fence — the source stays visible as the text being approved.
+    const plan = ['## Plan', '', '```mermaid', 'graph TD; A-->B;', '```'].join(
+      '\n',
+    );
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+    const planPanel = container!.querySelector('[class*="planContent"]')!;
+    expect(planPanel.textContent).toContain('graph TD; A-->B;');
+    expect(planPanel.querySelector('[class*="mermaid"]')).toBeNull();
+    expect(planPanel.querySelector('img')).toBeNull();
+  });
+
+  it('keeps plan-widget keys local while Escape still rejects', () => {
+    // The footnote trigger is a focusable widget inside the plan's
+    // data-plan-interactive container: digits and arrows must not move the
+    // approval selection, while Escape still rejects.
+    const plan = [
+      '## Plan',
+      '',
+      'Use the approach[^docs].',
+      '',
+      '[^docs]: Details.',
+    ].join('\n');
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+    const trigger = container!.querySelector<HTMLButtonElement>(
+      '[data-web-shell-footnote-trigger]',
+    )!;
+    const opts = optionButtons();
+    const tabIndexBefore = opts.map((option) => option.tabIndex);
+    trigger.focus();
+    pressKey(trigger, '1');
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(opts.map((option) => option.tabIndex)).toEqual(tabIndexBefore);
+    pressKey(trigger, 'Escape');
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith('req-plan', 'reject');
+  });
+
+  it('keeps an open plan footnote card out of the approval shortcuts', () => {
+    // The card portals out of the plan container, so the container's
+    // data-plan-interactive does not cover it; the card carries its own
+    // data-approval-shortcuts-ignore (inert only), and Escape there must not
+    // reject the approval either.
+    const plan = [
+      '## Plan',
+      '',
+      'Use the approach[^docs].',
+      '',
+      '[^docs]: Details.',
+    ].join('\n');
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+    act(() => {
       container!
-        .querySelector('[class*="planContent"]')
-        ?.hasAttribute('data-approval-shortcuts-ignore'),
-    ).toBe(true);
+        .querySelector<HTMLButtonElement>('[data-web-shell-footnote-trigger]')
+        .click();
+    });
+    const card = document.body.querySelector('[data-web-shell-footnote-card]')!;
+    expect(card).toBeTruthy();
+    expect(card.hasAttribute('data-approval-shortcuts-ignore')).toBe(true);
+    pressKey(card, 'Escape');
+    expect(onConfirm).not.toHaveBeenCalled();
+    pressKey(card, '1');
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 
   it('shows a dependency-free Plan Mode workflow as a list', () => {

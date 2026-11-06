@@ -914,6 +914,7 @@ describe('Gemini Client (client.ts)', () => {
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
       getCodeModeOnly: vi.fn().mockReturnValue(false),
+      isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(false),
       isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
       setStaticSystemPrefix: vi.fn(),
@@ -10896,30 +10897,74 @@ Other open files:
     it.each([
       [
         'uses the subagent plan reminder when a subagent inherits PLAN mode',
-        { sdkMode: false, inSubagent: true },
+        {
+          sdkMode: false,
+          inSubagent: true,
+          workflow: false,
+          todoFlag: false,
+          todoRegistered: false,
+        },
         'return plan to caller',
         'prompt-id-subagent-plan-reminder',
         true,
       ],
       [
         'uses the subagent plan reminder when SDK mode is active',
-        { sdkMode: true, inSubagent: false },
+        {
+          sdkMode: true,
+          inSubagent: false,
+          workflow: false,
+          todoFlag: false,
+          todoRegistered: false,
+        },
         'return plan to caller',
         'prompt-id-sdk-plan-reminder',
         true,
       ],
       [
         'uses the main-session plan reminder outside subagent and SDK mode',
-        { sdkMode: false, inSubagent: false },
+        {
+          sdkMode: false,
+          inSubagent: false,
+          workflow: false,
+          todoFlag: false,
+          todoRegistered: false,
+        },
         'call exit_plan_mode',
         'prompt-id-main-plan-reminder',
+        false,
+      ],
+      [
+        'passes both todo gates through to the main-session plan reminder',
+        {
+          sdkMode: false,
+          inSubagent: false,
+          workflow: true,
+          todoFlag: true,
+          todoRegistered: true,
+        },
+        'call exit_plan_mode',
+        'prompt-id-main-plan-reminder-todo',
+        false,
+      ],
+      [
+        'keeps the todo gate off when todo_write is not registered',
+        {
+          sdkMode: false,
+          inSubagent: false,
+          workflow: true,
+          todoFlag: true,
+          todoRegistered: false,
+        },
+        'call exit_plan_mode',
+        'prompt-id-main-plan-reminder-todo-unregistered',
         false,
       ],
     ])(
       '%s',
       async (
         _title,
-        { sdkMode, inSubagent },
+        { sdkMode, inSubagent, workflow, todoFlag, todoRegistered },
         reminder,
         promptId,
         forSubagent,
@@ -10928,6 +10973,13 @@ Other open files:
           ApprovalMode.PLAN,
         );
         vi.mocked(mockConfig.getSdkMode).mockReturnValue(sdkMode);
+        vi.mocked(
+          mockConfig.isSessionWorkflowTodoContextActive,
+        ).mockReturnValue(workflow);
+        vi.mocked(mockConfig.isTodoWriteEnabled).mockReturnValue(todoFlag);
+        registryMock().getAllToolNames.mockReturnValue(
+          todoRegistered ? [ToolNames.TODO_WRITE] : [],
+        );
         vi.mocked(getPlanModeSystemReminder).mockReturnValue(
           `<system-reminder>${reminder}</system-reminder>`,
         );
@@ -10937,12 +10989,13 @@ Other open files:
         const send = () => run([{ text: 'Plan this change' }], promptId);
         await (inSubagent ? runWithAgentContext('agent-1', send) : send());
 
-        // The mock Config has no session-workflow or todo_write gates, so
-        // both reminder dimensions are off.
+        // The reminder's todo dimension is the AND of the opt-in flag and
+        // the registry: a core-tools allowlist can remove the tool while
+        // the flag stays on, and the reminder must not name it then.
         expect(getPlanModeSystemReminder).toHaveBeenCalledWith(
           forSubagent,
-          false,
-          false,
+          workflow,
+          todoFlag && todoRegistered,
         );
       },
     );
