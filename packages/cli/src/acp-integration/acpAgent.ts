@@ -11230,12 +11230,19 @@ class QwenAgent implements Agent {
               }
               break;
             }
-            case 'skills':
-              await this.extMethodInternal(
+            case 'skills': {
+              const result = await this.extMethodInternal(
                 SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-                { cwd: changeCwd, reason: params['reason'] ?? 'all' },
+                {
+                  cwd: changeCwd,
+                  reason: params['reason'] ?? 'all',
+                  ...(params['includeUserSettings'] !== undefined
+                    ? { includeUserSettings: params['includeUserSettings'] }
+                    : {}),
+                },
               );
-              break;
+              return { ...result, v: 1, revision, acknowledged: true };
+            }
             default:
               throw RequestError.invalidParams(
                 undefined,
@@ -15919,6 +15926,22 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh: {
         const rawReason = params['reason'];
         const rawSessionIds = params['sessionIds'];
+        const includeUserSettings = params['includeUserSettings'];
+        if (
+          includeUserSettings !== undefined &&
+          typeof includeUserSettings !== 'boolean'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'includeUserSettings must be a boolean',
+          );
+        }
+        if (includeUserSettings && rawReason === 'content') {
+          throw RequestError.invalidParams(
+            undefined,
+            'includeUserSettings requires a settings refresh',
+          );
+        }
         if (
           rawSessionIds !== undefined &&
           (!Array.isArray(rawSessionIds) ||
@@ -15963,9 +15986,15 @@ class QwenAgent implements Agent {
         const refreshSettings = reason !== 'content';
         const refreshContent = reason !== 'settings';
         if (refreshSettings) {
-          if (
-            !this.workspaceSettings.reloadScopeFromDisk(SettingScope.Workspace)
-          ) {
+          const reloaded = includeUserSettings
+            ? this.workspaceSettings.reloadScopesFromDiskAtomically([
+                SettingScope.Workspace,
+                SettingScope.User,
+              ])
+            : this.workspaceSettings.reloadScopeFromDisk(
+                SettingScope.Workspace,
+              );
+          if (!reloaded) {
             throw new Error('Failed to reload workspace skill settings');
           }
         }
@@ -15973,7 +16002,11 @@ class QwenAgent implements Agent {
         const settingsReloadResults = refreshSettings
           ? await Promise.allSettled(
               sessions.map((session) =>
-                Promise.resolve().then(() => session.reloadSkillSettings()),
+                Promise.resolve().then(() =>
+                  includeUserSettings
+                    ? session.reloadSkillSettings(true)
+                    : session.reloadSkillSettings(),
+                ),
               ),
             )
           : undefined;
