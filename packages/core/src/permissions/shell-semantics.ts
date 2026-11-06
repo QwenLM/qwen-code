@@ -82,6 +82,17 @@ export interface ShellOperation {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Index of the next character the shell actually lexes after `from`: a
+ * `\`+newline continuation is removed outright, so `$` + continuation + `'`
+ * still opens the ANSI-C word (#16075 review, R7-1).
+ */
+function nextSignificantIndex(command: string, from: number): number {
+  let i = from;
+  while (command[i] === '\\' && command[i + 1] === '\n') i += 2;
+  return i;
+}
+
+/**
  * Tokenize a shell command string, respecting single/double quotes and
  * backslash escapes, splitting on unquoted whitespace.
  *
@@ -158,10 +169,14 @@ function tokenize(
     }
     // `$'…'`: skip only the `$`; the quote that follows opens the ANSI-C
     // word, so the payload stays one token instead of splitting on spaces.
-    if (ch === '$' && command[i + 1] === "'" && !inSingle && !inDouble) {
-      inAnsiC = true;
-      i++;
-      continue;
+    // A `\`+newline between the two is removed first (#16075 review, R7-1).
+    if (ch === '$' && !inSingle && !inDouble) {
+      const next = nextSignificantIndex(command, i + 1);
+      if (command[next] === "'") {
+        inAnsiC = true;
+        i = next;
+        continue;
+      }
     }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;

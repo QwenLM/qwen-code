@@ -208,6 +208,9 @@ describe('isDestructiveCommand — git commit --amend', () => {
     'xargs -I{} git commit --amend --no-edit',
     'find . -exec git commit --amend --no-edit \\;',
     '> amend.log git commit --amend --no-edit',
+    // The shell removes `\`+newline before it lexes, so the ANSI-C opener it
+    // interrupts still yields `--amend` (#16075 review, R7-1).
+    "git commit $\\\n'--amend' --no-edit",
     // Shell that reads the heredoc through a pipe or a prefix — the guard
     // must see the amend behind data-producing openers (#13570 review).
     "cat <<'EOF' | bash\ngit commit --amend --no-edit\nEOF",

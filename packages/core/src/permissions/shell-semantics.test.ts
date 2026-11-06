@@ -829,3 +829,14 @@ describe('extractShellOperationsAcrossCommand', () => {
     expect(() => across(deep)).not.toThrow();
   });
 });
+
+describe('line continuations before a `$` construct', () => {
+  it('reads the ANSI-C word the continuation interrupts (#16075 review, R7-1)', () => {
+    // The shell removes `\`+newline before it lexes, so the ANSI-C opener it
+    // interrupts is the word bash runs; `$` + continuation + `'` is not a
+    // dangling `$` followed by an unrelated quoted word.
+    const literal = ops("mv /tmp/a $'/tmp/protected/x'");
+    expect(literal).not.toEqual([]);
+    expect(ops("mv /tmp/a $\\\n'/tmp/protected/x'")).toEqual(literal);
+  });
+});
