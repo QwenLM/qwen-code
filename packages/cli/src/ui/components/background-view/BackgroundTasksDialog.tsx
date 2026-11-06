@@ -1950,7 +1950,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       }
       if (selectedWorkflowPauseHint) hints.push(selectedWorkflowPauseHint);
       if (selectedEntryAllowsResume) hints.push('r resume');
-      if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
+      if (
+        selectedEntry?.kind === 'agent' &&
+        selectedEntry.status === 'paused'
+      ) {
         hints.push('x abandon');
       }
       hints.push('\u2190/Esc close');
