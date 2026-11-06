@@ -97,7 +97,7 @@ import {
   type OpenTuiRestoredDraft,
   type OpenTuiInputSubmission,
   type OpenTuiCancelSettled,
-  type OpenTuiComposerHandle,
+  type OpenTuiComposerSlot,
 } from './input-submission.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
@@ -131,6 +131,7 @@ import {
 import { OpenTuiVoiceIndicator } from './OpenTuiVoiceIndicator.js';
 import { Command, matchesCommand, toOriginalKey } from './key-map.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
+import { useSubscriptionCommandVisibility } from '../hooks/use-subscription-command-visibility.js';
 import {
   CompletionMode,
   EscapeClearModel,
@@ -278,9 +279,7 @@ export interface InputPromptProps {
   /** Reports the double-Esc armed state (the footer hint). */
   onEscapeArmedChange?: (armed: boolean) => void;
   /** Lets the parent read/clear the composer buffer (Ctrl+Q queue). */
-  composerHandle?: {
-    current: OpenTuiComposerHandle | null;
-  };
+  composerHandle?: OpenTuiComposerSlot;
   /** Queued prompts awaiting the next turn (drives Esc/↑ pop-back parity). */
   queueLength?: number;
   /** Returns editable queued payloads with their attachments and source. */
@@ -555,7 +554,15 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   const unknownHistoryInputRef = useRef(false);
   const restoredQueueDraftRef = useRef<OpenTuiRestoredDraft | null>(null);
   const dismissedUntilChangeRef = useRef<string | null>(null);
-  const commandsRef = useRef<readonly SlashCommand[]>([]);
+  const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
+  const presentedCommands = useSubscriptionCommandVisibility(
+    commands,
+    config ?? null,
+  );
+  const commandsRef = useRef(presentedCommands);
+  useLayoutEffect(() => {
+    commandsRef.current = presentedCommands;
+  }, [presentedCommands]);
   // Query-relative replacement range for the current buffer's SLASH target.
   // The perfect-match verdict is deliberately not cached alongside it: Enter
   // recomputes that one from the buffer (see the Enter branch below).
@@ -668,7 +675,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     let cancelled = false;
     loadInteractiveCommands(config ?? null)
       .then((commands) => {
-        if (!cancelled) commandsRef.current = commands;
+        if (!cancelled) setCommands(commands);
       })
       .catch(() => {});
     return () => {
@@ -837,7 +844,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // way useCommandSuggestions re-runs when its recentCommands dep changes.
   useEffect(() => {
     refreshCompletion();
-  }, [recentSlashCommands, refreshCompletion]);
+  }, [recentSlashCommands, presentedCommands, refreshCompletion]);
 
   const applyTextToEditor = useCallback(
     (line: string, cursorCol?: number) => {
@@ -1113,7 +1120,14 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       cancelTurn,
       submitDraft,
       invalidateImportedInput,
+      restoreSubmission: (submission) => restoreSubmission(submission, '\n'),
     };
+    // A prompt handed back while a dialog had the composer unmounted.
+    const returned = props.composerHandle.returned;
+    if (returned && editorRef.current) {
+      props.composerHandle.returned = undefined;
+      restoreSubmission(returned, '\n');
+    }
     return () => {
       if (props.composerHandle) props.composerHandle.current = null;
     };
@@ -1123,6 +1137,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     submitDraft,
     invalidateImportedInput,
     replaceText,
+    restoreSubmission,
   ]);
 
   const acceptSuggestion = useCallback(

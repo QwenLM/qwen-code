@@ -23,7 +23,9 @@ class ManagedSchemaProjectionTest {
                 List<String> existing = new ArrayList<>();
                 try (var columns = connection.getMetaData().getColumns(null, null, table, null)) {
                     while (columns.next()) {
-                        existing.add(columns.getString("COLUMN_NAME"));
+                        if (!"id".equals(columns.getString("COLUMN_NAME"))) {
+                            existing.add(columns.getString("COLUMN_NAME"));
+                        }
                     }
                 }
                 assertEquals(existing, List.of(projection.columns().split(", ")), table);

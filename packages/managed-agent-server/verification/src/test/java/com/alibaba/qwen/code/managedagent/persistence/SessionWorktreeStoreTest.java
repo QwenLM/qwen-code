@@ -105,8 +105,8 @@ class SessionWorktreeStoreTest {
                 jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified) VALUES ('tenant','session','agent',1,1)");
                 store.admit("tenant", "actor", "session", plan, resolved);
             });
-            var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                    new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             assertThat(sessions.listSessions("tenant", null, null, null, 1).worktrees().get("session").state())
                     .isEqualTo("preparing");
             assertThat(SessionWorktreeStore.isReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session")).isFalse();

@@ -513,7 +513,7 @@ class ManagedSessionOperationStoreTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         ManagedSchema.initialize(dataSource);
         jdbc = new ManagedSchemaJdbcTemplate(dataSource);
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), new Clock() {
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), new Clock() {
             @Override
             public ZoneId getZone() {
                 return ZoneOffset.UTC;
@@ -528,7 +528,7 @@ class ManagedSessionOperationStoreTest {
             public Instant instant() {
                 return Instant.ofEpochMilli(now.get());
             }
-        }, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        }, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     private List<String> targets(ManagedAgentStore store) {

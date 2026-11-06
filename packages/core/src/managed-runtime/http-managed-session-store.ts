@@ -183,6 +183,7 @@ export interface HttpManagedSessionStores {
     kind?: 'legacy-close' | `configuration:${string}`,
   ): Promise<void>;
   approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
+  modelConfig(expectedDigest: string, kind?: 'legacy-close'): Promise<unknown>;
   claimUserMessages(
     promptId: string,
     initialOnly?: boolean,
@@ -285,6 +286,8 @@ export function createHttpManagedSessionStores(
     authorizeLifecycle: (kind) => client.authorizeLifecycle(kind),
     authorizeOrdinary: (kind) => client.authorizeOrdinary(kind),
     approvalSelection: () => client.approvalSelection(),
+    modelConfig: (expectedDigest, kind) =>
+      client.modelConfig(expectedDigest, kind),
     claimUserMessages: (promptId, initialOnly) =>
       client.claimUserMessages(promptId, initialOnly),
   };
@@ -892,6 +895,72 @@ class ManagedSessionStoreHttpClient {
         input: message['input'],
       };
     });
+  }
+
+  async modelConfig(
+    expectedDigest: string,
+    kind?: 'legacy-close',
+  ): Promise<unknown> {
+    if (!/^sha256:[0-9a-f]{64}$/u.test(expectedDigest)) {
+      throw corrupt('model configuration digest is invalid.');
+    }
+    await this.assertWritable();
+    return this.withRetry(
+      true,
+      'POST',
+      '/model-config:query',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/model-config:query',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            expectedDigest,
+            ...(kind ? { kind } : {}),
+          },
+          timeoutMs,
+        );
+        const reader = response.body?.getReader();
+        if (!reader) throw corrupt('Model configuration response has no body.');
+        const chunks: Uint8Array[] = [];
+        let length = 0;
+        try {
+          while (true) {
+            let item: ReadableStreamReadResult<Uint8Array>;
+            try {
+              item = await reader.read();
+            } catch (error) {
+              if (error instanceof TypeError || error instanceof DOMException) {
+                throw new ManagedSessionStoreTransportError(
+                  'Managed Session Store model configuration response failed.',
+                );
+              }
+              throw error;
+            }
+            if (item.done) break;
+            length += item.value.byteLength;
+            if (length > 16 * 1024) {
+              await reader.cancel();
+              throw corrupt(
+                'Model configuration response exceeds its byte limit.',
+              );
+            }
+            chunks.push(item.value);
+          }
+          try {
+            return JSON.parse(
+              Buffer.concat(chunks).toString('utf8'),
+            ) as unknown;
+          } catch {
+            throw corrupt('Model configuration response is invalid JSON.');
+          }
+        } finally {
+          reader.releaseLock();
+        }
+      },
+    );
   }
 
   async approvalSelection(): Promise<
@@ -2448,6 +2517,23 @@ class ManagedSessionStoreHttpClient {
     const expired = this.grant;
     this.stopRenewal();
     await this.renewPromise?.catch(() => undefined);
+    // A renewal in flight may have answered after the caller saw the lease
+    // lapse; it moved the lease forward and re-armed the timer, so keep that
+    // grant. Dropping it for an acquire, which a Store holding the Session's
+    // lifecycle can delay, leaves authorizeLifecycle, and any caller that
+    // reads the grant without first waiting in ensureWriter, refusing
+    // locally until the acquire answers. Only a lease that moved past the
+    // lapsed one counts: a refused renewal leaves the lapsed lease in place,
+    // and a commit, a head adoption or a journal read copies it into a new
+    // grant; in either case a wall-clock step back could make the lapsed
+    // lease look live.
+    if (
+      expired !== undefined &&
+      this.grant !== undefined &&
+      this.grant.leaseUntil > expired.leaseUntil &&
+      this.grant.leaseUntil > Date.now()
+    )
+      return;
     this.grant = undefined;
     const acquire = (async () => {
       await this.acquireWriter();

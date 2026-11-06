@@ -5,6 +5,7 @@
  */
 
 import { SettingScope, type LoadedSettings } from './settings.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 
 export function hasOwnModelProviders(settingsObj: unknown): boolean {
   if (!settingsObj || typeof settingsObj !== 'object') {
@@ -44,6 +45,15 @@ export function getModelProvidersOwnerScope(
 export function getPersistScopeForModelSelection(
   settings: LoadedSettings,
 ): SettingScope {
+  // Subscription activation owns workspace auth/model settings without a
+  // modelProviders entry; writing to User would be shadowed on restart.
+  if (
+    settings.isTrusted &&
+    settings.workspace.settings.security?.auth?.selectedType ===
+      AuthType.QWEN_SUBSCRIPTION
+  ) {
+    return SettingScope.Workspace;
+  }
   return getModelProvidersOwnerScope(settings) ?? SettingScope.User;
 }
 
