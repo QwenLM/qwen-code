@@ -179,12 +179,15 @@ function makeHandler(deps: QQFileToolDeps, spec: OutboundMediaSpec) {
       throw error;
     }
     const requestedName = args['file_name'];
+    // Sanitize the on-disk basename too: it reaches the platform card and the
+    // tool result verbatim, so a file named with a bidi override would spoof
+    // the name the user reads exactly as an explicit `file_name` would.
     const fileName =
       spec.kind === 'file' &&
       typeof requestedName === 'string' &&
       requestedName.trim() !== ''
         ? safeFileName(requestedName) || file.fileName
-        : file.fileName;
+        : safeFileName(file.fileName) || file.fileName;
     const result = await deps.sendMedia({
       sessionId: context.sessionId,
       chatId: chat.chatId,

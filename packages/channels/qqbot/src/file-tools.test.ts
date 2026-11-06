@@ -145,7 +145,16 @@ describe('readOutboundFile', () => {
     );
   });
 
-  it('opens with O_NOFOLLOW and O_NONBLOCK', () => {
+  // Windows has neither constant (`fs.constants.O_NOFOLLOW`/`O_NONBLOCK` are
+  // `undefined` there), so `flags & undefined` is 0 and the assertion can never
+  // hold; the suite is red on the Windows lane if it runs. Same skip pattern as
+  // backgroundShellRegistry.test.ts.
+  const itPosixOpenFlags =
+    constants.O_NOFOLLOW === undefined || constants.O_NONBLOCK === undefined
+      ? it.skip
+      : it;
+
+  itPosixOpenFlags('opens with O_NOFOLLOW and O_NONBLOCK', () => {
     const path = join(workspace, 'report.txt');
     writeFileSync(path, 'hello');
 
@@ -332,6 +341,20 @@ describe('buildFileTools', () => {
     await call({ path, file_name: 'invoice\u202Egnp.exe\u200F' });
 
     expect(sent[0]!.fileName).toBe('invoicegnp.exe');
+  });
+
+  it('sanitizes the on-disk basename when no display name is given', async () => {
+    // The default path reaches the platform card and the tool result verbatim,
+    // so an on-disk name carrying a bidi override spoofs the card exactly as an
+    // explicit file_name would.
+    const path = join(workspace, 'invoice\u202Egnp.exe');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+
+    const result = await call({ path });
+
+    expect(sent[0]!.fileName).toBe('invoicegnp.exe');
+    expect(textOf(result)).toBe('File sent (invoicegnp.exe).');
   });
 
   it('strips a lone surrogate from a display name', async () => {

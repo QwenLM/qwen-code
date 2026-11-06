@@ -5094,14 +5094,14 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
-   * The chat a moderation call may touch, resolved from the turn in progress.
-   * Under a shared `sessionScope` one session serves every group and DM, and
-   * the router target frozen at session creation is whichever chat happened to
-   * create it — using it would recall a message in a chat nobody asked about.
-   * ChannelBase calls `onPromptStart` for every turn with that turn's envelope
-   * chat, which is the only chat the turn is about.
+   * The chat a tool call may touch, resolved from the turn in progress. Under a
+   * shared `sessionScope` one session serves every group and DM, and the router
+   * target frozen at session creation is whichever chat happened to create it —
+   * using it would recall a message, or hand a file, to a chat nobody asked
+   * about. ChannelBase calls `onPromptStart` for every turn with that turn's
+   * envelope chat, which is the only chat the turn is about.
    */
-  private resolveModerationChat(
+  private resolveTurnChat(
     sessionId: string,
   ): { chatId: string; isGroup: boolean } | undefined {
     const turn = this.sessionTurnChat.get(sessionId);
@@ -5129,7 +5129,7 @@ export class QQChannel extends ChannelBase {
     const register = this.bridge.registerChannelTool?.bind(this.bridge);
     if (!register) return;
     for (const tool of buildModerationTools({
-      resolveChat: (sessionId) => this.resolveModerationChat(sessionId),
+      resolveChat: (sessionId) => this.resolveTurnChat(sessionId),
       memberRecallDisabled: this.moderationRecallWindowMs === 0,
       currentSenderId: (sessionId) => this.getResponseSenderId(sessionId),
       recentMemberMessage: (chatId, senderId) =>
@@ -5156,13 +5156,14 @@ export class QQChannel extends ChannelBase {
     const register = this.bridge.registerChannelTool?.bind(this.bridge);
     if (!register) return;
     for (const tool of buildFileTools({
+      // The turn's chat, not the router target: under a shared `sessionScope`
+      // the routed target is whichever chat created the session, so using it
+      // would upload and deliver the file into a chat the caller never asked
+      // about. Same resolver as the moderation tools, which fails closed for a
+      // 'single' session outside a turn.
       resolveChat: (sessionId) => {
-        const target = this.router.getTarget(sessionId);
-        // Same guard as the moderation tools: a router shared by several
-        // channels must not let one channel's session send through another's
-        // credentials.
-        if (!target || target.channelName !== this.name) return undefined;
-        return { chatId: target.chatId };
+        const chat = this.resolveTurnChat(sessionId);
+        return chat === undefined ? undefined : { chatId: chat.chatId };
       },
       sessionCwd: (sessionId) => this.router.getSessionCwd(sessionId),
       sendMedia: (input) => this.sendQQMedia(input),
