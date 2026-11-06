@@ -289,6 +289,67 @@ describe('PermissionsDialog scope rows', () => {
     }
   });
 
+  it('budgets the row from the layout cap, not from the terminal width', async () => {
+    // The companion to the test above: a short QWEN_HOME fits at 200 columns
+    // whichever width the row budget came from, so it cannot tell a 200-column
+    // budget from the 100-column cap. A home long enough to fill the cap can.
+    process.env['QWEN_HOME'] = nodePath.join(
+      nodePath.sep,
+      'srv',
+      'qwen-home-with-a-deliberately-long-name-for-the-budget',
+      'shared',
+    );
+    const originalColumns = Object.getOwnPropertyDescriptor(
+      process.stdout,
+      'columns',
+    );
+    Object.defineProperty(process.stdout, 'columns', {
+      value: 200,
+      configurable: true,
+    });
+    const { lastFrame, stdin, unmount } = renderDialogAtWidth(200);
+    try {
+      await waitFor(
+        () => expect(stripAnsi(lastFrame())).toContain('Add a new rule'),
+        { timeout: 3000 },
+      );
+      stdin.write('\r');
+      await waitFor(
+        () => expect(stripAnsi(lastFrame())).toContain('Enter to submit'),
+        { timeout: 3000 },
+      );
+      stdin.write('Bash');
+      await waitFor(() => expect(stripAnsi(lastFrame())).toContain('Bash'), {
+        timeout: 3000,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      stdin.write('\r');
+      await waitFor(
+        () => expect(stripAnsi(lastFrame())).toContain('User settings'),
+        { timeout: 3000 },
+      );
+
+      const frame = stripAnsi(lastFrame());
+      const row = frame
+        .split('\n')
+        .find((line) => line.includes('User settings'));
+      expect(row).toBeDefined();
+      // A 200-column budget clips nothing here; the 100-column cap does, and
+      // the file name is what falls off. Losing it means the budget grew with
+      // the terminal.
+      expect(row).toContain('settings.json');
+    } finally {
+      unmount();
+      if (originalColumns) {
+        Object.defineProperty(process.stdout, 'columns', originalColumns);
+      } else {
+        delete (process.stdout as unknown as Record<string, unknown>)[
+          'columns'
+        ];
+      }
+    }
+  });
+
   it('keeps the settings file name when the terminal is wider than the layout cap', async () => {
     // The app caps its content area at 100 columns, so a 200-column terminal
     // must not budget the row from 200: the renderer clips at the cap and the
