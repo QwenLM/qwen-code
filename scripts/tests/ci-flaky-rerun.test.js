@@ -650,6 +650,28 @@ describe('ci flaky rerun patrol', () => {
     }
   });
 
+  it('strips bidi overrides that could visually rewrite a notice', async () => {
+    // The reason is classifier output derived from untrusted logs; a bidi
+    // override could make "no Update Branch needed" read as its opposite.
+    for (const action of ['rerun', 'comment', 'no_action']) {
+      const c = client();
+      await actOnDecision(
+        c,
+        target(),
+        decision({
+          action,
+          confidence: action === 'no_action' ? 'low' : 'high',
+          reason_en: 'safe \u202Ereversed\u202C text',
+          reason_zh: '安全 \u2066隔离\u2069 文本',
+        }),
+      );
+      const body = c.calls.find((call) => call[0] === 'comment')[2];
+      expect(body).not.toMatch(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/);
+      expect(body).toContain('safe reversed text');
+      expect(body).toContain('安全 隔离 文本');
+    }
+  });
+
   it('stops after three actions on the same head', async () => {
     const c = client({
       async comments() {

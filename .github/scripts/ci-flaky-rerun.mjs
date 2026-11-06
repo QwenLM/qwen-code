@@ -428,12 +428,18 @@ export function eligibleAttemptJob(job, target, runAttempt, options = {}) {
 }
 
 function safeReason(reason) {
-  return reason
-    .trim()
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('@', '@\u200b');
+  return (
+    reason
+      .trim()
+      // Bidi overrides can visually rewrite a notice maintainers trust when
+      // deciding whether to update a branch; the reason is classifier output
+      // derived from untrusted logs, so drop them like the markup below.
+      .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('@', '@\u200b')
+  );
 }
 
 function bilingualComment(en, zh, marker) {
