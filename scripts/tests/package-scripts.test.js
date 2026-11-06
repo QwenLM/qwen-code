@@ -1238,7 +1238,7 @@ describe('package scripts', () => {
     // while resolving a conflict runs the regression on seven wrong shards or
     // nowhere, and the only CI coverage of that suite goes with it.
     expect(step).toContain(
-      "QWEN_CI_SKIP_STANDALONE_RUNTIMES: \"${{ matrix.shard != 4 && '1' || '' }}\"",
+      "QWEN_CI_SKIP_STANDALONE_RUNTIMES: \"${{ matrix.shard != 1 && '1' || '' }}\"",
     );
     // The step hands the shard and the retry to the lane script, which
     // passes them to all three of its Vitest runs: the CLI and core suites in the main lane, and
@@ -1437,7 +1437,7 @@ describe('package scripts', () => {
               // In CI this suite runs inside the side lane, whose own log
               // ci.yml names here: never write to it.
               SIDE_LANE_LOG: sideLog,
-              // ci.yml sets it on every shard but the fourth, this suite's
+              // ci.yml sets it on every shard but the first, this suite's
               // own run included: the passing case needs it unset.
               QWEN_CI_SKIP_STANDALONE_RUNTIMES: skipStandalone,
               LANES: lanes,

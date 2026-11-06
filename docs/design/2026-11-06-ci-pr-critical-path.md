@@ -45,7 +45,11 @@ reasons:
 - Skip the TypeScript lanes for changes that cannot affect them.
 
 Out of scope: duration-based unit sharding (it needs timing data that only
-`main` runs produce after this lands), narrowing the build cache's global
+`main` runs produce after this lands). Unit shard 1 is slow because Vitest's
+path-hash split gives it the heaviest CLI files (576 s of CLI suite against
+147 s on shard 4 for the same 181 files), not because it also runs the
+standalone regression: that runs in the parallel side lane, off the shard's
+critical path. Also out of scope: narrowing the build cache's global
 inputs, and a single required aggregate check. Each is a follow-up.
 
 ## Design
@@ -100,8 +104,6 @@ host.
 
 ### Smaller changes
 
-- The standalone runtime regression moves from unit shard 1 to shard 4, the
-  lightest.
 - `java_only` profile: a change confined to `packages/managed-agent-server/`
   and `packages/sdk-java/`, except `managed-agent-server/contracts/`,
   `managed-agent-server/verification/src/test/resources/` and the Markdown in

@@ -30,7 +30,7 @@
 - 每次 run 只构建一次，所有 lane 都测这同一棵树。
 - 不可能影响 TypeScript 的改动，跳过 TypeScript lane。
 
-不在本次范围内的：按耗时分配单测分片（需要耗时数据，而这份数据要等本改动合入后由 `main` 的 run 产生）、收窄构建缓存的全局输入、单一的 required 汇总 check。三项都留作后续。
+不在本次范围内的：按耗时分配单测分片（需要耗时数据，而这份数据要等本改动合入后由 `main` 的 run 产生）。单测 shard 1 慢，是因为 Vitest 按路径哈希切分，把最重的 CLI 测试文件分给了它（同样 181 个 CLI 文件，shard 1 跑了 576 s，shard 4 只要 147 s）；跟它额外跑 standalone 回归无关，那部分在并行的 side lane 里，不在这个分片的关键路径上。同样不在范围内的还有：收窄构建缓存的全局输入、单一的 required 汇总 check。三项都留作后续。
 
 ## 设计
 
@@ -68,7 +68,6 @@ flowchart LR
 
 ### 较小的改动
 
-- **standalone 回归**：从单测 shard 1 移到最轻的 shard 4。
 - **`java_only` 档位**：
   - 适用范围：只改了 `packages/managed-agent-server/` 和 `packages/sdk-java/` 的改动。例外是 `managed-agent-server/contracts/`、`managed-agent-server/verification/src/test/resources/`，以及 `TEST_READ_MARKDOWN` 里列出的 Markdown，这些仍按 full 处理。
   - 跳过：构建、单测、集成测试和浏览器 lane。
