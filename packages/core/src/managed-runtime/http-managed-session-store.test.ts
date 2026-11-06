@@ -1211,6 +1211,11 @@ describe('HTTP Managed Session store', () => {
     try {
       vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
       renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      // The stop below rejects this renewal, and fake timers flush the
+      // microtask queue before the `finally` handler is attached. Attach one
+      // now so the rejection is never unhandled; the assertions below still
+      // read the settled promise.
+      void renewal.catch(() => undefined);
       await vi.advanceTimersByTimeAsync(0);
       expect(rig.observed.acquiresAfterBoot).toBe(1);
       let stopped = false;
@@ -1228,6 +1233,9 @@ describe('HTTP Managed Session store', () => {
       // A locally stopped client seals nothing: stopLocal is a local close,
       // and the lease it waited for is left to lapse on the Store.
       expect(rig.server.sealCount).toBe(sealsWhileWaiting);
+      await expect(renewal).rejects.toThrow('locally stopped');
+      // The late grant was left in place, not adopted as renewed.
+      expect(rig.grant()?.leaseUntil).toBe(rig.observed.bootLeaseUntil);
       // No renewal timer survives the stop, so the late grant is not kept
       // alive.
       await vi.advanceTimersByTimeAsync(rig.observed.bootLeaseUntil);
