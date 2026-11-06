@@ -67,7 +67,7 @@ public final class JdbcCsiActivationAdmission {
     static JdbcCsiFilesRetirementGuard.Original lockForExecution(Connection connection, String bindingId,
             JdbcRuntimeBindingRepository bindings)
             throws SQLException {
-        var original = lockOriginal(connection, bindingId);
+        var original = JdbcCsiFilesRetirementGuard.lockExecutionControl(connection, bindingId);
         if (original != null) {
             original.requireAdmission();
             requireHistoryIdentity(connection, original, requireLive(connection, original), bindings);
