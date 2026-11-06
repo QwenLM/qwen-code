@@ -207,6 +207,51 @@ describe('BackgroundTaskViewProvider approval surfacing', () => {
     expect(result.current.state.selectedIndex).toBe(2);
   });
 
+  it('latches only the displayable queue head, not approvals parked behind it', () => {
+    // The detail view renders pendingApprovals[0] only. Latching a later
+    // approval marks it surfaced without ever displaying it: once the
+    // head drains unanswered, the "already surfaced" tail never
+    // auto-prompts — the exact hang this surfacing exists to remove.
+    let workflows: WorkflowTask[] = [workflowEntry(['wfap-a'])];
+    const { config, fireApprovalRequest, fireApprovalChange } = makeConfig(
+      () => workflows,
+    );
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <BackgroundTaskViewProvider config={config}>
+        {children}
+      </BackgroundTaskViewProvider>
+    );
+    const { result } = renderHook(
+      () => ({
+        state: useBackgroundTaskViewState(),
+        actions: useBackgroundTaskViewActions(),
+      }),
+      { wrapper },
+    );
+
+    // a parks → auto-open; the user backs out without answering.
+    expect(result.current.state.dialogMode).toBe('list');
+    act(() => result.current.actions.closeDialog());
+    expect(result.current.state.dialogMode).toBe('closed');
+
+    // b parks behind the still-parked head a: nothing new is displayable,
+    // so the dialog must stay closed and b must not be latched.
+    act(() => {
+      workflows = [workflowEntry(['wfap-a', 'wfap-b'])];
+      fireApprovalRequest();
+    });
+    expect(result.current.state.dialogMode).toBe('closed');
+
+    // a leaves the queue unanswered; b becomes the displayable head and
+    // must get its own auto-prompt.
+    act(() => {
+      workflows = [workflowEntry(['wfap-b'])];
+      fireApprovalChange();
+    });
+    expect(result.current.state.dialogMode).toBe('list');
+    expect(result.current.state.selectedIndex).toBe(1);
+  });
+
   it('exposes the state and actions contexts to consumers', () => {
     const { config } = makeConfig(() => []);
     const wrapper = ({ children }: { children: React.ReactNode }) => (

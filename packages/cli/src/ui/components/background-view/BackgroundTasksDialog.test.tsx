@@ -1773,6 +1773,105 @@ describe('BackgroundTasksDialog', () => {
     );
   });
 
+  describe('auto-opened dialog disarm (#16432 Critical 1)', () => {
+    // The auto-open lands mid-keystroke and keypress dispatch is a
+    // broadcast: a letter still aimed at the unmounted composer must not
+    // cancel/pause the run, and a stray Enter must not arm the approval.
+    // The first explicit navigation key acknowledges the auto-open.
+    function parkedApproval(approvalId: string): WorkflowApproval {
+      return {
+        approvalId,
+        subagentId: 'sub-1',
+        callId: `call-${approvalId}`,
+        name: 'Shell',
+        description: 'run',
+        confirmationDetails: {
+          type: 'exec',
+        } as WorkflowApproval['confirmationDetails'],
+        at: Date.now(),
+      };
+    }
+
+    async function autoSurfacedWorkflow() {
+      const wf = workflowEntry({
+        status: 'running',
+        pendingApprovals: [parkedApproval('wfap-1')],
+      });
+      const h = setup([wf]);
+      // ink flushes mount effects on its own scheduler, outside act —
+      // wait for the provider's auto-open instead of asserting on the
+      // pre-effect frame.
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.dialogMode).toBe('list');
+      });
+      // The provider auto-opens in list mode — no explicit openDialog.
+      expect(h.probe.current!.state.autoOpened).toBe(true);
+      return h;
+    }
+
+    it('ignores bare x until a navigation key, then cancels', async () => {
+      const h = await autoSurfacedWorkflow();
+
+      h.pressKey({ sequence: 'x' });
+      expect(h.workflowCancel).not.toHaveBeenCalled();
+
+      h.pressKey({ name: 'up' });
+      // The acknowledge re-registers the keypress closure in a passive
+      // effect; wait for it to flush so the next key sees autoOpened=false.
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ sequence: 'x' });
+      expect(h.workflowCancel).toHaveBeenCalledWith(
+        'wf_test1234',
+        expect.any(Number),
+      );
+    });
+
+    it('ignores bare p until a navigation key, then pauses', async () => {
+      const h = await autoSurfacedWorkflow();
+
+      h.pressKey({ sequence: 'p' });
+      expect(h.workflowPause).not.toHaveBeenCalled();
+
+      h.pressKey({ name: 'up' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ sequence: 'p' });
+      expect(h.workflowPause).toHaveBeenCalledWith('wf_test1234');
+    });
+
+    it('ignores Enter until a navigation key, then enters detail', async () => {
+      const h = await autoSurfacedWorkflow();
+
+      h.pressKey({ name: 'return' });
+      expect(h.probe.current!.state.dialogMode).toBe('list');
+
+      h.pressKey({ name: 'up' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ name: 'return' });
+      expect(h.probe.current!.state.dialogMode).toBe('detail');
+    });
+
+    it('keeps immediate x behavior for a user-initiated open', async () => {
+      const h = await autoSurfacedWorkflow();
+      // Close the auto-open, then reopen deliberately: the disarm tag
+      // must not survive into a user-initiated open.
+      h.call(() => h.probe.current!.actions.closeDialog());
+      h.call(() => h.probe.current!.actions.openDialog());
+      expect(h.probe.current!.state.autoOpened).toBe(false);
+
+      h.pressKey({ sequence: 'x' });
+      expect(h.workflowCancel).toHaveBeenCalledWith(
+        'wf_test1234',
+        expect.any(Number),
+      );
+    });
+  });
+
   describe('nested sub-agent display', () => {
     // Entries are passed pre-grouped (parent before child) — in production
     // useBackgroundTaskView applies reorderChildrenUnderParents before the
