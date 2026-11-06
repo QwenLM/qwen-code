@@ -19,11 +19,11 @@ const NON_BLANK_TEXT = /[^\s\u200c\u200d]/u;
 
 export const showInputSchema = z
   .object({
-    title: z.string().min(1).max(120),
-    summary: z.string().min(1).max(2000),
-    html: z.string().min(1).max(12_000),
-    css: z.string().max(6000),
-    javascript: z.string().max(12_000),
+    title: z.string('Expected text.').min(1).max(120),
+    summary: z.string('Expected text.').min(1).max(2000),
+    html: z.string('Expected text.').min(1).max(12_000),
+    css: z.string('Expected text.').max(6000),
+    javascript: z.string('Expected text.').max(12_000),
   })
   .strict();
 

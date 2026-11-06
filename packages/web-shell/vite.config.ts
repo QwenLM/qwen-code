@@ -1,4 +1,5 @@
 import { pierreResources } from './pierre-build';
+import { exceljsBrowser } from './exceljs-build';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import type { PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
@@ -130,9 +131,8 @@ export default defineConfig(({ command }) => ({
   root: 'client',
   // Worker-only imports otherwise trigger a dev-page reload on first preview.
   optimizeDeps: {
-    exclude: ['@pierre/diffs', 'shiki/wasm'],
+    exclude: ['@pierre/diffs', 'shiki/wasm', 'exceljs'],
     include: [
-      'exceljs',
       'ssf',
       'shiki-files/core',
       'shiki-files/engine/javascript',
@@ -141,6 +141,7 @@ export default defineConfig(({ command }) => ({
   },
   plugins: [
     pierreResources(),
+    exceljsBrowser(),
     react(),
     tailwindcss(),
     {
@@ -149,6 +150,9 @@ export default defineConfig(({ command }) => ({
       configurePreviewServer: configureDevelopmentMiddleware,
     },
   ],
+  worker: {
+    plugins: () => [exceljsBrowser()],
+  },
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(

@@ -1,4 +1,5 @@
 import { pierreResources } from './pierre-build';
+import { exceljsBrowser } from './exceljs-build';
 import { defineConfig, normalizePath, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
@@ -259,11 +260,15 @@ function stubTranscriptModules(): Plugin {
 export default defineConfig(({ mode }) => ({
   plugins: [
     pierreResources(),
+    exceljsBrowser(),
     ...(mode === 'transcript' ? [stubTranscriptModules()] : []),
     react(),
     tailwindcss(),
     injectCssModules(),
   ],
+  worker: {
+    plugins: () => [exceljsBrowser()],
+  },
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
@@ -332,9 +337,6 @@ export default defineConfig(({ mode }) => ({
           'remark-cjk-friendly',
           /^remark-cjk-friendly\//,
           'remark-gfm',
-          'remark-math',
-          'rehype-katex',
-          'mermaid',
           'katex',
           /^katex\/(?!dist\/katex\.min\.css$)/,
           'codemirror',
