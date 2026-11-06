@@ -349,7 +349,7 @@ describe('oscProgramStatus', () => {
       state: 'error',
       msg: 'x'.repeat(2049),
     });
-    expect(Buffer.byteLength(decodeMsg(overLimit))).toBeLessThanOrEqual(2048);
+    expect(Buffer.byteLength(decodeMsg(overLimit)!)).toBeLessThanOrEqual(2048);
   });
 
   it('is never wrapped for tmux passthrough', () => {
