@@ -452,6 +452,72 @@ describe('runNonInteractiveStreamJson', () => {
     expect(SDK_INITIALIZE_REPLY_TIMEOUT_MS).toBeLessThan(60_000);
   });
 
+  it('derives the initialize reply bound from the budget the client declared', async () => {
+    vi.useFakeTimers();
+    try {
+      const releaseInitialization = vi.fn();
+      config = createConfig({
+        initialize: vi.fn(() => new Promise<void>(releaseInitialization)),
+      });
+      mockDispatcher.dispatch.mockResolvedValue({ ready: true });
+
+      const initRequest = createControlRequest('initialize');
+      initRequest.request = {
+        subtype: 'initialize',
+        timeout: { controlRequest: 20_000 },
+      };
+      mockInputReader.read = async function* () {
+        yield initRequest;
+      };
+
+      const run = runNonInteractiveStreamJson(config, '');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockDispatcher.dispatch).toHaveBeenCalledOnce();
+
+      // The client abandons the request at 20 s; the error frame must land
+      // strictly before that, not at the 55 s default.
+      await vi.advanceTimersByTimeAsync(14_000);
+      expect(mockDispatcher.sendError).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(mockDispatcher.sendError).toHaveBeenCalledWith(
+        'req-1',
+        'Initialization did not finish within 15s',
+      );
+
+      releaseInitialization();
+      await run;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the default reply bound for a client that declares no control-request budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const releaseInitialization = vi.fn();
+      config = createConfig({
+        initialize: vi.fn(() => new Promise<void>(releaseInitialization)),
+      });
+      mockDispatcher.dispatch.mockResolvedValue({ ready: true });
+
+      mockInputReader.read = async function* () {
+        yield createControlRequest('initialize');
+      };
+
+      const run = runNonInteractiveStreamJson(config, '');
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(SDK_INITIALIZE_REPLY_TIMEOUT_MS - 1);
+      expect(mockDispatcher.sendError).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(mockDispatcher.sendError).toHaveBeenCalledOnce();
+
+      releaseInitialization();
+      await run;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('replies to initialize with an error when config initialization outlasts the client budget', async () => {
     vi.useFakeTimers();
     try {

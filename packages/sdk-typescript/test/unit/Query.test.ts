@@ -448,6 +448,31 @@ describe('Query', () => {
       await query.close();
     });
 
+    it('should include the client control-request budget in initialize request', async () => {
+      // The CLI bounds its deferred initialize reply from this value, so a
+      // lowered budget must reach it instead of leaving the 60 s default.
+      const query = new Query(transport, {
+        cwd: '/test',
+        timeout: {
+          controlRequest: 30_000,
+        },
+      });
+
+      await vi.waitFor(() => {
+        expect(transport.writtenMessages.length).toBeGreaterThan(0);
+      });
+
+      const initRequest =
+        transport.getLastWrittenMessage() as CLIControlRequest;
+      expect(initRequest.request.subtype).toBe('initialize');
+      expect(
+        (initRequest.request as CLIControlInitializeRequest).timeout,
+      ).toEqual({ controlRequest: 30_000 });
+
+      await respondToInitialize(transport, query);
+      await query.close();
+    });
+
     it('should expose a shadowed initial effort status', async () => {
       const query = new Query(transport, {
         cwd: '/test',

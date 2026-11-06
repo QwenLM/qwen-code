@@ -25,6 +25,7 @@ import type {
   CLIMessage,
   CLIUserMessage,
   CLIControlRequest,
+  CLIControlInitializeRequest,
   CLIControlResponse,
   ControlCancelRequest,
 } from './types.js';
@@ -64,6 +65,34 @@ const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 // server) from failing the handshake on the client while the CLI keeps
 // initializing.
 export const SDK_INITIALIZE_REPLY_TIMEOUT_MS = 55_000;
+
+// How long before the client's own deadline the reply is given up, so the
+// error frame is written while the client still has the request pending.
+export const SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS = 5_000;
+
+/**
+ * The deadline for the deferred initialize reply, derived from the budget the
+ * client actually declared for this request: it abandons the initialize
+ * control request at `timeout.controlRequest`, which the payload carries since
+ * it is consumer-configurable (a client may lower it to 30 s or raise it for
+ * slow MCP discovery). Falls back to `SDK_INITIALIZE_REPLY_TIMEOUT_MS` for
+ * clients that declare nothing, and never reaches the client's own deadline.
+ */
+export const sdkInitializeReplyTimeoutMs = (
+  declaredBudget: number | undefined,
+): number => {
+  if (
+    declaredBudget === undefined ||
+    !Number.isFinite(declaredBudget) ||
+    declaredBudget <= SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS
+  ) {
+    return SDK_INITIALIZE_REPLY_TIMEOUT_MS;
+  }
+  return Math.min(
+    declaredBudget - SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS,
+    Number.MAX_SAFE_INTEGER,
+  );
+};
 
 // An initialization that outlived its reply keeps running -- it may still
 // finish and serve prompts -- so failing the session there would leave a
@@ -438,6 +467,7 @@ class Session {
   private async awaitConfigInitializationWithReplyTimeout(
     requestId: string,
     options: ConfigInitializeOptions,
+    replyTimeoutMs: number = SDK_INITIALIZE_REPLY_TIMEOUT_MS,
   ): Promise<boolean> {
     const initPromise = this.ensureConfigInitialized(options).then(
       () => {
@@ -459,7 +489,7 @@ class Session {
       timeoutId = setTimeout(() => {
         abandoned = true;
         resolve(false);
-      }, SDK_INITIALIZE_REPLY_TIMEOUT_MS);
+      }, replyTimeoutMs);
     });
     try {
       const outcome = await Promise.race([initPromise, timedOut]);
@@ -479,7 +509,7 @@ class Session {
     }
 
     const message = `Initialization did not finish within ${
-      SDK_INITIALIZE_REPLY_TIMEOUT_MS / 1000
+      replyTimeoutMs / 1000
     }s`;
     this.dispatcher?.sendError(requestId, message);
     return false;
@@ -504,10 +534,17 @@ class Session {
       const sendSdkMcpMessage =
         this.dispatcher?.sdkMcpController.createSendSdkMcpMessage();
 
-      // Initialize config with SDK MCP message support
+      // Initialize config with SDK MCP message support. The reply deadline
+      // follows the budget the client declared for the initialize request
+      // itself, so a lowered (or raised) `timeout.controlRequest` is honored
+      // instead of being overridden by the SDK's default.
       const initialized = await this.awaitConfigInitializationWithReplyTimeout(
         request.request_id,
         { sendSdkMcpMessage },
+        sdkInitializeReplyTimeoutMs(
+          (request.request as CLIControlInitializeRequest).timeout
+            ?.controlRequest,
+        ),
       );
       if (!initialized) {
         return;
