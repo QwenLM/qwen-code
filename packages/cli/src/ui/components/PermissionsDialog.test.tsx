@@ -295,8 +295,10 @@ describe('PermissionsDialog scope rows', () => {
     // The app caps its content area at 100 columns, so a 200-column terminal
     // must not budget the row from 200: the renderer clips at the cap and the
     // file name is what falls off the right edge.
-    process.env['QWEN_HOME'] =
-      '/opt/qwen-enterprise/runtimes/tenant-42/configuration/shared/config';
+    // A short relocated home keeps the directory in the row: at this width no
+    // middle-compression hides it, so the assertion can tell a row built from
+    // QWEN_HOME from one that hard-codes `~/.qwen`.
+    process.env['QWEN_HOME'] = '/tmp/custom-qwen';
     const originalColumns = Object.getOwnPropertyDescriptor(
       process.stdout,
       'columns',
@@ -335,6 +337,9 @@ describe('PermissionsDialog scope rows', () => {
         .find((line) => line.includes('User settings'));
       expect(row).toBeDefined();
       expect(row).toContain('settings.json');
+      expect(row).toContain(
+        `${nodePath.sep}custom-qwen${nodePath.sep}settings.json`,
+      );
     } finally {
       unmount();
       if (originalColumns) {
