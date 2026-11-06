@@ -19,6 +19,15 @@ import {
   ManagedSessionConflictError,
   type ManagedSessionAction,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
+import {
+  assertHostedQuestions,
+  HOSTED_QUESTION_POLICY,
+  hostedQuestionDecisionBytes,
+  normalizeHostedQuestionAnswers,
+  HostedQuestionInputError,
+  type HostedActionQuestion,
+  type HostedQuestionAnswer,
+} from './hosted-user-question.js';
 
 export const HOSTED_TOOL_APPROVAL_POLICY = 'hosted-tool-approval/1';
 export const HOSTED_APPROVAL_TIMEOUT_MS = 10 * 60_000;
@@ -166,19 +175,29 @@ interface HostedActionOptionsBase {
   readonly createdAt: number;
   readonly expiresAt: number;
   readonly requiresHumanDecision?: true;
-  readonly options: ReadonlyArray<{
-    readonly id: string;
-    readonly label: string;
-  }>;
 }
 
 export type HostedActionOptions = HostedActionOptionsBase &
   (
-    | { readonly v: 1 }
-    | { readonly v: 2; readonly inputRef: ManagedSessionDurableRef }
+    | ({
+        readonly options: ReadonlyArray<{
+          readonly id: string;
+          readonly label: string;
+        }>;
+      } & (
+        | { readonly v: 1 }
+        | { readonly v: 2; readonly inputRef: ManagedSessionDurableRef }
+        | {
+            readonly v: 3;
+            readonly inputRef?: ManagedSessionDurableRef;
+            readonly continuationRef: ManagedSessionDurableRef;
+          }
+      ))
     | {
-        readonly v: 3;
-        readonly inputRef?: ManagedSessionDurableRef;
+        readonly v: 4;
+        readonly questions: readonly HostedActionQuestion[];
+        readonly requiresHumanDecision: true;
+        readonly inputRef: ManagedSessionDurableRef;
         readonly continuationRef: ManagedSessionDurableRef;
       }
   );
@@ -191,6 +210,8 @@ export function parseHostedActionOptions(bytes: Buffer): HostedActionOptions {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('Invalid Hosted Action options.');
   const options = value as Record<string, ManagedSessionJsonValue>;
+  const question = options['v'] === 4;
+  if (question) assertHostedQuestions(options['questions']);
   const fields = [
     'v',
     'requestId',
@@ -201,46 +222,55 @@ export function parseHostedActionOptions(bytes: Buffer): HostedActionOptions {
     'inputRevision',
     'createdAt',
     'expiresAt',
-    'options',
+    question ? 'questions' : 'options',
   ];
   if (options['requiresHumanDecision'] !== undefined) {
     if (options['requiresHumanDecision'] !== true)
       throw new Error('Invalid Hosted Action human decision floor.');
     fields.push('requiresHumanDecision');
   }
-  if (options['v'] === 2 || (options['v'] === 3 && options['inputRef']))
-    fields.push('inputRef');
-  if (options['v'] === 3) fields.push('continuationRef');
   if (
-    ![1, 2, 3].includes(options['v'] as number) ||
+    question ||
+    options['v'] === 2 ||
+    (options['v'] === 3 && options['inputRef'])
+  )
+    fields.push('inputRef');
+  if (question || options['v'] === 3) fields.push('continuationRef');
+  if (
+    ![1, 2, 3, 4].includes(options['v'] as number) ||
     Object.keys(options).length !== fields.length ||
     fields.some((field) => !Object.hasOwn(options, field)) ||
     !Number.isSafeInteger(options['inputRevision']) ||
     (options['inputRevision'] as number) < 1 ||
-    options['policyRevision'] !== HOSTED_TOOL_APPROVAL_POLICY ||
+    options['policyRevision'] !==
+      (question ? HOSTED_QUESTION_POLICY : HOSTED_TOOL_APPROVAL_POLICY) ||
+    (question &&
+      (options['requiresHumanDecision'] !== true ||
+        options['toolName'] !== 'ask_user_question')) ||
     !Number.isSafeInteger(options['createdAt']) ||
     !Number.isSafeInteger(options['expiresAt']) ||
     (options['createdAt'] as number) < 0 ||
     (options['expiresAt'] as number) <= (options['createdAt'] as number) ||
-    !Array.isArray(options['options']) ||
-    options['options'].length !== 2 ||
-    !isDeepStrictEqual(
-      options['options'].map((option) =>
-        option && typeof option === 'object' && !Array.isArray(option)
-          ? option['id']
-          : null,
-      ),
-      ['allow', 'deny'],
-    ) ||
-    options['options'].some(
-      (option) =>
-        !option ||
-        typeof option !== 'object' ||
-        Array.isArray(option) ||
-        Object.keys(option).length !== 2 ||
-        typeof option['label'] !== 'string' ||
-        !option['label'],
-    )
+    (!question &&
+      (!Array.isArray(options['options']) ||
+        options['options'].length !== 2 ||
+        !isDeepStrictEqual(
+          options['options'].map((option) =>
+            option && typeof option === 'object' && !Array.isArray(option)
+              ? option['id']
+              : null,
+          ),
+          ['allow', 'deny'],
+        ) ||
+        options['options'].some(
+          (option) =>
+            !option ||
+            typeof option !== 'object' ||
+            Array.isArray(option) ||
+            Object.keys(option).length !== 2 ||
+            typeof option['label'] !== 'string' ||
+            !option['label'],
+        )))
   )
     throw new Error('Invalid Hosted Action options.');
   for (const field of ['requestId', 'turnId', 'functionCallId', 'toolName'])
@@ -407,7 +437,8 @@ export async function readHostedActionOptions(
   );
   if (
     options.requestId !== action.requestId ||
-    options.inputRevision !== action.inputRevision
+    options.inputRevision !== action.inputRevision ||
+    action.kind !== (options.v === 4 ? 'question' : 'permission')
   )
     throw new Error('Hosted Action options do not match the Action.');
   return options;
@@ -442,7 +473,8 @@ export type HostedActionResolution =
       readonly body: {
         readonly requestId: string;
         readonly state: 'decided';
-        readonly optionId: string;
+        readonly optionId?: string;
+        readonly answers?: readonly HostedQuestionAnswer[];
       };
     }
   | {
@@ -489,22 +521,46 @@ export async function resolveHostedAction(
   if (
     request === undefined ||
     Object.keys(request).length !== 3 ||
-    typeof optionId !== 'string' ||
-    !options.options.some((option) => option.id === optionId) ||
+    (options.v === 4
+      ? !Object.hasOwn(request, 'answers')
+      : typeof optionId !== 'string' ||
+        !options.options.some((option) => option.id === optionId)) ||
     request['inputRevision'] !== existing.inputRevision ||
     request['policyRevision'] !== options.policyRevision
   )
     return { status: 400, code: 'invalid_action_response' };
   const writable = () => !isBlocked() && !authority.writesStopped;
-  const bytes = decisionBytes(
-    optionId,
-    existing.inputRevision,
-    options.policyRevision,
-  );
+  let answers: HostedQuestionAnswer[] | undefined;
+  try {
+    if (options.v === 4)
+      answers = normalizeHostedQuestionAnswers(
+        options.questions,
+        request['answers'],
+      );
+  } catch (cause) {
+    if (!(cause instanceof HostedQuestionInputError)) throw cause;
+    return { status: 400, code: 'invalid_action_response' };
+  }
+  const bytes = answers
+    ? hostedQuestionDecisionBytes(
+        answers,
+        existing.inputRevision,
+        options.policyRevision,
+      )
+    : decisionBytes(
+        optionId as string,
+        existing.inputRevision,
+        options.policyRevision,
+      );
+  const response = {
+    requestId,
+    state: 'decided' as const,
+    ...(answers ? { answers } : { optionId: optionId as string }),
+  };
   const digest = createHash('sha256').update(bytes).digest('hex');
   const decided = (action: ManagedSessionAction): HostedActionResolution =>
     action.decisionRef?.digest === digest
-      ? { status: 200, body: { requestId, state: 'decided', optionId } }
+      ? { status: 200, body: response }
       : { status: 409, code: 'action_already_resolved' };
   // What is already recorded is answered as it stands, blocked or not.
   const recorded = (): HostedActionResolution | undefined => {
@@ -568,7 +624,7 @@ export async function resolveHostedAction(
     return failed(cause);
   }
   waiters.notify(requestId);
-  return { status: 200, body: { requestId, state: 'decided', optionId } };
+  return { status: 200, body: response };
 }
 
 export function hostedLiveApprovalPoll(
