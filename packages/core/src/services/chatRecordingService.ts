@@ -49,6 +49,12 @@ import { compactToolResultDisplayForRecording } from '../utils/toolResultDisplay
 import { stripRuntimeSnapshotPrefix } from '../utils/runtimeModelPrefix.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import { modPromptTitleKey, tryGenerateSessionTitle } from './sessionTitle.js';
+import {
+  readSessionTitleSidecar,
+  sessionTitleSidecarPath,
+  truncateTitleForList,
+  writeSessionTitleSidecar,
+} from './session-title-sidecar.js';
 import type {
   ChatCompressionInfo,
   ToolCallResponseInfo,
@@ -325,6 +331,27 @@ function titleText(record: ChatRecord): string | null | undefined {
   if (record.provenance === 'mod_prompt') return null;
   return (record.systemPayload as UserPromptRecordPayload | undefined)
     ?.displayText;
+}
+
+/**
+ * The label a transcript's first user turn supports, under the same policy
+ * the list reader uses to derive that label from an intact transcript: an
+ * explicitly empty `displayText` projection offers nothing and lets a later
+ * prompt label the session, a record without a projection falls back to its
+ * own text parts, and a Mod-submitted prompt is not filtered out (the reader
+ * does not filter it either). Both sidecar writers go through this one
+ * function so a live write and a resume seed cannot disagree.
+ */
+function firstPromptLabelText(record: ChatRecord): string | undefined {
+  const payload = record.systemPayload as UserPromptRecordPayload | undefined;
+  if (payload?.displayText !== undefined) {
+    return payload.displayText.trim() || undefined;
+  }
+  return (
+    record.message?.parts
+      ?.find((part): part is { text: string } => 'text' in part)
+      ?.text?.trim() || undefined
+  );
 }
 
 function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
@@ -1292,6 +1319,12 @@ export class ChatRecordingService {
     | undefined;
   private readonly userDisplayTextsForTitle: Array<string | null | undefined> =
     [];
+  /**
+   * Set when the recorder attached through the projected restore, which
+   * carries no record stream. The session's first prompt (if any) is unknown
+   * there, so a later prompt must not become its label.
+   */
+  private firstPromptUnknown = false;
   // The Mods' prompts as the model read them, which a title drawn from the
   // conversation leaves out, as the projection does.
   private readonly modPromptKeysForTitle = new Set<string>();
@@ -1466,6 +1499,90 @@ export class ChatRecordingService {
     return conversationFile;
   }
 
+  private titleSidecarPath(): string {
+    return sessionTitleSidecarPath(this.ensureChatsDir(), this.getSessionId());
+  }
+
+  /**
+   * Keeps the session list label independent of the transcript's head. A
+   * transcript can be rebuilt without its first records (the writer recreates
+   * a missing file on the next append), and the list otherwise degrades to a
+   * bare session id. Managed logs own their metadata and are skipped.
+   */
+  private persistListTitle(
+    displayName: string,
+    source: 'manual' | 'auto' | 'prompt',
+  ): void {
+    if (this.managedSink) return;
+    try {
+      writeSessionTitleSidecar(this.titleSidecarPath(), displayName, source);
+    } catch {
+      // Best-effort: a missing sidecar must never fail a rename.
+    }
+  }
+
+  private persistPromptDerivedTitle(record: ChatRecord): void {
+    if (this.managedSink) return;
+    // The projected restore carries no record stream, so the session's first
+    // prompt is unknown. Inventing a label from a later prompt would name the
+    // session after the wrong turn as soon as its transcript loses its head.
+    if (this.firstPromptUnknown) return;
+    try {
+      const sidecarPath = this.titleSidecarPath();
+      // Any persisted label wins: a later prompt must not replace the first
+      // prompt's label, a rename, or an auto title. This also lets an
+      // image-only first prompt leave the slot open for the next text prompt.
+      if (readSessionTitleSidecar(sidecarPath)) return;
+      const text = firstPromptLabelText(record);
+      if (!text) return;
+      writeSessionTitleSidecar(
+        sidecarPath,
+        truncateTitleForList(text),
+        'prompt',
+      );
+    } catch {
+      // Best-effort: recording the prompt itself must not depend on the label
+      // sidecar, which can be unwritable (read-only home, partial Config).
+    }
+  }
+
+  /**
+   * Restores the list label from a resolved transcript on resume. Without
+   * this, sessions created before the sidecar existed (or before the current
+   * writer attached) would only gain one on their next prompt, which a resumed
+   * session never gets because the first prompt is already in its history.
+   */
+  private seedTitleSidecar(promptDisplayText?: string): void {
+    if (this.managedSink) return;
+    try {
+      const sidecarPath = this.titleSidecarPath();
+      const existing = readSessionTitleSidecar(sidecarPath);
+      const customTitle = this.currentCustomTitle?.trim();
+      if (customTitle) {
+        const source = this.currentTitleSource ?? 'manual';
+        if (
+          existing?.source === source &&
+          existing.displayName === customTitle
+        ) {
+          return;
+        }
+        writeSessionTitleSidecar(sidecarPath, customTitle, source);
+        return;
+      }
+      // An explicit name already on disk outranks a prompt-derived guess.
+      if (existing && existing.source !== 'prompt') return;
+      const prompt = promptDisplayText?.trim();
+      if (!prompt) return;
+      const label = truncateTitleForList(prompt);
+      if (existing?.source === 'prompt' && existing.displayName === label) {
+        return;
+      }
+      writeSessionTitleSidecar(sidecarPath, label, 'prompt');
+    } catch {
+      // Best-effort: a missing sidecar is a label gap, not a resume failure.
+    }
+  }
+
   private restoreSessionState(
     sessionData?: {
       conversation: { messages: ChatRecord[] };
@@ -1489,11 +1606,18 @@ export class ChatRecordingService {
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
     this.modPromptKeysForTitle.clear();
+    this.firstPromptUnknown = false;
     if (!sessionData) return;
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
+    // Tracked separately from `userDisplayTextsForTitle`: that buffer keeps
+    // only the newest 20 prompts, so its head is not the session's first turn.
+    let firstPromptText: string | undefined;
     for (const record of sessionData.conversation.messages) {
       if (record.type === 'user' && record.subtype === undefined) {
         this.trackTitleText(record);
+        if (firstPromptText === undefined) {
+          firstPromptText = firstPromptLabelText(record);
+        }
       }
       if (record.type !== 'system') continue;
       if (record.subtype === 'custom_title') {
@@ -1540,6 +1664,7 @@ export class ChatRecordingService {
     if (this.currentSourceType) {
       this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
+    this.seedTitleSidecar(firstPromptText);
   }
 
   private trackTitleText(record: ChatRecord): void {
@@ -1567,6 +1692,10 @@ export class ChatRecordingService {
   }
 
   private restoreProjectedState(state: ChatRecordingRestoreState): void {
+    // A projection only exists for a transcript that is already on disk, so
+    // the first prompt (if any) predates this recorder. No record stream is
+    // carried here, so the seed cannot recover it.
+    this.firstPromptUnknown = true;
     this.lastRecordUuid = state.lastCompletedUuid;
     this.lastPersistedRecordUuid = state.lastCompletedUuid;
     this.resetExternalRecordIndex();
@@ -1600,6 +1729,7 @@ export class ChatRecordingService {
     if (this.currentSourceType) {
       this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
+    this.seedTitleSidecar();
   }
 
   activate(
@@ -2600,6 +2730,11 @@ export class ChatRecordingService {
       this.turnPromptIds.push(getRecordRewindId(record));
       this.turnDaemonPromptIds.push(record.daemonPromptId);
       this.appendRecord(record);
+      // The sidecar write is best-effort and runs after the transcript
+      // append, so an unwritable label path can never drop the message. It
+      // only fills a missing label: a persisted prompt or custom title is
+      // never replaced by a later prompt.
+      this.persistPromptDerivedTitle(record);
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
     }
@@ -3913,6 +4048,7 @@ export class ChatRecordingService {
       );
       this.currentCustomTitle = customTitle;
       this.currentTitleSource = titleSource;
+      this.persistListTitle(customTitle, titleSource);
       try {
         this.titleRecordedCallback?.(
           customTitle,

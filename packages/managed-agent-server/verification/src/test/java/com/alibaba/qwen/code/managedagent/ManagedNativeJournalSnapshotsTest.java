@@ -76,6 +76,43 @@ class ManagedNativeJournalSnapshotsTest {
                 .isInstanceOf(ManagedAgentException.class);
     }
 
+    @Test
+    void publishesWhileBothTenantGuardsAreHeld() throws Exception {
+        // The snapshot writer takes neither tenant guard: root and head order it
+        // (design 2026-11-05-managed-snapshot-writer-tenant-guards).
+        commitMonitor();
+        var held = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        try (var holder = java.util.concurrent.Executors.newSingleThreadExecutor()) {
+            var hold = holder.submit(() -> tx.executeWithoutResult(status -> {
+                com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.lockPlacement(jdbc, TENANT);
+                String key = com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract
+                        .sha256(TENANT.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?,"
+                        + " 'output_publication') ON DUPLICATE KEY UPDATE tenant_key = tenant_key", key, TENANT);
+                jdbc.queryForList("SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain = 'output_publication'"
+                        + " AND tenant_key = ? FOR UPDATE", key);
+                held.countDown();
+                try {
+                    release.await(30, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }));
+            try {
+                assertThat(held.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                long before = System.nanoTime();
+                var published = snapshots.publish(TENANT, SESSION, TOKEN, request("guards-held"));
+                assertThat(published.replayed()).isFalse();
+                assertThat(java.time.Duration.ofNanos(System.nanoTime() - before)).isLessThan(java.time.Duration.ofSeconds(4));
+                assertThat(snapshots.publish(TENANT, SESSION, TOKEN, request("guards-held")).replayed()).isTrue();
+            } finally {
+                release.countDown();
+            }
+            hold.get(30, java.util.concurrent.TimeUnit.SECONDS);
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {".", "..", "folder/snapshot", "folder\\snapshot"})
     void leavesNamesThatTheHttpRouteCannotAddressUnselected(String id) {
