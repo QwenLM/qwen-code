@@ -695,7 +695,7 @@ jobs:
           # runners, so such state persists. Start the shard-owned cache
           # empty — and only that exact path, so a runner-exported shared
           # cache and lint's already-warmed run-unique home stay untouched.
-          if [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
+          if [ -n "${RUNNER_TEMP:-}" ] && [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
             rm -rf -- "${COREPACK_HOME}"
           fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
@@ -1194,7 +1194,7 @@ jobs:
           # runners, so such state persists. Start the shard-owned cache
           # empty — and only that exact path, so a runner-exported shared
           # cache and lint's already-warmed run-unique home stay untouched.
-          if [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
+          if [ -n "${RUNNER_TEMP:-}" ] && [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
             rm -rf -- "${COREPACK_HOME}"
           fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
@@ -1992,7 +1992,7 @@ jobs:
           # runners, so such state persists. Start the shard-owned cache
           # empty — and only that exact path, so a runner-exported shared
           # cache and lint's already-warmed run-unique home stay untouched.
-          if [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
+          if [ -n "${RUNNER_TEMP:-}" ] && [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
             rm -rf -- "${COREPACK_HOME}"
           fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
@@ -2407,6 +2407,26 @@ jobs:
             echo 'font baseline check: skipped (script not present in this checkout)'
             exit 0
           fi
+          # A recoverable setup gap should not emit a failure annotation.
+          if GITHUB_ACTIONS='' bash .github/scripts/ecs-runner/check-font-baseline.sh; then
+            exit 0
+          fi
+          # Keep PR-supplied code at the runner's existing privilege level.
+          font_stage="$(mktemp -d "${RUNNER_TEMP:-/tmp}/qwen-fonts.XXXXXX")"
+          trap 'rm -rf -- "${font_stage}"' EXIT
+          mkdir -p "${font_stage}/lists/partial" "${font_stage}/packages"
+          apt-get -o "Dir::State::lists=${font_stage}/lists" update -qq
+          (
+            cd "${font_stage}/packages"
+            apt-get -o "Dir::State::lists=${font_stage}/lists" download fonts-dejavu-core fonts-dejavu-mono
+          )
+          for archive in "${font_stage}"/packages/*.deb; do
+            dpkg-deb --extract "${archive}" "${font_stage}/extracted"
+          done
+          font_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/fonts/qwen-ci"
+          mkdir -p "${font_dir}"
+          cp -R "${font_stage}/extracted/usr/share/fonts/." "${font_dir}/"
+          fc-cache -f "${font_dir}"
           bash .github/scripts/ecs-runner/check-font-baseline.sh
 
       # The build comes from test_build's tree below, not from `prepare`.
