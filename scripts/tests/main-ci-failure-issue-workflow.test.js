@@ -891,6 +891,46 @@ printf '%s\\n' '1'
       expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
       expect(resolved.stdout).toContain('the newer push run owns its result');
     });
+    it('evaluates the successor jq projection end to end, including the id and attempt fields', () => {
+      // The deferral reads successor_id/successor_attempt out of this line's
+      // --jq projection, so the stub must hand back raw JSON and let real jq
+      // apply the caller's filter — a pre-formatted 'completed cancelled 555 1'
+      // would stay green even if `\(.id // "")` were dropped, while production
+      // would then bind the attempt number as the id and classify run 1
+      // (#16280 R5-5).
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == *commits/main* ]]; then printf '%s\\n' 'new-head'; exit 0; fi
+if [[ "$*" == *actions/workflows/*/runs* ]]; then
+  filter=''
+  args=("$@")
+  for ((i=0;i<\${#args[@]};i++)); do
+    if [[ "\${args[i]}" == --jq ]]; then filter="\${args[i+1]}"; fi
+  done
+  printf '%s\\n' '{"workflow_runs":[{"status":"completed","conclusion":"cancelled","id":555,"run_attempt":1}]}' | jq -r "$filter"
+  exit 0
+fi
+if [[ "$*" == *actions/runs/555/attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  exit 0
+fi
+if [[ "$*" == */check-runs/9001/annotations* ]]; then
+  printf '%s\\n' 'The job has exceeded the maximum execution time of 1h0m0s'
+  exit 0
+fi
+exit 1
+`;
+      const resolved = detect(
+        '1',
+        { EVENT_NAME: 'push', HEAD_BRANCH: 'main', HEAD_SHA: 'old-head' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('the newer push run owns its result');
+      // Shape pin on the projection itself: both fields the deferral binds
+      // must survive any edit to the jq expression.
+      expect(live.run).toContain('\\(.id // "")');
+      expect(live.run).toContain('\\(.run_attempt // "")');
+    });
     it('reports this run when the cancelled successor cannot be read', () => {
       // `unreadable` is a failed read of the successor, not its verdict: the
       // successor's own gate may have read the same run as concurrency and
