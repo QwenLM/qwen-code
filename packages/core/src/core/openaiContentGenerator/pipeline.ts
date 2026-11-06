@@ -2070,10 +2070,10 @@ export class ContentGenerationPipeline {
       this.contentGeneratorConfig.model === currentConfig.model &&
       (currentConfig.authType === undefined ||
         this.contentGeneratorConfig.authType === currentConfig.authType);
-    const modalitiesSourceKind = onPrimaryModel
+    const modalitiesSource = onPrimaryModel
       ? this.config.cliConfig.getContentGeneratorConfigSources?.()['modalities']
-          ?.kind
       : undefined;
+    const modalitiesSourceKind = modalitiesSource?.kind;
     const configModel = this.contentGeneratorConfig.model;
     const toolCallParser = isStreaming
       ? new StreamingToolCallParser()
@@ -2092,7 +2092,12 @@ export class ContentGenerationPipeline {
       // `samplingParams.model` can override; the kind describes the config's
       // own modalities, so a refusal must not pair the two when they differ.
       ...(modalitiesSourceKind && effectiveModel === configModel
-        ? { modalitiesSourceKind }
+        ? {
+            modalitiesSourceKind,
+            ...(modalitiesSource?.via?.kind
+              ? { modalitiesSourceViaKind: modalitiesSource.via.kind }
+              : {}),
+          }
         : {}),
       startTime: Date.now(),
       splitToolMedia:

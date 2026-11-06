@@ -28,6 +28,20 @@ describe('unsupportedModalityReason', () => {
     expect(reason).toContain('"modalities": { "image": true }');
   });
 
+  it('drops the settings key when the value came through modelProviders', () => {
+    // A provider-backed model ignores the top-level `model.generationConfig`,
+    // so offering it would name a setting that never produced this value.
+    const reason = unsupportedModalityReason(
+      'image',
+      'my-model',
+      'computed',
+      'modelProviders',
+    );
+    expect(reason).toContain('inferred from the model name');
+    expect(reason).not.toContain('model.generationConfig.modalities');
+    expect(reason).toContain('re-select the model with /model');
+  });
+
   it('points a settings-declared value at the settings key', () => {
     expect(
       unsupportedModalityReason('image', 'my-model', 'settings'),

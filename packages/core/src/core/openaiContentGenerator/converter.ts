@@ -1205,6 +1205,7 @@ function unsupportedModalityPlaceholder(
       modality,
       requestContext.model,
       requestContext.modalitiesSourceKind,
+      requestContext.modalitiesSourceViaKind,
     )} The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.`;
   }
   return {

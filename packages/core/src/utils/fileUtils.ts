@@ -1562,6 +1562,8 @@ export async function processSingleFileContent(
     const modality = mediaModalityKey(fileType);
     if (modality && modality !== 'pdf') {
       if (!modalities[modality]) {
+        const modalitiesSource =
+          config.getContentGeneratorConfigSources?.()['modalities'];
         // On the interactive @-resolution path, the caller can keep image parts
         // inline so the vision bridge can transcribe them downstream for a
         // text-only model. Other media (audio/video) are always skipped.
@@ -1574,7 +1576,8 @@ export async function processSingleFileContent(
             unsupportedModalityReason(
               modality,
               config.getModel(),
-              config.getContentGeneratorConfigSources?.()['modalities']?.kind,
+              modalitiesSource?.kind,
+              modalitiesSource?.via?.kind,
             ),
           );
           debugLogger.warn(
