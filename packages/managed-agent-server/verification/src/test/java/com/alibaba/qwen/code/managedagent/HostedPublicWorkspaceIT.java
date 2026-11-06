@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -94,6 +95,7 @@ class HostedPublicWorkspaceIT {
     private boolean shellLifecycleV2;
     private boolean publicChildren;
     private boolean publicChildBackground;
+    private boolean publicChildQuestions;
     private boolean restarted;
     private boolean publicChildFallback;
     private Map<String, byte[]> publicationObjects;
@@ -169,6 +171,105 @@ class HostedPublicWorkspaceIT {
         assertThat(request("POST", "/api/agent/web-shell/v1/transcript/query", Map.of("sessionId", session), null, "actor", 200)
                 .toString()).contains("G0_USER_QUESTION_DONE");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?", Long.class, session)).isZero();
+    }
+
+    @Test
+    @Timeout(240)
+    void publicChildQuestionsAllowTheSecondChildToAnswerFirst() throws Exception {
+        assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
+        publicChildren = true;
+        publicChildQuestions = true;
+        shell = true;
+        definitionApproval = true;
+        shellLifecycleV2 = true;
+        Path root = boot().getFirst().resolve("child");
+        register("workspace-0", "storage-0");
+        String parent = request("POST", "/api/agent/web-shell/v1/sessions/create",
+                Map.of("agentId", "qwen-code", "idempotencyKey", "parallel-questions", "input", List.of(),
+                        "approvalMode", "yolo", "workspace", Map.of("workspaceId", "workspace-0", "cwdRelative", "child")),
+                "parallel-questions", "actor", 202).path("sessionId").asText();
+        request("POST", "/api/agent/web-shell/v1/turns/submit",
+                Map.of("sessionId", parent, "idempotencyKey", "parallel-questions-turn",
+                        "input", List.of(Map.of("type", "input_text", "text", "G0_PUBLIC_QUESTIONS_PARENT"))),
+                "parallel-questions-turn", "actor", 202);
+        JsonNode page = await().atMost(Duration.ofSeconds(90)).until(() -> {
+            assertThat(modelFailure.get()).isNull();
+            return request("POST", "/api/agent/web-shell/v1/actions/query",
+                    Map.of("sessionId", parent, "includeChildren", true), null, "actor", 200);
+        }, result -> result.path("data").size() == 2);
+        List<JsonNode> pending = new ArrayList<>();
+        page.path("data").forEach(action -> {
+            assertThat(action.path("kind").asText()).isEqualTo("question");
+            assertThat(action.path("sessionId").asText()).isNotEqualTo(parent);
+            pending.add(action);
+        });
+        JsonNode first = pending.stream().filter(action -> action.at("/questions/0/prompt").asText().equals("Which target for A?"))
+                .findFirst().orElseThrow();
+        JsonNode second = pending.stream().filter(action -> action.at("/questions/0/prompt").asText().equals("Which target for B?"))
+                .findFirst().orElseThrow();
+        assertThat(first.path("sessionId")).isNotEqualTo(second.path("sessionId"));
+        Map<String, String> originalBindings = new java.util.HashMap<>();
+        for (JsonNode action : pending) {
+            String child = action.path("sessionId").asText();
+            String turn = action.path("turnId").asText();
+            await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM ma_runtime_session rs JOIN ma_runtime_binding rb ON rs.binding_id=rb.binding_id"
+                            + " AND rs.runtime_generation=rb.runtime_generation WHERE rs.tenant_id=? AND rs.harness_session_id=?"
+                            + " AND rs.runtime_session_id=? AND rs.session_state='READY' AND rs.execution_storage_key IS NULL"
+                            + " AND rb.binding_state='READY' AND rb.provisioner_kind='local-process'",
+                    Integer.class, tenant, child, turn)).isEqualTo(1));
+            originalBindings.put(child, jdbc.queryForObject(
+                    "SELECT binding_id FROM ma_runtime_session WHERE tenant_id=? AND harness_session_id=? AND runtime_session_id=?",
+                    String.class, tenant, child, turn));
+        }
+        assertThat(request("POST", "/api/agent/web-shell/v1/tasks/query", Map.of("sessionId", parent), null, "actor", 200)
+                .path("activeChildCount").asInt()).isEqualTo(2);
+        assertThat(root.resolve("question-A.txt")).doesNotExist();
+        assertThat(root.resolve("question-B.txt")).doesNotExist();
+        for (JsonNode action : List.of(second, first)) {
+            boolean answeringSecond = action == second;
+            String label = answeringSecond ? "B" : "A";
+            String child = action.path("sessionId").asText();
+            String key = "question-answer-" + label;
+            Map<String, Object> body = Map.of("sessionId", child, "actionId", action.path("actionId").asText(),
+                    "idempotencyKey", key, "response", Map.of("kind", "question",
+                            "inputRevision", action.path("inputRevision").asLong(),
+                            "policyRevision", action.path("policyRevision").asText(),
+                            "answers", List.of(Map.of("questionId", "q1", "optionIds", List.of(answeringSecond ? "q1o2" : "q1o1"),
+                                    "text", label + "-only"))));
+            String operation = request("POST", "/api/agent/web-shell/v1/actions/respond", body, key, "actor", 202)
+                    .path("operationId").asText();
+            assertThat(request("POST", "/api/agent/web-shell/v1/actions/respond", body, key, "actor", 202)
+                    .path("operationId").asText()).isEqualTo(operation);
+            await().atMost(Duration.ofSeconds(60)).untilAsserted(() -> {
+                assertThat(modelFailure.get()).isNull();
+                assertThat(request("GET", "/v1/agents/sessions/" + child + "/operations/" + operation,
+                        null, null, "actor", 200).path("status").asText()).isEqualTo("completed");
+                assertThat(root.resolve("question-" + label + ".txt")).hasContent(label + "-only");
+                assertThat(request("POST", "/api/agent/web-shell/v1/transcript/query", Map.of("sessionId", child), null, "actor", 200)
+                        .toString()).contains("G0_PUBLIC_QUESTION_" + label + "_DONE");
+            });
+            if (answeringSecond) {
+                JsonNode remaining = request("POST", "/api/agent/web-shell/v1/actions/query",
+                        Map.of("sessionId", parent, "includeChildren", true), null, "actor", 200).path("data");
+                assertThat(remaining.size()).isEqualTo(1);
+                assertThat(remaining.path(0).path("actionId")).isEqualTo(first.path("actionId"));
+                assertThat(remaining.path(0).path("sessionId")).isEqualTo(first.path("sessionId"));
+                assertThat(root.resolve("question-A.txt")).doesNotExist();
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE tenant_id=? AND harness_session_id=?"
+                        + " AND runtime_session_id=? AND binding_id=? AND session_state='READY' AND execution_storage_key IS NULL",
+                        Integer.class, tenant, first.path("sessionId").asText(), first.path("turnId").asText(),
+                        originalBindings.get(first.path("sessionId").asText()))).isEqualTo(1);
+            }
+        }
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+            JsonNode tasks = request("POST", "/api/agent/web-shell/v1/tasks/query", Map.of("sessionId", parent), null, "actor", 200);
+            assertThat(tasks.path("data").size()).isEqualTo(2);
+            tasks.path("data").forEach(task -> assertThat(task.path("state").asText()).isEqualTo("completed"));
+            assertThat(tasks.path("activeChildCount").asInt()).isZero();
+        });
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=? AND parent_session_id=?",
+                Integer.class, tenant, parent)).isEqualTo(2);
     }
 
     @ParameterizedTest
@@ -1534,7 +1635,7 @@ class HostedPublicWorkspaceIT {
         assertThat(modelRequests).hasSize(approvals ? 16 : 30);
     }
 
-    private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) {
+    private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) throws IOException {
         boolean mysql = System.getProperty("mysql.url") != null;
         List<String> arguments = new ArrayList<>(List.of("--server.address=127.0.0.1", "--server.port=" + port,
                 "--spring.datasource.url=" + System.getProperty("mysql.url",
@@ -1611,6 +1712,7 @@ class HostedPublicWorkspaceIT {
         if (!restarted && (definitionApproval || "Linux".equals(System.getProperty("os.name")))) {
             var guard = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
             for (int index = 0; index < roots.size(); index++) {
+                WorkspaceTestStorage.prepareNativeRoot(roots.get(index));
                 guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
             }
         }
@@ -1782,7 +1884,7 @@ class HostedPublicWorkspaceIT {
                 assertThat(tools).contains("read_file", "write_file", "edit", "run_shell_command");
                 assertThat(tools).doesNotContain("team_create", "workflow", "send_message");
             } else if (shell) {
-                var expectedTools = new ArrayList<>(List.of("read_file", "write_file", "edit", "web_fetch", "run_shell_command", "glob", "ask_user_question"));
+                var expectedTools = new ArrayList<>(List.of("read_file", "write_file", "edit", "web_fetch", "run_shell_command", "glob", "todo_write", "ask_user_question"));
                 if (shellLifecycleV2) {
                     expectedTools.add("monitor");
                 }
@@ -1795,7 +1897,7 @@ class HostedPublicWorkspaceIT {
             } else if (resident) {
                 assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
             } else {
-                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "web_fetch", "ask_user_question");
+                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "web_fetch", "glob", "ask_user_question");
             }
             // Count only this Turn's tool results, after the latest fixture prompt, so a later
             // Turn in the same Session runs the same write, edit and read sequence. Other user
@@ -1845,8 +1947,17 @@ class HostedPublicWorkspaceIT {
             var choice = chunk.putArray("choices").addObject().put("index", 0);
             var delta = choice.putObject("delta").put("role", "assistant");
             boolean publicParent = publicChildren && tools.contains("agent");
+            String questionChild = prompt.get().contains("G0_PUBLIC_QUESTION_A") ? "A" : "B";
+            if (publicChildQuestions && !publicParent && step > 0) {
+                assertThat(tools).contains("ask_user_question");
+                assertThat(results.getFirst().toString()).contains(questionChild + "-only")
+                        .doesNotContain(("A".equals(questionChild) ? "B" : "A") + "-only");
+            }
             boolean toolCall = publicChildren ? publicParent ? step == 0 && prompt.get().contains("G0_PUBLIC_PARENT") : step < 2
                     : step < (questionTurn || residentUnsupported ? 1 : definitionTurn ? 2 : runShell ? 1 : 3);
+            if (publicChildQuestions) {
+                toolCall = step < 2 && (!publicParent || prompt.get().contains("G0_PUBLIC_QUESTIONS_PARENT"));
+            }
             if (toolCall) {
                 String name = runShell ? "run_shell_command"
                         : (residentSecond ? List.of("read_file", "edit", "read_file")
@@ -1883,6 +1994,21 @@ class HostedPublicWorkspaceIT {
                         assertThat(body.path("messages").toString()).doesNotContain("G0_PUBLIC_PARENT");
                     }
                 }
+                if (publicChildQuestions) {
+                    if (publicParent) {
+                        name = "agent";
+                        args = Map.of("description", "ask child " + (step == 0 ? "A" : "B"),
+                                "prompt", "G0_PUBLIC_QUESTION_" + (step == 0 ? "A" : "B"), "run_in_background", true);
+                    } else if (step == 0) {
+                        name = "ask_user_question";
+                        args = Map.of("questions", List.of(Map.of("question", "Which target for " + questionChild + "?",
+                                "header", "Target", "multiSelect", true,
+                                "options", List.of(Map.of("label", "A", "description", "First"), Map.of("label", "B", "description", "Second")))));
+                    } else {
+                        name = "write_file";
+                        args = Map.of("file_path", "question-" + questionChild + ".txt", "content", questionChild + "-only");
+                    }
+                }
                 if (shellFault != null) {
                     String producer = "const fs = require('fs'); fs.appendFileSync('proof.txt', 'x');"
                             + " process.stdout.write(Buffer.alloc(1024 * 1024, 0x61), () => {"
@@ -1898,7 +2024,8 @@ class HostedPublicWorkspaceIT {
                         .put("type", "function").putObject("function").put("name", name)
                         .put("arguments", json.writeValueAsString(args));
             } else {
-                delta.put("content", questionTurn ? "G0_USER_QUESTION_DONE" : publicChildren && !publicParent ? "G0_PUBLIC_CHILD_DONE" : "G0_DONE");
+                delta.put("content", publicChildQuestions && !publicParent ? "G0_PUBLIC_QUESTION_" + questionChild + "_DONE"
+                        : questionTurn ? "G0_USER_QUESTION_DONE" : publicChildren && !publicParent ? "G0_PUBLIC_CHILD_DONE" : "G0_DONE");
             }
             choice.putNull("finish_reason");
             String first = "data: " + json.writeValueAsString(chunk) + "\n\n";

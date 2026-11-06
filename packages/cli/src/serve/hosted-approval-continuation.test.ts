@@ -27,12 +27,17 @@ import {
   HostedApprovalWaiters,
   resolveHostedAction,
 } from './hosted-tool-approval.js';
-import { findHostedApprovalContinuation } from './hosted-approval-continuation.js';
+import {
+  findHostedApprovalContinuation,
+  readHostedApprovalContinuation,
+} from './hosted-approval-continuation.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { hostedPublicPlanActive } from './hosted-plan-mode.js';
 import { HostedSkillCatalog } from './hosted-skill-catalog.js';
 import { slowHostBudgetMs } from '../test-utils/slow-test-host.js';
 import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -40,6 +45,186 @@ afterEach(() => vi.restoreAllMocks());
 // commits; a fixed 10s budget flaked on a loaded runner (#15176).
 const WAIT_TIMEOUT_MS = slowHostBudgetMs(10_000, 45_000);
 const TEST_TIMEOUT_MS = slowHostBudgetMs(20_000, 75_000);
+
+function nativeContinuationFixture(toolNames = ['ask_user_question']) {
+  const bytesById = new Map<string, Buffer>();
+  const publish = (kind: string, value: unknown): ManagedSessionDurableRef => {
+    const bytes = Buffer.from(JSON.stringify(value));
+    const resourceId = `resource-${bytesById.size}`;
+    bytesById.set(resourceId, bytes);
+    return {
+      resourceId,
+      kind,
+      schemaVersion: 1,
+      byteLength: bytes.length,
+      digest: createHash('sha256').update(bytes).digest('hex'),
+    };
+  };
+  const sessionKey = {
+    tenantId: 'tenant',
+    workspaceId: 'workspace',
+    sessionId: 'session',
+  };
+  const input = {
+    questions: [
+      {
+        header: 'Next step',
+        question: 'Which step should run next?',
+        options: [
+          { label: 'Read', description: 'Read the current files.' },
+          { label: 'Edit', description: 'Edit the current files.' },
+        ],
+      },
+    ],
+  };
+  const parts = toolNames.map((name, index) => ({
+    functionCall: { id: `call-${index}`, name, args: input },
+  }));
+  const definitionRef = publish('managed-definition', {
+    toolProfile: 'hosted-workspace-files/1',
+  });
+  const rootSnapshotRef = publish('managed-root', {});
+  const assistantRef = publish('managed-message', {
+    daemonPromptId: 'prompt',
+    message: { parts },
+  });
+  const runtime: Record<string, unknown> = {
+    runtimeSessionId: 'prompt',
+    bindingId: 'binding',
+    generation: '1',
+    workspaceGeneration: '1',
+  };
+  const plan: Record<string, unknown> = {
+    v: 1,
+    sessionKey,
+    promptId: 'prompt',
+    definitionRef,
+    rootSnapshotRef,
+    sourceActivation: { activationId: 'activation', epoch: 1 },
+    runtime,
+    batchId: 'batch',
+    assistantRef,
+    model: 'model',
+    round: 0,
+    stage: 'final',
+    approvalOrdinal: 0,
+    actionId: null,
+    calls: toolNames.map((name, index) => {
+      const callId = `call-${index}`;
+      const payloadJson = JSON.stringify({ toolName: name, input });
+      const requestDigest = `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`;
+      return {
+        call: { callId, name, args: input, prompt_id: 'prompt' },
+        runtimeCallId: callId,
+        inputRef: publish('managed-tool-input', {
+          harnessSessionId: 'session',
+          runtimeSessionId: 'prompt',
+          payloadJson,
+        }),
+        definitionRef: publish('managed-tool-definition', { name }),
+        requestDigest,
+        argsDigest: `sha256:${managedToolDigest(input)}`,
+        prepareKey: `prompt:${callId}`,
+        prepareReference: {
+          sessionId: 'prompt',
+          promptId: 'prompt',
+          callId,
+          argsDigest: requestDigest,
+        },
+        partIndex: index,
+        refusal: 'Question ended without an answer.',
+        actionId: null,
+      };
+    }),
+  };
+  const session = {
+    authority: {
+      sessionHeader: { sessionKey, definitionRef, rootSnapshotRef },
+      committedSequence: 1,
+      eventsInSequenceRange: () => [
+        {
+          kind: 'message.committed',
+          payload: {
+            messageId: 'batch',
+            role: 'assistant',
+            contentRef: assistantRef,
+          },
+        },
+      ],
+    },
+    resources: {
+      read: async (ref: ManagedSessionDurableRef) =>
+        bytesById.get(ref.resourceId)!,
+    },
+  } as unknown as Awaited<ReturnType<typeof openManagedSession>>;
+  return {
+    plan,
+    runtime,
+    read: () =>
+      readHostedApprovalContinuation(
+        session,
+        publish('hosted-approval-continuation', plan),
+        'prompt',
+      ),
+  };
+}
+
+it('accepts legacy native owners and the local question provider pin', async () => {
+  const fixture = nativeContinuationFixture();
+  await expect(fixture.read()).resolves.toMatchObject({
+    plan: { runtime: fixture.runtime },
+  });
+  fixture.runtime['provisionerKind'] = 'local-process';
+  await expect(fixture.read()).resolves.toMatchObject({
+    plan: { runtime: { provisionerKind: 'local-process' } },
+  });
+  await expect(
+    nativeContinuationFixture(['read_file']).read(),
+  ).resolves.toMatchObject({
+    plan: { runtime: { runtimeSessionId: 'prompt' } },
+  });
+});
+
+it.each(['ssh-process', 'external-workspace', 'static', '', null, true])(
+  'rejects an unsupported question provider pin (%s)',
+  async (provider) => {
+    const fixture = nativeContinuationFixture();
+    fixture.runtime['provisionerKind'] = provider;
+    await expect(fixture.read()).rejects.toThrow(
+      'Hosted approval continuation conflicts with the original Turn.',
+    );
+  },
+);
+
+it.each([['read_file'], ['ask_user_question', 'read_file']])(
+  'rejects provider pins outside a single question (%j)',
+  async (...toolNames) => {
+    const fixture = nativeContinuationFixture(toolNames);
+    fixture.runtime['provisionerKind'] = 'local-process';
+    await expect(fixture.read()).rejects.toThrow(
+      'Hosted approval continuation conflicts with the original Turn.',
+    );
+  },
+);
+
+it('rejects a question provider pin on command steps or open Runtime shapes', async () => {
+  const command = nativeContinuationFixture();
+  command.runtime['provisionerKind'] = 'local-process';
+  command.plan['commandStep'] = {
+    toolStageId: 'stage',
+    toolName: 'shell',
+    configRevision: 1,
+  };
+  await expect(command.read()).rejects.toThrow(
+    'Hosted approval continuation conflicts with the original Turn.',
+  );
+  const extra = nativeContinuationFixture();
+  extra.runtime['provisionerKind'] = 'local-process';
+  extra.runtime['unexpected'] = true;
+  await expect(extra.read()).rejects.toThrow(
+    'Hosted approval continuation conflicts with the original Turn.',
+  );
+});
 
 it.each(
   ['allow', 'deny', 'cancelled', 'expired']

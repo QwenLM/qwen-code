@@ -102,16 +102,23 @@ export function readLocalJournalBytes(
     const bytes = readDescriptorPrefix(fd, size);
     const after = fs.fstatSync(fd);
     const current = fs.lstatSync(filePath);
+    // Timestamps come from a coarse clock, so a write in the same tick as the
+    // previous one leaves them equal. They stand for the bytes only while the
+    // size is unchanged too, which assumes no writer brings the file back to
+    // the same length with different bytes within one tick, by rewriting it
+    // in place or by truncating it and appending again. A file that grew is
+    // read again up to the size read the first time, the bound or the size
+    // its first stat saw, and those bytes must match.
     requireSnapshot(
       !current.isSymbolicLink() &&
         current.isFile() &&
         current.dev === before.dev &&
         current.ino === before.ino &&
         after.size >= size &&
-        ((after.ctimeMs === before.ctimeMs &&
+        ((after.size === before.size &&
+          after.ctimeMs === before.ctimeMs &&
           after.mtimeMs === before.mtimeMs) ||
-          (maxBytes !== undefined &&
-            after.size > before.size &&
+          (after.size > before.size &&
             readDescriptorPrefix(fd, size).equals(bytes))),
       'file changed while reading',
     );
