@@ -1152,13 +1152,16 @@ export class WorkflowRunRegistry {
     releaseSource: () => void,
   ): string | 'duplicate' | 'rejected' {
     const entry = this.entries.get(runId);
+    // A change callback only repaints the "needs approval" badge; it cannot
+    // answer the request. Requiring a real responder is what keeps a parked
+    // approval from waiting forever on a badge-only host.
     if (
       !entry ||
       !isActiveWorkflowStatus(entry.status) ||
-      (!this.approvalChangeCallback && !this.approvalRequestCallback)
+      !this.approvalRequestCallback
     ) {
       debugLogger.warn(
-        `Workflow approval rejected for ${runId}/${event.callId}: entry missing, not active, or no host channel`,
+        `Workflow approval rejected for ${runId}/${event.callId}: entry missing, not active, or no host responder`,
       );
       return 'rejected';
     }

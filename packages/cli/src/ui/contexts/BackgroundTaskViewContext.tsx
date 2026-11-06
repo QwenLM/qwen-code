@@ -17,6 +17,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
@@ -173,6 +174,26 @@ export function BackgroundTaskViewProvider({
   useEffect(() => {
     if (livePanelFocused && !hasAgentEntries) setLivePanelFocusedRaw(false);
   }, [livePanelFocused, hasAgentEntries]);
+
+  // A workflow approval can only be answered from the detail view, and the
+  // registry rejects the call outright when no host answers it. Open the
+  // dialog on the parked approval once (keyed by approvalId) so a blocked
+  // workflow surfaces as a real prompt instead of a footer badge. Keying on
+  // the id keeps closing the dialog from bouncing the user straight back in.
+  const surfacedApprovalRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (dialogMode !== 'closed') return;
+    const index = entries.findIndex(
+      (entry) => entry.kind === 'workflow' && entry.pendingApprovals.length > 0,
+    );
+    const entry = entries[index];
+    if (entry?.kind !== 'workflow') return;
+    const approvalId = entry.pendingApprovals[0]?.approvalId;
+    if (!approvalId || surfacedApprovalRef.current === approvalId) return;
+    surfacedApprovalRef.current = approvalId;
+    setRawSelectedIndex(index);
+    setDialogMode('detail');
+  }, [entries, dialogMode]);
 
   // rawSelectedIndex can fall out of range when entries shrink; clamp on read.
   const selectedIndex =
