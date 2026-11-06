@@ -30183,9 +30183,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
       ]) {
         await expect(
           agent.unstable_listSessions({ cwd: '/tmp/project', cursor }),
-        ).rejects.toThrow(
-          `Invalid cursor: "${cursor}" is not a valid numeric cursor`,
-        );
+        ).rejects.toThrow(`Invalid cursor: "${cursor}" is not a valid cursor`);
       }
       expect(SessionService).not.toHaveBeenCalled();
     } finally {
@@ -30222,6 +30220,54 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
           excludeSourceTypes: ['agent-host', 'agent'],
         });
       }
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('passes a composite cursor through so page 2 stays reachable', async () => {
+    const listSessions = vi.fn().mockResolvedValue({
+      items: [],
+      nextCursor: undefined,
+    });
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          listSessions,
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+    const { agent, agentPromise } = await bootAgent();
+
+    try {
+      await agent.unstable_listSessions({
+        cwd: '/tmp/project',
+        cursor: '1700000000000|session-a.jsonl',
+      });
+      expect(listSessions).toHaveBeenCalledWith({
+        cursor: '1700000000000|session-a.jsonl',
+        size: undefined,
+        excludeSourceTypes: ['agent-host', 'agent'],
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('rejects a composite cursor with an empty mtime prefix', async () => {
+    const { agent, agentPromise } = await bootAgent();
+
+    try {
+      await expect(
+        agent.unstable_listSessions({
+          cwd: '/tmp/project',
+          cursor: '|session-a.jsonl',
+        }),
+      ).rejects.toThrow(
+        'Invalid cursor: "|session-a.jsonl" is not a valid cursor',
+      );
+      expect(SessionService).not.toHaveBeenCalled();
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
