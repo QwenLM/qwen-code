@@ -584,11 +584,11 @@ describe('extractShellOperations', () => {
     expectSorted(command, []);
   });
 
-  // A quoted `>` is not a redirect, so `2">"&1` is not fd duplication; bash
-  // reads the unquoted `&` as "run in background", and the check keeps the
-  // literal write.
+  // A quoted `>` is not a redirect, so `2">"&1` is not fd duplication
+  // either: bash reads the unquoted `&` as "run in background" and opens no
+  // file, as for any quoted `>`.
   it('2">"&1 is not fd duplication', () => {
-    expect(ops('printf X 2">"&1')).toContainEqual(write(`${CWD}/&1`));
+    expect(ops('printf X 2">"&1')).toEqual([]);
   });
 
   // A quoted or escaped `-` is part of the file name: `>&"-x"` writes `-x`.
@@ -828,4 +828,338 @@ describe('extractShellOperationsAcrossCommand', () => {
     const deep = 'bash -lc "bash -lc \\"bash -lc \'bash -lc echo > x.txt\'\\""';
     expect(() => across(deep)).not.toThrow();
   });
+});
+
+describe('redirect grammar', () => {
+  it.each<Row>([
+    ['fd-numbered writes', 'printf X 3>p.txt', [write(`${CWD}/p.txt`)]],
+    ['clobber-override writes', 'printf X >| p.txt', [write(`${CWD}/p.txt`)]],
+    [
+      'read-write opens',
+      'printf X <> data.txt',
+      [read(`${CWD}/data.txt`), write(`${CWD}/data.txt`)],
+    ],
+    ['fd-numbered reads', 'cat 0<.env', [read(`${CWD}/.env`)]],
+    ['redirects glued to a word', 'printf X>p.txt', [write(`${CWD}/p.txt`)]],
+    ['`>&` with a file name', 'printf X >&out.txt', [write(`${CWD}/out.txt`)]],
+    ['`&>` with a file name', 'printf X &>out.txt', [write(`${CWD}/out.txt`)]],
+    [
+      '`&>` glued to the word before it',
+      'cat .env&>f',
+      [read(`${CWD}/.env`), write(`${CWD}/f`)],
+    ],
+    ['`&>>` glued to the word before it', 'printf X&>>f', [write(`${CWD}/f`)]],
+    [
+      'a subshell closing right before a redirect',
+      '(cat .env)>f',
+      [read(`${CWD}/.env`), write(`${CWD}/f`)],
+    ],
+    ['`exec` redirects', 'exec 3>p.txt', [write(`${CWD}/p.txt`)]],
+    ['no write for fd duplication', 'ls -la 2>&1', [dir(CWD)]],
+    ['no write for `>&2`', 'printf X >&2', []],
+    ['no write for `>&-`', 'printf X >&-', []],
+    ['no write for /dev/null', 'echo hi > /dev/null', []],
+    ['no write for /dev/stderr', 'echo hi > /dev/stderr', []],
+    ['no write for a here-string', 'cat <<< hello', []],
+    ['no write for a quoted `>`', 'echo ">" foo', []],
+    ['no write for a single-quoted `>`', "echo '>' foo", []],
+    ['no write for an escaped `>`', 'echo \\> foo', []],
+    [
+      'a quoted `>` is a grep pattern',
+      'grep ">" a.txt',
+      [read(`${CWD}/a.txt`)],
+    ],
+    [
+      'a quoted `>` does not hide the redirect after it',
+      "echo x '>'>f",
+      [write(`${CWD}/f`)],
+    ],
+    [
+      'an escaped `>` does not hide the redirect after it',
+      'echo x \\>>f',
+      [write(`${CWD}/f`)],
+    ],
+    ['`<&` with a spaced fd is no file', 'cat <& 3', []],
+    ['`>&` with a spaced fd is no file', 'echo x >& 10', []],
+    ['backgrounding after fd duplication', 'echo x >&2&', []],
+    [
+      '`>&` with a spaced file name writes it',
+      'echo x >& out.txt',
+      [write(`${CWD}/out.txt`)],
+    ],
+    // bash splits a spaced target at its own unquoted `<` / `>` too.
+    [
+      'a spaced target splits at its own `>`',
+      'printf X > a>p.txt',
+      [write(`${CWD}/a`), write(`${CWD}/p.txt`)],
+    ],
+    [
+      'each spaced target splits at its own `>`',
+      'echo a> b> c',
+      [write(`${CWD}/b`), write(`${CWD}/c`)],
+    ],
+    [
+      'a spaced target splits at its own `<`',
+      'echo x > a<in.txt',
+      [write(`${CWD}/a`), read(`${CWD}/in.txt`)],
+    ],
+    [
+      'a spaced target splits at a glued `&>`',
+      'echo x > a&>f',
+      [write(`${CWD}/a`), write(`${CWD}/f`)],
+    ],
+    [
+      'a quoted `>` in a spaced target is part of the name',
+      'echo x > a">"b',
+      [write(`${CWD}/a>b`)],
+    ],
+    // Comments, tests, arithmetic and expansions are not modelled: masking
+    // them would also hide the substitutions they can hold.
+    [
+      'a redirect after a `#` still counts',
+      'echo hi # > foo',
+      [write(`${CWD}/foo`)],
+    ],
+    [
+      'a `#` inside a word is not a comment',
+      'echo ""#x >f',
+      [write(`${CWD}/f`)],
+    ],
+    [
+      'a `#` inside backquotes is not a comment',
+      'echo `echo a #b` > f',
+      [write(`${CWD}/f`)],
+    ],
+    [
+      'a `#` inside `${…}` is not a comment',
+      'echo ${x:-a #b} > f',
+      [write(`${CWD}/f`)],
+    ],
+    [
+      '`[[` as an argument hides no redirect',
+      'echo [[ > f',
+      [write(`${CWD}/f`)],
+    ],
+    ['`[[` without `]]` hides no redirect', '[[ x >f', [write(`${CWD}/f`)]],
+    // A quoted character is never shell syntax.
+    [
+      'a quoted `&` before an operator is an argument, not its fd',
+      'rm "&">f',
+      [edit(`${CWD}/&`), write(`${CWD}/f`)],
+    ],
+    ['a quoted `|` ends the operator', 'printf X >"|"x', [write(`${CWD}/|x`)]],
+    [
+      'a quoted leading `(` is part of the name',
+      "cat '(a).txt'",
+      [read(`${CWD}/(a).txt`)],
+    ],
+    // The word after `>&` reads the same with or without blanks.
+    [
+      'a spaced close passes the rest of its word on',
+      'rm >& -protected.txt',
+      [edit(`${CWD}/protected.txt`), write(`${CWD}/&-protected.txt`)],
+    ],
+    [
+      'a spaced `>&` with a quoted `-` names a file',
+      'echo x >& "-x"',
+      [write(`${CWD}/-x`)],
+    ],
+  ])('%s', (_title, command, expected) => {
+    expect(ops(command)).toEqual(expected);
+  });
+});
+
+describe('prefix commands and substitutions', () => {
+  it.each<Row>([
+    [
+      'a write inside a substitution is still a write',
+      'echo $(printf X > p.txt)',
+      [write(`${CWD}/p.txt`)],
+    ],
+    [
+      'prefix commands keep quoted words intact',
+      'sudo cat "my notes.txt"',
+      [read(`${CWD}/my notes.txt`)],
+    ],
+  ])('%s', (_title, command, expected) => {
+    expect(ops(command)).toEqual(expected);
+  });
+
+  it.each<Row>([
+    [
+      'an escaped `>` before `|` leaves a pipe',
+      'echo \\>| cat .env',
+      [read('/repo/.env')],
+    ],
+    [
+      'nested subshells are not arithmetic',
+      '((cat .env); printf X >p.txt)',
+      [read('/repo/.env'), write('/repo/p.txt')],
+    ],
+    // What the tokenizer does not model must not hide what it contains.
+    [
+      'a redirect in a substitution inside `[[ … ]]` counts',
+      '[[ -n $(printf X > p.txt) ]]',
+      [write('/repo/p.txt')],
+    ],
+    [
+      'a quoted `if` is a command name, so its redirect counts',
+      `'if' [[ 1 > p.txt ]]`,
+      [write('/repo/p.txt')],
+    ],
+    [
+      'a redirect in a substitution inside `${…}` counts',
+      'echo ${x:-$(printf X > p.txt )}',
+      [write('/repo/p.txt')],
+    ],
+    [
+      'a redirect in a substitution inside `(( … ))` counts',
+      '(( $(printf X > p.txt) ))',
+      [write('/repo/p.txt')],
+    ],
+    [
+      'a `#` inside `(( … ))` does not hide the redirect after it',
+      '(( 1 # c )) > p.txt',
+      [write('/repo/p.txt')],
+    ],
+  ])('%s', (_title, command, expected) => {
+    expect(across(command)).toEqual(expected);
+  });
+
+  it('unwraps a shell behind a prefix command', () => {
+    expect(across(`sudo bash -c 'printf X > p.txt'`)).toEqual([
+      write('/repo/p.txt'),
+    ]);
+  });
+
+  it('keeps the quotes inside a wrapped shell script', () => {
+    expect(across(`sudo bash -c "printf '%s' '{}' > p.txt"`)).toEqual([
+      write('/repo/p.txt'),
+    ]);
+  });
+});
+
+describe('prefix command options', () => {
+  it.each<Row>([
+    ['grouped short options', 'sudo -Eu root cat .env', [read('/repo/.env')]],
+    [
+      'a value glued to its option',
+      'sudo -uroot cat .env',
+      [read('/repo/.env')],
+    ],
+    ['`--` ends the options', 'sudo -- cat .env', [read('/repo/.env')]],
+    ['a bare `-` ends the options', 'sudo - cat .env', [read('/repo/.env')]],
+    ['`env -` ends the options', 'env - cat .env', [read('/repo/.env')]],
+    [
+      '`sudo -h` takes only a glued value',
+      'sudo -hhost cat .env',
+      [read('/repo/.env')],
+    ],
+    ['`nice -n` takes a value', 'nice -n 5 cat .env', [read('/repo/.env')]],
+    ['`env -u` takes a value', 'env -u FOO cat .env', [read('/repo/.env')]],
+    ['`env -S` runs its string', `env -S 'cat .env'`, [read('/repo/.env')]],
+    ['`env -S` glued', `env -S'cat .env'`, [read('/repo/.env')]],
+    [
+      '`env --split-string=`',
+      `env --split-string='cat .env'`,
+      [read('/repo/.env')],
+    ],
+    ['`env -S` in a group', `env -iS 'cat .env'`, [read('/repo/.env')]],
+    [
+      '`env -S` keeps the words after it',
+      `env -S 'cat a.txt' b.txt`,
+      [read('/repo/a.txt'), read('/repo/b.txt')],
+    ],
+    [
+      '`env -S` can hold env options',
+      `env -S '-C sub cat .env'`,
+      [read('/repo/sub/.env')],
+    ],
+    [
+      '`env -C` changes directory',
+      'env -C sub cat .env',
+      [read('/repo/sub/.env')],
+    ],
+    ['`env --chdir=`', 'env --chdir=/etc cat passwd', [read('/etc/passwd')]],
+    [
+      'the last `env -C` wins',
+      'env -C a -C b cat .env',
+      [read('/repo/b/.env')],
+    ],
+    [
+      "a split string's `-C` comes after the earlier one",
+      `env -C sub -S '-C x cat .env'`,
+      [read('/repo/x/.env')],
+    ],
+    [
+      "a later `-C` comes after the split string's",
+      `env -S '-C x' -C sub cat .env`,
+      [read('/repo/sub/.env')],
+    ],
+    [
+      '`env -C` applies to a split string',
+      `env -C sub -S 'cat .env'`,
+      [read('/repo/sub/.env')],
+    ],
+    [
+      'a chained `env -C` resolves from the one before it',
+      'env -C sub env -C sub cat .env',
+      [read('/repo/sub/sub/.env')],
+    ],
+    [
+      '`env -S` keeps a `NAME=VALUE` after the string as an argument',
+      'env -S cat a=b',
+      [read('/repo/a=b')],
+    ],
+    [
+      'an empty quoted option value is still a word',
+      "sudo -S -p '' cat .env",
+      [read('/repo/.env')],
+    ],
+    [
+      '`bash -lc` behind a prefix is unwrapped',
+      `sudo bash -lc 'cat .env'`,
+      [read('/repo/.env')],
+    ],
+    [
+      '`cd` keeps its redirections',
+      'cd sub 2> err.txt && cat .env',
+      [write('/repo/err.txt'), read('/repo/sub/.env')],
+    ],
+  ])('%s', (_title, command, expected) => {
+    expect(across(command)).toEqual(expected);
+  });
+
+  it('keeps a directory known only at run time unknown for a relative one after it', () => {
+    expect(across('env -C "$X" env -C sub cat .env')).toEqual([
+      { ...read('/repo/sub/.env'), cwdUnknown: true, pathMayDependOnCwd: true },
+    ]);
+  });
+
+  it('knows the directory again after an absolute `env -C`', () => {
+    expect(across('env -C "$X" env -C /abs cat .env')).toEqual([
+      read('/abs/.env'),
+    ]);
+  });
+
+  it('still splits a pipe at the start of a command', () => {
+    expect(across('| cat .env')).toEqual([read('/repo/.env')]);
+  });
+
+  it('returns for more operations or options than a call takes arguments', () => {
+    expect(across(`cat ${'>a'.repeat(130000)}`)).toHaveLength(130000);
+    expect(across(`sudo -${'E'.repeat(130000)} cat .env`)).toEqual([
+      read('/repo/.env'),
+    ]);
+  });
+
+  // Prefixes are peeled in a loop: a long chain must not overflow the stack.
+  it.each(['sudo ', 'env ', 'sudo -u root '])(
+    'a chain of 20000 `%s` prefixes returns',
+    (unit) => {
+      expect(across(`${unit.repeat(20000)}cat .env`)).toEqual([
+        read('/repo/.env'),
+      ]);
+    },
+  );
 });
