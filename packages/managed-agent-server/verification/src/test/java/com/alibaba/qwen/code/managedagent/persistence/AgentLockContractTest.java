@@ -58,7 +58,7 @@ class AgentLockContractTest extends RecoverySettlementStoreTest {
         trace.assertSessionBeforeTurn(TENANT, sessionId);
         trace.assertOneTransaction(TENANT, sessionId);
         var locks = trace.successful(TENANT, sessionId).stream()
-                .filter(event -> event.sql().contains("for update") && !event.sql().contains("csi_guard = true"))
+                .filter(event -> event.sql().contains("for update") && !event.sql().contains("is_csi_guard = true"))
                 .map(event -> event.root() ? "root" : event.turn() ? "turn" : "stream").toList();
         assertThat(locks.subList(0, 3)).containsExactly("root", "stream", "turn");
         assertThat(trace.events()).anyMatch(event -> event.phase() == StoreLockTrace.Phase.COMMIT);

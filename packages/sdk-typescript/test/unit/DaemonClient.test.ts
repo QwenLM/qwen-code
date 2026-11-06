@@ -7430,6 +7430,51 @@ describe('DaemonClient', () => {
   });
 
   describe('setUserLanguage (#10234)', () => {
+    it('uses REST for sessionless locale changes even with an ACP transport', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          language: 'en',
+          outputLanguage: null,
+          refresh: { runtimes: 0, sessions: 0, failed: 0 },
+        }),
+      );
+      const transportFetch = vi
+        .fn()
+        .mockRejectedValue(new Error('No ACP mapping'));
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport: { fetch: transportFetch } as unknown as DaemonTransport,
+      });
+      await client.setUserLanguage('en');
+      await client.workspaceByCwd('/secondary').setUiLanguage('en');
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/language',
+        'http://daemon/workspaces/%2Fsecondary/language',
+      ]);
+      expect(transportFetch).not.toHaveBeenCalled();
+    });
+
+    it('writes UI language to the selected workspace without a session', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          language: 'zh',
+          outputLanguage: null,
+          refresh: { runtimes: 0, sessions: 0, failed: 0 },
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client
+        .workspaceByCwd('/secondary project')
+        .setUiLanguage('zh', 'client-1');
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Fsecondary%20project/language',
+      );
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ language: 'zh' });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
     it('POSTs to the sessionless /language route and returns the typed result', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {
@@ -12480,6 +12525,34 @@ describe('DaemonClient', () => {
       });
 
       expect(JSON.parse(calls[0]!.body!)).toEqual({ groupId: 'group-1' });
+    });
+
+    it('requests the Channel event journal with one parameter per name', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { events: [], truncated: false }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.workspaceChannelEvents({
+        limit: 5,
+        types: ['inbound', 'poll'],
+        channels: ['bot', 'a,b'],
+        since: '2026-11-02T00:00:00.000Z',
+      });
+      await client
+        .workspaceByCwd('/tmp/work space')
+        .workspaceChannelEvents({ channels: ['bot'] });
+
+      expect(calls.map(({ method, url }) => [method, url])).toEqual([
+        [
+          'GET',
+          'http://daemon/workspace/channels/events?limit=5&type=inbound%2Cpoll&channel=bot&channel=a%2Cb&since=2026-11-02T00%3A00%3A00.000Z',
+        ],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/events?channel=bot',
+        ],
+      ]);
     });
   });
 

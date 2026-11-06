@@ -6,7 +6,7 @@
 
 import {
   EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
-  type DaemonClient,
+  DaemonClient,
   type GoalControlRequest,
   type GoalSnapshotV2,
   type GoalStateResponse,
@@ -55,6 +55,17 @@ export function createDaemonWorkspaceActions({
   baseUrl,
   token,
 }: CreateDaemonWorkspaceActionsArgs): DaemonWorkspaceActions {
+  // Login cleanup must outlive disposal of the workspace transport.
+  const subscriptionRequest = async <T>(
+    run: (client: DaemonClient) => Promise<T>,
+  ): Promise<T> => {
+    const client = new DaemonClient({ baseUrl, token });
+    try {
+      return await run(client);
+    } finally {
+      client.dispose();
+    }
+  };
   const requestRest = (url: URL, init: RequestInit) =>
     createDaemonRestRequest(
       baseUrl,
@@ -62,6 +73,18 @@ export function createDaemonWorkspaceActions({
       getClient(),
     )(daemonRoutePath(url, baseUrl), init);
   return {
+    async setUiLanguage(language, scope, workspaceCwd) {
+      const client = requireClient(getClient, 'Change UI language failed');
+      if (scope === 'workspace' && !workspaceCwd) {
+        throw new Error('The selected workspace is unavailable');
+      }
+      return withActionTimeout(
+        scope === 'workspace' && workspaceCwd
+          ? client.workspaceByCwd(workspaceCwd).setUiLanguage(language)
+          : client.setUserLanguage(language),
+        'Change UI language timed out',
+      );
+    },
     async listSessions(options) {
       const client = requireClient(getClient, 'List sessions failed');
       const cwd = getWorkspaceCwd();
@@ -204,6 +227,18 @@ export function createDaemonWorkspaceActions({
         'Load channels timed out',
       );
       return { catalog, snapshot };
+    },
+
+    async listChannelEvents(query) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load channel events failed',
+      );
+      return withActionTimeout(
+        workspace.workspaceChannelEvents(query),
+        'Load channel events timed out',
+      );
     },
 
     async upsertChannel(name, request) {
@@ -1147,6 +1182,42 @@ export function createDaemonWorkspaceActions({
         client.cancelDeviceFlow(deviceFlowId),
         'Cancel device flow timed out',
       );
+    },
+
+    activateSubscription(options) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Connect Qwen Subscription failed',
+      );
+      return workspace.activateSubscription(options);
+    },
+
+    getSubscriptionConfig(options) {
+      return subscriptionRequest((client) =>
+        client.getSubscriptionConfig(options),
+      );
+    },
+    startSubscriptionLogin() {
+      return subscriptionRequest((client) => client.startSubscriptionLogin());
+    },
+    getSubscriptionLogin(id, options) {
+      return subscriptionRequest((client) =>
+        client.getSubscriptionLogin(id, options),
+      );
+    },
+    cancelSubscriptionLogin(id) {
+      return subscriptionRequest((client) =>
+        client.cancelSubscriptionLogin(id),
+      );
+    },
+    getSubscriptionUserInfo(options) {
+      return subscriptionRequest((client) =>
+        client.getSubscriptionUserInfo(options),
+      );
+    },
+    signOutSubscription() {
+      return subscriptionRequest((client) => client.signOutSubscription());
     },
 
     async getAuthStatus() {

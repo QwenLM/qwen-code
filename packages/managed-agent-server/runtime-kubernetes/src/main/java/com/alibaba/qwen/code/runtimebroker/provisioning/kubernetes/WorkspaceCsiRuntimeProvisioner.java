@@ -71,7 +71,8 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
     private final Duration timeout;
     private final RuntimeTransport transport;
     private final Map<String, Object> authority;
-    private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService executor = Executors.newThreadPerTaskExecutor(
+            Thread.ofVirtual().name("runtime-workspace-csi-", 0).factory());
     private final ThreadLocal<Long> deadline = new ThreadLocal<>();
     private final Map<RuntimeProvisionSeed, RuntimeBindingRecord> claims = new ConcurrentHashMap<>();
     private final Map<RuntimeProvisionSeed, Placement> placements = new ConcurrentHashMap<>();

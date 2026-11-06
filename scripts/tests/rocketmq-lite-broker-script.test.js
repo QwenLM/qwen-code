@@ -322,7 +322,12 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
     for (const port of parked) expect(await isFree(port)).toBe(false);
 
     expect(run('stop', chosen).status).toBe(0);
-    for (const port of parked) expect(await isFree(port)).toBe(true);
+    // As with the holders below, check the port's listener the way the
+    // script does: a bind probe on this shared host can fail for a socket
+    // this job does not own.
+    for (const port of parked) {
+      expect(await waitForNoListener(port)).toBe(true);
+    }
     expect(pidFiles()).toEqual([]);
   }, 200_000);
 

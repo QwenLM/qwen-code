@@ -26,7 +26,7 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                         && exists(
                                 connection,
                                 "SELECT 1 FROM ma_session WHERE tenant_id = ? AND session_id = ?"
-                                    + " AND csi_guard = TRUE LIMIT 1 FOR UPDATE",
+                                    + " AND is_csi_guard = TRUE LIMIT 1 FOR UPDATE",
                                 identity(request.getScope().getTenantId()),
                                 identity(request.getIsolationKey()))
                 || exists(
