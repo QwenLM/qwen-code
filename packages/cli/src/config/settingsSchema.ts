@@ -1309,6 +1309,16 @@ const SETTINGS_SCHEMA = {
         description: 'The last time the feedback dialog was shown.',
         showInDialog: false,
       },
+      startExpanded: {
+        type: 'boolean',
+        label: 'Start Expanded',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Start in expanded detail mode: thinking blocks and tool output are shown inline from the first turn. Ctrl+O / Alt+T still toggles it.',
+        showInDialog: true,
+      },
       compactMode: {
         type: 'boolean',
         label: 'Compact Mode',
