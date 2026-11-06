@@ -2309,12 +2309,7 @@ export const AppContainer = (props: AppContainerProps) => {
     });
     config.getLlmClient()?.requestShutdown();
     await runExitCleanup();
-    const rosterArgv = buildCurrentQwenCliArgv([
-      'agents',
-      '--cwd',
-      config.getProjectRoot(),
-    ]);
-    if (await requestAgentViewRosterOnExit(rosterArgv)) {
+    if (await requestAgentViewRosterOnExit(config.getProjectRoot())) {
       process.exit(0);
     }
     process.exit(runAgentViewRosterCommand(config.getProjectRoot()));

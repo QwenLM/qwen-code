@@ -81,15 +81,13 @@ let relaunchSupervised = false;
  * spawnSync cannot do reliably on Windows: the blocked parent keeps reading
  * console input. Resolves false when no supervisor is listening.
  */
-export function requestAgentViewRosterOnExit(
-  argv: readonly string[],
-): Promise<boolean> {
+export function requestAgentViewRosterOnExit(cwd: string): Promise<boolean> {
   if (!relaunchSupervised || !process.send || !process.connected) {
     return Promise.resolve(false);
   }
   return new Promise((resolve) => {
     try {
-      process.send!({ type: AGENT_VIEW_ROSTER_MESSAGE, argv }, (error) =>
+      process.send!({ type: AGENT_VIEW_ROSTER_MESSAGE, cwd }, (error) =>
         resolve(!error),
       );
     } catch {
@@ -153,14 +151,13 @@ export async function relaunchAppInChildProcess(
   const script = process.argv[1];
   const scriptArgs = process.argv.slice(2);
   const command = options?.interpreter?.command ?? process.execPath;
-  const nodeArgs = [
+  const launchPrefix = [
     ...(options?.interpreter?.runtime === 'bun'
       ? ['--expose-gc']
       : [...getRelaunchExecArgv(), ...additionalNodeArgs]),
     script,
-    ...additionalScriptArgs,
-    ...scriptArgs,
   ];
+  const nodeArgs = [...launchPrefix, ...additionalScriptArgs, ...scriptArgs];
   const createChildEnv = (): NodeJS.ProcessEnv => {
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -220,7 +217,7 @@ export async function relaunchAppInChildProcess(
 
   const runner = () => {
     let updateOnExitRequested = false;
-    let agentViewRosterArgv: string[] | undefined;
+    let agentViewRosterCwd: string | undefined;
     const terminalHandoff =
       options?.interpreter?.runtime === 'bun' && isatty(0);
     const newEnv = {
@@ -257,12 +254,11 @@ export async function relaunchAppInChildProcess(
         message !== null &&
         'type' in message &&
         message.type === AGENT_VIEW_ROSTER_MESSAGE &&
-        'argv' in message &&
-        Array.isArray(message.argv) &&
-        message.argv.length > 0 &&
-        message.argv.every((arg: unknown) => typeof arg === 'string')
+        'cwd' in message &&
+        typeof message.cwd === 'string' &&
+        message.cwd.length > 0
       ) {
-        agentViewRosterArgv = message.argv as string[];
+        agentViewRosterCwd = message.cwd;
       }
     });
 
@@ -283,17 +279,23 @@ export async function relaunchAppInChildProcess(
       });
       child.on('close', (code) => {
         removeSignalHandler();
-        if (agentViewRosterArgv) {
+        if (agentViewRosterCwd) {
           // The detached session asked for the roster: hand the terminal to
-          // it while stdin stays paused here.
-          const [rosterCommand, ...rosterArgs] = agentViewRosterArgv;
-          agentViewRosterArgv = undefined;
+          // it while stdin stays paused here. The command is this CLI's own;
+          // the child only chooses the workspace.
+          const rosterArgs = [
+            ...launchPrefix,
+            'agents',
+            '--cwd',
+            agentViewRosterCwd,
+          ];
+          agentViewRosterCwd = undefined;
           if (process.platform === 'win32') {
             // The exiting session cleared the shared console title, and
             // Node 22's libuv aborts when a process reads an empty one.
             process.title = 'Qwen Agent View';
           }
-          const roster = spawn(rosterCommand!, rosterArgs, {
+          const roster = spawn(command, rosterArgs, {
             stdio: 'inherit',
             env: createChildEnv(),
           });

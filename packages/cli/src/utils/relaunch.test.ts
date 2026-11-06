@@ -751,13 +751,15 @@ describe('relaunchAppInChildProcess', () => {
 
       sessionChild.emit('message', {
         type: AGENT_VIEW_ROSTER_MESSAGE,
-        argv: ['/usr/bin/node', '/app/cli.js', 'agents', '--cwd', '/work'],
+        cwd: '/work',
       });
       sessionChild.emit('close', 0);
 
       await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledTimes(2));
-      expect(mockedSpawn.mock.calls[1]?.[0]).toBe('/usr/bin/node');
-      expect(mockedSpawn.mock.calls[1]?.[1]).toEqual([
+      expect(mockedSpawn.mock.calls[1]?.[0]).toBe(
+        mockedSpawn.mock.calls[0]?.[0],
+      );
+      expect(mockedSpawn.mock.calls[1]?.[1]?.slice(-4)).toEqual([
         '/app/cli.js',
         'agents',
         '--cwd',
