@@ -662,11 +662,13 @@ describe('ci flaky rerun patrol', () => {
           action,
           confidence: action === 'no_action' ? 'low' : 'high',
           reason_en: 'safe \u202Ereversed\u202C text',
-          reason_zh: '安全 \u2066隔离\u2069 文本',
+          reason_zh: '安全 \u2066隔离\u2069 \u061C文本',
         }),
       );
       const body = c.calls.find((call) => call[0] === 'comment')[2];
-      expect(body).not.toMatch(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/);
+      expect(body).not.toMatch(
+        /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/,
+      );
       expect(body).toContain('safe reversed text');
       expect(body).toContain('安全 隔离 文本');
     }

@@ -434,7 +434,8 @@ function safeReason(reason) {
       // Bidi overrides can visually rewrite a notice maintainers trust when
       // deciding whether to update a branch; the reason is classifier output
       // derived from untrusted logs, so drop them like the markup below.
-      .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+      // The class is the full Unicode Bidi_Control set.
+      .replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
       .replaceAll('&', '&amp;')
       .replaceAll('<', '&lt;')
       .replaceAll('>', '&gt;')
