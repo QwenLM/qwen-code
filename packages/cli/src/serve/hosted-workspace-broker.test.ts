@@ -631,6 +631,20 @@ it.each(['runtime_idempotency_conflict', 'runtime_execution_conflict'])(
   },
 );
 
+it('preserves a definite payload-invalid start rejection without polling', async () => {
+  const paths: string[] = [];
+  const broker = await fixture((path) => {
+    paths.push(path);
+    return { code: 400, body: { code: 'runtime_payload_invalid' } };
+  });
+  await expect(
+    broker.execute('execution', '{}', new AbortController().signal, 50),
+  ).rejects.toMatchObject({ status: 400, code: 'runtime_payload_invalid' });
+  expect(paths).toEqual([
+    '/internal/runtime-broker/v1/executions/execution:start',
+  ]);
+});
+
 it('queries the original identity when start reports an unknown execution', async () => {
   const paths: string[] = [];
   const broker = await fixture((path, fields) => {
