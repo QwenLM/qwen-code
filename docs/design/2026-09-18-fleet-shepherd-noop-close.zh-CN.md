@@ -28,9 +28,9 @@ autofix 机器人为每个它认领的 issue 开一个 PR。当另一个 PR 先�
 
 triage 跑完之后，现有自动化中没有任何环节会关闭这样的 PR。autofix 的 agent 车道没有 GitHub 写凭据
 （它在 #11376 上自己就是这么说的），循环的推送与报告步骤持有 bot PAT 但没有关闭
-路径，`stale.yml` 要等 60 + 30 天才动手。Fleet Shepherd 每 15 分钟用 bot PAT 走一遍
-bot 车队，并且已经拥有车队的其它杠杆（冲突派发、陈旧 base 同步、liveness、接管
-自动释放），所以它是再加一个杠杆的自然位置。
+路径，`stale.yml` 要等 60 + 30 天才动手（2026-11 的策略调整起为 30 + 14 天）。
+Fleet Shepherd 每 15 分钟用 bot PAT 走一遍 bot 车队，并且已经拥有车队的其它杠杆（冲突
+派发、陈旧 base 同步、liveness、接管自动释放），所以它是再加一个杠杆的自然位置。
 
 ## 判定：GitHub 自己的试合并
 

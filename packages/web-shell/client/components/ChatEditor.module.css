@@ -1990,16 +1990,6 @@
   }
 }
 
-.addMenuPlanIcon {
-  display: inline-flex;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  color: var(--muted-foreground);
-}
-
 .workspaceSelectTrigger {
   min-width: 0;
   max-width: 176px;

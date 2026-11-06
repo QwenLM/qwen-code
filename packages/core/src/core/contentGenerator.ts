@@ -28,6 +28,10 @@ import {
 } from '../models/modelConfigErrors.js';
 import { PROVIDER_SOURCED_FIELDS } from '../models/constants.js';
 import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
+import {
+  getModuleNotFoundError,
+  wrapLazyModuleLoadError,
+} from '../utils/errors.js';
 import type { ReasoningEffort } from './reasoning-effort.js';
 
 /**
@@ -429,35 +433,8 @@ export function createContentGeneratorConfig(
   ).config;
 }
 
-function getModuleNotFoundError(
-  error: unknown,
-): NodeJS.ErrnoException | undefined {
-  let current = error;
-
-  while (current instanceof Error) {
-    if (
-      'code' in current &&
-      (current as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND'
-    ) {
-      return current as NodeJS.ErrnoException;
-    }
-    current = current.cause;
-  }
-
-  return undefined;
-}
-
 function wrapProviderLoadError(error: unknown, authType: AuthType): unknown {
-  const moduleNotFoundError = getModuleNotFoundError(error);
-  if (!moduleNotFoundError) {
-    return error;
-  }
-
-  return new Error(
-    `Qwen Code was updated in the background and needs to be restarted.\n` +
-      `Please exit and restart Qwen Code to use the '${authType}' provider.`,
-    { cause: moduleNotFoundError },
-  );
+  return wrapLazyModuleLoadError(error, `the '${authType}' provider`);
 }
 
 class LazyContentGenerator implements ContentGenerator {

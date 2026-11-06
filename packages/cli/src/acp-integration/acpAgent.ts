@@ -3732,9 +3732,17 @@ function normalizeAcpSessionListSize(value: unknown): number | undefined {
 
 function parseAcpSessionListCursor(
   value: string | null | undefined,
-): number | undefined {
+): number | string | undefined {
   if (value == null || value === '') return undefined;
   const trimmed = value.trim();
+  // Composite cursors ("<mtime>|<name>") are minted by listSessions when a page
+  // ends inside a group of files sharing an mtime; they must survive the round
+  // trip or the client cannot fetch page 2.
+  const separator = trimmed.indexOf('|');
+  if (separator > 0 && separator < trimmed.length - 1) {
+    const mtime = Number(trimmed.slice(0, separator));
+    if (Number.isFinite(mtime) && mtime >= 0) return trimmed;
+  }
   const parsedCursor = Number(trimmed);
   if (
     trimmed === '' ||
@@ -3744,7 +3752,7 @@ function parseAcpSessionListCursor(
   ) {
     throw RequestError.invalidParams(
       undefined,
-      `Invalid cursor: "${value}" is not a valid numeric cursor`,
+      `Invalid cursor: "${value}" is not a valid cursor`,
     );
   }
   return parsedCursor;
@@ -11235,12 +11243,19 @@ class QwenAgent implements Agent {
               }
               break;
             }
-            case 'skills':
-              await this.extMethodInternal(
+            case 'skills': {
+              const result = await this.extMethodInternal(
                 SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-                { cwd: changeCwd, reason: params['reason'] ?? 'all' },
+                {
+                  cwd: changeCwd,
+                  reason: params['reason'] ?? 'all',
+                  ...(params['includeUserSettings'] !== undefined
+                    ? { includeUserSettings: params['includeUserSettings'] }
+                    : {}),
+                },
               );
-              break;
+              return { ...result, v: 1, revision, acknowledged: true };
+            }
             default:
               throw RequestError.invalidParams(
                 undefined,
@@ -15927,6 +15942,22 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh: {
         const rawReason = params['reason'];
         const rawSessionIds = params['sessionIds'];
+        const includeUserSettings = params['includeUserSettings'];
+        if (
+          includeUserSettings !== undefined &&
+          typeof includeUserSettings !== 'boolean'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'includeUserSettings must be a boolean',
+          );
+        }
+        if (includeUserSettings && rawReason === 'content') {
+          throw RequestError.invalidParams(
+            undefined,
+            'includeUserSettings requires a settings refresh',
+          );
+        }
         if (
           rawSessionIds !== undefined &&
           (!Array.isArray(rawSessionIds) ||
@@ -15971,9 +16002,15 @@ class QwenAgent implements Agent {
         const refreshSettings = reason !== 'content';
         const refreshContent = reason !== 'settings';
         if (refreshSettings) {
-          if (
-            !this.workspaceSettings.reloadScopeFromDisk(SettingScope.Workspace)
-          ) {
+          const reloaded = includeUserSettings
+            ? this.workspaceSettings.reloadScopesFromDiskAtomically([
+                SettingScope.Workspace,
+                SettingScope.User,
+              ])
+            : this.workspaceSettings.reloadScopeFromDisk(
+                SettingScope.Workspace,
+              );
+          if (!reloaded) {
             throw new Error('Failed to reload workspace skill settings');
           }
         }
@@ -15981,7 +16018,11 @@ class QwenAgent implements Agent {
         const settingsReloadResults = refreshSettings
           ? await Promise.allSettled(
               sessions.map((session) =>
-                Promise.resolve().then(() => session.reloadSkillSettings()),
+                Promise.resolve().then(() =>
+                  includeUserSettings
+                    ? session.reloadSkillSettings(true)
+                    : session.reloadSkillSettings(),
+                ),
               ),
             )
           : undefined;
