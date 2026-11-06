@@ -1739,9 +1739,9 @@ export class PermissionManager {
     const persistentDangerous = findDangerousAllowRules(
       this.persistentRules.allow.filter((rule) => !rule.invalid),
     );
-    const sessionDangerous = findDangerousAllowRules(
-      this.sessionRules.allow.filter((rule) => !rule.invalid),
-    );
+    // `addSessionAllowRule` returns before its only push when the rule is
+    // invalid, so the session list never holds one.
+    const sessionDangerous = findDangerousAllowRules(this.sessionRules.allow);
 
     if (persistentDangerous.length === 0 && sessionDangerous.length === 0) {
       this.strippedAllowRules = { persistent: [], session: [] };
