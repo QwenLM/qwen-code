@@ -1483,3 +1483,37 @@ test('names the cancelled job of a run a job timeout ended', () => {
   assert.match(comment, /Run E2E tests/);
   assert.doesNotMatch(comment, /Set up Docker/);
 });
+
+test('names only the timed-out lane, not every sibling the timeout cancelled', () => {
+  // A job timeout ends the whole run, so every sibling shard concludes
+  // `cancelled` carrying nothing. Naming them all reports five failures for
+  // the one lane that exceeded its cap and buries the timeout line.
+  const comment = renderFailureComment({
+    analysis: { workflow: 'E2E Tests', tests: [] },
+    occurrence: {
+      sha: 'abc123456789',
+      runId: '41743539611',
+      runUrl: 'https://example.com/run',
+    },
+    cancellationKind: 'timeout',
+    jobs: [
+      {
+        name: 'E2E Test - sandbox:docker - shard 1/5',
+        conclusion: 'cancelled',
+        html_url: 'https://example.com/job/1',
+        steps: [{ name: 'Run E2E tests', conclusion: 'cancelled' }],
+      },
+      ...[2, 3, 4, 5].map((shard) => ({
+        name: `E2E Test - sandbox:docker - shard ${shard}/5`,
+        conclusion: 'cancelled',
+        html_url: `https://example.com/job/${shard}`,
+        steps: [
+          { name: 'Set up job', conclusion: 'success' },
+          { name: 'Upload artifacts', conclusion: 'skipped' },
+        ],
+      })),
+    ],
+  });
+  assert.match(comment, /shard 1\/5/);
+  assert.doesNotMatch(comment, /shard [2-5]\/5/);
+});

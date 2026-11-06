@@ -402,22 +402,36 @@ function cappedTestLines(tests) {
   return lines;
 }
 
-export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
+export function renderFailureComment({
+  analysis,
+  occurrence,
+  jobs = [],
+  cancellationKind = 'none',
+}) {
   const code = (text) => `\`${String(text).replace(/[`\r\n]/g, ' ')}\``;
+  // A timeout cancels every sibling, but only the lane that hit its cap is
+  // the failure. The download step narrows the list the same way; without it
+  // here a five-shard matrix names five failures for one lane.
+  const reported = jobs.filter((job) => {
+    if (!['failure', 'cancelled'].includes(job.conclusion)) return false;
+    if (cancellationKind !== 'timeout') return true;
+    if (job.conclusion === 'failure') return true;
+    return (job.steps ?? []).some(
+      (step) => !['success', 'skipped', 'pending'].includes(step.conclusion),
+    );
+  });
   return [
     `<!-- qwen-managed-agent-ci-failure:${occurrence.runId} -->`,
     `### ${code(analysis.workflow)} failed`,
     '',
     `[Run ${occurrence.runId}](${occurrence.runUrl}) · commit ${code(occurrence.sha.slice(0, 12))}`,
     '',
-    ...jobs
-      .filter((job) => ['failure', 'cancelled'].includes(job.conclusion))
-      .map((job) => {
-        const steps = (job.steps ?? [])
-          .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))
-          .map((step) => code(step.name));
-        return `- [${code(job.name)}](${job.html_url})${steps.length ? `: ${steps.join(', ')}` : ''}`;
-      }),
+    ...reported.map((job) => {
+      const steps = (job.steps ?? [])
+        .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))
+        .map((step) => code(step.name));
+      return `- [${code(job.name)}](${job.html_url})${steps.length ? `: ${steps.join(', ')}` : ''}`;
+    }),
     '',
     ...(analysis.tests.length
       ? [
@@ -605,6 +619,7 @@ export function runCli(argv) {
           runUrl: options['run-url'],
         },
         jobs: readJobs(options['jobs-json']),
+        cancellationKind: options['cancellation-kind'] ?? 'none',
       }),
     );
     return;
