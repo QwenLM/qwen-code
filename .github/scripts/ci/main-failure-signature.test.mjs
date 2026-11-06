@@ -1486,8 +1486,8 @@ test('names the cancelled job of a run a job timeout ended', () => {
 
 test('names only the timed-out lane, not every sibling the timeout cancelled', () => {
   // A job timeout ends the whole run, so every sibling shard concludes
-  // `cancelled` carrying nothing. Naming them all reports five failures for
-  // the one lane that exceeded its cap and buries the timeout line.
+  // `cancelled`. Naming them all reports five failures for the one lane that
+  // exceeded its cap and buries the timeout line.
   const comment = renderFailureComment({
     analysis: { workflow: 'E2E Tests', tests: [] },
     occurrence: {
@@ -1501,14 +1501,25 @@ test('names only the timed-out lane, not every sibling the timeout cancelled', (
         name: 'E2E Test - sandbox:docker - shard 1/5',
         conclusion: 'cancelled',
         html_url: 'https://example.com/job/1',
-        steps: [{ name: 'Run E2E tests', conclusion: 'cancelled' }],
+        steps: [
+          { name: 'Set up job', conclusion: 'success' },
+          // The step that blew its cap, concluded `failure` before the job
+          // was cancelled; this is what distinguishes the lane from its
+          // siblings.
+          { name: 'Run E2E tests', conclusion: 'failure' },
+          { name: 'Upload artifacts', conclusion: 'cancelled' },
+        ],
       },
+      // The real shape (run 42227747366): a sibling the timeout killed has one
+      // step concluded `cancelled` and every other step `skipped`, so a filter
+      // that only drops success/skipped/pending still admits it.
       ...[2, 3, 4, 5].map((shard) => ({
         name: `E2E Test - sandbox:docker - shard ${shard}/5`,
         conclusion: 'cancelled',
         html_url: `https://example.com/job/${shard}`,
         steps: [
           { name: 'Set up job', conclusion: 'success' },
+          { name: 'Run E2E tests', conclusion: 'cancelled' },
           { name: 'Upload artifacts', conclusion: 'skipped' },
         ],
       })),

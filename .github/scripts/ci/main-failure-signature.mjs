@@ -416,9 +416,13 @@ export function renderFailureComment({
     if (!['failure', 'cancelled'].includes(job.conclusion)) return false;
     if (cancellationKind !== 'timeout') return true;
     if (job.conclusion === 'failure') return true;
-    return (job.steps ?? []).some(
-      (step) => !['success', 'skipped', 'pending'].includes(step.conclusion),
-    );
+    // A sibling the timeout took down is cancelled mid-flight: every step is
+    // `success`, `skipped` or `cancelled`, with no failure of its own. The
+    // lane that hit its cap has a step that failed before the cancel, which is
+    // what marks it as the lane to name. (Run 42227747366 has both shapes.)
+    const steps = job.steps ?? [];
+    if (!steps.length) return true;
+    return steps.some((step) => !['success', 'skipped', 'pending', 'cancelled'].includes(step.conclusion));
   });
   return [
     `<!-- qwen-managed-agent-ci-failure:${occurrence.runId} -->`,
