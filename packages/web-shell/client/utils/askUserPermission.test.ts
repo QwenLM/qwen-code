@@ -74,6 +74,21 @@ describe('formatAskUserQuestions', () => {
     ).toBe('[1] Why?');
   });
 
+  it('marks multi-select questions and only when the flag is true', () => {
+    expect(
+      formatAskUserQuestions({
+        questions: [
+          { question: 'Pick any', multiSelect: true },
+          { question: 'Pick one', multiSelect: false },
+          { question: 'Default' },
+          { question: 'Loose typing', multiSelect: 'yes' },
+        ],
+      }),
+    ).toBe(
+      '[1] Pick any [multiSelect]\n\n[2] Pick one\n\n[3] Default\n\n[4] Loose typing',
+    );
+  });
+
   it('skips malformed entries and renumbers the survivors', () => {
     expect(
       formatAskUserQuestions({

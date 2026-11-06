@@ -94,6 +94,18 @@ first committing to an answer or discarding the question.
   (en/zh-CN; ru falls back to en via the existing i18n fallback), so the
   explanation language follows the UI language rather than the daemon's
   output-language setting.
+- **One details task per pending question.** The details tab uses a stable id
+  derived from the parent session and the permission request id and is
+  upserted, not appended: repeat clicks focus the existing tab instead of
+  provisioning duplicate child sessions. `/btw side` keeps its unique
+  per-invocation draft id.
+- **The snapshot carries selection semantics.** Multi-select questions are
+  marked `[multiSelect]` so the explanation covers combinable options without
+  relying on the inherited transcript alone.
+- **The actions row wraps.** A fifth button can push the row past narrow
+  viewports, and a flex-end row overflows to the left — invisible to
+  `scrollWidth`. The row wraps, and a 320px multi-question regression test
+  asserts every action button stays inside the panel and stays clickable.
 
 ## Constraints and risks
 

@@ -41,12 +41,17 @@ export function formatAskUserQuestions(
   const parts: string[] = [];
   for (const entry of questions) {
     if (typeof entry !== 'object' || entry === null) continue;
-    const { question, options } = entry as {
+    const { question, options, multiSelect } = entry as {
       question?: unknown;
       options?: unknown;
+      multiSelect?: unknown;
     };
     if (typeof question !== 'string' || !question.trim()) continue;
-    const lines = [`[${parts.length + 1}] ${question.trim()}`];
+    // Selection semantics matter to the explanation (options may combine);
+    // the marker keeps the snapshot self-contained without prose.
+    const lines = [
+      `[${parts.length + 1}] ${question.trim()}${multiSelect === true ? ' [multiSelect]' : ''}`,
+    ];
     if (Array.isArray(options)) {
       for (const option of options) {
         if (typeof option !== 'object' || option === null) continue;

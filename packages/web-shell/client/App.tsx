@@ -5663,11 +5663,17 @@ export function App({
           !archivedSideTaskCatalog.loaded)));
   const nextSideTaskTabIdRef = useRef(0);
   const createSideTask = useCallback(
-    (initialPrompt?: string) => {
+    (initialPrompt?: string, detailsRequestId?: string) => {
       const parentSessionId = connection.sessionId;
       if (!parentSessionId || !sideTasksAvailable) return false;
+      // A details side task is one-per-pending-question: repeat clicks focus
+      // the existing tab instead of provisioning a duplicate child session.
+      // /btw side keeps the unique draft id — each invocation is a new task.
+      const id = detailsRequestId
+        ? `side-task:details:${parentSessionId}:${detailsRequestId}`
+        : `side-task:draft:${Date.now()}:${++nextSideTaskTabIdRef.current}`;
       const tab: ArtifactPanelTab = {
-        id: `side-task:draft:${Date.now()}:${++nextSideTaskTabIdRef.current}`,
+        id,
         kind: 'side_task',
         title: t('sideTask.title'),
         parentSessionId,
@@ -5677,8 +5683,10 @@ export function App({
           ? { initialPrompt: initialPrompt.trim() }
           : {}),
       };
-      setArtifactPanelTabs((tabs) => [...tabs, tab]);
-      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === id) ? tabs : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(id);
       setArtifactPanelOpen(true);
       return true;
     },
@@ -19830,7 +19838,10 @@ export function App({
   const handleAskUserDetails = useCallback(() => {
     if (!pendingAskUserApproval) return;
     const questions = formatAskUserQuestions(pendingAskUserApproval.rawInput);
-    createSideTask(t('askUser.detailsPrompt', { questions }));
+    createSideTask(
+      t('askUser.detailsPrompt', { questions }),
+      pendingAskUserApproval.id,
+    );
   }, [pendingAskUserApproval, createSideTask, t]);
 
   // Runs once the daemon has settled the cancelled turn, so the transcript
