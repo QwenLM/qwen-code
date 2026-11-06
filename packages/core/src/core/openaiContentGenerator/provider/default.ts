@@ -249,8 +249,28 @@ export class DefaultOpenAICompatibleProvider
       messages,
       ...(extraBody ? extraBody : {}),
     };
+    if (extraBody) this.dropBudgetKeyShadowedByExtraBody(result, extraBody);
     this.flattenGptReasoningEffort(result);
     return this.flattenDeepSeekReasoningEffort(result);
+  }
+
+  /**
+   * An output budget spelled in `extra_body` is the wire key the user chose,
+   * like an explicit `samplingParams.max_tokens`: it goes out as written and
+   * the sibling key the clamp emitted for the model family is dropped, so a
+   * GPT-5 / o-series body never carries `max_tokens` next to
+   * `max_completion_tokens` (before the family re-key both writes landed on
+   * `max_tokens`, and only one key ever went out).
+   */
+  protected dropBudgetKeyShadowedByExtraBody(
+    body: Record<string, unknown>,
+    extraBody: Record<string, unknown>,
+  ): void {
+    const keys = ['max_tokens', 'max_completion_tokens'] as const;
+    if (!keys.some((key) => extraBody[key] !== undefined)) return;
+    for (const key of keys) {
+      if (extraBody[key] === undefined) delete body[key];
+    }
   }
 
   protected flattenDeepSeekReasoningEffort<T extends object>(body: T): T {

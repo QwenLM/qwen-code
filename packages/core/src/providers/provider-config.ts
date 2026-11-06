@@ -442,6 +442,28 @@ export function buildInstallPlan(
           delete preservedGeneration.samplingParams[key];
         if (!Object.keys(preservedGeneration.samplingParams).length)
           delete preservedGeneration.samplingParams;
+      } else if (
+        preservedGeneration.samplingParams &&
+        resolveModelProtocol(savedProtocol, model) === AuthType.USE_OPENAI &&
+        outputBudgetWireKey(model.id) === 'max_completion_tokens' &&
+        typeof preservedGeneration.samplingParams['max_tokens'] === 'number' &&
+        preservedGeneration.samplingParams['max_completion_tokens'] ===
+          undefined
+      ) {
+        // No new budget this run, but the preserved one sits under a key the
+        // model's Chat Completions endpoint rejects: an earlier installer
+        // wrote `max_tokens` for a GPT-5 / o-series id, and the pipeline
+        // forwards an explicit `max_tokens` verbatim, so nothing downstream
+        // would repair it. Move the value onto the family key here. The
+        // reverse (`max_completion_tokens` on a family that reads
+        // `max_tokens`) is accepted by those endpoints and is left alone, as
+        // is anything on the Responses wire, which translates `max_tokens`.
+        const { max_tokens: budget, ...rest } =
+          preservedGeneration.samplingParams;
+        preservedGeneration.samplingParams = {
+          ...rest,
+          max_completion_tokens: budget,
+        };
       }
       if (!config.models && advanced) {
         if (advanced.replaceExisting) {

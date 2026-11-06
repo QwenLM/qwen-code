@@ -399,6 +399,41 @@ describe('DefaultOpenAICompatibleProvider', () => {
           expect(result).not.toHaveProperty('max_completion_tokens');
         }
       });
+
+      it('lets a budget spelled in extra_body replace the family key instead of pairing with it', () => {
+        // extra_body is merged last and is the user's wire shape: a
+        // `max_tokens` written there for a GPT-5 id ships alone, exactly as
+        // it did before the family re-key existed.
+        const result = build(
+          hello('gpt-5.5'),
+          providerWith({ extra_body: { max_tokens: 4096 } }),
+        );
+        expect(result.max_tokens).toBe(4096);
+        expect(result).not.toHaveProperty('max_completion_tokens');
+        // Same contract for the other key on a family that reads max_tokens.
+        const gpt41 = build(
+          hello('gpt-4.1'),
+          providerWith({ extra_body: { max_completion_tokens: 4096 } }),
+        );
+        expect(gpt41.max_completion_tokens).toBe(4096);
+        expect(gpt41).not.toHaveProperty('max_tokens');
+        // Control: the pre-existing single-key case is unchanged.
+        const control = build(
+          hello('gpt-4.1'),
+          providerWith({ extra_body: { max_tokens: 4096 } }),
+        );
+        expect(control.max_tokens).toBe(4096);
+        expect(control).not.toHaveProperty('max_completion_tokens');
+      });
+
+      it('keeps the family key when extra_body names no budget', () => {
+        const result = build(
+          hello('gpt-5.5'),
+          providerWith({ extra_body: { reasoning_effort: 'low' } }),
+        );
+        expect(typeof result.max_completion_tokens).toBe('number');
+        expect(result).not.toHaveProperty('max_tokens');
+      });
     });
 
     it('should ignore malformed QWEN_CODE_MAX_OUTPUT_TOKENS values', () => {
