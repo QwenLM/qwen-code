@@ -482,7 +482,7 @@ export function PermissionsDialog({
     if (rule.invalid) {
       setRuleInputError(
         t(
-          'Malformed rule: write it as ToolName(specifier) so it ends at the closing ")" of the specifier.',
+          'Malformed rule: write it as ToolName(specifier), with the "(" and ")" around the whole specifier.',
         ),
       );
       return;

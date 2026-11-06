@@ -329,7 +329,7 @@ export class PermissionManager {
     // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where a dropped rule would otherwise be invisible
     console.warn(
       `${origin}: ignoring malformed ${type} rule (no closing parenthesis at the end): ${JSON.stringify(raw)}. ` +
-        `The rule has no effect; write it as "Tool(specifier)" so it ends at the closing ")" of the specifier.`,
+        `The rule has no effect; write it as "Tool(specifier)", with the "(" and ")" around the whole specifier.`,
     );
   }
 
