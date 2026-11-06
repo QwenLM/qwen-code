@@ -23,10 +23,15 @@ describe('outbound media tools resolve the turn chat', () => {
 
   beforeEach(() => {
     workspace = realpathSync(mkdtempSync(join(tmpdir(), 'qq-file-tool-')));
+    // Constructing a real QQChannel creates the shared channel state directory
+    // under the global Qwen home; keep it inside this test's workspace so the
+    // suite never touches the developer's ~/.qwen.
+    vi.stubEnv('QWEN_HOME', join(workspace, 'qwen-home'));
     writeFileSync(join(workspace, 'chart.png'), Buffer.from('not-an-image'));
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     rmSync(workspace, { recursive: true, force: true });
   });
 
@@ -111,6 +116,31 @@ describe('outbound media tools resolve the turn chat', () => {
     expect(sendMedia.mock.calls[0]![0]).not.toMatchObject({
       chatId: 'GROUP_A',
     });
+  });
+
+  it('rebinds to each new turn chat instead of keeping the first one', async () => {
+    const { ch, tool, sendMedia } = makeChannel(
+      {},
+      {
+        channelName: 'test-bot',
+        chatId: 'GROUP_A',
+      },
+    );
+    const raw = ch as unknown as {
+      onPromptStart: (chatId: string, sessionId: string) => void;
+      onPromptEnd: (chatId: string, sessionId: string) => void;
+    };
+
+    raw.onPromptStart('GROUP_B', 'session-1');
+    await call(tool, 'session-1');
+    raw.onPromptEnd('GROUP_B', 'session-1');
+    raw.onPromptStart('GROUP_C', 'session-1');
+    await call(tool, 'session-1');
+
+    expect(sendMedia.mock.calls.map((c) => c[0].chatId)).toEqual([
+      'GROUP_B',
+      'GROUP_C',
+    ]);
   });
 
   it('fails closed for a single-scope session outside a turn', async () => {

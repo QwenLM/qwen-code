@@ -5921,6 +5921,51 @@ describe('sendQQMedia', () => {
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
 
+  it('re-resolves the reply anchor after a slow upload, so an expired window sends actively', async () => {
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+    const raw = ch as unknown as Record<string, unknown>;
+    // A multi-part upload can outlive the 300 s anchor TTL: the sweep drops the
+    // session anchor and its msg_seq counter while the upload is in flight.
+    // Sending the pre-upload msgId would restart the counter at 1, a
+    // (msg_id, msg_seq) pair the streaming text already used and QQ silently
+    // dedupes.
+    (raw['msgSeqMap'] as Map<string, number>).set('msg-anchor', 1);
+    mockUploadQQRichMedia.mockImplementation(async () => {
+      (raw['sessionReplyMsgId'] as Map<string, unknown>).delete('s1');
+      (raw['msgSeqMap'] as Map<string, number>).delete('msg-anchor');
+      return { fileInfo: 'FILE-INFO', ttl: 86400 };
+    });
+
+    const result = await sendMedia(ch, input);
+
+    expect(result).toEqual({ ok: true });
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      { msg_type: 7, media: { file_info: 'FILE-INFO' } },
+    );
+  });
+
+  it('fails when the reply window closes during the upload and active messages are disabled', async () => {
+    const ch = makeChannel({ chatType: 'group', sessionAnchor: 'msg-anchor' });
+    const raw = ch as unknown as Record<string, unknown>;
+    (raw['groupActiveMsgEnabled'] as Map<string, boolean>).set(
+      'test-chat-id',
+      false,
+    );
+    mockUploadQQRichMedia.mockImplementation(async () => {
+      (raw['sessionReplyMsgId'] as Map<string, unknown>).delete('s1');
+      return { fileInfo: 'FILE-INFO', ttl: 86400 };
+    });
+
+    const result = await sendMedia(ch, input);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('reply window closed during the upload');
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
   it('reports an upload failure instead of sending anything', async () => {
     const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
     mockUploadQQRichMedia.mockRejectedValue(

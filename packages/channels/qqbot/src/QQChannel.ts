@@ -5288,9 +5288,10 @@ export class QQChannel extends ChannelBase {
       };
     }
     // The same per-session anchor the streaming sends use, so the media lands in
-    // this turn's reply chain instead of starting a new one.
-    const { msgId } = this.resolveSessionReplyAnchor(sessionId);
-    if (!msgId && this.groupActiveMsgEnabled.get(chatId) === false) {
+    // this turn's reply chain instead of starting a new one. Read before the
+    // upload only for this cheap refusal: the anchor is re-resolved after it.
+    const initial = this.resolveSessionReplyAnchor(sessionId);
+    if (!initial.msgId && this.groupActiveMsgEnabled.get(chatId) === false) {
       return {
         ok: false,
         message: `${toolName}: active messages are disabled for this chat and this turn has no open reply window, so the media cannot be sent.`,
@@ -5317,6 +5318,21 @@ export class QQChannel extends ChannelBase {
         `[QQ:${this.name}] ${toolName} upload failed: ${sanitizeLogText(message, 200)}\n`,
       );
       return { ok: false, message };
+    }
+
+    // Re-resolve after the upload: a multi-part upload can outlive
+    // REPLY_MSG_ID_TTL_MS, and the TTL sweep then drops both the session anchor
+    // and its msg_seq counter. Sending the pre-upload msgId would restart the
+    // counter at 1 — a (msg_id, msg_seq) pair the streaming text already used,
+    // which QQ dedupes silently while this path reports success. The fresh
+    // anchor is also what lets the documented "reply window closed, send
+    // actively" fallback happen instead of posting into a dead chain.
+    const { msgId } = this.resolveSessionReplyAnchor(sessionId);
+    if (!msgId && this.groupActiveMsgEnabled.get(chatId) === false) {
+      return {
+        ok: false,
+        message: `${toolName}: the reply window closed during the upload and active messages are disabled for this chat, so the media cannot be sent.`,
+      };
     }
 
     let seq = 0;
