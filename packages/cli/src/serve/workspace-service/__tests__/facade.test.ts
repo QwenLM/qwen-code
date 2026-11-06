@@ -607,6 +607,141 @@ describe('createDaemonWorkspaceService', () => {
   });
 
   describe('status methods', () => {
+    describe('project hooks approval', () => {
+      const hooksBlock = {
+        SessionStart: [
+          { hooks: [{ type: 'command', command: 'node marker.mjs' }] },
+        ],
+      };
+
+      async function setupWorkspaceHooks(workspace: string) {
+        await writeJson(path.join(workspace, '.qwen', 'settings.json'), {
+          $version: 4,
+          hooks: hooksBlock,
+        });
+      }
+
+      it('cold daemon reports the pending block with its hash', async () => {
+        await withIsolatedWorkspace(async ({ workspace }) => {
+          await setupWorkspaceHooks(workspace);
+          const svc = createDaemonWorkspaceService(
+            makeDeps({
+              boundWorkspace: workspace,
+              isWorkspaceTrusted: () => false,
+            }),
+          );
+
+          const status = await svc.getWorkspaceHooksStatus(makeCtx());
+
+          expect(status.pendingApproval).toBe(true);
+          expect(status.pendingApprovalHooks).toEqual([
+            expect.stringContaining('node marker.mjs'),
+          ]);
+          expect(status.pendingApprovalHash).toMatch(/^[0-9a-f]{64}$/);
+        });
+      });
+
+      it('a trusted workspace shows no approval prompt on a cold daemon', async () => {
+        await withIsolatedWorkspace(async ({ workspace }) => {
+          await setupWorkspaceHooks(workspace);
+          const svc = createDaemonWorkspaceService(
+            makeDeps({
+              boundWorkspace: workspace,
+              isWorkspaceTrusted: () => true,
+            }),
+          );
+
+          const status = await svc.getWorkspaceHooksStatus(makeCtx());
+
+          expect(status.pendingApproval).toBeUndefined();
+        });
+      });
+
+      it('persists the decision when the echoed hash matches, then stops prompting', async () => {
+        await withIsolatedWorkspace(async ({ home, workspace }) => {
+          await setupWorkspaceHooks(workspace);
+          const svc = createDaemonWorkspaceService(
+            makeDeps({
+              boundWorkspace: workspace,
+              isWorkspaceTrusted: () => false,
+              invokeWorkspaceCommand: vi
+                .fn()
+                .mockRejectedValue(new Error('no live channel')),
+            }),
+          );
+          const before = await svc.getWorkspaceHooksStatus(makeCtx());
+
+          const result = await svc.approveProjectHooks(
+            makeCtx(),
+            'approve',
+            before.pendingApprovalHash,
+          );
+
+          expect(result).toEqual({ decision: 'approve', reloaded: false });
+          const stored = JSON.parse(
+            await fs.readFile(path.join(home, 'hookApprovals.json'), 'utf8'),
+          ) as Record<string, { hash: string; status: string }>;
+          expect(Object.values(stored)[0]).toMatchObject({
+            hash: before.pendingApprovalHash,
+            status: 'approved',
+          });
+          const after = await svc.getWorkspaceHooksStatus(makeCtx());
+          expect(after.pendingApproval).toBeUndefined();
+        });
+      });
+
+      it('refuses a decision whose hash names a changed block and persists nothing', async () => {
+        await withIsolatedWorkspace(async ({ home, workspace }) => {
+          await setupWorkspaceHooks(workspace);
+          const svc = createDaemonWorkspaceService(
+            makeDeps({
+              boundWorkspace: workspace,
+              isWorkspaceTrusted: () => false,
+            }),
+          );
+          const before = await svc.getWorkspaceHooksStatus(makeCtx());
+          await writeJson(path.join(workspace, '.qwen', 'settings.json'), {
+            $version: 4,
+            hooks: {
+              SessionStart: [
+                { hooks: [{ type: 'command', command: 'node evil.mjs' }] },
+              ],
+            },
+          });
+
+          await expect(
+            svc.approveProjectHooks(
+              makeCtx(),
+              'approve',
+              before.pendingApprovalHash,
+            ),
+          ).rejects.toMatchObject({
+            name: 'WorkspaceProjectHooksChangedError',
+          });
+          await expect(
+            fs.access(path.join(home, 'hookApprovals.json')),
+          ).rejects.toThrow();
+        });
+      });
+
+      it('rejects a decision when the workspace declares no hooks', async () => {
+        await withIsolatedWorkspace(async ({ workspace }) => {
+          const svc = createDaemonWorkspaceService(
+            makeDeps({
+              boundWorkspace: workspace,
+              isWorkspaceTrusted: () => false,
+            }),
+          );
+
+          await expect(
+            svc.approveProjectHooks(makeCtx(), 'approve'),
+          ).rejects.toMatchObject({
+            name: 'WorkspaceProjectHooksNotPendingError',
+          });
+        });
+      });
+    });
+
     it('getWorkspaceTrustStatus reads current settings and trusted folders', async () => {
       await withIsolatedWorkspace(async ({ home, workspace }) => {
         await writeJson(path.join(home, 'settings.json'), {
@@ -4460,6 +4595,30 @@ describe('createDaemonWorkspaceService', () => {
   });
 
   describe('reloadModelProviders', () => {
+    it('notifies the selected runtime without clearing model settings on subscription logout', async () => {
+      const preheatAcpChild = vi.fn().mockResolvedValue(undefined);
+      const invokeWorkspaceCommand = vi
+        .fn()
+        .mockResolvedValue({ configsFailed: 0 });
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          preheatAcpChild,
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+        }),
+      );
+      await expect(
+        svc.reloadModelProviders(makeCtx(), { subscriptionSignedOut: true }),
+      ).resolves.toEqual({ status: 'applied' });
+      expect(preheatAcpChild).toHaveBeenCalledOnce();
+      expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/control/workspace/model-providers/reload',
+        { cwd: '/workspace', subscriptionSignedOut: true },
+        { timeoutMs: 30_000 },
+      );
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
     it('uses the provider-specific environment refresh when configured', async () => {
       const reloadDaemonEnv = vi.fn();
       const reloadModelProvidersDaemonEnv = vi.fn().mockResolvedValue({

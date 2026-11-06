@@ -2,7 +2,8 @@
 
 [English](2026-11-04-managed-publication-tenant-guards.md) | [简体中文](2026-11-04-managed-publication-tenant-guards.zh-CN.md)
 
-状态：C1、C2 已实现；C3 为方案。
+状态：C1、C2 已实现；C3 的设计见
+[不经 placement guard 的发布车道](2026-11-04-managed-publication-placement.zh-CN.md)。
 
 ## C1/C2 之前的问题与基线状态
 
@@ -99,22 +100,14 @@ root 和 head 下获取的租约本身就能与它们互斥。租约续期也跳
 
 未覆盖：native journal 快照写入方，其 build 事务在锁 Session 之前先锁资源行，顺序需要单独分析。
 
-### C3. 用原始 Runtime binding 取代 placement
+### C3. placement
 
-在普通（非 CSI）发布车道中，用对原始 binding 行（`ma_runtime_binding`）的共享锁取代
-placement guard，获取位置与目前的 placement 相同，位于 Session root 和 head 之前。retention 清扫在检查引用之前以
-`FOR UPDATE` 锁定该行，因此要么车道等待清扫，随后发现 binding 已不存在而拒绝；要么清扫等待
-车道，随后看到它的引用。CSI 固定的 Session 保留 placement；CSI 退役与应用路径不在范围内。
-
-这正是[锁范围设计](2026-11-04-managed-lock-scope.zh-CN.md)为 hosted cleanup 引用留下的
-binding 握手；同一握手之后也可用于这些引用。
+见[不经 placement guard 的发布车道](2026-11-04-managed-publication-placement.zh-CN.md)。
+此处最初提出的"binding 在 root 之前"的草案不成立：placement 持有者以两种顺序锁 binding 和 Session root。
 
 ## 待定问题
 
 1. native journal 快照写入方仍获取 guard（见 C2）。
-2. C3 需要验证其提出的 binding 在 root 之前的顺序：清扫在 placement 下先锁 slot 再锁 binding；
-   车道会在 Session root 和 head 之前锁 binding。清扫锁定 binding 之后不再锁 Session 行，预计不会
-   形成环路，但审计必须覆盖车道和清扫对 `ma_tool_execution` 的加锁。
 
 ## 风险
 

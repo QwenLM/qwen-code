@@ -133,6 +133,8 @@ import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
 import { registerDaemonUpdateRoutes } from './routes/daemon-update.js';
 import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
+import { registerWorkspaceSubscriptionRoutes } from './routes/workspace-subscription.js';
+import { registerSubscriptionAuthRoutes } from './routes/subscription-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import {
@@ -696,6 +698,14 @@ export interface ServeAppDeps {
   ) => Promise<void>;
   persistDisabledSkills?: DaemonWorkspaceServiceDeps['persistDisabledSkills'];
   persistDisabledSkillsBatch?: DaemonWorkspaceServiceDeps['persistDisabledSkillsBatch'];
+  persistUserSkillsActivation?: (
+    workspace: string,
+    skillNames: readonly string[],
+    activation: import('../config/skill-settings.js').UserSkillActivation,
+    assertGenerationOpen?: () => void,
+  ) => Promise<
+    import('./workspace-service/types.js').PersistUserSkillsActivationResult
+  >;
   contextFilename?: string;
   persistSetting?: (
     workspace: string,
@@ -1183,6 +1193,8 @@ export function createServeApp(
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
+      userSkillActivationAvailable:
+        deps.persistUserSkillsActivation !== undefined,
       sessionArtifactsPersistenceAvailable:
         deps.sessionArtifactsPersistenceAvailable !== false,
       sessionGenerationAvailable: () => {
@@ -2937,6 +2949,7 @@ export function createServeApp(
   });
   registerWorkspaceQualifiedStatusRoutes(app, {
     workspaceRegistry,
+    mutate,
     sendBridgeError,
   });
   registerWorkspaceRuntimeStopRoutes(app, {
@@ -3558,6 +3571,38 @@ export function createServeApp(
     },
   });
 
+  registerWorkspaceSubscriptionRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    persistSettings: deps.persistSettings,
+    sendBridgeError,
+  });
+  const stopSubscriptionAuth = registerSubscriptionAuthRoutes(
+    app,
+    mutate,
+    async () => {
+      let failed = false;
+      for (const runtime of workspaceRegistry.listAll()) {
+        if (runtime.generationGuard?.closed) continue;
+        try {
+          runtime.generationGuard?.assertOpen();
+          const result = await runtime.workspaceService.reloadModelProviders(
+            createBuildWorkspaceCtx(runtime.workspaceCwd)(
+              'POST /auth/subscription/revoke',
+            ),
+            { subscriptionSignedOut: true },
+          );
+          if (result.status !== 'applied') failed = true;
+        } catch {
+          failed = true;
+        }
+      }
+      if (failed)
+        throw new Error('Unable to restore model connections after sign-out.');
+    },
+  );
+  app.locals['stopSubscriptionAuth'] = stopSubscriptionAuth;
+
   registerWorkspaceAuthRoutes(app, {
     mutate,
     deviceFlowRegistry,
@@ -3751,6 +3796,17 @@ export function createServeApp(
     sendBridgeError,
     getSkillsConfigStatus,
     invalidateSkillsConfigStatus,
+    ...(deps.persistUserSkillsActivation
+      ? {
+          persistUserSkillsActivation: (skillNames, activation) =>
+            deps.persistUserSkillsActivation!(
+              primaryBoundWorkspace,
+              skillNames,
+              activation,
+              capturePrimaryGenerationAssertion(),
+            ),
+        }
+      : {}),
     installSkillConfig: (workspaceCwd, request) =>
       installWorkspaceSkill(
         workspaceCwd,
@@ -4391,6 +4447,7 @@ export function createServeApp(
       stopAppResource(locals.stopExtensionGenerationReconciler);
       stopAppResource(locals.stopSessionAgentOrchestrators);
       stopAppResource(locals.stopHostedMountHandbacks);
+      stopAppResource(stopSubscriptionAuth);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());

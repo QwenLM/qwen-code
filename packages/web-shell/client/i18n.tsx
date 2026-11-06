@@ -114,6 +114,94 @@ function ruPlural(
 }
 
 const EN: Messages = {
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    (v) =>
+      `You've used up your weekly credits.${v?.['reset'] ?? ''} You can wait or run /upgrade to get more credits.`,
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    (v) =>
+      `You've used up your weekly credits.${v?.['reset'] ?? ''} Please try again after the reset.`,
+  "You've used up your credits.{{reset}} Please try again after the reset.": (
+    v,
+  ) =>
+    `You've used up your credits.${v?.['reset'] ?? ''} Please try again after the reset.`,
+  ' Your credits are expected to reset in {{time}}.': (v) =>
+    ` Your credits are expected to reset in ${v?.['time'] ?? ''}.`,
+  '{{days}} and {{hours}}': (v) =>
+    `${v?.['days'] ?? ''} and ${v?.['hours'] ?? ''}`,
+  '1 day': '1 day',
+  '{{count}} days': (v) => `${v?.['count'] ?? ''} days`,
+  '1 hour': '1 hour',
+  '{{count}} hours': (v) => `${v?.['count'] ?? ''} hours`,
+  'subscription.entryTitle': 'Qwen Account with Subscription',
+  'subscription.entryDescription':
+    'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
+  'subscription.new': 'New',
+  'subscription.openPlansDescription':
+    'Opens the Qwen Code plans page in your browser',
+  'subscription.switchProviderDescription': 'Choose another model provider',
+  'subscription.upgradeDescription': 'Open Qwen subscription plans',
+  'subscription.commandUnavailable':
+    'Sign in to Qwen and select a Qwen subscription model to use this command.',
+  'subscription.upgradeFailed':
+    'Could not open Qwen subscription plans. Please try again.',
+  'subscription.signOutDescription':
+    'Disconnect this device from your Qwen account',
+  'subscription.title': 'Qwen Subscription',
+  'subscription.waiting':
+    'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.',
+  'subscription.browserFallback': "If the browser didn't open, visit:",
+  'subscription.pending': 'Waiting for sign-in…',
+  'subscription.checking': 'Checking your subscription…',
+  'subscription.waitingForPurchase':
+    'Waiting for your subscription to become active…',
+  'subscription.included': 'Qwen Code is included with Qwen Plus and Pro',
+  'subscription.openAuthorization': 'Open authorization page',
+  'subscription.openPlans': 'View Plans',
+  'subscription.checkAgain': 'Retry Connection',
+  'subscription.switchProvider': 'Switch Provider',
+  'subscription.useAnotherAccount': 'Use another account',
+  'subscription.successTitle': 'Signed in successfully',
+  'subscription.successDescription': 'You can now use Qwen Code.',
+  'subscription.accountLabel': 'Account',
+  'subscription.planLabel': 'Plan',
+  'subscription.modelLabel': 'Model',
+  'subscription.startUsing': 'Start Using',
+  'subscription.signOut': 'Sign out',
+  'subscription.signedOut': 'Signed out of Qwen. Use /auth to sign in again.',
+  'subscription.signedOutLocally':
+    'You are signed out locally, but the remote session could not be revoked.',
+  'subscription.signOutFailed': 'Could not sign out of Qwen. Please try again.',
+  'subscription.logoutNotRequired':
+    'This connection does not require /logout. Use /auth to switch model providers.',
+  'subscription.unavailable':
+    'Qwen subscription is not available in this build.',
+  'subscription.cancel': 'Cancel',
+  'subscription.connecting': 'Loading models from provider…',
+  'subscription.refreshFailed':
+    'Could not refresh your Qwen session. Please try again.',
+  'subscription.credentialsFailed':
+    'Could not read or save Qwen credentials. Check local file permissions and disk space.',
+  'subscription.rateLimited': 'Too many requests. Please try again later.',
+  'subscription.networkFailed': 'The network request failed or timed out.',
+  'subscription.modelsUnavailable':
+    'Could not load models. Your account is still signed in. Please try again.',
+  'subscription.connectFailed':
+    'Could not connect Qwen Subscription. Please try again.',
+  'subscription.connected': (v) =>
+    `✓ Signed in successfully · ${v?.email ?? ''}  \n✓ Current plan: Qwen ${v?.plan ?? ''}. Qwen Code is ready.${v?.model ? `  \nModel: ${v.model}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.` : ''}${v?.url ? `  \nIf the browser didn't open, visit:  \n${v.url}` : ''}  \nCommon commands: /usage   /upgrade   /model   /status   /logout`,
+  'subscription.signedIn': (v) => `Signed in successfully · ${v?.email ?? ''}`,
+  'subscription.modelSummary': (v) =>
+    `Model: ${v?.model ?? ''}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.`,
+  'subscription.commonCommands':
+    'Common commands: /usage   /upgrade   /model   /status   /logout',
+  'subscription.loginRequired':
+    'Your login credentials are no longer valid. Run /auth to sign in again.',
+  'subscription.signedInWithPlan': (v) =>
+    `Signed in as ${v?.email ?? ''} (Qwen ${v?.plan ?? ''})`,
+  'subscription.ready': (v) =>
+    `Current plan: Qwen ${v?.plan ?? ''}. Qwen Code is ready.`,
+  'subscription.purchase-required': (v) =>
+    `You're signed in with a ${v?.plan ?? ''} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; Qwen Code continues automatically after you subscribe.`,
   'remoteAccess.title': 'Allow remote connections',
   'remoteAccess.description':
     'Enable access to this server without restarting it. Local sessions and tasks keep running.',
@@ -229,6 +317,15 @@ const EN: Messages = {
   'localControl.connectionRetry':
     'Connection interrupted. Retry to refresh the QR code.',
   'daemon.connection.retry': 'Retry connection',
+  'hooksApproval.title': 'This project wants to run hooks',
+  'hooksApproval.description':
+    'Hooks in this project\u2019s .qwen/settings.json run commands on your machine. They stay disabled until you approve this exact configuration. Any change to the hooks or the project .env asks again.',
+  'hooksApproval.scopeNote':
+    'Approving records a decision for this project only. If folder trust is enabled and this folder is not trusted, the hooks stay disabled until the folder is trusted.',
+  'hooksApproval.approve': 'Approve hooks',
+  'hooksApproval.reject': 'Keep disabled',
+  'hooksApproval.failed':
+    'The decision could not be saved. Nothing changed; please try again.',
   'daemon.capacity.exhausted':
     'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
   'managed.title': 'Managed Agents',
@@ -2384,6 +2481,8 @@ const EN: Messages = {
     `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'}`,
   'sidebar.overview.hooksDisabled': (v) =>
     `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'} (disabled)`,
+  'sidebar.overview.hooksUntrusted': (v) =>
+    `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'}, ${v?.untrusted ?? 0} not loaded (folder not trusted). Enable security.folderTrust.enabled and trust the folder, or run qwen interactively to review.`,
   'sidebar.forceRemoveWorkspace': 'Force remove',
   'sidebar.removeWorkspaceTitle': 'Remove workspace',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -2406,6 +2505,7 @@ const EN: Messages = {
   'sidebar.removeWorkspaceVoiceSessions': (v) =>
     `Voice sessions: ${v?.count ?? 0}`,
   'sidebar.noSessions': 'No sessions.',
+  'sidebar.untitledSession': 'Untitled session',
   'sidebar.projectFallback': 'Workspace',
   'sidebar.sessionsOverview': 'Session Overview',
   'sidebar.splitView': 'Split View',
@@ -2764,7 +2864,9 @@ const EN: Messages = {
   'language.invalid': `Invalid language. Available: ${WEB_SHELL_LANGUAGES.join(', ')}`,
   'language.options': 'Available options:',
   'language.set': 'Set UI language',
-  'language.usage': `Usage: /language ui [${WEB_SHELL_LANGUAGES.join('|')}] | output <language>`,
+  'language.refreshFailed':
+    'UI language saved, but it could not be fully applied.',
+  'language.usage': `Usage: /language ui [${WEB_SHELL_LANGUAGES.join('|')}] [--project|--global] | output <language>`,
   'localCommand.noSession':
     'No active session yet. Send your first message before using this command.',
   'localCommand.diffNoWorkspace':
@@ -2839,6 +2941,7 @@ const EN: Messages = {
   'local.auth': 'Connect an LLM provider',
   'auth.title': 'Connect a Provider',
   'auth.step.group': 'Type',
+  'auth.step.authorization': 'Authorization',
   'auth.step.provider': 'Provider',
   'auth.step.protocol': 'Protocol',
   'auth.step.api': 'API',
@@ -4605,7 +4708,29 @@ const EN: Messages = {
     'state_change — the PR is merged or closed',
   'channels.editor.field.github.boundSessionActions': 'Bound Session Actions',
   'channels.editor.field.github.boundSessionActions.description':
-    'Optional. Operator instruction templates delivered to PR-bound sessions, keyed by event class (watch:<type> or a notification reason), optionally role-qualified (review:, verify:, fix:). Requires Deliver To PR-Bound Sessions. With templates configured, each role gets its own delivery (one winner per role); a role with no matching key skips the event. Template variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%. Use %% for a literal %. Leave empty for the default generic prompt.',
+    'Optional. Instruction templates delivered to PR-bound sessions. Pick an event key below; a role prefix (review:, verify:, fix:) targets that binding role only. Requires Deliver To PR-Bound Sessions. Each role with a matching key gets its own delivery; roles without one skip the event. Variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%; %% for a literal %. Leave empty for the default generic prompt.',
+  'channels.editor.field.github.boundSessionActions.disabledHint':
+    'Enable "Deliver To PR-Bound Sessions" above to add templates.',
+  'channels.editor.field.github.boundSessionActions.group.any': 'Any role',
+  'channels.editor.field.github.boundSessionActions.group.review':
+    'review — code review sessions',
+  'channels.editor.field.github.boundSessionActions.group.verify':
+    'verify — verification sessions',
+  'channels.editor.field.github.boundSessionActions.group.fix':
+    'fix — fix sessions',
+  'channels.editor.field.github.boundSessionActions.empty':
+    'No templates configured yet.',
+  'channels.editor.field.github.boundSessionActions.addPlaceholder':
+    'Add template…',
+  'channels.editor.field.gitlab.action_prompt_template.empty':
+    'No templates configured yet.',
+  'channels.editor.field.gitlab.action_prompt_template.addPlaceholder':
+    'Add template…',
+  // Generic defaults for every record field; template-worded fields override
+  // them through their field label key (messageRoutes is routes, not templates).
+  'channels.editor.record.addPlaceholder': 'Add entry…',
+  'channels.editor.record.empty': 'No entries configured yet.',
+  'channels.editor.record.remove': (v) => `Remove ${v?.key ?? ''}`,
   'channels.editor.field.gitlab.token': 'Personal Access Token',
   'channels.editor.field.gitlab.token.description':
     'PAT with "read_api" + "api" scopes',
@@ -4843,8 +4968,135 @@ const EN: Messages = {
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
 };
 
+/**
+ * zh-CN descriptions for the GitHub boundSessionActions keys. The 20 base
+ * event descriptions are written once; the 60 role-qualified spellings
+ * reuse them (the picker group header names the role). English needs no
+ * entries here: the renderer falls back to the descriptor's own option
+ * descriptions. The role list mirrors PR_BINDING_ROLES in
+ * @qwen-code/channel-base, which the client cannot import.
+ */
+function githubBoundActionOptionDescriptionsZh(): Record<string, string> {
+  const base: Record<string, string> = {
+    default: '没有更具体键的事件使用的回退模板',
+    'watch:ci_failure': 'head 提交上的 CI 检查变红',
+    'watch:merge_conflict': 'PR 出现合并冲突',
+    'watch:head_change': 'PR 的 head 提交变更',
+    'watch:state_change': 'PR 被合并或关闭',
+    mention: '你在评论中被 @提及',
+    review_requested: '有人请求你评审',
+    assign: '你被指派到该 PR',
+    author: '你创建的 PR 有新动态',
+    comment: '已订阅 PR 的新评论',
+    ci_activity: '已订阅 PR 的 CI 动态',
+    manual: '你手动订阅了该 PR',
+    state_change: 'PR 被关闭或合并',
+    subscribed: '你订阅的 PR 有新动态',
+    team_mention: '你所在的团队被 @提及',
+    security_alert: '仓库的安全告警',
+    approval_requested: '有人请求你批准',
+    invitation: '你收到协作邀请',
+    member_feature_requested: '成员功能请求通知',
+    security_advisory_credit: '你在安全公告中被署名致谢',
+  };
+  const prefix = 'channels.editor.field.github.boundSessionActions';
+  const entries: Record<string, string> = {};
+  for (const [key, description] of Object.entries(base)) {
+    entries[`${prefix}.optionDescription.${key}`] = description;
+    for (const role of ['review', 'verify', 'fix']) {
+      entries[`${prefix}.optionDescription.${role}:${key}`] = description;
+    }
+  }
+  return entries;
+}
+
 const ZH: Messages = {
   ...EN,
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    (v) =>
+      `周额度已用完${v?.['reset'] ?? ''}。您可以等待额度恢复，或运行 /upgrade 升级套餐以获取更多额度。`,
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    (v) => `周额度已用完${v?.['reset'] ?? ''}，请在额度恢复后重试。`,
+  "You've used up your credits.{{reset}} Please try again after the reset.": (
+    v,
+  ) => `额度已用完${v?.['reset'] ?? ''}，请在额度恢复后重试。`,
+  ' Your credits are expected to reset in {{time}}.': (v) =>
+    `，预计将于${v?.['time'] ?? ''}后恢复`,
+  '{{days}} and {{hours}}': (v) => `${v?.['days'] ?? ''} ${v?.['hours'] ?? ''}`,
+  '1 day': '1天',
+  '{{count}} days': (v) => `${v?.['count'] ?? ''}天`,
+  '1 hour': '1小时',
+  '{{count}} hours': (v) => `${v?.['count'] ?? ''}小时`,
+  'Third-party Providers': '第三方供应商',
+  'Custom Provider': '自定义供应商',
+  'Official recommended setup: Token Plan or Standard API Key':
+    '官方推荐配置：Token Plan 或标准 API Key',
+  'Official recommended setup: Coding Plan, Token Plan, or Standard API Key':
+    '官方推荐配置：Coding Plan、Token Plan 或标准 API Key',
+  'Choose a built-in provider and connect with an API key':
+    '选择内置供应商并使用 API Key 连接',
+  'Manually connect a local server, proxy, or unsupported provider':
+    '手动连接本地服务、代理或其他供应商',
+  'subscription.entryTitle': 'Qwen 会员账号',
+  'subscription.entryDescription':
+    '在 chat.qwen.ai 订阅 Plus/Pro，解锁 Qwen Code 和 Agent 能力',
+  'subscription.new': '新',
+  'subscription.openPlansDescription': '在浏览器中打开 Qwen Code 套餐页',
+  'subscription.switchProviderDescription': '选择其他模型供应商',
+  'subscription.upgradeDescription': '打开 Qwen 订阅套餐页面',
+  'subscription.commandUnavailable':
+    '请先登录 Qwen 并选择 Qwen 订阅模型，再使用此命令。',
+  'subscription.upgradeFailed': '无法打开 Qwen 订阅套餐页面，请重试。',
+  'subscription.signOutDescription': '断开此设备与你的 Qwen 账号的连接',
+  'subscription.title': 'Qwen 订阅',
+  'subscription.waiting':
+    '正在浏览器中打开 chat.qwen.ai… 请在那里登录以连接 Qwen Code。',
+  'subscription.browserFallback': '如果浏览器未打开，请访问：',
+  'subscription.pending': '正在等待登录…',
+  'subscription.checking': '正在检查你的订阅…',
+  'subscription.waitingForPurchase': '正在等待你的订阅生效…',
+  'subscription.included': 'Qwen Plus 和 Pro 包含 Qwen Code',
+  'subscription.openAuthorization': '打开授权页',
+  'subscription.openPlans': '查看套餐',
+  'subscription.checkAgain': '重试',
+  'subscription.switchProvider': '切换供应商',
+  'subscription.useAnotherAccount': '使用其他账号',
+  'subscription.successTitle': '登录成功',
+  'subscription.successDescription': '已成功登录，现在可以使用 Qwen Code。',
+  'subscription.accountLabel': '账号',
+  'subscription.planLabel': '套餐',
+  'subscription.modelLabel': '模型',
+  'subscription.startUsing': '开始使用',
+  'subscription.signOut': '退出登录',
+  'subscription.signedOut': '已退出 Qwen 登录。使用 /auth 重新登录。',
+  'subscription.signedOutLocally': '已在本地退出登录，但未能撤销远端会话。',
+  'subscription.signOutFailed': '无法退出 Qwen 登录，请重试。',
+  'subscription.logoutNotRequired':
+    '当前连接无需通过 /logout 退出。如需切换模型服务，请使用 /auth。',
+  'subscription.unavailable': '当前版本暂不支持 Qwen 订阅。',
+  'subscription.cancel': '取消',
+  'subscription.connecting': '正在加载模型…',
+  'subscription.refreshFailed': '无法刷新 Qwen 登录凭证，请重试。',
+  'subscription.credentialsFailed':
+    '无法读取或保存 Qwen 凭证，请检查本地文件权限和磁盘空间。',
+  'subscription.rateLimited': '请求过多，请稍后重试。',
+  'subscription.networkFailed': '网络请求失败或超时。',
+  'subscription.modelsUnavailable': '无法加载模型。已保留登录态，请重试。',
+  'subscription.connectFailed': '无法连接 Qwen 订阅，请重试。',
+  'subscription.connected': (v) =>
+    `✓ 登录成功 · ${v?.email ?? ''}  \n✓ 当前套餐：Qwen ${v?.plan ?? ''}，已可使用 Qwen Code${v?.model ? `  \n模型：${v.model}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。` : ''}${v?.url ? `  \n如果浏览器未打开，请访问：  \n${v.url}` : ''}  \n常用命令：/usage   /upgrade   /model   /status   /logout`,
+  'subscription.signedIn': (v) => `登录成功 · ${v?.email ?? ''}`,
+  'subscription.modelSummary': (v) =>
+    `模型：${v?.model ?? ''}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。`,
+  'subscription.commonCommands':
+    '常用命令：/usage   /upgrade   /model   /status   /logout',
+  'subscription.loginRequired': '登录凭证已失效，请运行 /auth 重新登录。',
+  'subscription.signedInWithPlan': (v) =>
+    `已登录为 ${v?.email ?? ''}（Qwen ${v?.plan ?? ''}）`,
+  'subscription.ready': (v) =>
+    `当前套餐：Qwen ${v?.plan ?? ''}，已可使用 Qwen Code`,
+  'subscription.purchase-required': (v) =>
+    `你已使用 ${v?.plan ?? ''} 账号登录，该账号不包含 Qwen Code。请在浏览器中选择 Plus 或 Pro；订阅后 Qwen Code 将自动继续。`,
   'remoteAccess.title': '允许远程连接',
   'remoteAccess.description':
     '无需重启即可开放当前服务器，本地会话和任务继续运行。',
@@ -4943,6 +5195,14 @@ const ZH: Messages = {
   'daemon.connection.unavailable': '无法连接服务。',
   'localControl.connectionRetry': '连接已中断，请点击重试刷新二维码。',
   'daemon.connection.retry': '重试连接',
+  'hooksApproval.title': '此项目想要运行 hooks',
+  'hooksApproval.description':
+    '此项目 .qwen/settings.json 中的 hooks 会在你的机器上执行命令。只有你批准这份确切配置后它们才会启用；hooks 或项目 .env 发生变化时会重新询问。',
+  'hooksApproval.scopeNote':
+    '批准只记录针对此项目的决定。若启用了文件夹信任且此文件夹未受信任，hooks 仍会保持禁用，直到文件夹受信任。',
+  'hooksApproval.approve': '批准 hooks',
+  'hooksApproval.reject': '保持禁用',
+  'hooksApproval.failed': '决策未能保存，一切保持原样，请重试。',
   'daemon.capacity.exhausted':
     '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
   'managed.title': '托管 Agent',
@@ -7019,6 +7279,8 @@ const ZH: Messages = {
     `${v?.files ?? 0} 个上下文文件，${v?.rules ?? 0} 条规则`,
   'sidebar.overview.hooksDetail': (v) => `${v?.count ?? 0} 个 hook`,
   'sidebar.overview.hooksDisabled': (v) => `${v?.count ?? 0} 个 hook（已禁用）`,
+  'sidebar.overview.hooksUntrusted': (v) =>
+    `${v?.count ?? 0} 个 hook，${v?.untrusted ?? 0} 个未加载（目录未受信任）。请启用 security.folderTrust.enabled 并信任该目录，或在交互式终端中运行 qwen 审查。`,
   'sidebar.forceRemoveWorkspace': '强制移除',
   'sidebar.removeWorkspaceTitle': '移除工作区',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -7038,6 +7300,7 @@ const ZH: Messages = {
   'sidebar.removeWorkspaceWorkers': (v) => `Channel worker：${v?.count ?? 0}`,
   'sidebar.removeWorkspaceVoiceSessions': (v) => `语音会话：${v?.count ?? 0}`,
   'sidebar.noSessions': '暂无会话',
+  'sidebar.untitledSession': '未命名会话',
   'sidebar.projectFallback': '工作区',
   'sidebar.sessionsOverview': '会话总览',
   'sidebar.splitView': '分屏',
@@ -7368,7 +7631,8 @@ const ZH: Messages = {
   'language.invalid': `语言无效。可用值：${WEB_SHELL_LANGUAGES.join(', ')}`,
   'language.options': '可用选项：',
   'language.set': '设置 UI 语言',
-  'language.usage': `用法：/language ui [${WEB_SHELL_LANGUAGES.join('|')}] | output <language>`,
+  'language.refreshFailed': 'UI 语言已保存，但未能完全生效。',
+  'language.usage': `用法：/language ui [${WEB_SHELL_LANGUAGES.join('|')}] [--project|--global] | output <language>`,
   'localCommand.noSession':
     '当前还没有会话。请先发送第一条消息，再使用这个命令。',
   'localCommand.diffNoWorkspace': '当前还没有可用于查看变更的工作区。',
@@ -7428,9 +7692,10 @@ const ZH: Messages = {
   'skilldesc.tmuxRealUserTesting': '用 tmux 做真实用户测试并保存日志',
   'skilldesc.triage': '把关和审查 Qwen Code 的 issue 与 PR',
   'local.approvalMode': '切换审批模式',
-  'local.auth': '连接 LLM provider',
-  'auth.title': '连接 Provider',
+  'local.auth': '连接模型供应商',
+  'auth.title': '连接供应商',
   'auth.step.group': '类型',
+  'auth.step.authorization': '授权',
   'auth.step.provider': '供应商',
   'auth.step.protocol': '协议',
   'auth.step.api': 'API',
@@ -9064,7 +9329,26 @@ const ZH: Messages = {
     'state_change — PR 被合并或关闭',
   'channels.editor.field.github.boundSessionActions': '绑定会话动作模板',
   'channels.editor.field.github.boundSessionActions.description':
-    '可选。投递给 PR 绑定会话的 operator 指令模板，键为事件类别（watch:<type> 或通知 reason），可加角色前缀（review:、verify:、fix:）。需开启"投递到 PR 绑定会话"。配置模板后每个角色各自投递（每角色一个 winner）；没有匹配键的角色跳过该事件。模板变量：%repo%、%pr%、%url%、%title%、%event%、%sender%、%role%。%% 表示字面 %。留空则使用默认通用 prompt。',
+    '可选。投递给 PR 绑定会话的 operator 指令模板。在下方选择事件键；加角色前缀（review:、verify:、fix:）可只定向该绑定角色。需开启"投递到 PR 绑定会话"。有匹配键的角色各自投递，没有匹配键的角色跳过该事件。变量：%repo%、%pr%、%url%、%title%、%event%、%sender%、%role%；%% 表示字面 %。留空则使用默认通用 prompt。',
+  'channels.editor.field.github.boundSessionActions.disabledHint':
+    '开启上方「投递到 PR 绑定会话」后即可添加模板。',
+  'channels.editor.field.github.boundSessionActions.group.any': '任意角色',
+  'channels.editor.field.github.boundSessionActions.group.review':
+    'review — 代码评审会话',
+  'channels.editor.field.github.boundSessionActions.group.verify':
+    'verify — 验证会话',
+  'channels.editor.field.github.boundSessionActions.group.fix':
+    'fix — 修复会话',
+  'channels.editor.field.github.boundSessionActions.empty': '尚未配置模板。',
+  'channels.editor.field.github.boundSessionActions.addPlaceholder':
+    '添加模板…',
+  'channels.editor.field.gitlab.action_prompt_template.empty': '尚未配置模板。',
+  'channels.editor.field.gitlab.action_prompt_template.addPlaceholder':
+    '添加模板…',
+  'channels.editor.record.addPlaceholder': '添加条目…',
+  'channels.editor.record.empty': '尚未配置条目。',
+  'channels.editor.record.remove': (v) => `删除 ${v?.key ?? ''}`,
+  ...githubBoundActionOptionDescriptionsZh(),
   'channels.editor.field.gitlab.token': '个人访问令牌',
   'channels.editor.field.gitlab.token.description':
     '需要 "read_api" + "api" 权限的 PAT',
