@@ -465,6 +465,46 @@ cat "\${RUNNER_TEMP}/pulls.json"
       expect(evaluate(String(jobs.file_issue.if), needs)).toBe(false);
     });
 
+    it('files a provisional timeout instead of deferring to a rerun that never runs', () => {
+      // A provisional report and a timeout deferral cancel each other out:
+      // `rerun_infra` refuses a provisional run, and `file_issue` refuses a
+      // rerun_pending one, so the occurrence was neither rerun nor filed. The
+      // head is already replaced, so the report is the only record of it.
+      const resolved = resolve([], {
+        EVENT_NAME: 'push',
+        HEAD_BRANCH: 'main',
+        HEAD_SHA: 'tested-head',
+        CANCELLATION_KIND: 'timeout',
+        TIMEOUT_ATTEMPTS_EXHAUSTED: 'false',
+        TIMEOUT_ANNOTATIONS_READABLE: 'true',
+        PROVISIONAL: 'true',
+      });
+
+      expect(resolved.output).toContain('file_issue=true');
+      expect(resolved.output).toContain('rerun_pending=false');
+      const evaluate = (condition, needs) =>
+        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
+          needs,
+          () => true,
+        );
+      const needs = {
+        analyze: {
+          result: 'success',
+          outputs: {
+            infra_only: 'false',
+            file_issue: 'true',
+            rerun_pending: 'false',
+            cancellation_kind: 'timeout',
+            timeout_attempts_exhausted: 'false',
+            provisional: 'true',
+          },
+        },
+        rerun_infra: { result: 'skipped' },
+      };
+      expect(evaluate(String(jobs.rerun_infra.if), needs)).toBe(false);
+      expect(evaluate(String(jobs.file_issue.if), needs)).toBe(true);
+    });
+
     it('files rather than reruns a timeout it only guessed at', () => {
       // The annotation read failed, so the timeout classification is a guess.
       // Reporting it is right; buying a whole-matrix rerun on a guess is not,

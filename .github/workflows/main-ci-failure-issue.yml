@@ -304,6 +304,7 @@ jobs:
           CANCELLATION_KIND: '${{ steps.live.outputs.cancellation_kind }}'
           TIMEOUT_ATTEMPTS_EXHAUSTED: '${{ steps.live.outputs.timeout_attempts_exhausted }}'
           TIMEOUT_ANNOTATIONS_READABLE: '${{ steps.live.outputs.timeout_annotations_readable }}'
+          PROVISIONAL: '${{ steps.live.outputs.provisional }}'
         run: |-
           set -euo pipefail
           pr_number=''
@@ -359,18 +360,27 @@ jobs:
             echo "::warning::The admitted ${EVENT_NAME} run on ${HEAD_BRANCH} resolved to no PR and no issue; nothing will be reported."
           fi
           if [[ "${timeout_pending_rerun}" == 'true' ]]; then
-            # rerun_infra reruns this run; its own completion reports the
-            # result. Suppress only the filing, not the dispatch.
-            file_issue=false
-            # A timeout inferred from an unreadable annotation list is still
-            # reported, but it must not buy a whole-matrix rerun: the read
-            # that would have told a timeout from a supersede failed, and
-            # replaying a superseded matrix is the expensive mistake. A
-            # timeout that WAS read from an annotation is unambiguous.
-            if [[ "${TIMEOUT_ANNOTATIONS_READABLE:-false}" == 'true' ]]; then
+            # A provisional report is the only record of this occurrence: the
+            # head it tested is already replaced, and rerun_infra skips a
+            # provisional run, so deferring the filing to that rerun dropped
+            # the report entirely — the failure mode this workflow exists to
+            # prevent. File it instead, with the caveat the writer prefixes.
+            if [[ "${PROVISIONAL:-false}" == 'true' ]]; then
+              file_issue=true
+              echo "::warning::Timeout on a provisional report; filing it rather than deferring to an unrun rerun."
+            elif [[ "${TIMEOUT_ANNOTATIONS_READABLE:-false}" == 'true' ]]; then
+              # rerun_infra reruns this run; its own completion reports the
+              # result. Suppress only the filing, not the dispatch.
+              file_issue=false
+              # A timeout read from an annotation is unambiguous, so it buys
+              # the whole-matrix rerun.
               rerun_pending=true
               echo "Run timed out and has not exhausted its reruns; rerun_infra owns the outcome."
             else
+              # A timeout inferred from an unreadable annotation list is still
+              # reported, but it must not buy a whole-matrix rerun: the read
+              # that would have told a timeout from a supersede failed, and
+              # replaying a superseded matrix is the expensive mistake.
               file_issue=true
               echo "::warning::Timeout inferred from an unreadable annotation list; filing it rather than rerunning the whole matrix."
             fi
@@ -578,6 +588,7 @@ jobs:
             --jobs "${RUNNER_TEMP}/failed-jobs.tsv" "${logs[@]}" > "${RUNNER_TEMP}/analysis.json"
           node "${helper}" comment --analysis "${RUNNER_TEMP}/analysis.json" \
             --jobs-json "${RUNNER_TEMP}/run-jobs.json" --sha "${HEAD_SHA}" \
+            --cancellation-kind "${CANCELLATION_KIND}" \
             --run-id "${WORKFLOW_RUN_ID}" --run-url "${WORKFLOW_RUN_URL}" > "${RUNNER_TEMP}/pr-comment.md"
           delim="QWEN_CI_COMMENT_$(openssl rand -hex 16)"
           {
