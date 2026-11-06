@@ -251,7 +251,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       );
     },
   );
-  it('moves the session search beside the activity toggle in the top row', async () => {
+  it('moves the session search to the right of the activity toggle', async () => {
     renderSidebar();
     await flushSidebar();
 
@@ -268,6 +268,10 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(search).not.toBeNull();
     expect(activity).not.toBeNull();
     expect(search!.parentElement).toBe(activity!.parentElement);
+    const controls = [...activity!.parentElement!.querySelectorAll('button')];
+    expect(controls.indexOf(search!)).toBeGreaterThan(
+      controls.indexOf(activity!),
+    );
 
     const projectsHeader = container.querySelector<HTMLElement>(
       `.${sidebarStyles.projectsHeader}`,
