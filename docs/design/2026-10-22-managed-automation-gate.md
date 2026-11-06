@@ -195,10 +195,10 @@ Idempotency-Key: watch-pr-123
 
 Authentication and tenant headers are left out of the example.
 
-The deployment has to enable automations
-(`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`) and Workspace files
-(`QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED`, which has prerequisites of its
-own), both off by default, and the Session has to have the Shell profile. A
+Automations are enabled by default; the deployment can disable them with
+`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED=false`. The deployment has to enable
+Workspace files (`QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED`, off by default
+with prerequisites of its own), and the Session has to have the Shell profile. A
 built-in `qwen-code` Workspace Session gets it when created while Workspace
 Shell is enabled (`QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED`, off by
 default, which needs `QWEN_MANAGED_AGENT_APPROVAL_MODE` set to `default` or
@@ -742,6 +742,7 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
   Session are admitted and fired concurrently, and that one fire can outlive
   its lease. Traced through the scanner's and the funnel's code, these mean
   for gates:
+
   - Probes on different Sessions can run in parallel, up to the node's scanner
     threads; one Session's probes run one at a time in its funnel queue, and
     that Session's other automation operations (define, retire, cancel, the
