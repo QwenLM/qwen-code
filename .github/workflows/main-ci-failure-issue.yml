@@ -129,9 +129,10 @@ jobs:
           provisional=false
           cancellation_kind='none'
           timeout_attempts_exhausted=false
-          # 'true' only when the annotations were actually read and no time out
-          # message was among them. A timeout with this false is a guess from a
-          # failed read, so it is reported but never buys a whole-matrix rerun.
+          # 'true' only when the annotations were read and one of them named
+          # the timeout. A timeout classified while this is false is a guess
+          # from a failed read, so it is reported but never buys a whole-matrix
+          # rerun.
           timeout_annotations_readable=false
           # Every attempt of a run that keeps exceeding a lane's
           # `timeout-minutes` reruns the whole matrix, and its own completion
