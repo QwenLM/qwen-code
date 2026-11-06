@@ -418,7 +418,7 @@ function cutShellCommentsAndProcessSubstitutions(command: string): string {
       // bash ends a `#` comment at the newline even when a backslash precedes
       // it, while the segment splitter suppresses every `\<newline>` pair.
       // walkCompoundCommand de-glues an odd trailing backslash out of comment
-      // text before splitting (dropCommentContinuationBackslashes), so the
+      // text before splitting (normalizeShellCommentsForSplit), so the
       // split already sees the boundary bash sees and this break is just the
       // conservative exit. It returns the strict prefix before the `#`; the
       // remainder is discarded, since gluing the next line's words onto this
@@ -455,20 +455,28 @@ function cutShellCommentsAndProcessSubstitutions(command: string): string {
 }
 
 /**
- * Drop the last backslash of an odd run at the end of a `#` comment line.
+ * Normalize comment text before compound-command splitting. Drop the last
+ * backslash of an odd run at the end of a `#` comment line. On commands with
+ * no backslashes, blank quote characters elsewhere in the comment without
+ * changing their positions.
  * bash ends a comment at the newline regardless of a preceding backslash, but
  * the segment splitter suppresses every `\<newline>` pair as a continuation,
  * so without this the comment and the following line arrive glued into one
  * segment and the following line's commands (`cd`, writes) are cut away with
  * the comment (#12280 R2-2). An even run means the final backslash is itself
- * escaped and the continuation is real, so those pass through untouched.
+ * escaped and the continuation is real, so those pass through untouched. Quote
+ * characters in ordinary comment prose must not open a quoted blob that hides
+ * the newline and the following command's cwd.
  */
-function dropCommentContinuationBackslashes(command: string): string {
+function normalizeShellCommentsForSplit(command: string): string {
   let out = '';
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
   let wordStart = true;
+  // Backslash-bearing commands already use the conservative dual-reading merge.
+  // Keep that envelope unchanged; this repair is for the single no-backslash scan.
+  const neutralizeCommentQuotes = !command.includes('\\');
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -530,7 +538,13 @@ function dropCommentContinuationBackslashes(command: string): string {
       }
       const drop = trailingBackslashes % 2 === 1 ? end - 1 : -1;
       for (let j = i; j < end; j++) {
-        if (j !== drop) out += command[j];
+        if (j === drop) continue;
+        const commentChar = command[j]!;
+        out +=
+          neutralizeCommentQuotes &&
+          (commentChar === "'" || commentChar === '"')
+            ? ' '
+            : commentChar;
       }
       i = end - 1; // the loop's i++ lands on the newline, emitted normally
       continue;
@@ -3123,9 +3137,7 @@ function walkCompoundCommand(
   initialCwdUnknown: boolean,
   reading?: BackslashReading,
 ): ShellOperation[] {
-  const stripped = dropCommentContinuationBackslashes(
-    stripHeredocBodies(command),
-  );
+  const stripped = normalizeShellCommentsForSplit(stripHeredocBodies(command));
   const subCommands = reading
     ? splitCompoundCommandSegmentsForReading(stripped, reading)
     : splitCompoundCommandSegments(stripped);

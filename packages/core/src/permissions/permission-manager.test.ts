@@ -1996,6 +1996,23 @@ describe('PermissionManager', () => {
       }
     });
 
+    it('deny rule still fires after unbalanced quotes in ordinary comment prose (#12280-R8-4)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      for (const command of [
+        "cd .qwen # don't\necho {} > settings.json",
+        'cd .qwen # say "hello\necho {} > settings.json',
+      ]) {
+        expect(
+          await pm.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      }
+    });
+
     it('deny rule still fires for a cd hidden by fd duplication (#R7-2)', async () => {
       pm = makePm({
         permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],

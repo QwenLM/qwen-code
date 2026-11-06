@@ -1147,6 +1147,15 @@ describe('R1 review round: comment desync, union-merge cwd, artifact spans', () 
     ).toEqual([write('/repo/.qwen/one.txt'), write(REPO_SETTINGS)]);
   });
 
+  it('keeps the cd boundary after unbalanced quotes in ordinary comment prose (#12280-R8-4)', () => {
+    for (const command of [
+      "cd .qwen # don't\necho {} > settings.json",
+      'cd .qwen # say "hello\necho {} > settings.json',
+    ]) {
+      expect(across(command)).toEqual([write(REPO_SETTINGS)]);
+    }
+  });
+
   // The merge walk triggered by the open quote must use the union split:
   // re-walking under the escape-everywhere reading alone from the original
   // cwd loses the `cd sub` and publishes a phantom /repo/f next to the real
