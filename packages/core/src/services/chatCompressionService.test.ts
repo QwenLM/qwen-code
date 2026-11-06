@@ -4153,6 +4153,97 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     );
   });
 
+  it.each([
+    ['an 8K window', 8_000, 6, 3_400],
+    ['a 32K window', 32_000, 26, 4_000],
+  ])(
+    'sends a request that fits %s below the minimum with the room it leaves',
+    async (_label, window, count, chars) => {
+      // No part is long enough for the reduction to cut, so the request
+      // leaves its summary less than the minimum. It still fits, so it is
+      // sent with that room, as before the minimum (#15936 R3-7).
+      mockBackend({ window, outputTokens: 500 });
+      configureWindow(window);
+      const history: Content[] = [];
+      for (let i = 0; i < count; i++) {
+        history.push(
+          i % 2 === 0
+            ? userText(`u${i} ` + 'a'.repeat(chars))
+            : modelText(`m${i} ` + 'b'.repeat(chars)),
+        );
+      }
+
+      const result = await compressHistory(history, window - 100);
+
+      expectCompressed(result);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.maxOutputTokens).toBe(
+        window - sent[0]!.promptTokens - COMPACTION_BUDGET_SAFETY_MARGIN,
+      );
+      expect(sent[0]!.maxOutputTokens).toBeLessThan(
+        Math.min(MIN_COMPACTION_OUTPUT_TOKENS, window / 4),
+      );
+      // The reduction cut nothing, so the provider's usage still describes
+      // the history it replaces and sizes the new count.
+      expect(result.info.newTokenCount).toBe(
+        window - 100 - (sent[0]!.promptTokens - 1_000) + 500,
+      );
+    },
+  );
+
+  it('does not send a request whose estimate leaves no room past the margin', async () => {
+    // No part is long enough to cut, and the estimate sits inside the safety
+    // margin below the window: the request would not fit, so it is not sent.
+    const generateText = mockBackend({ window: 8_000 });
+    configureWindow(8_000);
+    const history: Content[] = [];
+    for (let i = 0; i < 8; i++) {
+      history.push(
+        i % 2 === 0
+          ? userText('a'.repeat(3_250))
+          : modelText('b'.repeat(3_250)),
+      );
+    }
+
+    const result = await compressHistory(history, 7_900);
+
+    expect(generateText).not.toHaveBeenCalled();
+    expectNoNewHistory(
+      result,
+      CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+    );
+  });
+
+  it('sizes the retry from its own rejection, not another attempt riding along', async () => {
+    // The error object also carries an earlier attempt's rejection. Read
+    // first, its 310,000 made the retry look hopeless and compression gave
+    // up (#15936 R3-2).
+    mockBackend({
+      window: 32_768,
+      ratio: 1.5,
+      rejection: (promptTokens) =>
+        Object.assign(
+          new Error(
+            `This model's maximum context length is 32768 tokens. However, your prompt contains ${promptTokens} input tokens, which exceeds this limit.`,
+          ),
+          {
+            previousAttempt: {
+              error: 'prompt is too long: 310000 tokens > 300000 maximum',
+            },
+          },
+        ),
+    });
+    configureWindow(32_768);
+
+    const result = await compressHistory(toolSession(8, 12_000), 30_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(
+      sent[1]!.promptTokens + sent[1]!.maxOutputTokens,
+    ).toBeLessThanOrEqual(32_768);
+  });
+
   it('leaves a small window a quarter of it for the summary', async () => {
     // A fixed 4,096-token minimum would take half of an 8K window, so the
     // minimum scales down to a quarter of the window.

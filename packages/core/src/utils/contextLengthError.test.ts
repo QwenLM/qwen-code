@@ -505,6 +505,24 @@ describe('contextLengthError', () => {
         'a maximum count of prompt tokens',
         'Prompt is too long: maximum prompt tokens (32768) exceeded.',
       ],
+      // A limit the clause names as one is not a count, whatever the verb's
+      // tense (#15936 R3-2).
+      [
+        'a maximum count of prompt tokens, present tense',
+        'Prompt is too long: maximum prompt tokens (32768) exceed the limit.',
+      ],
+      [
+        'a maximum input token count',
+        'The maximum input token count (1048575) has been exceeded.',
+      ],
+      [
+        'a max input length',
+        'Input is too long: max input length (32768) exceeds the request.',
+      ],
+      [
+        'a requested output budget, "in your completion"',
+        "This model's maximum context length is 4096 tokens. However, you requested 1000000 tokens in your completion.",
+      ],
     ])('reports no prompt count for %s', (_label, message) => {
       const info = getContextLengthExceededInfo(new Error(message));
 
@@ -540,6 +558,92 @@ describe('contextLengthError', () => {
       expect(info.isExceeded).toBe(true);
       expect(info.promptTokens).toBeUndefined();
     });
+
+    it.each([
+      [
+        'a sibling field',
+        (main: string, other: string) =>
+          Object.assign(new Error(main), { previousAttempt: { error: other } }),
+      ],
+      [
+        'a wrapped cause',
+        (main: string, other: string) =>
+          new Error(main, { cause: new Error(other) }),
+      ],
+      [
+        'another field of the same JSON body',
+        (main: string, other: string) =>
+          new Error(
+            `400 ${JSON.stringify({ error: { message: main, previous: { message: other } } })}`,
+          ),
+      ],
+    ])(
+      'reads the count and limit from the rejection itself, not from %s',
+      (_label, build) => {
+        // Another attempt's rejection rides along in the error object; its
+        // numbers must not size this one (#15936 R3-2).
+        const info = getContextLengthExceededInfo(
+          build(
+            "This model's maximum context length is 32768 tokens. However, your prompt contains 25000 input tokens, which exceeds this limit.",
+            'prompt is too long: 310000 tokens > 300000 maximum',
+          ),
+        );
+
+        expect(info.promptTokens).toBe(25_000);
+        expect(info.limitTokens).toBe(32_768);
+        expect(info.limitKind).toBe('total');
+      },
+    );
+
+    it.each([
+      [
+        'the error object',
+        (body: object) => Object.assign(new Error('400 Bad Request'), body),
+      ],
+      [
+        'its JSON body',
+        (body: object) => new Error(`400 ${JSON.stringify(body)}`),
+      ],
+    ])(
+      'takes no count from a field of %s that reports no overflow',
+      (_label, build) => {
+        // Only a rejection supplies figures: a usage note ahead of it is not
+        // this request's size (#15936 R3-2).
+        const info = getContextLengthExceededInfo(
+          build({
+            note: 'your prompt contains 5000 input tokens',
+            error: {
+              message:
+                "This model's maximum context length is 32768 tokens. However, your prompt contains 40000 input tokens, which exceeds this limit.",
+            },
+          }),
+        );
+
+        expect(info.promptTokens).toBe(40_000);
+      },
+    );
+
+    it.each([
+      [
+        'vLLM',
+        "Input length (40000) exceeds model's maximum context length (32768).",
+        'total',
+      ],
+      [
+        'Bedrock',
+        'prompt tokens (40000) exceed model maximum (32768)',
+        undefined,
+      ],
+    ])(
+      'reads the limit %s states beside the count',
+      (_label, message, limitKind) => {
+        const info = getContextLengthExceededInfo(new Error(message));
+
+        expect(info.promptTokens).toBe(40_000);
+        expect(info.limitTokens).toBe(32_768);
+        expect(info.limitKind).toBe(limitKind);
+      },
+    );
 
     it('leaves actualTokens as the reactive path has always read it', () => {
       const info = getContextLengthExceededInfo(

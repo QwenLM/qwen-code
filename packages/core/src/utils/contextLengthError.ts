@@ -70,12 +70,33 @@ const PROMPT_TOKEN_PATTERNS = [
 ];
 
 /**
+ * A word just before a count's wording that makes its number a limit:
+ * "maximum prompt tokens (32768)" is what the server takes, not what the
+ * request held (#15936 R3-2).
+ */
+const LIMIT_QUALIFIER =
+  /\b(?:max(?:imum)?|limit|allowed|permitted|capacity|up to|at most|no more than|less than)\b/i;
+
+/** The last three words before `index`, within its clause. */
+function wordsBefore(text: string, index: number): string {
+  const clause =
+    text
+      .slice(0, index)
+      .split(/[.;:!?\n]/)
+      .pop() ?? '';
+  return clause.split(/\s+/).filter(Boolean).slice(-3).join(' ');
+}
+
+/**
  * OpenAI and the servers that copy its wording: "you requested 131329 tokens
  * (123137 in the messages, 8192 in the completion)". The total includes the
- * output budget; the parenthesis, when present, says how much of it.
+ * output budget; the parenthesis, when present, says how much of it. The
+ * rest of the clause after "tokens" is captured so a total that is only the
+ * output budget ("in the completion", "in your completion") is passed over.
  */
 const REQUESTED_TOKENS_PATTERN =
-  /\byou requested\s+(?:about\s+)?(\d[\d,]*)\s+tokens?\b(?!\s+(?:in|for)\s+the\s+(?:completion|output))(?:\s*\(([^)]*)\))?/i;
+  /\byou requested\s+(?:about\s+)?(\d[\d,]*)\s+tokens?\b([^.(\n]*)(?:\(([^)]*)\))?/i;
+const OUTPUT_WORDING = /\b(?:completion|output)\b/i;
 const OUTPUT_SHARE_PATTERN =
   /(\d[\d,]*)\s+(?:in|for)\s+the\s+(?:completion|output)\b/i;
 
@@ -213,35 +234,94 @@ function parseTokenCounts(text: string): {
     };
   }
 
+  // vLLM: "Input length (40000) exceeds model's maximum context length
+  // (32768)"; Bedrock: "prompt tokens (40000) exceed model maximum (32768)".
+  // The bound follows the count in the same sentence. "Context length" names
+  // the window; a bare "maximum" leaves its kind unsaid (#15936 R3-2).
+  const boundAfterCountMatch = text.match(
+    /\(\s*(\d[\d,]{0,31})\s*\)\s*exceeds?\b([^()\n]{0,80}?\bmax(?:imum)?\b[^()\n]{0,40}?)\(\s*(\d[\d,]{0,31})\s*\)/i,
+  );
+  if (boundAfterCountMatch) {
+    return {
+      actualTokens: parseInteger(boundAfterCountMatch[1]!),
+      limitTokens: parseInteger(boundAfterCountMatch[3]!),
+      ...(/\bcontext (?:length|window|size)\b/i.test(boundAfterCountMatch[2]!)
+        ? { limitKind: 'total' as const }
+        : {}),
+    };
+  }
+
   return {};
 }
 
+/**
+ * The prompt's own size as one fragment states it. A match whose wording a
+ * limit word qualifies is passed over: "maximum prompt tokens (32768)" names
+ * what the server takes (#15936 R3-2).
+ */
 function parsePromptTokens(
-  fragments: string[],
+  fragment: string,
 ): Pick<ContextLengthExceededInfo, 'promptTokens' | 'requestedTokens'> {
   for (const pattern of PROMPT_TOKEN_PATTERNS) {
-    for (const fragment of fragments) {
-      const match = pattern.exec(fragment);
-      if (match) return { promptTokens: parseInteger(match[1]!) };
+    for (const match of fragment.matchAll(new RegExp(pattern, 'gi'))) {
+      if (!LIMIT_QUALIFIER.test(wordsBefore(fragment, match.index))) {
+        return { promptTokens: parseInteger(match[1]!) };
+      }
     }
   }
-  for (const fragment of fragments) {
-    const match = REQUESTED_TOKENS_PATTERN.exec(fragment);
-    if (!match) continue;
-    const total = parseInteger(match[1]!);
-    const output = match[2] ? OUTPUT_SHARE_PATTERN.exec(match[2]) : null;
-    if (!output) return { requestedTokens: total };
-    const prompt = total - parseInteger(output[1]!);
-    return prompt > 0 ? { promptTokens: prompt } : {};
-  }
-  return {};
+  const match = REQUESTED_TOKENS_PATTERN.exec(fragment);
+  if (!match || OUTPUT_WORDING.test(match[2]!)) return {};
+  const total = parseInteger(match[1]!);
+  const output = match[3] ? OUTPUT_SHARE_PATTERN.exec(match[3]) : null;
+  if (!output) return { requestedTokens: total };
+  const prompt = total - parseInteger(output[1]!);
+  return prompt > 0 ? { promptTokens: prompt } : {};
 }
 
-function tryParseEmbeddedJson(text: string): unknown | undefined {
+type TokenCounts = Omit<ContextLengthExceededInfo, 'isExceeded' | 'message'>;
+
+/**
+ * Every figure comes from one rejection fragment, so a limit is never paired
+ * with another fragment's count. The first fragment that states the prompt's
+ * size wins: collection order puts the error's own message before the fields
+ * and causes it carries, such as an earlier attempt's rejection (#15936
+ * R3-2). Without a stated size, the first fragment that states any figure
+ * supplies it.
+ */
+function parseCounts(overflowFragments: string[]): TokenCounts {
+  let figuresOnly: TokenCounts | undefined;
+  const texts = overflowFragments.flatMap(ownTexts).filter(isOverflowText);
+  for (const fragment of texts) {
+    const counts = parseTokenCounts(fragment);
+    const prompt = parsePromptTokens(fragment);
+    if (
+      prompt.promptTokens !== undefined ||
+      prompt.requestedTokens !== undefined
+    ) {
+      return { ...counts, ...prompt };
+    }
+    if (
+      figuresOnly === undefined &&
+      (counts.actualTokens !== undefined || counts.limitTokens !== undefined)
+    ) {
+      figuresOnly = counts;
+    }
+  }
+  return figuresOnly ?? {};
+}
+
+/** A JSON document in `text` and where it sits: all of it, or an embedded object. */
+function findEmbeddedJson(
+  text: string,
+): { value: unknown; start: number; end: number } | undefined {
   const trimmed = text.trim();
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
-      return JSON.parse(trimmed) as unknown;
+      return {
+        value: JSON.parse(trimmed) as unknown,
+        start: 0,
+        end: text.length,
+      };
     } catch {
       // Fall through to embedded-object parsing.
     }
@@ -254,10 +334,40 @@ function tryParseEmbeddedJson(text: string): unknown | undefined {
   }
 
   try {
-    return JSON.parse(text.slice(start, end + 1)) as unknown;
+    return {
+      value: JSON.parse(text.slice(start, end + 1)) as unknown,
+      start,
+      end: end + 1,
+    };
   } catch {
     return undefined;
   }
+}
+
+function tryParseEmbeddedJson(text: string): unknown | undefined {
+  return findEmbeddedJson(text)?.value;
+}
+
+/**
+ * The texts a fragment states, in order. An embedded JSON body is replaced by
+ * its own fields: read whole, the body would put a sibling field's rejection
+ * beside this one (#15936 R3-2).
+ */
+function ownTexts(fragment: string): string[] {
+  const json = findEmbeddedJson(fragment);
+  if (!json) return [fragment];
+  return [
+    `${fragment.slice(0, json.start)}\n${fragment.slice(json.end)}`,
+    ...collectStrings(json.value, new Set<object>(), 1).flatMap(ownTexts),
+  ];
+}
+
+/** A fragment that names a context-length failure and is not a timeout. */
+function isOverflowText(fragment: string): boolean {
+  return (
+    CONTEXT_LENGTH_PATTERNS.some((pattern) => pattern.test(fragment)) &&
+    !TIMEOUT_PATTERNS.some((pattern) => pattern.test(fragment))
+  );
 }
 
 function safeReadProperty(value: object, key: string): unknown {
@@ -366,14 +476,9 @@ export function getContextLengthExceededInfo(
   // sibling field was reported as not-an-overflow and never reached the
   // compaction path. A fragment counts as evidence only if it names a
   // context-length failure and is not itself a timeout message.
-  const isExceeded = fragments.some(
-    (fragment) =>
-      CONTEXT_LENGTH_PATTERNS.some((pattern) => pattern.test(fragment)) &&
-      !TIMEOUT_PATTERNS.some((pattern) => pattern.test(fragment)),
-  );
-  const counts = isExceeded
-    ? { ...parseTokenCounts(message), ...parsePromptTokens(fragments) }
-    : {};
+  const overflowFragments = fragments.filter(isOverflowText);
+  const isExceeded = overflowFragments.length > 0;
+  const counts = isExceeded ? parseCounts(overflowFragments) : {};
 
   return {
     isExceeded,

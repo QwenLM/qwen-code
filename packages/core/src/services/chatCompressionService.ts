@@ -1328,11 +1328,27 @@ export class ChatCompressionService {
       }
       let coldHistory = slim.slimmedHistory;
       let coldSizing = initialSizing;
-      const minOutputTokens = minCompactionOutputTokens(budgetWindow);
-      if (coldBudgetFor(coldHistory) < minOutputTokens) {
-        coldInputReduced = true;
-        coldHistory = reduceColdInput();
-        if (coldBudgetFor(coldHistory) < minOutputTokens) {
+      // A request that leaves its summary less than the minimum is reduced
+      // first. Only one whose input then leaves no output room at all is not
+      // sent: one that fits is sent with the room left, as before the
+      // minimum, and a summary cut off for lack of room is dropped by the
+      // truncation checks below (#15936 R3-7). When no part is long enough
+      // to cut, the reduction changes nothing and the usage still describes
+      // the history it replaces.
+      if (
+        coldBudgetFor(coldHistory) < minCompactionOutputTokens(budgetWindow)
+      ) {
+        const reduced = reduceColdInput();
+        if (estimateColdRequest(reduced) < estimateColdRequest(coldHistory)) {
+          coldInputReduced = true;
+          coldHistory = reduced;
+        }
+        if (
+          budgetWindow -
+            estimateColdRequest(coldHistory) -
+            COMPACTION_BUDGET_SAFETY_MARGIN <
+          1
+        ) {
           config
             .getDebugLogger()
             .warn(
