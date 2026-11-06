@@ -13,7 +13,9 @@ import {
 import type { Content } from '@google/genai';
 import {
   runNonInteractiveStreamJson,
+  sdkInitializeReplyTimeoutMs,
   SDK_INITIALIZE_ABANDONED_SHUTDOWN_TIMEOUT_MS,
+  SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS,
   SDK_INITIALIZE_REPLY_TIMEOUT_MS,
 } from './session.js';
 import type {
@@ -450,6 +452,34 @@ describe('runNonInteractiveStreamJson', () => {
     // control request after 60 s, and any value at or above that would leave
     // the deferred reply addressed to a request_id the client already dropped.
     expect(SDK_INITIALIZE_REPLY_TIMEOUT_MS).toBeLessThan(60_000);
+  });
+
+  it('derives a bound below the client deadline even under a tiny budget', () => {
+    // A budget at or below the margin must not fall back to the 55 s default:
+    // that bound is later than the client's own deadline, so the reply would
+    // be addressed to a request the client already abandoned. Half the budget
+    // keeps the reply early and still leaves time for the error frame.
+    for (const budget of [1, 100, SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS]) {
+      const derived = sdkInitializeReplyTimeoutMs(budget);
+      expect(derived).toBeGreaterThan(0);
+      expect(derived).toBeLessThan(budget);
+      expect(derived).not.toBe(SDK_INITIALIZE_REPLY_TIMEOUT_MS);
+    }
+    // Above the margin the whole margin is kept.
+    expect(
+      sdkInitializeReplyTimeoutMs(SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS * 4),
+    ).toBe(SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS * 3);
+    // A non-positive budget is not a deadline at all; use the default.
+    expect(sdkInitializeReplyTimeoutMs(0)).toBe(SDK_INITIALIZE_REPLY_TIMEOUT_MS);
+  });
+
+  it('clamps a declared budget above the timer range', () => {
+    // setTimeout stores its delay in a signed 32-bit int: a larger value wraps
+    // and fires on the next tick, abandoning the reply the client is still
+    // waiting for. Both SDKs expose `timeout.controlRequest` to consumers.
+    for (const budget of [1e12, Number.MAX_SAFE_INTEGER, 2 ** 31 + 5_000]) {
+      expect(sdkInitializeReplyTimeoutMs(budget)).toBe(2_147_483_647);
+    }
   });
 
   it('derives the initialize reply bound from the budget the client declared', async () => {

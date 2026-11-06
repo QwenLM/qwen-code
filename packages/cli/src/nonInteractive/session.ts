@@ -70,6 +70,10 @@ export const SDK_INITIALIZE_REPLY_TIMEOUT_MS = 55_000;
 // error frame is written while the client still has the request pending.
 export const SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS = 5_000;
 
+// `setTimeout` stores its delay in a signed 32-bit int, so any larger value
+// fires on the next tick instead of at the requested deadline.
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 /**
  * The deadline for the deferred initialize reply, derived from the budget the
  * client actually declared for this request: it abandons the initialize
@@ -84,14 +88,20 @@ export const sdkInitializeReplyTimeoutMs = (
   if (
     declaredBudget === undefined ||
     !Number.isFinite(declaredBudget) ||
-    declaredBudget <= SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS
+    declaredBudget <= 0
   ) {
     return SDK_INITIALIZE_REPLY_TIMEOUT_MS;
   }
-  return Math.min(
-    declaredBudget - SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS,
-    Number.MAX_SAFE_INTEGER,
+  // A budget at or below the margin cannot keep the whole margin without
+  // falling back to the 55 s default, which is later than the client's own
+  // deadline and so the exact bug this derivation exists to avoid. Keep half
+  // the budget instead: the reply is still written while the request is
+  // pending, and the error frame still has the other half to land in.
+  const margin = Math.min(
+    SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS,
+    declaredBudget / 2,
   );
+  return Math.min(declaredBudget - margin, MAX_TIMER_DELAY_MS);
 };
 
 // An initialization that outlived its reply keeps running -- it may still
