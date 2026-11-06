@@ -330,7 +330,9 @@ function getNightlyVersion() {
 // A channel base at or below the published stable would repeat a shipped
 // version or move the `latest` tag backwards, so target the next patch after
 // `latest` instead. Returns the base unchanged when no bump is needed.
-function bumpPastPublishedLatest(baseVersion, label, target) {
+// Read through the rollback-aware lookup so a rolled-back dist-tag can never
+// become the base.
+function bumpPastPublishedLatest(baseVersion, label, target, refBase) {
   const latestStable =
     getAndVerifyTags('latest', 'v[0-9].[0-9].[0-9]')?.latestVersion ?? '';
   if (
@@ -339,6 +341,18 @@ function bumpPastPublishedLatest(baseVersion, label, target) {
     semver.lt(latestStable, baseVersion)
   ) {
     return baseVersion;
+  }
+  // A dispatch from an older release branch resolves against the global
+  // dist-tags, which may already be on a newer line; bumping there would
+  // publish the old branch's content under the newer version.
+  if (
+    refBase &&
+    (semver.major(refBase) !== semver.major(latestStable) ||
+      semver.minor(refBase) !== semver.minor(latestStable))
+  ) {
+    throw new Error(
+      `Published latest ${latestStable} and the checked-out package.json version ${refBase} are on different release lines. Refusing a cross-line stable release.`,
+    );
   }
   const bumped = semver.inc(latestStable, 'patch');
   console.error(
@@ -357,10 +371,12 @@ function getStableVersion(args) {
   } else if (tagResult) {
     releaseVersion = tagResult.latestVersion.replace(/-preview.*/, '');
     validateVersion(releaseVersion, 'X.Y.Z', 'derived from preview dist-tag');
+    const refBase = readJson('package.json').version.split('-')[0];
     releaseVersion = bumpPastPublishedLatest(
       releaseVersion,
       'Preview baseline',
       'the stable base to at least',
+      refBase,
     );
   } else {
     const packageJson = readJson('package.json');

@@ -685,6 +685,10 @@ describe('getVersion', () => {
         return mockExecSync(command);
       };
       vi.mocked(execSync).mockImplementation(mockWithOlderPreviewVersions);
+      // The checked-out ref is on the same release line as published latest.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.9.0' }),
+      );
 
       const result = getVersion({ type: 'stable' });
       expect(result.releaseVersion).toBe('0.9.1');
@@ -766,10 +770,45 @@ describe('getVersion', () => {
         return mockExecSync(command);
       };
       vi.mocked(execSync).mockImplementation(mockWithRolledBackLatest);
+      // The ref is on the 0.11 line; only the dist-tag was rolled back.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.11.0' }),
+      );
 
       const result = getVersion({ type: 'stable' });
       expect(result.releaseVersion).toBe('0.11.1');
       expect(result.npmTag).toBe('latest');
+    });
+
+    it('should refuse a versionless stable release dispatched from an older release line', () => {
+      // A release/0.25 dispatch resolves against the global dist-tags, which
+      // have moved on to 0.26. Bumping would publish 0.25 branch content as
+      // 0.26.9 under `latest`, so the cross-line dispatch must abort.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.25.9' }),
+      );
+      const mockWithOlderReleaseLine = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.3-preview.0';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.8';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.26.3-preview.0', '0.26.8']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithOlderReleaseLine);
+
+      expect(() => getVersion({ type: 'stable' })).toThrow(
+        'different release lines',
+      );
     });
 
     it('should bump the stable base when the preview base equals the published latest', () => {
@@ -794,6 +833,9 @@ describe('getVersion', () => {
         return mockExecSync(command);
       };
       vi.mocked(execSync).mockImplementation(mockWithEqualLatest);
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.9.0' }),
+      );
 
       const result = getVersion({ type: 'stable' });
       expect(result.releaseVersion).toBe('0.9.1');
@@ -823,6 +865,9 @@ describe('getVersion', () => {
         return mockExecSync(command);
       };
       vi.mocked(execSync).mockImplementation(mockWithTaggedCandidate);
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.9.0' }),
+      );
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       const result = getVersion({ type: 'stable' });
