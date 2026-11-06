@@ -125,6 +125,8 @@ import type {
   DaemonSkillBatchToggleErrorCode,
   DaemonSkillBatchToggleItem,
   DaemonSkillBatchToggleResult,
+  DaemonUserSkillActivation,
+  DaemonUserSkillsActivationResult,
   ExtensionDefaultActivationBatchItem,
   ExtensionMutationResponse,
   ExtensionWorkspaceActivationBatchItem,
@@ -443,6 +445,15 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // assertion a future barrel reshuffle could silently drop the
     // result type SDK consumers need to type `client.recapSession`.
     expectTypeOf<DaemonSessionRecapResult>().not.toBeNever();
+    expect(typeof Public.DaemonClient.prototype.setUserSkillsActivation).toBe(
+      'function',
+    );
+    expectTypeOf<
+      Awaited<ReturnType<DaemonClient['setUserSkillsActivation']>>
+    >().toEqualTypeOf<DaemonUserSkillsActivationResult>();
+    expectTypeOf<
+      Parameters<DaemonClient['setUserSkillsActivation']>[1]
+    >().toEqualTypeOf<DaemonUserSkillActivation>();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
     expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
     // Batch Skill toggle surface: type-only imports are erased at vitest

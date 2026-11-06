@@ -338,6 +338,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_skill_settings_batch_toggle: NO_MANAGED_EQUIVALENT(
     'no Managed skill settings mutation',
   ),
+  user_skill_activation: NO_MANAGED_EQUIVALENT(
+    'no Managed user skill settings mutation',
+  ),
   workspace_session_refresh: NO_MANAGED_EQUIVALENT(
     'no Managed session refresh route',
   ),

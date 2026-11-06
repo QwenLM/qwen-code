@@ -17,6 +17,7 @@ import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceEntryFromParam,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 import type {
@@ -24,7 +25,11 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
-import { WorkspaceSkillNotFoundError } from '../workspace-service/types.js';
+import {
+  WorkspaceSkillNotFoundError,
+  type PersistUserSkillsActivationResult,
+} from '../workspace-service/types.js';
+import type { UserSkillActivation } from '../../config/skill-settings.js';
 import {
   MAX_WORKSPACE_SKILL_NAME_LENGTH,
   WorkspaceSkillManagementError,
@@ -73,6 +78,10 @@ interface RegisterWorkspaceSkillsRoutesDeps {
     skillName: string,
     installedPath: string,
   ) => Promise<WorkspaceSkillMutationResult>;
+  persistUserSkillsActivation?: (
+    skillNames: readonly string[],
+    activation: UserSkillActivation,
+  ) => Promise<PersistUserSkillsActivationResult>;
 }
 
 type WorkspaceSkillActivation = 'deferred' | 'reconciling';
@@ -181,6 +190,16 @@ function parseSkillBatchToggleRequest(
   safeBody: (req: Request) => Record<string, unknown>,
 ): { skillNames: string[]; enabled: boolean } | undefined {
   const body = safeBody(req);
+  const skillNames = parseSkillNames(body, res);
+  if (!skillNames) return undefined;
+  const flag = parseEnabledFlag(body, res);
+  return flag ? { skillNames, enabled: flag.enabled } : undefined;
+}
+
+function parseSkillNames(
+  body: Record<string, unknown>,
+  res: Response,
+): string[] | undefined {
   const rawSkillNames = body['skillNames'];
   if (
     !Array.isArray(rawSkillNames) ||
@@ -213,8 +232,7 @@ function parseSkillBatchToggleRequest(
     skillNames.push(skillName);
   }
 
-  const flag = parseEnabledFlag(body, res);
-  return flag ? { skillNames, enabled: flag.enabled } : undefined;
+  return skillNames;
 }
 
 function parseSkillScope(
@@ -382,6 +400,95 @@ export function registerWorkspaceSkillsRoutes(
       deps.invalidateSkillsConfigStatus(entry.workspaceCwd);
     }
   };
+  app.put(
+    '/skills/activation',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      if (!deps.persistUserSkillsActivation) {
+        res.status(501).json({
+          error: 'User Skill settings persistence is not available',
+          code: 'user_skill_activation_unsupported',
+        });
+        return;
+      }
+      const body = deps.safeBody(req);
+      const skillNames = parseSkillNames(body, res);
+      if (!skillNames) return;
+      const state = body['state'];
+      const mode = body['mode'];
+      if (state !== 'enabled' && state !== 'disabled') {
+        res.status(400).json({
+          error: '`state` must be enabled or disabled',
+          code: 'invalid_skill_activation_state',
+        });
+        return;
+      }
+      if (
+        mode !== undefined &&
+        (state !== 'disabled' || (mode !== 'hard' && mode !== 'default'))
+      ) {
+        res.status(400).json({
+          error: '`mode` must be hard or default and only applies to disabled',
+          code: 'invalid_skill_activation_mode',
+        });
+        return;
+      }
+      const activation: UserSkillActivation =
+        state === 'enabled' ? { state } : { state, mode: mode ?? 'hard' };
+      const managedRuntimes = () =>
+        deps.workspaceRegistry?.listManaged() ?? [deps.workspaceRuntime];
+      const clientId = parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        managedRuntimes().map((runtime) => runtime.bridge),
+      );
+      if (clientId === null) return;
+      try {
+        const persisted = await deps.persistUserSkillsActivation(
+          skillNames,
+          activation,
+        );
+        let propagation: 'queued' | 'deferred' | 'not_required' =
+          'not_required';
+        if (persisted.settingsChanges.length) {
+          invalidateGlobalConfigStatus(globalConfigOwner().workspaceCwd);
+          propagation = 'deferred';
+          for (const runtime of managedRuntimes()) {
+            runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+            const coordinator =
+              getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+            if (
+              coordinator?.reconcileSkillsConfiguration({
+                userSettings: true,
+              }) === 'reconciling'
+            ) {
+              propagation = 'queued';
+            }
+            for (const change of persisted.settingsChanges) {
+              try {
+                runtime.bridge.publishWorkspaceEvent({
+                  type: 'settings_changed',
+                  data: { ...change, scope: 'user' },
+                  ...(clientId ? { originatorClientId: clientId } : {}),
+                });
+              } catch {
+                // A disconnected event consumer cannot undo a durable write.
+              }
+            }
+          }
+        }
+        res.status(200).json({
+          scope: 'user',
+          ...activation,
+          results: persisted.outcomes,
+          propagation,
+        });
+      } catch (error) {
+        if (sendGenerationClosedError(res, error)) return;
+        deps.sendBridgeError(res, error, { route: 'PUT /skills/activation' });
+      }
+    },
+  );
   app.get('/workspace/config/skills', async (_req, res) => {
     const configRoute = 'GET /workspace/config/skills';
     try {
