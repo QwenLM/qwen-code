@@ -81,6 +81,23 @@ describe.each(workflows)('$path failure reporting', ({ path, titlePrefix }) => {
     const title = notifier.run.match(/--title "([^"]*)"/)?.[1];
     expect(title, notifier.run).toBeDefined();
     expect(title.startsWith(titlePrefix), title).toBe(true);
+
+    // The prefix alone is not the contract: `run-release-step.sh` filters on
+    // `startswith(prefix + version + " on ")`, so a title that stops before
+    // the version, or separates it with something other than " on ", closes
+    // nothing while both suites stay green. The notifier interpolates its
+    // version variable with or without a `:-unknown` default, so accept both.
+    expect(title.slice(titlePrefix.length)).toMatch(
+      /^\$\{RELEASE_VERSION(?::-unknown)?\} on \$\(date \+'%Y-%m-%d'\)$/,
+    );
+    // Both sides must read the same version variable, or the reader looks for
+    // a value the writer never wrote.
+    const reconcileStep = yml.jobs['reconcile-failure'].steps.find(
+      (entry) => entry.name === 'Close the issue an earlier attempt filed',
+    );
+    expect(notifier.env.RELEASE_VERSION).toBe(
+      reconcileStep.env.RELEASE_VERSION,
+    );
   });
 });
 
