@@ -17,6 +17,20 @@ final class ExternalWorkspaceSessionPolicies {
     }
 
     /**
+     * Admission-side eligibility read. The registry predicate throws so execution
+     * paths fail closed; on admission an unreadable or drifted registration is a
+     * permanent record defect, so the caller answers its own 409 instead of the
+     * registry's retryable 503.
+     */
+    static boolean externalFilesAllowedOrRefuse(ManagedWorkspaceRegistry workspaces, ContextBinding binding) {
+        try {
+            return workspaces.externalFilesAllowed(binding);
+        } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException unreadable) {
+            return false;
+        }
+    }
+
+    /**
      * Resolve the revision and compile the stored definition before Workspace
      * resolution. External-profile eligibility and requested approval/plan
      * options are checked after the Workspace determines the effective profile.
@@ -27,7 +41,7 @@ final class ExternalWorkspaceSessionPolicies {
             AgentSessionPolicies.AgentPin resolvedPin, SessionCreationCommand command) {
         AgentSessionPolicies.AgentPin effective = resolvedPin;
         if (external) {
-            if (!AgentSessionPolicies.externalFilesAllowedOrRefuse(workspaces, binding)
+            if (!externalFilesAllowedOrRefuse(workspaces, binding)
                     || !"qwen-code".equals(command.agentId())
                     || resolvedPin.digest() != null || resolvedPin.hooks() || resolvedPin.mcp()
                     || Boolean.TRUE.equals(command.requestedPlanMode()) || !command.skills().isEmpty() || command.extensionPins() != null
