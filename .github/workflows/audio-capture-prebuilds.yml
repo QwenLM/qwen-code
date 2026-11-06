@@ -44,8 +44,8 @@ jobs:
         include:
           # arm64 runner; also cross-compiles the x64 slice (see Build step) to
           # avoid the scarce macos-13 Intel runner that queues 20+ min (#5642).
-          - os: 'macos-14'
-            runner: 'macos-14'
+          - os: 'macos-15'
+            runner: 'macos-15'
             arch: 'arm64'
             artifact_suffix: 'arm64+x64'
           - os: 'ubuntu-latest'
