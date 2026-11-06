@@ -482,7 +482,10 @@ describe('handleC2C', () => {
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
     const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
-    expect(env.text).toBe('[bot] !echo hi');
+    // The routed text must reach matchMessageRoute unmarked, so the bot marker
+    // rides on the envelope and ChannelBase renders it after routing/sanitizing.
+    expect(env.text).toBe('!echo hi');
+    expect(env.senderTag).toBe('bot');
   });
 
   it('forwards a bot slash command to the model instead of running it', async () => {
@@ -883,7 +886,10 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env['text']).toBe('[bot] !echo hi');
+    // Route matching sees the unmarked head; the marker is on the envelope so
+    // ChannelBase can render it after routing (and keep it out of the bang gate).
+    expect(env['text']).toBe('!echo hi');
+    expect(env['senderTag']).toBe('bot');
   });
 
   it('human routed messages keep their text unchanged (no [bot] tag)', async () => {

@@ -773,6 +773,98 @@ describe('ChannelBase', () => {
     });
   });
 
+  describe('automated sender tag', () => {
+    const routedGroupConfig: Partial<ChannelConfig> = {
+      messageRoutes: { '/proj': 'Project only.' },
+      groupPolicy: 'open',
+      groups: { '*': { requireMention: true } },
+    };
+
+    it('renders the tag before the sender attribution on a routed group message', async () => {
+      const ch = createChannel(routedGroupConfig);
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'g1',
+          senderName: 'Peer Bot',
+          senderTag: 'bot',
+          text: '/proj list files',
+        }),
+      );
+      expect(bridge.prompt).toHaveBeenCalledOnce();
+      const prompt = vi.mocked(bridge.prompt).mock.calls[0]![1];
+      // The route prefix still matched (the tag is not part of `text`), and the
+      // marker survives prompt sanitization because ChannelBase renders it.
+      expect(prompt).toContain('Project only.');
+      expect(prompt).toContain('[bot] [Peer Bot] list files');
+    });
+
+    it('opens a 1:1 prompt with the tag when no attribution is rendered', async () => {
+      const ch = createChannel({ messageRoutes: { '/proj': 'Project only.' } });
+      await ch.handleInbound(
+        envelope({ senderTag: 'bot', text: '/proj list files' }),
+      );
+      expect(vi.mocked(bridge.prompt).mock.calls[0]![1]).toContain(
+        '[bot] list files',
+      );
+    });
+
+    it('never executes command-shaped text from an automated sender', async () => {
+      const shellCommand = vi.fn().mockResolvedValue({
+        exitCode: 0,
+        output: 'root',
+        aborted: false,
+      });
+      (bridge as unknown as Record<string, unknown>)['shellCommand'] =
+        shellCommand;
+      const ch = createChannel(routedGroupConfig);
+      ch.enableCancelCommand();
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'g1',
+          senderName: 'Peer Bot',
+          senderTag: 'bot',
+          text: '/proj !whoami',
+        }),
+      );
+      expect(shellCommand).not.toHaveBeenCalled();
+      expect(
+        ch.sent.some((m) => m.text.includes('disabled in group chats')),
+      ).toBe(false);
+      expect(vi.mocked(bridge.prompt).mock.calls[0]![1]).toContain(
+        '[bot] [Peer Bot] !whoami',
+      );
+
+      const dm = createChannel();
+      dm.enableCancelCommand();
+      await dm.handleInbound(envelope({ senderTag: 'bot', text: '/clear' }));
+      expect(bridge.discardSession).not.toHaveBeenCalled();
+      expect(vi.mocked(bridge.prompt).mock.calls[1]![1]).toBe('[bot] /clear');
+
+      // A 1:1 session is the one place `!` shell execution is otherwise allowed.
+      await dm.handleInbound(envelope({ senderTag: 'bot', text: '!whoami' }));
+      expect(shellCommand).not.toHaveBeenCalled();
+      expect(vi.mocked(bridge.prompt).mock.calls[2]![1]).toBe('[bot] !whoami');
+    });
+
+    it('keeps an already-prefixed envelope byte-identical (adapter owns the tag)', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(
+        envelope({
+          senderTag: 'bot',
+          alreadyPrefixed: true,
+          text: '[atMention=false] [bot] [Peer Bot]: list files',
+        }),
+      );
+      expect(vi.mocked(bridge.prompt).mock.calls[0]![1]).toBe(
+        '[atMention=false] [bot] [Peer Bot]: list files',
+      );
+    });
+  });
+
   it('fails closed when named sessions lack daemon state or user scope', () => {
     expect(() => createChannel({ multiSession: true })).toThrow(
       'only in daemon-managed mode',

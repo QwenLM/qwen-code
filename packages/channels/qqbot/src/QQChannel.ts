@@ -90,6 +90,15 @@ import {
 /** QQ Bot OPENID format: exactly 32 uppercase hex chars (bot and sender OPENIDs). */
 const QQ_OPENID_RE = /^[A-F0-9]{32}$/i;
 
+/**
+ * Marks a forwarded bot's message as machine-authored: `[bot] ` goes into the
+ * self-prefixed sender line, and the same word rides on the envelope
+ * (`senderTag`) so ChannelBase renders it on the paths where it owns the
+ * prefix (message routes, DM without a prefix). One definition, both carriers.
+ */
+const QQ_BOT_SENDER_TAG = 'bot';
+const QQ_BOT_TAG = `[${QQ_BOT_SENDER_TAG}] `;
+
 export type DeliveryErrorCode =
   | 'RATE_LIMITED'
   | 'RETRY_EXHAUSTED'
@@ -6001,6 +6010,7 @@ export class QQChannel extends ChannelBase {
     body: string;
     text: string;
     senderName: string;
+    forwardedBot: boolean;
   } | null {
     // Keep identity values out of the display-name position. In particular,
     // falling back to member_openid would expose a full mentionable OPENID
@@ -6062,10 +6072,7 @@ export class QQChannel extends ChannelBase {
     // automatic rate cap follows the switch — the group's human members and the
     // model's own silence rules are the guard. Dropping them is the default. A
     // user-supplied `[bot]` is stripped above, so the tag cannot be forged.
-    const botTag =
-      event.author?.bot === true && this.qqConfig.forwardBotMessages === true
-        ? '[bot] '
-        : '';
+    const botTag = forwardedBot ? QQ_BOT_TAG : '';
 
     const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
     const openIdSuffix =
@@ -6134,12 +6141,11 @@ export class QQChannel extends ChannelBase {
       safeName,
       cleanText,
       commandText,
-      routeText: forwardedBot
-        ? `${botTag}${sanitizePromptText(safeDisplayText)}`
-        : sanitizePromptText(safeDisplayText),
+      routeText: sanitizePromptText(safeDisplayText),
       body,
       text,
       senderName,
+      forwardedBot,
     };
   }
 
@@ -6291,7 +6297,7 @@ export class QQChannel extends ChannelBase {
     const safeName = sanitizeSenderName(senderName);
     const forwardedBot =
       event.author.bot === true && this.qqConfig.forwardBotMessages === true;
-    const botTag = forwardedBot ? '[bot] ' : '';
+    const botTag = forwardedBot ? QQ_BOT_TAG : '';
     const cleanText = rawContent.trim();
     // Strip system-reserved tags that could be forged by users
     const safeContent = cleanText
@@ -6306,7 +6312,7 @@ export class QQChannel extends ChannelBase {
     const text = mediaOnly
       ? `${botTag}${mediaPlaceholder(media)}`
       : isSlash || this.config.messageRoutes
-        ? `${botTag}${body}`
+        ? body
         : `[atMention=true] ${botTag}[${safeName}]: ${body}`;
     const envelope: Envelope = {
       channelName: this.name,
@@ -6314,6 +6320,7 @@ export class QQChannel extends ChannelBase {
       senderName,
       chatId,
       text,
+      ...(forwardedBot && !mediaOnly ? { senderTag: QQ_BOT_SENDER_TAG } : {}),
       messageId: event.id,
       isGroup: false,
       isMentioned: true,
@@ -6370,8 +6377,15 @@ export class QQChannel extends ChannelBase {
       forceAtMention: true,
     });
     if (!result) return;
-    const { isSlash, text, commandText, routeText, senderName, safeName } =
-      result;
+    const {
+      isSlash,
+      text,
+      commandText,
+      routeText,
+      senderName,
+      safeName,
+      forwardedBot,
+    } = result;
     const media = this.inboundMedia(event);
     const mediaOnly = result.body === '' && media.length > 0;
 
@@ -6412,6 +6426,7 @@ export class QQChannel extends ChannelBase {
         : this.config.messageRoutes
           ? routeText
           : text,
+      ...(forwardedBot ? { senderTag: QQ_BOT_SENDER_TAG } : {}),
       messageId: event.id,
       isGroup: true,
       isMentioned: true,
@@ -6477,6 +6492,7 @@ export class QQChannel extends ChannelBase {
       senderName,
       isAtBot,
       safeName,
+      forwardedBot,
     } = result;
     const media = this.inboundMedia(event);
     const mediaOnly = result.body === '' && media.length > 0;
@@ -6584,6 +6600,7 @@ export class QQChannel extends ChannelBase {
           : text,
       senderId,
       senderName,
+      ...(forwardedBot ? { senderTag: QQ_BOT_SENDER_TAG } : {}),
       messageId: event.id,
       isGroup: true,
       isMentioned: isAtBot,
