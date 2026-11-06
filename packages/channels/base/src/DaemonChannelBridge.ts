@@ -209,7 +209,7 @@ function channelImageName(mimeType: string, index = 0): string | undefined {
 function decodeChannelImage(
   data: string,
   oversizedReason: string,
-): { bytes: Buffer } | { skip: string } {
+): { bytes: Buffer<ArrayBuffer> } | { skip: string } {
   // Valid base64 decodes to at most this many bytes, so an oversized image
   // is rejected on length alone instead of allocating a buffer the size
   // check would discard. Padding is subtracted only when the input length
