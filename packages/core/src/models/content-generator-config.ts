@@ -209,6 +209,15 @@ function applyAgentReasoningEffort(
   }
 }
 
+/** Call a Config accessor, treating a missing or throwing one as absent. */
+function safeCall<T>(read: () => T | undefined): T | undefined {
+  try {
+    return read();
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Track where a per-agent config's `modalities` came from.
  *
@@ -229,12 +238,14 @@ export function resolveAgentModalitiesSource(
   model: string,
   resolvedModel?: ResolvedModelConfig,
 ): ContentGeneratorConfigSource {
-  const providers = base.getModelProvidersConfig?.();
+  // A partially-built Config (tests, a view created before models are loaded)
+  // can throw here; the fallback below is the correct answer for it anyway.
+  const providers = safeCall(() => base.getModelProvidersConfig?.());
   if (resolvedModel && providers) {
     const declared = findProviderEntry(
       providers,
       resolvedModel,
-      base.getModelsConfig?.()?.getProviderProtocolConfig?.(),
+      safeCall(() => base.getModelsConfig?.()?.getProviderProtocolConfig?.()),
     );
     if (declared?.generationConfig?.modalities !== undefined) {
       return {
