@@ -59,8 +59,7 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     void requireSubmitterRole(SessionRecord session,
             String actorId) {
         requireSubmitterRole(session,
-                principalOf(session.tenantId(), actorId,
-                        session.workspace() == null));
+                principalOf(session.tenantId(), actorId));
     }
 
     void requireSubmitterRole(SessionRecord session,
@@ -82,8 +81,7 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     void requireSubmitterFacts(SessionRecord session,
             String actorId) {
         requireSubmitterFacts(session,
-                principalOf(session.tenantId(), actorId,
-                        session.workspace() == null));
+                principalOf(session.tenantId(), actorId));
     }
 
     void requireSubmitterFacts(SessionRecord session,
@@ -180,8 +178,7 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     void requireLegacyWorkspace(SessionRecord session,
             String actorId) {
         requireLegacyWorkspace(session,
-                principalOf(session.tenantId(), actorId,
-                        session.workspace() == null));
+                principalOf(session.tenantId(), actorId));
     }
 
     void requireLegacyWorkspace(SessionRecord session,
@@ -287,8 +284,7 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
         return normalized;
     }
 
-    static SessionPrincipal principalOf(String tenantId, String actorId,
-            boolean ownershipQuestion) {
+    static SessionPrincipal principalOf(String tenantId, String actorId) {
         if (actorId == null || actorId.isBlank()) {
             return null;
         }

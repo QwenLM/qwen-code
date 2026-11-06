@@ -48,8 +48,7 @@ public class ManagedTaskCancelService {
             String actorId, String idempotencyKey, String sessionId,
             String taskId) {
         OperationAdmission admission = admit(tenantId,
-                actorId == null ? null
-                        : SessionPrincipal.ofUser(tenantId, actorId),
+                SessionPrincipal.ofUser(tenantId, actorId),
                 idempotencyKey, sessionId, taskId);
         return operations.publicOperation(admission.operation(),
                 admission.replayed());
@@ -59,8 +58,7 @@ public class ManagedTaskCancelService {
             String actorId, String idempotencyKey, String sessionId,
             String taskId) {
         OperationAdmission admission = admit(tenantId,
-                actorId == null ? null
-                        : SessionPrincipal.ofUser(tenantId, actorId),
+                SessionPrincipal.ofUser(tenantId, actorId),
                 idempotencyKey, sessionId, taskId);
         return operations.webShellOperation(admission.operation(),
                 admission.replayed());

@@ -199,16 +199,21 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
                 RuntimeObservation observation = observe(request, seed, handle);
                 URI originalEndpoint = retained.endpoint() != null ? retained.endpoint()
                         : lastLease == null ? null : lastLease.getEndpoint();
+                // The endpoint-evidence guard runs before any provider call:
+                // a lease that disagrees with the saved endpoint is a
+                // permanent conflict, not something reattach may "repair".
+                if (lastLease != null && !lastLease.getEndpoint().equals(originalEndpoint)) {
+                    throw conflict();
+                }
                 // UNKNOWN means the provider lost its process-local attachment,
                 // not that the Worker is gone. Reattach only the exact original
                 // endpoint; never enter provisioning or mint a replacement.
                 if (observation.getOutcome() == RuntimeObservation.Outcome.UNKNOWN
                         && lastLease != null && supportsReattach(request)) {
-                    observation = reattach(request, seed, handle, lastLease.getEndpoint());
+                    observation = reattach(request, seed, handle, originalEndpoint);
                 }
-                if ((lastLease != null && !lastLease.getEndpoint().equals(originalEndpoint))
-                        || (observation.getOutcome() == RuntimeObservation.Outcome.READY
-                        && originalEndpoint != null && !originalEndpoint.equals(observation.getEndpoint()))) {
+                if (observation.getOutcome() == RuntimeObservation.Outcome.READY
+                        && originalEndpoint != null && !originalEndpoint.equals(observation.getEndpoint())) {
                     throw conflict();
                 }
                 // UNKNOWN loses readiness evidence, not ownership of the original endpoint.

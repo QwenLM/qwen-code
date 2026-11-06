@@ -37,6 +37,17 @@ public final class VerifiedDispatchPayload {
         return new VerifiedDispatchPayload(actual, Set.of("read_file", "glob").contains(name));
     }
 
+    /**
+     * Classification from a digest and tool name the caller has already
+     * verified against the execution receipt and parsed shape. Avoids a
+     * second SHA-256 and JSON parse of the same payload on the dispatch
+     * path; the caller owns the verification this factory trusts.
+     */
+    public static VerifiedDispatchPayload of(String digest, String toolName) {
+        return new VerifiedDispatchPayload(digest,
+                Set.of("read_file", "glob").contains(toolName));
+    }
+
     public String digest() {
         return digest;
     }

@@ -1798,10 +1798,12 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                                     && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
                         }
+                        // The digest was just computed and compared to the
+                        // receipt and the payload parsed and shape-checked
+                        // above; classify from those locals instead of
+                        // hashing and parsing the same bytes a second time.
                         VerifiedDispatchPayload verifiedPayload =
-                                VerifiedDispatchPayload.verify(
-                                        payloadJson,
-                                        record.getRequestDigest());
+                                VerifiedDispatchPayload.of(digest, toolName);
                         if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
                                 && (v3 || record.getReference().containsKey("runtimeProtocol")
                                         || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {

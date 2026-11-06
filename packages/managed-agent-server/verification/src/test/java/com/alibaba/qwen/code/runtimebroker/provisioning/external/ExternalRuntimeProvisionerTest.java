@@ -148,6 +148,32 @@ class ExternalRuntimeProvisionerTest {
     }
 
     @Test
+    void disagreeingLeaseEndpointConflictsBeforeAnyProviderReattach() {
+        var api = new Provider();
+        var seed = RuntimeProvisionSeed.create("binding", 1);
+        try (var provider = new ExternalRuntimeProvisioner(api, "provider-a", Duration.ofSeconds(1)) {
+            @Override
+            protected boolean supportsReattach(RuntimeProvisionRequest request) {
+                return true;
+            }
+        }) {
+            var request = request(provider);
+            var handle = join(provider.ensureResource(request, seed, null));
+            var lease = join(provider.provision(request, seed));
+            // Same identity, different endpoint: the evidence guard must
+            // refuse before reattach mutates the provider at the endpoint
+            // the client just declared invalid.
+            var forged = new RuntimeLease(lease.getRuntimeInstanceId(), URI.create("https://other.example/"),
+                    lease.getToken(), lease.getLeaseId(), lease.getEpoch());
+            api.state = "UNKNOWN";
+            var observed = join(provider.reconcile(request, seed, handle, forged));
+            assertEquals(RuntimeObservation.Outcome.CONFLICT, observed.getOutcome());
+            assertEquals(0, api.reattaches);
+            assertEquals(1, api.provisions);
+        }
+    }
+
+    @Test
     void shutdownDuringReconcileAnswersUnknownInsteadOfConflict() {
         var api = new Provider();
         var provider = provisioner(api);
@@ -446,6 +472,7 @@ class ExternalRuntimeProvisionerTest {
         private int startingLeft;
         private int provisions;
         private int observations;
+        private int reattaches;
 
         @Override
         public CompletionStage<Map<String, Object>> provision(Map<String, Object> request) {
@@ -460,6 +487,7 @@ class ExternalRuntimeProvisionerTest {
 
         @Override
         public CompletionStage<Map<String, Object>> reattach(Map<String, Object> request) {
+            reattaches++;
             return observe(request);
         }
 

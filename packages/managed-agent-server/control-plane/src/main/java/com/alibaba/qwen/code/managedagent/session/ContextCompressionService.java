@@ -18,18 +18,16 @@ import java.util.Map;
 
 @Service
 public class ContextCompressionService {
-    private final ManagedAgentService sessions;
     private final SessionLifecycleStore store;
     private final RequestDigests digests;
     private final HarnessConnector harness;
     private final ContextCompressionCoordinator coordinator;
     private final ManagedExtensionRecordStore records;
 
-    public ContextCompressionService(ManagedAgentService sessions,
+    public ContextCompressionService(
             SessionLifecycleStore store, RequestDigests digests,
             HarnessConnector harness, ContextCompressionCoordinator coordinator,
             ManagedExtensionRecordStore records) {
-        this.sessions = sessions;
         this.store = store;
         this.digests = digests;
         this.harness = harness;
@@ -69,7 +67,9 @@ public class ContextCompressionService {
             throw new ManagedAgentException(401, "actor_required",
                     "A trusted actor is required.");
         }
-        sessions.requireReadableSession(principal, sessionId);
+        // The store enforces the read grant immediately before its receipt
+        // replay; a visibility pre-read here would tombstone-fence retries of
+        // an already-recorded compression and answer 404 instead of replaying.
         ManagedAgentService.validateIdempotencyKey(key);
         if (revision == null || revision < 0 || revision > 9_007_199_254_740_991L) {
             throw new ManagedAgentException(400, "invalid_request",

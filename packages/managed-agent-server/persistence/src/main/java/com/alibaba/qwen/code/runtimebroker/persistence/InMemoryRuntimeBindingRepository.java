@@ -392,6 +392,24 @@ public final class InMemoryRuntimeBindingRepository
     }
 
     @Override
+    public synchronized RuntimeBindingRecord findLatestForRequest(
+            RuntimeProvisionRequest request) {
+        RuntimeBindingRecord activeRecord = findActive(request);
+        if (activeRecord != null) {
+            return activeRecord;
+        }
+        RuntimeBindingRecord latest = null;
+        for (RuntimeBindingRecord record : records.values()) {
+            if (record.getRequest().equals(request)
+                    && (latest == null
+                            || record.getGeneration() > latest.getGeneration())) {
+                latest = record;
+            }
+        }
+        return latest;
+    }
+
+    @Override
     public synchronized List<RuntimeBindingRecord> findRecoveryCandidates(String kind, String afterBindingId, int limit) {
         BrokerValues.requireId(kind, "provisionerKind");
         if (limit < 1 || limit > 100) {

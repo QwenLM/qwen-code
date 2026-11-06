@@ -88,13 +88,18 @@ public class ManagedMcpManagementService {
         }
         Map<String, Object> request = new LinkedHashMap<>();
         try {
-            // A principal without a business actor carries a null subject, so
-            // the identity list must tolerate it; List.of rejects nulls.
-            request.put("operationId", UUID.nameUUIDFromBytes(json.writeValueAsBytes(
-                    java.util.Arrays.asList("managed-mcp-command",
-                            principal.tenantId(), principal.userId(),
-                            principal.actorSubjectId(), sessionId,
-                            idempotencyKey))).toString());
+            // A subjectless principal keeps the pre-ownership operation
+            // identity so recorded keys still replay; only an actual subject
+            // joins the identity (the commandKey rule).
+            java.util.List<String> identity = new java.util.ArrayList<>(java.util.List.of(
+                    "managed-mcp-command", principal.tenantId(), principal.userId()));
+            if (principal.actorPresent()) {
+                identity.add(principal.actorSubjectId());
+            }
+            identity.add(sessionId);
+            identity.add(idempotencyKey);
+            request.put("operationId", UUID.nameUUIDFromBytes(
+                    json.writeValueAsBytes(identity)).toString());
         } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
             throw new IllegalStateException("Cannot encode MCP command identity", error);
         }

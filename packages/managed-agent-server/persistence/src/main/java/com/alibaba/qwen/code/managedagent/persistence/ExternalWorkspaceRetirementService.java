@@ -225,22 +225,31 @@ public final class ExternalWorkspaceRetirementService {
             var heads = WorkspaceOperations.rows(jdbc, "SELECT phase, operation_id, recovery_status, state FROM ma_session_head"
                     + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", request.tenantId(), session);
             for (var head : heads) {
-                require("OPEN".equals(head.get("phase")) && head.get("operation_id") == null
+                // Settled heads keep their drain/lifecycle phase: close writes
+                // DRAINING and lifecycle writes LIFECYCLE_ONLY, and neither is
+                // ever reset to OPEN. A head naming an operation is unfinished
+                // only while that operation is nonterminal, which the
+                // operation fence below proves for the whole Session.
+                require(List.of("OPEN", "DRAINING", "LIFECYCLE_ONLY").contains(head.get("phase"))
                         && (head.get("recovery_status") == null || "READY".equals(head.get("recovery_status")))
                         && (head.get("state") == null || List.of("ACTIVE", "SEALED", "DELETED").contains(head.get("state"))));
             }
             WorkspaceLifecycleStore.requireIdleJournal(jdbc, json, request.tenantId(), session);
             empty("SELECT turn_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
                     + " AND status NOT IN ('COMPLETED','FAILED','CANCELLED') LIMIT 1 FOR UPDATE", request.tenantId(), session);
-            // decided 仍可能持有 continuation；首版只接受没有审批或已明确失效/取消的审批。
+            // A decided approval is a recorded decision: any continuation it
+            // names can only run behind a nonterminal Turn or operation, and
+            // both fences below already refuse those. Only an undecided
+            // (requested) approval is unfinished work.
             empty("SELECT record_id FROM ma_session_record WHERE tenant_id = ? AND session_id = ? AND record_kind = 'ACTION'"
-                    + " AND (state IS NULL OR state NOT IN ('expired','cancelled')) LIMIT 1 FOR UPDATE", request.tenantId(), session);
+                    + " AND (state IS NULL OR state NOT IN ('decided','expired','cancelled')) LIMIT 1 FOR UPDATE", request.tenantId(), session);
             // FAILED/CANCELLED operations deliberately retain BLOCKED delivery so
             // the relay never redispatches them. That delivery marker does not make
             // a terminal operation an unfinished effect; only nonterminal states
-            // fence retirement of the lost Worker.
+            // fence retirement of the lost Worker. SUPERSEDED is terminal too:
+            // a rename supersedes its parked predecessors and never leaves it.
             empty("SELECT operation_id FROM ma_operation WHERE tenant_id = ? AND session_id = ?"
-                    + " AND state NOT IN ('COMPLETED','FAILED','CANCELLED') LIMIT 1 FOR UPDATE",
+                    + " AND state NOT IN ('COMPLETED','FAILED','CANCELLED','SUPERSEDED') LIMIT 1 FOR UPDATE",
                     request.tenantId(), session);
         }
         // 孤立 head 不能当作没有成员；常规 Hosted 写入在同一 placement guard 后串行提交。

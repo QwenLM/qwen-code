@@ -351,9 +351,16 @@ public final class JdbcToolExecutionRepository
                     if (payload != null && !payload.digest().equals(hint.getRequestDigest())) {
                         throw new IllegalArgumentException("Tool execution digest changed");
                     }
-                    boolean verifiedRead = payload != null && payload.readOnly();
-                    if (!claimSharedExternalSlot(connection, hint, verifiedRead)) {
-                        return null;
+                    // The shared-slot fence admits new dispatches only. A
+                    // payload-less claim is lifecycle maintenance (takeover,
+                    // renewal re-claim, cancel dispatch, non-shared profiles)
+                    // of an already-admitted execution; judging it as a writer
+                    // would strand it behind any in-flight shared read.
+                    if (payload != null) {
+                        boolean verifiedRead = payload.readOnly();
+                        if (!claimSharedExternalSlot(connection, hint, verifiedRead)) {
+                            return null;
+                        }
                     }
                     var continuation = lockCsiContinuation(connection, hint);
                     ToolExecutionRecord current = selectByExecutionId(connection, id, true);
@@ -420,7 +427,7 @@ public final class JdbcToolExecutionRepository
                         throw new IllegalStateException(
                                 "Tool execution digest changed");
                     }
-                    if (verifiedRead && storedClass == null) {
+                    if (payload != null && payload.readOnly() && storedClass == null) {
                         try (var classify = connection.prepareStatement(
                                 "UPDATE ma_tool_execution"
                                         + " SET shared_dispatch_class = 'READ'"

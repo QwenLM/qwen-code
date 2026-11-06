@@ -49,8 +49,7 @@ public class ManagedTaskService {
 
     public PublicList<PublicTask> listPublicTasks(String tenantId,
             String actorId, String sessionId, String cursor, int limit) {
-        return listPublicTasks(actorId == null ? null
-                : SessionPrincipal.ofUser(tenantId, actorId), sessionId,
+        return listPublicTasks(SessionPrincipal.ofUser(tenantId, actorId), sessionId,
                 cursor, limit);
     }
 
@@ -67,8 +66,7 @@ public class ManagedTaskService {
 
     public PublicTask getPublicTask(String tenantId, String actorId,
             String sessionId, String taskId) {
-        return getPublicTask(actorId == null ? null
-                : SessionPrincipal.ofUser(tenantId, actorId), sessionId,
+        return getPublicTask(SessionPrincipal.ofUser(tenantId, actorId), sessionId,
                 taskId);
     }
 
@@ -81,8 +79,7 @@ public class ManagedTaskService {
 
     public WebShellTaskPage queryWebShellTasks(String tenantId,
             String actorId, String sessionId, String cursor, int limit) {
-        return queryWebShellTasks(actorId == null ? null
-                : SessionPrincipal.ofUser(tenantId, actorId), sessionId,
+        return queryWebShellTasks(SessionPrincipal.ofUser(tenantId, actorId), sessionId,
                 cursor, limit);
     }
 
@@ -101,8 +98,7 @@ public class ManagedTaskService {
 
     public WebShellTask getWebShellTask(String tenantId, String actorId,
             String sessionId, String taskId) {
-        return getWebShellTask(actorId == null ? null
-                : SessionPrincipal.ofUser(tenantId, actorId), sessionId,
+        return getWebShellTask(SessionPrincipal.ofUser(tenantId, actorId), sessionId,
                 taskId);
     }
 
@@ -116,8 +112,7 @@ public class ManagedTaskService {
     public PublicList<PublicTaskEvent> listPublicTaskEvents(String tenantId,
             String actorId, String sessionId, String taskId, String after,
             int limit) {
-        return listPublicTaskEvents(actorId == null ? null
-                : SessionPrincipal.ofUser(tenantId, actorId), sessionId,
+        return listPublicTaskEvents(SessionPrincipal.ofUser(tenantId, actorId), sessionId,
                 taskId, after, limit);
     }
 
@@ -135,8 +130,7 @@ public class ManagedTaskService {
     public WebShellPage<WebShellTaskEvent> queryWebShellTaskEvents(
             String tenantId, String actorId, String sessionId, String taskId,
             String after, int limit) {
-        return queryWebShellTaskEvents(actorId == null ? null
-                : SessionPrincipal.ofUser(tenantId, actorId), sessionId,
+        return queryWebShellTaskEvents(SessionPrincipal.ofUser(tenantId, actorId), sessionId,
                 taskId, after, limit);
     }
 

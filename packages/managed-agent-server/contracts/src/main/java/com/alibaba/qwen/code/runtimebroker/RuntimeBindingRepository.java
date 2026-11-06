@@ -149,11 +149,11 @@ public interface RuntimeBindingRepository {
      * request, including a released generation. Trusted saved-runtime
      * recovery uses this to distinguish "never provisioned" from "the
      * original generation was retired"; normal admission uses
-     * {@link #findActive(RuntimeProvisionRequest)}.
+     * {@link #findActive(RuntimeProvisionRequest)}. Implementations must not
+     * fall back to {@code findActive}: after a retirement that fallback
+     * reports "never provisioned" for a request that was provisioned.
      */
-    public default RuntimeBindingRecord findLatestForRequest(RuntimeProvisionRequest request) {
-        return findActive(request);
-    }
+    public RuntimeBindingRecord findLatestForRequest(RuntimeProvisionRequest request);
 
     public List<RuntimeBindingRecord> findActiveByIsolationKey(RuntimeScope scope,
             String isolationKey);

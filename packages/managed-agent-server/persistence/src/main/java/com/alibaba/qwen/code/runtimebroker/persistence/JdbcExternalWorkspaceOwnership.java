@@ -175,12 +175,6 @@ public final class JdbcExternalWorkspaceOwnership {
         return current;
     }
 
-    public static ContextBinding savedContext(Connection connection, RuntimeBindingRecord binding,
-            boolean acquiring) throws SQLException {
-        return savedContext(connection, binding,
-                binding.getRequest().getIsolationKey(), acquiring);
-    }
-
     public static ContextBinding savedContext(Connection connection,
             RuntimeBindingRecord binding, String harness, boolean acquiring)
             throws SQLException {

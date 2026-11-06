@@ -33,10 +33,14 @@ class SharedExternalDispatchTest {
         String json = "{\"toolName\":\"read_file\",\"input\":{}}";
         String digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                 .digest(json.getBytes(StandardCharsets.UTF_8)));
+        String writeJson = "{\"toolName\":\"write_file\",\"input\":{}}";
+        String writeDigest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(writeJson.getBytes(StandardCharsets.UTF_8)));
         var read = VerifiedDispatchPayload.verify(json, digest);
+        var writePayload = VerifiedDispatchPayload.verify(writeJson, writeDigest);
         var first = prepare(fixture, "first", digest);
         var second = prepare(fixture, "second", digest);
-        var write = prepare(fixture, "write", digest);
+        var write = prepare(fixture, "write", writeDigest);
         var third = prepare(fixture, "third", digest);
         try (var connection = source.getConnection();
                 var statement = connection.prepareStatement("UPDATE ma_runtime_binding SET provisioner_kind = ?,"
@@ -49,7 +53,18 @@ class SharedExternalDispatchTest {
         var lease = Duration.ofMinutes(1);
         assertNotNull(executions.claimValidatedDispatch(first.getExecutionCallId(), "owner-a", lease, read));
         assertNotNull(executions.claimValidatedDispatch(second.getExecutionCallId(), "owner-b", lease, read));
-        assertNull(executions.claimDispatch(write.getExecutionCallId(), "owner-w", lease));
+        // A new write admission stays fenced while a read is in flight.
+        assertNull(executions.claimValidatedDispatch(write.getExecutionCallId(), "owner-w", lease, writePayload));
+        // Taking over a lapsed claim is lifecycle maintenance, not a new
+        // admission: the payload-less claim path must not be judged as a
+        // writer and refused while a read runs on the same binding.
+        try (var connection = source.getConnection();
+                var statement = connection.prepareStatement("UPDATE ma_tool_execution SET dispatch_lease_until = 1"
+                        + " WHERE execution_call_id_hash = ?")) {
+            statement.setString(1, JdbcRepositorySupport.valueKey(second.getExecutionCallId()));
+            statement.executeUpdate();
+        }
+        assertNotNull(executions.claimDispatch(second.getExecutionCallId(), "owner-takeover", lease));
         try (var connection = source.getConnection();
                 var statement = connection.prepareStatement("UPDATE ma_tool_execution SET execution_state = 'UNKNOWN'"
                         + " WHERE execution_call_id_hash = ?")) {

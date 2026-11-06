@@ -72,9 +72,20 @@ public final class ExternalWorkspaceMaterializationStore {
             if (registrations.size() != 1) {
                 throw conflict("external_workspace_conflict");
             }
-            var registration =
-                    com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.decodeRegistration(
-                            registrations.getFirst());
+            com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.RegisteredExternalStorage registration;
+            try {
+                registration =
+                        com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.decodeRegistration(
+                                registrations.getFirst());
+            } catch (RuntimeException failure) {
+                // A stored registration this build cannot read is a permanent
+                // ownership refusal, not a malformed request: keep the 409 the
+                // sibling shape checks answer instead of a mapper 400.
+                throw conflict("external_workspace_conflict");
+            }
+            if (registration == null) {
+                throw conflict("external_workspace_conflict");
+            }
             String physical = registration.ownerKey();
             long revision = registration.registrationRevision();
             if (registration.ephemeral() && !tenant.equals(registration.ephemeralTenantId())

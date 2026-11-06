@@ -35,6 +35,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -195,6 +196,98 @@ class RuntimeExecutionDispatcherTest {
                 .toCompletableFuture().join();
 
         verify(fixture.transport).acknowledgeV2(fixture.lease, fixture.session, reference);
+    }
+
+    @Test
+    @Timeout(15)
+    @SuppressWarnings("unchecked")
+    void sharedDispatchWaitBacksOffAndAnswersConflictAtTheDeadline() throws Exception {
+        var registry = mock(RuntimeBindingRegistry.class);
+        var bindings = mock(RuntimeBindingRepository.class);
+        var sessions = mock(RuntimeSessionRepository.class);
+        var executions = mock(ToolExecutionRepository.class);
+        var scheduler = mock(ScheduledExecutorService.class);
+        var context = mock(SessionContext.class);
+        var binding = mock(RuntimeBindingRecord.class);
+        var session = mock(RuntimeSession.class);
+        var prepared = mock(ToolExecutionRecord.class);
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace");
+        var request = new RuntimeProvisionRequest(scope, null,
+                com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE,
+                "workspace");
+        when(binding.getRequest()).thenReturn(request);
+        when(context.binding()).thenReturn(binding);
+        when(context.session()).thenReturn(session);
+        when(session.getScope()).thenReturn(scope);
+        when(session.getHarnessSessionId()).thenReturn("harness");
+        when(prepared.getExecutionCallId()).thenReturn("execution");
+        when(prepared.getState()).thenReturn(ToolExecutionRecord.State.PREPARED);
+        when(prepared.sameIdentity(prepared)).thenReturn(true);
+        when(prepared.getReference()).thenReturn(Map.of("sessionId", "runtime", "dispatchMode", "deferred"));
+        when(executions.findByExecutionCallId("execution")).thenReturn(prepared);
+        when(executions.claimValidatedDispatch(eq("execution"), eq("broker"), any(Duration.class), any()))
+                .thenReturn(null);
+        var now = new AtomicReference<>(Instant.parse("2026-11-01T00:00:00Z"));
+        var clock = new Clock() {
+            @Override
+            public java.time.ZoneId getZone() {
+                return ZoneOffset.UTC;
+            }
+
+            @Override
+            public Clock withZone(java.time.ZoneId zone) {
+                return this;
+            }
+
+            @Override
+            public Instant instant() {
+                return now.get();
+            }
+        };
+        var delays = new java.util.ArrayList<Long>();
+        var ticks = new java.util.ArrayList<Runnable>();
+        when(scheduler.schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS))).thenAnswer(call -> {
+            ticks.add(call.getArgument(0));
+            delays.add(call.getArgument(1));
+            return mock(ScheduledFuture.class);
+        });
+        var dispatcher = new RuntimeExecutionDispatcher(registry, mock(RuntimeExecutionState.class), bindings,
+                sessions, executions, mock(RuntimeProvisioner.class), mock(RuntimeTransport.class),
+                mock(RuntimePublicationVerifier.class), "broker", Duration.ofSeconds(60),
+                Duration.ofSeconds(10), clock, scheduler, mock(ScheduledExecutorService.class),
+                new AtomicBoolean());
+        dispatcher.beginDispatch(context, prepared, Map.of("toolName", "read_file", "input", Map.of()), null,
+                com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload.of("digest", "read_file"));
+        var field = RuntimeExecutionDispatcher.class.getDeclaredField("dispatches");
+        field.setAccessible(true);
+        var dispatches = (java.util.concurrent.ConcurrentMap<String, CompletableFuture<Void>>) field.get(dispatcher);
+        var queued = dispatches.get("execution");
+        assertNotNull(queued);
+
+        // The occupant never settles: the wait must back off instead of
+        // hammering the coordination thread at a fixed interval.
+        for (int index = 0; index < 8; index++) {
+            assertFalse(queued.isDone());
+            ticks.get(ticks.size() - 1).run();
+        }
+        assertEquals(250L, delays.get(0));
+        assertEquals(100L, delays.get(1));
+        assertEquals(200L, delays.get(2));
+        assertEquals(400L, delays.get(3));
+        assertEquals(2000L, delays.get(delays.size() - 1));
+        assertFalse(queued.isDone());
+
+        // Past the deadline the next tick answers a conflict instead of
+        // rescheduling forever.
+        now.set(now.get().plus(Duration.ofSeconds(11)));
+        int scheduled = ticks.size();
+        ticks.get(ticks.size() - 1).run();
+        assertEquals(scheduled, ticks.size());
+        var error = assertThrows(java.util.concurrent.ExecutionException.class,
+                () -> queued.get(1, TimeUnit.SECONDS));
+        assertTrue(error.getCause() instanceof RuntimeBrokerException);
+        assertEquals("runtime_execution_conflict", ((RuntimeBrokerException) error.getCause()).getCode());
     }
 
     private static final class Fixture {

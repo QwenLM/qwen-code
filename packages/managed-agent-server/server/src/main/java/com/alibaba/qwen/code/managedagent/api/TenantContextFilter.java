@@ -102,8 +102,14 @@ public class TenantContextFilter extends OncePerRequestFilter {
     private static boolean validActorId(String tenantId, String actorId) {
         try {
             new WorkspaceActor(tenantId, actorId);
+            // The ownership columns bound UTF-8 bytes, not code points: an
+            // actor the principal would reject must fail here, before any
+            // controller commits a Session it can no longer represent.
+            com.alibaba.qwen.code.managedagent.model.SessionPrincipal.ofUser(
+                    tenantId, actorId);
             return true;
-        } catch (IllegalArgumentException error) {
+        } catch (IllegalArgumentException
+                | com.alibaba.qwen.code.managedagent.exception.ManagedAgentException error) {
             return false;
         }
     }

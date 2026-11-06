@@ -105,10 +105,18 @@ public class ManagedExtensionManagementService {
         } catch (ManagedExtensionRecords.InvalidRecordException error) {
             throw invalid();
         }
-        String operationId = UUID.nameUUIDFromBytes(("managed-extension-apply\0"
-                + principal.tenantId() + "\0" + principal.userId() + "\0"
-                + principal.actorSubjectId() + "\0" + sessionId + "\0" + key)
-                .getBytes(StandardCharsets.UTF_8)).toString();
+        // A subjectless principal keeps the pre-ownership operation identity
+        // so keys recorded before the subject column existed still replay;
+        // only an actual subject joins the identity (the commandKey rule).
+        StringBuilder identity = new StringBuilder("managed-extension-apply\0")
+                .append(principal.tenantId()).append('\0')
+                .append(principal.userId()).append('\0');
+        if (principal.actorPresent()) {
+            identity.append(principal.actorSubjectId()).append('\0');
+        }
+        String operationId = UUID.nameUUIDFromBytes(identity
+                .append(sessionId).append('\0').append(key)
+                .toString().getBytes(StandardCharsets.UTF_8)).toString();
         sessions.requireReadableSession(principal, sessionId);
         SessionRecord session = store.requireExtensionManagement(principal.tenantId(),
                 principal.userId(), sessionId, operationId, true);

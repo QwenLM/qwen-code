@@ -564,6 +564,13 @@ class ExternalWorkspaceMaterializationTest {
                 "\"tenantWorkspaceId\":\"other\""));
         conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
         jdbc.update("UPDATE ma_storage SET registration_json = ?", registration);
+        // An unreadable stored registration is a permanent ownership refusal
+        // (409), not a malformed-request 400 from the decode exception.
+        for (String malformed : List.of("not-json", "{\"kind\":\"ephemeral\"}")) {
+            jdbc.update("UPDATE ma_storage SET registration_json = ?", malformed);
+            conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
+        }
+        jdbc.update("UPDATE ma_storage SET registration_json = ?", registration);
         new TransactionTemplate(manager).executeWithoutResult(status ->
                 conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "workspace_unavailable"));
         for (String mutation : List.of("mount_root = '/other'", "mount_revision = 2", "holder_key = 'held'", "maintenance_id = 'maintenance'")) {

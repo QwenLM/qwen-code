@@ -1010,12 +1010,6 @@ public final class JdbcRuntimeBindingRepository
         });
     }
 
-    public static void requireExternalHarnessAdmission(Connection connection, RuntimeProvisionRequest request,
-            RuntimeScope scope, boolean cleanup) throws SQLException {
-        requireExternalHarnessAdmission(
-                connection, request, scope, request.getIsolationKey(), cleanup);
-    }
-
     public static void requireExternalHarnessAdmission(Connection connection,
             RuntimeProvisionRequest request, RuntimeScope scope,
             String harnessSessionId, boolean cleanup) throws SQLException {

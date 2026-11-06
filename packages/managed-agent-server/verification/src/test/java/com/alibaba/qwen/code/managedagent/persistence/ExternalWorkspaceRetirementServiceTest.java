@@ -26,6 +26,7 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -189,7 +190,9 @@ class ExternalWorkspaceRetirementServiceTest {
         assertThatThrownBy(() -> service.retire(request, identity -> {
             observations.incrementAndGet();
             return terminated(identity);
-        })).isInstanceOf(RuntimeBrokerException.class);
+        })).isInstanceOf(RuntimeBrokerException.class)
+                .hasFieldOrPropertyWithValue("statusCode", 409)
+                .hasFieldOrPropertyWithValue("code", "external_workspace_retirement_blocked");
 
         assertThat(durableState()).isEqualTo(before);
         assertThat(executions.findByIdempotencyKey(prepared.getIdempotencyKey()).getState())
@@ -212,7 +215,9 @@ class ExternalWorkspaceRetirementServiceTest {
         var before = durableState();
 
         assertThatThrownBy(() -> service.retire(request, this::terminated))
-                .isInstanceOf(RuntimeBrokerException.class);
+                .isInstanceOf(RuntimeBrokerException.class)
+                .hasFieldOrPropertyWithValue("statusCode", 409)
+                .hasFieldOrPropertyWithValue("code", "external_workspace_retirement_blocked");
 
         assertThat(durableState()).isEqualTo(before);
         assertThat(sessions.findById(placement.getScope(), activeId).getState())
@@ -229,7 +234,9 @@ class ExternalWorkspaceRetirementServiceTest {
         var before = durableState();
 
         assertThatThrownBy(() -> service.retire(request, this::terminated))
-                .isInstanceOf(RuntimeBrokerException.class);
+                .isInstanceOf(RuntimeBrokerException.class)
+                .hasFieldOrPropertyWithValue("statusCode", 409)
+                .hasFieldOrPropertyWithValue("code", "external_workspace_retirement_blocked");
 
         assertThat(durableState()).isEqualTo(before);
         assertThat(service.inspect(request)).isNull();
@@ -244,7 +251,9 @@ class ExternalWorkspaceRetirementServiceTest {
         var before = durableState();
 
         assertThatThrownBy(() -> service.retire(request, this::terminated))
-                .isInstanceOf(RuntimeBrokerException.class);
+                .isInstanceOf(RuntimeBrokerException.class)
+                .hasFieldOrPropertyWithValue("statusCode", 409)
+                .hasFieldOrPropertyWithValue("code", "external_workspace_retirement_blocked");
 
         assertThat(durableState()).isEqualTo(before);
         assertThat(service.inspect(request)).isNull();
@@ -350,10 +359,44 @@ class ExternalWorkspaceRetirementServiceTest {
     void unknownTurnInAnyMemberPreventsAllRetirementWrites() {
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest, status,"
                 + " gmt_create, gmt_modified) VALUES ('tenant','user-session','unknown','prompt','{}','digest','RECOVERY_BLOCKED',1,1)");
-        assertThatThrownBy(() -> service.retire(request, this::terminated)).isInstanceOf(RuntimeBrokerException.class);
+        assertThatThrownBy(() -> service.retire(request, this::terminated)).isInstanceOf(RuntimeBrokerException.class)
+                .hasFieldOrPropertyWithValue("statusCode", 409)
+                .hasFieldOrPropertyWithValue("code", "external_workspace_retirement_blocked");
         assertThat(bindings.findById(original.getBindingId()).getVersion()).isEqualTo(original.getVersion());
         assertThat(bindings.findActive(placement).getBindingId()).isEqualTo(original.getBindingId());
         assertThat(jdbc.queryForObject("SELECT state FROM ma_workspace", String.class)).isEqualTo("ACTIVE");
         assertThat(service.inspect(request)).isNull();
+    }
+
+    @Test
+    void settledDrainHeadWithSupersededOperationAndDecidedApprovalRetires() {
+        // Closing a session settles its head to DRAINING and keeps the named
+        // operation; a later rename supersedes that operation and the parked
+        // approval was decided. None of that is live work: the operation fence
+        // proves the named operation terminal, so the head shape must not
+        // fence retirement of the lost Worker.
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, 'RENAME', ?, 'user-session', 'SESSION', ?,"
+                + " 'digest', '{}', 'SUPERSEDED', 'COMPLETED', 'BLOCKED', 1, 1)",
+                "d".repeat(64), "e".repeat(64), "settled-drain-op".getBytes(StandardCharsets.UTF_8),
+                "tenant".getBytes(StandardCharsets.UTF_8), "f".repeat(64));
+        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, session_id, harness_session_id,"
+                + " head_kind, phase, operation_id, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, ?, 'user-session', 'user-session', 'HARNESS', 'DRAINING', ?, 1, 1)",
+                "1".repeat(64), "2".repeat(64), "tenant".getBytes(StandardCharsets.UTF_8),
+                "settled-drain-op".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, session_id,"
+                + " domain, record_id, revision, gmt_create, record_kind, state, action_id, action_version, options_json)"
+                + " VALUES (?, ?, ?, 'user-session', 'action', 'action', 1, 1, 'ACTION', 'decided', 'action', 1, '{}')",
+                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "user-session"),
+                "3".repeat(64), "tenant".getBytes(StandardCharsets.UTF_8));
+
+        var receipt = service.retire(request, this::terminated);
+
+        assertThat(receipt.state()).isEqualTo("RELEASED");
+        assertThat(receipt.resumed()).isFalse();
+        assertThat(bindings.findById(original.getBindingId()).getState())
+                .isEqualTo(RuntimeBindingRecord.State.RELEASED);
     }
 }

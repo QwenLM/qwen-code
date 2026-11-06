@@ -180,12 +180,6 @@ final class RuntimeExecutionDispatcher {
 
     private CompletionStage<Void> dispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
-            RuntimePublicationGrant grant) {
-        return dispatch(context, prepared, payload, grant, null);
-    }
-
-    private CompletionStage<Void> dispatch(SessionContext context,
-            ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant,
             VerifiedDispatchPayload verifiedPayload) {
         ToolExecutionRecord claimed = claimDispatchForPayload(
@@ -224,8 +218,14 @@ final class RuntimeExecutionDispatcher {
             Map<String, Object> payload, RuntimePublicationGrant grant,
             VerifiedDispatchPayload verifiedPayload) {
         // Keep a single Future per waiting request; a long-lived UNKNOWN
-        // occupant must not build a recursive chain.
+        // occupant must not build a recursive chain. The wait is bounded like
+        // the v3 result poll: backoff between attempts and a deadline, so an
+        // occupant that never settles answers a conflict instead of retrying
+        // forever on the shared coordination thread.
         CompletableFuture<Void> queued = new CompletableFuture<>();
+        java.time.Instant deadline = clock.instant().plus(v3ResultWindow);
+        java.util.concurrent.atomic.AtomicInteger attempt =
+                new java.util.concurrent.atomic.AtomicInteger();
         Runnable tick = new Runnable() {
             @Override
             public void run() {
@@ -235,6 +235,10 @@ final class RuntimeExecutionDispatcher {
                 try {
                     com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport
                             .requireOpen(closed);
+                    if (!clock.instant().isBefore(deadline)) {
+                        throw conflict("runtime_execution_conflict",
+                                "Shared Workspace dispatch slot did not free in time");
+                    }
                     ToolExecutionRecord waiting =
                             executionRepository.findByExecutionCallId(
                                     prepared.getExecutionCallId());
@@ -259,8 +263,9 @@ final class RuntimeExecutionDispatcher {
                         context.unlock();
                     }
                     if (next == null) {
-                        scheduler.schedule(
-                                this, 250, TimeUnit.MILLISECONDS);
+                        scheduler.schedule(this,
+                                v3PollDelayMillis(attempt.getAndIncrement()),
+                                TimeUnit.MILLISECONDS);
                     } else {
                         dispatchClaimed(
                                 context, next, payload, grant)
