@@ -86,6 +86,7 @@ import {
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
+  getShellDisplayName,
   hasShellSubstitution,
   SHELL_SELF_KILL_REJECTION,
   type ShellConfiguration,
@@ -5708,30 +5709,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 }
 
-function getExecutableBasename(executable: string): string {
-  return path.basename(path.win32.basename(executable));
-}
-
-function getShellDisplayName({
-  executable,
-  shell,
-}: ShellConfiguration): string {
-  switch (shell) {
-    case 'cmd':
-      return 'cmd.exe';
-    case 'powershell': {
-      const basename = getExecutableBasename(executable).toLowerCase();
-      return basename === 'pwsh.exe' ? 'pwsh.exe' : 'powershell.exe';
-    }
-    case 'bash':
-      return 'bash';
-    default: {
-      const _exhaustive: never = shell;
-      return _exhaustive;
-    }
-  }
-}
-
 function getShellExecutionWrapper(
   shellConfiguration = getShellConfiguration(),
 ): string {
@@ -5796,9 +5773,10 @@ function getShellCommandSequencingGuidance({
   - Use '&' only when you need to run commands sequentially but don't care if earlier commands fail.
   - DO NOT use ';' or newlines to separate commands in cmd.exe.`;
     case 'powershell': {
-      const executableBasename =
-        getExecutableBasename(executable).toLowerCase();
-      if (executableBasename === 'pwsh.exe') {
+      if (
+        getShellDisplayName({ executable, argsPrefix: [], shell }) ===
+        'pwsh.exe'
+      ) {
         return `- When issuing multiple commands:
   ${independentGuidance}
   - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`).

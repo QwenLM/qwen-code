@@ -14,6 +14,10 @@ import type {
 } from '../tools/tool-registry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
+import {
+  getShellConfiguration,
+  getShellDisplayName,
+} from '../utils/shell-utils.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
 import {
   collectAvailableSkillEntries,
@@ -199,12 +203,20 @@ export async function getEnvironmentContext(
   const platform = config.getExecutionEnvironment?.()
     ? ''
     : `My operating system is: ${process.platform}\n`;
+  // Platform alone does not decide shell syntax: a Windows machine may run
+  // cmd, PowerShell, or a POSIX shell inside WSL. Say which one will run the
+  // command, so the model does not guess from the platform.
+  const shell = config.getExecutionEnvironment?.()
+    ? ''
+    : `Shell commands run under: ${getShellDisplayName(
+        getShellConfiguration(),
+      )}\n`;
   const directoryContext = await getDirectoryContextString(config);
 
   const context = `
 This is the Qwen Code. We are setting up the context for our chat.
 Today's date is ${today}.
-${platform}${directoryContext}
+${platform}${shell}${directoryContext}
         `.trim();
 
   return [{ text: context }];
