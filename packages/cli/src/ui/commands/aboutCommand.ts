@@ -27,11 +27,15 @@ export const aboutCommand: SlashCommand = {
     const systemInfo = await getExtendedSystemInfo(context);
 
     if (context.executionMode !== 'interactive') {
+      const authLabel =
+        systemInfo.selectedAuthType === 'qwen-subscription'
+          ? 'Qwen Subscription'
+          : systemInfo.selectedAuthType;
       const lines = [
         `Qwen Code v${systemInfo.cliVersion}`,
         `Model: ${systemInfo.modelVersion}`,
         `Fast Model: ${systemInfo.fastModel ?? 'not set'}`,
-        `Auth: ${systemInfo.selectedAuthType}`,
+        `Auth: ${authLabel}`,
         `Platform: ${systemInfo.osPlatform} ${systemInfo.osArch} (${systemInfo.osRelease})`,
         `Node.js: ${systemInfo.nodeVersion}`,
         `Session: ${systemInfo.sessionId}`,

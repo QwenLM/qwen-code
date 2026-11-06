@@ -947,6 +947,43 @@ The initial approval mode is pinned at Session creation and must be confirmed by
 Harness on creation and load. Built-in Workspace Sessions can select a different
 policy for later Turns while retaining the original definition.
 
+### Structured user questions
+
+Root Sessions using `hosted-workspace-files/1`, `/2`, `/3`, or
+`hosted-workspace-shell/1` expose `ask_user_question`, including public Plan
+mode. The tool asks one to four required questions, each offering two to four
+choices and a custom-text answer. Single-choice questions accept one option or
+custom text; multiple-choice questions also allow both together. The tool must
+be the only call in its batch. MCP/Hook Sessions, child Sessions,
+foreground-only workers and resident CSI profiles do not expose it.
+
+The question appears as a pending Action with `kind: question`. WebShell keeps
+the answer draft visible until delivery is confirmed; refreshing retrieves the
+same pending Action. Public responses use `kind: question`, `answers` with
+`question_id`, optional `option_ids` and optional `text`, plus the Action's
+`input_revision` and `policy_revision`. WebShell uses their camelCase names.
+Use the returned question and option IDs, not their labels, and the existing
+Action response endpoints and idempotency key. Response authorization is the
+same as permission Actions, including the Shell owner restriction.
+
+Questions always wait for a human answer, including Full Access and live
+approval-policy changes. The existing approval timeout, cancellation and
+expiry rules apply. Invalid or conflicting answers cannot replace the durable
+decision; an equivalent retry returns the original result. The original
+question and answer survive service/Harness restart and resume the same tool
+call. Answer text is limited to 8192 UTF-16 code units per question and the
+canonical answer array to 32 KiB; the complete tool input is limited to 16 KiB.
+
+Deploy compatible Java server, Java SDK, Harness and WebShell artifacts
+together. Drain and fence older writers before reopening execution; older
+binaries cannot interpret the new question options/decisions and must not
+resume Sessions with pending questions. No database schema change is required.
+See the [question design](../../docs/design/2026-11-06-managed-user-questions.md)
+([简体中文](../../docs/design/2026-11-06-managed-user-questions.zh-CN.md)) for
+the continuation contract and acceptance scope.
+
+### Approval policy selection
+
 For new Workspace-bound WebShell Sessions, the shared composer queries `POST /api/agent/web-shell/v1/session-options/query` with `agentId` using the authenticated tenant actor. The response contains the effective `approvalMode` and `availableApprovalModes`; Workspace discovery advertises `approvalModeSelection` for this contract. Built-in Sessions allow `default`, `auto-edit`, and `yolo` (Full Access). Shell Full Access additionally requires the Harness feature `approval-selection/1`; without it Shell offers only `default` and `auto-edit`. The Shell deployment opt-in and its deployment default remain unchanged. Hosted execution does not support classifier `auto` or `plan`. An AgentDefinition exposes only its compiled policy, which a creation request cannot override.
 
 The WebShell create request may include `approvalMode` only with a Workspace binding. Omission preserves the existing default and request digest; explicit selection is persisted in the Session and joins its idempotency digest. Retrying the same key reads the original pin even if deployment defaults, the AgentDefinition, or a later Session selection changed. Workspace-bound and definition-pinned Session summaries expose the current `approvalMode`, immutable `initialApprovalMode`, and `approvalRevision`. Legacy unbound built-in Sessions omit this metadata because their execution policy is supplied by the deployment. The public REST create contract is unchanged.
@@ -1946,7 +1983,7 @@ each arm runs even when an earlier one failed.
 
 ### Hosted recovery scope
 
-Ordinary LOCAL and SSH_LOCAL Managed Workspace Sessions may execute concurrently in the same directory, with one active Turn per Session. An UNKNOWN tool result on a READY binding retains its original Runtime Session and cannot be replayed, but does not exclude another ordinary Session. Existing LOST, DRAINING, OPERATOR_RECOVERY and attested RECOVERY_BLOCKED placement barriers remain in force. Physical registration, fencing, migration and maintenance still require every execution membership and unproven writer to drain. Shared files have no transactional isolation. Past execution overlap does not disable file undo. Undo requires other current memberships to release, then briefly excludes new acquisitions; existing file-level history checks still apply. Resident/private CSI and existing Agent/Workflow child-admission restrictions are unchanged. See the [concurrency design](../../docs/design/2026-10-21-managed-workspace-concurrency.md) ([简体中文](../../docs/design/2026-10-21-managed-workspace-concurrency.zh-CN.md)).
+Ordinary LOCAL and SSH_LOCAL Managed Workspace Sessions may execute concurrently in the same directory, with one active Turn per Session. An UNKNOWN tool result on a READY binding retains its original Runtime Session and cannot be replayed, but does not exclude another ordinary Session. Existing LOST, DRAINING, OPERATOR_RECOVERY and attested RECOVERY_BLOCKED placement barriers remain in force. Physical registration, fencing, migration and maintenance still require every execution membership and unproven writer to drain. Shared files have no transactional isolation. Undo can run alongside other Sessions and uploads, subject to the existing file-level history checks. An active or unconfirmed undo blocks only its originating Runtime Session's execution, repeated undo and mount handback; neighboring Sessions can continue. Resident/private CSI and existing Agent/Workflow child-admission restrictions are unchanged. See the [concurrency design](../../docs/design/2026-10-21-managed-workspace-concurrency.md) ([简体中文](../../docs/design/2026-10-21-managed-workspace-concurrency.zh-CN.md)) and the updated [rewind semantics](../../docs/design/2026-11-05-managed-rewind-concurrency.md) ([简体中文](../../docs/design/2026-11-05-managed-rewind-concurrency.zh-CN.md)).
 
 The baseline stores ordinary execution memberships per Runtime Session. Use matching Server/Broker builds with a fresh catalog. CSI reservation and physical-maintenance ownership retain their existing roles. Development catalogs using singleton holders require their original deployment to finish or recover and release those holders; they cannot be reused by this build.
 

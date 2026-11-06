@@ -209,6 +209,7 @@ import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { keyMatchers, Command } from './keyMatchers.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalProgress } from './hooks/useTerminalProgress.js';
+import { useProgramStatus } from './hooks/use-program-status.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useMcpApproval } from './hooks/useMcpApproval.js';
 import { useProjectHooksApproval } from './hooks/use-project-hooks-approval.js';
@@ -1270,7 +1271,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Restore the transcript before Mod diagnostics, without making input
       // or Mod startup wait for asynchronous session recovery.
       void getInteractiveModSession(config)
-        ?.initialize(['AbovePrompt'], { prompts: true })
+        ?.initialize(['AbovePrompt'], { prompts: true, runsPrompts: true })
         .catch(() => {});
 
       if (resumedSessionData) {
@@ -1846,17 +1847,30 @@ export const AppContainer = (props: AppContainerProps) => {
     handleOutputStyleSelect,
   } = useOutputStyleCommand(settings, config, historyManager.addItem);
 
+  const handleAuthChange = useCallback(() => {
+    const model = config.getModel();
+    lastNotifiedModelRef.current = model;
+    refreshStatic();
+    setCurrentModel(model);
+  }, [config, refreshStatic]);
+
   const auth = useAuthCommand(
     settings,
     config,
     historyManager.addItem,
-    refreshStatic,
+    handleAuthChange,
+    initializationResult.skipStartupAuthDialog,
   );
   const { state: authState, actions: authActions } = auth;
   const { onAuthError, openAuthDialog, closeAuthDialog } = authActions;
   const { isAuthDialogOpen, isAuthenticating, pendingAuthType } = authState;
 
-  useInitializationAuthError(initializationResult.authError, onAuthError);
+  useInitializationAuthError(
+    initializationResult.skipStartupAuthDialog
+      ? null
+      : initializationResult.authError,
+    onAuthError,
+  );
 
   // Sync user tier from config when authentication changes
   // TODO: Implement getUserTier() method on Config if needed
@@ -2622,6 +2636,7 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingResponseLengthRef,
     isReceivingContent,
     workflowKeywordActive,
+    turnCancelledRef,
   } = useLlmStream(
     config.getLlmClient(),
     historyManager.history,
@@ -3790,10 +3805,12 @@ export const AppContainer = (props: AppContainerProps) => {
       // so the auto-restore branch below bails out before its orphan strip
       // runs. Strip the orphaned prompt here; otherwise appendCuratedContent
       // merges the user's NEXT real message into the "no new real user input"
-      // preamble. Safe even if the turn already produced a model response:
-      // the strip only pops trailing user entries, and a responded prompt is
-      // not trailing.
-      if (info?.wasGoalTurn) {
+      // preamble. A Mod's own prompt is stripped the same way: the person
+      // stopped it, so the next prompt must not reach the model behind it.
+      // Safe even if the turn already produced a model response: the strip
+      // only pops trailing user entries, and a responded prompt is not
+      // trailing.
+      if (info?.wasGoalTurn || info?.wasModPromptTurn) {
         llmClient?.stripOrphanedUserEntriesFromHistory?.(true);
       }
 
@@ -4842,6 +4859,22 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     terminal,
     pendingToolCalls,
+  });
+
+  // Program status (OSC 7501) for terminal tabs and agent inboxes
+  useProgramStatus({
+    streamingState,
+    pendingToolCalls,
+    history: historyManager.history,
+    pendingHistoryItems,
+    turnCancelledRef,
+    authPending: isAuthDialogOpen || isAuthenticating,
+    shellConfirmationPending: !!shellConfirmationRequest,
+    loopDetectionPending: !!loopDetectionConfirmationRequest,
+    startupApprovalPending:
+      isFolderTrustDialogOpen ||
+      isMcpApprovalDialogOpen ||
+      isProjectHooksApprovalDialogOpen,
   });
 
   // P-notif: terminal-bell when a workflow run finishes (completed / failed),

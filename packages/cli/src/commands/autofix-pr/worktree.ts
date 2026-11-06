@@ -8,10 +8,20 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { GIT_TIMEOUT_MS, gitOpt, gitProbe, gitRaw } from '../review/lib/git.js';
+import { shellQuotePath } from '../review/lib/shell-quote.js';
 import { redirectedAncestor, sanitizedGitEnv } from '../review/lib/worktree.js';
 import type { AutofixPrPaths } from './state.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 /**
  * Why the worktree's `.git` is not to be trusted, or null. It is a file a
@@ -331,9 +341,118 @@ export function requireWorktree(
     return;
   }
   if (branch !== `refs/heads/${paths.branch}`) {
-    throw new Error(
-      `${worktreePath} has ${branch ? branch.replace(/^refs\/heads\//, 'branch ') : 'a detached HEAD'} checked out, not ${paths.branch}; switch it back before pushing or syncing.`,
+    const checkedOut = `${worktreePath} has ${branch ? branch.replace(/^refs\/heads\//, 'branch ') : 'a detached HEAD'} checked out, not ${paths.branch}`;
+    // Asked to switch back (`sync --discard`), git refused: the branch is
+    // checked out elsewhere, or a lock or a missing branch stops it.
+    // Discarding again would only ask the same.
+    if (switchBack && !inPlace) {
+      // The branch checked out in another worktree is the one cause no
+      // command of the watch can clear: `cleanup` cannot delete the branch
+      // either while that checkout holds it.
+      const holder = branchHolder(worktreePath, worktreePath, paths.branch);
+      throw new SwitchBackRefused(
+        holder
+          ? `${checkedOut}, and git could not switch it back: ${paths.branch} is checked out in ${holder.path}${freeing(holder, worktreePath)}; until then neither a round nor \`qwen autofix-pr cleanup ${prNumber}\` can use or remove the branch.`
+          : `${checkedOut}, and git could not switch it back; remove the watch with \`qwen autofix-pr cleanup ${prNumber} --force\` and prepare it again.`,
+      );
+    }
+    throw new AutofixPrRefusal(
+      'worktree_dirty',
+      `${checkedOut}; switch it back before pushing or syncing.`,
     );
+  }
+}
+
+/** Another worktree of the clone that git counts as having a branch checked
+ * out: `main` for the clone's own checkout, which git never removes;
+ * `stale` once it is no checkout any more (its directory or its `.git`
+ * deleted by hand), which git still counts until the record is pruned. */
+export interface Holder {
+  path: string;
+  main: boolean;
+  stale: boolean;
+  locked: boolean;
+}
+
+/** A directory's real path; for one that is gone, its parent's real path
+ * and its name. */
+function canonical(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    try {
+      return join(realpathSync(dirname(path)), basename(path));
+    } catch {
+      return resolve(path);
+    }
+  }
+}
+
+/** A worktree of the clone `cwd` is in, other than `self` (the watch's own,
+ * which may be gone), with `branch` checked out; or null. */
+export function branchHolder(
+  cwd: string,
+  self: string,
+  branch: string,
+): Holder | null {
+  // NUL-separated from git 2.36 on, so that a path keeps a newline in it;
+  // an older git has only the line form.
+  const z = gitOpt('-C', cwd, 'worktree', 'list', '--porcelain', '-z');
+  const out = z ?? gitOpt('-C', cwd, 'worktree', 'list', '--porcelain');
+  if (out === null) return null;
+  const end = z === null ? '\n' : '\0';
+  const own = canonical(self);
+  // git lists the main worktree first.
+  for (const [index, entry] of out.split(end.repeat(2)).entries()) {
+    const fields = entry.split(end);
+    const value = (name: string) =>
+      fields
+        .find((field) => field.startsWith(`${name} `))
+        ?.slice(name.length + 1);
+    const path = value('worktree');
+    if (!path || value('branch') !== `refs/heads/${branch}`) continue;
+    if (canonical(path) === own) continue;
+    return {
+      path,
+      main: index === 0,
+      // What makes git call a record `prunable`, asked here rather than
+      // read: git says it only from 2.31 on, and never of a locked record.
+      stale: !existsSync(join(path, '.git')),
+      locked: fields.some((field) => /^locked(?: |$)/.test(field)),
+    };
+  }
+  return null;
+}
+
+/** How the user frees the branch `holder` keeps. `git worktree prune`
+ * drops a stale record but not a locked one, and `git worktree remove`
+ * refuses a locked worktree, one whose `.git` is gone, and the clone's own
+ * checkout. Each command runs as printed from any directory: the path in it
+ * is quoted, and it names `anchor`, a directory of the clone git has just
+ * been run in, to run in. */
+export function freeing(
+  { path, main, stale, locked }: Holder,
+  anchor: string,
+): string {
+  if (main) return '. Switch that checkout to another branch';
+  const git = `git -C ${shellQuotePath(anchor)} worktree`;
+  const quoted = shellQuotePath(path);
+  const gone =
+    'worktree git still records although nothing is checked out there any more';
+  const free = stale
+    ? `drop its record with \`${git} prune\``
+    : `switch that checkout to another branch or remove it (\`${git} remove ${quoted}\`)`;
+  if (locked) {
+    return `, ${stale ? `a locked ${gone}` : 'which is locked'}. Unlock it (\`${git} unlock ${quoted}\`), then ${free}`;
+  }
+  return `${stale ? `, a ${gone}` : ''}. ${free[0].toUpperCase()}${free.slice(1)}`;
+}
+
+/** `sync --discard` asked to switch the worktree back to the watch's
+ * branch, and git refused: the worktree cannot be cleaned. */
+export class SwitchBackRefused extends AutofixPrRefusal {
+  constructor(message: string) {
+    super('failed', message);
   }
 }
 
