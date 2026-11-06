@@ -389,4 +389,26 @@ describe('sedEditParser', () => {
       'X a\\]',
     );
   });
+
+  it('matches carriage returns in CRLF input with dot', () => {
+    // The substitution layer consumes each CR with dot; the shell edit writes
+    // the result back using the file's recorded CRLF line ending.
+    expect(applySed("sed -i 's/=.*$/=new/' f.txt", 'key=old\r\nk2=v\r\n')).toBe(
+      'key=new\nk2=new\n',
+    );
+  });
+
+  it('matches non-BMP characters as single characters', () => {
+    const emoji = '\u{1F600}';
+    expect(applySed("sed -i 's/^.//' f.txt", `${emoji} Title\n`)).toBe(
+      ' Title\n',
+    );
+    expect(applySed("sed -i 's/.$//' f.txt", `abc${emoji}\n`)).toBe('abc\n');
+    expect(applySed("sed -i 's/[^a-z]/_/g' f.txt", `a${emoji}b\n`)).toBe(
+      'a_b\n',
+    );
+    expect(applySed("sed -i 's/x*/-/g' f.txt", `${emoji}\n`)).toBe(
+      `-${emoji}-\n`,
+    );
+  });
 });
