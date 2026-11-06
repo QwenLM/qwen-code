@@ -505,6 +505,8 @@ export type {
   DaemonSkillBatchToggleErrorCode,
   DaemonSkillBatchToggleItem,
   DaemonSkillBatchToggleResult,
+  DaemonUserSkillActivation,
+  DaemonUserSkillsActivationResult,
   DaemonSkillToggleActivation,
   DaemonSkillToggleMutation,
   DaemonSkillToggleMutationSkill,
