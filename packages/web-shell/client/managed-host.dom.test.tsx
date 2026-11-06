@@ -108,6 +108,14 @@ it('accepts a real composer submission without a public durable operation ID', a
         (button) => button.textContent === 'Retry the same request',
       ),
     ).toBe(false);
+    // Both pending rows are `role="status"`, so the alert check above misses
+    // them; also exclude the cross-conversation row and its Open button.
+    expect(container.textContent).not.toContain('unconfirmed');
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (button) => button.textContent === 'Open the original conversation',
+      ),
+    ).toBe(false);
     expect(unsupported).not.toHaveBeenCalled();
     expect(unexpectedFetch).not.toHaveBeenCalled();
   } finally {

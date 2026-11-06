@@ -281,7 +281,9 @@ export default defineConfig(({ mode }) => ({
     jsxDev: false,
   },
   build: {
-    emptyOutDir: false,
+    // Only the managed-host pass owns its outDir, so it can safely empty it;
+    // the other passes share `dist/` with the app build.
+    emptyOutDir: mode === 'managed-host',
     // Outside `dist/`: the app build empties that directory, which would
     // silently delete a host bundle a maintainer had just produced.
     outDir: mode === 'managed-host' ? 'dist-managed-host' : 'dist',
