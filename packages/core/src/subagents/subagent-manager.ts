@@ -1209,7 +1209,7 @@ export class SubagentManager {
         const status = await runtimeContext
           .getPermissionManager?.()
           ?.getToolRegistrationStatus(ToolNames.SKILL);
-        if (runtimeContext.getToolMode?.() === ToolMode.CodeMode) {
+        if (runtimeContext.getToolMode?.() !== ToolMode.CodeModeOnly) {
           skillEagerHidden =
             status === 'disabled' ||
             (status === 'deferred' &&

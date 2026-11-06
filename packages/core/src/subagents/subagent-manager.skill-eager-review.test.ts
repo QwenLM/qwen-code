@@ -141,4 +141,88 @@ describe('nested agents retain their actual Skill availability', () => {
       }
     },
   );
+
+  it('withholds the session SkillManager from a Direct-mode grandchild that cannot reach Skill', async () => {
+    // A Direct-mode `tools.eager` allowlist omits `skill`, so the root
+    // registry registers it permission-deferred. The child's registry holds no
+    // Skill factory (its own policy withholds `skill`), and the grandchild
+    // asks for it back without either bridge half.
+    const config = makeFakeConfig({
+      targetDir: process.cwd(),
+      cwd: process.cwd(),
+      toolMode: ToolMode.Direct,
+      eagerTools: [ToolNames.READ_FILE],
+    });
+    const skills = {
+      addChangeListener: () => () => {},
+      listSkills: async () => [],
+      getCachedSkills: () => [],
+      hasDiscoveryErrors: () => false,
+      isSkillActive: () => true,
+    };
+    const permissions = new PermissionManager(config);
+    permissions.initialize();
+    vi.spyOn(config, 'getPermissionManager').mockReturnValue(permissions);
+    vi.spyOn(config, 'getSkillManager').mockReturnValue(skills as never);
+    const manager = new SubagentManager(config);
+    vi.spyOn(manager, 'listSubagents').mockResolvedValue([]);
+    vi.spyOn(config, 'getSubagentManager').mockReturnValue(manager);
+    const rootRegistry = await config.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(rootRegistry);
+
+    let capture: { context: Config; tools: ToolConfig | undefined } | undefined;
+    const createSpy = vi
+      .spyOn(AgentHeadless, 'create')
+      .mockImplementation(
+        async (_name, context, _prompt, _model, _run, tools) => {
+          capture = { context, tools };
+          return {
+            getCore: () => ({ subagentId: 'direct-skill-policy' }),
+          } as unknown as AgentHeadless;
+        },
+      );
+    const handles: Array<{ dispose(): Promise<void> }> = [];
+    try {
+      handles.push(
+        await manager.createAgentHeadless(
+          {
+            name: 'direct-skill-parent',
+            description: 'Direct-mode parent without Skill',
+            systemPrompt: 'Inspect Skill availability only.',
+            level: 'session',
+            tools: [ToolNames.READ_FILE],
+          },
+          config,
+        ),
+      );
+      const child = capture!.context;
+      expect(child.getSkillManager()).toBeNull();
+      expect(child.getToolRegistry().getAllToolNames()).not.toContain(
+        ToolNames.SKILL,
+      );
+
+      handles.push(
+        await manager.createAgentHeadless(
+          {
+            name: 'direct-skill-grandchild',
+            description: 'Direct-mode grandchild naming Skill',
+            systemPrompt: 'Inspect Skill availability only.',
+            level: 'session',
+            tools: [ToolNames.READ_FILE, ToolNames.SKILL],
+          },
+          child,
+        ),
+      );
+      const grandchild = capture!.context;
+      expect(grandchild.getSkillManager()).toBeNull();
+      expect(resolveAgentDelegationSurface(grandchild)).toBe('inline');
+    } finally {
+      createSpy.mockRestore();
+      for (const handle of handles.reverse()) await handle.dispose();
+      await rootRegistry.stop();
+      vi.restoreAllMocks();
+    }
+  });
 });
