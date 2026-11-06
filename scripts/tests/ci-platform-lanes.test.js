@@ -443,6 +443,56 @@ it('pins the build-to-shard artifact handoff on both ends', () => {
   );
 });
 
+it.skipIf(process.platform === 'win32').each([
+  'test',
+  'web_shell_e2e_smoke',
+  'integration_no_ak',
+])('refreshes host assets on older PR checkouts in %s', (job) => {
+  const root = mkdtempSync(join(tmpdir(), 'ci-host-assets-'));
+  try {
+    mkdirSync(join(root, 'scripts'));
+    mkdirSync(join(root, 'dist', 'opentui-assets'), { recursive: true });
+    writeFileSync(join(root, 'package.json'), '{"type":"module"}');
+    writeFileSync(
+      join(root, 'scripts', 'ci-build-cache.mjs'),
+      'throw new Error("usage: ci-build-cache.mjs key | build <dir> | pack <dir> | paths");',
+    );
+    writeFileSync(
+      join(root, 'scripts', 'copy_bundle_assets.js'),
+      `import { copyFileSync } from 'node:fs';
+export function copyOpenTuiAssets() {
+  copyFileSync('host-native.so', 'dist/opentui-assets/native.so');
+}
+`,
+    );
+    writeFileSync(join(root, 'host-native.so'), 'consumer-host');
+    writeFileSync(join(root, 'dist', 'cli.js'), 'built-bundle');
+    writeFileSync(join(root, 'dist', 'opentui-assets', 'native.so'), 'build-host');
+    const runnerTemp = join(root, 'runner-temp');
+    const artifact = join(runnerTemp, 'unit-test-tree');
+    mkdirSync(artifact, { recursive: true });
+    execFileSync('tar', ['-czf', join(artifact, 'unit-test-tree.tgz'), 'dist'], {
+      cwd: root,
+    });
+    rmSync(join(root, 'dist'), { recursive: true });
+
+    const unpack = ci.jobs[job].steps.find(
+      (step) => step.name === 'Unpack the built tree',
+    );
+    execFileSync('bash', ['-e', '-o', 'pipefail', '-c', unpack.run], {
+      cwd: root,
+      env: { ...process.env, RUNNER_TEMP: runnerTemp },
+    });
+
+    expect(readFileSync(join(root, 'dist', 'cli.js'), 'utf8')).toBe('built-bundle');
+    expect(
+      readFileSync(join(root, 'dist', 'opentui-assets', 'native.so'), 'utf8'),
+    ).toBe('consumer-host');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it('keeps the no-AK gate above its dependency-install budget on ECS', () => {
   expect(timeoutMinutesOn('integration_no_ak', ECS_RUNNER)).toBe(60);
 });
