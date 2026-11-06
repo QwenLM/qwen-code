@@ -73,10 +73,7 @@ export interface ToolResultBlock {
 }
 
 export type ContentBlock =
-  | TextBlock
-  | ThinkingBlock
-  | ToolUseBlock
-  | ToolResultBlock;
+  TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock;
 
 export interface APIUserMessage {
   role: 'user';
@@ -490,9 +487,7 @@ export interface ControlCancelRequest {
 }
 
 export type ControlMessage =
-  | CLIControlRequest
-  | CLIControlResponse
-  | ControlCancelRequest;
+  CLIControlRequest | CLIControlResponse | ControlCancelRequest;
 
 /**
  * Union of all SDK message types

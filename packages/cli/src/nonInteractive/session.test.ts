@@ -470,7 +470,9 @@ describe('runNonInteractiveStreamJson', () => {
       sdkInitializeReplyTimeoutMs(SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS * 4),
     ).toBe(SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS * 3);
     // A non-positive budget is not a deadline at all; use the default.
-    expect(sdkInitializeReplyTimeoutMs(0)).toBe(SDK_INITIALIZE_REPLY_TIMEOUT_MS);
+    expect(sdkInitializeReplyTimeoutMs(0)).toBe(
+      SDK_INITIALIZE_REPLY_TIMEOUT_MS,
+    );
   });
 
   it('clamps a declared budget above the timer range', () => {
@@ -1542,8 +1544,7 @@ describe('runNonInteractiveStreamJson', () => {
     ]);
     const order: string[] = [];
     let failureListener:
-      | ((event: { sessionId: string; error: Error }) => void)
-      | undefined;
+      ((event: { sessionId: string; error: Error }) => void) | undefined;
     let flushCount = 0;
     config = createConfig({
       getLlmClient: vi.fn().mockReturnValue(config.getLlmClient()),
