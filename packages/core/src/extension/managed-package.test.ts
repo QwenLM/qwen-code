@@ -39,6 +39,59 @@ afterEach(async () => {
 });
 
 describe('Managed raw package compiler', () => {
+  it.each([
+    { recipe: undefined, version: 1 },
+    { recipe: { command: 'node', args: ['server.js'] }, version: 1 },
+    { recipe: { httpUrl: 'https://mcp.example.test/mcp' }, version: 1 },
+    {
+      recipe: {
+        httpUrl: 'https://mcp.example.test/mcp',
+        auth: {
+          type: 'oauth',
+          providerId: 'fixture',
+          resourceUri: 'https://mcp.example.test/mcp',
+          scopes: ['read'],
+        },
+      },
+      version: 2,
+    },
+  ])(
+    'publishes schema/compiler $version only for the required protocol',
+    async ({ recipe, version }) => {
+      await file(
+        'qwen-extension.json',
+        JSON.stringify({
+          name: 'fixture',
+          version: '1.0.0',
+          ...(recipe ? { mcpServers: { tools: recipe } } : {}),
+        }),
+      );
+      const compiled = await compileManagedExtensionPackage(root, { target });
+      expect(compiled.manifest).toMatchObject({
+        schemaVersion: version,
+        compilerVersion: version,
+      });
+      const prepared = await prepareManagedExtensionPackage(
+        { type: 'local', source: root },
+        { target, destination: path.join(temporary, 'prepared') },
+      );
+      const restored = path.join(temporary, 'restored');
+      await fs.mkdir(restored);
+      await tar.x({ file: prepared.archivePath, cwd: restored });
+      expect(prepared.manifest).toMatchObject({
+        schemaVersion: version,
+        compilerVersion: version,
+      });
+      expect(
+        (await compileManagedExtensionPackage(restored, { target })).manifest,
+      ).toEqual(prepared.manifest);
+      if (version === 2)
+        expect(compiled.contributions.mcpServers['tools']).toMatchObject({
+          auth: { type: 'oauth', providerId: 'fixture' },
+        });
+    },
+  );
+
   it('preserves an architecture-independent publication when compiled on either target architecture', async () => {
     const prepared = await prepareManagedExtensionPackage(
       { type: 'local', source: root },

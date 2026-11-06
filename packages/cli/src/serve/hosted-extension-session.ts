@@ -177,6 +177,18 @@ export class HostedExtensionSession {
           ? latest.configRevision
           : (latest?.previousConfigRevision ?? 0),
       extensions: active?.packages.map((entry) => entry.pin) ?? [],
+      ...(requested?.formatVersion === 2 ||
+      latest?.command.selectionVersion === 2 ||
+      active?.formatVersion === 2
+        ? {
+            selectionVersion: 2 as const,
+            mcpAuthBindings:
+              requested?.mcpAuthBindings ??
+              latest?.command.mcpAuthBindings ??
+              active?.mcpAuthBindings ??
+              [],
+          }
+        : {}),
       requestedExtensions:
         requested?.packages.map((entry) => entry.pin) ??
         latest?.command.extensions ??
@@ -213,6 +225,10 @@ export class HostedExtensionSession {
     }
     if (this.pending) throw new HostedExtensionRecoveryRequired();
     const active = await this.active();
+    if (active?.formatVersion === 2 && command.selectionVersion !== 2)
+      throw new HostedMcpConflictError(
+        'This Session requires a version 2 extension selection.',
+      );
     if (command.expectedRevision !== (active?.configRevision ?? 0))
       throw new HostedExtensionRevisionConflict(
         'Extension configuration revision conflicts.',
@@ -474,6 +490,13 @@ export class HostedExtensionSession {
     }
     const active = await this.active();
     if (!active || this.pending) throw new HostedExtensionRecoveryRequired();
+    if (
+      active.mcpAuthBindings?.length &&
+      active.executionActorKey !== command.actorKey
+    )
+      throw new HostedMcpConflictError(
+        'Personal MCP configuration belongs to another actor.',
+      );
     if (command.expectedRevision !== active.mcpRevision)
       throw new HostedMcpConflictError('MCP settings revision conflicts.');
     if (
@@ -509,6 +532,12 @@ export class HostedExtensionSession {
       actorKey: command.actorKey,
       expectedRevision: active.configRevision,
       extensions: active.packages.map((entry) => entry.pin),
+      ...(active.formatVersion === 2
+        ? {
+            selectionVersion: 2 as const,
+            mcpAuthBindings: active.mcpAuthBindings ?? [],
+          }
+        : {}),
       mcpChange: {
         action: command.action,
         serverId: command.serverId,
@@ -587,6 +616,12 @@ export class HostedExtensionSession {
             actorKey: record.command.actorKey,
             expectedRevision: record.previousConfigRevision,
             extensions: baseline.packages.map((entry) => entry.pin),
+            ...(baseline.formatVersion === 2
+              ? {
+                  selectionVersion: 2 as const,
+                  mcpAuthBindings: baseline.mcpAuthBindings!,
+                }
+              : {}),
           };
     const result = await broker.extensionControl({
       kind: 'extension-prepare',
@@ -641,7 +676,24 @@ export class HostedExtensionSession {
         : undefined;
     const bundle = parseManagedExtensionEffectiveBundle({
       kind: 'managed-extension-config-bundle',
-      formatVersion: 1,
+      formatVersion:
+        record.command.selectionVersion === 2 || baseline.formatVersion === 2
+          ? 2
+          : 1,
+      ...(record.command.selectionVersion === 2 || baseline.formatVersion === 2
+        ? {
+            mcpAuthBindings:
+              record.mode === 'apply'
+                ? record.command.mcpAuthBindings!
+                : (baseline.mcpAuthBindings ?? []),
+            executionActorKey: (record.mode === 'apply'
+              ? record.command.mcpAuthBindings!
+              : (baseline.mcpAuthBindings ?? [])
+            ).length
+              ? record.command.actorKey
+              : null,
+          }
+        : {}),
       configRevision: record.configRevision,
       executionMode: prepared.executionMode,
       mcpRevision: previous

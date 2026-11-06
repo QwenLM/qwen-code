@@ -119,6 +119,33 @@ public class RuntimeBrokerConfiguration {
     }
 
     @Bean
+    @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker", name = "enabled", havingValue = "true")
+    public org.springframework.beans.factory.InitializingBean personalMcpRuntimeTokens(EmbeddedRuntimeBroker broker,
+            com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedMcpOAuthConfiguration oauth,
+            org.springframework.beans.factory.ObjectProvider<com.alibaba.qwen.code.managedagent.extensions.ManagedMcpOAuthService> issuer) {
+        return () -> {
+            if (!oauth.isEnabled()) return;
+            if (StringUtils.isBlank(oauth.getRuntimeTokenProxyBaseUrl())) {
+                throw new IllegalStateException("Personal MCP OAuth requires a Runtime token proxy base URL");
+            }
+            broker.configureMcpOAuth(oauth.getRuntimeTokenProxyBaseUrl(), (scope, session, request) -> {
+                try {
+                    return issuer.getObject().accessTokenForRuntime(scope.getTenantId(), scope.getWorkspaceId(), session,
+                            com.alibaba.qwen.code.runtimebroker.BrokerValues.exactLong(request.get("configRevision")),
+                            com.alibaba.qwen.code.runtimebroker.JsonCodec.requiredString(request, "serverId", "MCP token"),
+                            com.alibaba.qwen.code.runtimebroker.JsonCodec.requiredString(request, "credentialId", "MCP token"),
+                            com.alibaba.qwen.code.runtimebroker.BrokerValues.exactLong(request.get("credentialGeneration")),
+                            (String) request.get("resourceUri"),
+                            com.alibaba.qwen.code.runtimebroker.JsonCodec.requiredString(request, "executionActorKey", "MCP token"));
+                } catch (com.alibaba.qwen.code.managedagent.exception.ManagedAgentException error) {
+                    throw new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(error.getStatus(), error.getCode(),
+                            "Personal MCP authorization is unavailable.", false);
+                }
+            });
+        };
+    }
+
+    @Bean
     @ConditionalOnMissingBean(RuntimeWarmer.class)
     public RuntimeWarmer runtimeWarmer() {
         return new RuntimeWarmer() {

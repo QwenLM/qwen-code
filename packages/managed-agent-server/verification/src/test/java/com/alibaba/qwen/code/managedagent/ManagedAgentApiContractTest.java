@@ -151,6 +151,11 @@ class ManagedAgentApiContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
             Map.ofEntries(
+                    entry(com.alibaba.qwen.code.managedagent.api.ManagedMcpOAuthController.Query.class, List.of("ManagedMcpOAuthQueryRequest", "WebShellManagedMcpOAuthQueryRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.ManagedMcpOAuthController.Start.class, List.of("ManagedMcpOAuthStartRequest", "WebShellManagedMcpOAuthStartRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.ManagedMcpOAuthController.Status.class, List.of("ManagedMcpOAuthStatusRequest", "WebShellManagedMcpOAuthStatusRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.ManagedMcpOAuthController.Complete.class, List.of("ManagedMcpOAuthCompleteRequest", "WebShellManagedMcpOAuthCompleteRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.ManagedMcpOAuthController.Revoke.class, List.of("ManagedMcpOAuthRevokeRequest", "WebShellManagedMcpOAuthRevokeRequest")),
                     entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.OptionsRequest.class, List.of("WebShellSessionWorktreeOptionsRequest")),
                     entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.QueryRequest.class, List.of("WebShellSessionWorktreeQueryRequest")),
                     entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.InspectRequest.class, List.of("WebShellSessionWorktreeInspectRequest")),

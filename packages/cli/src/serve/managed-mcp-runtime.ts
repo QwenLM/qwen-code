@@ -37,6 +37,12 @@ import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtim
 import { launchManagedStdio } from './managed-stdio-supervisor.js';
 import type { ManagedExtensionProcessOwners } from './managed-extension-process.js';
 import { ManagedExtensionStdioTransport } from './managed-extension-stdio.js';
+import {
+  createManagedMcpAuthorizedFetch,
+  ManagedMcpOAuthError,
+  type ManagedMcpOAuthReference,
+  type ManagedMcpAccessTokenProvider,
+} from './managed-mcp-oauth.js';
 
 export interface ManagedMcpDefinition {
   readonly tenantId: string;
@@ -51,10 +57,11 @@ export interface ManagedMcpDefinition {
   readonly url?: string;
   readonly headers?: Record<string, string>;
   readonly timeoutMs?: number;
+  readonly oauth?: ManagedMcpOAuthReference;
 }
 
 export interface ManagedMcpManifest {
-  readonly version: 1;
+  readonly version: 1 | 2;
   readonly servers: readonly ManagedMcpDefinition[];
 }
 
@@ -251,7 +258,10 @@ export function loadManagedMcpManifest(
 function parseManifest(value: unknown): ManagedMcpManifest {
   const manifest = object(value);
   closed(manifest, ['version', 'servers']);
-  if (manifest['version'] !== 1 || !Array.isArray(manifest['servers']))
+  if (
+    (manifest['version'] !== 1 && manifest['version'] !== 2) ||
+    !Array.isArray(manifest['servers'])
+  )
     throw new ManagedMcpError('managed_mcp_manifest_invalid');
   const keys = new Set<string>();
   for (const item of manifest['servers']) {
@@ -269,6 +279,7 @@ function parseManifest(value: unknown): ManagedMcpManifest {
       'url',
       'headers',
       'timeoutMs',
+      'oauth',
     ]);
     if (
       ['tenantId', 'workspaceId', 'serverId'].some(
@@ -330,6 +341,40 @@ function parseManifest(value: unknown): ManagedMcpManifest {
       )
         throw new ManagedMcpError('managed_mcp_manifest_invalid');
     } else throw new ManagedMcpError('managed_mcp_transport_unsupported');
+    if (definition['oauth'] !== undefined) {
+      const auth = object(definition['oauth']);
+      closed(auth, [
+        'resourceUri',
+        'credentialId',
+        'credentialGeneration',
+        'configRevision',
+        'executionActorKey',
+      ]);
+      if (
+        manifest['version'] !== 2 ||
+        definition['transport'] === 'stdio' ||
+        typeof auth['resourceUri'] !== 'string' ||
+        typeof auth['credentialId'] !== 'string' ||
+        !/^[A-Za-z0-9._:-]{1,128}$/u.test(auth['credentialId']) ||
+        !positive(auth['credentialGeneration']) ||
+        !positive(auth['configRevision']) ||
+        typeof auth['executionActorKey'] !== 'string' ||
+        !/^[a-f0-9]{64}$/u.test(auth['executionActorKey']) ||
+        Object.keys((definition['headers'] ?? {}) as object).some((key) =>
+          ['authorization', 'host'].includes(key.toLowerCase()),
+        )
+      )
+        throw new ManagedMcpError('managed_mcp_manifest_invalid');
+      const resource = new URL(auth['resourceUri']);
+      if (
+        !['http:', 'https:'].includes(resource.protocol) ||
+        resource.username ||
+        resource.password ||
+        resource.hash ||
+        resource.origin !== new URL(definition['url'] as string).origin
+      )
+        throw new ManagedMcpError('managed_mcp_manifest_invalid');
+    }
   }
   return structuredClone(manifest) as unknown as ManagedMcpManifest;
 }
@@ -359,6 +404,7 @@ export class ManagedMcpRuntime {
     ) => Promise<string | undefined>,
     manifest: ManagedMcpManifest,
     private readonly extensionProcesses?: ManagedExtensionProcessOwners,
+    private readonly accessToken?: ManagedMcpAccessTokenProvider,
   ) {
     this.definitions = parseManifest(manifest);
   }
@@ -885,6 +931,24 @@ export class ManagedMcpRuntime {
           .length >= MANAGED_MCP_MAX_CONNECTIONS
       )
         throw new ManagedMcpError('managed_mcp_connection_quota');
+      const httpFetch = definition.oauth
+        ? createManagedMcpAuthorizedFetch(
+            definition.url!,
+            {
+              sessionKey: control.sessionKey,
+              serverId: definition.serverId,
+              configRevision: control.configRevision,
+              oauth: definition.oauth,
+            },
+            () =>
+              !!authorizedConnection &&
+              !authorizedConnection.closed &&
+              !authorizedConnection.retiring &&
+              !this.closing &&
+              definition.oauth?.configRevision === control.configRevision,
+            this.accessToken,
+          )
+        : undefined;
       const transport =
         definition.transport === 'stdio'
           ? this.extensionProcesses
@@ -940,15 +1004,19 @@ export class ManagedMcpRuntime {
           : definition.transport === 'streamable-http'
             ? new StreamableHTTPClientTransport(new URL(definition.url!), {
                 requestInit: { headers: definition.headers, redirect: 'error' },
+                ...(httpFetch ? { fetch: httpFetch } : {}),
               })
             : new SSEClientTransport(new URL(definition.url!), {
                 requestInit: { headers: definition.headers, redirect: 'error' },
+                ...(httpFetch ? { fetch: httpFetch } : {}),
                 eventSourceInit: {
-                  fetch: (url, init) =>
-                    fetch(url, {
-                      ...init,
-                      redirect: 'error',
-                    }),
+                  fetch:
+                    httpFetch ??
+                    ((url, init) =>
+                      fetch(url, {
+                        ...init,
+                        redirect: 'error',
+                      })),
                 },
               });
       const client = new Client(
@@ -978,6 +1046,7 @@ export class ManagedMcpRuntime {
         closed: false,
       };
       operation.connection = connection;
+      const authorizedConnection = connection;
       this.connections.set(
         bindingKey(
           operation.runtimeSessionId,
@@ -1044,14 +1113,18 @@ export class ManagedMcpRuntime {
             await this.closeConnection(sibling).catch(() => undefined);
         }
         this.settled(operation, { catalog: connection.catalog! });
-      } catch {
+      } catch (error) {
         try {
           await this.closeConnection(connection);
         } catch {
           this.unknown(operation, 'managed_mcp_drain_unknown');
           return;
         }
-        throw new ManagedMcpError('managed_mcp_connection_failed');
+        throw new ManagedMcpError(
+          error instanceof ManagedMcpOAuthError
+            ? error.code
+            : 'managed_mcp_connection_failed',
+        );
       }
     } else if (control.kind === 'mcp-discover') {
       const connection = this.connection(operation, control);

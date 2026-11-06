@@ -59,6 +59,7 @@ public class ManagedUserMessageStore
             throw refusal("invalid_request", "A bounded Idempotency-Key is required.");
         }
         lockSession(tenant, session);
+        ManagedMcpOAuthAdmission.requireActor(jdbc, tenant, session, actor);
         if (command == null || command.action() == null) {
             throw refusal("invalid_request", "A queue action is required.");
         }
@@ -140,6 +141,22 @@ public class ManagedUserMessageStore
     @Transactional
     public List<Message> claim(String tenant, String session, String promptId, boolean initialOnly) {
         lock(tenant, session);
+        String principal = ManagedMcpOAuthAdmission.actor(jdbc, tenant, session);
+        if (principal != null) {
+            boolean foreign = false;
+            for (String actor : jdbc.queryForList("SELECT DISTINCT actor_id FROM ma_user_message WHERE tenant_id=? AND session_id=?"
+                    + " AND state IN ('queued','claimed')", String.class, tenant, session)) {
+                if (actor == null || !principal.equals(DigestUtils.sha256Hex(actor))) {
+                    jdbc.update("UPDATE ma_user_message SET state='recovery_blocked' WHERE tenant_id=? AND session_id=?"
+                            + " AND actor_id=? AND state IN ('queued','claimed')", tenant, session, actor);
+                    foreign = true;
+                }
+            }
+            if (foreign) {
+                jdbc.update("UPDATE ma_user_message_queue SET is_paused=TRUE WHERE tenant_id=? AND session_id=?", tenant, session);
+                return List.of();
+            }
+        }
         reconcile(tenant, session);
         if (initialOnly) {
             return read(tenant, session, "state = 'claimed' AND prompt_id = ?", promptId);

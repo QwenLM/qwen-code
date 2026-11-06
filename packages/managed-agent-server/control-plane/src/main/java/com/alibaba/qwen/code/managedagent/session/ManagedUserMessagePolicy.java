@@ -57,6 +57,7 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     // has its own, narrower rule (requireCancellerRole/Shape).
     void requireSubmitterRole(SessionRecord session,
             String actorId) {
+        store.requirePersonalMcpActor(session.tenantId(), session.sessionId(), actorId);
         if (session.workspace() != null
                 && !workspaces.accessOf(session.tenantId(), actorId,
                         session.workspace().getWorkspaceId())

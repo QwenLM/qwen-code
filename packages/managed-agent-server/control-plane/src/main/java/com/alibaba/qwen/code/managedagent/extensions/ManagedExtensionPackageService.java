@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionP
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Settings;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SettingsCommand;
+import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ExtensionPackageRepository;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
@@ -16,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -39,6 +41,10 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
     private final ManagedAgentSettings properties;
     private final ExtensionArchives archives;
     private final ObjectMapper json;
+    private HarnessConnector harness;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void configurePreparation(HarnessConnector value) { harness = value; }
 
     public ManagedExtensionPackageService(ExtensionPackageRepository repository,
             ManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties,
@@ -52,7 +58,139 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
     public Catalog list(String tenant, String actor, String workspace) {
         requireAccess(tenant, actor, workspace, false);
         var packages = repository.list(tenant, workspace);
-        return new Catalog(properties.getExtensions().isEnabled() && archives.configured(), packages);
+        boolean supported = selfServiceSupported();
+        return new Catalog(properties.getExtensions().isEnabled() && archives.configured(), packages,
+                new ManagedExtensionPackages.SelfService(supported, supported && canPublish(tenant, actor, workspace)));
+    }
+
+    public boolean canPublish(String tenant, String actor, String workspace) {
+        return workspaces.accessOf(tenant, actor, workspace).atLeast(WorkspaceAccess.OPERATOR)
+                && properties.getExtensions().isEnabled() && archives.configured()
+                && (properties.getExtensions().getAllowedActors().contains(actor)
+                || properties.getExtensions().getAllowedActors().contains("*"));
+    }
+
+    private boolean supportsPreparation() { return harness != null && harness.supportsPackagePreparation(); }
+
+    public boolean selfServiceSupported() { return properties.getExtensions().isSelfServiceEnabled() && supportsPreparation(); }
+
+    public boolean runtimeSkillImportEnabled() { return selfServiceSupported() && properties.getExtensions().isRuntimeSkillImportEnabled(); }
+
+    private void requireSelfService() {
+        if (!selfServiceSupported()) {
+            throw new ManagedAgentException(409, "unsupported_feature", "Managed self-service installation is unavailable.");
+        }
+    }
+
+    public ManagedExtensionPackages.ImportMetadata decodeImportMetadata(String encoded) {
+        try {
+            if (encoded == null || encoded.length() > 16 * 1024) {
+                throw invalid();
+            }
+            var input = json.readValue(encoded, ManagedExtensionPackages.ImportMetadata.class);
+            if (input == null || input.sourceKind() == null || !Set.of("skill", "extension", "mcp").contains(input.sourceKind())
+                    || input.compilerVersion() != 1 && input.compilerVersion() != 2 || input.target() == null
+                    || input.target().platform() == null || input.target().arch() == null
+                    || !Set.of("linux", "darwin").contains(input.target().platform())
+                    || !Set.of("x64", "arm64", "any").contains(input.target().arch())
+                    || input.packageName() != null && !input.packageName().matches("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")) {
+                throw invalid();
+            }
+            requireDigest(input.sourceDigest());
+            return input;
+        } catch (IOException | IllegalArgumentException error) {
+            throw invalid();
+        }
+    }
+
+    public Operation importPackage(String tenant, String actor, String workspace, String extensionId,
+            String key, String encodedMetadata, InputStream source, long length) throws IOException {
+        requireExecutionAccess(tenant, actor, workspace);
+        requireSelfService();
+        ManagedAgentService.validateIdempotencyKey(key);
+        var input = decodeImportMetadata(encodedMetadata);
+        if (extensionId != null) {
+            requireId(extensionId);
+            if (repository.list(tenant, workspace).stream().noneMatch(entry -> extensionId.equals(entry.pin().extensionId()))) {
+                throw missing();
+            }
+        }
+        if (length > ManagedExtensionPackages.MAX_ARCHIVE_BYTES) {
+            throw new ManagedAgentException(413, "payload_too_large", "Extension input exceeds 100 MiB.");
+        }
+        requirePreparation();
+        try (var prepared = prepareCall(() -> harness.preparePackage(envelope(tenant, actor, workspace, input), source))) {
+            JsonNode descriptor = json.valueToTree(prepared.descriptor());
+            String digest = descriptor.path("packageDigest").asText();
+            requireDigest(digest);
+            var manifest = decodeManifest(Base64.getUrlEncoder().withoutPadding()
+                    .encodeToString(json.writeValueAsBytes(descriptor.get("manifest"))));
+            if (!input.target().equals(manifest.target())) {
+                throw new ManagedAgentException(409, "package_target_mismatch", "Prepared package target differs.");
+            }
+            return publish(tenant, actor, workspace, extensionId, digest, key, manifest, prepared.archive());
+        }
+    }
+
+    public JsonNode inspection(String tenant, String actor, String workspace, Pin pin) throws IOException {
+        requireExecutionAccess(tenant, actor, workspace);
+        requirePreparation();
+        Package saved = get(tenant, actor, workspace, pin.extensionId(), pin.packageRevision(), pin.packageDigest());
+        var input = new ManagedExtensionPackages.ImportMetadata("extension", saved.manifest().target(), pin.packageDigest(), 1, null);
+        try (var source = java.nio.file.Files.newInputStream(archive(tenant, actor, workspace,
+                pin.extensionId(), pin.packageRevision(), pin.packageDigest()), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            JsonNode result = json.valueToTree(prepareCall(() -> harness.inspectPackage(envelope(tenant, actor, workspace, input), source)));
+            if (!result.isObject() || !result.path("files").isArray() || result.path("files").size() > 256
+                    || !result.path("fileCount").canConvertToInt() || result.path("fileCount").asInt() < result.path("files").size()
+                    || !json.valueToTree(saved.manifest()).equals(result.path("manifest"))
+                    || !result.path("skills").isArray() || !result.path("mcpServers").isArray() || !result.path("settings").isArray()) {
+                throw new ManagedAgentException(409, "extension_inspection_invalid", "Package inspection could not be verified.");
+            }
+            return result;
+        }
+    }
+
+    public JsonNode preview(String tenant, String actor, String workspace, String encodedMetadata,
+            InputStream source, long length) {
+        requireExecutionAccess(tenant, actor, workspace);
+        requireSelfService();
+        var input = decodeImportMetadata(encodedMetadata);
+        requirePreparation();
+        if (length > ManagedExtensionPackages.MAX_ARCHIVE_BYTES) {
+            throw new ManagedAgentException(413, "payload_too_large", "Extension input exceeds 100 MiB.");
+        }
+        JsonNode result = json.valueToTree(prepareCall(() -> harness.previewPackage(envelope(tenant, actor, workspace, input), source)));
+        if (!result.isObject() || !result.path("files").isArray() || result.path("files").size() > 256
+                || !result.path("skills").isArray() || !result.path("mcpServers").isArray() || !result.path("settings").isArray()) {
+            throw new ManagedAgentException(409, "extension_inspection_invalid", "Package preview could not be verified.");
+        }
+        return result;
+    }
+
+    private Map<String, Object> envelope(String tenant, String actor, String workspace, ManagedExtensionPackages.ImportMetadata input) {
+        return Map.of("tenantId", tenant, "workspaceId", workspace, "actorKey", DigestUtils.sha256Hex(actor),
+                "input", json.convertValue(input, json.getTypeFactory().constructMapType(java.util.LinkedHashMap.class, String.class, Object.class)));
+    }
+
+    private void requirePreparation() {
+        if (!supportsPreparation()) {
+            throw new ManagedAgentException(409, "unsupported_feature", "Managed package preparation is unavailable.");
+        }
+    }
+
+    private <T> T prepareCall(java.util.function.Supplier<T> call) {
+        try {
+            return call.get();
+        } catch (com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure error) {
+            int status = error.getStatusCode();
+            String code = error.getErrorCode();
+            if (status >= 400 && status < 500 && code != null && code.matches("[a-z][a-z0-9_]{0,127}")) {
+                throw new ManagedAgentException(status, code, "Managed package preparation was refused.");
+            }
+            throw new ManagedAgentException(503, "package_preparation_unavailable", "Managed package preparation is unavailable.");
+        } catch (com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure error) {
+            throw new ManagedAgentException(503, "package_preparation_unavailable", "Managed package preparation is unavailable.");
+        }
     }
 
     public void requireExecutionAccess(String tenant, String actor, String workspace) {
@@ -66,7 +204,10 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
             throw invalid();
         }
         for (Pin pin : pins) {
-            repository.get(tenant, workspace, pin);
+            if (repository.get(tenant, workspace, pin).manifest().schemaVersion() == 2) {
+                throw new ManagedAgentException(409, "unsupported_feature",
+                        "Create the Session first, then explicitly install and authorize personal MCP packages.");
+            }
             if (pin.settingsRevision() != null && !repository.hasSettings(tenant, workspace, pin)) {
                 throw missing();
             }
@@ -83,7 +224,8 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
                 throw invalid();
             }
             Manifest manifest = json.readValue(bytes, Manifest.class);
-            if (manifest == null || manifest.schemaVersion() != 1 || manifest.compilerVersion() != 1
+            if (manifest == null || manifest.schemaVersion() != manifest.compilerVersion()
+                    || manifest.schemaVersion() != 1 && manifest.schemaVersion() != 2
                     || manifest.name() == null || !manifest.name().matches("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
                     || manifest.version() == null || manifest.version().isBlank() || manifest.version().length() > 128
                     || manifest.target() == null || manifest.target().platform() == null || manifest.target().arch() == null
@@ -110,6 +252,14 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
             String digest, String idempotencyKey, Manifest manifest, InputStream archive) throws IOException {
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
         requireDigest(digest);
+        if (extensionId != null) {
+            requireExecutionAccess(tenant, actor, workspace);
+            Package previous = repository.list(tenant, workspace).stream()
+                    .filter(entry -> extensionId.equals(entry.pin().extensionId())).findFirst().orElseThrow(ManagedExtensionPackageService::missing);
+            if (!previous.manifest().name().equals(manifest.name())) {
+                throw new ManagedAgentException(409, "extension_namespace_conflict", "An update must retain the package namespace.");
+            }
+        }
         String operationId = operationId(tenant, actor, workspace, "publish", idempotencyKey);
         String id = extensionId == null ? "ext_" + UUID.nameUUIDFromBytes(operationId.getBytes(StandardCharsets.UTF_8)) : extensionId;
         requireId(id);
@@ -128,6 +278,14 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
     public Operation operation(String tenant, String actor, String workspace, String operationId) {
         return repository.operation(tenant, actor, workspace, operationId,
                 write -> requireAccess(tenant, actor, workspace, write));
+    }
+
+    public Operation lookup(String tenant, String actor, String workspace, String kind, String key) {
+        ManagedAgentService.validateIdempotencyKey(key);
+        if (kind == null || !Set.of("publish", "settings").contains(kind)) {
+            throw invalid();
+        }
+        return operation(tenant, actor, workspace, operationId(tenant, actor, workspace, kind, key));
     }
 
     public Package get(String tenant, String actor, String workspace, String extensionId, long revision, String digest) {

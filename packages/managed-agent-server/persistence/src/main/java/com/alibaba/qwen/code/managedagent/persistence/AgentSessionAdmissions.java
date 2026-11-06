@@ -462,6 +462,7 @@ final class AgentSessionAdmissions {
         }
         SessionRecord parent = storeRows.requireSessionForUpdate(tenantId,
                 parentSessionId);
+        ManagedMcpOAuthAdmission.requireUnattendedAllowed(jdbc, tenantId, parentSessionId);
         if (parent.workspace() == null || residentWorkspaces.find(parent.workspace()) != null || !"ACTIVE".equals(parent.status())
                 || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
             throw new ManagedAgentException(409,

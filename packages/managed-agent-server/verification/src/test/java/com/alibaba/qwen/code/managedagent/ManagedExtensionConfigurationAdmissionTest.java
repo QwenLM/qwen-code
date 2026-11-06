@@ -1,11 +1,17 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcMcpOAuthRepository;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedMcpOAuthAdmission;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedMcpSettings;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.McpOAuthRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -14,6 +20,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.AopTestUtils;
@@ -114,8 +121,142 @@ class ManagedExtensionConfigurationAdmissionTest {
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("session_config_recovery_required"));
     }
 
+    @Test
+    void revokedCommittedGrantCanRecordRecoveryAndRestoreEmptyWithoutAdmittingANewRevokedBinding() throws Exception {
+        String workspace = registerWorkspace();
+        String id = UUID.randomUUID().toString();
+        var journal = publicJournal(id, workspace);
+        var beans = new DefaultListableBeanFactory();
+        beans.registerSingleton("secrets", new AesGcmSecretProtector("test", new byte[32]));
+        var grants = new JdbcMcpOAuthRepository(jdbc, transactionManager, json, beans.getBeanProvider(SecretProtector.class));
+        var scope = new McpOAuthRepository.Scope("tenant", workspace, "actor");
+        String attemptId = "mauth_" + UUID.randomUUID();
+        String stateHash = DigestUtils.sha256Hex(attemptId);
+        String nonceHash = DigestUtils.sha256Hex("nonce");
+        grants.createAttempt(new McpOAuthRepository.Attempt(attemptId, scope, stateHash, nonceHash, DigestUtils.sha256Hex("request"), "pending",
+                System.currentTimeMillis() + 60_000, json.createObjectNode().put("serverId", "ext_fixture:server")
+                        .put("providerId", "test").put("resourceUri", "https://mcp.example/mcp").put("credentialEpoch", 0),
+                json.createObjectNode().put("verifier", "private"), null));
+        grants.receiveCode(stateHash, null, "code", System.currentTimeMillis());
+        grants.claimAttempt(scope, attemptId, nonceHash, System.currentTimeMillis());
+        var grant = grants.completeAttempt(scope, attemptId, json.createObjectNode().put("access_token", "private"),
+                System.currentTimeMillis() + 3600_000, System.currentTimeMillis());
+        ObjectNode bindings = json.createObjectNode();
+        bindings.putArray("values").addObject().put("serverId", "ext_fixture:server")
+                .put("credentialId", grant.id()).put("credentialGeneration", grant.generation());
+        var auth = bindings.get("values");
+        var empty = json.createArrayNode();
+        CommitResource baseline = bundle("baseline-empty", 1, empty);
+        CommitResource personal = bundle("personal", 2, auth);
+        CommitResource altered = bundle("altered-personal", 2, auth);
+        CommitResource restored = bundle("restored-empty", 3, empty);
+        CommitResource rejected = bundle("new-revoked-binding", 4, auth);
+        List<CommitResource> closure = new ArrayList<>(resources());
+        closure.addAll(List.of(baseline, personal, altered, restored, rejected));
+        ObjectNode initialCommand = command(0, empty);
+        ObjectNode current = null;
+        for (String phase : List.of("preparing", "prepared", "committed", "active")) {
+            current = configurationPhase(phase, current, initialCommand, 1, null, null, baseline);
+            commit(journal, id, workspace, current, "committed".equals(phase), false, closure);
+        }
+        ObjectNode personalCommand = command(1, auth);
+        for (String phase : List.of("preparing", "prepared", "committed")) {
+            current = configurationPhase(phase, current, personalCommand, 2, baseline, null, personal);
+            commit(journal, id, workspace, current, "committed".equals(phase), false, closure);
+        }
+        grants.revoke(scope, grant.id(), grant.generation());
+        assertThat(grants.credential(scope, grant.id()).state()).isEqualTo("revoked");
+        ObjectNode committed = current;
+        ObjectNode active = configurationPhase("active", committed, personalCommand, 2, baseline, null, personal);
+        assertThatCode(() -> transaction(() -> {
+            sessions.requireConfigurationCommit("tenant", workspace, id, active);
+            return null;
+        })).doesNotThrowAnyException();
+        ObjectNode recovery = configurationPhase("recovery_required", committed, personalCommand, 2, baseline, null, personal);
+        ObjectNode changedBundle = recovery.deepCopy();
+        changedBundle.set("bundleRef", reference(altered));
+        assertThatThrownBy(() -> commit(journal, id, workspace, changedBundle, false, false, closure))
+                .isInstanceOf(ManagedAgentException.class);
+        ObjectNode changedOperation = recovery.deepCopy();
+        String other = UUID.randomUUID().toString();
+        changedOperation.put("operationId", other).put("phaseOperationId", other);
+        ((ObjectNode) changedOperation.get("command")).put("operationId", other);
+        assertThatThrownBy(() -> commit(journal, id, workspace, changedOperation, false, false, closure))
+                .isInstanceOf(ManagedAgentException.class);
+        commit(journal, id, workspace, recovery, false, false, closure);
+        assertThat(ManagedMcpSettings.find(jdbc, "tenant", id).path("phase").asText()).isEqualTo("recovery_required");
+        assertThat(grants.credential(scope, grant.id()).state()).isEqualTo("revoked");
+        assertThat(ManagedMcpOAuthAdmission.actor(jdbc, "tenant", id)).isEqualTo(DigestUtils.sha256Hex("actor"));
+        assertThatThrownBy(() -> ManagedMcpOAuthAdmission.requireActor(jdbc, "tenant", id, "other"))
+                .isInstanceOf(ManagedAgentException.class);
+        current = recovery;
+        for (String phase : List.of("preparing", "prepared", "committed", "active")) {
+            current = configurationPhase(phase, current, personalCommand, 3, personal, baseline, restored);
+            commit(journal, id, workspace, current, "committed".equals(phase), false, closure);
+        }
+        assertThat(ManagedMcpSettings.find(jdbc, "tenant", id).path("configRevision").asLong()).isEqualTo(3);
+        assertThat(ManagedMcpSettings.find(jdbc, "tenant", id).path("phase").asText()).isEqualTo("active");
+        assertThat(ManagedMcpOAuthAdmission.actor(jdbc, "tenant", id)).isNull();
+        ManagedMcpOAuthAdmission.requireActor(jdbc, "tenant", id, "other");
+        ObjectNode newCommand = command(3, auth);
+        for (String phase : List.of("preparing", "prepared")) {
+            current = configurationPhase(phase, current, newCommand, 4, restored, null, rejected);
+            commit(journal, id, workspace, current, false, false, closure);
+        }
+        ObjectNode newCommit = configurationPhase("committed", current, newCommand, 4, restored, null, rejected);
+        assertThatThrownBy(() -> commit(journal, id, workspace, newCommit, true, false, closure))
+                .isInstanceOf(ManagedAgentException.class);
+        assertThat(ManagedMcpSettings.find(jdbc, "tenant", id).path("phase").asText()).isEqualTo("prepared");
+        assertThat(ManagedMcpOAuthAdmission.actor(jdbc, "tenant", id)).isNull();
+    }
+
+    private ObjectNode command(long revision, JsonNode bindings) {
+        ObjectNode command = json.createObjectNode().put("operationId", UUID.randomUUID().toString())
+                .put("actorKey", DigestUtils.sha256Hex("actor")).put("expectedRevision", revision).put("selectionVersion", 2);
+        command.putArray("extensions");
+        command.set("mcpAuthBindings", bindings.deepCopy());
+        return command;
+    }
+
+    private CommitResource bundle(String id, long revision, JsonNode bindings) {
+        ObjectNode body = json.createObjectNode().put("kind", "managed-extension-config-bundle")
+                .put("formatVersion", 2).put("configRevision", revision);
+        body.set("mcpAuthBindings", bindings.deepCopy());
+        body.set("executionActorKey", bindings.isEmpty() ? json.nullNode() : json.getNodeFactory().textNode(DigestUtils.sha256Hex("actor")));
+        byte[] bytes = ExtensionRecordJournal.bytes(body);
+        return new CommitResource(id, "managed-extension-config-bundle", 1, bytes.length, DigestUtils.sha256Hex(bytes), Base64.getEncoder().encodeToString(bytes));
+    }
+
+    private ObjectNode reference(CommitResource resource) {
+        return json.createObjectNode().put("resourceId", resource.resourceId()).put("kind", resource.kind())
+                .put("schemaVersion", resource.schemaVersion()).put("byteLength", resource.byteLength()).put("digest", resource.digest());
+    }
+
+    private ObjectNode configurationPhase(String phase, JsonNode previous, JsonNode command, long revision,
+            CommitResource previousBundle, CommitResource restores, CommitResource bundle) throws Exception {
+        ObjectNode body = phase("active".equals(phase) ? "active" : "preparing".equals(phase) ? "nullable_preparing" : "prepared",
+                previous == null ? 1 : previous.path("revision").asLong() + 1, previous);
+        String operation = command.path("operationId").asText();
+        body.put("phase", phase).put("configRevision", revision).put("previousConfigRevision", revision - 1)
+                .put("operationId", operation).put("mode", restores == null ? "apply" : "recoverPrevious")
+                .put("phaseOperationId", restores == null ? operation : ManagedConfigInstall.derivedOperationId("managed-extension-recoverPrevious:", operation));
+        body.set("command", command.deepCopy());
+        body.set("bundleRef", reference(bundle));
+        body.set("previousBundleRef", previousBundle == null ? json.nullNode() : reference(previousBundle));
+        body.set("restoresBundleRef", restores == null ? json.nullNode() : reference(restores));
+        if ("recovery_required".equals(phase)) {
+            body.putObject("error").put("code", "mcp_authorization_required");
+        }
+        return body;
+    }
+
     private void commit(ExtensionRecordJournal journal, String id, String workspace, ObjectNode body,
             boolean binding, boolean mismatch) {
+        commit(journal, id, workspace, body, binding, mismatch, resources());
+    }
+
+    private void commit(ExtensionRecordJournal journal, String id, String workspace, ObjectNode body,
+            boolean binding, boolean mismatch, List<CommitResource> resources) {
         String operation = body.path("operationId").asText();
         var request = journal.request("commitDomainRecord", operation + ":phase:" + body.path("revision").asLong(), ExtensionRecordJournal.bytes(body), 1000,
                 event -> ((ObjectNode) event.path("payload")).put("operationId", operation), records -> {
@@ -126,11 +267,16 @@ class ManagedExtensionConfigurationAdmissionTest {
                             .put("eventId", "config-bound:" + body.path("revision").asLong()).put("kind", "config.bound").put("occurredAt", 1000);
                     event.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", workspace).put("sessionId", id);
                     ObjectNode payload = event.putObject("payload").put("revision", mismatch ? 99 : body.path("configRevision").asLong());
-                    payload.putNull("previousRevision").set("bundleRef", body.get("bundleRef"));
+                    if (body.path("previousConfigRevision").asLong() == 0) {
+                        payload.putNull("previousRevision");
+                    } else {
+                        payload.put("previousRevision", body.path("previousConfigRevision").asLong());
+                    }
+                    payload.set("bundleRef", body.get("bundleRef"));
                     payload.set("rootSnapshotRef", body.get("rootSnapshotRef"));
                     int cut = records.indexOf('\n') + 1;
                     return records.substring(0, cut) + ExtensionRecordJournal.line(id, "managed_session_event_v1", event) + records.substring(cut);
-                }, binding ? 1 : 0, "config_install", resources());
+                }, binding ? 1 : 0, "config_install", resources);
         journal.commit(request);
         journal.committed(request);
     }
@@ -145,6 +291,9 @@ class ManagedExtensionConfigurationAdmissionTest {
         for (String field : List.of("rootSnapshotRef", "bundleRef")) {
             if (!body.path(field).isNull()) {
                 ((ObjectNode) body.path(field)).put("digest", DigestUtils.sha256Hex("{}"));
+                if ("bundleRef".equals(field)) {
+                    body.set(field, reference(bundle("bundle", 1, json.createArrayNode())));
+                }
             }
         }
         for (String field : List.of("stageAckRefs", "enableAckRefs")) {
@@ -158,7 +307,11 @@ class ManagedExtensionConfigurationAdmissionTest {
     private List<CommitResource> resources() {
         List<CommitResource> resources = new ArrayList<>();
         for (String id : List.of("root", "bundle", "hstage", "rstage", "henable", "renable")) {
-            resources.add(new CommitResource(id, "managed-test", 1, 2, DigestUtils.sha256Hex("{}"), Base64.getEncoder().encodeToString("{}".getBytes(StandardCharsets.UTF_8))));
+            if ("bundle".equals(id)) {
+                resources.add(bundle(id, 1, json.createArrayNode()));
+            } else {
+                resources.add(new CommitResource(id, "managed-test", 1, 2, DigestUtils.sha256Hex("{}"), Base64.getEncoder().encodeToString("{}".getBytes(StandardCharsets.UTF_8))));
+            }
         }
         return resources;
     }

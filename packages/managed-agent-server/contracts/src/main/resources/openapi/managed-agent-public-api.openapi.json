@@ -7526,6 +7526,1445 @@
         "description": "Requires current Session read authorization on every page. Read at most limit recent current message Items in chronological order; nextCursor continues toward older Items in the initial sequence membership range. snapshotThroughSequence names that fixed membership upper bound, while bodies and statuses remain live. Cursors bind scope, backward direction and projection generation. Rebuild invalidates the cursor. No snapshot copies are generated and no live tail is scanned; transcript reads provide actual projection coverage for SSE handoff. Projection coverage below the replay floor returns retryable message_projection_pending.",
         "summary": "Read recent current Session Items and page toward older Items"
       }
+    },
+    "/v1/agents/sessions/{sessionId}/extensions/skills/candidates": {
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "publicRuntimeSkillCandidates",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply.",
+        "responses": {
+          "200": {
+            "description": "Verified owner-scoped result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedRuntimeSkillCandidates"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/extensions/skills/snapshot": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "publicRuntimeSkillSnapshot",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply.",
+        "responses": {
+          "200": {
+            "description": "Verified owner-scoped result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedRuntimeSkillSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedRuntimeSkillSnapshotRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/extensions/skills/imports": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "publicRuntimeSkillImports",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply.",
+        "responses": {
+          "200": {
+            "description": "Verified owner-scoped result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedRuntimeSkillImportRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/session-extensions/skills/candidates/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellRuntimeSkillCandidates",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply.",
+        "responses": {
+          "200": {
+            "description": "Verified owner-scoped result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedRuntimeSkillCandidates"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellRuntimeSkillQuery"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/session-extensions/skills/snapshot": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellRuntimeSkillSnapshot",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply.",
+        "responses": {
+          "200": {
+            "description": "Verified owner-scoped result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedRuntimeSkillSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellRuntimeSkillSnapshotRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/session-extensions/skills/imports": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellRuntimeSkillImports",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply.",
+        "responses": {
+          "200": {
+            "description": "Verified owner-scoped result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellRuntimeSkillImportRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions/imports": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "importWorkspaceExtensionPackage",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires Workspace operator and deployment publishing permission before consuming bounded input. Prepares without a Session, publishes immutable bytes and does not activate content. Retry the same input/version/target and key, or query the actor-scoped operation.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "metadata",
+            "in": "query",
+            "required": true,
+            "description": "URL-encoded JSON ManagedExtensionImportMetadata, at most16KiB. Raw input digest is verified by the Hosted compiler.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionImportMetadata"
+                }
+              }
+            }
+          },
+          {
+            "name": "extensionId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^ext_[a-f0-9-]{36}$"
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "maxLength": 104857600
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspace-extensions/imports": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "importWebShellExtensionPackage",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires Workspace operator and deployment publishing permission before consuming bounded input. Prepares without a Session, publishes immutable bytes and does not activate content. Retry the same input/version/target and key, or query the actor-scoped operation.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "metadata",
+            "in": "query",
+            "required": true,
+            "description": "URL-encoded JSON ManagedExtensionImportMetadata, at most16KiB. Raw input digest is verified by the Hosted compiler.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionImportMetadata"
+                }
+              }
+            }
+          },
+          {
+            "name": "extensionId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^ext_[a-f0-9-]{36}$"
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "maxLength": 104857600
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/packages/{packageRevision}/inspection": {
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "inspectWorkspaceExtensionPackage",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires publishing permission. Inspects exact published canonical bytes without hydrating settings, starting a Runtime or executing components. Literal credential fields are redacted; redaction markers must not be republished.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageInspection"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "extensionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "packageRevision",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "packageDigest",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        ]
+      }
+    },
+    "/api/agent/web-shell/v1/workspace-extensions/inspection/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "inspectWebShellExtensionPackage",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires publishing permission. Inspects exact published canonical bytes without hydrating settings, starting a Runtime or executing components. Literal credential fields are redacted; redaction markers must not be republished.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageInspection"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExtensionPackageQuery"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions/operations/lookup": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "lookupWorkspaceExtensionOperation",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Read-only actor-scoped lookup by the original idempotency key. Does not resubmit or acquire Runtime ownership.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedExtensionOperationLookup"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/agent/web-shell/v1/workspace-extensions/operations/lookup": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "lookupWebShellExtensionOperation",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Read-only actor-scoped lookup by the original idempotency key. Does not resubmit or acquire Runtime ownership.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExtensionOperationLookup"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/extensions/operations/lookup": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "lookupSessionExtensionOperation",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Read-only actor-scoped lookup by the original idempotency key. Does not resubmit or acquire Runtime ownership.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionManagementSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedExtensionApplyLookup"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/agent/web-shell/v1/session-extensions/operations/lookup": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "lookupWebShellSessionExtensionOperation",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Read-only actor-scoped lookup by the original idempotency key. Does not resubmit or acquire Runtime ownership.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionManagementSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExtensionApplyLookup"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions/imports/preview": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "previewWorkspaceExtensionImport",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires publishing permission. Previews validated normalized input without publishing a catalog revision or activating a Session. Retain exact input bytes, target, compiler version and source digest for the later explicit import.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageInspection"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "parameters": [
+          {
+            "name": "metadata",
+            "in": "query",
+            "required": true,
+            "description": "URL-encoded JSON ManagedExtensionImportMetadata, at most16KiB. Raw input digest is verified by the Hosted compiler.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionImportMetadata"
+                }
+              }
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "maxLength": 104857600
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspace-extensions/imports/preview": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "previewWebShellExtensionImport",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires publishing permission. Previews validated normalized input without publishing a catalog revision or activating a Session. Retain exact input bytes, target, compiler version and source digest for the later explicit import.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageInspection"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "parameters": [
+          {
+            "name": "metadata",
+            "in": "query",
+            "required": true,
+            "description": "URL-encoded JSON ManagedExtensionImportMetadata, at most16KiB. Raw input digest is verified by the Hosted compiler.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionImportMetadata"
+                }
+              }
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "maxLength": 104857600
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/mcp-oauth/query": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "McpOAuthQuery",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedMcpOAuthQueryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Actor-scoped metadata without tokens or authorization codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedMcpOAuthQueryResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ]
+    },
+    "/api/agent/web-shell/v1/session-mcp-oauth/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellMcpOAuthQuery",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellManagedMcpOAuthQueryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Actor-scoped metadata without tokens or authorization codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedMcpOAuthQueryResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/mcp-oauth/start": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "McpOAuthStart",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedMcpOAuthStartRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Actor-scoped metadata without tokens or authorization codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedMcpOAuthStartResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ]
+    },
+    "/api/agent/web-shell/v1/session-mcp-oauth/start": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellMcpOAuthStart",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellManagedMcpOAuthStartRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Actor-scoped metadata without tokens or authorization codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedMcpOAuthStartResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/mcp-oauth/status": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "McpOAuthStatus",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedMcpOAuthStatusRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Actor-scoped metadata without tokens or authorization codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedMcpOAuthStatusResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ]
+    },
+    "/api/agent/web-shell/v1/session-mcp-oauth/status": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellMcpOAuthStatus",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellManagedMcpOAuthStatusRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Actor-scoped metadata without tokens or authorization codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedMcpOAuthStatusResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/mcp-oauth/complete": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "McpOAuthComplete",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedMcpOAuthCompleteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Actor-scoped metadata without tokens or authorization codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedMcpOAuthStatusResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ]
+    },
+    "/api/agent/web-shell/v1/session-mcp-oauth/complete": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellMcpOAuthComplete",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellManagedMcpOAuthCompleteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Actor-scoped metadata without tokens or authorization codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedMcpOAuthStatusResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/mcp-oauth/revoke": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "McpOAuthRevoke",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedMcpOAuthRevokeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Actor-scoped metadata without tokens or authorization codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedMcpOAuthRevokeResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ]
+    },
+    "/api/agent/web-shell/v1/session-mcp-oauth/revoke": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellMcpOAuthRevoke",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellManagedMcpOAuthRevokeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Actor-scoped metadata without tokens or authorization codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedMcpOAuthRevokeResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -16174,11 +17613,11 @@
         "properties": {
           "schemaVersion": {
             "type": "integer",
-            "enum": [1]
+            "enum": [1, 2]
           },
           "compilerVersion": {
             "type": "integer",
-            "enum": [1]
+            "enum": [1, 2]
           },
           "name": {
             "type": "string",
@@ -16282,6 +17721,19 @@
             "items": {
               "$ref": "#/components/schemas/ManagedExtensionPackage"
             }
+          },
+          "selfService": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "supported": {
+                "type": "boolean"
+              },
+              "canPublish": {
+                "type": "boolean"
+              }
+            },
+            "required": ["supported", "canPublish"]
           }
         },
         "required": ["supported", "extensions"]
@@ -16464,8 +17916,36 @@
             "items": {
               "$ref": "#/components/schemas/ManagedExtensionPackagePin"
             }
+          },
+          "selectionVersion": {
+            "type": "integer",
+            "enum": [2]
+          },
+          "mcpAuthBindings": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/ManagedMcpAuthBinding"
+            }
           }
-        }
+        },
+        "oneOf": [
+          {
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["selectionVersion"]
+                },
+                {
+                  "required": ["mcpAuthBindings"]
+                }
+              ]
+            }
+          },
+          {
+            "required": ["selectionVersion", "mcpAuthBindings"]
+          }
+        ]
       },
       "ManagedExtensionApplyOperation": {
         "type": "object",
@@ -16547,6 +18027,33 @@
           },
           "operation": {
             "$ref": "#/components/schemas/ManagedExtensionApplyOperation"
+          },
+          "selfService": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "supported": {
+                "type": "boolean"
+              },
+              "canApply": {
+                "type": "boolean"
+              },
+              "runtimeSkillImportSupported": {
+                "type": "boolean"
+              }
+            },
+            "required": ["supported", "canApply"]
+          },
+          "selectionVersion": {
+            "type": "integer",
+            "enum": [2]
+          },
+          "mcpAuthBindings": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/ManagedMcpAuthBinding"
+            }
           }
         }
       },
@@ -16963,6 +18470,967 @@
           }
         },
         "required": ["workspaceId", "worktreeId", "idempotencyKey"]
+      },
+      "ManagedExtensionImportMetadata": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sourceKind": {
+            "type": "string",
+            "enum": ["skill", "extension", "mcp"]
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["linux", "darwin"]
+              },
+              "arch": {
+                "type": "string",
+                "enum": ["x64", "arm64", "any"]
+              }
+            },
+            "required": ["platform", "arch"]
+          },
+          "sourceDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "compilerVersion": {
+            "type": "integer",
+            "enum": [1, 2]
+          },
+          "packageName": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          }
+        },
+        "required": ["sourceKind", "target", "sourceDigest", "compilerVersion"]
+      },
+      "ManagedExtensionPackageInspection": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "manifest": {
+            "$ref": "#/components/schemas/ManagedExtensionPackageManifest"
+          },
+          "fileCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000
+          },
+          "files": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "type": "string"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                }
+              },
+              "required": ["name", "description"]
+            }
+          },
+          "mcpServers": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "recipe": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "redacted": {
+                  "type": "boolean"
+                }
+              },
+              "required": ["name", "recipe", "redacted"]
+            }
+          },
+          "settings": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "envVar": {
+                  "type": "string"
+                },
+                "sensitive": {
+                  "type": "boolean"
+                }
+              },
+              "required": ["name", "envVar"]
+            }
+          }
+        },
+        "required": [
+          "manifest",
+          "fileCount",
+          "files",
+          "truncated",
+          "skills",
+          "mcpServers",
+          "settings"
+        ]
+      },
+      "ManagedExtensionOperationLookup": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["publish", "settings"]
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": ["kind", "idempotencyKey"]
+      },
+      "WebShellExtensionOperationLookup": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "workspaceId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["publish", "settings"]
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": ["workspaceId", "kind", "idempotencyKey"]
+      },
+      "ManagedExtensionApplyLookup": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": ["idempotencyKey"]
+      },
+      "WebShellExtensionApplyLookup": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": ["sessionId", "idempotencyKey"]
+      },
+      "ManagedRuntimeSkillOwner": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "bindingId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "generation": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,15}$"
+          }
+        },
+        "required": ["bindingId", "generation"]
+      },
+      "ManagedRuntimeSkillCandidate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "shadowed": {
+            "type": "boolean"
+          },
+          "compatible": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "path",
+          "digest",
+          "shadowed",
+          "compatible"
+        ]
+      },
+      "ManagedRuntimeSkillCandidates": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/ManagedRuntimeSkillOwner"
+          },
+          "candidates": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/ManagedRuntimeSkillCandidate"
+            }
+          }
+        },
+        "required": ["sessionId", "owner", "candidates"]
+      },
+      "ManagedRuntimeSkillSnapshotRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "$ref": "#/components/schemas/ManagedRuntimeSkillOwner"
+          },
+          "path": {
+            "type": "string"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["linux", "darwin"]
+              },
+              "arch": {
+                "type": "string",
+                "enum": ["x64", "arm64", "any"]
+              }
+            },
+            "required": ["platform", "arch"]
+          }
+        },
+        "required": ["owner", "path", "digest", "target"]
+      },
+      "ManagedRuntimeSkillImportRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "$ref": "#/components/schemas/ManagedRuntimeSkillOwner"
+          },
+          "operationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "preparationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "byteLength": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 104857600
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["linux", "darwin"]
+              },
+              "arch": {
+                "type": "string",
+                "enum": ["x64", "arm64", "any"]
+              }
+            },
+            "required": ["platform", "arch"]
+          },
+          "extensionId": {
+            "type": "string",
+            "pattern": "^ext_[a-f0-9-]{36}$"
+          }
+        },
+        "required": [
+          "owner",
+          "operationId",
+          "preparationId",
+          "sourceDigest",
+          "byteLength",
+          "target"
+        ]
+      },
+      "ManagedRuntimeSkillSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/ManagedRuntimeSkillOwner"
+          },
+          "operationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "preparationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "byteLength": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 104857600
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["linux", "darwin"]
+              },
+              "arch": {
+                "type": "string",
+                "enum": ["x64", "arm64", "any"]
+              }
+            },
+            "required": ["platform", "arch"]
+          },
+          "inspection": {
+            "$ref": "#/components/schemas/ManagedExtensionPackageInspection"
+          }
+        },
+        "required": [
+          "sessionId",
+          "owner",
+          "operationId",
+          "preparationId",
+          "sourceDigest",
+          "byteLength",
+          "target",
+          "inspection"
+        ]
+      },
+      "WebShellRuntimeSkillQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": ["sessionId"]
+      },
+      "WebShellRuntimeSkillSnapshotRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/ManagedRuntimeSkillOwner"
+          },
+          "path": {
+            "type": "string"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["linux", "darwin"]
+              },
+              "arch": {
+                "type": "string",
+                "enum": ["x64", "arm64", "any"]
+              }
+            },
+            "required": ["platform", "arch"]
+          }
+        },
+        "required": ["sessionId", "owner", "path", "digest", "target"]
+      },
+      "WebShellRuntimeSkillImportRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "owner": {
+            "$ref": "#/components/schemas/ManagedRuntimeSkillOwner"
+          },
+          "operationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "preparationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "byteLength": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 104857600
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["linux", "darwin"]
+              },
+              "arch": {
+                "type": "string",
+                "enum": ["x64", "arm64", "any"]
+              }
+            },
+            "required": ["platform", "arch"]
+          },
+          "extensionId": {
+            "type": "string",
+            "pattern": "^ext_[a-f0-9-]{36}$"
+          }
+        },
+        "required": [
+          "sessionId",
+          "idempotencyKey",
+          "owner",
+          "operationId",
+          "preparationId",
+          "sourceDigest",
+          "byteLength",
+          "target"
+        ]
+      },
+      "ManagedMcpAuthBinding": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["serverId", "credentialId", "credentialGeneration"],
+        "properties": {
+          "serverId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "credentialId": {
+            "type": "string",
+            "pattern": "^mcred_[0-9a-f-]{36}$"
+          },
+          "credentialGeneration": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        }
+      },
+      "ManagedMcpOAuthQueryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "extensions": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/ManagedExtensionPackagePin"
+            }
+          }
+        }
+      },
+      "ManagedMcpOAuthStartRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["serverId", "browserNonce", "idempotencyKey"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "serverId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "pin": {
+            "$ref": "#/components/schemas/ManagedExtensionPackagePin"
+          },
+          "browserNonce": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{32,128}$"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      },
+      "ManagedMcpOAuthStatusRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["attemptId"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "attemptId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      },
+      "ManagedMcpOAuthCompleteRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["attemptId", "browserNonce"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "attemptId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "browserNonce": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{32,128}$"
+          }
+        }
+      },
+      "ManagedMcpOAuthRevokeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["credentialId", "expectedGeneration"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "credentialId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "expectedGeneration": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        }
+      },
+      "ManagedMcpOAuthProvider": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["providerId", "resourceUri", "scopes"],
+        "properties": {
+          "providerId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "resourceUri": {
+            "type": "string",
+            "format": "uri"
+          },
+          "scopes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 128,
+            "items": {
+              "type": "string",
+              "maxLength": 256
+            }
+          }
+        }
+      },
+      "ManagedMcpOAuthServer": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "serverId",
+          "serverName",
+          "providerId",
+          "resourceUri",
+          "pin",
+          "scopes",
+          "state",
+          "actorOwned"
+        ],
+        "properties": {
+          "serverId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "serverName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "providerId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "resourceUri": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "pin": {
+            "$ref": "#/components/schemas/ManagedExtensionPackagePin"
+          },
+          "scopes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 128,
+            "items": {
+              "type": "string",
+              "maxLength": 256
+            }
+          },
+          "state": {
+            "type": "string",
+            "enum": ["unauthorized", "authorized", "revoked", "unavailable"]
+          },
+          "actorOwned": {
+            "type": "boolean"
+          },
+          "credentialId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        }
+      },
+      "ManagedMcpOAuthQueryResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "supported",
+          "canAuthorize",
+          "notice",
+          "providers",
+          "servers"
+        ],
+        "properties": {
+          "supported": {
+            "type": "boolean"
+          },
+          "canAuthorize": {
+            "type": "boolean"
+          },
+          "notice": {
+            "type": "string"
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManagedMcpOAuthProvider"
+            }
+          },
+          "servers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManagedMcpOAuthServer"
+            }
+          }
+        }
+      },
+      "ManagedMcpOAuthStartResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["attemptId", "authorizationUrl", "expiresAt"],
+        "properties": {
+          "attemptId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "authorizationUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "expiresAt": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        }
+      },
+      "ManagedMcpOAuthStatusResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["attemptId", "state", "expiresAt"],
+        "properties": {
+          "attemptId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "code_received",
+              "exchanging",
+              "completed",
+              "failed",
+              "expired"
+            ]
+          },
+          "expiresAt": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "credentialId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        }
+      },
+      "ManagedMcpOAuthRevokeResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["credentialId", "generation", "state"],
+        "properties": {
+          "credentialId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "state": {
+            "type": "string",
+            "enum": ["revoked"]
+          }
+        }
+      },
+      "WebShellManagedMcpOAuthQueryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "extensions": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/ManagedExtensionPackagePin"
+            }
+          }
+        }
+      },
+      "WebShellManagedMcpOAuthStartRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId", "serverId", "browserNonce", "idempotencyKey"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "serverId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "pin": {
+            "$ref": "#/components/schemas/ManagedExtensionPackagePin"
+          },
+          "browserNonce": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{32,128}$"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      },
+      "WebShellManagedMcpOAuthStatusRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId", "attemptId"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "attemptId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      },
+      "WebShellManagedMcpOAuthCompleteRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId", "attemptId", "browserNonce"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "attemptId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "browserNonce": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{32,128}$"
+          }
+        }
+      },
+      "WebShellManagedMcpOAuthRevokeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId", "credentialId", "expectedGeneration"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "credentialId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "expectedGeneration": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        }
       }
     }
   }

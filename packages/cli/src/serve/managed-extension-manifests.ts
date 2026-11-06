@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import type { ManagedPackageContributions } from '@qwen-code/qwen-code-core/extension/managed-package.js';
+import { parseManagedMcpRecipe } from '@qwen-code/qwen-code-core/extension/managed-mcp-recipe.js';
 import {
   HookEventName,
   HooksConfigSource,
@@ -46,6 +47,7 @@ export function stageManagedExtensionManifests(input: {
   preparedMcpServers?: readonly ManagedExtensionMcpPin[];
   baseHookCatalog: ManagedHookCatalogPin | null;
   mcp: ManagedMcpRuntime;
+  oauthAvailable?: boolean;
   hooks: ManagedHookRuntime;
   hydrated: (assetRoot: string) => {
     contributions: ManagedPackageContributions;
@@ -65,39 +67,56 @@ export function stageManagedExtensionManifests(input: {
         .map((setting) => [setting.envVar, environment[setting.envVar]!]),
     );
     for (const [name, raw] of Object.entries(contributions.mcpServers)) {
-      const recipe = object(raw);
-      if (
-        Object.keys(recipe).some(
-          (key) =>
-            ![
-              'command',
-              'args',
-              'env',
-              'timeout',
-              'url',
-              'httpUrl',
-              'headers',
-              'type',
-            ].includes(key),
-        )
-      )
-        throw new Error('Unsupported extension MCP recipe field.');
+      const recipe = parseManagedMcpRecipe(raw) as unknown as Record<
+        string,
+        unknown
+      >;
       const transport =
         recipe['command'] !== undefined
           ? 'stdio'
           : recipe['type'] === 'sse'
             ? 'sse'
             : 'streamable-http';
+      const serverId = `${pkg.pin.extensionId}:${name}`;
+      const auth = recipe['auth'] as { resourceUri: string } | undefined;
+      const binding = input.command.mcpAuthBindings?.find(
+        (entry) => entry.serverId === serverId,
+      );
+      if (auth && input.command.selectionVersion !== 2)
+        throw new Error('OAuth packages require version 2 selection.');
+      if (auth && !binding) continue;
+      if (auth && !input.oauthAvailable)
+        throw new Error('Personal MCP token delivery is unavailable.');
+      if (binding && !auth)
+        throw new Error('Personal MCP binding requires an OAuth server.');
       const definition: ManagedMcpDefinition = {
         tenantId: input.tenantId,
         workspaceId: input.workspaceId,
-        serverId: `${pkg.pin.extensionId}:${name}`,
+        serverId,
         serverRevision: revision,
         definitionDigest: digest({
           pin: pkg.pin,
           recipe: pkg.contributions.mcpServers[name],
+          ...(auth
+            ? {
+                binding,
+                executionActorKey: input.command.actorKey,
+                configRevision: revision,
+              }
+            : {}),
         }),
         transport,
+        ...(auth && binding
+          ? {
+              oauth: {
+                resourceUri: auth.resourceUri,
+                credentialId: binding.credentialId,
+                credentialGeneration: binding.credentialGeneration,
+                configRevision: revision,
+                executionActorKey: input.command.actorKey,
+              },
+            }
+          : {}),
         ...(transport === 'stdio'
           ? {
               command: recipe['command'] as string,
@@ -200,7 +219,20 @@ export function stageManagedExtensionManifests(input: {
     throw new Error(
       'Extension MCP selection has duplicate identities or exceeds its limit.',
     );
-  const mcpManifest: ManagedMcpManifest = { version: 1, servers };
+  for (const binding of input.command.mcpAuthBindings ?? []) {
+    if (
+      !servers.some(
+        (server) => server.serverId === binding.serverId && server.oauth,
+      )
+    )
+      throw new Error(
+        'Personal MCP binding does not match an installed OAuth server.',
+      );
+  }
+  const mcpManifest: ManagedMcpManifest = {
+    version: servers.some((server) => server.oauth) ? 2 : 1,
+    servers,
+  };
   const hookCatalog = hooks.length
     ? {
         catalogId: `extensions:${digest(input.runtimeSessionId).slice(0, 32)}`,

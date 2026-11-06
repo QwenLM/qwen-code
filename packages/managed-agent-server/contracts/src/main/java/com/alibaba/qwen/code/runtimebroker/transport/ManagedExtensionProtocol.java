@@ -20,7 +20,7 @@ public final class ManagedExtensionProtocol {
     public static final int REQUEST_LIMIT = 512 * 1024;
     public static final int RESPONSE_LIMIT = 8 * 1024 * 1024;
     private static final Set<String> KINDS = Set.of("extension-prepare", "extension-activate", "extension-status", "extension-reconcile",
-            "extension-asset-read", "extension-asset-glob");
+            "extension-asset-read", "extension-asset-glob", "extension-skill-candidates", "extension-skill-snapshot", "extension-skill-archive");
 
     private ManagedExtensionProtocol() { }
 
@@ -63,7 +63,7 @@ public final class ManagedExtensionProtocol {
                     "baseMcpServers", "baseHookCatalog"))
                     || !(operation.get("command") instanceof Map<?, ?> command)
                     || !command.keySet().containsAll(Set.of("operationId", "actorKey", "expectedRevision", "extensions"))
-                    || !Set.of("operationId", "actorKey", "expectedRevision", "extensions", "mcpChange").containsAll(command.keySet())
+                    || !Set.of("operationId", "actorKey", "expectedRevision", "extensions", "mcpChange", "selectionVersion", "mcpAuthBindings").containsAll(command.keySet())
                     || !operationId.equals(command.get("operationId"))
                     || !(command.get("actorKey") instanceof String actor) || !actor.matches("[a-f0-9]{64}")
                     || !counter(operation.get("expectedRevision"), 0)
@@ -75,6 +75,7 @@ public final class ManagedExtensionProtocol {
                     || operation.get("baseHookCatalog") != null && !(operation.get("baseHookCatalog") instanceof Map)) {
                 throw invalid();
             }
+            authBindings(command);
             Set<String> identities = new HashSet<>();
             for (Object item : pins) {
                 if (!(item instanceof Map<?, ?> pin)
@@ -102,7 +103,18 @@ public final class ManagedExtensionProtocol {
                     || ((Number) operation.get("revision")).longValue() != ((Number) operation.get("expectedRevision")).longValue() + 1) {
                 throw invalid();
             }
-        } else if ("extension-status".equals(kind)) {
+        } else if ("extension-skill-snapshot".equals(kind)) {
+            if (!operation.keySet().equals(Set.of("kind", "operationId", "path", "digest"))
+                    || !skillPath(operation.get("path")) || !digest(operation.get("digest"))) {
+                throw invalid();
+            }
+        } else if ("extension-skill-archive".equals(kind)) {
+            if (!operation.keySet().equals(Set.of("kind", "operationId", "preparationId", "offset"))
+                    || !uuid(operation.get("preparationId")) || !counter(operation.get("offset"), 0)
+                    || BrokerValues.exactLong(operation.get("offset")) > 100L * 1024 * 1024) {
+                throw invalid();
+            }
+        } else if ("extension-status".equals(kind) || "extension-skill-candidates".equals(kind)) {
             if (!operation.keySet().equals(Set.of("kind", "operationId"))) {
                 throw invalid();
             }
@@ -130,7 +142,9 @@ public final class ManagedExtensionProtocol {
                 || !request.get("operationId").equals(result.get("operationId"))) {
             throw invalidResponse();
         }
-        if (!String.valueOf(request.get("kind")).startsWith("extension-asset-")) {
+        if (String.valueOf(request.get("kind")).startsWith("extension-skill-")) {
+            validateSkillResponse(request, result);
+        } else if (!String.valueOf(request.get("kind")).startsWith("extension-asset-")) {
             if (!(result.get("state") instanceof String state)
                     || !("extension-reconcile".equals(request.get("kind"))
                             ? Set.of("stopped", "outcome_unknown") : Set.of("prepared", "active", "failed", "outcome_unknown")).contains(state)
@@ -179,6 +193,67 @@ public final class ManagedExtensionProtocol {
         return BrokerValues.immutableMap(value);
     }
 
+    private static void validateSkillResponse(Map<String, Object> request, Map<?, ?> result) {
+        String kind = (String) request.get("kind");
+        if ("extension-skill-candidates".equals(kind)) {
+            if (!result.keySet().equals(Set.of("operationId", "candidates"))
+                    || !(result.get("candidates") instanceof List<?> candidates) || candidates.size() > 256) {
+                throw invalidResponse();
+            }
+            Set<Object> paths = new HashSet<>();
+            for (Object item : candidates) {
+                if (!(item instanceof Map<?, ?> candidate)
+                        || !candidate.keySet().containsAll(Set.of("name", "description", "path", "digest", "shadowed", "compatible"))
+                        || !Set.of("name", "description", "path", "digest", "shadowed", "compatible", "error").containsAll(candidate.keySet())
+                        || !boundedText(candidate.get("name"), 256)
+                        || !(candidate.get("description") instanceof String description) || description.length() > 4096 || description.indexOf('\0') >= 0
+                        || !skillPath(candidate.get("path")) || !paths.add(candidate.get("path"))
+                        || !digest(candidate.get("digest")) || !(candidate.get("shadowed") instanceof Boolean)
+                        || !(candidate.get("compatible") instanceof Boolean)
+                        || candidate.containsKey("error") && !boundedText(candidate.get("error"), 4096)) {
+                    throw invalidResponse();
+                }
+            }
+        } else if ("extension-skill-snapshot".equals(kind)) {
+            if (!result.keySet().equals(Set.of("operationId", "preparationId", "sourceDigest", "byteLength"))
+                    || !uuid(result.get("preparationId")) || !digest(result.get("sourceDigest"))
+                    || !counter(result.get("byteLength"), 1) || BrokerValues.exactLong(result.get("byteLength")) > 100L * 1024 * 1024) {
+                throw invalidResponse();
+            }
+        } else if (!result.keySet().equals(Set.of("operationId", "preparationId", "offset", "totalBytes", "base64"))
+                || !request.get("preparationId").equals(result.get("preparationId"))
+                || !java.util.Objects.equals(BrokerValues.exactLong(request.get("offset")), BrokerValues.exactLong(result.get("offset")))
+                || !counter(result.get("totalBytes"), 1) || BrokerValues.exactLong(result.get("totalBytes")) > 100L * 1024 * 1024
+                || !(result.get("base64") instanceof String encoded) || encoded.length() > 349528) {
+            throw invalidResponse();
+        } else {
+            try {
+                int length = java.util.Base64.getDecoder().decode(encoded).length;
+                if (length > 256 * 1024 || length < 1
+                        || BrokerValues.exactLong(result.get("offset")) + length > BrokerValues.exactLong(result.get("totalBytes"))) {
+                    throw invalidResponse();
+                }
+            } catch (IllegalArgumentException error) {
+                throw invalidResponse();
+            }
+        }
+    }
+
+    private static boolean boundedText(Object value, int maximum) {
+        return value instanceof String text && !text.isEmpty() && text.length() <= maximum && text.indexOf('\0') < 0;
+    }
+
+    private static boolean uuid(Object value) {
+        return value instanceof String text && text.matches("(?i)[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}");
+    }
+
+    private static boolean skillPath(Object value) {
+        return value instanceof String path && path.length() <= 4096 && path.indexOf('\0') < 0
+                && (path.startsWith(".qwen/skills/") || path.startsWith(".agents/skills/"))
+                && !path.contains("\\") && java.util.Arrays.stream(path.split("/", -1))
+                        .noneMatch(segment -> segment.isEmpty() || segment.equals(".") || segment.equals(".."));
+    }
+
     private static boolean counter(Object value, long minimum) {
         Long number = BrokerValues.exactLong(value);
         return number != null && number >= minimum && number <= 9_007_199_254_740_991L;
@@ -213,6 +288,22 @@ public final class ManagedExtensionProtocol {
             if ("enabled".equals(pin.get("state")) && ++enabled > 16) {
                 throw invalid();
             }
+        }
+    }
+
+    private static void authBindings(Map<?, ?> command) {
+        if (!command.containsKey("selectionVersion")) {
+            if (command.containsKey("mcpAuthBindings")) throw invalid();
+            return;
+        }
+        if (!counter(command.get("selectionVersion"), 2) || BrokerValues.exactLong(command.get("selectionVersion")) != 2
+                || !(command.get("mcpAuthBindings") instanceof List<?> bindings) || bindings.size() > 32) throw invalid();
+        Set<String> ids = new HashSet<>();
+        for (Object item : bindings) {
+            if (!(item instanceof Map<?, ?> binding) || !binding.keySet().equals(Set.of("serverId", "credentialId", "credentialGeneration"))
+                    || !identity(binding.get("serverId")) || !ids.add((String) binding.get("serverId"))
+                    || !(binding.get("credentialId") instanceof String credential) || !credential.matches("mcred_[0-9a-f-]{36}")
+                    || !counter(binding.get("credentialGeneration"), 1)) throw invalid();
         }
     }
 

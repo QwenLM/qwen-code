@@ -33,11 +33,19 @@ export interface ManagedExtensionPin {
 }
 
 export interface ManagedExtensionApplyCommand {
+  readonly selectionVersion?: 2;
+  readonly mcpAuthBindings?: readonly ManagedMcpAuthBinding[];
   readonly operationId: string;
   readonly actorKey: string;
   readonly expectedRevision: number;
   readonly extensions: readonly ManagedExtensionPin[];
   readonly mcpChange?: ManagedExtensionMcpChange;
+}
+
+export interface ManagedMcpAuthBinding {
+  readonly serverId: string;
+  readonly credentialId: string;
+  readonly credentialGeneration: number;
 }
 
 export interface ManagedExtensionMcpPin {
@@ -72,7 +80,9 @@ export interface ManagedExtensionPackageView {
 
 export interface ManagedExtensionEffectiveBundle {
   readonly kind: 'managed-extension-config-bundle';
-  readonly formatVersion: 1;
+  readonly formatVersion: 1 | 2;
+  readonly executionActorKey?: string | null;
+  readonly mcpAuthBindings?: readonly ManagedMcpAuthBinding[];
   readonly configRevision: number;
   readonly executionMode: 'linux-cgroup' | 'developer-process-group';
   readonly mcpRevision: number;
@@ -161,12 +171,12 @@ export function parseManagedExtensionEffectiveBundle(
       'mcpServers',
       'hookCatalog',
     ],
-    ['mcpChange'],
+    ['mcpChange', 'executionActorKey', 'mcpAuthBindings'],
     'effective extension configuration',
   );
   if (
     bundle['kind'] !== 'managed-extension-config-bundle' ||
-    bundle['formatVersion'] !== 1 ||
+    (bundle['formatVersion'] !== 1 && bundle['formatVersion'] !== 2) ||
     !['linux-cgroup', 'developer-process-group'].includes(
       String(bundle['executionMode']),
     ) ||
@@ -176,6 +186,21 @@ export function parseManagedExtensionEffectiveBundle(
     bundle['packages'].length > MANAGED_EXTENSION_MAX_PACKAGES
   )
     invalid('effective extension configuration');
+  const authBindings =
+    bundle['formatVersion'] === 2
+      ? parseManagedMcpAuthBindings(bundle['mcpAuthBindings'])
+      : undefined;
+  if (
+    (bundle['formatVersion'] === 1 &&
+      (bundle['mcpAuthBindings'] !== undefined ||
+        bundle['executionActorKey'] !== undefined)) ||
+    (authBindings !== undefined &&
+      (authBindings.length === 0
+        ? bundle['executionActorKey'] !== null
+        : typeof bundle['executionActorKey'] !== 'string' ||
+          !/^[a-f0-9]{64}$/u.test(bundle['executionActorKey'])))
+  )
+    invalid('personal MCP execution actor');
   const packages = bundle['packages'].map(
     (value): ManagedExtensionPackageView => {
       const entry = object(value, 'package view');
@@ -202,7 +227,13 @@ export function parseManagedExtensionEffectiveBundle(
     invalid('duplicate package view');
   return {
     kind: 'managed-extension-config-bundle',
-    formatVersion: 1,
+    formatVersion: bundle['formatVersion'] as 1 | 2,
+    ...(authBindings === undefined
+      ? {}
+      : {
+          mcpAuthBindings: authBindings,
+          executionActorKey: bundle['executionActorKey'] as string | null,
+        }),
     configRevision: bundle['configRevision'] as number,
     executionMode: bundle[
       'executionMode'
@@ -313,7 +344,7 @@ export function parseManagedExtensionApplyCommand(
   keys(
     command,
     ['operationId', 'actorKey', 'expectedRevision', 'extensions'],
-    ['mcpChange'],
+    ['mcpChange', 'selectionVersion', 'mcpAuthBindings'],
     'extension apply command',
   );
   if (
@@ -327,15 +358,64 @@ export function parseManagedExtensionApplyCommand(
     command['expectedRevision'] === Number.MAX_SAFE_INTEGER
   )
     invalid('extension apply command');
+  if (
+    (command['selectionVersion'] !== undefined &&
+      command['selectionVersion'] !== 2) ||
+    (command['selectionVersion'] !== 2 &&
+      command['mcpAuthBindings'] !== undefined)
+  )
+    invalid('extension selection version');
   return Object.freeze({
     operationId: command['operationId'],
     actorKey: command['actorKey'],
     expectedRevision: command['expectedRevision'] as number,
     extensions: parseManagedExtensionPins(command['extensions']),
+    ...(command['selectionVersion'] === 2
+      ? {
+          selectionVersion: 2 as const,
+          mcpAuthBindings: parseManagedMcpAuthBindings(
+            command['mcpAuthBindings'],
+          ),
+        }
+      : {}),
     ...(command['mcpChange'] === undefined
       ? {}
       : { mcpChange: mcpChange(command['mcpChange']) }),
   });
+}
+
+export function parseManagedMcpAuthBindings(
+  value: unknown,
+): readonly ManagedMcpAuthBinding[] {
+  if (!Array.isArray(value) || value.length > 32)
+    invalid('personal MCP bindings');
+  const ids = new Set<string>();
+  return Object.freeze(
+    value.map((raw): ManagedMcpAuthBinding => {
+      const binding = object(raw, 'personal MCP binding');
+      keys(
+        binding,
+        ['serverId', 'credentialId', 'credentialGeneration'],
+        [],
+        'personal MCP binding',
+      );
+      if (
+        typeof binding['serverId'] !== 'string' ||
+        !/^[A-Za-z0-9._:-]{1,128}$/u.test(binding['serverId']) ||
+        ids.has(binding['serverId']) ||
+        typeof binding['credentialId'] !== 'string' ||
+        !/^mcred_[0-9a-f-]{36}$/u.test(binding['credentialId']) ||
+        !revision(binding['credentialGeneration'], 1)
+      )
+        invalid('personal MCP binding');
+      ids.add(binding['serverId']);
+      return Object.freeze({
+        serverId: binding['serverId'],
+        credentialId: binding['credentialId'],
+        credentialGeneration: binding['credentialGeneration'] as number,
+      });
+    }),
+  );
 }
 
 function mcpSelections(
