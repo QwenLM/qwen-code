@@ -1206,9 +1206,7 @@ export class WorkflowRunRegistry {
       at: event.timestamp,
     };
     const approvalRequestCallback = this.approvalRequestCallback;
-    const requestController = approvalRequestCallback
-      ? new AbortController()
-      : undefined;
+    const requestController = new AbortController();
     this.approvalRuntimes.set(approvalId, {
       respond: event.respond,
       requestController,
@@ -1222,11 +1220,7 @@ export class WorkflowRunRegistry {
       ...(dispatchId ? { dispatchId } : {}),
     });
     this.emitApprovalChange(entry);
-    if (
-      approvalRequestCallback &&
-      requestController &&
-      !requestController.signal.aborted
-    ) {
+    if (requestController && !requestController.signal.aborted) {
       try {
         const request = approvalRequestCallback(
           entry,
