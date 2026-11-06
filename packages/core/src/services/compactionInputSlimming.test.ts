@@ -679,6 +679,44 @@ describe('compactionInputSlimming', () => {
       );
     });
 
+    it.each([
+      [
+        'stacked at the start, as the CLI prepends one over another',
+        `<system-reminder>\nworktree restored\n</system-reminder>\n\n<system-reminder>\nrecovered agents ${'x'.repeat(8_000)}\n</system-reminder>\n\nfix the bug`,
+      ],
+      [
+        'appended one after another to a tool output',
+        `${'o'.repeat(300)}\n<system-reminder>\nfirst ${'x'.repeat(8_000)}\n</system-reminder>\n<system-reminder>\nsecond\n</system-reminder>`,
+      ],
+    ])(
+      'closes the reminder a cut lands in when two are %s',
+      (_label, original) => {
+        // Only the first envelope at the start, or the last at the end, was
+        // looked at, so a cut inside the other one left it open (#15936 R3-3).
+        const [part] = slimText(original, 500).slimmedHistory[0]!.parts!;
+
+        const count = (tag: string) => part!.text!.split(tag).length - 1;
+        expect(count('</system-reminder>')).toBe(count('<system-reminder>'));
+        expect(part!.text).toBe(
+          original.slice(0, 500) +
+            SLIM_TEXT_TRUNCATION_MARKER +
+            '\n</system-reminder>',
+        );
+      },
+    );
+
+    it('adds no closing tag for one a tool result only quotes at its end', () => {
+      // `grep -n '</system-reminder>'`, or a file whose last line is the tag:
+      // with no opening tag, no envelope ends the text (#15936 R3-11).
+      const original = `${'g'.repeat(8_000)}\n</system-reminder>`;
+
+      const [part] = slimText(original, 4_000).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 4_000) + SLIM_TEXT_TRUNCATION_MARKER,
+      );
+    });
+
     it('closes cut hook context again, keeping the marker inside it', () => {
       const original = wrapUserPromptSubmitContext('h'.repeat(20_000));
 

@@ -3611,6 +3611,39 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     );
   });
 
+  it.each([
+    ['inside', COMPACTION_BUDGET_SAFETY_MARGIN - 524, 'dropped'],
+    ['just outside', COMPACTION_BUDGET_SAFETY_MARGIN + 1, 'kept'],
+  ])(
+    'treats a server that stopped %s the margin short of its window as having filled it',
+    async (_label, shortBy, outcome) => {
+      // A server can stop its output a few hundred tokens short of the
+      // window; within the margin, the unclosed snapshot is still a cut
+      // (#15936 R3-5).
+      mockVllmBackend(WINDOW, false, {
+        text: '<state_snapshot><overall_goal>port the parser</overall_goal><cur',
+        usage: (promptTokens: number) => {
+          const counted = Math.ceil(promptTokens * 1.2);
+          return {
+            promptTokenCount: counted,
+            candidatesTokenCount: WINDOW - shortBy - counted,
+          };
+        },
+      });
+
+      const result = await compressChars(182_000, 45_000);
+
+      if (outcome === 'dropped') {
+        expectNoNewHistory(
+          result,
+          CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+        );
+      } else {
+        expectCompressed(result);
+      }
+    },
+  );
+
   it('keeps an unclosed snapshot when the reported usage leaves the window room', async () => {
     // A model can end without closing the tag. Nothing capped this one: its
     // output is far below the budget and the window was not filled, so
@@ -3672,12 +3705,15 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     expectCompressed(result);
   });
 
-  it('drops a summary cut off mid-snapshot after an analysis that names a whole example snapshot mid-line', async () => {
-    // The example's tag is mid-line, so it opens nothing: the real snapshot's
-    // line-start tag is the one checked.
+  it('drops a summary cut off mid-snapshot after an analysis followed by a whole example snapshot mid-line', async () => {
+    // Setting the closed analysis aside leaves the sentence after it, and the
+    // example in that sentence reaches the check. Its tag is mid-line, so it
+    // opens nothing: the real snapshot's line-start tag is the one checked.
+    // An example inside the closed analysis never reached the check at all
+    // (#15936 R3-12).
     mockVllmBackend(WINDOW, false, {
       text:
-        '<analysis>The format is <state_snapshot>...</state_snapshot>.</analysis>\n' +
+        '<analysis>The user asked to port the parser.</analysis> The format is <state_snapshot>...</state_snapshot>.\n' +
         '<state_snapshot><overall_goal>port the parser</overall_goal><cur',
       usage: windowFillingUsage,
     });
@@ -4383,6 +4419,46 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     expect(
       sent[1]!.promptTokens + sent[1]!.maxOutputTokens,
     ).toBeLessThanOrEqual(WINDOW);
+  });
+
+  it('reports an API error when the one retry fails for another reason', async () => {
+    // Only a second context-length rejection says the history is too large.
+    // A 5xx on the retry is a plain API failure, which keeps the retry-able
+    // advice instead of the new-session one (#15936 R3-4).
+    let calls = 0;
+    mockBackend({
+      ratio: 2,
+      alwaysReject: true,
+      rejection: () =>
+        ++calls === 1
+          ? new Error('400 context_length_exceeded')
+          : new Error('500 Internal Server Error'),
+    });
+
+    const result = await compressHistory(toolSession(20, 6_000), 60_000);
+
+    expect(sent).toHaveLength(2);
+    expectNoNewHistory(result, CompressionStatus.COMPRESSION_FAILED_API_ERROR);
+  });
+
+  it('holds the reserve on a large window to the output ceiling', async () => {
+    // A quarter of a 131,072-token window is 32,768, past the ceiling a
+    // compression request asks for (#15936 R3-6).
+    mockBackend({
+      window: 131_072,
+      ratio: 1.5,
+      rejection: (promptTokens) =>
+        new Error(
+          `prompt is too long: ${promptTokens} tokens > 131072 maximum`,
+        ),
+    });
+    configureWindow(131_072);
+
+    const result = await compressHistory(toolSession(26, 12_000), 120_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
   });
 
   it('leaves a retry without counts no more than the reserve', async () => {

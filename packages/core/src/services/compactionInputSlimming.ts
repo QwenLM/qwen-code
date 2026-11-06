@@ -524,37 +524,48 @@ interface EnvelopeSpan {
 
 /**
  * The envelopes at the start and at the end of `value`, the two places a
- * writer puts one. The writers escape tags inside an envelope's body, so the
- * first closing tag after a leading opening, and the last opening tag before
- * a trailing closing tag, are the envelope's own. The text around them, such
- * as a file a tool read or what the user typed, is not escaped, so a tag
- * inside it is never taken for an envelope.
+ * writer puts one. Writers stack them there: the CLI prepends one reminder
+ * over another, and a tool result can end with more than one, so each end
+ * holds a run of envelopes apart only by whitespace (#15936 R3-3). The
+ * writers escape tags inside an envelope's body, so the first closing tag
+ * after a leading opening, and the last opening tag before a trailing closing
+ * tag, are the envelope's own. The text around them, such as a file a tool
+ * read or what the user typed, is not escaped, so a tag inside it is never
+ * taken for an envelope.
  */
 function envelopesAtEnds(value: string): EnvelopeSpan[] {
   const spans: EnvelopeSpan[] = [];
-  const leading = ENVELOPES.find(({ open }) => value.startsWith(open));
-  if (leading) {
-    const closeAt = value.indexOf(leading.close, leading.open.length);
-    if (closeAt !== -1) {
-      spans.push({
-        bodyAt: leading.open.length,
-        closeAt,
-        close: leading.close,
-      });
-    }
+  let openAt = 0;
+  for (;;) {
+    const leading = ENVELOPES.find(({ open }) =>
+      value.startsWith(open, openAt),
+    );
+    if (!leading) break;
+    const closeAt = value.indexOf(leading.close, openAt + leading.open.length);
+    if (closeAt === -1) break;
+    spans.push({
+      bodyAt: openAt + leading.open.length,
+      closeAt,
+      close: leading.close,
+    });
+    const next = closeAt + leading.close.length;
+    openAt =
+      next + (value.length - next - value.slice(next).trimStart().length);
   }
-  const text = value.trimEnd();
-  const trailing = ENVELOPES.find(({ close }) => text.endsWith(close));
-  if (trailing) {
-    const closeAt = text.length - trailing.close.length;
-    const openAt = text.lastIndexOf(trailing.open, closeAt);
-    if (openAt !== -1) {
-      spans.push({
-        bodyAt: openAt + trailing.open.length,
-        closeAt,
-        close: trailing.close,
-      });
-    }
+  let end = value.trimEnd().length;
+  for (;;) {
+    const text = value.slice(0, end);
+    const trailing = ENVELOPES.find(({ close }) => text.endsWith(close));
+    if (!trailing) break;
+    const closeAt = end - trailing.close.length;
+    const lastOpenAt = text.lastIndexOf(trailing.open, closeAt);
+    if (lastOpenAt === -1) break;
+    spans.push({
+      bodyAt: lastOpenAt + trailing.open.length,
+      closeAt,
+      close: trailing.close,
+    });
+    end = value.slice(0, lastOpenAt).trimEnd().length;
   }
   return spans;
 }
