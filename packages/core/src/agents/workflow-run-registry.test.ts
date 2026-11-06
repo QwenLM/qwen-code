@@ -7,7 +7,11 @@
 import { createContext, runInContext } from 'node:vm';
 import { describe, it, expect, vi } from 'vitest';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
-import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
+import { runWithInvocationContext } from '../utils/invocation-context.js';
 import {
   AgentEventEmitter,
   AgentEventType,
@@ -2195,6 +2199,52 @@ describe('WorkflowRunRegistry', () => {
 
     expect(entry.todoWorkChainId).toBe('workflow-chain');
     expect(completion.mock.calls[0][2].todoWorkChainId).toBe('workflow-chain');
+  });
+
+  it('carries the registering turn on the completion notification', () => {
+    const { r, completion, bg } = withCompletion();
+    const entry = promptIdContext.run('turn-42', () => bg('wf_turn'));
+
+    r.complete(entry.runId, 'done', 1_000);
+
+    expect(entry.sourceTurnId).toBe('turn-42');
+    expect(completion.mock.calls[0][2].sourceTurnId).toBe('turn-42');
+  });
+
+  it('leaves the registering turn unattributed without turn context', () => {
+    const { r, completion, bg } = withCompletion();
+    const entry = bg('wf_turn');
+
+    r.complete(entry.runId, 'done', 1_000);
+
+    expect(entry.sourceTurnId).toBeUndefined();
+    expect(completion.mock.calls[0][2].sourceTurnId).toBeUndefined();
+  });
+
+  // Mirrors the monitor case: in a daemon/ACP session the invocation store and
+  // `promptIdContext` hold different ids, and the consumer matches the former.
+  it('prefers the invocation-context turn over the prompt-id context', () => {
+    const { r, completion, bg } = withCompletion();
+    const entry = promptIdContext.run('local-turn', () =>
+      runWithInvocationContext(
+        { version: 1, sessionId: 's', promptId: 'invocation-turn' },
+        () => bg('wf_turn'),
+      ),
+    );
+
+    r.complete(entry.runId, 'done', 1_000);
+
+    expect(entry.sourceTurnId).toBe('invocation-turn');
+    expect(completion.mock.calls[0][2].sourceTurnId).toBe('invocation-turn');
+  });
+
+  it('keeps a caller-supplied turn instead of re-attributing it', () => {
+    const entry = promptIdContext.run(
+      'ctx-turn',
+      () => registered('wf_turn', { sourceTurnId: 'caller-turn' }).entry,
+    );
+
+    expect(entry.sourceTurnId).toBe('caller-turn');
   });
 
   it('errors thrown by the notification callback do not break the call site', () => {

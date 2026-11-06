@@ -20,15 +20,33 @@ export class GroupGate {
   private policy: GroupPolicy;
   private groups: Record<string, GroupConfig>;
   private pairingStore: PairingStore | null;
+  private normalizeGroupId: (groupId: string) => string;
 
   constructor(
     policy: GroupPolicy = 'disabled',
     groups: Record<string, GroupConfig> = {},
     pairingStore?: PairingStore,
+    normalizeGroupId: (groupId: string) => string = (groupId) => groupId,
   ) {
     this.policy = policy;
     this.groups = groups;
     this.pairingStore = pairingStore ?? null;
+    this.normalizeGroupId = normalizeGroupId;
+  }
+
+  /**
+   * Configured groups are matched verbatim first. Platforms whose group IDs
+   * are case-insensitive (GitHub repository full names) also match a
+   * normalized key, so the operator's spelling admits the canonical ID the
+   * platform reports.
+   */
+  private groupConfigFor(groupId: string): GroupConfig | undefined {
+    if (Object.hasOwn(this.groups, groupId)) return this.groups[groupId];
+    const normalized = this.normalizeGroupId(groupId);
+    for (const [key, group] of Object.entries(this.groups)) {
+      if (this.normalizeGroupId(key) === normalized) return group;
+    }
+    return undefined;
   }
 
   /**
@@ -61,7 +79,7 @@ export class GroupGate {
     if (this.policy === 'allowlist') {
       // In allowlist mode, "*" is only a default config — not a wildcard allow.
       // The group must be explicitly listed by ID.
-      if (!this.groups[envelope.chatId]) {
+      if (!this.groupConfigFor(envelope.chatId)) {
         return { allowed: false, reason: 'not_allowlisted' };
       }
     }
@@ -90,7 +108,7 @@ export class GroupGate {
     }
 
     const requireMention =
-      this.groups[envelope.chatId]?.requireMention ??
+      this.groupConfigFor(envelope.chatId)?.requireMention ??
       this.groups['*']?.requireMention ??
       true;
 
