@@ -13,6 +13,7 @@ import {
 import type { Content } from '@google/genai';
 import {
   runNonInteractiveStreamJson,
+  SDK_INITIALIZE_ABANDONED_SHUTDOWN_TIMEOUT_MS,
   SDK_INITIALIZE_REPLY_TIMEOUT_MS,
 } from './session.js';
 import type {
@@ -413,6 +414,13 @@ describe('runNonInteractiveStreamJson', () => {
       releaseInitialization = resolve;
     });
     config = createConfig({ initialize: vi.fn(() => initialization) });
+    // The reply is a readiness signal for the session, so MCP discovery -- the
+    // slow half of initialization -- must hold it back too.
+    let releaseMcpReady!: () => void;
+    const mcpReady = new Promise<void>((resolve) => {
+      releaseMcpReady = resolve;
+    });
+    config.waitForMcpReady = vi.fn(() => mcpReady);
     mockDispatcher.dispatch.mockResolvedValue({ ready: true });
 
     mockInputReader.read = async function* () {
@@ -421,11 +429,15 @@ describe('runNonInteractiveStreamJson', () => {
 
     const run = runNonInteractiveStreamJson(config, '');
     await vi.waitFor(() => expect(mockDispatcher.dispatch).toHaveBeenCalled());
-    // The reply is the readiness signal: it must not go out while config
-    // initialization (and its extension-store load) is still running.
-    expect(mockDispatcher.sendSuccess).not.toHaveBeenCalled();
 
     releaseInitialization();
+    await vi.waitFor(() =>
+      expect(config.waitForMcpReady).toHaveBeenCalledOnce(),
+    );
+    await Promise.resolve();
+    expect(mockDispatcher.sendSuccess).not.toHaveBeenCalled();
+
+    releaseMcpReady();
     await run;
 
     expect(mockDispatcher.sendSuccess).toHaveBeenCalledWith('req-1', {
@@ -433,7 +445,57 @@ describe('runNonInteractiveStreamJson', () => {
     });
   });
 
+  it('keeps the initialize reply bound below the SDKs control-request budget', () => {
+    // A literal, not the imported constant: the SDKs abandon an initialize
+    // control request after 60 s, and any value at or above that would leave
+    // the deferred reply addressed to a request_id the client already dropped.
+    expect(SDK_INITIALIZE_REPLY_TIMEOUT_MS).toBeLessThan(60_000);
+  });
+
   it('replies to initialize with an error when config initialization outlasts the client budget', async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseInitialization!: () => void;
+      const initialization = new Promise<void>((resolve) => {
+        releaseInitialization = resolve;
+      });
+      config = createConfig({ initialize: vi.fn(() => initialization) });
+      mockDispatcher.dispatch.mockResolvedValue({ ready: true });
+
+      const initRequest = createControlRequest('initialize');
+      const userMessage = createUserMessage('after the deadline');
+      mockInputReader.read = async function* () {
+        yield initRequest;
+        yield userMessage;
+      };
+
+      const run = runNonInteractiveStreamJson(config, '');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(config.initialize).toHaveBeenCalledOnce();
+      expect(mockDispatcher.sendSuccess).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(SDK_INITIALIZE_REPLY_TIMEOUT_MS);
+
+      expect(mockDispatcher.sendSuccess).not.toHaveBeenCalled();
+      expect(mockDispatcher.sendError).toHaveBeenCalledWith(
+        'req-1',
+        `Initialization did not finish within ${
+          SDK_INITIALIZE_REPLY_TIMEOUT_MS / 1000
+        }s`,
+      );
+
+      // Abandoning the reply must not abandon the initialization: a slow init
+      // still becomes ready, and prompts queued behind it are served normally.
+      releaseInitialization();
+      await run;
+
+      expect(runNonInteractiveMock).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not leave shutdown waiting on an initialization that never settles', async () => {
     vi.useFakeTimers();
     try {
       config = createConfig({
@@ -446,20 +508,13 @@ describe('runNonInteractiveStreamJson', () => {
       };
 
       const run = runNonInteractiveStreamJson(config, '');
-      await vi.advanceTimersByTimeAsync(0);
-      expect(config.initialize).toHaveBeenCalledOnce();
-      expect(mockDispatcher.sendSuccess).not.toHaveBeenCalled();
-
       await vi.advanceTimersByTimeAsync(SDK_INITIALIZE_REPLY_TIMEOUT_MS);
+      await vi.advanceTimersByTimeAsync(
+        SDK_INITIALIZE_ABANDONED_SHUTDOWN_TIMEOUT_MS,
+      );
       await run;
 
-      expect(mockDispatcher.sendSuccess).not.toHaveBeenCalled();
-      expect(mockDispatcher.sendError).toHaveBeenCalledWith(
-        'req-1',
-        `Initialization did not finish within ${
-          SDK_INITIALIZE_REPLY_TIMEOUT_MS / 1000
-        }s`,
-      );
+      expect(mockDispatcher.sendError).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
     }

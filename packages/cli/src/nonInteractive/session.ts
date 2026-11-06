@@ -65,6 +65,12 @@ const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 // initializing.
 export const SDK_INITIALIZE_REPLY_TIMEOUT_MS = 55_000;
 
+// An initialization that outlived its reply keeps running -- it may still
+// finish and serve prompts -- so failing the session there would leave a
+// permanently rejected readiness gate. All later callers must settle, and a
+// process-exit path must not hang while it is still false.
+export const SDK_INITIALIZE_ABANDONED_SHUTDOWN_TIMEOUT_MS = 5_000;
+
 interface MonitorStartedQueueItem {
   task_id: string;
   tool_use_id?: string;
@@ -114,6 +120,8 @@ class Session {
   private initializationPromise: Promise<void> | null = null;
   private initializationResolve: (() => void) | null = null;
   private initializationReject: ((error: Error) => void) | null = null;
+  // Set while an initialization that outlived its reply is still running.
+  private abandonedInitialization: Promise<void> | null = null;
 
   constructor(
     config: Config,
@@ -418,39 +426,62 @@ class Session {
   }
 
   /**
-   * Awaits config initialization, but gives up before the SDK clients abandon
-   * the initialize request. The deferred reply is a readiness signal, so its
-   * bound is what stops a slow init from leaving the success frame addressed
-   * to a request_id the client has already dropped.
+   * Awaits config initialization, but gives up replying before the SDK clients
+   * abandon the initialize request. The deferred reply is a readiness signal,
+   * so its bound is what stops a slow init from leaving the success frame
+   * addressed to a request_id the client has already dropped.
+   *
+   * Giving up the reply does not abandon the initialization: it keeps running
+   * and settles readiness itself, so a session whose config legitimately needs
+   * longer still serves the prompts queued after it.
    */
   private async awaitConfigInitializationWithReplyTimeout(
     requestId: string,
     options: ConfigInitializeOptions,
   ): Promise<boolean> {
+    const initPromise = this.ensureConfigInitialized(options).then(
+      () => {
+        this.completeInitialization();
+        return { ok: true as const };
+      },
+      (error: unknown) => {
+        const failure =
+          error instanceof Error ? error : new Error(String(error));
+        this.failInitialization(failure);
+        return { ok: false as const, failure };
+      },
+    );
+    this.abandonedInitialization = initPromise.then(() => undefined);
+
+    let abandoned = false;
     let timeoutId: NodeJS.Timeout | undefined;
     const timedOut = new Promise<false>((resolve) => {
-      timeoutId = setTimeout(
-        () => resolve(false),
-        SDK_INITIALIZE_REPLY_TIMEOUT_MS,
-      );
+      timeoutId = setTimeout(() => {
+        abandoned = true;
+        resolve(false);
+      }, SDK_INITIALIZE_REPLY_TIMEOUT_MS);
     });
     try {
-      const initialized = await Promise.race([
-        this.ensureConfigInitialized(options).then(() => true),
-        timedOut,
-      ]);
-      if (initialized) {
+      const outcome = await Promise.race([initPromise, timedOut]);
+      if (outcome !== false) {
+        if (!outcome.ok) {
+          throw outcome.failure;
+        }
         return true;
       }
     } finally {
       clearTimeout(timeoutId);
+      if (!abandoned) {
+        // The init settled with the reply still on time, so shutdown has
+        // nothing extra to wait for.
+        this.abandonedInitialization = null;
+      }
     }
 
     const message = `Initialization did not finish within ${
       SDK_INITIALIZE_REPLY_TIMEOUT_MS / 1000
     }s`;
     this.dispatcher?.sendError(requestId, message);
-    this.failInitialization(new Error(message));
     return false;
   }
 
@@ -485,9 +516,6 @@ class Session {
       if (initResponse) {
         this.dispatcher?.sendSuccess(request.request_id, initResponse);
       }
-
-      // Initialization complete!
-      this.completeInitialization();
     } catch (error) {
       // The deferred initialize reply would otherwise never arrive.
       this.dispatcher?.sendError(
@@ -963,14 +991,37 @@ class Session {
    * Wait for all pending work to complete before shutdown
    */
   private async waitForAllPendingWork(): Promise<void> {
-    // 1. Wait for initialization to complete (or fail)
+    // 1. Wait for initialization to complete (or fail). An initialization that
+    // outlived its SDK reply may never settle, so it gets its own bound:
+    // shutdown must not hang on work the client was already told about.
+    let abandonedTimeoutId: NodeJS.Timeout | undefined;
     try {
-      await this.waitForInitialization();
+      const waitForInitialization = this.waitForInitialization().then(
+        () => true,
+      );
+      const initialized = await (this.abandonedInitialization
+        ? Promise.race([
+            waitForInitialization,
+            new Promise<boolean>((resolve) => {
+              abandonedTimeoutId = setTimeout(
+                () => resolve(false),
+                SDK_INITIALIZE_ABANDONED_SHUTDOWN_TIMEOUT_MS,
+              );
+            }),
+          ])
+        : waitForInitialization);
+      if (!initialized) {
+        debugLogger.warn(
+          '[Session] Initialization did not settle before shutdown; continuing',
+        );
+      }
     } catch (error) {
       debugLogger.error(
         '[Session] Initialization error during shutdown:',
         error,
       );
+    } finally {
+      clearTimeout(abandonedTimeoutId);
     }
 
     // 2. Wait for all control request handlers using dispatcher's tracking
