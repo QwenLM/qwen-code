@@ -64,9 +64,9 @@ export interface ManagedAgentWebShellProps
 }
 
 function shellErrorFallback(language: WebShellLanguage) {
-  return (error: Error, reset: () => void) => (
-    <RootErrorFallback error={error} onRetry={reset} language={language} />
-  );
+  return function ShellErrorFallback(error: Error, reset: () => void) {
+    return <RootErrorFallback error={error} onRetry={reset} language={language} />;
+  };
 }
 
 /**

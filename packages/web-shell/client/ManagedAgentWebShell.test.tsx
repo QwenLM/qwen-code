@@ -63,7 +63,7 @@ describe('ManagedAgentWebShell', () => {
   it('fails loudly when neither a provider nor a base URL is supplied', async () => {
     const errors: unknown[] = [];
     const spy = vi.spyOn(console, 'error').mockImplementation((...args) => {
-      errors.push(args[0]);
+      errors.push(...args);
     });
     try {
       await act(async () => {
@@ -75,7 +75,10 @@ describe('ManagedAgentWebShell', () => {
       spy.mockRestore();
     }
     // The built-in Java provider must not silently resolve requests against
-    // `<origin>/undefined`.
+    // `<origin>/undefined`. The guard throws inside the shell, so its own
+    // boundary reports that through the fallback instead of a blank container
+    // and still logs the guard's message.
+    expect(container.textContent).toContain('Something went wrong');
     expect(
       errors.some(
         (error) =>
@@ -100,7 +103,7 @@ describe('ManagedAgentWebShell', () => {
     // against `<origin>/null`.
     const errors: unknown[] = [];
     const spy = vi.spyOn(console, 'error').mockImplementation((...args) => {
-      errors.push(args[0]);
+      errors.push(...args);
     });
     try {
       await act(async () => {
@@ -113,6 +116,7 @@ describe('ManagedAgentWebShell', () => {
     } finally {
       spy.mockRestore();
     }
+    expect(container.textContent).toContain('Something went wrong');
     expect(
       errors.some(
         (error) =>
