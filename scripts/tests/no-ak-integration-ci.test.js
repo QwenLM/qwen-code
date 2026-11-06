@@ -466,8 +466,14 @@ describe('no-AK integration CI wiring', () => {
     expect(
       resultJob.split('\n').find((line) => line.startsWith('    if:')),
     ).toBe(gateJob.split('\n').find((line) => line.startsWith('    if:')));
-    // Same runner routing as the Ubuntu gate, never a hard-coded pool.
-    expect(gateJob).toContain('needs.classify_pr.outputs.ubuntu_runner');
+    // Same trust class as lint (PR code on the pool, zero secrets by
+    // construction — 2026-11-02 extension of the 2026-10-31 decision),
+    // never a hard-coded pool. Pin the runs-on line itself: the timeout line
+    // also mentions lint_runner, so a bare substring stays green under a
+    // runs-on-only revert.
+    expect(gateJob).toContain(
+      "runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner",
+    );
     const jobIf = gateJob
       .split('\n')
       .find((line) => line.startsWith('    if:'));
@@ -626,19 +632,22 @@ describe('no-AK integration CI wiring', () => {
     expect(gateStep.indexOf(integrationTypecheckCommand)).toBeLessThan(
       gateStep.indexOf(`npm run ${NO_AK_SCRIPT}`),
     );
+    // The job's first step publishes the run-unique HOME via GITHUB_ENV
+    // (2026-11-02 round-2: fork code starts at checkout/install, not at the
+    // gate — HOME/USERPROFILE are job-wide, not gate-scoped); the gate keeps
+    // QWEN_HOME + the key scrub.
     expect(gateStep).toContain(
-      "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'",
+      "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen'",
     );
     expect(gateStep).toContain('timeout-minutes: 20');
-    expect(gateStep).toContain(
-      "\n          HOME: '${{ runner.temp }}/qwen-no-ak-home'",
-    );
-    expect(gateStep).toContain(
-      "\n          USERPROFILE: '${{ runner.temp }}/qwen-no-ak-home'",
-    );
+    // HOME/USERPROFILE are job-wide now (first-step GITHUB_ENV), so the
+    // gate must not re-pin them step-locally.
+    expect(gateStep).not.toContain('\n          HOME: ');
+    expect(gateStep).not.toContain('\n          USERPROFILE: ');
     for (const key of [
       'API_KEY',
       'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
       'ANTHROPIC_BASE_URL',
       'ANTHROPIC_MODEL',
       'BAILIAN_CODING_PLAN_API_KEY',

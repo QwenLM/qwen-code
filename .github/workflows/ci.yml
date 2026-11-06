@@ -2957,21 +2957,46 @@ jobs:
     # A draft pull request skips it (and the browser smoke): it cannot merge,
     # and `ready_for_review` starts the full run that gates the merge.
     if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && !github.event.pull_request.draft }}"
-    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    # Reads lint_runner, NOT ubuntu_runner: like lint_and_static, this lane
+    # executes PR code on the pool for every pull request — accepted under the
+    # same 2026-10-31 decision, and it carries NO secrets by construction
+    # (every model key is emptied at the integration step; the job's only
+    # token is the read-only checkout grant). The lane publishes a run-unique
+    # HOME from its first step (lint's shape) and empties every model key at
+    # the gate, so the pool exposure is the class already accepted for lint.
+    # test and integration_cli keep the association-gated ubuntu_runner.
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'') }}'
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
     # Dependency installation alone can exceed 30 minutes on a contended shared
     # ECS host, before the separately bounded 20-minute integration step starts.
-    # Same self-hosted scoping as `test` (this lane keeps the association-gated
-    # ubuntu_runner, unlike lint_and_static): hosted fallback routing
-    # keeps the pre-contention ceiling, and the ARM64 fleet — which carries
-    # no `ecs-qwen` label — gets the contended-pool allowance it runs under.
-    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''60'' || ''30'') }}'
+    # Same self-hosted scoping as lint_and_static (60/30 like its 90/45):
+    # hosted fallback routing keeps the pre-contention ceiling, and the ARM64
+    # fleet — which carries no `ecs-qwen` label — gets the contended-pool
+    # allowance it runs under.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''60'' || ''30'') }}'
     permissions:
       contents: 'read'
     steps:
+      # This lane's fork code starts at the local checkout action and the
+      # install (lifecycle scripts AND scripts/prepare.js — build+bundle),
+      # not at the gate step, so isolate HOME from the FIRST step like
+      # lint_and_static: publish a run-unique HOME via GITHUB_ENV (job env
+      # cannot read the runner context), keep the content-verified linter
+      # cache shared, and keep COREPACK_HOME inside the per-run home
+      # (corepack does not re-verify entries on cache hit — a shared home is
+      # a cross-job poisoning channel). The gate step's key scrub stays.
+      - name: 'Create isolated HOME'
+        run: |-
+          home="${RUNNER_TEMP}/qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf -- "$home"
+          mkdir -p "$home" "${RUNNER_TOOL_CACHE}/qwen-ci-cache"
+          printf 'HOME=%s\nUSERPROFILE=%s\n' "$home" "$home" >> "${GITHUB_ENV}"
+          printf 'XDG_CACHE_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" >> "${GITHUB_ENV}"
+          printf 'COREPACK_HOME=%s\n' "${home}/.cache/node/corepack" >> "${GITHUB_ENV}"
+
       - name: 'Restore workspace ownership'
         run: |-
           set -uo pipefail
@@ -3122,13 +3147,16 @@ jobs:
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
 
-      - name: 'Configure persistent npm cache (self-hosted)'
+      # HOME is per-run (isolated above), so this cache dies with the job —
+      # the name must not promise persistence. The cold install is the
+      # accepted cost (review round-3); a shared pnpm store is a follow-up.
+      - name: 'Configure per-run npm cache (self-hosted)'
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: |-
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using npm cache at ${cache_dir}"
+          echo "Using per-run npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Disk floor gate (self-hosted)'
@@ -3180,12 +3208,17 @@ jobs:
       - name: 'Run required no-AK integration gate'
         if: "${{ needs.test_build.result == 'success' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         timeout-minutes: 20
+        # HOME/USERPROFILE come from the first step's GITHUB_ENV publication
+        # (run-unique, cleared before use). QWEN_HOME rides the same home.
+        # The key scrub below is the zero-secrets contract: pinned by the
+        # routing battery (every non-path env value must be '').
         env:
-          HOME: '${{ runner.temp }}/qwen-no-ak-home'
-          USERPROFILE: '${{ runner.temp }}/qwen-no-ak-home'
-          QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'
+          QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen'
           API_KEY: ''
           ANTHROPIC_API_KEY: ''
+          # The SDK auth resolver back-fills this from env; a runner-account
+          # residue would survive into fork PR code (review round-3).
+          ANTHROPIC_AUTH_TOKEN: ''
           ANTHROPIC_BASE_URL: ''
           ANTHROPIC_MODEL: ''
           BAILIAN_CODING_PLAN_API_KEY: ''
@@ -3213,11 +3246,17 @@ jobs:
           QWENCLOUD_TOKEN_PLAN_API_KEY: ''
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
-          mkdir -p "${HOME}" "${QWEN_HOME}"
+          mkdir -p "${QWEN_HOME}"
           if [ "${{ matrix.shard }}" = 1 ]; then
             npm run typecheck:integration
           fi
           npm run test:integration:no-ak:sandbox:none -- --shard=${{ matrix.shard }}/3
+
+      # Reclaim the run-unique HOME (constructed path, never $HOME) so it
+      # does not accumulate in RUNNER_TEMP on this persistent pool.
+      - name: 'Clean isolated HOME'
+        if: '${{ always() }}'
+        run: 'rm -rf -- "${RUNNER_TEMP}/qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'
 
   # The required check. It passes only when the build and every shard pass,
   # so a failed test_build (whose shards skip their steps) still fails it.
@@ -3228,6 +3267,9 @@ jobs:
       - 'test_build'
       - 'integration_no_ak'
     if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && !github.event.pull_request.draft }}"
+    # ubuntu_runner, not the shards' lint_runner: the routing battery keeps
+    # the fork-admitting route to the lanes that isolate HOME, and this job
+    # checks out nothing.
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
