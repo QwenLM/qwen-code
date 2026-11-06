@@ -461,9 +461,13 @@ export function AgentViewRoster({
         {rows.length === 0 ? (
           <Text dimColor>No sessions</Text>
         ) : (
-          getRosterSections(rows, groupMode).map((section) => (
-            <Box key={section.key} flexDirection="column">
-              <Text dimColor>{section.label}</Text>
+          getRosterSections(rows, groupMode).map((section, sectionIndex) => (
+            <Box
+              key={section.key}
+              flexDirection="column"
+              marginTop={sectionIndex === 0 ? 0 : 1}
+            >
+              <Text bold>{section.label}</Text>
               {section.rows.map(({ row, index }) => (
                 <RosterRow
                   key={row.sessionId}
@@ -636,7 +640,9 @@ function AgentViewHeader({
         workingDirectory={cwd}
       />
       <Tips />
-      <Text dimColor>{summary}</Text>
+      <Box marginTop={1}>
+        <Text dimColor>{summary}</Text>
+      </Box>
     </Box>
   );
 }
