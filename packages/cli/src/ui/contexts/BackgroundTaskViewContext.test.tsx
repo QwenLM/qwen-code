@@ -252,6 +252,42 @@ describe('BackgroundTaskViewProvider approval surfacing', () => {
     expect(result.current.state.selectedIndex).toBe(1);
   });
 
+  it('leaves an open detail view alone when a new approval parks', () => {
+    // R2-3: pin the `dialogMode !== 'closed'` guard. Without it, any
+    // registry refresh while the user is reading the dialog yanks them
+    // back to the list and moves the selection out from under their next
+    // keypress. Deleting the guard must turn this case red.
+    let workflows: WorkflowTask[] = [];
+    const { config, fireApprovalRequest } = makeConfig(() => workflows);
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <BackgroundTaskViewProvider config={config}>
+        {children}
+      </BackgroundTaskViewProvider>
+    );
+    const { result } = renderHook(
+      () => ({
+        state: useBackgroundTaskViewState(),
+        actions: useBackgroundTaskViewActions(),
+      }),
+      { wrapper },
+    );
+
+    // The user opens the dialog themselves and reads the agent's detail.
+    act(() => result.current.actions.openDialog());
+    act(() => result.current.actions.enterDetail());
+    expect(result.current.state.dialogMode).toBe('detail');
+    expect(result.current.state.selectedIndex).toBe(0);
+
+    // A workflow parks an approval mid-read: the refresh must not steal
+    // the view or the selection.
+    act(() => {
+      workflows = [workflowEntry(['wfap-open'])];
+      fireApprovalRequest();
+    });
+    expect(result.current.state.dialogMode).toBe('detail');
+    expect(result.current.state.selectedIndex).toBe(0);
+  });
+
   it('exposes the state and actions contexts to consumers', () => {
     const { config } = makeConfig(() => []);
     const wrapper = ({ children }: { children: React.ReactNode }) => (
