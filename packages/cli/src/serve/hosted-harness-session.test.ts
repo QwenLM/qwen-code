@@ -71,7 +71,10 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { ResourceToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
-import type { ManagedSessionEvent } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import type {
+  ManagedSessionDurableRef,
+  ManagedSessionEvent,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   assertManagedSessionDurableRef,
   ManagedSessionAppendUnsettledError,
@@ -18051,6 +18054,105 @@ describe('Hosted Harness no-tool session', () => {
     });
     expect(state.model).not.toHaveBeenCalled();
   });
+
+  it.each(['invalid todo body', 'missing todo ancestor'])(
+    'refuses a workspace cold load with %s',
+    async (fault) => {
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+      const server = await app(true);
+      const toolProfile = 'hosted-workspace-shell/1';
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile,
+      });
+      expect(created.status).toBe(200);
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .expect(204);
+      const sessionKey = {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      };
+      const managed = await openManagedSession({
+        runtimeBaseDir: state.root,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        sessionId: SESSION_ID,
+        sessionKey,
+        cwd: state.root,
+        version: 'hosted-harness/1',
+        workerId: BOOT_ID,
+        activationLeaseDurationMs: 60_000,
+      });
+      let missingRef: ManagedSessionDurableRef | undefined;
+      try {
+        const content = {
+          todos:
+            fault === 'invalid todo body'
+              ? [{ id: 'a' }]
+              : [{ id: 'a', content: 'Keep this task', status: 'pending' }],
+        };
+        const commitTodo = () =>
+          managed.authority.commitDomainRecord(
+            {
+              operation: 'writeHostedTodos',
+              commandId: randomUUID(),
+              sessionKey,
+              contentDigest: createHash('sha256')
+                .update(JSON.stringify(content))
+                .digest('hex'),
+            },
+            { domain: 'todo_state', content },
+            { class: 'trusted_entry' },
+          );
+        const first = await commitTodo();
+        if (fault === 'missing todo ancestor') {
+          missingRef = { ...first.recordRef, resourceId: randomUUID() };
+          const publish = managed.resources.publish.bind(managed.resources);
+          const damaged = vi
+            .spyOn(managed.resources, 'publish')
+            .mockImplementation((kind, bytes) =>
+              publish(
+                kind,
+                kind === 'managed-todo_state'
+                  ? Buffer.from(
+                      JSON.stringify({
+                        ...JSON.parse(bytes.toString('utf8')),
+                        previousRecordRef: missingRef,
+                      }),
+                    )
+                  : bytes,
+              ),
+            );
+          await commitTodo();
+          damaged.mockRestore();
+        }
+      } finally {
+        await managed.close();
+      }
+      const reads = vi.spyOn(
+        LocalManagedSessionResourceStore.prototype,
+        'read',
+      );
+      const log = vi
+        .spyOn(stdio, 'writeStderrLineSafe')
+        .mockImplementation(() => {});
+      const refused = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store(), toolProfile });
+      expect(refused.status).toBe(409);
+      expect(refused.body.code).toBe('hosted_turn_recovery_required');
+      expect(refused.body.reason).toBe('restore_verification_failed');
+      if (fault === 'invalid todo body')
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining('Stored Hosted Todo state is invalid'),
+        );
+      else expect(reads).toHaveBeenCalledWith(missingRef);
+      expect(state.model).not.toHaveBeenCalled();
+    },
+  );
 
   it('refuses a workspace cold load before another input when a committed resource is missing', async () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();

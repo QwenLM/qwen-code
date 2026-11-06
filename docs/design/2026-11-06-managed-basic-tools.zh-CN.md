@@ -22,7 +22,11 @@
 
 不新增 profile 版本、默认选择逻辑、能力协商或 Java/SDK 适配。创建和加载使用同一套当前工具声明，不再选择旧工具集合。既有回执幂等性和已持久化的 Session 身份仍是正确性要求。文件搜索、带待办的文件 profile 和只读子代理保留各自现有用途。SSH 继续执行 foreground-only 限制；glob 走现有原生文件通路，待办走 Session journal。
 
+普通文件会话有意预批准原生 `glob`，与现有搜索及 Shell profile 一致。未声明的工具在审批前拒绝。MCP 工具名称仍隔离为 `mcp_<digest>` 别名，即使服务端将工具命名为 `glob`，也继续遵守既有审批要求。
+
 普通 Hosted 的 `read_file` 声明（包含只读子代理）开放已有可选参数 `pages`。这是对现有执行能力的增量声明，不增加工具名称。Resident/CSI 声明保持不变。Core 继续负责页码校验和提取：页码从 1 开始，支持单页与闭区间，每次最多选择 20 页。不改变结果预算。PDF 结果过大时提示缩小 `pages` 范围；文本继续提示使用 `offset`/`limit`。
+
+声明引用 Core 的页数限制常量，确保提示与执行保持一致。
 
 恢复必须与当前工具声明完全匹配。旧 schema 保存的待恢复读取会被拒绝，不再通过移除 `pages` 回退匹配。含不兼容待处理工作的开发会话需要重新创建。
 
@@ -41,11 +45,11 @@ Workspace 恢复校验 `todo_state` 域并沿已保存的记录链读取，确�
 1. 普通 `files/1` 声明和执行 `glob`；`shell/1` 声明 `todo_write`。
 2. 创建和加载使用当前声明；恢复拒绝过时的读取 schema，不包含历史工具集合或 schema 回退。
 3. 既有审批、Plan、生命周期、扩展和子代理继续使用当前 profile 契约。Resident/CSI 与 SSH 执行限制继续生效。
-4. Shell 待办在会话重新加载后保留，沿用现有校验与事件投影。Plan 模式不声明待办写入。
+4. Shell 待办在会话重新加载后保留，沿用现有校验与事件投影。非法待办内容及缺失的历史引用会在模型调用前拒绝加载。Plan 模式不声明待办写入。
 5. Hosted 声明及转发请求包含 `pages`。对真实三页 PDF 读取第 2 页，只返回该页标记。错误及超量范围由 Core 校验拒绝；普通文本行范围读取继续有效。CSI 不声明 `pages`。
 6. 执行聚焦 TypeScript 测试、构建、类型检查，以及使用本地确定性模型的打包 Harness 进程测试。在 `.qwen/e2e-tests/managed-basic-tools.md` 记录基线及本地验证结果。
 
-Java/SDK 代码无改动。完整 CI、Linux 及已部署 Hosted 验收，除非实际执行，否则属于独立证据。Fixture 成功不代表真实模型或生产验收。
+Java/SDK 生产代码无改动；Hosted Java fixture 的精确工具集合会同步普通声明。由于累计本地 Java 验证预算已耗尽，该 fixture 的执行待 CI 完成。完整 CI、Linux 及已部署 Hosted 验收，除非实际执行，否则属于独立证据。Fixture 成功不代表真实模型或生产验收。
 
 ## 风险与开放问题
 

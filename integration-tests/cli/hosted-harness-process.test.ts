@@ -359,6 +359,9 @@ describe(
       expect(JSON.stringify(model!.requests[2].body.messages)).toContain(
         '# Current Session todo list',
       );
+      expect(brokerRequests).toEqual(
+        expect.arrayContaining([expect.stringMatching(/\/runtimes:warm$/)]),
+      );
       expect(
         brokerRequests.every(
           (route) =>

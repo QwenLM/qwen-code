@@ -24,6 +24,7 @@ import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runti
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import { PDF_MAX_PAGES_PER_READ } from '@qwen-code/qwen-code-core/utils/pdf.js';
 import {
   createHttpManagedSessionStores,
   ManagedSessionStoreHttpError,
@@ -1916,7 +1917,9 @@ it.each([
     properties: {
       pages: {
         type: ['string', 'null'],
-        description: expect.stringContaining('at most 20 pages'),
+        description: expect.stringContaining(
+          `at most ${PDF_MAX_PAGES_PER_READ} pages`,
+        ),
       },
     },
     required: ['file_path'],
@@ -2171,9 +2174,7 @@ it.each([
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
-// #13905 (item 41): the approval wiring keys on the Session's own profile,
-// not the call's name — a read-profile glob asks nothing under `default`,
-// while an MCP-declared glob still asks.
+// Native glob follows the Session profile; namespaced MCP tools still ask.
 it.each([
   ['hosted-workspace-files/1', 'default'],
   ['hosted-workspace-files/1', 'auto-edit'],
@@ -2227,54 +2228,59 @@ it.each([
     ).toEqual(['glob']);
     await native.consumeResults();
     await native.finish();
-
-    const mcp = {
-      broker,
-      ensureReady: async () => undefined,
-      refresh: async () => undefined,
-      tools: () => [{ name: 'glob', parametersJsonSchema: { type: 'object' } }],
-      toolInput: () => ({ toolName: 'managed_mcp_call', input: {} }),
-    };
-    turn = new HostedWorkspaceToolTurn(
-      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-      session,
-      harness,
-      'prompt',
-      commit,
-      messageFitsInline,
-      undefined,
-      undefined,
-      { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
-      {
-        mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
-      },
-    );
-    const mcpGlobCall = { ...globCall, callId: 'call-glob-mcp' };
-    const running = turn.execute(
-      [mcpGlobCall],
-      [
-        {
-          functionCall: {
-            id: mcpGlobCall.callId,
-            name: mcpGlobCall.name,
-            args: mcpGlobCall.args,
-          },
-        },
-      ],
-      'model',
-      new AbortController().signal,
-    );
-    // The MCP call must ask before dispatching even this name.
-    const requestId = await requested();
-    expect(actionIds()).toEqual([requestId]);
-    expect(broker.execute).toHaveBeenCalledOnce();
-    await resolveHostedAction(session, waiters, requestId, answer('allow'));
-    await running;
-    expect(broker.execute).toHaveBeenCalledTimes(2);
-    await turn.consumeResults();
-    await turn.finish();
   },
 );
+
+it('asks before an MCP glob on the ordinary file profile', async () => {
+  const name = `mcp_${'a'.repeat(32)}`;
+  const mcp = {
+    broker,
+    ensureReady: async () => undefined,
+    refresh: async () => undefined,
+    tools: () => [{ name, parametersJsonSchema: { type: 'object' } }],
+    toolInput: (tool: string) =>
+      tool === name ? { toolName: 'managed_mcp_call', input: {} } : undefined,
+  };
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
+    {
+      profile: 'hosted-workspace-files/1',
+      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    },
+  );
+  const declarations = await turn.declarations(new AbortController().signal);
+  expect(declarations.map((tool) => tool.name)).toEqual(
+    expect.arrayContaining(['glob', name]),
+  );
+  const call = {
+    ...calls[0],
+    callId: 'call-glob-mcp',
+    name,
+    args: { pattern: '**/*.ts' },
+  };
+  const running = turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  expect(actionIds()).toEqual([requestId]);
+  expect(broker.execute).not.toHaveBeenCalled();
+  await resolveHostedAction(session, waiters, requestId, answer('allow'));
+  await running;
+  expect(broker.execute).toHaveBeenCalledOnce();
+  await turn.consumeResults();
+  await turn.finish();
+});
 
 function createSearchTurn(profile = 'hosted-workspace-files/1') {
   return new HostedWorkspaceToolTurn(

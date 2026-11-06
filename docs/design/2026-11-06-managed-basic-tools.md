@@ -38,6 +38,11 @@ The separate file-search, todo-enabled file and read-only child profiles keep
 their existing roles. SSH retains its foreground-only execution limits; glob
 uses the existing native file path and todos use the Session journal.
 
+Native `glob` is intentionally pre-approved on ordinary file sessions, as on
+the existing search and Shell profiles. Undeclared calls are refused before
+approval. MCP tool names remain isolated as `mcp_<digest>` aliases and retain
+their existing approval requirements even when the server calls a tool `glob`.
+
 Normal Hosted `read_file` declarations, including read-only children, expose the
 existing optional `pages` parameter. This additive declaration matches execution
 that already exists; it does not add a tool name. Resident/CSI declarations stay
@@ -45,6 +50,8 @@ unchanged. Core remains responsible for page validation and extraction: page
 numbers start at 1, single pages and closed ranges are supported, and one request
 may select at most 20 pages. Result budgets do not change. Oversized PDF results
 suggest a smaller `pages` range; text results retain `offset`/`limit` guidance.
+The declaration uses Core's page-limit constant so its guidance stays aligned
+with execution.
 
 Recovery requires an exact match with the current tool declaration. A pending
 read saved with an old schema is refused; no fallback removes `pages` for matching.
@@ -78,7 +85,8 @@ tests. Core PDF parsing and existing Java/Web Shell todo projection are reused.
    its current profile contracts. Resident/CSI and SSH execution restrictions
    remain enforced.
 4. Shell todos survive a session reload and retain existing validation and
-   event projection. Plan mode does not advertise todo writes.
+   event projection. Invalid todo bodies and missing ancestors refuse load
+   before a model call. Plan mode does not advertise todo writes.
 5. Hosted declarations and forwarded requests include `pages`. A real three-page
    PDF read of page 2 returns only its marker. Invalid and excessive ranges fail
    through Core validation; ordinary text line reads still work. CSI does not
@@ -87,9 +95,11 @@ tests. Core PDF parsing and existing Java/Web Shell todo projection are reused.
    Harness process fixture with a deterministic local model. Record baseline and
    local verification in `.qwen/e2e-tests/managed-basic-tools.md`.
 
-Java/SDK code is unchanged. Full CI, Linux, and deployed Hosted qualification
-remain separate evidence unless actually run. Fixture success is not real-model
-or production acceptance.
+Java/SDK production code is unchanged; the Hosted Java fixture's exact tool
+sets are updated to match ordinary declarations. Its execution remains pending
+CI because the shared local Java validation budget is exhausted. Full CI, Linux,
+and deployed Hosted qualification remain separate evidence unless actually run.
+Fixture success is not real-model or production acceptance.
 
 ## Risks and open questions
 

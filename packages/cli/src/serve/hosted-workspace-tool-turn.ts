@@ -31,6 +31,7 @@ import {
 } from './hosted-file-history.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { PDF_MAX_PAGES_PER_READ } from '@qwen-code/qwen-code-core/utils/pdf.js';
 import {
   checkHostedGlobPattern,
   HOSTED_GLOB_TOO_COMPLEX,
@@ -619,12 +620,12 @@ const HOSTED_PAGED_READ_FILE_TOOL: FunctionDeclaration = {
       ...HOSTED_READ_FILE_TOOL.parametersJsonSchema.properties,
       pages: {
         type: ['string', 'null'],
-        description:
-          "Optional PDF page range to extract as text, such as '3' or '1-5'. Pages start at 1; at most 20 pages per request. Open-ended ranges are unsupported. Omit or set to null for other files.",
+        description: `Optional PDF page range to extract as text, such as '3' or '1-5'. Pages start at 1; at most ${PDF_MAX_PAGES_PER_READ} pages per request. Open-ended ranges are unsupported. Omit or set to null for other files.`,
       },
     },
   },
 };
+// Resident/CSI keeps this restricted schema; ordinary reads use the paged one.
 export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
   HOSTED_READ_FILE_TOOL,
   {
