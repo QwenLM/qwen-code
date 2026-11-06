@@ -202,11 +202,29 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
 }
 
 function hasPosixBracketExpression(pattern: string): boolean {
-  // Any `[:`, `[.` or `[=` opens a POSIX character class, collating symbol or
-  // equivalence class. Matching only the self-contained `[[:alpha:]]` form let
-  // negated and mixed expressions such as `[^[:space:]]` or `[[:alpha:]abc]`
-  // through, and the simulation then disagreed with sed on them.
-  return /\[[:.=]/u.test(pattern);
+  // A character class, collating symbol or equivalence class opens with `[:`,
+  // `[.` or `[=` only *inside* a bracket expression (`[[:alpha:]]`, `[[.ch.]]`,
+  // `[[=a=]]`). Matching the byte sequence anywhere also rejected plain classes
+  // such as `[.]`, a common literal-dot idiom the translator handles correctly.
+  let inBracketExpression = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === '\\') {
+      i++;
+      continue;
+    }
+    if (char === '[') {
+      if (inBracketExpression && /[:.=]/u.test(pattern[i + 1] ?? '')) {
+        return true;
+      }
+      inBracketExpression = true;
+      continue;
+    }
+    if (char === ']') {
+      inBracketExpression = false;
+    }
+  }
+  return false;
 }
 
 /**

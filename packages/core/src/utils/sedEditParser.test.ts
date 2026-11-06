@@ -248,6 +248,15 @@ describe('sedEditParser', () => {
     expect(parseSedEditCommand("sed -i 's/[[=a=]]/X/g' file.txt")).toBeNull();
   });
 
+  it('keeps plain bracket classes whose first member is `:`, `.` or `=`', () => {
+    // Not POSIX constructs: the `:`/`.`/`=` is a literal class member, and the
+    // translator handles them exactly like sed.
+    expect(parseSedEditCommand("sed -i 's/[.]/X/g' f.txt")).not.toBeNull();
+    expect(parseSedEditCommand("sed -i 's/[=]/X/g' f.txt")).not.toBeNull();
+    expect(parseSedEditCommand("sed -i 's/[:]/X/g' f.txt")).not.toBeNull();
+    expect(applySed("sed -i 's/[.]$//' f.txt", 'ab.\n')).toBe('ab\n');
+  });
+
   it('rejects sed escapes that diverge in JavaScript regexes', () => {
     expect(parseSedEditCommand("sed -i 's/\\d/X/g' file.txt")).toBeNull();
     expect(parseSedEditCommand("sed -i 's/\\</X/g' file.txt")).toBeNull();
