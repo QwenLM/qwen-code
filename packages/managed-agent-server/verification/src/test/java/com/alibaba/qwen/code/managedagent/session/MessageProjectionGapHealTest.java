@@ -360,7 +360,7 @@ class MessageProjectionGapHealTest {
         // the gap are still materialized, not merely skipped over.
         jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id,"
                         + " sequence_id, event_id, turn_id, event_type,"
-                        + " data_json, terminal, source_key, gmt_create,"
+                        + " data_json, is_terminal, source_key, gmt_create,"
                         + " schema_version, projection_version, item_id,"
                         + " content_part_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
                         + " ?, ?, ?, ?, ?, ?)",
@@ -383,7 +383,7 @@ class MessageProjectionGapHealTest {
         jdbc = new ManagedSchemaJdbcTemplate(dataSource);
         transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), new Clock() {
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), new Clock() {
             @Override
             public ZoneId getZone() {
                 return ZoneOffset.UTC;
@@ -398,6 +398,6 @@ class MessageProjectionGapHealTest {
             public Instant instant() {
                 return Instant.ofEpochMilli(now.get());
             }
-        }, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        }, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 }

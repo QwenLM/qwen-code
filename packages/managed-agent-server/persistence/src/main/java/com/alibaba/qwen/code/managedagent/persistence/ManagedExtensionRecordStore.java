@@ -1643,6 +1643,13 @@ public class ManagedExtensionRecordStore
             new AutomationLedgerStore(jdbc).projectSchedule(tenantId, workspaceId,
                     sessionId, revision, record, committedAt);
         }
+        if (domain.equals("child_run") && "consumed".equals(deliveryState)) {
+            // The relay may have classified its ledger row between the
+            // acceptance and this consuming revision; the parent's commit
+            // carries the later fact and corrects the mirror with it.
+            new ChildResultRelayStore(jdbc).markConsumed(tenantId, sessionId,
+                    recordId, committedAt);
+        }
         jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ?"
                         + " AND owner_kind = 'SESSION_RECORD' AND owner_key = ?", scopeKey, recordKey);
         jdbc.update(
@@ -2149,9 +2156,9 @@ public class ManagedExtensionRecordStore
      * Whether the Session is being deleted or deleted. The read runs inside the record commit's own
      * transaction, so a plain SELECT would read that transaction's own snapshot and silently miss a
      * deletion that committed later (REPEATABLE READ) — the journal must stay empty once a deletion
-     * began. Up to this point the commit holds the tenant row and the journal head, not the Session
-     * row, so FOR UPDATE takes the Session row's lock here for the first time and may wait across
-     * connections — the same shape main's announce() already has.
+     * began. A journal commit already holds the Session row from its first statement, so this lock
+     * is re-entrant there; a caller that has not taken it waits here across connections — the same
+     * shape main's announce() already has.
      */
     private boolean isBeingDeleted(String tenantId, String sessionId) {
         String status = jdbc.query("SELECT status FROM ma_session"

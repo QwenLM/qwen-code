@@ -13,7 +13,7 @@ import {
   readWorktreeSession,
   readWorktreeSessionMarker,
   canonicalSessionPrUrl,
-  readSessionPrs,
+  readSessionPrsDetailed,
   toSessionPrInfo,
   type SessionArchiveState,
   type SessionGroupPresetColor,
@@ -485,25 +485,28 @@ async function enrichPrSidecars(
 ): Promise<void> {
   for (const [sessionId, summary] of bySessionId) {
     signal?.throwIfAborted();
-    let sidecar: Awaited<ReturnType<typeof readSessionPrs>>;
+    let result: Awaited<ReturnType<typeof readSessionPrsDetailed>>;
     try {
       const sidecarPath = sessionService.getPrSessionPathForArchiveState(
         sessionId,
         archiveState,
       );
-      sidecar = signal
-        ? await readSessionPrs(sidecarPath, { signal })
-        : await readSessionPrs(sidecarPath);
+      result = signal
+        ? await readSessionPrsDetailed(sidecarPath, { signal })
+        : await readSessionPrsDetailed(sidecarPath);
     } catch {
       signal?.throwIfAborted();
-      sidecar = null;
+      result = { status: 'invalid' };
     }
-    if (sidecar) {
+    if (result.status === 'ok') {
       bySessionId.set(sessionId, {
         ...summary,
-        prs: sidecarToPrInfos(sidecar),
+        prs: sidecarToPrInfos(result.prs),
       });
     }
+    // An unreadable sidecar is UNKNOWN bindings, not an unbind: leave `prs`
+    // unset rather than projecting an empty list. The PR-bindings snapshot
+    // reads the sidecars itself and reports such a session as partial.
   }
 }
 
@@ -685,22 +688,24 @@ async function liveOnlySummary(
     hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     isArchived: false,
   };
-  let sidecar: Awaited<ReturnType<typeof readSessionPrs>>;
+  let result: Awaited<ReturnType<typeof readSessionPrsDetailed>>;
   try {
     const sidecarPath = sessionService.getPrSessionPathForArchiveState(
       live.sessionId,
       'active',
     );
-    sidecar = signal
-      ? await readSessionPrs(sidecarPath, { signal })
-      : await readSessionPrs(sidecarPath);
+    result = signal
+      ? await readSessionPrsDetailed(sidecarPath, { signal })
+      : await readSessionPrsDetailed(sidecarPath);
   } catch {
     signal?.throwIfAborted();
-    sidecar = null;
+    result = { status: 'invalid' };
   }
-  if (sidecar) {
-    summary.prs = mergeSummaryPrs(sidecarToPrInfos(sidecar), live.prs);
+  if (result.status === 'ok') {
+    summary.prs = mergeSummaryPrs(sidecarToPrInfos(result.prs), live.prs);
   }
+  // Invalid: unknown bindings, not an unbind; the live entry's own bindings
+  // (if any) survive via the spread above.
   return summary;
 }
 
