@@ -387,7 +387,26 @@ describe('GenAI response attributes', () => {
     expect(attributes).toEqual({});
   });
 
-  it('refuses a handle from a different generation', () => {
+  it('refuses a handle from an earlier generation', () => {
+    // The retry path reuses one span, so a stale handle and a live one have
+    // the same controller: only the generation tells them apart, and the
+    // foreign-controller case below cannot exercise that check.
+    const { span, attributes } = createSpan();
+    const exchange = createGenAiExchange(ROOT_CONTEXT, span, {
+      captureContent: false,
+      sensitiveAttributeMaxLength: 1024,
+    });
+    const stale = reportOpenAiRequest({}, exchange.context);
+    reportOpenAiRequest({}, exchange.context);
+    exchange.controller.recordResponseAttribute(
+      stale,
+      'openrouter.provider',
+      'stale',
+    );
+    expect(attributes['openrouter.provider']).toBeUndefined();
+  });
+
+  it('refuses a handle from a different controller', () => {
     const { attributes, controller, handle } = observed();
     const exchange = createGenAiExchange(ROOT_CONTEXT, createSpan().span, {
       captureContent: false,

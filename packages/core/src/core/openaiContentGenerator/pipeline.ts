@@ -886,6 +886,11 @@ export class ContentGenerationPipeline {
       // OpenRouter reports its routing decision on every SSE chunk; the
       // converter drops the field, so it is read from the raw chunk here.
       let routingProviderReported = false;
+      // Resolved once per pipeline, not per chunk: the endpoint does not
+      // change mid-stream.
+      const openRouterEndpoint = isOpenRouterHostname(
+        this.contentGeneratorConfig,
+      );
       for await (const chunk of stream) {
         reportOpenAiChunk(telemetryAttempt, chunk);
         if (!routingProviderReported) {
@@ -894,7 +899,7 @@ export class ContentGenerationPipeline {
             routingProviderReported = true;
             reportOpenRouterResponseAttributes(
               telemetryAttempt,
-              isOpenRouterHostname(this.contentGeneratorConfig),
+              openRouterEndpoint,
               { provider },
             );
           }

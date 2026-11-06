@@ -259,6 +259,11 @@ function expectStopWithUsage(response: GenerateContentResponse) {
 }
 
 describe('ContentGenerationPipeline', () => {
+  const httpResponse = (
+    headers: Record<string, string>,
+    body: ReadableStream | null = null,
+  ) => ({ headers: new Headers(headers), status: 200, body }) as Response;
+
   let pipeline: ContentGenerationPipeline;
   let mockConfig: PipelineConfig;
   let mockProvider: OpenAICompatibleProvider;
@@ -2675,6 +2680,99 @@ describe('ContentGenerationPipeline', () => {
     });
   });
 
+  describe('OpenRouter routing attributes (non-streaming)', () => {
+    /** Serves `completion` from an OpenRouter-configured pipeline. */
+    const completeFromOpenRouter = async (
+      completion: Record<string, unknown>,
+      headers: Record<string, string> = {},
+    ) => {
+      pipelineWith({ baseUrl: OPENROUTER_URL });
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      createMock().mockImplementation(() =>
+        Object.assign(Promise.resolve(completion), {
+          withResponse: () =>
+            Promise.resolve({
+              data: completion,
+              response: httpResponse(headers),
+            }),
+        }),
+      );
+      await pipeline.execute(userRequest(), 'test-id');
+    };
+
+    it('records the X-Generation-Id response header', async () => {
+      await completeFromOpenRouter(
+        { id: 'r', choices: [{ message: { content: 'ok' } }] },
+        { 'x-generation-id': 'gen-abc123' },
+      );
+
+      expect(mockSpanAttributes.get('openrouter.generation_id')).toBe(
+        'gen-abc123',
+      );
+    });
+
+    it('records the provider from the response body', async () => {
+      await completeFromOpenRouter({
+        id: 'r',
+        choices: [{ message: { content: 'ok' } }],
+        provider: 'DigitalOcean',
+      });
+
+      expect(mockSpanAttributes.get('openrouter.provider')).toBe(
+        'DigitalOcean',
+      );
+    });
+
+    it('still reads the body when withResponse is unavailable', async () => {
+      pipelineWith({ baseUrl: OPENROUTER_URL });
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      createMock().mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' } }],
+        provider: 'SiliconFlow',
+      });
+
+      await pipeline.execute(userRequest(), 'test-id');
+
+      expect(mockSpanAttributes.get('openrouter.provider')).toBe('SiliconFlow');
+      expect(mockSpanAttributes.has('openrouter.generation_id')).toBe(false);
+    });
+
+    it('records nothing for a non-OpenRouter endpoint', async () => {
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      createMock().mockImplementation(() =>
+        Object.assign(
+          Promise.resolve({
+            id: 'r',
+            choices: [{ message: { content: 'ok' } }],
+            provider: 'DigitalOcean',
+          }),
+          {
+            withResponse: () =>
+              Promise.resolve({
+                data: {
+                  id: 'r',
+                  choices: [{ message: { content: 'ok' } }],
+                  provider: 'DigitalOcean',
+                },
+                response: httpResponse({ 'x-generation-id': 'gen-abc123' }),
+              }),
+          },
+        ),
+      );
+
+      await pipeline.execute(userRequest(), 'test-id');
+
+      expect(mockSpanAttributes.size).toBe(0);
+    });
+  });
+
   describe('executeStream', () => {
     /** An APIPromise for `stream` whose withResponse() returns `withResponse()`. */
     const apiPromise = (
@@ -2695,11 +2793,6 @@ describe('ContentGenerationPipeline', () => {
         ),
       );
     }
-
-    const httpResponse = (
-      headers: Record<string, string>,
-      body: ReadableStream | null = null,
-    ) => ({ headers: new Headers(headers), status: 200, body }) as Response;
 
     const bodyOf = (text: string) =>
       new ReadableStream({
@@ -3524,101 +3617,6 @@ describe('ContentGenerationPipeline', () => {
       // streamFrom resolves create() plainly — no withResponse method.
       const results = await streamed(chunkOf({ content: 'Hello' }, 'stop'));
       expect(results.length).toBeGreaterThan(0);
-    });
-
-    describe('OpenRouter routing attributes (non-streaming)', () => {
-      /** Serves `completion` from an OpenRouter-configured pipeline. */
-      const completeFromOpenRouter = async (
-        completion: Record<string, unknown>,
-        headers: Record<string, string> = {},
-      ) => {
-        pipelineWith({ baseUrl: OPENROUTER_URL });
-        (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
-          new GenerateContentResponse(),
-        );
-        createMock().mockImplementation(() =>
-          Object.assign(Promise.resolve(completion), {
-            withResponse: () =>
-              Promise.resolve({
-                data: completion,
-                response: httpResponse(headers),
-              }),
-          }),
-        );
-        await pipeline.execute(userRequest(), 'test-id');
-      };
-
-      it('records the X-Generation-Id response header', async () => {
-        await completeFromOpenRouter(
-          { id: 'r', choices: [{ message: { content: 'ok' } }] },
-          { 'x-generation-id': 'gen-abc123' },
-        );
-
-        expect(mockSpanAttributes.get('openrouter.generation_id')).toBe(
-          'gen-abc123',
-        );
-      });
-
-      it('records the provider from the response body', async () => {
-        await completeFromOpenRouter({
-          id: 'r',
-          choices: [{ message: { content: 'ok' } }],
-          provider: 'DigitalOcean',
-        });
-
-        expect(mockSpanAttributes.get('openrouter.provider')).toBe(
-          'DigitalOcean',
-        );
-      });
-
-      it('still reads the body when withResponse is unavailable', async () => {
-        pipelineWith({ baseUrl: OPENROUTER_URL });
-        (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
-          new GenerateContentResponse(),
-        );
-        createMock().mockResolvedValue({
-          id: 'r',
-          choices: [{ message: { content: 'ok' } }],
-          provider: 'SiliconFlow',
-        });
-
-        await pipeline.execute(userRequest(), 'test-id');
-
-        expect(mockSpanAttributes.get('openrouter.provider')).toBe(
-          'SiliconFlow',
-        );
-        expect(mockSpanAttributes.has('openrouter.generation_id')).toBe(false);
-      });
-
-      it('records nothing for a non-OpenRouter endpoint', async () => {
-        (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
-          new GenerateContentResponse(),
-        );
-        createMock().mockImplementation(() =>
-          Object.assign(
-            Promise.resolve({
-              id: 'r',
-              choices: [{ message: { content: 'ok' } }],
-              provider: 'DigitalOcean',
-            }),
-            {
-              withResponse: () =>
-                Promise.resolve({
-                  data: {
-                    id: 'r',
-                    choices: [{ message: { content: 'ok' } }],
-                    provider: 'DigitalOcean',
-                  },
-                  response: httpResponse({ 'x-generation-id': 'gen-abc123' }),
-                }),
-            },
-          ),
-        );
-
-        await pipeline.execute(userRequest(), 'test-id');
-
-        expect(mockSpanAttributes.size).toBe(0);
-      });
     });
 
     describe('OpenRouter routing attributes (streaming)', () => {
