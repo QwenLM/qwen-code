@@ -30,6 +30,7 @@ const jobs = [
     'qwen-autofix',
     name,
   ]),
+  ...['classify', 'act'].map((name) => ['qwen-ci-flaky-rerun', name]),
 ];
 
 it.each(jobs)(

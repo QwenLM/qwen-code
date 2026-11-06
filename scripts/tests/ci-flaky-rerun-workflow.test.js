@@ -221,9 +221,12 @@ describe('ci failure patrol workflow', () => {
     }
     // classify additionally preflights docker: without a daemon the sandboxed
     // classifier would otherwise burn its whole 5-minute budget before failing.
-    expect(yml.jobs.classify.steps[0].run).toContain('docker info');
+    expect(yml.jobs.classify.steps[0].run).toContain(
+      '"${SANDBOX_COMMAND}" info',
+    );
     // act never starts a sandbox, so it must not require a daemon.
-    expect(yml.jobs.act.steps[0].run).not.toContain('docker info');
+    expect(yml.jobs.act.steps[0].run).not.toContain('SANDBOX_COMMAND');
+    expect(yml.jobs.act.steps[0].env?.SANDBOX_COMMAND).toBeUndefined();
   });
 
   it('behaviorally proves the guard rejects unapproved and daemon-less hosts', () => {
@@ -231,20 +234,42 @@ describe('ci failure patrol workflow', () => {
     // disables the allowlist, so run the real step body against a stub docker.
     const runGuard = (step, { environment, name, dockerOk }) => {
       const dir = mkdtempSync(join(tmpdir(), 'patrol-guard-'));
+      // The stub answers only for the endpoint the workflow pins, so dropping
+      // DOCKER_CONTEXT or DOCKER_HOST from the step's env fails the approved
+      // host case instead of silently probing whatever the ambient shell had.
       writeFileSync(
         join(dir, 'docker'),
-        `#!/bin/sh\nexit ${dockerOk ? 0 : 1}\n`,
+        '#!/bin/sh\n' +
+          '[ "${DOCKER_CONTEXT:-}" = "default" ] || exit 91\n' +
+          '[ -z "${DOCKER_HOST:-}" ] || exit 92\n' +
+          `exit ${dockerOk ? 0 : 1}\n`,
       );
       chmodSync(join(dir, 'docker'), 0o755);
+      // The guard body ends in `timeout 10 …`, and coreutils timeout is absent
+      // on a stock macOS host. Shim it here so the allowlist assertions stay
+      // live on every platform; the separate wedged-daemon test deliberately
+      // uses the real binary behind its own capability probe.
+      writeFileSync(join(dir, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
+      chmodSync(join(dir, 'timeout'), 0o755);
+      const childEnv = {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH}`,
+        RUNNER_ENVIRONMENT: environment,
+        RUNNER_NAME: name,
+        // Probe the stub rather than the host's real docker. The production
+        // value is pinned structurally against the resolver's below.
+        SANDBOX_COMMAND: join(dir, 'docker'),
+      };
+      // Only the pins the workflow itself declares may reach the stub.
+      delete childEnv.DOCKER_HOST;
+      delete childEnv.DOCKER_CONTEXT;
+      for (const key of ['DOCKER_HOST', 'DOCKER_CONTEXT']) {
+        if (step.env?.[key] !== undefined) childEnv[key] = step.env[key];
+      }
       let status = 0;
       try {
         execFileSync('bash', ['-c', step.run], {
-          env: {
-            ...process.env,
-            PATH: `${dir}:${process.env.PATH}`,
-            RUNNER_ENVIRONMENT: environment,
-            RUNNER_NAME: name,
-          },
+          env: childEnv,
           encoding: 'utf8',
           stdio: ['ignore', 'pipe', 'pipe'],
         });
@@ -295,6 +320,30 @@ describe('ci failure patrol workflow', () => {
     ).toBe(1);
     // ...but must not inherit classify's daemon requirement.
     expect(runGuard(actGuard, { ...approved, dockerOk: false })).toBe(0);
+  });
+
+  it('preflights the same daemon and binary the classifier and resolver use', () => {
+    // An unpinned probe answers for the pool-shared currentContext, which is
+    // not the context the classifier is pinned to: it can reject a host whose
+    // default daemon is healthy, or pass on one whose default daemon is dead
+    // and let the classifier burn its five-minute budget. The binary has the
+    // same shape — a PATH docker that is not the resolver's absolute path
+    // makes the preflight green while the resolve step fails immediately.
+    const classify = yml.jobs.classify;
+    const guard = classify.steps[0];
+    const resolver = classify.steps.find((step) => step.id === 'sandbox_image');
+    const classifier = classify.steps.find((step) =>
+      step.uses?.includes('qwen-code-action'),
+    );
+    expect(guard.env.DOCKER_HOST).toBe(classifier.env.DOCKER_HOST);
+    expect(guard.env.DOCKER_CONTEXT).toBe(classifier.env.DOCKER_CONTEXT);
+    expect(guard.env.DOCKER_HOST).toBe('');
+    expect(guard.env.DOCKER_CONTEXT).toBe('default');
+    expect(guard.env.SANDBOX_COMMAND).toBe(resolver.env.SANDBOX_COMMAND);
+    expect(guard.env.SANDBOX_COMMAND).toBe('/usr/bin/docker');
+    // The probe must go through that pinned binary, not a PATH lookup.
+    expect(guard.run).toContain('timeout 10 "${SANDBOX_COMMAND}" info');
+    expect(guard.run).not.toMatch(/timeout 10 docker/);
   });
 
   it('pulls the sandbox image outside the classifier budget and times it', () => {
@@ -488,17 +537,14 @@ describe('ci failure patrol workflow', () => {
   });
 
   it('behaviorally proves a planted Git filter cannot ride into the next round', () => {
+    // Step placement, the self-hosted gate and symlink safety are owned by the
+    // cross-workflow registry in qwen-runner-checkout-workflow.test.js, where
+    // both patrol jobs are registered. This fixture covers what that registry
+    // cannot: that a filter planted with write_file alone actually executes
+    // during a normal checkout, and that the rebuild stops it.
     const recreate = yml.jobs.classify.steps.find(
       (step) => step.name === 'Recreate runner Git metadata',
     );
-    for (const job of [yml.jobs.classify, yml.jobs.act]) {
-      const names = job.steps.map((step) => step.name);
-      const at = names.indexOf('Recreate runner Git metadata');
-      expect(at).toBeGreaterThanOrEqual(0);
-      expect(at).toBeLessThan(names.indexOf('Checkout trusted event commit'));
-      expect(job.steps[at].if).toContain("runner.environment == 'self-hosted'");
-      expect(job.steps[at].run).toContain('rm -rf -- "$GITHUB_WORKSPACE/.git"');
-    }
 
     const dir = mkdtempSync(join(tmpdir(), 'patrol-git-'));
     const sentinel = join(dir, 'PWNED');
@@ -567,11 +613,12 @@ describe('ci failure patrol workflow', () => {
       // nor the classifier step cap applies, and even an empty-candidate round
       // would hold the serialized patrol for the whole job budget.
       const guard = yml.jobs.classify.steps[0];
-      expect(guard.run).toContain('timeout 10 docker info');
+      expect(guard.run).toContain('timeout 10 "${SANDBOX_COMMAND}" info');
       expect(guard['timeout-minutes']).toBeLessThanOrEqual(2);
       const dir = mkdtempSync(join(tmpdir(), 'patrol-wedged-'));
-      writeFileSync(join(dir, 'docker'), '#!/bin/sh\nsleep 60\n');
-      chmodSync(join(dir, 'docker'), 0o755);
+      const stub = join(dir, 'docker');
+      writeFileSync(stub, '#!/bin/sh\nsleep 60\n');
+      chmodSync(stub, 0o755);
       const started = Date.now();
       let status = 0;
       try {
@@ -581,6 +628,12 @@ describe('ci failure patrol workflow', () => {
             PATH: `${dir}:${process.env.PATH}`,
             RUNNER_ENVIRONMENT: 'self-hosted',
             RUNNER_NAME: 'ecs-qwen-hk1-1',
+            // Point the probe at the wedged stub. Without this the guard would
+            // fail instantly on an empty command name and the elapsed-time
+            // assertion below would pass without any timeout ever firing.
+            SANDBOX_COMMAND: stub,
+            DOCKER_HOST: guard.env.DOCKER_HOST,
+            DOCKER_CONTEXT: guard.env.DOCKER_CONTEXT,
           },
           encoding: 'utf8',
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -592,7 +645,10 @@ describe('ci failure patrol workflow', () => {
       const elapsed = Date.now() - started;
       rmSync(dir, { recursive: true, force: true });
       expect(status).not.toBe(0);
-      // Bounded by the probe's own ten seconds, not the twenty-minute job cap.
+      // Both bounds matter: the upper one proves the probe is not unbounded,
+      // the lower one proves it really waited for the ten-second timeout
+      // instead of failing immediately for an unrelated reason.
+      expect(elapsed).toBeGreaterThan(9000);
       expect(elapsed).toBeLessThan(25000);
     },
   );

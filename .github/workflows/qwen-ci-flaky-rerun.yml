@@ -52,6 +52,17 @@ jobs:
         env:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           RUNNER_NAME: '${{ runner.name }}'
+          # Probe the same daemon and the same binary the steps below actually
+          # use. The pool-shared $DOCKER_CONFIG/config.json can name a
+          # non-default currentContext, so an unpinned probe answers for a
+          # context the classifier never touches: it would reject a host whose
+          # default daemon is healthy, or pass on one whose default daemon is
+          # dead and let the classifier burn its budget. These two pins must
+          # match the classifier's, and SANDBOX_COMMAND must match the
+          # resolver's; a test binds all three pairs.
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
+          SANDBOX_COMMAND: '/usr/bin/docker'
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
             github-hosted|self-hosted) ;;
@@ -78,7 +89,7 @@ jobs:
             # neither the resolve nor the classifier step cap applies and even
             # an empty-candidate round would block the serialized patrol for
             # the whole job budget.
-            if ! timeout 10 docker info > /dev/null 2>&1; then
+            if ! timeout 10 "${SANDBOX_COMMAND}" info > /dev/null 2>&1; then
               echo "::error::docker daemon did not answer within 10s on this runner; the sandboxed classifier cannot start."
               exit 1
             fi
