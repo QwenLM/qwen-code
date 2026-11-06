@@ -101,8 +101,10 @@ public final class ManagedAgentPreflight {
     private static final int KEY_BYTES = 32;
     private static final int MIN_JAVA_FEATURE = 21;
     private static final int DEFAULT_SERVER_PORT = 8080;
-    private static final List<String> SECRET_MARKERS =
-            List.of("credential-key", "signing-key", "password");
+    // In a file's text, commented-out lines among it; credential-key-id is
+    // an ID, not a key.
+    private static final Pattern SECRET_MARKER =
+            Pattern.compile("credential-key(?!-id)|signing-key|password");
     // A property whose last word is one of these holds a secret, in the
     // configuration reference's terms; credential-key-id and the paths to
     // files that hold one end otherwise.
@@ -400,7 +402,8 @@ public final class ManagedAgentPreflight {
             return List.of(new Check("config", Status.WARN,
                     "no configuration file; packaged defaults and the"
                             + " environment only",
-                    "create config/application.yml for the credential key ring"));
+                    "create a configuration file at a location Spring reads, such as"
+                            + " config/application.yml, for the credential key ring"));
         }
         List<Check> checks = new ArrayList<>();
         for (Path file : files) {
@@ -437,7 +440,7 @@ public final class ManagedAgentPreflight {
         // A file that names its properties is judged by the keys it declares,
         // and by the markers in its text, commented-out lines among them.
         boolean secrets = property == null
-                ? SECRET_MARKERS.stream().anyMatch(content::contains) || declaresSecret(file)
+                ? SECRET_MARKER.matcher(content).find() || declaresSecret(file)
                 : secretProperty(property);
         return secrets ? sharedSecretFileCheck("config", file, path)
                 : new Check("config", Status.PASS, path, null);
@@ -1789,7 +1792,8 @@ public final class ManagedAgentPreflight {
     }
 
     private static void print(List<Check> checks) {
-        System.out.println("Managed Agent preflight");
+        // Relative locations, Spring Boot's defaults among them, are read here.
+        System.out.println("Managed Agent preflight in " + Path.of("").toAbsolutePath());
         System.out.printf("%-6s %-14s %s%n", "STATUS", "CHECK", "DETAIL");
         for (Check check : checks) {
             System.out.printf("%-6s %-14s %s%n",

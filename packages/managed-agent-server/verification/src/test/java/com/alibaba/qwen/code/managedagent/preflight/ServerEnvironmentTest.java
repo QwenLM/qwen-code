@@ -627,6 +627,46 @@ class ServerEnvironmentTest {
         }
         assertEquals(ManagedAgentPreflight.Status.PASS,
                 ManagedAgentPreflight.configFileCheck(path, null).status());
+        // An ID named like a key holds no secret; a commented-out key still
+        // asks for the chmod before the operator fills it in.
+        Path id = write("conf/id.yml",
+                "qwen.managed-agent.runtime-broker.credential-key-id: reference-v2\n");
+        Path commented = write("conf/commented.yml",
+                "# qwen.managed-agent.runtime-broker.credential-key: <key>\n");
+        Files.setPosixFilePermissions(id, PosixFilePermissions.fromString("rw-r--r--"));
+        Files.setPosixFilePermissions(commented, PosixFilePermissions.fromString("rw-r--r--"));
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                ManagedAgentPreflight.configFileCheck(id, null).status());
+        assertEquals("chmod 600 " + commented,
+                ManagedAgentPreflight.configFileCheck(commented, null).fix());
+    }
+
+    @Test
+    void readsTheImportsTheArgumentsTheEnvironmentAndTheSystemPropertiesName() throws IOException {
+        // A top-level import, as SPRING_CONFIG_IMPORT gives it.
+        Path top = write("top/top.yml", "# only a comment\n");
+        ManagedAgentPreflight.Prepared prepared = prepare(environment(Map.of(
+                "SPRING_CONFIG_IMPORT", "optional:file:" + top)), new ArrayList<>());
+        assertEquals(List.of(top), prepared.files());
+        // A -D system property, such as JAVA_TOOL_OPTIONS passes.
+        Path system = write("system/application.yml", "# only a comment\n");
+        ConfigurableEnvironment environment = environment(Map.of());
+        environment.getPropertySources().replace(
+                StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME,
+                new MapPropertySource(StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME,
+                        Map.of("spring.config.additional-location",
+                                "optional:file:" + system.getParent() + "/")));
+        prepared = prepare(environment, new ArrayList<>());
+        assertEquals(List.of(system), prepared.files());
+        // A placeholder in an import a file declares, which Spring resolves.
+        Path near = write("near/near.yml", "# only a comment\n");
+        Path declaring = write("decl/application.yml",
+                "spring.config.import: optional:file:${NEAR_DIR}/near.yml\n");
+        Map<String, Object> variables = new HashMap<>();
+        variables.put("SPRING_CONFIG_ADDITIONAL_LOCATION", "optional:file:" + declaring);
+        variables.put("NEAR_DIR", near.getParent().toString());
+        prepared = prepare(environment(variables), new ArrayList<>());
+        assertEquals(Set.of(declaring, near), Set.copyOf(prepared.files()));
     }
 
     @Test
@@ -873,14 +913,20 @@ class ServerEnvironmentTest {
                     .directory(directory.toFile())
                     .redirectErrorStream(true)
                     .redirectOutput(output.toFile());
-            builder.environment().keySet().removeIf(name -> name.startsWith("SPRING_")
-                    || name.startsWith("QWEN_MANAGED_AGENT_"));
+            // Only what starts a JVM: any other variable, such as SERVER_PORT,
+            // could reach the configuration.
+            builder.environment().keySet().retainAll(
+                    Set.of("PATH", "HOME", "JAVA_HOME", "LANG", "TMPDIR"));
             Process process = builder.start();
             if (!process.waitFor(120, TimeUnit.SECONDS)) {
                 process.destroyForcibly();
                 throw new AssertionError("--check did not finish: " + Files.readString(output));
             }
             String report = Files.readString(output);
+            // The report says where it read the relative locations.
+            assertTrue(report.contains("Managed Agent preflight in " + directory.toRealPath()
+                    + "\n") || report.contains("Managed Agent preflight in " + directory + "\n"),
+                    report);
             Map<String, List<String>> rows = new HashMap<>();
             report.lines().map(line -> line.split("\\s+", 3))
                     .filter(row -> row.length == 3)

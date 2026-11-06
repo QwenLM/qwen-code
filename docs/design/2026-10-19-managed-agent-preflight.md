@@ -27,7 +27,7 @@ keeps Spring's precedence:
 
 - the command line (`--server.address=...`, `--qwen.managed-agent.*`);
 - the process environment, `SPRING_APPLICATION_JSON` included, and the JVM
-  system properties (`-D…`, such as those `JAVA_OPTS` passes);
+  system properties (`-D…`, such as those in `JAVA_TOOL_OPTIONS`);
 - the configuration files Spring Boot reads: those named by
   `spring.config.location`, `spring.config.additional-location` or
   `spring.config.import`, as an argument or a `SPRING_CONFIG_*` variable (the

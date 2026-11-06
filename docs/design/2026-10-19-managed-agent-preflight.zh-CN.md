@@ -16,7 +16,7 @@
 命令读取服务端读取的配置，按 `SpringApplication` 在创建 context 之前准备环境的方式准备，因此每项输入都保持 Spring 的优先级：
 
 - 命令行参数（`--server.address=...`、`--qwen.managed-agent.*`）；
-- 进程环境变量（包括 `SPRING_APPLICATION_JSON`）以及 JVM 系统属性（`-D…`，例如经 `JAVA_OPTS` 传入的）；
+- 进程环境变量（包括 `SPRING_APPLICATION_JSON`）以及 JVM 系统属性（`-D…`，例如 `JAVA_TOOL_OPTIONS` 中的）；
 - Spring Boot 读取的配置文件：由 `spring.config.location`、`spring.config.additional-location` 或 `spring.config.import` 指定的文件，以参数或 `SPRING_CONFIG_*` 变量给出（启动脚本在 `config/application.yml` 存在时设置 `SPRING_CONFIG_ADDITIONAL_LOCATION`，systemd unit 的 `server.env` 指定 `/etc/qwen-managed-agent/application.yml`）；默认位置 `./`、`./config/` 和 `./config/*/` 下的文件，除非 `spring.config.location` 替换了它们；`.yml`、`.yaml`、`.properties` 或 `.xml` 格式，文件名取 `spring.config.name`；以及它们的 profile 变体、它们 import 的文件和 config tree；
 - classpath 中把 `QWEN_MANAGED_AGENT_*` 变量映射为属性的 `application.yml`。
 

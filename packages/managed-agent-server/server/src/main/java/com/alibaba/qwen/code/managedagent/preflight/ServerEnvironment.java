@@ -189,8 +189,9 @@ final class ServerEnvironment {
                 }
                 Path declaring = file(resource(tracked.getOrigin(key)));
                 if (declaring != null) {
-                    locations(String.valueOf(entry.getValue()), workingDirectory,
-                            declaring.getParent(), named);
+                    // Spring resolves a placeholder in it as in any value.
+                    locations(environment.resolvePlaceholders(String.valueOf(entry.getValue())),
+                            workingDirectory, declaring.getParent(), named);
                 }
             }
         }
