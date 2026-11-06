@@ -139,6 +139,12 @@ export async function startHostedSessionStore(sessionId: string) {
         assert.equal(body.writerId, writerId);
         assert.equal(body.writerGeneration, writerGeneration);
         json({ authorized: true });
+      } else if (route === '/approval:query') {
+        assert.equal(req.method, 'POST');
+        assert(handle);
+        assert.equal(body.writerId, writerId);
+        assert.equal(body.writerGeneration, writerGeneration);
+        json({ mode: 'default', revision: 0 });
       } else if (route === '/restore') {
         json({
           ...head,

@@ -28,15 +28,18 @@
 
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
@@ -498,7 +501,26 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
   expect(ci.jobs.web_shell_e2e_smoke.strategy['fail-fast']).toBe(false);
   const result = ci.jobs.web_shell_e2e_smoke_result;
   expect(result.name).toBe('web-shell E2E Smoke (ubuntu-latest, Node 22.x)');
-  expect(result.needs).toEqual(['classify_pr', 'web_shell_e2e_smoke']);
+  expect(result.needs).toEqual([
+    'classify_pr',
+    'test_build',
+    'web_shell_e2e_smoke',
+  ]);
+  // The smoke tests test_build's tree instead of building its own, and a
+  // draft skips it along with the no-AK integration gate.
+  expect(ci.jobs.web_shell_e2e_smoke.needs).toEqual([
+    'classify_pr',
+    'test_build',
+  ]);
+  expect(condOf('web_shell_e2e_smoke')).toContain(
+    "needs.test_build.result == 'success'",
+  );
+  expect(condOf('web_shell_e2e_smoke')).toContain(
+    '!github.event.pull_request.draft',
+  );
+  const smokeSteps = ci.jobs.web_shell_e2e_smoke.steps.map((x) => x.name);
+  expect(smokeSteps).not.toContain('Build');
+  expect(smokeSteps).toContain('Unpack the built tree');
   expect(result['runs-on']).toBe(ci.jobs.web_shell_e2e_smoke['runs-on']);
   expect(condOf('web_shell_e2e_smoke_result')).toBe(
     condOf('web_shell_e2e_smoke'),
@@ -554,6 +576,9 @@ const gateRunsOn = (cond, event) => {
     // re-derive this helper's verdict before adding such a gate.
     [/needs\.classify_pr\.outputs\.skip_ci/g, '"false"'],
     [/needs\.classify_pr\.outputs\.ci_profile/g, '"full"'],
+    // A normal run: the build passed and the pull request is not a draft.
+    [/needs\.test_build\.result/g, '"success"'],
+    [/github\.event\.pull_request\.draft/g, 'false'],
     [
       /github\.event\.pull_request\.head\.repo\.full_name/g,
       event === 'pull_request' ? '"QwenLM/qwen-code"' : '""',
@@ -929,7 +954,7 @@ describe('post-merge push lane', () => {
         body,
         `${job} must scope the reset to the shard-owned path`,
       ).toContain(
-        'if [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then',
+        'if [ -n "${RUNNER_TEMP:-}" ] && [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then',
       );
       const reset = body.indexOf('rm -rf -- "${COREPACK_HOME}"');
       expect(
@@ -975,7 +1000,36 @@ describe('post-merge push lane', () => {
     // intersection, and a floor below the real count lets any one shared step
     // be deleted out of either job without turning this red.
     expect(shared.length).toBeGreaterThanOrEqual(13);
+    // One deliberate divergence: lint maps java_only to its full payload
+    // and adds the scripts/tests lane, where every other job skips. The
+    // step must equal test's in everything else.
+    const profileStep = 'Use trusted CI profile';
+    const stepOf = (job, name) =>
+      (ci.jobs[job].steps ?? []).find((x) => x.name === name);
+    const lintProfile = stepOf('lint_and_static', profileStep);
+    const testProfile = stepOf('test', profileStep);
+    const { run: lintRun, ...lintRest } = lintProfile;
+    const { run: testRun, ...testRest } = testProfile;
+    expect(lintRest).toEqual(testRest);
+    expect(lintRun).toContain(
+      'java_only)\n    profile=full\n    scripts_unit=true',
+    );
+    expect(testRun).toContain('docs_only|github_ci_only|java_only|full) ;;');
+    // Strip lint's java_only additions; what is left is test's step.
+    const lintBase = lintRun
+      .replace('scripts_unit=false\n', '')
+      .replace(/\n {2}# A change confined[\s\S]*?java_only\)\n[\s\S]*?;;/, '')
+      .replace(
+        'docs_only|github_ci_only|full',
+        'docs_only|github_ci_only|java_only|full',
+      )
+      .replace(
+        'echo "scripts_unit=${scripts_unit}" >> "${GITHUB_OUTPUT}"\n',
+        '',
+      );
+    expect(lintBase).toBe(testRun);
     for (const n of shared) {
+      if (n === profileStep) continue;
       expect(l.get(n), `step "${n}" drifted between the two jobs`).toBe(
         t.get(n),
       );
@@ -1092,7 +1146,7 @@ describe('post-merge push lane', () => {
         (s) => s.name === 'Install dependencies',
       );
       const body = String(step.run ?? '');
-      const start = body.indexOf('if [ "${COREPACK_HOME:-}"');
+      const start = body.indexOf('if [ -n "${RUNNER_TEMP:-}" ]');
       const end = body.indexOf('corepack pnpm install');
       expect(
         start,
@@ -1329,17 +1383,58 @@ describe('post-merge push lane', () => {
       'Run yamllint',
       'Run Prettier',
       'Run sensitive keyword linter',
-      'Check serve fast-path bundle closure',
-      'Check core subpath exports resolve',
       'Run i18n check',
-      'Generate settings schema',
-      'Check settings schema is up-to-date',
       'Generate Web Shell and VS Code companion notices',
       'Check Web Shell and VS Code companion notices are up-to-date',
       'Run .github/scripts helper tests',
     ];
     const steps = ci.jobs.lint_and_static.steps ?? [];
     const stepByName = new Map(steps.map((x) => [x.name, x]));
+    // The two checks that read the built tree moved to test_build, which
+    // builds it anyway; Lint & Static used to build and bundle the CLI a
+    // second time for them. They stay full-gated and required through
+    // `Test (ubuntu-latest, Node 22.x)`.
+    const buildSteps = new Map(
+      (ci.jobs.test_build.steps ?? []).map((x) => [x.name, x]),
+    );
+    for (const [name, command] of [
+      [
+        'Check serve fast-path bundle closure',
+        'node scripts/check-serve-fast-path-bundle.js',
+      ],
+      [
+        'Check core subpath exports resolve',
+        'npm run check:core-subpath-exports',
+      ],
+      // The generator imports core's dist.
+      ['Generate settings schema', 'npm run generate:settings-schema'],
+      [
+        'Check settings schema is up-to-date',
+        'git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json',
+      ],
+    ]) {
+      expect(stepByName.has(name), name).toBe(false);
+      expect(buildSteps.get(name)?.run, name).toContain(command);
+      expect(buildSteps.get(name)?.if, name).toContain("ci_profile == 'full'");
+    }
+    expect(buildSteps.get('Build').env?.DEV).toBe('true');
+    const buildOrder = [...buildSteps.keys()];
+    expect(buildOrder.indexOf('Check serve fast-path bundle closure')).toBe(
+      buildOrder.indexOf('Build') + 1,
+    );
+    // A java_only change runs scripts/tests here instead of in the shards.
+    const javaSuites = stepByName.get(
+      'Run scripts/tests for a Java-only change',
+    );
+    expect(javaSuites.if).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.scripts_unit == 'true' }}",
+    );
+    expect(javaSuites.run).toContain(
+      "git grep -l -E 'managed-agent-server/|sdk-java/' -- 'scripts/tests/*.test.*'",
+    );
+    expect(javaSuites.run).toContain(
+      'npm run test:scripts:unit -- "${suites[@]}"',
+    );
     const testNames = new Set((ci.jobs.test.steps ?? []).map((x) => x.name));
     const prelude = new Set((ci.jobs.test.steps ?? []).map((x) => x.name));
     // Order and completeness in one shot: the full-gated steps that are not
@@ -1398,14 +1493,7 @@ describe('post-merge push lane', () => {
       'Run Prettier': 'node scripts/lint.js --prettier',
       'Run sensitive keyword linter':
         'node scripts/lint.js --sensitive-keywords',
-      'Check serve fast-path bundle closure':
-        'npm run check:serve-fast-path-bundle',
-      'Check core subpath exports resolve':
-        'npm run check:core-subpath-exports',
       'Run i18n check': 'npm run check-i18n',
-      'Generate settings schema': 'npm run generate:settings-schema',
-      'Check settings schema is up-to-date':
-        'git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json',
       'Generate Web Shell and VS Code companion notices':
         'npm run generate:notices --workspace=@qwen-code/web-shell',
       'Check Web Shell and VS Code companion notices are up-to-date':
@@ -1419,7 +1507,7 @@ describe('post-merge push lane', () => {
     ).toEqual([...FULL_PAYLOAD].sort());
     // Whole literal, not the `ci_profile == 'full'` substring filtered above:
     // an appended `&&` clause still matches that substring while dropping the
-    // step from the unattended post-merge lane. All 19 gates are identical.
+    // step from the unattended post-merge lane. All 15 gates are identical.
     const FULL_GATE =
       "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}";
     for (const n of FULL_PAYLOAD) {
@@ -1444,7 +1532,7 @@ describe('post-merge push lane', () => {
       ).not.toMatch(/\|\|\s*(true|:)/);
     }
     expect(
-      String(stepByName.get('Check settings schema is up-to-date').run),
+      String(buildSteps.get('Check settings schema is up-to-date').run),
       'settings-schema gate lost its exit 1',
     ).toContain('exit 1');
     // The two deliberately-different gates, pinned as they are.
@@ -1824,4 +1912,183 @@ describe('platform lanes — a failing nightly is visible', () => {
     expect(cond).toContain("workflow_run.head_branch == 'main'");
     expect(cond).toContain("workflow_run.conclusion == 'failure'");
   });
+});
+
+describe('run-local pnpm cache startup', () => {
+  const install = ci.jobs.test.steps.find(
+    (step) => step.name === 'Install dependencies',
+  );
+  const version = JSON.parse(
+    readFileSync('package.json', 'utf8'),
+  ).packageManager.match(/^pnpm@([^+]+)/)[1];
+  // Exercise installation without the unrelated Linux disk sampler.
+  const [, commandChain] = install.run.split(/\ntrap [^\n]*\n/);
+
+  for (const scenario of [
+    {
+      name: 'recreates a broken run-local cache before installing',
+      local: true,
+      healthy: false,
+      succeeds: true,
+    },
+    {
+      name: 'recreates a healthy run-local cache before installing',
+      local: true,
+      healthy: true,
+      succeeds: true,
+    },
+    {
+      name: 'fails installation when the fresh package manager is unavailable',
+      local: true,
+      healthy: false,
+      bootstrapFails: true,
+      succeeds: false,
+    },
+    {
+      name: 'leaves a broken shared cache untouched',
+      local: false,
+      healthy: false,
+      succeeds: false,
+    },
+    {
+      name: 'installs from a healthy shared cache without rewriting it',
+      local: false,
+      healthy: true,
+      succeeds: true,
+    },
+  ]) {
+    it(scenario.name, () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'pnpm-startup-')));
+      const runnerTemp = join(root, 'runner-temp');
+      const home = scenario.local
+        ? `${runnerTemp}/qwen-ci-corepack`
+        : join(root, 'shared-corepack');
+      const cache = join(home, 'v1', 'pnpm', version);
+      const entry = join(cache, 'bin', 'pnpm.mjs');
+      const bin = join(root, 'bin');
+      const seed = join(root, 'pnpm.mjs');
+      const marker = join(root, 'installed');
+      const trace = join(root, 'trace.jsonl');
+      const oldEntryMarker = join(root, 'old-entry-ran');
+      const sentinel = join(root, 'bystander');
+      const cacheNeighbor = join(home, 'v1', 'pnpm', 'other-version');
+      try {
+        mkdirSync(join(cache, 'bin'), { recursive: true });
+        mkdirSync(runnerTemp, { recursive: true });
+        mkdirSync(bin);
+        writeFileSync(
+          join(cache, '.corepack'),
+          '{"bin":{"pnpm":"bin/pnpm.mjs"}}',
+        );
+        writeFileSync(sentinel, 'keep');
+        writeFileSync(cacheNeighbor, 'old-cache');
+        writeFileSync(
+          seed,
+          String.raw`
+import { appendFileSync, writeFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+appendFileSync(process.env.FIXTURE_TRACE, JSON.stringify({ stage: 'pnpm', args }) + '\n');
+if (args.length === 1 && args[0] === '--version') {
+  console.log(process.env.FIXTURE_PINNED_VERSION);
+} else if (JSON.stringify(args) === JSON.stringify(['install', '--frozen-lockfile', '--prefer-offline', '--reporter=append-only'])) {
+  writeFileSync(process.env.FIXTURE_INSTALL_MARKER, 'installed');
+} else {
+  process.exit(2);
+}
+`,
+        );
+        if (scenario.healthy) {
+          writeFileSync(
+            entry,
+            `${readFileSync(seed, 'utf8')}\nwriteFileSync(process.env.FIXTURE_OLD_ENTRY_MARKER, 'ran');\n`,
+          );
+        }
+        writeFileSync(
+          join(bin, 'corepack'),
+          String.raw`#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const root = fs.realpathSync(process.env.FIXTURE_ROOT);
+const configuredHome = path.resolve(process.env.COREPACK_HOME);
+const parent = fs.realpathSync(path.dirname(configuredHome));
+if (parent !== root && !parent.startsWith(root + path.sep)) throw new Error('Not a private fixture parent');
+fs.mkdirSync(configuredHome, { recursive: true });
+const home = fs.realpathSync(configuredHome);
+if (!home.startsWith(root + path.sep)) throw new Error('Not a private fixture');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.FIXTURE_TRACE, JSON.stringify({ stage: 'corepack', args }) + '\n');
+if (args[0] !== 'pnpm') throw new Error('Unexpected package manager');
+const cache = path.join(home, 'v1', 'pnpm', process.env.FIXTURE_PINNED_VERSION);
+const entry = path.join(cache, 'bin', 'pnpm.mjs');
+if (!fs.existsSync(cache)) {
+  fs.appendFileSync(process.env.FIXTURE_TRACE, JSON.stringify({ stage: 'hydrate' }) + '\n');
+  fs.mkdirSync(path.dirname(entry), { recursive: true });
+  fs.writeFileSync(path.join(cache, '.corepack'), '{"bin":{"pnpm":"bin/pnpm.mjs"}}');
+  if (process.env.FIXTURE_BOOTSTRAP_FAILS !== '1') fs.copyFileSync(process.env.FIXTURE_SEED, entry);
+}
+const result = spawnSync(process.execPath, [entry, ...args.slice(1)], { stdio: 'inherit' });
+process.exit(result.status ?? 1);
+`,
+        );
+        chmodSync(join(bin, 'corepack'), 0o755);
+        writeFileSync(
+          join(bin, 'corepack.cmd'),
+          `@"${process.execPath}" "%~dp0corepack" %*\r\n`,
+        );
+        const before = statSync(cache).ino;
+        const run = () =>
+          execFileSync('bash', ['-e', '-o', 'pipefail', '-c', commandChain], {
+            cwd: process.cwd(),
+            env: {
+              ...process.env,
+              PATH: `${bin}${delimiter}${process.env.PATH}`,
+              COREPACK_ENABLE_NETWORK: '0',
+              COREPACK_HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              FIXTURE_ROOT: root,
+              FIXTURE_TRACE: trace,
+              FIXTURE_OLD_ENTRY_MARKER: oldEntryMarker,
+              FIXTURE_PINNED_VERSION: version,
+              FIXTURE_INSTALL_MARKER: marker,
+              FIXTURE_SEED: seed,
+              FIXTURE_BOOTSTRAP_FAILS: scenario.bootstrapFails ? '1' : '0',
+            },
+            stdio: 'pipe',
+          });
+        expect(commandChain).toBeTruthy();
+        if (scenario.succeeds) expect(run).not.toThrow();
+        else expect(run).toThrow();
+        expect(existsSync(marker)).toBe(scenario.succeeds);
+        expect(readFileSync(sentinel, 'utf8')).toBe('keep');
+        expect(existsSync(cacheNeighbor)).toBe(!scenario.local);
+        expect(existsSync(oldEntryMarker)).toBe(
+          !scenario.local && scenario.healthy,
+        );
+        const installArgs = [
+          'install',
+          '--frozen-lockfile',
+          '--prefer-offline',
+          '--reporter=append-only',
+        ];
+        const events = readFileSync(trace, 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line));
+        expect(events).toEqual([
+          { stage: 'corepack', args: ['pnpm', ...installArgs] },
+          ...(scenario.local ? [{ stage: 'hydrate' }] : []),
+          ...(scenario.succeeds ? [{ stage: 'pnpm', args: installArgs }] : []),
+        ]);
+        if (!scenario.local) {
+          expect(statSync(cache).ino).toBe(before);
+          expect(readFileSync(join(cache, '.corepack'), 'utf8')).toBe(
+            '{"bin":{"pnpm":"bin/pnpm.mjs"}}',
+          );
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
 });

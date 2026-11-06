@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -94,7 +95,7 @@ class HostedPublicWorkspaceIT {
     private boolean shellLifecycleV2;
     private boolean publicChildren;
     private boolean publicChildBackground;
-    private boolean publicChildRestarted;
+    private boolean restarted;
     private boolean publicChildFallback;
     private Map<String, byte[]> publicationObjects;
     private String shellFault;
@@ -109,6 +110,67 @@ class HostedPublicWorkspaceIT {
     // the Session owner, proving R1's second-operator handoff.
     private final java.util.Set<String> operatorAnswered = new java.util.HashSet<>();
     private final java.util.Set<String> fixedAnswered = new java.util.HashSet<>();
+
+    @Test
+    @Timeout(180)
+    void structuredQuestionSurvivesJavaAndHarnessRestart() throws Exception {
+        assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
+        shell = true;
+        approvals = true;
+        definitionApproval = true;
+        var roots = boot();
+        register("workspace-0", "storage-0");
+        String session = request("POST", "/api/agent/web-shell/v1/sessions/create",
+                Map.of("agentId", "qwen-code", "idempotencyKey", "question-session", "input", List.of(),
+                        "approvalMode", "yolo", "workspace", Map.of("workspaceId", "workspace-0", "cwdRelative", "child")),
+                "question-session", "actor", 202).path("sessionId").asText();
+        String turn = request("POST", "/api/agent/web-shell/v1/turns/submit",
+                Map.of("sessionId", session, "idempotencyKey", "question-turn",
+                        "input", List.of(Map.of("type", "input_text", "text", "G0_USER_QUESTION"))),
+                "question-turn", "actor", 202).path("turnId").asText();
+        JsonNode waiting = await().atMost(Duration.ofSeconds(45)).until(() -> {
+            assertThat(modelFailure.get()).isNull();
+            return request("GET", "/v1/agents/sessions/" + session + "/actions", null, null, "actor", 200).path("data").path(0);
+        }, action -> "question".equals(action.path("kind").asText()));
+        assertThat(waiting.path("tool_name").asText()).isEqualTo("ask_user_question");
+        assertThat(waiting.at("/questions/0/options/1/id").asText()).isEqualTo("q1o2");
+        assertThat(modelRequests).hasSize(1);
+        var properties = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
+        int harnessPort = URI.create(properties.getHarness().getBaseUrl()).getPort();
+        int brokerPort = properties.getRuntimeBroker().getPort();
+        harness.destroyForcibly();
+        assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
+        spring.close();
+        restarted = true;
+        Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath();
+        startSpring(cli, roots, harnessPort, brokerPort);
+        startHarness(cli, harnessPort, brokerPort);
+        JsonNode refreshed = request("POST", "/api/agent/web-shell/v1/actions/query", Map.of("sessionId", session), null, "actor", 200)
+                .path("data").get(0);
+        assertThat(refreshed.path("actionId")).isEqualTo(waiting.path("id"));
+        assertThat(refreshed.path("inputRevision")).isEqualTo(waiting.path("input_revision"));
+        assertThat(refreshed.path("questions").get(0).path("prompt")).isEqualTo(waiting.path("questions").get(0).path("prompt"));
+        Map<String, Object> response = Map.of("kind", "question", "inputRevision", refreshed.path("inputRevision").asLong(),
+                "policyRevision", refreshed.path("policyRevision").asText(),
+                "answers", List.of(Map.of("questionId", "q1", "optionIds", List.of("q1o2", "q1o1"), "text", "Custom 中😀")));
+        Map<String, Object> body = Map.of("sessionId", session, "actionId", refreshed.path("actionId").asText(),
+                "idempotencyKey", "question-answer", "response", response);
+        String operation = request("POST", "/api/agent/web-shell/v1/actions/respond", body, "question-answer", "actor", 202)
+                .path("operationId").asText();
+        assertThat(request("POST", "/api/agent/web-shell/v1/actions/respond", body, "question-answer", "actor", 202)
+                .path("operationId").asText()).isEqualTo(operation);
+        await().atMost(Duration.ofSeconds(90)).untilAsserted(() -> {
+            assertThat(modelFailure.get()).isNull();
+            assertThat(request("GET", "/v1/agents/sessions/" + session + "/operations/" + operation,
+                    null, null, "actor", 200).path("status").asText()).isEqualTo("completed");
+            assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
+                    String.class, tenant, session, turn)).isEqualTo("COMPLETED");
+        });
+        assertThat(modelRequests).hasSize(2);
+        assertThat(request("POST", "/api/agent/web-shell/v1/transcript/query", Map.of("sessionId", session), null, "actor", 200)
+                .toString()).contains("G0_USER_QUESTION_DONE");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?", Long.class, session)).isZero();
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -233,7 +295,7 @@ class HostedPublicWorkspaceIT {
         harness.destroyForcibly();
         assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
         spring.close();
-        publicChildRestarted = true;
+        restarted = true;
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath();
         startSpring(cli, roots, harnessPort, brokerPort);
         startHarness(cli, harnessPort, brokerPort);
@@ -1473,7 +1535,7 @@ class HostedPublicWorkspaceIT {
         assertThat(modelRequests).hasSize(approvals ? 16 : 30);
     }
 
-    private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) {
+    private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) throws IOException {
         boolean mysql = System.getProperty("mysql.url") != null;
         List<String> arguments = new ArrayList<>(List.of("--server.address=127.0.0.1", "--server.port=" + port,
                 "--spring.datasource.url=" + System.getProperty("mysql.url",
@@ -1547,9 +1609,10 @@ class HostedPublicWorkspaceIT {
                 })
                 .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
-        if (!publicChildRestarted && (definitionApproval || "Linux".equals(System.getProperty("os.name")))) {
+        if (!restarted && (definitionApproval || "Linux".equals(System.getProperty("os.name")))) {
             var guard = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
             for (int index = 0; index < roots.size(); index++) {
+                WorkspaceTestStorage.prepareNativeRoot(roots.get(index));
                 guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
             }
         }
@@ -1721,7 +1784,7 @@ class HostedPublicWorkspaceIT {
                 assertThat(tools).contains("read_file", "write_file", "edit", "run_shell_command");
                 assertThat(tools).doesNotContain("team_create", "workflow", "send_message");
             } else if (shell) {
-                var expectedTools = new ArrayList<>(List.of("read_file", "write_file", "edit", "web_fetch", "run_shell_command", "glob"));
+                var expectedTools = new ArrayList<>(List.of("read_file", "write_file", "edit", "web_fetch", "run_shell_command", "glob", "todo_write", "ask_user_question"));
                 if (shellLifecycleV2) {
                     expectedTools.add("monitor");
                 }
@@ -1734,7 +1797,7 @@ class HostedPublicWorkspaceIT {
             } else if (resident) {
                 assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
             } else {
-                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "web_fetch");
+                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "web_fetch", "glob", "ask_user_question");
             }
             // Count only this Turn's tool results, after the latest fixture prompt, so a later
             // Turn in the same Session runs the same write, edit and read sequence. Other user
@@ -1758,6 +1821,11 @@ class HostedPublicWorkspaceIT {
                 return;
             }
             int step = results.size();
+            boolean questionTurn = prompt.get().contains("G0_USER_QUESTION");
+            if (questionTurn && step > 0) {
+                assertThat(results).hasSize(1);
+                assertThat(results.getFirst().toString()).contains("q1o1", "q1o2", "Custom 中😀");
+            }
             boolean definitionTurn = prompt.get().contains("G0_DEFINITION_APPROVAL_");
             boolean runShell = shell && prompt.get().contains("G0_SHELL");
             if (!runShell && step == 3) {
@@ -1780,7 +1848,7 @@ class HostedPublicWorkspaceIT {
             var delta = choice.putObject("delta").put("role", "assistant");
             boolean publicParent = publicChildren && tools.contains("agent");
             boolean toolCall = publicChildren ? publicParent ? step == 0 && prompt.get().contains("G0_PUBLIC_PARENT") : step < 2
-                    : step < (residentUnsupported ? 1 : definitionTurn ? 2 : runShell ? 1 : 3);
+                    : step < (questionTurn || residentUnsupported ? 1 : definitionTurn ? 2 : runShell ? 1 : 3);
             if (toolCall) {
                 String name = runShell ? "run_shell_command"
                         : (residentSecond ? List.of("read_file", "edit", "read_file")
@@ -1823,11 +1891,16 @@ class HostedPublicWorkspaceIT {
                             + " process.stdout.write('stdout-tail\\n'); process.stderr.write('stderr-tail\\n'); });";
                     args = Map.of("command", quote(node) + " -e " + quote(producer), "timeout", 60000);
                 }
+                if (questionTurn) {
+                    name = "ask_user_question";
+                    args = Map.of("questions", List.of(Map.of("question", "Which targets?", "header", "Targets", "multiSelect", true,
+                            "options", List.of(Map.of("label", "Same", "description", "First"), Map.of("label", "Same", "description", "Second")))));
+                }
                 delta.putArray("tool_calls").addObject().put("index", 0).put("id", "g0-tool-" + step)
                         .put("type", "function").putObject("function").put("name", name)
                         .put("arguments", json.writeValueAsString(args));
             } else {
-                delta.put("content", publicChildren && !publicParent ? "G0_PUBLIC_CHILD_DONE" : "G0_DONE");
+                delta.put("content", questionTurn ? "G0_USER_QUESTION_DONE" : publicChildren && !publicParent ? "G0_PUBLIC_CHILD_DONE" : "G0_DONE");
             }
             choice.putNull("finish_reason");
             String first = "data: " + json.writeValueAsString(chunk) + "\n\n";
