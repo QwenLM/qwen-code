@@ -84,6 +84,51 @@ class ExecutionControlTenantGuardsTest {
                 executions.findByExecutionCallId(claimed.getExecutionCallId()).getState());
     }
 
+    @Test
+    void sessionIsolatedLeaseChangesCompleteWhileBothTenantGuardsAreHeld() throws Exception {
+        // Claim, renew and release move no binding out of its state, so like
+        // dispatch they decide the CSI pin under the Session root alone
+        // (design 2026-11-06-managed-binding-control-tenant-guards).
+        var fixture = sessionFixture(true);
+        bindings.releaseOperation(fixture.binding.getBindingId(), "recovery", fixture.binding.getOperationGeneration());
+        var released = whileGuardsHeld(fixture.id, true, () -> leaseRound(fixture));
+        assertEquals(null, released.getOperationOwner());
+    }
+
+    @Test
+    void withoutASessionRootLeaseChangesTakeNoPublicationGuard() throws Exception {
+        // The guarded path still takes placement but no longer the publication
+        // guard, which only a CSI profile original needs.
+        var fixture = sessionFixture(false);
+        bindings.releaseOperation(fixture.binding.getBindingId(), "recovery", fixture.binding.getOperationGeneration());
+        var released = whileGuardsHeld(fixture.id, false, () -> leaseRound(fixture));
+        assertEquals(null, released.getOperationOwner());
+        var waited = org.junit.jupiter.api.Assertions.assertThrows(Exception.class,
+                () -> whileGuardsHeld(fixture.id, true, () -> leaseRound(fixture)));
+        assertTrue(waited instanceof java.util.concurrent.TimeoutException, waited.toString());
+    }
+
+    @Test
+    void compareAndSetTakesPlacementButNoPublicationGuard() throws Exception {
+        var fixture = sessionFixture(true);
+        var current = bindings.findById(fixture.binding.getBindingId());
+        var updated = whileGuardsHeld(fixture.id, false, () -> bindings.compareAndSet(current,
+                current.withResourceHandle(current.getResourceHandle(), java.time.Instant.now())));
+        assertEquals(current.getVersion() + 1, updated.getVersion());
+        var latest = bindings.findById(fixture.binding.getBindingId());
+        var waited = org.junit.jupiter.api.Assertions.assertThrows(Exception.class, () -> whileGuardsHeld(fixture.id, true,
+                () -> bindings.compareAndSet(latest, latest.withResourceHandle(latest.getResourceHandle(),
+                        java.time.Instant.now()))));
+        assertTrue(waited instanceof java.util.concurrent.TimeoutException, waited.toString());
+    }
+
+    private RuntimeBindingRecord leaseRound(RuntimeRecoveryContract.Fixture fixture) {
+        var claimed = bindings.claimOperation(fixture.binding.getBindingId(), "control", Duration.ofMinutes(1));
+        var renewed = bindings.renewOperation(claimed.getBindingId(), "control", claimed.getOperationGeneration(),
+                Duration.ofMinutes(1));
+        return bindings.releaseOperation(renewed.getBindingId(), "control", renewed.getOperationGeneration());
+    }
+
     /** A session-class fixture; {@code root} adds the managed Session root of its harness Session. */
     protected RuntimeRecoveryContract.Fixture sessionFixture(boolean root) throws Exception {
         String tenant = "tenant-" + UUID.randomUUID();
