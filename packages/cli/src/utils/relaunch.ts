@@ -288,6 +288,11 @@ export async function relaunchAppInChildProcess(
           // it while stdin stays paused here.
           const [rosterCommand, ...rosterArgs] = agentViewRosterArgv;
           agentViewRosterArgv = undefined;
+          if (process.platform === 'win32') {
+            // The exiting session cleared the shared console title, and
+            // Node 22's libuv aborts when a process reads an empty one.
+            process.title = 'Qwen Agent View';
+          }
           const roster = spawn(rosterCommand!, rosterArgs, {
             stdio: 'inherit',
             env: createChildEnv(),
