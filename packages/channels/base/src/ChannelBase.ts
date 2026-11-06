@@ -7586,7 +7586,12 @@ export abstract class ChannelBase {
         // bridge only after the latest recovery has restored session routing.
         await this.waitForBridgeRecovery();
         const promptBridge = this.bridge;
+        let turnNotice = '';
+        const onTurnNotice = (sid: string, notice: string) => {
+          if (sid === sessionId) turnNotice = notice;
+        };
         promptBridge.on('textChunk', onChunk);
+        promptBridge.on('turnNotice', onTurnNotice);
         promptBridge.on('responseBoundary', onResponseBoundary);
 
         let taskResultPartial = false;
@@ -7594,7 +7599,7 @@ export abstract class ChannelBase {
           if (!this.canStartInboundTurn()) {
             throw new ChannelPromptCancelledError();
           }
-          const response = await promptBridge.prompt(sessionId, promptToSend, {
+          let response = await promptBridge.prompt(sessionId, promptToSend, {
             ...(this.config.outputMode === 'per_task'
               ? {
                   outputMode: 'per_task' as const,
@@ -7619,6 +7624,11 @@ export abstract class ChannelBase {
           // If cancelled, skip sending the response
           if (!promptState.cancelled && response) {
             promptState.deliveryStarted = true;
+            if (turnNotice) {
+              response = response.slice(turnNotice.length + 2);
+            }
+          }
+          if (!promptState.cancelled && response) {
             const segment = this.ensureOutputSegment(sessionId, promptState);
             if (segment && taskResultPartial) segment.partial = true;
             await this.onResponseComplete(
@@ -7630,6 +7640,16 @@ export abstract class ChannelBase {
             if (segment && promptState.activeSegmentId === segment.segmentId) {
               promptState.activeSegmentId = undefined;
             }
+          }
+          if (!promptState.cancelled && turnNotice) {
+            // Keep notices out of stream buffers and let the answer consume
+            // adapter-specific reply metadata (such as DingTalk mentions) first.
+            await this.sendResponseMessage(
+              envelope.chatId,
+              turnNotice,
+              sessionId,
+              sourceLabel,
+            );
           }
           // Once delivery started the turn's outcome is fixed — don't let a
           // cancel settling during the send rewrite completed into cancelled.
@@ -7706,6 +7726,7 @@ export abstract class ChannelBase {
           throw err;
         } finally {
           promptBridge.off('textChunk', onChunk);
+          promptBridge.off('turnNotice', onTurnNotice);
           promptBridge.off('responseBoundary', onResponseBoundary);
           // Identity guard: a turn that wedged past /clear's bounded wait gets
           // EVICTED — /clear gives up on active.done, deletes activePrompts, and a

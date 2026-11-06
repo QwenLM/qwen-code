@@ -16608,6 +16608,31 @@ describe('ChannelBase', () => {
   });
 
   describe('response delivery', () => {
+    it.each(['', 'Answer'])(
+      'delivers a turn notice separately from %j',
+      async (body) => {
+        const events = bridge as unknown as EventEmitter;
+        vi.mocked(bridge.prompt).mockImplementation(async (sid) => {
+          events.emit('turnNotice', 'another-session', 'Unrelated notice');
+          events.emit('turnNotice', sid, 'Overflow notice');
+          if (body) events.emit('textChunk', sid, body);
+          return body ? `Overflow notice\n\n${body}` : 'Overflow notice';
+        });
+        const ch = createChannel();
+
+        await ch.handleInbound(envelope());
+
+        expect(ch.responseChunks.map(({ chunk }) => chunk)).toEqual(
+          body ? [body] : [],
+        );
+        expect(ch.sent).toEqual([
+          ...(body ? [{ chatId: 'chat1', text: body }] : []),
+          { chatId: 'chat1', text: 'Overflow notice' },
+        ]);
+        expect(events.listenerCount('turnNotice')).toBe(0);
+      },
+    );
+
     it('keeps partial paragraphs in adapter updates until the final response', async () => {
       vi.useFakeTimers();
       try {

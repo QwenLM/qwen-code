@@ -185,6 +185,8 @@ interface ChannelAgentBridgeEventMap {
    */
   disconnected: [code: number | null, signal: NodeJS.Signals | null];
   textChunk: [sessionId: string, chunk: string];
+  /** Also prefixes prompt()'s result, with a blank line before a non-empty body. */
+  turnNotice: [sessionId: string, notice: string];
   backgroundResponse: [
     sessionId: string,
     text: string,

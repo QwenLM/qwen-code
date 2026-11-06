@@ -692,9 +692,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         }
         if (content?.type === 'text' && content.text) {
           if (meta?.[CHANNEL_TURN_NOTICE_META_KEY] === true) {
-            // A notice emitted ahead of a turn has to ride the reply: channel
-            // delivery returns only prompt()'s text, and the slash-command slot
-            // is shadowed as soon as the turn produces model text.
+            // Keep notices outside the text buffer cleared by tool boundaries.
             this.emit('turnNotice', sessionId, content.text);
             break;
           }
