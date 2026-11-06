@@ -12,13 +12,12 @@ import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
 
 import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.text.Normalizer;
 import java.util.HexFormat;
 import java.util.Map;
@@ -294,17 +293,13 @@ public final class ManagedCsiProtocol {
     }
 
     public static String physicalKey(String backend, String driver, String handle) {
-        try {
-            var digest = MessageDigest.getInstance("SHA-256");
-            for (String field : new String[] {"qwen-csi-physical/1", backend, driver, handle}) {
-                byte[] bytes = field.getBytes(StandardCharsets.UTF_8);
-                digest.update(ByteBuffer.allocate(4).putInt(bytes.length).array());
-                digest.update(bytes);
-            }
-            return HexFormat.of().formatHex(digest.digest());
-        } catch (NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException("SHA-256 is unavailable", impossible);
+        var digest = DigestUtils.getSha256Digest();
+        for (String field : new String[] {"qwen-csi-physical/1", backend, driver, handle}) {
+            byte[] bytes = field.getBytes(StandardCharsets.UTF_8);
+            digest.update(ByteBuffer.allocate(4).putInt(bytes.length).array());
+            digest.update(bytes);
         }
+        return HexFormat.of().formatHex(digest.digest());
     }
 
     private static Map<String, Object> map(Object value) {
