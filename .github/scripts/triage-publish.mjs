@@ -110,6 +110,15 @@ function readBodyFile(draftDir, bodiesDir, rel, where) {
 export function validateDrafts({ dir, targetKind }) {
   const draftDir = path.resolve(dir);
   const bodiesDir = path.join(draftDir, 'bodies');
+  // lstat the containers themselves: a symlinked bodies/ would redirect the
+  // realpath containment base below, letting outside files pass as bodies,
+  // and a symlinked actions.jsonl would feed validation from another file.
+  if (!lstatSync(path.join(draftDir, 'actions.jsonl')).isFile()) {
+    throw new Error('actions.jsonl must be a regular file, not a symlink');
+  }
+  if (!lstatSync(bodiesDir).isDirectory()) {
+    throw new Error('bodies/ must be a real directory, not a symlink');
+  }
   const raw = readFileSync(path.join(draftDir, 'actions.jsonl'), 'utf8');
   const actions = [];
   const lines = raw.split('\n');
@@ -173,6 +182,17 @@ export function validateDrafts({ dir, targetKind }) {
     }
     if (action.action === 'defer' && targetKind !== 'pr') {
       throw new Error(`${where}: defer is only valid for pull requests`);
+    }
+    if (
+      (action.action === 'review' || action.action === 'close-pr') &&
+      targetKind !== 'pr'
+    ) {
+      throw new Error(
+        `${where}: ${action.action} is only valid for pull requests`,
+      );
+    }
+    if (action.action === 'close-issue' && targetKind !== 'issue') {
+      throw new Error(`${where}: close-issue is only valid for issues`);
     }
     if (['upsert-comment', 'review', 'defer'].includes(action.action)) {
       if (typeof action.body !== 'string') {

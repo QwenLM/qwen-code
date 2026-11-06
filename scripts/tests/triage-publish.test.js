@@ -350,6 +350,35 @@ describe('preflight fail-closed', () => {
     expect(writes).toHaveLength(0);
   });
 
+  it('rejects a bodies directory that is itself a symlink', () => {
+    // Per-file lstat is not enough: a symlinked bodies/ redirects the
+    // realpath containment base itself, so outside files would pass.
+    const dir = makeDraft(
+      [{ action: 'upsert-comment', marker: 'stage=1', body: 'bodies/s.md' }],
+      { 's.md': stageBody('stage=1') },
+    );
+    const outside = mkdtempSync(join(tmpdir(), 'triage-bodies-outside-'));
+    writeFileSync(join(outside, 's.md'), stageBody('stage=1'));
+    rmSync(join(dir, 'bodies'), { recursive: true, force: true });
+    symlinkSync(outside, join(dir, 'bodies'));
+    const gh = fakeGh();
+    const { code, writes } = runPublish(dir, gh);
+    expect(code).toBe(2);
+    expect(writes).toHaveLength(0);
+  });
+
+  it('rejects an actions.jsonl that is a symlink', () => {
+    const dir = makeDraft([{ action: 'close-pr' }]);
+    const real = join(dir, 'real.jsonl');
+    writeFileSync(real, '{"action":"close-pr"}\n');
+    rmSync(join(dir, 'actions.jsonl'));
+    symlinkSync(real, join(dir, 'actions.jsonl'));
+    const gh = fakeGh();
+    const { code, writes } = runPublish(dir, gh);
+    expect(code).toBe(2);
+    expect(writes).toHaveLength(0);
+  });
+
   it.runIf(process.platform !== 'win32')('rejects a FIFO body', () => {
     const dir = makeDraft([
       { action: 'upsert-comment', marker: 'stage=1', body: 'bodies/fifo.md' },
@@ -471,6 +500,27 @@ describe('preflight fail-closed', () => {
       'd.md': 'uncertain',
     });
     const gh = fakeGh({ kind: 'issue' });
+    const { code, writes } = runPublish(dir, gh);
+    expect(code).toBe(2);
+    expect(writes).toHaveLength(0);
+  });
+
+  it('rejects review and close-pr when the target is an issue', () => {
+    for (const action of [
+      { action: 'review', event: 'REQUEST_CHANGES', body: 'bodies/r.md' },
+      { action: 'close-pr' },
+    ]) {
+      const dir = makeDraft([action], { 'r.md': 'notes' });
+      const gh = fakeGh({ kind: 'issue' });
+      const { code, writes } = runPublish(dir, gh);
+      expect(code).toBe(2);
+      expect(writes).toHaveLength(0);
+    }
+  });
+
+  it('rejects close-issue when the target is a pull request', () => {
+    const dir = makeDraft([{ action: 'close-issue', reason: 'not planned' }]);
+    const gh = fakeGh();
     const { code, writes } = runPublish(dir, gh);
     expect(code).toBe(2);
     expect(writes).toHaveLength(0);

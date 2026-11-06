@@ -145,7 +145,10 @@ bodies/<name>.md     # 动作引用的评论/review 正文
    agent）；超过 GitHub 65,536 字符上限的正文拒绝而非截断（截断可能切掉 CI 区域
    或 approve-on-green marker）；review event 仅限 `APPROVE` 与
    `REQUEST_CHANGES`；`APPROVE` 必须带 `commit_id`；body 路径必须解析为 draft
-   目录内的常规文件。
+   目录内的常规文件；`actions.jsonl` 与 `bodies/` 本身必须分别是常规文件与
+   真实目录（lstat——符号链接容器会重定向 realpath 包含检查的基准目录）；
+   `review` 与 `close-pr` 要求 PR 目标，`close-issue` 要求 issue 目标，
+   `labels` 拒绝 SKILL.md 划为禁区的 process label。
 2. 按序执行动作，逐动作 best-effort 并输出逐动作结果摘要：
    - `upsert-comment`：bot 作者 + 正文 startswith marker 去重，取 last，PATCH
      否则 POST——即 `publish-tmux` 的纪律，包括身份解析 fail-closed。
@@ -200,7 +203,11 @@ stream-json`。显式环境携带只读 `GH_TOKEN`、`BOT_LOGIN`、draft 目录�
   `QWEN_HOME` 的 settings 文件。
 - 既有 workspace 卫生保留（属主恢复、stale-agent-state 净化、git metadata 重建）；
   base checkout 增加 `persist-credentials: false`；job 末尾增加镜像 tmux 的属主
-  恢复步骤。drafts 以 artifact 上传并剥离非常规文件。
+  恢复步骤。drafts 以 artifact 上传并剥离非常规文件；剥离之前先杀尽残留的
+  agent 用户进程（僵尸除外——杀不掉的幸存者按 deny-by-default 丢弃整组
+  draft），关闭剥离与上传之间的重植竞态。gh/git 代理包装器目录对 agent 用户
+  可遍历（mktemp 的 700 会让包装器悄悄从它的 PATH 里消失），工具链步骤与
+  兄弟 lane 一样安装 `util-linux` 提供 `runuser`。
 
 ## 关键设计决策
 

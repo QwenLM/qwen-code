@@ -807,6 +807,12 @@ describe('qwen-triage: token isolation contract', () => {
 
   it('runs the agent in a container with no write credential in its env', () => {
     assert.equal(triageJob.container?.image, 'node:22-bookworm');
+    // runuser comes from util-linux; the tmux/verify lanes install it
+    // explicitly before launching the agent as node. Pin the install line,
+    // not a prose mention.
+    const tools = steps.find((s) => s.name === 'Install triage tools');
+    assert.ok(tools, 'the container toolchain step must exist');
+    assert.match(tools.run, /apt-get install[^\n]*util-linux/);
     const env = triageStep.env ?? {};
     // The agent's GitHub credential is the job's read-only GITHUB_TOKEN.
     assert.equal(env.GH_TOKEN, '${{ secrets.GITHUB_TOKEN }}');
@@ -814,6 +820,9 @@ describe('qwen-triage: token isolation contract', () => {
     assert.ok(!JSON.stringify(env).includes('QWEN_CODE_BOT_TOKEN'));
     const run = triageStep.run;
     assert.match(run, /runuser -u node -- env -i/);
+    // The gh/git proxy wrappers must be traversable by the agent user, or
+    // they silently fall out of PATH on a proxied runner.
+    assert.match(run, /chmod 755 "\$proxy_bin"/);
     assert.match(run, /"GITHUB_TOKEN=\$GH_TOKEN"/);
     assert.match(run, /"GH_TOKEN=\$GH_TOKEN"/);
     assert.match(run, /"QWEN_TRIAGE_PUBLISH=workflow"/);
@@ -834,8 +843,38 @@ describe('qwen-triage: token isolation contract', () => {
     assert.ok(upload, 'drafts must upload for the publisher');
     assert.equal(sanitize.if, 'always()');
     assert.match(sanitize.run, /-type l/);
+    // A detached agent child could re-plant symlinks between the strip and
+    // the upload (which FOLLOWS them), so lingering agent-user processes
+    // must be killed BEFORE the strip — and zombies must not count, or the
+    // check never clears (tmux/verify rule).
+    const killAt = sanitize.run.indexOf('pkill -KILL -u node');
+    const stripAt = sanitize.run.indexOf('-type l');
+    assert.ok(killAt !== -1, 'sanitize must kill lingering agent processes');
+    assert.ok(
+      killAt < stripAt,
+      'the process kill must precede the symlink strip',
+    );
+    assert.match(sanitize.run, /\$2 !~ \/\^Z\//);
     assert.equal(upload.if, 'always()');
     assert.match(String(upload.with.name), /triage-drafts-/);
+  });
+
+  it('keeps the drafts artifact addressable when resolve never ran', () => {
+    // Upload and download must agree on the name even when the run died
+    // before 'Resolve target number': the job output mirrors the upload's
+    // primary segment, and both sides share the same event-number fallback.
+    const upload = steps.find((s) => s.name === 'Upload triage drafts');
+    const download = publishTriageJob.steps.find(
+      (s) => s.name === 'Download triage drafts',
+    );
+    assert.ok(download, 'the publisher must download the drafts artifact');
+    assert.equal(
+      triageJob.outputs.pr_number,
+      '${{ steps.resolve.outputs.number }}',
+    );
+    const fallback = '|| github.event.issue.number';
+    assert.ok(String(upload.with.name).includes(fallback));
+    assert.ok(String(download.with.name).includes(fallback));
   });
 
   it('publishes drafts from a separate job that never runs agent code', () => {

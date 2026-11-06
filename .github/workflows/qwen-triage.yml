@@ -531,7 +531,9 @@ jobs:
         run: |-
           set -euo pipefail
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git gnupg jq
+          # util-linux provides runuser for the agent launch (tmux/verify
+          # install it explicitly for the same reason).
+          apt-get install -y --no-install-recommends ca-certificates curl git gnupg jq util-linux
 
           install -d -m 755 /etc/apt/keyrings
           curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -997,6 +999,11 @@ jobs:
             export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
             export QWEN_CI_http_proxy="${http_proxy:-}"
             proxy_bin="$(mktemp -d /tmp/qwen-network-bin.XXXXXX)"
+            # mktemp -d is 700 root-owned; the agent runs as node and must be
+            # able to traverse it, or the wrappers silently fall out of PATH
+            # and child gh/git lose the runner proxy. The wrappers hold no
+            # secrets (env-var names only).
+            chmod 755 "$proxy_bin"
             if command -v gh >/dev/null 2>&1; then
               local real_gh
               real_gh="$(command -v gh)"
@@ -1409,6 +1416,31 @@ jobs:
         if: 'always()'
         run: |-
           set -uo pipefail
+          # A steered agent can background children (the denylist is not a
+          # boundary), and a detached child could re-plant symlinks between
+          # the strip below and the upload — RUNNER_TEMP is shared across
+          # jobs on the host, so a followed link exfiltrates other lanes'
+          # data. Kill everything still running as the agent user FIRST
+          # (tmux/verify rule). Zombies do not count: they hold nothing open
+          # and cannot be killed, so counting them would never clear.
+          live_agent_processes() {
+            ps -o pid=,stat=,args= -u node 2>/dev/null | awk '$2 !~ /^Z/'
+          }
+          pkill -KILL -u node 2>/dev/null || true
+          for _ in 1 2 3; do
+            [ -n "$(live_agent_processes)" ] || break
+            sleep 1
+            pkill -KILL -u node 2>/dev/null || true
+          done
+          survivors="$(live_agent_processes)" || true
+          if [ -n "$survivors" ]; then
+            # Deny by default: an unkillable writer makes the draft set
+            # untrustworthy, so drop it instead of uploading a race loser.
+            echo "::error::Processes owned by the agent user survived SIGKILL; dropping drafts as possibly tainted."
+            printf '%s\n' "$survivors"
+            rm -rf "${RUNNER_TEMP:?}/triage-drafts"
+            exit 0
+          fi
           [ -d "${RUNNER_TEMP:?}/triage-drafts" ] || exit 0
           find "$RUNNER_TEMP/triage-drafts" \( -type l -o -type p -o -type s -o -type b -o -type c \) -delete 2>/dev/null || true
 

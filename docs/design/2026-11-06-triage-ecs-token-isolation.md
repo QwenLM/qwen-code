@@ -174,7 +174,12 @@ implementation of the write path for both CI and local use. It:
    limit are rejected, not truncated (truncation could cut the CI-region or
    approve-on-green markers); review events are limited to `APPROVE` and
    `REQUEST_CHANGES`; `APPROVE` requires `commit_id`; body paths must resolve
-   to regular files inside the draft directory.
+   to regular files inside the draft directory; `actions.jsonl` and `bodies/`
+   must themselves be a regular file and a real directory (lstat — a
+   symlinked container would redirect the realpath containment base);
+   `review` and `close-pr` require a PR target, `close-issue` an issue
+   target, and `labels` rejects the process labels SKILL.md places
+   off-limits.
 2. Executes the actions in order, best-effort per action with a per-action
    result summary:
    - `upsert-comment`: bot-owned + body-startswith-marker dedup, last match
@@ -243,7 +248,14 @@ openai --approval-mode yolo --prompt '/triage …' --output-format stream-json`.
 - Existing workspace hygiene stays (ownership restore, stale-agent-state
   sanitize, git-metadata recreate); the base checkout adds
   `persist-credentials: false`, and an end-of-job ownership-restore step
-  mirrors tmux. Drafts upload as an artifact with the non-regular-file strip.
+  mirrors tmux. Drafts upload as an artifact with the non-regular-file
+  strip; before the strip, lingering agent-user processes are killed
+  (zombies excluded — an unkillable survivor drops the draft set
+  deny-by-default), closing the re-plant race between strip and upload.
+  The gh/git proxy-wrapper directory is made traversable by the agent user
+  (mktemp's 700 would silently drop the wrappers from its PATH), and the
+  toolchain step installs `util-linux` for `runuser`, as the sibling lanes
+  do.
 
 ## Key design decisions
 
