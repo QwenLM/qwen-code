@@ -48,7 +48,9 @@ matching event, do not synthesize an out-of-order replacement. Existing resync,
 load, and history-truncation behavior remains authoritative.
 
 Seeded replay uses the same projection and keeps only the last complete command
-event. Reset and close clear the ring and latest slot. A subsequent command event
+event. Only complete command snapshots are serialized for snapshot-slot byte
+accounting; ordinary history avoids an extra serialization pass before compaction.
+Reset and close clear the ring and latest slot. A subsequent command event
 without details clears the prior complete slot, preventing stale skill bodies
 from resurfacing. No new protocol field, capability, cursor, or id-less snapshot
 notification is introduced. Browser/REST egress reuses the same projection;

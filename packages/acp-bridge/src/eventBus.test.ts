@@ -133,9 +133,31 @@ describe('EventBus', () => {
       JSON.stringify(bus.snapshotReplay()?.compactedTurns[0]),
     ).not.toContain('old');
     expect(bus.retentionSnapshot().ringCount).toBe(0);
+    expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(
+      Buffer.byteLength(JSON.stringify(seeded[1])),
+    );
     bus.resetReplay();
     expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(0);
     expect(bus.snapshotReplay()?.compactedTurns).toEqual([]);
+    bus.close();
+  });
+
+  it('does not serialize ordinary history for command snapshot accounting', () => {
+    const bus = new EventBus();
+    const history = Array.from({ length: 200 }, () => ({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'x'.repeat(4096) },
+        },
+      },
+    }));
+    const stringify = vi.spyOn(JSON, 'stringify');
+    const seeded = bus.seedReplayEvents(history);
+    expect(stringify).not.toHaveBeenCalled();
+    expect(seeded).toHaveLength(200);
+    expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(0);
     bus.close();
   });
 
@@ -195,8 +217,15 @@ describe('EventBus', () => {
       events.slice(-state.ringCount).map((event) => event.id),
     );
     expect(current.at(-1)?.type).toBe('replay_complete');
+    const lifetimeEvictions = {
+      evictedEvents: state.evictedEvents,
+      evictedBytes: state.evictedBytes,
+    };
     bus.resetReplay();
     expect(bus.retentionSnapshot().ringBytes).toBe(0);
+    expect(bus.retentionSnapshot()).toMatchObject(lifetimeEvictions);
+    bus.seedReplayEvents([{ type: 'text', data: 'seeded history' }]);
+    expect(bus.retentionSnapshot()).toMatchObject(lifetimeEvictions);
     bus.close();
   });
 
@@ -229,18 +258,50 @@ describe('EventBus', () => {
             sessionUpdate: 'available_commands_update',
             availableCommands: [],
             _meta: {
-              availableSkillDetails: [{ body: `body-${i}`.repeat(100) }],
+              availableSkillDetails: [{ body: `body-${i}`.repeat(180) }],
             },
           },
         },
       });
       expect(bus.retentionSnapshot().ringBytes).toBeLessThanOrEqual(2000);
     }
-    expect(bus.retentionSnapshot().ringCount).toBeLessThan(100);
+    for (let i = 0; i < 4; i++) {
+      bus.publish({ type: 'text', data: { text: 'x'.repeat(350) } });
+    }
+    expect(bus.retentionSnapshot().ringCount).toBe(1);
     const replay = JSON.stringify(bus.snapshotReplay());
     expect(replay.match(/availableSkillDetails/g)).toHaveLength(1);
     expect(replay).toContain('body-99');
     expect(replay).not.toContain('body-98');
+    bus.close();
+  });
+
+  it('retains at most one ring event when the full command snapshot exceeds the budget', () => {
+    const bus = new EventBus(100, undefined, undefined, { maxRingBytes: 2000 });
+    bus.publish({ type: 'text', data: 'before snapshot' });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: { availableSkillDetails: [{ body: 'x'.repeat(3000) }] },
+        },
+      },
+    });
+    expect(bus.retentionSnapshot()).toMatchObject({
+      ringCount: 1,
+      earliestEventId: 2,
+    });
+    expect(
+      bus.retentionSnapshot().availableCommandsSnapshotBytes,
+    ).toBeGreaterThan(2000);
+    bus.publish({ type: 'text', data: 'after snapshot' });
+    expect(bus.retentionSnapshot()).toMatchObject({
+      ringCount: 1,
+      earliestEventId: 3,
+    });
+    expect(bus.retentionSnapshot().ringBytes).toBeGreaterThan(2000);
     bus.close();
   });
 

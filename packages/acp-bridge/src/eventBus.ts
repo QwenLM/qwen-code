@@ -569,14 +569,13 @@ export class EventBus {
     return latest && latest.event.id === event.id ? latest.event : event;
   }
 
-  private retainCommandSnapshot(
-    event: BridgeEvent,
-    eventBytes: number,
-  ): BridgeEvent {
+  private retainCommandSnapshot(event: BridgeEvent): BridgeEvent {
     const retained = omitAvailableSkillDetails(event);
     if (isAvailableCommandsEvent(event)) {
       this.latestAvailableCommands =
-        retained === event ? undefined : { event, bytes: eventBytes };
+        retained === event
+          ? undefined
+          : { event, bytes: serializedBridgeEventByteLength(event) ?? 0 };
     }
     return retained;
   }
@@ -615,10 +614,7 @@ export class EventBus {
     this.clearRetention();
     try {
       const retainedEvents = events.map((event) =>
-        this.retainCommandSnapshot(
-          event,
-          serializedBridgeEventByteLength(event) ?? 0,
-        ),
+        this.retainCommandSnapshot(event),
       );
       this.compactionEngine?.seedReplayEvents(retainedEvents);
     } catch (err) {
