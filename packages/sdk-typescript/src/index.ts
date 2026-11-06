@@ -111,6 +111,8 @@ export {
   type DaemonSkillBatchToggleErrorCode,
   type DaemonSkillBatchToggleItem,
   type DaemonSkillBatchToggleResult,
+  type DaemonUserSkillActivation,
+  type DaemonUserSkillsActivationResult,
   type ExtensionMutationResponse,
   type ExtensionWorkspaceBatchActivationState,
   type ExtensionDefaultActivationBatchItem,
