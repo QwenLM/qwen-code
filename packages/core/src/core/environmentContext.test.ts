@@ -405,6 +405,20 @@ describe('date announcements', () => {
       );
       expect(await startupDate(undefined, null)).toBeUndefined();
     });
+
+    it('reuses a stored startup prelude instead of rebuilding it', async () => {
+      const stored = userText(
+        '<system-reminder>\nstored prelude\n</system-reminder>',
+      );
+      const extra = [stored, userText('Earlier')];
+      const { config } = chatHistorySetup();
+
+      const [history] = await getInitialChatHistory(config as Config, extra, {
+        gitStatus: 'dirty',
+      });
+
+      expect(history).toEqual(extra);
+    });
   });
 });
 

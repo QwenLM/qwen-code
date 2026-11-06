@@ -1769,6 +1769,32 @@ describe('Gemini Client (client.ts)', () => {
       expect(enableSpy).toHaveBeenCalledTimes(2);
     });
 
+    it('records a generated startup prelude but not a replayed one', async () => {
+      const recorder = { recordStartupContext: vi.fn() };
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+        recorder as unknown as ReturnType<Config['getChatRecordingService']>,
+      );
+      const prelude = userText(
+        '<system-reminder>\nstartup prelude\n</system-reminder>',
+      );
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([[prelude], []]);
+
+      await client.startChat();
+
+      expect(recorder.recordStartupContext).toHaveBeenCalledWith(prelude);
+
+      recorder.recordStartupContext.mockClear();
+      const stored = userText(
+        '<system-reminder>\nstored prelude\n</system-reminder>',
+      );
+      const resumed = [stored, userText('resumed')];
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([resumed, []]);
+
+      await client.startChat(resumed, SessionStartSource.Resume);
+
+      expect(recorder.recordStartupContext).not.toHaveBeenCalled();
+    });
+
     it('clears trusted user answers when a chat is rebuilt', async () => {
       client.recordTrustedUserAnswers('ask-1', [{ question: 'Continue?' }], {
         '0': 'No',

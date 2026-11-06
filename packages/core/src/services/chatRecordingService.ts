@@ -430,6 +430,7 @@ export interface ChatRecord {
   subtype?:
     | 'chat_compression'
     | 'memory_catalog_snapshot'
+    | 'startup_context'
     | 'slash_command'
     | 'ui_telemetry'
     | 'at_command'
@@ -3723,6 +3724,29 @@ export class ChatRecordingService {
       });
     } catch (error) {
       debugLogger.error('Error saving memory catalog snapshot:', error);
+    }
+  }
+
+  /**
+   * Persists the exact startup prelude the model saw so a resumed session can
+   * replay the same prefix instead of rebuilding it with fresh date/git data.
+   * The latest record wins on recovery.
+   */
+  recordStartupContext(message: Content): void {
+    try {
+      this.appendRecord({
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'startup_context',
+        message: {
+          ...message,
+          ...(message.parts
+            ? { parts: message.parts.map((part) => ({ ...part })) }
+            : {}),
+        },
+      });
+    } catch (error) {
+      debugLogger.error('Error saving startup context record:', error);
     }
   }
 

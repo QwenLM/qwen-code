@@ -706,6 +706,16 @@ export async function getInitialChatHistory(
   const includeAvailableSkillsReminder =
     (options.includeAvailableSkillsReminder ?? true) &&
     toolRegistry.getAllToolNames().includes(ToolNames.SKILL);
+
+  // A resumed session replays the prelude it originally sent. Rebuilding it
+  // here would change the date/git snapshot in the middle of an otherwise
+  // byte-identical conversation and invalidate an implicit prefix cache from
+  // the first user message onward. Skills are restored from history by the
+  // caller (`restoreLoadedSkillsFromHistory`), so no fresh snapshot is needed.
+  if (extraHistory?.[0] && isSystemReminderContent(extraHistory[0])) {
+    return [[...extraHistory], []];
+  }
+
   const today = formatDateForContext();
   const startupReminder = config.getSkipStartupContext()
     ? null

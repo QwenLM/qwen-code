@@ -329,6 +329,25 @@ describe('ChatRecordingService', () => {
     await expect(target.recordSessionModel(payload)).resolves.toBe(true);
   }
 
+  describe('startup context recording', () => {
+    it('records the prelude as a system record with its message', async () => {
+      const prelude = {
+        role: 'user' as const,
+        parts: [{ text: '<system-reminder>\nprelude\n</system-reminder>' }],
+      };
+
+      svc.recordStartupContext(prelude);
+      const record = await flushed();
+
+      expect(record).toMatchObject({
+        type: 'system',
+        subtype: 'startup_context',
+        message: prelude,
+      });
+      expect(record.message).not.toBe(prelude);
+    });
+  });
+
   describe('background execution recording ownership', () => {
     const turn: BackgroundNotificationTurn = {
       turnId: 'automatic-turn',

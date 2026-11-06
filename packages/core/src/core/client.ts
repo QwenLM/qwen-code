@@ -186,6 +186,7 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  isSystemReminderContent,
   wrapSystemReminder,
   type AgentAvailabilityEntry,
 } from './environmentContext.js';
@@ -2292,6 +2293,11 @@ export class LlmClient {
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
+    if (startupContext) {
+      this.config
+        .getChatRecordingService()
+        ?.recordStartupContext?.(startupContext);
+    }
     this.getChat().setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
       this.getChat().getCompletedToolCallIds(),
@@ -2334,6 +2340,9 @@ export class LlmClient {
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
     if (startupContext) {
+      this.config
+        .getChatRecordingService()
+        ?.recordStartupContext?.(startupContext);
       this.getChat().setHistory(
         [startupContext, ...currentHistory],
         this.getChat().getCompletedToolCallIds(),
@@ -3009,6 +3018,9 @@ export class LlmClient {
           (isDeferredToolBridgeAvailable(toolRegistry) &&
             deferredSummary.some(({ name }) => name === ToolNames.AGENT)),
       );
+      const storedPrelude = Boolean(
+        extraHistory?.[0] && isSystemReminderContent(extraHistory[0]),
+      );
       [history, snapshotEntries] = await profiler.time(
         'initial_chat_history',
         () =>
@@ -3016,6 +3028,15 @@ export class LlmClient {
             gitStatus: this.getCachedGitStatus(),
           }),
       );
+      if (!storedPrelude && history[0] && isSystemReminderContent(history[0])) {
+        try {
+          this.config
+            .getChatRecordingService()
+            ?.recordStartupContext?.(history[0]);
+        } catch (error) {
+          debugLogger.warn('Failed to record startup context', error);
+        }
+      }
       this.config
         .getMemoryManager()
         .restoreMemoryBodiesPresentInHistory(
