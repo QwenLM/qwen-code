@@ -61,6 +61,16 @@ interface ExtendedCompletionUsage extends OpenAI.CompletionUsage {
   cached_tokens?: number;
 }
 
+/**
+ * Prompt breakdown fields the OpenAI SDK's `PromptTokensDetails` does not
+ * declare. Gateways that proxy a provider with prompt caching (Moonshot,
+ * DeepSeek and others) report cache writes there; the value reaches GenAI
+ * telemetry's `gen_ai.usage.cache_creation.input_tokens` unchanged.
+ */
+interface ExtendedPromptTokensDetails {
+  cache_write_tokens?: number;
+}
+
 export interface ExtendedChatCompletionAssistantMessageParam
   extends OpenAI.Chat.ChatCompletionAssistantMessageParam {
   reasoning_content?: string | null;
@@ -1541,6 +1551,12 @@ export function convertOpenAIResponseToLlm(
     const cachedInputTokensReported =
       typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
       typeof extendedUsage.cached_tokens === 'number';
+    const cacheWriteTokens = (
+      usage.prompt_tokens_details as
+        | ExtendedPromptTokensDetails
+        | null
+        | undefined
+    )?.cache_write_tokens;
     const providerReasoningTokens =
       usage.completion_tokens_details?.reasoning_tokens;
     let thinkingTokens = providerReasoningTokens;
@@ -1573,6 +1589,8 @@ export function convertOpenAIResponseToLlm(
     };
     setGenAiUsageProvenance(response.usageMetadata, {
       cachedInputTokensReported,
+      cacheCreationInputTokens:
+        typeof cacheWriteTokens === 'number' ? cacheWriteTokens : undefined,
     });
   }
 
@@ -2169,6 +2187,12 @@ export function convertOpenAIChunkToLlm(
     const cachedInputTokensReported =
       typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
       typeof extendedUsage.cached_tokens === 'number';
+    const cacheWriteTokens = (
+      usage.prompt_tokens_details as
+        | ExtendedPromptTokensDetails
+        | null
+        | undefined
+    )?.cache_write_tokens;
 
     const hasTokenBreakdown =
       totalTokens === 0 || promptTokens !== 0 || completionTokens !== 0;
@@ -2186,6 +2210,8 @@ export function convertOpenAIChunkToLlm(
     };
     setGenAiUsageProvenance(response.usageMetadata, {
       cachedInputTokensReported,
+      cacheCreationInputTokens:
+        typeof cacheWriteTokens === 'number' ? cacheWriteTokens : undefined,
     });
   }
 
