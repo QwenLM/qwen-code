@@ -301,7 +301,10 @@ terminal words, not persisted task states. `retired` carries a reason:
 snapshot — the non-watch sibling of `watch_no_candidate`) and
 `siblings_still_follow` (the gone fallback retires because other roles still
 follow the PR or the delivery ring already holds the event, so a public reply
-would duplicate a sibling's private delivery). A failed dead-letter append
+would duplicate a sibling's private delivery). Where another comment would fall
+back to the public path, a comment that reached the bound path only through its
+mention waiver retires with `private_only_no_target` instead, since such a
+comment never takes the public path. A failed dead-letter append
 journals `task` / `failed` with reason `dead_letter_write_failed`. For six of
 the seven `retireBoundTask` call sites the task is kept and stays recoverable,
 so the next poll retries the append — it is not a retire. The exception is the

@@ -163,9 +163,10 @@
                 <executions>
                     <!-- Writes META-INF/spring-configuration-metadata.json, from
                          which docs/users/managed-agent-configuration-reference.md
-                         is generated. Only ManagedAgentProperties: the two Druid
-                         beans share a prefix, which the processor refuses. It
-                         reads Lombok's annotations itself. -->
+                         is generated. Only ManagedAgentProperties: the generator
+                         documents every property in this metadata, and the Druid
+                         pools bound to spring.datasource.druid would add hundreds.
+                         It reads Lombok's annotations itself. -->
                     <execution>
                         <id>configuration-metadata</id>
                         <phase>process-classes</phase>
