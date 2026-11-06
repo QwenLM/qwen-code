@@ -934,8 +934,17 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 // answers "already being delivered" for its own rename.
                 if (awaitRenameSettle(tenantId, idempotencyKey, sessionId,
                         renameDigest(sessionId, title)) != null) {
+                    // The settle arm answers a recorded outcome through the
+                    // same TOCTOU window as the COMPLETED read-back below:
+                    // the pre-read above could not see a key the recorder
+                    // committed after it, so the creator gate re-runs here,
+                    // and the body serializes the Session as last visible.
+                    SessionRecord settled = store.requireSession(tenantId,
+                            sessionId);
+                    requireReplayActor(tenantId, RENAME, idempotencyKey,
+                            settled, actorId);
                     return new SessionMutationResult<>(publicSession(
-                            store.requireSession(tenantId, sessionId)), true);
+                            asLastVisible(settled)), true);
                 }
                 throw dependencyUnavailable("hosted_harness_unavailable",
                         "The Session title is already being delivered.");
