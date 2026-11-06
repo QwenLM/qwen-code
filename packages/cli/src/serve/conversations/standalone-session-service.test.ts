@@ -2625,6 +2625,53 @@ describe('StandaloneSessionService', () => {
     await creating;
   });
 
+  it.each([
+    {
+      prompt: '',
+      customTitle: undefined,
+      goalObjective: 'Write release notes',
+      expected: 'Write release notes',
+    },
+    {
+      prompt: 'First prompt',
+      customTitle: undefined,
+      goalObjective: 'Write release notes',
+      expected: 'First prompt',
+    },
+    {
+      prompt: 'First prompt',
+      customTitle: 'Manual title',
+      goalObjective: 'Write release notes',
+      expected: 'Manual title',
+    },
+  ])(
+    'labels an archived Goal session without overriding title or prompt: $expected',
+    async ({ prompt, customTitle, goalObjective, expected }) => {
+      mockArchivedStandalone();
+      vi.spyOn(
+        SessionService.prototype,
+        'getSessionListItem',
+      ).mockResolvedValue({
+        sessionId,
+        cwd: root.canonicalRoot,
+        startTime: '2026-08-24T00:00:00.000Z',
+        mtime: Date.parse('2026-08-24T01:00:00.000Z'),
+        prompt,
+        customTitle,
+        goalObjective,
+        filePath: '/transcripts/session.jsonl',
+        sourceType: 'standalone',
+        isArchived: true,
+      });
+      const harness = createHarness();
+      await expect(harness.service.get(sessionId)).resolves.toMatchObject({
+        sessionId,
+        displayName: expected,
+        isArchived: true,
+      });
+    },
+  );
+
   it('returns a canonical archived summary for a mixed-case transcript', async () => {
     const storageSessionId = sessionId.toUpperCase();
     vi.spyOn(

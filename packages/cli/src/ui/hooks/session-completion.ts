@@ -100,7 +100,8 @@ export async function getSessionSuggestions(
   const needle = stripped.trim().toLowerCase();
   return items
     .map((s) => {
-      const label = s.customTitle?.trim() || s.prompt || s.sessionId;
+      const label =
+        s.customTitle?.trim() || s.prompt || s.goalObjective || s.sessionId;
       const description = s.customTitle ? s.prompt : undefined;
       return {
         label,
