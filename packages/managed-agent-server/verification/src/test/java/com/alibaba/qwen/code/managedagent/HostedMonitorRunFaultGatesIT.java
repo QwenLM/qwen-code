@@ -35,6 +35,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.IntFunction;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 
 // FG8 (issues #14054/#14163): multi-process fault gates for monitor_run
@@ -161,7 +162,7 @@ class HostedMonitorRunFaultGatesIT {
         Files.createDirectory(temporary.resolve("runtime"));
         // The publication service base-url must name the public connector
         // before boot, so the port is pinned rather than ephemeral.
-        int port = freePort();
+        int port = reservePort();
 
         var arguments = new ArrayList<>(List.of("--server.address=127.0.0.1",
                 "--server.port=" + port,
@@ -1520,30 +1521,6 @@ class HostedMonitorRunFaultGatesIT {
         assertThat(cli).as("Build and bundle the packaged CLI first")
                 .isRegularFile();
         return cli;
-    }
-
-    // A port from the ephemeral range can be stolen by any outgoing
-    // connection between this probe and Spring's bind. Stay below Linux's
-    // 32768-60999 and macOS's 49152-65535 ephemeral ranges.
-    private static final java.util.concurrent.atomic.AtomicInteger NEXT_PORT =
-            new java.util.concurrent.atomic.AtomicInteger(20_000
-                    + java.util.concurrent.ThreadLocalRandom.current()
-                            .nextInt(8_000));
-
-    private static int freePort() throws java.io.IOException {
-        for (int attempt = 0; attempt < 1000; attempt++) {
-            int candidate = NEXT_PORT.getAndUpdate(
-                    port -> port >= 28_000 ? 20_000 : port + 1);
-            try (java.net.ServerSocket socket = new java.net.ServerSocket(
-                    candidate, 0,
-                    java.net.InetAddress.getLoopbackAddress())) {
-                return candidate;
-            } catch (java.io.IOException ignored) {
-                // Occupied; try the next candidate.
-            }
-        }
-        throw new java.io.IOException(
-                "No free port below the ephemeral range");
     }
 
     private static Path repoRoot() {

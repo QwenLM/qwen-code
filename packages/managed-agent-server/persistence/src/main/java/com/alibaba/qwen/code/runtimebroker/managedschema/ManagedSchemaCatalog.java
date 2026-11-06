@@ -22,16 +22,16 @@ final class ManagedSchemaCatalog {
     private static final Pattern COLUMN =
             Pattern.compile(
                     "(?m)^    ([a-z0-9_]+)"
-                        + " (VARBINARY|VARCHAR|CHAR|BIGINT|INT|BOOLEAN|DATETIME|LONGTEXT|MEDIUMTEXT|MEDIUMBLOB|LONGBLOB)(?:\\((\\d+)\\))?([^\\n"
+                        + " (VARBINARY|VARCHAR|CHAR|BIGINT|INT|TINYINT|BOOLEAN|DATETIME|LONGTEXT|MEDIUMTEXT|MEDIUMBLOB|LONGBLOB)(?:\\((\\d+)\\))?([^\\n"
                         + "]*)");
     private static final Pattern PRIMARY = Pattern.compile("PRIMARY KEY \\(([^)]+)\\)");
     private static final Pattern UNIQUE = Pattern.compile("UNIQUE(?: KEY [a-z_]+)? \\(([^)]+)\\)");
     private static final Pattern CHECK = Pattern.compile("CONSTRAINT ([a-z_]+) CHECK");
     private static final Pattern INDEX =
-            Pattern.compile("CREATE (UNIQUE )?INDEX ([a-z_]+) ON (ma_[a-z_]+) \\(([^)]+)\\)");
+            Pattern.compile("CREATE (UNIQUE )?INDEX ([a-z_]+) ON (ma_[a-z_]+) \\(([^;]+)\\);");
     private static final Pattern INLINE_INDEX = Pattern.compile("INDEX ([a-z_]+)\\s*\\(([^)]+)\\)");
-    private static final Pattern FOREIGN =
-            Pattern.compile("FOREIGN KEY \\(([^)]+)\\)\\s*REFERENCES (ma_[a-z_]+) \\(([^)]+)\\)");
+    private static final Pattern INDEX_PREFIX =
+            Pattern.compile(" /\\*!50000 \\((\\d+)\\) \\*/");
 
     private ManagedSchemaCatalog() {}
 
@@ -45,6 +45,14 @@ final class ManagedSchemaCatalog {
                 throw new SQLException("Managed schema requires a dedicated application catalog;"
                         + " system or missing catalog refused before DDL: " + name);
             }
+            try (var statement = connection.prepareStatement("SELECT @@SESSION.sql_mode");
+                    var result = statement.executeQuery()) {
+                if (!result.next() || !strictSqlMode(result.getString(1))) {
+                    throw new SQLException("Managed schema requires strict SQL mode"
+                            + " (STRICT_TRANS_TABLES or STRICT_ALL_TABLES) for the current session;"
+                            + " refused before DDL");
+                }
+            }
             if (isMariaDb(connection)) {
                 try (var statement = connection.prepareStatement(
                         "SELECT @@GLOBAL.check_constraint_checks, @@SESSION.check_constraint_checks");
@@ -56,6 +64,16 @@ final class ManagedSchemaCatalog {
                 }
             }
         }
+    }
+
+    private static boolean strictSqlMode(String modes) {
+        for (String mode : modes.split(",")) {
+            if ("STRICT_TRANS_TABLES".equalsIgnoreCase(mode.trim())
+                    || "STRICT_ALL_TABLES".equalsIgnoreCase(mode.trim())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean isMariaDb(Connection connection) throws SQLException {
@@ -137,7 +155,7 @@ final class ManagedSchemaCatalog {
             validateGeneratedColumns(connection, name, body);
             validateKeys(connection, name, body, ddl);
             validateChecks(connection, name, body);
-            validateForeignKeys(connection, name, body, ddl);
+            validateForeignKeys(connection, name);
         }
         if (!declared.equals(ManagedSchemaContract.TABLES)) {
             throw new SQLException(
@@ -152,6 +170,7 @@ final class ManagedSchemaCatalog {
         Map<String, Boolean> unsigned = new HashMap<>();
         Map<String, String> names = new HashMap<>();
         Map<String, Boolean> required = new HashMap<>();
+        Map<String, Boolean> automatic = new HashMap<>();
         try (var result =
                 connection
                         .getMetaData()
@@ -167,6 +186,8 @@ final class ManagedSchemaCatalog {
                 required.put(
                         lower(result.getString("COLUMN_NAME")),
                         result.getInt("NULLABLE") == DatabaseMetaData.columnNoNulls);
+                automatic.put(lower(result.getString("COLUMN_NAME")),
+                        "YES".equals(result.getString("IS_AUTOINCREMENT")));
             }
         }
         boolean nativeDatabase = "MySQL".equals(connection.getMetaData().getDatabaseProductName())
@@ -203,9 +224,12 @@ final class ManagedSchemaCatalog {
             if (!compatibleType(column.group(2), types.get(key))) {
                 throw new SQLException("Managed schema column type differs: " + name + "." + key);
             }
-            if (nativeDatabase && "BIGINT".equals(column.group(2))
+            if (nativeDatabase && Set.of("BIGINT", "INT", "TINYINT").contains(column.group(2))
                     && column.group(4).contains("UNSIGNED") != Boolean.TRUE.equals(unsigned.get(key))) {
                 throw new SQLException("Managed schema integer signedness differs: " + name + "." + key);
+            }
+            if (column.group(4).contains("AUTO_INCREMENT") != automatic.get(key)) {
+                throw new SQLException("Managed schema identity generation differs: " + name + "." + key);
             }
             if (Set.of("LONGTEXT", "MEDIUMTEXT", "MEDIUMBLOB", "LONGBLOB").contains(column.group(2))
                     && actual.get(key) < 1_048_576) {
@@ -315,6 +339,7 @@ final class ManagedSchemaCatalog {
                         || index.group(1) != null && !uniqueIndexes.contains(index.group(2))) {
                     throw new SQLException("Managed schema index differs: " + index.group(2));
                 }
+                validateIndexPrefix(connection, name, index.group(2), index.group(4));
             }
         }
         var inline = INLINE_INDEX.matcher(body);
@@ -327,44 +352,36 @@ final class ManagedSchemaCatalog {
         }
     }
 
-    private static void validateForeignKeys(
-            Connection connection, String name, String body, String ddl) throws SQLException {
-        Map<String, Map<Integer, String>> actual = new HashMap<>();
-        try (var result =
-                connection
-                        .getMetaData()
-                        .getImportedKeys(
-                                connection.getCatalog(),
-                                connection.getSchema(),
-                                storedName(connection, name))) {
-            while (result.next()) {
-                String key = lower(result.getString("FK_NAME"));
-                actual.computeIfAbsent(key, ignored -> new java.util.TreeMap<>())
-                        .put(
-                                result.getInt("KEY_SEQ"),
-                                lower(result.getString("FKCOLUMN_NAME"))
-                                        + ":"
-                                        + lower(result.getString("PKTABLE_NAME"))
-                                        + ":"
-                                        + lower(result.getString("PKCOLUMN_NAME")));
+    private static void validateIndexPrefix(Connection connection, String table,
+            String index, String declaration) throws SQLException {
+        if (!"MySQL".equals(connection.getMetaData().getDatabaseProductName())
+                && !isMariaDb(connection)) {
+            return;
+        }
+        String[] fields = declaration.split(",");
+        try (var statement = connection.prepareStatement(
+                "SELECT SEQ_IN_INDEX, SUB_PART FROM INFORMATION_SCHEMA.STATISTICS"
+                        + " WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = ?")) {
+            statement.setString(1, schema(connection));
+            statement.setString(2, table);
+            statement.setString(3, index);
+            try (var rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    var prefix = INDEX_PREFIX.matcher(fields[rows.getInt(1) - 1]);
+                    Integer expected = prefix.find() ? Integer.valueOf(prefix.group(1)) : null;
+                    if (!java.util.Objects.equals(expected, rows.getObject(2, Integer.class))) {
+                        throw new SQLException("Managed schema index prefix differs: " + index);
+                    }
+                }
             }
         }
-        var alters = Pattern.compile("ALTER TABLE " + name + " ([^;]+);").matcher(ddl);
-        String declarations = body;
-        while (alters.find()) {
-            declarations += "\n" + alters.group(1);
-        }
-        var foreign = FOREIGN.matcher(declarations);
-        while (foreign.find()) {
-            List<String> local = columns(foreign.group(1));
-            List<String> remote = columns(foreign.group(3));
-            List<String> expected = new ArrayList<>();
-            for (int index = 0; index < local.size(); index++) {
-                expected.add(local.get(index) + ":" + foreign.group(2) + ":" + remote.get(index));
-            }
-            if (actual.values().stream()
-                    .noneMatch(key -> new ArrayList<>(key.values()).equals(expected))) {
-                throw new SQLException("Managed schema foreign key is missing: " + name + local);
+    }
+
+    private static void validateForeignKeys(Connection connection, String name) throws SQLException {
+        try (var keys = connection.getMetaData().getImportedKeys(
+                connection.getCatalog(), connection.getSchema(), storedName(connection, name))) {
+            if (keys.next()) {
+                throw new SQLException("Managed schema must not contain foreign keys: " + name);
             }
         }
     }
@@ -376,6 +393,7 @@ final class ManagedSchemaCatalog {
             case "CHAR" -> type == java.sql.Types.CHAR;
             case "BIGINT" -> type == java.sql.Types.BIGINT;
             case "INT" -> type == java.sql.Types.INTEGER;
+            case "TINYINT" -> type == java.sql.Types.TINYINT;
             case "BOOLEAN" ->
                     type == java.sql.Types.BOOLEAN
                             || type == java.sql.Types.BIT
@@ -594,7 +612,7 @@ final class ManagedSchemaCatalog {
     }
 
     private static List<String> columns(String value) {
-        return java.util.Arrays.stream(value.split(","))
+        return java.util.Arrays.stream(INDEX_PREFIX.matcher(value).replaceAll("").split(","))
                 .map(String::trim)
                 .map(ManagedSchemaCatalog::lower)
                 .toList();
