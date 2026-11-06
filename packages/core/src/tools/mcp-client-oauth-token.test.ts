@@ -542,8 +542,9 @@ describe('createTransport OAuth bearer token per request', () => {
     await dueRequest;
     expect(sent.at(-1)?.authorization).toBe('Bearer access-0');
     expect(tokenRequest).toHaveBeenCalledOnce();
-    // The refresh request itself is bounded.
+    // The refresh request itself is bounded, at 10 s.
     expect(timeouts).toHaveLength(1);
+    expect(AbortSignal.timeout).toHaveBeenCalledWith(10_000);
 
     // Backing off: neither storage nor the token endpoint is asked again.
     const reads = storage.getCredentials.mock.calls.length;
