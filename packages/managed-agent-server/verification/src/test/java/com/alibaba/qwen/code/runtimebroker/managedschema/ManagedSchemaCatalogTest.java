@@ -18,6 +18,24 @@ class ManagedSchemaCatalogTest {
     private static final String BODY = "\n    CONSTRAINT ck_probe CHECK (state = 'OK')\n";
 
     @Test
+    void requiresStrictSessionSqlModeWithoutReadingGlobalDefaults() throws Exception {
+        for (String product : new String[] {"MySQL", "MariaDB"}) {
+            try (var data = fixture(false)) {
+                ManagedSchemaCatalog.requireApplicationCatalog(adapted(data, product, "8.4.11", 1, 1,
+                        "STRICT_ALL_TABLES"));
+                ManagedSchemaCatalog.requireApplicationCatalog(adapted(data, product, "8.4.11", 1, 1,
+                        "NO_ENGINE_SUBSTITUTION,STRICT_TRANS_TABLES"));
+                for (String mode : new String[] {"", "NO_STRICT_TRANS_TABLES", "STRICT_ALL_TABLES_DISABLED"}) {
+                    var connection = adapted(data, product, "8.4.11", 1, 1, mode);
+                    var error = assertThrows(SQLException.class,
+                            () -> ManagedSchemaCatalog.requireApplicationCatalog(connection));
+                    assertTrue(error.getMessage().contains("requires strict SQL mode"));
+                }
+            }
+        }
+    }
+
+    @Test
     void acceptsMariaDbMetadataWithEitherDriverProductName() throws Exception {
         for (String product : new String[] {"MySQL", "MariaDB"}) {
             try (var data = fixture(false)) {
@@ -30,9 +48,9 @@ class ManagedSchemaCatalogTest {
 
     @Test
     void acceptsNumericBooleanCaseWithoutAcceptingConstraintDrift() throws Exception {
-        String body = "\n    CONSTRAINT ck_probe CHECK (CASE resource_gc_completed"
+        String body = "\n    CONSTRAINT ck_probe CHECK (CASE is_resource_gc_completed"
                 + " WHEN FALSE THEN 1 WHEN TRUE THEN 1 ELSE 0 END = 1)\n";
-        String numeric = "CASE resource_gc_completed WHEN 0 THEN 1 WHEN 1 THEN 1 ELSE 0 END = 1";
+        String numeric = "CASE is_resource_gc_completed WHEN 0 THEN 1 WHEN 1 THEN 1 ELSE 0 END = 1";
         try (var data = fixture(false); var update = data.prepareStatement(
                 "UPDATE catalog_fixture.check_constraints SET check_clause=?")) {
             Connection connection = mariaDb(data, "MySQL", 1, 1);
@@ -60,15 +78,15 @@ class ManagedSchemaCatalogTest {
     void acceptsMariaDbNumericBooleansInPlanChecksWithoutAcceptingDrift() throws Exception {
         // MariaDB stores a bare FALSE as 0 and drops the grouping parentheses
         // it can infer from precedence; both V10 plan checks hit this shape.
-        String sessionBody = "\n    CONSTRAINT ck_probe CHECK (plan_enabled = FALSE"
+        String sessionBody = "\n    CONSTRAINT ck_probe CHECK (is_plan_enabled = FALSE"
                 + " OR (selected_approval_mode IS NOT NULL AND approval_revision >= 1))\n";
-        String sessionStored = "`plan_enabled` = 0 or `selected_approval_mode` is not null"
+        String sessionStored = "`is_plan_enabled` = 0 or `selected_approval_mode` is not null"
                 + " and `approval_revision` >= 1";
-        String turnBody = "\n    CONSTRAINT ck_probe CHECK (plan_enabled IS NULL"
+        String turnBody = "\n    CONSTRAINT ck_probe CHECK (is_plan_enabled IS NULL"
                 + " OR (approval_mode IS NOT NULL AND approval_revision IS NOT NULL"
-                + " AND (plan_enabled = FALSE OR approval_revision >= 1)))\n";
-        String turnStored = "`plan_enabled` is null or `approval_mode` is not null"
-                + " and `approval_revision` is not null and (`plan_enabled` = 0"
+                + " AND (is_plan_enabled = FALSE OR approval_revision >= 1)))\n";
+        String turnStored = "`is_plan_enabled` is null or `approval_mode` is not null"
+                + " and `approval_revision` is not null and (`is_plan_enabled` = 0"
                 + " or `approval_revision` >= 1)";
         try (var data = fixture(false); var update = data.prepareStatement(
                 "UPDATE catalog_fixture.check_constraints SET check_clause=?")) {
@@ -81,9 +99,9 @@ class ManagedSchemaCatalogTest {
             ManagedSchemaCatalog.validateChecks(connection, "ma_operation", turnBody);
             String[][] drift = {
                     {sessionBody, sessionStored.replace(">= 1", ">= 2")},
-                    {sessionBody, sessionStored.replace("`plan_enabled` = 0", "`plan_enabled` = 1")},
+                    {sessionBody, sessionStored.replace("`is_plan_enabled` = 0", "`is_plan_enabled` = 1")},
                     {turnBody, turnStored.replace(" is null or", " is not null or")},
-                    {turnBody, turnStored.replace("`plan_enabled` = 0", "`plan_enabled` = 1")}};
+                    {turnBody, turnStored.replace("`is_plan_enabled` = 0", "`is_plan_enabled` = 1")}};
             for (String[] arm : drift) {
                 update.setString(1, arm[1]);
                 update.executeUpdate();
@@ -140,7 +158,7 @@ class ManagedSchemaCatalogTest {
 
     @Test
     void acceptsNumericGeneratedBooleansWithoutAcceptingExpressionDrift() throws Exception {
-        String body = "\n    csi_guard BOOLEAN GENERATED ALWAYS AS (COALESCE("
+        String body = "\n    is_csi_guard BOOLEAN GENERATED ALWAYS AS (COALESCE("
                 + "tool_profile = 'csi-files-retirement/1' OR runtime_request_key IS NOT NULL, FALSE))\n";
         String numeric = "coalesce(`tool_profile` = 'csi-files-retirement/1'"
                 + " or `runtime_request_key` is not null,0)";
@@ -214,7 +232,7 @@ class ManagedSchemaCatalogTest {
             statement.execute("CREATE TABLE catalog_fixture.columns"
                     + " (column_name VARCHAR, generation_expression VARCHAR, table_schema VARCHAR, table_name VARCHAR)");
             statement.execute("INSERT INTO catalog_fixture.columns"
-                    + " VALUES ('csi_guard',NULL,'PUBLIC','MA_SESSION')");
+                    + " VALUES ('is_csi_guard',NULL,'PUBLIC','MA_SESSION')");
             statement.execute("CREATE TABLE catalog_fixture.table_constraints"
                     + " (constraint_name VARCHAR, constraint_schema VARCHAR, table_schema VARCHAR,"
                     + " table_name VARCHAR, constraint_type VARCHAR"
@@ -227,15 +245,16 @@ class ManagedSchemaCatalogTest {
             statement.execute("INSERT INTO catalog_fixture.check_constraints"
                     + " VALUES ('ck_probe','PUBLIC','(state = ''OK'')')");
         }
-        return adapted(data, "MySQL", "8.4.11", 1, 1);
+        return adapted(data, "MySQL", "8.4.11", 1, 1, "STRICT_TRANS_TABLES");
     }
 
     private static Connection mariaDb(Connection data, String product, int global, int session) {
-        return adapted(data, product, "10.11.18-MariaDB", global, session);
+        return adapted(data, product, "10.11.18-MariaDB", global, session,
+                "STRICT_TRANS_TABLES");
     }
 
     private static Connection adapted(Connection data, String product, String version,
-            int global, int session) {
+            int global, int session, String sessionMode) {
         DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
                 ManagedSchemaCatalogTest.class.getClassLoader(), new Class<?>[] {DatabaseMetaData.class},
                 (proxy, method, args) -> switch (method.getName()) {
@@ -250,15 +269,21 @@ class ManagedSchemaCatalogTest {
                     }
                     if ("prepareStatement".equals(method.getName())) {
                         String sql = (String) args[0];
-                        args[0] = sql.contains("@@GLOBAL.check_constraint_checks")
-                                ? "SELECT " + global + ", " + session
-                                : sql.startsWith("SELECT TABLE_NAME, ENGINE")
-                                        ? "SELECT TABLE_NAME, CASE WHEN TABLE_NAME='MA_TENANT_GUARD'"
-                                                + " THEN 'MyISAM' ELSE 'InnoDB' END AS ENGINE FROM"
-                                                + " INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?"
-                                        : sql.replace("INFORMATION_SCHEMA.TABLE_CONSTRAINTS", "catalog_fixture.table_constraints")
-                                        .replace("INFORMATION_SCHEMA.CHECK_CONSTRAINTS", "catalog_fixture.check_constraints")
-                                        .replace("INFORMATION_SCHEMA.COLUMNS", "catalog_fixture.columns");
+                        if (sql.contains("@@GLOBAL.sql_mode")) {
+                            throw new AssertionError("Schema admission must not require global SQL defaults");
+                        } else if (sql.equals("SELECT @@SESSION.sql_mode")) {
+                            args[0] = "SELECT '" + sessionMode + "'";
+                        } else {
+                            args[0] = sql.contains("@@GLOBAL.check_constraint_checks")
+                                    ? "SELECT " + global + ", " + session
+                                    : sql.startsWith("SELECT TABLE_NAME, ENGINE")
+                                            ? "SELECT TABLE_NAME, CASE WHEN TABLE_NAME='MA_TENANT_GUARD'"
+                                                    + " THEN 'MyISAM' ELSE 'InnoDB' END AS ENGINE FROM"
+                                                    + " INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?"
+                                            : sql.replace("INFORMATION_SCHEMA.TABLE_CONSTRAINTS", "catalog_fixture.table_constraints")
+                                            .replace("INFORMATION_SCHEMA.CHECK_CONSTRAINTS", "catalog_fixture.check_constraints")
+                                            .replace("INFORMATION_SCHEMA.COLUMNS", "catalog_fixture.columns");
+                        }
                     }
                     return invoke(method, data, args);
                 });

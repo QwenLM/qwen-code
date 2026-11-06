@@ -56,7 +56,7 @@ const HEADING_TITLE_MAX = 120;
 const FOOTER =
   /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
-const HELP = `Usage: node scripts/verify-pr-check.mjs <artifact-dir>
+const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] <artifact-dir>
 
 Checks a local round against the rules the CI publisher enforces:
 
@@ -79,6 +79,10 @@ when a round with failures carries no failures ledger at all, when over
 ${SUITE_SIZED_TOTAL} assertions come with no gate results (an existing test suite
 counted as the round's own), or when comment.md — the exact body a local round
 posts, optional — repeats the heading shape or lacks the attribution footer.
+
+With --context <snapshot>, the head-OID check reads that file instead of the
+round's own context.json. Pass a copy the round never saw: the artifact
+directory is writable by the PR code the round executed.
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
@@ -416,10 +420,29 @@ function main(argv) {
     process.stdout.write(HELP);
     return 0;
   }
-  const dir = argv.find((arg) => !arg.startsWith('-'));
-  if (!dir) {
+  let contextPath = null;
+  const positional = [];
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index];
+    if (arg === '--context') {
+      contextPath = argv[++index];
+      if (!contextPath) {
+        process.stderr.write(
+          `verify-pr check: --context requires a snapshot path\n\n${HELP}`,
+        );
+        return 2;
+      }
+    } else if (arg.startsWith('-')) {
+      process.stderr.write(`verify-pr check: unknown option ${arg}\n\n${HELP}`);
+      return 2;
+    } else {
+      positional.push(arg);
+    }
+  }
+  const dir = positional[0];
+  if (!dir || positional.length > 1) {
     process.stderr.write(
-      `verify-pr check: an artifact directory is required\n\n${HELP}`,
+      `verify-pr check: exactly one artifact directory is required\n\n${HELP}`,
     );
     return 2;
   }
@@ -448,25 +471,47 @@ function main(argv) {
   // rather than silently downgrading the check.
   let expectedHead = null;
   let snapshotWarning = null;
-  let snapshotPath = join(dir, 'context.json');
-  const prNumber = /^pr(\d+)-verify-/.exec(basename(resolve(dir)))?.[1];
-  if (!existsSync(snapshotPath) && prNumber) {
-    snapshotPath = join(
-      dirname(resolve(dir)),
-      'verify-context',
-      `pr${prNumber}.json`,
-    );
-  }
-  if (existsSync(snapshotPath)) {
+  let snapshotPath = null;
+  if (contextPath) {
+    // A host-held snapshot: the artifact directory is writable by the PR code
+    // the round just executed, so its own context.json cannot pin the head
+    // when the maintainer supplies a copy that code never saw.
     try {
-      const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+      const snapshot = JSON.parse(readFileSync(contextPath, 'utf8'));
       if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
         expectedHead = snapshot.headRefOid;
-      } else {
-        snapshotWarning = `snapshot ${snapshotPath} has no valid head OID; the head-OID check fell back to presence-only`;
+        snapshotPath = contextPath;
       }
     } catch {
-      snapshotWarning = `snapshot ${snapshotPath} is unreadable; the head-OID check fell back to presence-only`;
+      // Reported below; never falls back to the writable artifact copy.
+    }
+    if (!expectedHead) {
+      process.stderr.write(
+        `verify-pr check: --context ${contextPath} is missing, unreadable, or carries no valid head OID\n`,
+      );
+      return 1;
+    }
+  } else {
+    snapshotPath = join(dir, 'context.json');
+    const prNumber = /^pr(\d+)-verify-/.exec(basename(resolve(dir)))?.[1];
+    if (!existsSync(snapshotPath) && prNumber) {
+      snapshotPath = join(
+        dirname(resolve(dir)),
+        'verify-context',
+        `pr${prNumber}.json`,
+      );
+    }
+    if (existsSync(snapshotPath)) {
+      try {
+        const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+        if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
+          expectedHead = snapshot.headRefOid;
+        } else {
+          snapshotWarning = `snapshot ${snapshotPath} has no valid head OID; the head-OID check fell back to presence-only`;
+        }
+      } catch {
+        snapshotWarning = `snapshot ${snapshotPath} is unreadable; the head-OID check fell back to presence-only`;
+      }
     }
   }
 

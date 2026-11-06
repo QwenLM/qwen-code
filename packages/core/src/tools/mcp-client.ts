@@ -31,8 +31,6 @@ import { parse } from 'shell-quote';
 import type { Config, MCPServerConfig } from '../config/config.js';
 import { AuthProviderType, isSdkMcpServerConfig } from '../config/config.js';
 import { validateAgentPluginStdioRuntimePaths } from '../extension/agent-plugins-v1/mcp.js';
-import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
-import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-provider.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import type { McpToolAnnotations } from './mcp-tool.js';
 import { SdkControlClientTransport } from './sdk-control-client-transport.js';
@@ -67,7 +65,11 @@ import type {
 } from '../mcp/token-storage/types.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { ResourceRegistry } from '../resources/resource-registry.js';
-import { getErrorMessage, getErrorStatus } from '../utils/errors.js';
+import {
+  getErrorMessage,
+  getErrorStatus,
+  wrapLazyModuleLoadError,
+} from '../utils/errors.js';
 import {
   getOrCreateMcpDispatcher,
   loadUndici,
@@ -2788,6 +2790,21 @@ export async function connectToMcpServer(
   }
 }
 
+/**
+ * Loads a Google auth provider on demand: google-auth-library would otherwise
+ * ride along in every process that imports this module, MCP servers or not.
+ * As a separate chunk it can be gone after a background update replaced
+ * `dist`, which is reported as a restart rather than a connection error.
+ */
+function loadGoogleAuthModule<T>(load: () => Promise<T>): Promise<T> {
+  return load().catch((error: unknown) => {
+    throw wrapLazyModuleLoadError(
+      error,
+      'Google authentication for MCP servers',
+    );
+  });
+}
+
 /** Visible for Testing */
 export async function createTransport(
   mcpServerName: string,
@@ -2812,6 +2829,9 @@ export async function createTransport(
     mcpServerConfig.authProviderType ===
     AuthProviderType.SERVICE_ACCOUNT_IMPERSONATION
   ) {
+    const { ServiceAccountImpersonationProvider } = await loadGoogleAuthModule(
+      () => import('../mcp/sa-impersonation-provider.js'),
+    );
     const provider = new ServiceAccountImpersonationProvider(mcpServerConfig);
     const transportOptions:
       | StreamableHTTPClientTransportOptions
@@ -2841,6 +2861,9 @@ export async function createTransport(
   if (
     mcpServerConfig.authProviderType === AuthProviderType.GOOGLE_CREDENTIALS
   ) {
+    const { GoogleCredentialProvider } = await loadGoogleAuthModule(
+      () => import('../mcp/google-auth-provider.js'),
+    );
     const provider = new GoogleCredentialProvider(mcpServerConfig);
     const transportOptions:
       | StreamableHTTPClientTransportOptions

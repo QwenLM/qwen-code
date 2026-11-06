@@ -132,3 +132,40 @@ v2 关闭被准入之后，store 会 fence 普通写者续租，而 Harness 要�
 变异见证：在打包 CLI 的副本中让 `drainConfigurations` 只遍历 `configurations.slice(0, 1)`。两个 server 的用例在 `settle must complete` 处变红，因为第二个配置保持 active；一个 server 的用例仍绿，因此是这个用例钉住了第二个配置。还原后的 bundle 复绿。
 
 预算：两个 server 的用例在 JDK 21、MySQL 8.4.6、Linux x86_64 上单独实测 16.16–16.24 秒（两次），十用例整类 81.6 秒。按 2× 记 32 秒加入共享健康总和（11504 → 11536 秒），`hosted-harness-mysql` fork 移到 11536 秒，Verify 步骤移到 203 分钟（含 wrap 共 12136 秒），job 上限移到 326（293 + 33）。`hosted-mcp-gates` profile 与产物根不变。
+
+## 后续格：工具结果未知时 detach 被拒
+
+#15750 的 FG12d 行还要求：工具结果未知时 detach 必须被拒。本类已有的 unknown 结果用例（`stdioKillDuringRequestSettlesOutcomeUnknownOnMySql` 与 `workerKillDuringOperationSettlesOutcomeUnknownOnMySql`）只停在 unknown；本后续格在记录处于 `recovery_blocked` / `outcome_unknown` 时调用 Harness 的 detach 路由。
+
+| 用例                            | 注入                                                                                                                            | 期望                                                                                                                                                                                 |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `detach-refused-unknown-result` | 通过私有路由发起 `ext://hold` 原始操作；杀掉 stdio fixture；等 `outcome_unknown` / `recovery_blocked`；POST Harness detach 路由 | detach 返回 409 `hosted_turn_active` 或 503 `managed_session_close_failed`（close 捕获 MCP recovery 错误）；没有 `mcp-release` 控制；操作保持 unknown；Session 保持 attached、可重开 |
+
+决策：
+
+1. **以 Harness detach 路由为门禁。** 控制面 lifecycle close 已由 R1-1 与两 server 用例覆盖；本格直接调 `POST /session/{id}/detach`，即生产 detach 到达 `HostedMcpSession.close()` 的路径。
+2. **unknown 是永久的，不是定时窗口。** 带 `ext://hold` 读在飞时杀掉 stdio fixture，操作只能由原 Runtime 代的确定性应答结算；detach 没有可赛跑的窗口。
+3. **拒绝码取自已记录的关闭应答。** 测试接受 409 `hosted_turn_active`（MCP busy/recovering）与 503 `managed_session_close_failed` / `hosted_mcp_recovery_required`；拒绝 200/204，并断言没有 release 控制、记录仍是 unknown。
+
+变异见证：在打包 CLI 副本的 close 路径中把 `session.mcp?.close()` 包进 `try { … } catch {}`；detach 返回 204，用例在状态断言处变红。还原后的 bundle 复绿。
+
+预算：该用例在 JDK 21、MySQL 8.4.6、Linux x86_64 上两次实测取最慢 27.4 秒（27.4/17.4），按 2× 记 55 秒。`hosted-harness-mysql` fork 移到 11591 秒，Verify 移到 204 分钟，job 上限移到 327（294 + 33）。
+
+## 后续格：stopped worker 的 lifecycle-v2 close
+
+#15750 的 FG12d 行还要求一格遇到**已停 worker** 的 lifecycle-v2 close，及其 stop proof。R1-1 格在 worker 存活时替换 Broker；本格保留 Broker，在配置已 drained 之后杀掉 durable worker，因此 close 只能凭原 worker 持久化的 stop receipt 完成。
+
+| 用例                              | 注入                                                                                                                                                                                                                                                       | 期望                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `close-stopped-worker-stop-proof` | 把 v2 close 驱动到 `prepare_resources`；在转发前拒绝第一次 owner release，让配置在 worker 存活时提交 `drained`；SIGKILL durable worker；下一次 settle 被拒；在同一 claim 下执行协调器的 MCP recovery 臂（`recoverStoppedWorkspaceResources`）；重试 settle | 第一次 settle 答 503 `workspace_lifecycle_resources_unsettled`，记录 `drained`、一个 `mcp-release`、一个 `mcp.exit`。kill 后的 settle 同样答 503。recovery 退休 binding：`binding_state` `RELEASED` 且持久化了 `drain_receipt_json`，其 `bindingId`/`generation` 与退休行一致，Runtime Session `RELEASED`、storage holder 清空。重试的 settle 答 200，配置 `released`。kill 之后每个代理调用都是 owner release（无 acquire、无 MCP 控制）；恰好一个 `mcp.start`，没有替换 worker。 |
+
+决策：
+
+1. **worker 死在 `drained` 之后，而非之前。** 配置仍 `active` 时杀 worker，留下的是无法派发的 `mcp-release`——那是 detach-unknown 格已门禁的未知/受阻形态。stop-proof 路径属于 release：配置在活 worker 上 drain，然后 close 必须在没有 worker 的情况下退休 binding。
+2. **stop proof 就是持久化的 drain receipt。** recovery 臂观察到原 worker 缺失且 loss evidence 匹配，先 durable stop、持久化 receipt，**然后**才释放 session 行（`releaseStoppedSession` 拒绝空 receipt）、清空 storage holder（`releaseRetiredHolders` 只凭持久化 receipt 清空）。用例读取 `ma_runtime_binding.drain_receipt_json`，把它的 `bindingId`/`generation` 与退休行比对；没有 receipt 的 `RELEASED` 就是伪造的退休。
+3. **测试代打协调器的 recovery 触发。** `SessionLifecycleCoordinator` 在 MCP profile 的 Harness settle 失败时执行 `recoverStoppedWorkspaceResources`；本格以已准入 close 的 `{operationId, claimGeneration}` 调用同一个 embedded-Broker 臂，正如它用 SQL 更新代打 DRAINING 围栏。协调器的触发逻辑不是被测对象——Broker 的 drain 与 stop-proof 机制才是。这把本切片「直接驱动 lifecycle v2」的决策扩展到 Harness 独自无法完成的这一个阶段。
+4. **不与死进程交换。** kill 之后代理只看到 owner release：受阻 settle 的 503 与重试 settle 的 200。recovery 在 JVM 内。不得有 acquire 或 MCP 控制越过，也不得出现第二个 `mcp.start`。
+
+变异见证：在 `drainClaimedBinding` 的 absence 臂跳过 `renewal.persistDrainReceipt(proof, authority)`。recovery 随即在 stop-proof 步骤失败（`Original drain claim expired`），用例在 binding 断言之前报错；还原后的文件逐字节一致（sha256 校验），用例复绿。
+
+预算：用例在 JDK 21、MySQL 8.4.6、Linux x86_64 上单独测得 33.09 s 与 27.16 s（变异还原后的运行 18.21 s）；十二用例整类 152.9 s。按最坏 33.1 s 的 2× 计 67 s 加入共享健康总和（11591 → 11658 s），`hosted-harness-mysql` fork 移至 11658 s，Verify 步骤移至 205 分钟（fork 加 wrap 共 12258 s，余 42 s），job 上限移至 328（295 + 33）。

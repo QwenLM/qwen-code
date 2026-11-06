@@ -383,11 +383,13 @@ export class LspServerManager {
   ): Promise<void> {
     const workspaceTrusted = this.config.isTrustedFolder();
     if (
-      (this.requireTrustedWorkspace || handle.config.trustRequired) &&
-      !workspaceTrusted
+      ((this.requireTrustedWorkspace || handle.config.trustRequired) &&
+        !workspaceTrusted) ||
+      (handle.config.source === 'workspace' &&
+        !this.config.isExplicitlyTrustedFolder())
     ) {
       debugLogger.warn(
-        `LSP server ${name} requires trusted workspace, skipping startup`,
+        `LSP server ${name} requires trusted workspace, skipping startup. Workspace .lsp.json requires explicit trust: enable security.folderTrust.enabled in user settings and trust this folder, or grant IDE workspace trust.`,
       );
       // The admission early-returns precede the `try` that assigns
       // handle.error, so record the cause here — a bare FAILED state gives

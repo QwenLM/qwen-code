@@ -28,6 +28,7 @@ import {
   type Config,
 } from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
+import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-provider.js';
 import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
 import { MCPOAuthTokenStorage } from '../mcp/oauth-token-storage.js';
 import { OAuthUtils } from '../mcp/oauth-utils.js';
@@ -3213,6 +3214,47 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
           createTransport('test-server', googleAuth(), false),
         ).rejects.toThrow(
           'URL must be provided in the config for Google Credentials provider',
+        );
+      });
+    });
+
+    describe('useServiceAccountImpersonationProvider', () => {
+      const impersonation = () => ({
+        authProviderType: AuthProviderType.SERVICE_ACCOUNT_IMPERSONATION,
+        targetAudience: 'test-audience',
+        targetServiceAccount: 'mcp@test-project.iam.gserviceaccount.com',
+      });
+
+      it('should use ServiceAccountImpersonationProvider when specified', async () => {
+        const transport = await transportFor({
+          httpUrl: 'http://test.googleapis.com',
+          ...impersonation(),
+        });
+
+        expect(transport).toBeInstanceOf(StreamableHTTPClientTransport);
+        expect(transport._oauthProvider).toBeInstanceOf(
+          ServiceAccountImpersonationProvider,
+        );
+        expect(transport._fetch).toEqual(expect.any(Function));
+      });
+
+      it('should use ServiceAccountImpersonationProvider with SSE transport', async () => {
+        const transport = await transportFor({
+          url: 'http://test.googleapis.com',
+          ...impersonation(),
+        });
+
+        expect(transport).toBeInstanceOf(SSEClientTransport);
+        expect(transport._oauthProvider).toBeInstanceOf(
+          ServiceAccountImpersonationProvider,
+        );
+      });
+
+      it('should throw an error if no URL is provided with ServiceAccountImpersonationProvider', async () => {
+        await expect(
+          createTransport('test-server', impersonation(), false),
+        ).rejects.toThrow(
+          'A url or httpUrl must be provided for the Service Account Impersonation provider',
         );
       });
     });

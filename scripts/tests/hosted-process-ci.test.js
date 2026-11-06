@@ -661,13 +661,13 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (203 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (205 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
     // The MySQL job's ceiling carries 33 minutes of setup allowance, above
     // the 13-minute floor: a Verify that timed out used to skip admission,
     // and now that path too can fill all four ceilings, so a slow setup
     // must still leave the O4 gates time to run.
-    ['hosted-harness-mysql', 293, 326, 33],
+    ['hosted-harness-mysql', 295, 328, 33],
     // Twenty-seven failover arms at 10 each; the allowance is ~13 minutes of
     // setup plus 2.
     ['hosted-failover-e2e', 270, 285, 15],
@@ -930,11 +930,15 @@ describe('Hosted real-process gates', () => {
       // (21–23 s measured), moving the fork to 11504 and the step to 202
       // minutes; the FG12d two-server release cell adds 32 s (2x its
       // measured 16.2 s), moving the fork to 11536 and the step to 203
-      // minutes until CI measures it: the relational check above tolerates
-      // anything up to step*60, so the value is pinned literally here —
-      // an unnoticed raise has no other red to land on.
+      // minutes; the FG12d detach-unknown cell adds 55 s (2x its measured
+      // 27.4 s), moving the fork to 11591 and the step to 204 minutes; the
+      // FG12d stopped-worker close cell adds 67 s (2x its measured 33.1 s),
+      // moving the fork to 11658 and the step to 205 minutes until
+      // CI measures it: the relational check above tolerates anything up to
+      // step*60, so the value is pinned literally here — an unnoticed raise
+      // has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(11536);
+        expect(forkSeconds).toBe(11658);
       }
     },
   );

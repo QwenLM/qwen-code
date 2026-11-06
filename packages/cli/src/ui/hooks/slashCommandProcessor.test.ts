@@ -28,7 +28,12 @@ import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
 import { helpCommand } from '../commands/helpCommand.js';
 import { quitCommand } from '../commands/quitCommand.js';
+import {
+  logoutCommand,
+  upgradeCommand,
+} from '../commands/subscription-commands.js';
 import { clearCommand } from '../commands/clearCommand.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { rewindCommand } from '../commands/rewindCommand.js';
 import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
@@ -57,6 +62,14 @@ const {
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
+  },
+}));
+
+const isSubscriptionSignedIn = vi.hoisted(() => vi.fn(() => false));
+vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
+  QwenSubscriptionSession: class {
+    isSignedIn = isSubscriptionSignedIn;
+    onChange = () => () => {};
   },
 }));
 
@@ -271,6 +284,7 @@ describe('useSlashCommandProcessor', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    isSubscriptionSignedIn.mockReturnValue(false);
     let nextHistoryItemId = 1;
     mockAddItem.mockImplementation(() => nextHistoryItemId++);
     vi.mocked(BuiltinCommandLoader).mockClear();
@@ -336,13 +350,143 @@ describe('useSlashCommandProcessor', () => {
     return result;
   };
 
+  it('removes subscription commands from presentation and manual dispatch for non-subscription auth', async () => {
+    const authType = vi
+      .spyOn(mockConfig, 'getAuthType')
+      .mockReturnValue(undefined);
+    try {
+      const result = setupProcessorHook([
+        logoutCommand,
+        upgradeCommand,
+        helpCommand,
+      ]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+      expect(result.current.slashCommands[0]?.name).toBe('help');
+
+      for (const command of [logoutCommand, upgradeCommand]) {
+        await act(async () => {
+          expect(
+            await result.current.handleSlashCommand(`/${command.name}`),
+          ).toEqual({ type: 'handled' });
+        });
+        expect(mockAddItem).toHaveBeenLastCalledWith(
+          {
+            type: MessageType.ERROR,
+            text: `Unknown command: /${command.name}`,
+          },
+          expect.any(Number),
+        );
+      }
+      expect(mockOpenAuthDialog).not.toHaveBeenCalled();
+    } finally {
+      authType.mockRestore();
+    }
+  });
+
+  it('updates subscription command dispatch when auth changes without changing the model', async () => {
+    isSubscriptionSignedIn.mockReturnValue(true);
+    let authType = AuthType.QWEN_SUBSCRIPTION;
+    let notify: (model: string) => void = () => {};
+    const auth = vi
+      .spyOn(mockConfig, 'getAuthType')
+      .mockImplementation(() => authType);
+    const subscription = vi
+      .spyOn(mockConfig, 'onModelChange')
+      .mockImplementation((listener) => {
+        notify = listener;
+        return () => {};
+      });
+    const browser = vi
+      .spyOn(mockConfig, 'isBrowserLaunchSuppressed')
+      .mockReturnValue(true);
+    try {
+      const result = setupProcessorHook(
+        [logoutCommand, upgradeCommand, helpCommand],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(3));
+      await act(async () => {
+        await result.current.handleSlashCommand('/logout');
+      });
+      expect(mockAddItem).toHaveBeenLastCalledWith(
+        {
+          type: MessageType.WARNING,
+          text: 'Wait for the current response to finish before signing out.',
+        },
+        expect.any(Number),
+      );
+
+      act(() => {
+        authType = AuthType.USE_OPENAI;
+        notify('same-model');
+      });
+      expect(
+        result.current.slashCommands.map((command) => command.name),
+      ).toEqual(['help']);
+      for (const name of ['logout', 'upgrade']) {
+        await act(async () => {
+          await result.current.handleSlashCommand(`/${name}`);
+        });
+        expect(mockAddItem).toHaveBeenLastCalledWith(
+          { type: MessageType.ERROR, text: `Unknown command: /${name}` },
+          expect.any(Number),
+        );
+      }
+
+      act(() => {
+        authType = AuthType.QWEN_SUBSCRIPTION;
+        notify('same-model');
+      });
+      expect(result.current.slashCommands).toHaveLength(3);
+      await act(async () => {
+        await result.current.handleSlashCommand('/upgrade');
+      });
+      expect(mockAddItem).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining('Qwen subscription plans:'),
+        }),
+        expect.any(Number),
+      );
+    } finally {
+      auth.mockRestore();
+      subscription.mockRestore();
+      browser.mockRestore();
+    }
+  });
+
+  it.each(['logout', 'upgrade'])(
+    'preserves a custom /%s command with non-subscription auth',
+    async (name) => {
+      const action = vi.fn();
+      const command = createTestCommand({ name, action }, CommandKind.FILE);
+      const result = setupProcessorHook(
+        [logoutCommand, upgradeCommand],
+        [command],
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+      await act(async () => {
+        await result.current.handleSlashCommand(`/${name}`);
+      });
+      expect(action).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each([
     ['direct builtin restore', 'restore', CommandKind.BUILT_IN, false, false],
     ['owned builtin restore', 'restore', CommandKind.BUILT_IN, true, true],
+    ['direct builtin logout', 'logout', CommandKind.BUILT_IN, false, false],
+    ['owned builtin logout', 'logout', CommandKind.BUILT_IN, true, true],
+    ['same-name logout file command', 'logout', CommandKind.FILE, true, false],
     ['same-name file command', 'restore', CommandKind.FILE, true, false],
     ['unrelated builtin', 'other', CommandKind.BUILT_IN, true, false],
   ] as const)(
-    'scopes the restore submission idle exception: %s',
+    'scopes the restore/logout submission idle exception: %s',
     async (_label, name, kind, suppliesOwner, expectedIdle) => {
       const observedIdle = vi.fn();
       const isCurrentSubmission = vi.fn(() => true);

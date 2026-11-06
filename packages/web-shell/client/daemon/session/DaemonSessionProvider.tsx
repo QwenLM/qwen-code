@@ -1331,6 +1331,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const repairReloadRef = useRef<
     DaemonSessionActions['reloadSession'] | undefined
   >(undefined);
+  const refreshModelsRef = useRef<
+    DaemonSessionActions['refreshModels'] | undefined
+  >(undefined);
   const tryLiveJournalRepairRef = useRef<(() => void) | undefined>(undefined);
   const passiveAssistantDoneTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined
@@ -3480,6 +3483,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 activeSession.lastEventId != null ||
                 undefined,
           }));
+          // The config-sync domain belongs to the attachment, so establish it
+          // here rather than at SSE setup below: resolving the pending load
+          // lets first-prompt config writes start immediately, while the
+          // metadata await can still be outstanding. Recreating the domain
+          // after that await invalidated their ownership tokens mid-write and
+          // silently dropped daemon-confirmed values (#16065).
+          resetSessionConfigSync(
+            sessionConfigGenerationRef.current,
+            activeSession,
+          );
           if (pendingLoadToResolve) {
             lastHandledSessionIdRef.current = activeSession.sessionId;
             lastHandledSessionContextRef.current = activeProductSessionContext;
@@ -3625,8 +3638,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           ].filter((warning): warning is string => Boolean(warning));
           const providerModelStatus = mapProviderStatus(providers);
           const contextModelStatus = mapSessionContextModels(context);
+          const contextModelState = context?.state.models;
+          const hasContextModelCatalog =
+            isRecord(contextModelState) &&
+            Array.isArray(contextModelState['availableModels']);
           const sessionModels =
-            contextModelStatus && contextModelStatus.models.length > 0
+            contextModelStatus &&
+            (contextModelStatus.models.length > 0 || hasContextModelCatalog)
               ? contextModelStatus.models
               : providerModelStatus.models;
           const sessionCurrentModel =
@@ -3701,7 +3719,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 supportedCommands !== undefined ? commands : current.commands,
               skills: supportedCommands !== undefined ? skills : current.skills,
               models:
-                configSnapshotCurrent && sessionModels.length > 0
+                configSnapshotCurrent &&
+                (sessionModels.length > 0 || hasContextModelCatalog)
                   ? sessionModels
                   : current.models,
               currentModel: configSnapshotCurrent
@@ -3868,10 +3887,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           };
           eventStreamRef.current = eventStream;
           configStreamOwner = activeSession;
-          resetSessionConfigSync(
-            sessionConfigGenerationRef.current,
-            activeSession,
-          );
           const configState = getSessionConfigSync(
             sessionConfigGenerationRef.current,
             activeSession,
@@ -4096,6 +4111,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 addNotice,
                 dismissNotice,
               );
+              if (
+                event.type === 'model_switched' &&
+                isRecord(event.data) &&
+                event.data['subscriptionSignedOut'] === true &&
+                activeWorkspaceScoped &&
+                sessionRef.current === activeSession
+              ) {
+                void refreshModelsRef
+                  .current?.(undefined, { reloadProviders: false })
+                  .catch((error: unknown) =>
+                    console.warn(
+                      'Unable to read models after a model switch',
+                      error,
+                    ),
+                  );
+              }
               const recoveryEventCurrent =
                 (context?.recovery ||
                   connectionRef.current.context?.recovery) &&
@@ -5643,6 +5674,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     ],
   );
   repairReloadRef.current = actions.reloadSession;
+  refreshModelsRef.current = actions.refreshModels;
   useEffect(() => {
     if (promptStatus !== 'idle') return;
     queueMicrotask(() => tryLiveJournalRepairRef.current?.());
