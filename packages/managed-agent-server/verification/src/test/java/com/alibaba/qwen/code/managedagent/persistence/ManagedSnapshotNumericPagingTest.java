@@ -197,13 +197,13 @@ class ManagedSnapshotNumericPagingTest {
                     new TransactionTemplate(new DataSourceTransactionManager(database.source()));
             transaction.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
             store =
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
                             jdbc,
                             new ObjectMapper(),
                             Clock.systemUTC(),
                             ignored -> {},
                             new ManagedWorkspaceRegistry(jdbc),
-                            new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                            new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             jdbc.update(
                     "INSERT INTO"
                         + " ma_session(tenant_id,session_id,agent_id,gmt_create,gmt_modified,tenant_key,session_key,session_scope_key)"
@@ -282,7 +282,7 @@ class ManagedSnapshotNumericPagingTest {
                             String.class,
                             jdbc.directoryArguments);
             assertThat(plan)
-                    .contains("ix_ma_message_history")
+                    .contains("idx_ma_message_history")
                     .doesNotContain("Table scan", "Sort:");
             var counts =
                     java.util.regex.Pattern.compile(

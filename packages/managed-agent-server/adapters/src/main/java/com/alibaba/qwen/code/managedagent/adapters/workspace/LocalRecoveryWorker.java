@@ -79,6 +79,6 @@ public final class LocalRecoveryWorker implements RecoveryWorker {
     }
 
     public void validateStateDirectory(java.nio.file.Path directory) throws java.io.IOException {
-        com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner.validateStateDirectory(directory);
+        com.alibaba.qwen.code.runtimebroker.host.RuntimeStateFiles.validateDirectory(directory);
     }
 }
