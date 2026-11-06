@@ -31,6 +31,12 @@ import {
   DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  DEFAULT_MAX_RECENT_FILES,
+  DEFAULT_MAX_RECENT_IMAGES,
+  DEFAULT_SCREENSHOT_TRIGGER_ENABLED,
+  DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD,
+  DEFAULT_IMAGE_PAYLOAD_THRESHOLD,
+  DEFAULT_IMAGE_TOKEN_ESTIMATE,
   OutputFormat,
   REASONING_EFFORT_TIERS,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
@@ -1969,6 +1975,76 @@ const SETTINGS_SCHEMA = {
         default: undefined as ChatCompressionSettings | undefined,
         description: 'Chat compression settings.',
         showInDialog: false,
+        // Mirrors the runtime contract in core's `resolveCompactionTuning` /
+        // `resolveSlimmingConfig`: without these declarations the knobs are
+        // invisible to settings help, validation and the settings dialog.
+        properties: {
+          imageTokenEstimate: {
+            type: 'number',
+            label: 'Image Token Estimate',
+            category: 'Model',
+            requiresRestart: false,
+            default: DEFAULT_IMAGE_TOKEN_ESTIMATE,
+            minimum: 1,
+            description:
+              'Estimated tokens for a single inline image / document part when apportioning chars across history during compression size estimation, and the placeholder budget used when stripping inline media out of the side-query compaction prompt. Env override: QWEN_IMAGE_TOKEN_ESTIMATE.',
+            showInDialog: false,
+          },
+          maxRecentFilesToRetain: {
+            type: 'integer',
+            label: 'Max Recent Files to Retain',
+            category: 'Model',
+            requiresRestart: false,
+            default: DEFAULT_MAX_RECENT_FILES,
+            minimum: 0,
+            description:
+              'Number of most-recently-touched files whose current content is restored into history after auto-compaction. 0 restores none. Env override: QWEN_COMPACT_MAX_RECENT_FILES.',
+            showInDialog: false,
+          },
+          maxRecentImagesToRetain: {
+            type: 'integer',
+            label: 'Max Recent Images to Retain',
+            category: 'Model',
+            requiresRestart: false,
+            default: DEFAULT_MAX_RECENT_IMAGES,
+            minimum: 0,
+            description:
+              'Number of most-recent images (tool screenshots / user pastes) restored into history after auto-compaction. 0 restores none. Env override: QWEN_COMPACT_MAX_RECENT_IMAGES.',
+            showInDialog: false,
+          },
+          enableScreenshotTrigger: {
+            type: 'boolean',
+            label: 'Enable Screenshot Trigger',
+            category: 'Model',
+            requiresRestart: false,
+            default: DEFAULT_SCREENSHOT_TRIGGER_ENABLED,
+            description:
+              'When true, auto-compaction also fires once the number of tool-returned images accumulated in history reaches screenshotTriggerThreshold, independent of token usage. Env override: QWEN_COMPACT_SCREENSHOT_TRIGGER (1/true/0/false).',
+            showInDialog: false,
+          },
+          screenshotTriggerThreshold: {
+            type: 'integer',
+            label: 'Screenshot Trigger Threshold',
+            category: 'Model',
+            requiresRestart: false,
+            default: DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD,
+            minimum: 1,
+            description:
+              'Tool-returned image count at or above which the screenshot trigger fires (only when enableScreenshotTrigger). Env override: QWEN_COMPACT_SCREENSHOT_THRESHOLD.',
+            showInDialog: false,
+          },
+          imagePayloadThreshold: {
+            type: 'integer',
+            label: 'Image Payload Threshold',
+            category: 'Model',
+            requiresRestart: false,
+            default: DEFAULT_IMAGE_PAYLOAD_THRESHOLD,
+            minimum: 0,
+            description:
+              'Inline image count at or above which historical image payloads are replaced with text references and only the most recent images are reattached. 0 disables eviction, keeping every image payload in history. Env override: QWEN_IMAGE_PAYLOAD_THRESHOLD.',
+            showInDialog: false,
+          },
+        },
       },
       sessionTokenLimit: {
         type: 'number',

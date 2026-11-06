@@ -297,6 +297,44 @@ describe('SettingsSchema', () => {
       expect(threshold?.requiresRestart).toBe(false);
     });
 
+    // The runtime resolves these in core's `resolveCompactionTuning` /
+    // `resolveSlimmingConfig`; declaring them keeps the settings dialog,
+    // validation and the IDE schema in step with what the runtime reads.
+    it('should declare every model.chatCompression knob', () => {
+      const properties =
+        getSettingsSchema().model.properties.chatCompression.properties;
+
+      expect(Object.keys(properties).sort()).toEqual(
+        [
+          'enableScreenshotTrigger',
+          'imagePayloadThreshold',
+          'imageTokenEstimate',
+          'maxRecentFilesToRetain',
+          'maxRecentImagesToRetain',
+          'screenshotTriggerThreshold',
+        ].sort(),
+      );
+      expect(properties.imagePayloadThreshold).toMatchObject({
+        type: 'integer',
+        default: 20,
+        minimum: 0,
+      });
+      expect(properties.maxRecentFilesToRetain).toMatchObject({
+        type: 'integer',
+        minimum: 0,
+      });
+      expect(properties.maxRecentImagesToRetain).toMatchObject({
+        type: 'integer',
+        minimum: 0,
+      });
+      expect(properties.screenshotTriggerThreshold).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+      });
+      expect(properties.enableScreenshotTrigger.type).toBe('boolean');
+      expect(properties.imageTokenEstimate.type).toBe('number');
+    });
+
     it('should have sandboxImage setting under tools', () => {
       expect(getSettingsSchema().tools.properties.sandboxImage).toBeDefined();
       expect(getSettingsSchema().tools.properties.sandboxImage.type).toBe(

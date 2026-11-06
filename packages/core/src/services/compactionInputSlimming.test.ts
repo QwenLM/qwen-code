@@ -13,6 +13,7 @@ import {
   DEFAULT_MAX_RECENT_IMAGES,
   DEFAULT_SCREENSHOT_TRIGGER_ENABLED,
   DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD,
+  DEFAULT_IMAGE_PAYLOAD_THRESHOLD,
   estimateContentChars,
   estimatePartChars,
   resolveCompactionTuning,
@@ -106,6 +107,16 @@ describe('compactionInputSlimming', () => {
       });
       expect(t.maxRecentFiles).toBe(0);
       expect(t.maxRecentImages).toBe(0);
+    });
+
+    it('accepts 0 for the image payload threshold (eviction disabled)', () => {
+      expect(
+        resolveCompactionTuning({ imagePayloadThreshold: 0 })
+          .imagePayloadThreshold,
+      ).toBe(0);
+      expect(resolveCompactionTuning(undefined).imagePayloadThreshold).toBe(
+        DEFAULT_IMAGE_PAYLOAD_THRESHOLD,
+      );
     });
 
     it('env overrides settings for every knob', () => {
