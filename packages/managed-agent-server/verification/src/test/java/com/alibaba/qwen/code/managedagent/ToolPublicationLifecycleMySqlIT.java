@@ -158,10 +158,12 @@ class ToolPublicationLifecycleMySqlIT {
                         Thread.currentThread().setName("receipt");
                         return admission.commitReceipt(key, "pub-1", WRITER_TOKEN, request);
                     });
-                    assertThat(source.receiptPlacement.await(10, TimeUnit.SECONDS)).isTrue();
+                    // An ordinary receipt locks its own Session root instead of
+                    // tenant placement (design 2026-11-04-managed-publication-placement),
+                    // so it completes while the lifecycle completion holds placement.
+                    assertThat(receipt.get(10, TimeUnit.SECONDS).path("historyRevision").asLong()).isEqualTo(sequence);
                     source.releaseLifecycle.countDown();
                     assertThat(completion.get(10, TimeUnit.SECONDS)).isTrue();
-                    assertThat(receipt.get(10, TimeUnit.SECONDS).path("historyRevision").asLong()).isEqualTo(sequence);
                 } finally {
                     source.releaseLifecycle.countDown();
                 }
@@ -179,7 +181,6 @@ class ToolPublicationLifecycleMySqlIT {
 
     private static final class ScheduledDataSource extends DelegatingDataSource {
         private final CountDownLatch lifecyclePlacement = new CountDownLatch(1);
-        private final CountDownLatch receiptPlacement = new CountDownLatch(1);
         private final CountDownLatch releaseLifecycle = new CountDownLatch(1);
         private final AtomicBoolean paused = new AtomicBoolean();
         private volatile boolean enabled;
@@ -211,9 +212,6 @@ class ToolPublicationLifecycleMySqlIT {
                                     (prepared, call, values) -> {
                                         boolean execute = enabled && call.getName().startsWith("execute");
                                         String role = Thread.currentThread().getName();
-                                        if (execute && "receipt".equals(role) && sql.startsWith("INSERT INTO ma_tenant_guard") && sql.contains("'runtime_placement'")) {
-                                            receiptPlacement.countDown();
-                                        }
                                         try {
                                             Object value = call.invoke(statement, values);
                                             if (execute && "lifecycle".equals(role)
