@@ -85,16 +85,27 @@ java_env() {
   export JAVA_OPT_EXT="-Xms${RMQ_HEAP} -Xmx${RMQ_HEAP} -Duser.home=${RMQ_WORK_DIR}/home"
 }
 
+download_file() {
+  log "downloading $2"
+  curl -fsSL --connect-timeout 10 --max-time 45 --retry 1 \
+    --retry-max-time 45 -o "$1" "$2"
+}
+
 download() {
   mkdir -p "${RMQ_CACHE_DIR}"
   local zip="${RMQ_CACHE_DIR}/${DIST_NAME}.zip"
   local sum="${RMQ_CACHE_DIR}/${DIST_NAME}.zip.sha512"
   local base
-  if [ ! -s "${zip}" ] || [ ! -s "${sum}" ]; then
-    for base in "https://dlcdn.apache.org/rocketmq/${RMQ_VERSION}" \
-      "https://archive.apache.org/dist/rocketmq/${RMQ_VERSION}"; do
-      if curl -fsSL --retry 3 -o "${zip}.part" "${base}/${DIST_NAME}.zip" &&
-        curl -fsSL --retry 3 -o "${sum}" "${base}/${DIST_NAME}.zip.sha512"; then
+  if [ ! -s "${zip}" ] || { [ "${RMQ_VERSION}" != "5.5.1" ] && [ ! -s "${sum}" ]; }; then
+    local bases=("https://dlcdn.apache.org/rocketmq/${RMQ_VERSION}"
+      "https://archive.apache.org/dist/rocketmq/${RMQ_VERSION}")
+    if [ "${RMQ_VERSION}" = "5.5.1" ]; then
+      bases=("https://mirrors.aliyun.com/apache/rocketmq/${RMQ_VERSION}" "${bases[@]}")
+    fi
+    for base in "${bases[@]}"; do
+      if download_file "${zip}.part" "${base}/${DIST_NAME}.zip" &&
+        { [ "${RMQ_VERSION}" = "5.5.1" ] ||
+          download_file "${sum}" "${base}/${DIST_NAME}.zip.sha512"; }; then
         mv "${zip}.part" "${zip}"
         break
       fi
@@ -102,6 +113,7 @@ download() {
     done
   fi
   [ -s "${zip}" ] || die "could not download ${DIST_NAME}.zip"
+  [ "${RMQ_VERSION}" = "5.5.1" ] || [ -s "${sum}" ] || die "could not download ${DIST_NAME}.zip.sha512"
   # Apache publishes the digest in `gpg --print-md` form ("name: HEX HEX …"
   # across lines, upper case); sha512sum form is "hex  name". Accept both.
   local expected actual
