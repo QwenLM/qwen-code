@@ -24,6 +24,22 @@ const mockReportAnthropicFollowingRequest = vi.hoisted(() => vi.fn());
 const mockReportAnthropicResponse = vi.hoisted(() => vi.fn());
 const mockReportAnthropicEvent = vi.hoisted(() => vi.fn());
 
+const debugWarn = vi.hoisted(() => vi.fn());
+
+vi.mock('../../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: () => ({
+      debug: () => {},
+      info: () => {},
+      warn: debugWarn,
+      error: () => {},
+    }),
+  };
+});
+
 vi.mock('../../telemetry/gen-ai-request.js', () => ({
   reportAnthropicRequest: mockReportAnthropicRequest,
   reportAnthropicFollowingRequest: mockReportAnthropicFollowingRequest,
@@ -1423,6 +1439,28 @@ describe('AnthropicContentGenerator', () => {
       );
       if (kept) expect(req).toEqual(expect.objectContaining({ temperature }));
       else expect(req).not.toHaveProperty('temperature');
+    });
+
+    it('omits temperature when the caller set none on a temperature-accepting model (#12928)', async () => {
+      // The other half of the omit-unless-supplied contract: no default of 1
+      // is written back for a model that would accept the parameter.
+      const { req } = await send(nativeCfg('claude-opus-4-7'));
+      expect(req).not.toHaveProperty('temperature');
+    });
+
+    it('warns once per generator instance when a caller temperature is dropped (#12928)', async () => {
+      debugWarn.mockClear();
+      const { generator } = await send(nativeCfg('claude-opus-4-8'));
+      // Same instance, second request now carrying a caller temperature: the
+      // warn-once latch must fire exactly once across the two requests.
+      createImpl.mockResolvedValue(reply('claude-opus-4-8'));
+      await generator.generateContent(hello({ config: { temperature: 0.7 } }));
+      expect(debugWarn).toHaveBeenCalledTimes(1);
+      expect(debugWarn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "temperature=0.7 is not supported by 'claude-opus-4-8'",
+        ),
+      );
     });
 
     describe('adaptive thinking (Claude 4.6+ models)', () => {

@@ -85,13 +85,20 @@ describe('generateSessionRecap', () => {
     ];
 
     let captured: Content[] | null = null;
-    const generateText = vi.fn(async (opts: { contents: Content[] }) => {
-      captured = opts.contents;
-      return {
-        text: '<recap>Fixing session title pollution. Next: verify tests.</recap>',
-        usage: undefined,
-      };
-    });
+    let capturedConfig: Record<string, unknown> | undefined;
+    const generateText = vi.fn(
+      async (opts: {
+        contents: Content[];
+        config?: Record<string, unknown>;
+      }) => {
+        captured = opts.contents;
+        capturedConfig = opts.config;
+        return {
+          text: '<recap>Fixing session title pollution. Next: verify tests.</recap>',
+          usage: undefined,
+        };
+      },
+    );
     const config = {
       getFastModel: vi.fn(() => 'qwen-turbo'),
       getModel: vi.fn(() => 'qwen-plus'),
@@ -116,5 +123,7 @@ describe('generateSessionRecap', () => {
     expect(serialized).not.toContain('IDE_CONTEXT');
     expect(serialized).toContain('fix session title pollution');
     expect(serialized).toContain('continue with recap coverage');
+    // #12928: no hard-coded temperature reaches the recap wire.
+    expect(capturedConfig).not.toHaveProperty('temperature');
   });
 });
