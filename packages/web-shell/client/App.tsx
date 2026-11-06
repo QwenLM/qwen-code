@@ -5256,6 +5256,9 @@ export function App({
     readStoredDetailsChildren(DETAILS_CHILDREN_STORAGE_KEY),
   );
   const detailsChildrenRef = useRef(initialDetailsChildren);
+  // Details creations that are still in flight, keyed by tab id: the parent
+  // identity must survive the draft tab closing before creation resolves.
+  const detailsParentByTabRef = useRef(new Map<string, string>());
   const initialArtifactPanelOpen = Boolean(
     panelStateKey && initialArtifactPanelPersistedStates[panelStateKey]?.open,
   );
@@ -5768,10 +5771,18 @@ export function App({
         title: t('sideTask.title'),
         parentSessionId,
         workspaceCwd: connection.workspaceCwd,
-        // Reopening an existing child attaches to it directly: no draft and
-        // no initial prompt, so nothing is provisioned or sent again.
+        // Reopening an existing child attaches to it directly. Keep the
+        // prompt on the reopened tab: creation resolves before the pane
+        // admits the prompt, so a tab closed in that window leaves an empty
+        // child. SideTaskPanel's empty-session guard sends the prompt only
+        // while the child has no user prompt yet, and never re-sends it.
         ...(existingChildSessionId
-          ? { sessionId: existingChildSessionId }
+          ? {
+              sessionId: existingChildSessionId,
+              ...(initialPrompt?.trim()
+                ? { initialPrompt: initialPrompt.trim() }
+                : {}),
+            }
           : {
               nameFromFirstPrompt: true,
               ...(initialPrompt?.trim()
@@ -5849,6 +5860,11 @@ export function App({
     (tabId: string, parentSessionId: string, title: string) => {
       const pending = sideTaskCreationPromisesRef.current.get(tabId);
       if (pending) return pending;
+      if (tabId.startsWith(DETAILS_TAB_ID_PREFIX)) {
+        // Capture the parent identity now: the draft tab may close before
+        // creation resolves, and the association must still be recorded.
+        detailsParentByTabRef.current.set(tabId, parentSessionId);
+      }
       const creation = (async () => {
         const owner = sessionOwnerGuard.capture();
         const ownerCwd = connection.workspaceCwd;
@@ -5948,18 +5964,22 @@ export function App({
           break;
         }
       }
-      const sideTaskTab =
-        createdTab?.kind === 'side_task' ? createdTab : undefined;
-      if (!sideTaskTab) return;
       if (tabId.startsWith(DETAILS_TAB_ID_PREFIX)) {
         // Remember which child explains this pending question so closing the
         // tab (or reloading) cannot trick "Ask for details" into provisioning
-        // a duplicate. One entry per parent supersedes the resolved question.
+        // a duplicate. Record it even when the draft tab already closed:
+        // server-side creation is not cancelled by closing the tab. One entry
+        // per parent supersedes the resolved question's association.
         const requestId = tabId.slice(DETAILS_TAB_ID_PREFIX.length);
-        if (requestId && sideTaskTab.parentSessionId) {
+        const parentId =
+          (createdTab?.kind === 'side_task'
+            ? createdTab.parentSessionId
+            : undefined) ?? detailsParentByTabRef.current.get(tabId);
+        detailsParentByTabRef.current.delete(tabId);
+        if (requestId && parentId) {
           detailsChildrenRef.current = {
             ...detailsChildrenRef.current,
-            [sideTaskTab.parentSessionId]: { [requestId]: sessionId },
+            [parentId]: { [requestId]: sessionId },
           };
           writeStoredDetailsChildren(
             DETAILS_CHILDREN_STORAGE_KEY,
@@ -5967,6 +5987,9 @@ export function App({
           );
         }
       }
+      const sideTaskTab =
+        createdTab?.kind === 'side_task' ? createdTab : undefined;
+      if (!sideTaskTab) return;
       optimisticSideTaskIdsRef.current.add(sessionId);
       setSideTaskCatalog((catalog) => {
         if (catalog.parentSessionId !== sideTaskTab.parentSessionId) {
@@ -12346,6 +12369,33 @@ export function App({
             ),
           }));
           removeSideTaskTabs(archived);
+          // An archived child can no longer be attached (the daemon's load
+          // route 409s session_archived), so drop any details association
+          // pointing at it; the next click provisions a fresh child instead
+          // of reopening an unloadable one.
+          const nextDetailsChildren: StoredDetailsChildren = {};
+          let detailsChanged = false;
+          for (const [parentKey, entries] of Object.entries(
+            detailsChildrenRef.current,
+          )) {
+            const kept = Object.fromEntries(
+              Object.entries(entries).filter(
+                ([, childId]) => !archived.has(childId),
+              ),
+            );
+            if (Object.keys(kept).length !== Object.keys(entries).length) {
+              detailsChanged = true;
+            }
+            if (Object.keys(kept).length > 0)
+              nextDetailsChildren[parentKey] = kept;
+          }
+          if (detailsChanged) {
+            detailsChildrenRef.current = nextDetailsChildren;
+            writeStoredDetailsChildren(
+              DETAILS_CHILDREN_STORAGE_KEY,
+              nextDetailsChildren,
+            );
+          }
           setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
         }
         const errorMessages = [

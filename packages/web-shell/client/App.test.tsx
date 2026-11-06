@@ -34906,9 +34906,194 @@ describe('App session callbacks', () => {
     expect(reopened).toEqual(
       expect.objectContaining({ sessionId: 'details-side-task' }),
     );
+    // The prompt rides along: creation resolves before the pane admits it,
+    // so a tab closed in that window leaves an empty child. The pane's
+    // empty-session guard sends it only if it was never admitted.
     expect(
       reopened?.kind === 'side_task' ? reopened.initialPrompt : undefined,
-    ).toBeUndefined();
+    ).toContain('Pick one');
+  });
+
+  it('records the details association when creation resolves after the tab closed', async () => {
+    mockConnection.capabilities.features = ['session_side_task'];
+    let resolveCreation!: (value: {
+      sessionId: string;
+      clientId: string;
+      workspaceCwd: string;
+      displayName: string;
+    }) => void;
+    mockWorkspace.client.createSideTaskSession.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCreation = resolve;
+        }),
+    );
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    act(() => testState.latestAskUserQuestionOnAskDetails!());
+    await flush();
+    const panel = testState.latestArtifactPanelProps!;
+    const draftTab = panel.tabs.find((tab) => tab.kind === 'side_task')!;
+    // Close the loading tab BEFORE creation resolves; server-side creation
+    // is not cancelled, so the association must still be recorded.
+    act(() => panel.onCloseTab(draftTab.id));
+    await flush();
+    await act(async () => {
+      resolveCreation({
+        sessionId: 'details-side-task',
+        clientId: 'side-client',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Details side task',
+      });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-details-children'),
+    ).toContain('details-side-task');
+
+    act(() => testState.latestAskUserQuestionOnAskDetails!());
+    await flush();
+    expect(mockWorkspace.client.createSideTaskSession).toHaveBeenCalledTimes(1);
+    const reopened = testState.latestArtifactPanelProps?.tabs.find(
+      (tab) => tab.kind === 'side_task',
+    );
+    expect(reopened).toEqual(
+      expect.objectContaining({ sessionId: 'details-side-task' }),
+    );
+    // The draft closed before creation resolved, so the display name never
+    // landed on the tab; it reopens under the generic side-task title.
+    expect(container.querySelector('button[title="Side task"]')).not.toBeNull();
+  });
+
+  it('drops the details association when the child is archived', async () => {
+    mockConnection.capabilities.features = [
+      'session_side_task',
+      'session_archive',
+      'session_archive_idle_guard',
+    ];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      getSessionToolCalls: vi.fn(),
+      getSessionTurnIndexPage: vi.fn(),
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/tmp/project',
+        available: true,
+        pullRequests: [],
+      }),
+      archiveSessionsData: vi.fn().mockResolvedValue({
+        archived: ['details-side-task'],
+        alreadyArchived: [],
+        resolvedConflicts: [],
+        notFound: [],
+        errors: [],
+      }),
+    }));
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    act(() => testState.latestAskUserQuestionOnAskDetails!());
+    await flush();
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-details-children'),
+    ).toContain('details-side-task');
+
+    // Archive the idle child while the question is still pending.
+    await act(async () => {
+      await testState.latestArtifactPanelProps?.onArchiveSideTasks?.([
+        {
+          sessionId: 'details-side-task',
+          title: 'Details side task',
+          workspaceCwd: '/tmp/project',
+          updatedAt: new Date().toISOString(),
+          archivable: true,
+        },
+      ]);
+      await Promise.resolve();
+    });
+    await flush();
+    // The archived child can no longer be attached (load 409s); the stored
+    // binding must be gone so the next click provisions a fresh child.
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-details-children'),
+    ).not.toContain('details-side-task');
+
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task-2',
+      clientId: 'side-client-2',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task 2',
+    });
+    act(() => testState.latestAskUserQuestionOnAskDetails!());
+    await flush();
+    expect(mockWorkspace.client.createSideTaskSession).toHaveBeenCalledTimes(2);
+    const reopened = testState.latestArtifactPanelProps?.tabs.find(
+      (tab) => tab.kind === 'side_task',
+    );
+    expect(reopened).toEqual(
+      expect.objectContaining({ sessionId: 'details-side-task-2' }),
+    );
+  });
+
+  it('keeps the derived details clientId within the daemon budget with uuid ids', async () => {
+    // The daemon rejects client ids over 128 chars. With uuid-length parent
+    // and request ids, the derived side-task:<parent>:<tabId> must fit; the
+    // pre-fix double-uuid tab id measured 138 and 400s the pane's load.
+    mockConnection.sessionId = 'da424824-c6a7-4ce5-a5fd-9b12c9255bef';
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({
+          toolName: 'ask_user_question',
+          requestId: '06a69fb6-7293-4f61-a279-e7b3963b1cd3',
+        }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    act(() => testState.latestAskUserQuestionOnAskDetails!());
+    await flush();
+    const tab = testState.latestArtifactPanelProps?.tabs.find(
+      (t) => t.kind === 'side_task',
+    );
+    expect(tab).toBeDefined();
+    const derivedClientId = `side-task:${mockConnection.sessionId}:${tab!.id}`;
+    expect(derivedClientId.length).toBeLessThanOrEqual(128);
   });
 
   it('focuses a catalog-reopened details child instead of adding a tab', async () => {

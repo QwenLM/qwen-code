@@ -111,5 +111,8 @@ describe('formatAskUserQuestions', () => {
     expect(formatAskUserQuestions({})).toBe('');
     expect(formatAskUserQuestions({ questions: 'nope' })).toBe('');
     expect(formatAskUserQuestions({ questions: [] })).toBe('');
+    // A non-array object must not reach the iterator: dropping the
+    // Array.isArray guard throws "questions is not iterable" here.
+    expect(formatAskUserQuestions({ questions: { a: 1 } })).toBe('');
   });
 });

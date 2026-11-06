@@ -664,6 +664,50 @@ it('sends the /btw question as the first side-task prompt', async () => {
   );
 });
 
+it('does not re-send a retained initial prompt to a child that already has a user prompt', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.displayName = 'Side task';
+  connection.status = 'connected';
+  transcript.blocks = [{ kind: 'user', text: 'the explanation already ran' }];
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    renderSideTask({ initialPrompt: 'Explain the pending question' });
+    await Promise.resolve();
+  });
+
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it('sends a retained initial prompt once transcript loading completes', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.displayName = 'Side task';
+  connection.status = 'connected';
+  connection.loadingTranscript = true;
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    renderSideTask({ initialPrompt: 'Explain the pending question' });
+    await Promise.resolve();
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+
+  connection.loadingTranscript = false;
+  await act(async () => {
+    renderSideTask({ initialPrompt: 'Explain the pending question' });
+    await Promise.resolve();
+  });
+  expect(sendPrompt).toHaveBeenCalledTimes(1);
+  expect(sendPrompt).toHaveBeenCalledWith(
+    'Explain the pending question',
+    expect.objectContaining({ onAdmitted: expect.any(Function) }),
+  );
+});
+
 it('does not patch a different workspace after side-task admission', async () => {
   connection.sessionId = 'side-session-1';
   connection.workspaceCwd = '/work/other';
