@@ -106,12 +106,14 @@ first committing to an answer or discarding the question.
   even when the draft tab closes before creation resolves (the parent identity
   is captured when creation starts, since the server does not cancel it); the
   reopened tab retains the explanation prompt, and the pane's empty-session
-  guard sends it only while the child has no user prompt yet, so a prompt
-  interrupted by a close is delivered exactly once and never re-sent; a
-  catalog-reopened tab carries no prompt of its own, so clicking details again
-  supplies the pending prompt on the matched tab before focusing it, letting
-  the same guard deliver it to a still-empty child; and archiving a child
-  invalidates its association, because the daemon's load route rejects
+  guard sends it only while the child has no user prompt yet (media-only
+  messages — image, file, or resource link — count; they submit with empty
+  text), so a prompt interrupted by a close is delivered exactly once and
+  never re-sent; a catalog-reopened tab
+  carries no prompt of its own, so clicking details again supplies the pending
+  prompt on the matched tab before focusing it, letting the same guard deliver
+  it to a still-empty child; and archiving a child invalidates its
+  association, because the daemon's load route rejects
   archived sessions (409 `session_archived`) — the next click provisions a
   fresh child instead of attaching an unloadable one. One entry per parent
   supersedes the resolved question's association, keeping the store

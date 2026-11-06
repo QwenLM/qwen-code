@@ -681,6 +681,42 @@ it('does not re-send a retained initial prompt to a child that already has a use
   expect(sendPrompt).not.toHaveBeenCalled();
 });
 
+it.each([
+  ['image', { images: [{ data: 'AQID', mimeType: 'image/png' }] }],
+  ['file', { files: [{ name: 'notes.txt', mimeType: 'text/plain' }] }],
+  [
+    'resource link',
+    {
+      resourceLinks: [
+        {
+          type: 'resource_link',
+          uri: 'file:///tmp/notes.txt',
+          name: 'notes.txt',
+        },
+      ],
+    },
+  ],
+])(
+  'does not re-send a retained initial prompt to a child whose only user prompt is %s-only',
+  async (_label, media) => {
+    connection.sessionId = 'side-session-1';
+    connection.displayName = 'Side task';
+    connection.status = 'connected';
+    // Media-only prompts submit with empty text; the child is not empty.
+    transcript.blocks = [{ kind: 'user', text: '', ...media }];
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      renderSideTask({ initialPrompt: 'Explain the pending question' });
+      await Promise.resolve();
+    });
+
+    expect(sendPrompt).not.toHaveBeenCalled();
+  },
+);
+
 it('sends a retained initial prompt once transcript loading completes', async () => {
   connection.sessionId = 'side-session-1';
   connection.displayName = 'Side task';
