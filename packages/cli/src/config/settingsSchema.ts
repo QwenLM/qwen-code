@@ -1533,7 +1533,8 @@ const SETTINGS_SCHEMA = {
         category: 'Privacy',
         requiresRestart: true,
         default: true,
-        description: 'Enable collection of usage statistics',
+        description:
+          'Enable collection of usage statistics. Disabling this also stops the models.dev catalog refresh.',
         showInDialog: true,
       },
     },
@@ -1861,6 +1862,16 @@ const SETTINGS_SCHEMA = {
           type: 'string',
           enum: ['none', ...REASONING_EFFORT_TIERS],
         },
+      },
+      catalogRefresh: {
+        type: 'boolean',
+        label: 'Refresh Models.dev Catalog',
+        category: 'Model',
+        requiresRestart: true,
+        default: true,
+        description:
+          'Download the models.dev model catalog in the background at most once every 24 hours. Disable it in managed installations that must not contact models.dev; the bundled and previously downloaded catalog data remain available. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored. QWEN_CODE_MODELS_DEV_REFRESH=off in the process environment still wins, and disabling privacy.usageStatisticsEnabled also disables the refresh.',
+        showInDialog: false,
       },
       maxSessionTurns: {
         type: 'integer',
@@ -3891,7 +3902,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: true,
         description:
-          'Let Qwen Code sessions on this machine send each other messages over a per-session local socket. On by default: this session is discoverable by the others, takes peer messages under the review rules of agents.crossSessionInbound, and its model can address them from send_message. Two senders are delivered without review unless agents.crossSessionInbound is "hold" or "refuse": processes this session starts, which inherit its child token, and a same-user process that claims this session\'s own review class, which nothing authenticates. Set to false to keep this session invisible and unreachable.',
+          'Let Qwen Code sessions on this machine send each other messages over a per-session local socket. On by default: this session is discoverable by the others, takes peer messages under the review rules of agents.crossSessionInbound, and its model can address them from send_message. Two senders are delivered without review unless agents.crossSessionInbound is "hold" or "refuse": processes this session starts, which inherit its child token, and a same-user process that claims this session\'s own review class, which nothing authenticates. Set to false to disable peer discovery and messaging. --bare and --safe-mode disable messaging regardless of this setting. Interactive sessions can still appear in qwen sessions ps without a messaging address. Daemon- or editor-hosted sessions register only while messaging is active; Agent View managed rows are listed independently.',
         showInDialog: false,
       },
       crossSessionInbound: {
@@ -4386,9 +4397,9 @@ const SETTINGS_SCHEMA = {
         label: 'Generated UI',
         category: 'Experimental',
         requiresRestart: true,
-        default: false,
+        default: true,
         description:
-          'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+          'Show interactive views from bundled Generated UI in supported local sessions, such as Web Shell. Enabled by default; set to false to turn it off. Restart the owning session to apply changes.',
         showInDialog: true,
       },
       mods: {
@@ -4547,7 +4558,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Run headless sessions (`-p` and stream-json) and the model rounds of ACP user prompts (Zed, VS Code, Web Shell) on the shared agent loop (experimental). Other turns and surfaces keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.',
+          'Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI sends its model requests and runs its tool batches through it, while its turn continuation, OpenTUI and subagents keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.',
         showInDialog: true,
       },
       agentCollaboration: {

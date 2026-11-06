@@ -109,9 +109,12 @@ import type { LiveHistoryItem } from './live-session-model.js';
 import { ensureConfigInitialized } from './live-session.js';
 import { consumeLastRenderError } from './opentui-error-boundary.js';
 import { createExitGuard, exitGuardHint } from './exit-guard.js';
-import { EXIT_CODE_INTERRUPT, exitSession } from './exit-lifecycle.js';
+import { exitSession } from './exit-lifecycle.js';
 import { Command, matchesCommand } from './key-map.js';
-import type { OpenTuiComposerHandle } from './input-submission.js';
+import {
+  returnToComposer,
+  type OpenTuiComposerSlot,
+} from './input-submission.js';
 import { buildUiHistoryItems } from './session-switch.js';
 import { projectHistoryToStreamEvents } from './item-projection.js';
 import {
@@ -162,10 +165,16 @@ function OpenTuiEntryApp({
   }, [config, renderer, width]);
   const { stats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, config.getSessionId());
+  // A prompt handed back while a dialog has the composer unmounted waits in
+  // the slot's `returned`.
+  const composerHandle: OpenTuiComposerSlot =
+    useRef<OpenTuiComposerSlot['current']>(null);
   const live = useOpenTuiLiveTurn({
     config,
     logger,
     dualOutput: runtime.dualOutputBridge,
+    onPromptReturned: (submission) =>
+      returnToComposer(composerHandle, submission),
   });
   const { applyEvent, submit, interrupt, resetTranscript, settleWaitingCall } =
     live;
@@ -254,7 +263,6 @@ function OpenTuiEntryApp({
   const getSessionStats = useCallback(() => statsRef.current, []);
 
   // --- early-input injection (ink initialCapturedInput parity) -------------
-  const composerHandle = useRef<OpenTuiComposerHandle | null>(null);
   const vimComposerBuffer = useRef<VimBuffer | null>(null);
   const vimBuffer = useMemo(
     () => createVimBuffer(() => vimComposerBuffer.current!),
@@ -347,7 +355,7 @@ function OpenTuiEntryApp({
     // Ink pre-arms C before cleanup; D only arms at an idle/confirmation boundary.
     if (key.name === 'c' || parked || !streamingRef.current) {
       if (exitGuard.press(guardKey) === 'exit') {
-        void exitSession(config, EXIT_CODE_INTERRUPT);
+        void exitSession(config, 0);
         return;
       }
       setExitHint(exitGuardHint(guardKey));

@@ -6,12 +6,13 @@
 
 import {
   EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
-  type DaemonClient,
+  DaemonClient,
   type GoalControlRequest,
   type GoalSnapshotV2,
   type GoalStateResponse,
 } from '@qwen-code/sdk/daemon';
 import { withActionTimeout } from '../timing.js';
+import { createDaemonRestRequest } from '../rest-request.js';
 import type {
   DaemonAutofixPrWatchList,
   DaemonDirectoryListing,
@@ -54,7 +55,36 @@ export function createDaemonWorkspaceActions({
   baseUrl,
   token,
 }: CreateDaemonWorkspaceActionsArgs): DaemonWorkspaceActions {
+  // Login cleanup must outlive disposal of the workspace transport.
+  const subscriptionRequest = async <T>(
+    run: (client: DaemonClient) => Promise<T>,
+  ): Promise<T> => {
+    const client = new DaemonClient({ baseUrl, token });
+    try {
+      return await run(client);
+    } finally {
+      client.dispose();
+    }
+  };
+  const requestRest = (url: URL, init: RequestInit) =>
+    createDaemonRestRequest(
+      baseUrl,
+      token,
+      getClient(),
+    )(daemonRoutePath(url, baseUrl), init);
   return {
+    async setUiLanguage(language, scope, workspaceCwd) {
+      const client = requireClient(getClient, 'Change UI language failed');
+      if (scope === 'workspace' && !workspaceCwd) {
+        throw new Error('The selected workspace is unavailable');
+      }
+      return withActionTimeout(
+        scope === 'workspace' && workspaceCwd
+          ? client.workspaceByCwd(workspaceCwd).setUiLanguage(language)
+          : client.setUserLanguage(language),
+        'Change UI language timed out',
+      );
+    },
     async listSessions(options) {
       const client = requireClient(getClient, 'List sessions failed');
       const cwd = getWorkspaceCwd();
@@ -197,6 +227,18 @@ export function createDaemonWorkspaceActions({
         'Load channels timed out',
       );
       return { catalog, snapshot };
+    },
+
+    async listChannelEvents(query) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load channel events failed',
+      );
+      return withActionTimeout(
+        workspace.workspaceChannelEvents(query),
+        'Load channel events timed out',
+      );
     },
 
     async upsertChannel(name, request) {
@@ -683,13 +725,7 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    // TODO(transport-parity): globWorkspace, stat, and listDirectory
-    // bypass the DaemonClient transport layer by calling global fetch()
-    // directly. This means ACP transports (WS, HTTP+JSON-RPC) never
-    // see these requests. DaemonClient exposes client.glob(),
-    // client.fileStat(), and client.dirList() that go through the
-    // transport — migrate to those once the route table covers
-    // /glob, /stat, /list (see acpRouteTable.ts).
+    // These routes stay native REST until the ACP route table supports them.
     async globWorkspace(pattern, opts) {
       requireClient(getClient, 'Glob workspace failed');
       const url = createDaemonRequestUrl(baseUrl, '/glob');
@@ -704,7 +740,7 @@ export function createDaemonWorkspaceActions({
         url.searchParams.set('cwd', opts.cwd);
       }
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           headers: createDaemonHeaders(token),
         }),
         'Glob workspace timed out',
@@ -762,7 +798,7 @@ export function createDaemonWorkspaceActions({
       const url = createDaemonRequestUrl(baseUrl, '/stat');
       url.searchParams.set('path', filePath);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           headers: createDaemonHeaders(token),
         }),
         'Stat file timed out',
@@ -778,7 +814,7 @@ export function createDaemonWorkspaceActions({
       const url = createDaemonRequestUrl(baseUrl, '/list');
       url.searchParams.set('path', dirPath);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           headers: createDaemonHeaders(token),
         }),
         'List directory timed out',
@@ -789,18 +825,14 @@ export function createDaemonWorkspaceActions({
       return (await res.json()) as DaemonDirectoryListing;
     },
 
-    // Scheduled tasks (durable cron). Raw fetch like glob/stat/list — the
-    // /scheduled-tasks routes are REST-only and not yet on the DaemonClient
-    // transport, so this path only reaches the daemon over plain HTTP (the
-    // web-shell's own origin), which is exactly where the page runs. A
-    // `workspaceId` selects a non-primary workspace's own cron file via the
-    // workspace-qualified route; omitting it hits the primary surface.
+    // A workspaceId selects that workspace's cron file; omitting it selects
+    // the primary workspace. These routes require native REST.
     async listScheduledTasks(workspaceId) {
       requireClient(getClient, 'List scheduled tasks failed');
       const path = scheduledTasksPath(workspaceId);
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           headers: createDaemonHeaders(token),
         }),
         'List scheduled tasks timed out',
@@ -817,7 +849,7 @@ export function createDaemonWorkspaceActions({
       const path = scheduledTasksPath(workspaceId);
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           method: 'POST',
           headers: createDaemonJsonHeaders(token),
           body: JSON.stringify(req),
@@ -838,7 +870,7 @@ export function createDaemonWorkspaceActions({
       );
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           method: 'PATCH',
           headers: createDaemonJsonHeaders(token),
           body: JSON.stringify(patch),
@@ -859,7 +891,7 @@ export function createDaemonWorkspaceActions({
       );
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           method: 'POST',
           headers: createDaemonJsonHeaders(token),
         }),
@@ -879,7 +911,7 @@ export function createDaemonWorkspaceActions({
       );
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           method: 'DELETE',
           headers: createDaemonHeaders(token),
         }),
@@ -899,7 +931,7 @@ export function createDaemonWorkspaceActions({
         : '/autofix-pr/watches';
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           headers: createDaemonHeaders(token),
         }),
         'List autofix-pr watches timed out',
@@ -927,7 +959,7 @@ export function createDaemonWorkspaceActions({
       requireClient(getClient, 'List goals failed');
       const url = createDaemonRequestUrl(baseUrl, '/goals');
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           headers: createDaemonHeaders(token),
         }),
         'List goals timed out',
@@ -958,7 +990,7 @@ export function createDaemonWorkspaceActions({
         `/session/${encodeURIComponent(sessionId)}/goal/clear`,
       );
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           method: 'POST',
           headers: createDaemonJsonHeaders(token),
           body: '{}',
@@ -978,7 +1010,7 @@ export function createDaemonWorkspaceActions({
       const path = `/session/${encodeURIComponent(sessionId)}/goal`;
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           method: 'POST',
           headers: createDaemonJsonHeaders(token),
           body: JSON.stringify(request),
@@ -1150,6 +1182,42 @@ export function createDaemonWorkspaceActions({
         client.cancelDeviceFlow(deviceFlowId),
         'Cancel device flow timed out',
       );
+    },
+
+    activateSubscription(options) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Connect Qwen Subscription failed',
+      );
+      return workspace.activateSubscription(options);
+    },
+
+    getSubscriptionConfig(options) {
+      return subscriptionRequest((client) =>
+        client.getSubscriptionConfig(options),
+      );
+    },
+    startSubscriptionLogin() {
+      return subscriptionRequest((client) => client.startSubscriptionLogin());
+    },
+    getSubscriptionLogin(id, options) {
+      return subscriptionRequest((client) =>
+        client.getSubscriptionLogin(id, options),
+      );
+    },
+    cancelSubscriptionLogin(id) {
+      return subscriptionRequest((client) =>
+        client.cancelSubscriptionLogin(id),
+      );
+    },
+    getSubscriptionUserInfo(options) {
+      return subscriptionRequest((client) =>
+        client.getSubscriptionUserInfo(options),
+      );
+    },
+    signOutSubscription() {
+      return subscriptionRequest((client) => client.signOutSubscription());
     },
 
     async getAuthStatus() {
@@ -1365,10 +1433,16 @@ function createDaemonRequestUrl(baseUrl: string, path: string): URL {
   return new URL(`${normalizedBaseUrl}${path}`, fallbackBase);
 }
 
-function serializeDaemonRequestUrl(url: URL, baseUrl: string): string {
-  return stripTrailingSlashes(baseUrl)
-    ? url.toString()
-    : `${url.pathname}${url.search}`;
+function daemonRoutePath(url: URL, baseUrl: string): string {
+  const fallbackBase =
+    typeof window === 'undefined' ? 'http://localhost' : window.location.origin;
+  const prefix = baseUrl
+    ? new URL(stripTrailingSlashes(baseUrl), fallbackBase).pathname.replace(
+        /\/+$/,
+        '',
+      )
+    : '';
+  return `${url.pathname.slice(prefix.length)}${url.search}`;
 }
 
 function stripTrailingSlashes(value: string): string {

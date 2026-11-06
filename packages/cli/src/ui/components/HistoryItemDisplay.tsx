@@ -491,6 +491,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           text={itemForDisplay.text}
           linkUrl={itemForDisplay.linkUrl}
           linkText={itemForDisplay.linkText}
+          presentation={itemForDisplay.presentation}
         />
       )}
       {itemForDisplay.type === 'success' && (
@@ -588,6 +589,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           breakdown={itemForDisplay.breakdown}
           builtinTools={itemForDisplay.builtinTools}
           mcpTools={itemForDisplay.mcpTools}
+          instructionFiles={itemForDisplay.instructionFiles}
           memoryFiles={itemForDisplay.memoryFiles}
           skills={itemForDisplay.skills}
           isEstimated={itemForDisplay.isEstimated}

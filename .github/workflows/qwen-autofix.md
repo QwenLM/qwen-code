@@ -1368,9 +1368,12 @@ author-permission gate by design, not a head-repository gate: takeover
 engages maintainer fork PRs, and the pattern matches qwen-code-pr-review,
 whose ECS-routed review job also rides its upstream write+ check. The
 job therefore runs host-side (no `container:`): the branch code it
-executes is collaborator-authored — the same trust class ci.yml's
-pick_runner routes onto this pool — and persistent-workspace residue is
-scrubbed by the hygiene steps below. On pull_request /
+executes is collaborator-authored — a narrower trust class than ci.yml's
+pick_runner now routes onto this pool, since the 2026-10-31 decision
+sends every pull request, untrusted forks included, to lint_and_static
+(that lane pins a per-job HOME; this job does not) — and
+persistent-workspace residue is scrubbed by the hygiene steps below. On
+pull_request /
 pull_request_review events the ECS route additionally needs a same-repo
 head or a write+ author (ci.yml's pick_runner form); issue_comment and
 the other triggers skip that clause and rely on the live write+ gates.
@@ -1406,8 +1409,8 @@ Why 20: 37 PRs carried the label on 2026-08-08, so 5 slots served
 at a larger scale. The ecs-qwen fleet is 84 runners, so 20 concurrent
 legs occupy under a quarter of it, and the executed legs sampled that
 day finished in 3-28 minutes.
-The 300-minute job cap puts the worst case at 5 runner-hours per slot
-(100 across the fleet at 20) and holds the per-PR head-write
+The 345-minute job cap puts the worst case at 5.75 runner-hours per
+slot (115 across the fleet at 20) and holds the per-PR head-write
 concurrency group for the same window. Different PRs never share that
 group, so raising this does not add push contention.
 RAISE BOTH TOGETHER: this must stay strictly below
@@ -1647,11 +1650,11 @@ for this cap. Worst-case budget:
   setup                    7
   Triage and address     130  (120 budget + 10 margin)
   Verification gate       60  (2.6x the measured 22m48s)
-  Repair                  20
+  Repair                  70  (60 budget + the same 10 margin)
   Repair verification     60
   report                   3
   -------------------------------
-  worst case             280  => job timeout 300, and the job runs
+  worst case             330  => job timeout 345, and the job runs
                                  on ubuntu-latest, whose own ceiling
                                  is 360.
 ```
@@ -2543,6 +2546,26 @@ non-allowlisted keys (the steady state on an already-sanitized
 runner) means grep exits 1, which would kill the step exactly
 when there is nothing to clean.
 ```
+
+The two preamble lines above that block are not the allowlist sweep and
+carry their own rationale. The worktree-scoped config file
+(`git rev-parse --git-path config.worktree`) is deleted first: a worktree
+keeps per-worktree config separately, and `extensions.worktreeConfig` is
+what makes git read it at all. Because `extensions.` is itself a KEPT
+allowlist key, that file is the one place a prior job on this pool can
+still plant `core.hooksPath` while the sweep below reports itself clean —
+so the file and the matching local `extensions.worktreeConfig` key both
+go before the sweep.
+
+The hooks path is then resolved with `GIT_CONFIG_GLOBAL=/dev/null
+GIT_CONFIG_SYSTEM=/dev/null`, i.e. from the repository only, and only
+after the allowlist sweep. Both properties are load-bearing: resolving
+before the sweep would let a config a global override supplied decide the
+path the containment guard validates, and a prior job's
+`--worktree core.hooksPath=/` would survive the local sweep untouched,
+leave the hooks path outside the git dir, make the guard refuse the
+delete, and fire the planted hook on the next git command in this
+PAT-bearing job.
 
 <a id="af-086"></a>
 
@@ -3790,6 +3813,16 @@ fills a per-run WORKDIR with API dumps that no VM teardown
 removes on the pool, so it gets a fixed autofix* per-run path
 (the age sweep can reclaim it after a hard kill), an EXIT
 trap, and an always() cleanup step mirroring issue-autofix.
+That cleanup must be the LAST step, after every reader including
+the artifact upload: nothing else removes the per-run WORKDIR, so
+on the persistent pool every run would otherwise leave its
+transcripts and decision files behind forever, and moving the
+`rm -rf "${WORKDIR}"` ahead of the upload deletes the transcript
+before its last reader — the upload's `if-no-files-found: ignore`
+then turns that into a silent no-op artifact. always() covers
+cancellation too; only a hard runner kill abandons the dir, and
+run_id never repeats, so the age sweep in Reset autofix workspace
+reclaims it.
 ```
 
 <a id="af-149"></a>
@@ -4623,6 +4656,14 @@ counted in eval markers rather than in ROUND:
   run still charges once. A run that is cancelled or dies in setup is
   NOT free: the report step runs on always() and writes its marker with
   a sentinel timestamp, so the census charges it.
+- The eval marker's fields are POSITIONAL in the scan regex
+  (`.[0]=ts .[2]=round .[3]=win .[4]=run`), so every write site must emit
+  `ts= acted= round= win= run=` in that order verbatim. Adding a field or
+  reordering them still produces a well-formed marker while the regex
+  binds the wrong captures, and the window watermark, round accounting
+  and budget census then count wrong numbers — which the consecutive and
+  cumulative caps gate on. Only the bot's own comments are trusted, so a
+  spoofed marker is ignored.
 - A breaker stop is NOT a spent budget. Three shapes reach the cap gate
   with the budget spent anyway: the consecutive-failure breaker jumps
   the round to MAX_ROUNDS with a real timestamp (no trailing sentinel),
@@ -4723,10 +4764,13 @@ zero-round engagement is what 'stop' already means (af-007).
 
 In the workflow `env:` block.
 
-The workflow file sits against this repository's own 470 KB gate
-(`.github/scripts/check-workflow-size.sh`, env-overridable, ~42 KB below
-GitHub's 512 KB start-runs limit), so the long-form commentary on the constants
-below lives here verbatim — with TWO exceptions, each marked at its entry: the
+The workflow file sits well under this repository's own gate
+(`.github/scripts/check-workflow-size.sh`, env-overridable at both ends) and
+well below GitHub's 512 KB start-runs limit; `.github/workflows/.size-baseline`
+records its current byte count, so no figure here can drift from the file. The
+gate is still close enough that the
+long-form commentary on the constants below lives here verbatim — with TWO
+exceptions, each marked at its entry: the
 `TAKEOVER_COMMAND` entry was updated to name the second parameterized form, and
 the `TRUSTED_ASSOC` entry gained the note on where the constant is read and what
 widening it would do. Neither is a byte-for-byte copy of the base block. Each

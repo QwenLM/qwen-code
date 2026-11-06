@@ -338,6 +338,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_skill_settings_batch_toggle: NO_MANAGED_EQUIVALENT(
     'no Managed skill settings mutation',
   ),
+  user_skill_activation: NO_MANAGED_EQUIVALENT(
+    'no Managed user skill settings mutation',
+  ),
   workspace_session_refresh: NO_MANAGED_EQUIVALENT(
     'no Managed session refresh route',
   ),
@@ -349,6 +352,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   workspace_skill_manage: NO_MANAGED_EQUIVALENT(
     'no Managed skill management route',
+  ),
+  skill_archive_install: NO_MANAGED_EQUIVALENT(
+    'no Managed native Skill archive installation or receipt route',
+  ),
+  skill_zip_file_source: NO_MANAGED_EQUIVALENT(
+    'no Managed daemon-local Skill ZIP source or receipt route',
   ),
   web_shell_brand: {
     standing: 'managed',
@@ -530,6 +539,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_session_live_state: NO_MANAGED_EQUIVALENT(
     'no Managed live-state snapshot',
   ),
+  workspace_session_live_state_batch: NO_MANAGED_EQUIVALENT(
+    'no Managed live-state snapshot',
+  ),
   workspace_session_metadata: NO_MANAGED_EQUIVALENT(
     'Managed renames a Session and has no metadata bag',
   ),
@@ -614,6 +626,7 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'PUB_STREAM_PREFIX',
   'PUB_STREAM_SEAL',
   'STORE_APPROVAL_QUERY',
+  'STORE_MODEL_CONFIG_QUERY',
   'STORE_USER_MESSAGE_CLAIM',
   'STORE_EXECUTION_AUTHORIZE',
   'STORE_LIFECYCLE_AUTHORIZE',
@@ -657,6 +670,7 @@ export const MANAGED_ONLY_REPORTED: readonly string[] = [
   'SESSION_CONTEXT_COMPRESSION',
   'SESSION_RECOVERY_QUERY',
   'SESSION_RECOVERY_RECHECK',
+  'SESSION_WORKTREE',
 ];
 
 /**
