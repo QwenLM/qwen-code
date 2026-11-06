@@ -106,8 +106,8 @@ Options:
   --skip-database          check, backup: the database is backed up another way
   --runtime-state <dir>    check, backup: the Runtime state directory, or none,
                            instead of the one the server's configuration resolves to
-  --server-url <url>       start, verify: control-plane URL (default: the listener
-                           the server's configuration resolves to)
+  --server-url <url>       check, start, verify: control-plane URL (default: the
+                           listener the server's configuration resolves to)
   --timeout <seconds>      stop, start, verify: how long to wait
   --actor <id>             verify: read Sessions as this actor, through the server's
                            trusted actor header
@@ -533,8 +533,8 @@ export function fetchRefusal(url) {
 }
 
 /**
- * `url` as a refusal may print it: its user information, a password or a
- * token in the user-name position, shows as `***`.
+ * `url` as a refusal or report row may print it: its user information, a
+ * password or a token in the user-name position, shows as `***`.
  */
 export function withoutCredentials(url) {
   let shown = url;
@@ -552,8 +552,8 @@ export function withoutCredentials(url) {
   // Such a value does not parse, unless the password starts with digits, as
   // in http://svc:2024#Secret@harness:4170, which the parser and
   // java.net.URI both read as port 2024 with the rest of the password in
-  // the fragment. So everything up to the last @ shows as ***, which only
-  // ever hides more of a value that is refused anyway.
+  // the fragment. So everything up to the last @ shows as ***, including in
+  // a path that the command dials: the text alone cannot distinguish them.
   return shown.replace(
     /^([a-zA-Z][a-zA-Z0-9+.-]*:(?:\/\/)?|\/\/)?[\s\S]*@/,
     '$1***@',
@@ -1812,8 +1812,8 @@ function planFlags(options, names) {
       options.mysqldump !== 'mysqldump' ? options.mysqldump : undefined,
     'skip-database': options.skipDatabase || undefined,
     'runtime-state': options.runtimeState,
-    // check has refused a --server-url that would print a password.
-    'server-url': options.serverUrl,
+    // The plan masks credentials and control bytes like every other URL row.
+    'server-url': options.serverUrl && shown(options.serverUrl),
   };
   return names
     .filter((name) => flags[name] !== undefined)
@@ -2666,19 +2666,15 @@ async function listeners(
  * information, so a ? or # starts a query or a fragment, which would take in
  * the paths appended to the URL: http://proxy.test/?a probes
  * /?a/actuator/health, and fetch drops a fragment with the path after it.
- * An @ left after that is the rest of a password that starts with digits,
- * as in https://svc:12/s3cret@cp.example.com, which the parser reads as
- * host svc and port 12: dialling it would reach the wrong host, and naming
- * it would print the password.
+ * An @ in the path remains valid path text; every printed URL masks up to it.
  */
 function refuseServerUrl(serverUrl) {
   const reason =
+    fetchRefusal(serverUrl) ??
     fetchRefusal(`${serverUrl}/actuator/health`) ??
     (/[?#]/.test(serverUrl)
       ? 'carries a query or a fragment, where the /actuator/health and API paths appended to it would land'
-      : serverUrl.includes('@')
-        ? 'carries an @, as a user name or password would before its host'
-        : undefined);
+      : undefined);
   if (reason) {
     throw new Refusal(
       `--server-url ${quoted(withoutCredentials(serverUrl))} ${reason}.`,
@@ -2849,7 +2845,7 @@ function harnessUrlReason(text, url) {
 // URI path may, untrimmed. It is narrower than the server's rule, never
 // wider.
 const PLAIN_HTTP_URL =
-  /^https?:\/\/(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?(?:\/[A-Za-z0-9\-._~!$&'()*+,;=:@%/]*)?$/i;
+  /^https?:\/\/(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?(?:\/(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9\-._~!$&'()*+,;=:@/])*)?$/i;
 
 async function phaseStart(system, deployment, options) {
   refuseUnless(deployment);
