@@ -348,9 +348,13 @@ for (const kind of ['approval', 'question'] as const) {
         }),
       )
       .toBe(true);
-    await expect(help).toContainText(/macOS/);
-    await expect(help).toContainText(/Windows/);
-    for (const system of ['macOS', 'Windows']) {
+    // Only the running host's guide renders; the other OS's steps do not
+    // apply here and listing them was the bug this spec now pins.
+    const hostSystem = process.platform === 'win32' ? 'Windows' : 'macOS';
+    const otherSystem = hostSystem === 'macOS' ? 'Windows' : 'macOS';
+    await expect(help).toContainText(new RegExp(hostSystem));
+    await expect(help).not.toContainText(new RegExp(otherSystem));
+    for (const system of [hostSystem]) {
       const guide = help.locator('details').filter({ hasText: system });
       const summary = guide.locator('summary');
       await expect(guide).not.toHaveAttribute('open');

@@ -227,23 +227,57 @@ it('preserves global shortcuts from the trigger with help open and closed', () =
   }
 });
 
-function operatingSystemGuides(platform: string): string[] {
+function operatingSystemGuides(
+  platform: string,
+  maxTouchPoints = 0,
+): Array<{ heading: string; body: string }> {
   vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue(platform);
+  // jsdom's navigator has no maxTouchPoints, so it cannot be spied on.
+  Object.defineProperty(window.navigator, 'maxTouchPoints', {
+    configurable: true,
+    get: () => maxTouchPoints,
+  });
   render();
   hover();
+  // The summary is a literal string, so pairing each heading with its body is
+  // what keeps the two guides from being swapped without a failing test.
   return Array.from(
     document.querySelector(popup)!.querySelectorAll('details'),
-  ).map((details) => details.querySelector('summary')!.textContent!.trim());
+  ).map((details) => ({
+    heading: details.querySelector('summary')!.textContent!.trim(),
+    body: details.querySelector('p')!.textContent!.trim(),
+  }));
 }
 
 it.each([
-  ['Win32', ['Windows']],
-  ['MacIntel', ['macOS']],
-  ['iPhone', ['macOS']],
-  ['Linux x86_64', ['macOS', 'Windows']],
-  ['', ['macOS', 'Windows']],
-])('lists only the guides for %s', (platform, guides) => {
-  expect(operatingSystemGuides(platform)).toEqual(guides);
+  ['Win32', 0, ['Windows']],
+  ['MacIntel', 0, ['macOS']],
+  ['iPhone', 5, []],
+  // An iPad in desktop mode reports `MacIntel` but has a touch screen, and
+  // the macOS steps do not apply to it.
+  ['MacIntel', 5, []],
+  ['Linux x86_64', 0, ['macOS', 'Windows']],
+  ['', 0, ['macOS', 'Windows']],
+])(
+  'lists only the guides for %s (touch points %i)',
+  (platform, touch, guides) => {
+    expect(
+      operatingSystemGuides(platform, touch).map((g) => g.heading),
+    ).toEqual(guides);
+  },
+);
+
+it("pairs each guide heading with that system's steps", () => {
+  const guides = operatingSystemGuides('Linux x86_64');
+  const byHeading = Object.fromEntries(
+    guides.map((guide) => [guide.heading, guide.body]),
+  );
+  expect(byHeading['macOS']).toBeTruthy();
+  expect(byHeading['Windows']).toBeTruthy();
+  expect(byHeading['macOS']).not.toBe(byHeading['Windows']);
+  // The Windows steps name the Windows-only control; if the bodies were
+  // swapped, the macOS entry would carry this text instead.
+  expect(byHeading['Windows']).toMatch(/Windows/);
 });
 
 it('keeps unrelated input focus when Escape closes hover-opened help', () => {

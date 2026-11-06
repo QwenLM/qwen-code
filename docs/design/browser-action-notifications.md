@@ -95,9 +95,11 @@ not yet authorized, denied, and unsupported environments. Unavailable notificati
 contexts (including iframe and hosts that have not opted in) render no control.
 The popover offers the existing enable/permission action where possible, browser
 site-setting instructions when denied, and explains background/unfocused triggers,
-mounted chats, click behavior, and macOS/Windows notification and Focus settings.
-Both OS guides start collapsed, with a chevron beside each heading to expand or
-collapse the instructions independently.
+mounted chats, click behavior, and the notification and Focus settings for the
+browser's own operating system. Only the guide matching the platform the page is
+running on renders; a platform the page cannot identify keeps both guides rather
+than none. The guide starts collapsed, with a chevron beside the heading to
+expand or collapse the instructions.
 The web page cannot detect OS-level permission; do not claim that it can.
 
 On the first eligible panel appearance, attempt authorization once per browser

@@ -55,8 +55,19 @@ export function BrowserNotificationControl() {
       : BellOff;
   const platform =
     typeof navigator === 'undefined' ? '' : (navigator.platform ?? '');
-  const showMacHelp = !/^Win/i.test(platform);
-  const showWindowsHelp = !/Mac|iPhone|iPad|iPod/i.test(platform);
+  // iOS reports `iPhone`/`iPad`/`iPod`, and an iPad in desktop mode reports
+  // `MacIntel` with a touch screen; neither runs the macOS steps below. An
+  // empty or unrecognized platform keeps both guides rather than losing help.
+  const isAppleMobile =
+    /iPhone|iPad|iPod/i.test(platform) ||
+    (typeof navigator !== 'undefined' &&
+      navigator.maxTouchPoints > 1 &&
+      /Mac/i.test(platform));
+  const showMacHelp = /Mac/i.test(platform) && !isAppleMobile;
+  const showWindowsHelp = /^Win/i.test(platform);
+  // Neither guide applies on a phone or tablet, so render none. An empty or
+  // unrecognized desktop platform keeps both rather than losing the help.
+  const showBothGuides = !isAppleMobile && !showMacHelp && !showWindowsHelp;
   const cancelClose = () => clearTimeout(timer.current);
   const show = () => {
     cancelClose();
@@ -211,7 +222,7 @@ export function BrowserNotificationControl() {
           <p className="text-muted-foreground">
             {t('browserNotifications.helpSystem')}
           </p>
-          {showMacHelp && (
+          {(showMacHelp || showBothGuides) && (
             <details className="group shrink-0">
               <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
                 macOS
@@ -225,7 +236,7 @@ export function BrowserNotificationControl() {
               </p>
             </details>
           )}
-          {showWindowsHelp && (
+          {(showWindowsHelp || showBothGuides) && (
             <details className="group shrink-0">
               <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
                 Windows
