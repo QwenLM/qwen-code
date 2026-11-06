@@ -254,6 +254,7 @@ interface ServeArgs {
   'max-journal-events'?: number;
   'max-journal-bytes'?: number;
   workspace?: string | string[];
+  'conversations-dir'?: string;
   'memory-project-scope'?: MemoryProjectScope;
   'require-auth': boolean;
   'enable-session-shell': boolean;
@@ -400,6 +401,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Defaults to process.cwd() when omitted. ' +
           'Repeat to register isolated workspace runtimes; the first is primary.',
       })
+      .option('conversations-dir', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Absolute working-directory root shared by standalone and Live Conversations. Overrides QWEN_CONVERSATIONS_DIR; defaults to ~/Documents/Qwen Code/Conversations.',
+      })
       .option('memory-project-scope', {
         type: 'string',
         choices: MEMORY_PROJECT_SCOPES,
@@ -527,6 +534,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Allow unencrypted Agent Host HTTP connections outside loopback (trusted demo networks only).',
       })
       .check((argv) => {
+        if (Array.isArray(argv['conversations-dir'])) {
+          throw new Error('pass --conversations-dir once.');
+        }
         if (argv['local-control'] === true && argv['web'] === false) {
           throw new Error('Local Control requires the Web Shell.');
         }
@@ -881,7 +891,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           argv.managed ||
           argv.profile !== 'default' ||
           !argv.web ||
-          argv.workspace !== undefined
+          argv.workspace !== undefined ||
+          argv['conversations-dir'] !== undefined
         ) {
           throw new Error(
             '--managed-web-config cannot be combined with daemon execution or Managed local mode.',
@@ -916,6 +927,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           argv.profile !== 'default' ||
           !argv.web ||
           argv.workspace !== undefined ||
+          argv['conversations-dir'] !== undefined ||
           argv.token !== undefined ||
           argv['tls-cert'] ||
           argv['tls-key'] ||
@@ -1183,6 +1195,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           ? { maxJournalBytes: argv['max-journal-bytes'] }
           : {}),
         workspace: argv.workspace,
+        ...(argv['conversations-dir'] !== undefined
+          ? { conversationsDir: argv['conversations-dir'] }
+          : {}),
         ...(argv['memory-project-scope'] !== undefined
           ? { memoryProjectScope: argv['memory-project-scope'] }
           : {}),

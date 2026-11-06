@@ -34,6 +34,7 @@ import {
   chmodSync,
   existsSync,
   readFileSync,
+  realpathSync,
 } from 'node:fs';
 import { expect, vi } from 'vitest';
 import { applyContainerSandboxNoProxy, type TestRig } from '../test-helper.js';
@@ -159,8 +160,18 @@ export function stubFakeModelEnv(
   vi.stubEnv('OPENAI_BASE_URL', fakeServer.baseUrl);
   vi.stubEnv('OPENAI_MODEL', 'fake-model');
   vi.stubEnv('QWEN_MODEL', 'fake-model');
-  vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
-  vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
+  const qwenHome = join(rig.testDir!, '.qwen-home');
+  mkdirSync(qwenHome, { recursive: true });
+  writeFileSync(
+    join(qwenHome, 'settings.json'),
+    JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+  );
+  writeFileSync(
+    join(qwenHome, 'trustedFolders.json'),
+    JSON.stringify({ [realpathSync(rig.testDir!)]: 'TRUST_FOLDER' }),
+  );
+  vi.stubEnv('QWEN_HOME', qwenHome);
+  vi.stubEnv('QWEN_RUNTIME_DIR', qwenHome);
   const restoreNoProxy = applyContainerSandboxNoProxy();
   // The gate's required value is deliberately absent, in every session.
   vi.stubEnv('DOWNSTREAM_SESSION_ID', '');

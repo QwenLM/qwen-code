@@ -133,6 +133,17 @@ export function mapSessionContextModels(
         getString(model, 'value');
       if (!modelId) continue;
       const meta = getRecord(model?.['_meta']);
+      const rawModalities = getRecord(meta?.['modalities']);
+      const modalities: DaemonModelInfo['modalities'] = rawModalities
+        ? {}
+        : undefined;
+      if (rawModalities && modalities) {
+        for (const key of ['image', 'pdf', 'audio', 'video'] as const) {
+          if (typeof rawModalities[key] === 'boolean') {
+            modalities[key] = rawModalities[key];
+          }
+        }
+      }
       const modelContextWindow =
         getNumber(meta, 'contextLimit') ??
         getNumber(meta, 'contextWindow') ??
@@ -148,16 +159,32 @@ export function mapSessionContextModels(
       models.push({
         id: modelId,
         baseModelId:
-          getString(model, 'baseModelId') ?? stripAcpAuthSuffix(modelId),
+          getString(meta, 'baseModelId') ??
+          getString(model, 'baseModelId') ??
+          stripAcpAuthSuffix(modelId),
         label: getString(model, 'name') ?? getString(model, 'label') ?? modelId,
+        ...(getString(meta, 'authType') !== undefined
+          ? { authType: getString(meta, 'authType') }
+          : {}),
         ...(modelContextWindow !== undefined
           ? { contextWindow: modelContextWindow }
+          : {}),
+        ...(modalities !== undefined ? { modalities } : {}),
+        ...(getString(meta, 'baseUrl') !== undefined
+          ? { baseUrl: getString(meta, 'baseUrl') }
+          : {}),
+        ...(getString(meta, 'envKey') !== undefined
+          ? { envKey: getString(meta, 'envKey') }
+          : {}),
+        ...(typeof meta?.['isRuntime'] === 'boolean'
+          ? { isRuntime: meta['isRuntime'] }
           : {}),
       });
     }
   }
 
-  if (!currentModel && models.length === 0) return undefined;
+  if (!currentModel && models.length === 0 && !Array.isArray(availableModels))
+    return undefined;
   return { models, currentModel, contextWindow };
 }
 
@@ -301,7 +328,11 @@ export function applySessionConfigContext(
   return applyConfigOptions(
     {
       ...current,
-      ...(models?.models.length ? { models: models.models } : {}),
+      ...(models &&
+      (models.models.length > 0 ||
+        Array.isArray(getRecord(context.state.models)?.['availableModels']))
+        ? { models: models.models }
+        : {}),
       currentModel: models?.currentModel ?? current.currentModel,
       currentMode: mode ?? current.currentMode,
       planExecutionMode:
@@ -543,11 +574,12 @@ export function updateConnectionFromDaemonEvent(
       break;
     }
     case 'model_switched': {
-      const modelId = getString(getRecord(event.data), 'modelId');
-      if (modelId) {
+      const modelId = getRecord(event.data)?.['modelId'];
+      if (typeof modelId === 'string') {
         setConnection((current) => ({
           ...current,
-          currentModel: modelId,
+          currentModel: modelId || undefined,
+          ...(modelId ? {} : { contextWindow: undefined }),
           reasoning:
             current.currentModel === modelId ? current.reasoning : undefined,
         }));

@@ -29,5 +29,6 @@ public final class HarnessNegotiation implements AutoCloseable {
             throw HarnessSdkValues.runtime(failure);
         }
     }
+    @Override
     public void close() { client.close(); }
 }
