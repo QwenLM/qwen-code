@@ -16,6 +16,7 @@ import {
   useEffect,
   useMemo,
   useLayoutEffect,
+  type RefObject,
 } from 'react';
 import {
   runOutsideAgentContext,
@@ -8441,5 +8442,7 @@ export const useLlmStream = (
     loopDetectionConfirmationRequest,
     streamingResponseLengthRef,
     isReceivingContent,
+    /** True once the user cancels the current turn; reset when one starts. */
+    turnCancelledRef: turnCancelledRef as RefObject<boolean>,
   };
 };

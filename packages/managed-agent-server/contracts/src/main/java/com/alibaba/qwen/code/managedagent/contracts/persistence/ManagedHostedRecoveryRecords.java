@@ -60,7 +60,7 @@ public final class ManagedHostedRecoveryRecords {
         }
         JsonNode body = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(stored.bytes(), StandardCharsets.UTF_8));
         require(body != null && stored.schemaVersion() == 1, "Invalid Hosted recovery resource.");
-        if ("managed-action-options".equals(stored.kind()) && body.path("v").asInt() != 3) {
+        if ("managed-action-options".equals(stored.kind()) && body.path("v").asInt() != 3 && body.path("v").asInt() != 4) {
             return;
         }
         if (KINDS.contains(stored.kind())) {

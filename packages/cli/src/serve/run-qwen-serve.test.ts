@@ -157,6 +157,7 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
     maxSessions: 20,
     maxPendingPromptsPerSession: 5,
     eventRingSize: 8_000,
+    eventRingMaxBytes: 8 * 1024 * 1024,
     compactedReplayMaxBytes: 4 * 1024 * 1024,
     maxJournalEvents: 10_000,
     maxJournalBytes: 8 * 1024 * 1024,
@@ -731,6 +732,7 @@ it('marks only the live-conversation bridge with the Conversations provenance en
         workspace,
         maxSessions: 1,
         serveWebShell: false,
+        eventRingMaxBytes: 1_234_567,
       },
       {
         bridge: makeRuntimeBridge(),
@@ -758,6 +760,7 @@ it('marks only the live-conversation bridge with the Conversations provenance en
     expect((marked?.[0] as { boundWorkspace?: string }).boundWorkspace).toBe(
       canonicalRoot,
     );
+    expect(marked?.[0].eventRingMaxBytes).toBe(1_234_567);
     for (const call of createBridge.mock.calls) {
       const overrides = overridesOf(call);
       if (overrides?.[MARKER] === '1') continue;
@@ -6404,6 +6407,7 @@ describe('runQwenServe telemetry validation', () => {
         workspace: [primary, secondary],
         maxSessions: 1,
         eventRingSize: 1234,
+        eventRingMaxBytes: 1_234_567,
         compactedReplayMaxBytes: 1024,
         channelIdleTimeoutMs: 60_000,
         sessionRestoreTimeoutMs: 90_000,
@@ -6462,6 +6466,7 @@ describe('runQwenServe telemetry validation', () => {
         channelIdleTimeoutMs: 60_000,
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
+        eventRingMaxBytes: 1_234_567,
         sessionRestoreTimeoutMs: 90_000,
         sessionPromptSettledCloseGraceMs: 5_000,
         permissionPolicy: 'local-only',
@@ -6471,6 +6476,7 @@ describe('runQwenServe telemetry validation', () => {
         channelIdleTimeoutMs: 60_000,
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
+        eventRingMaxBytes: 1_234_567,
         sessionRestoreTimeoutMs: 90_000,
         sessionPromptSettledCloseGraceMs: 5_000,
         permissionPolicy: 'local-only',
@@ -6889,6 +6895,7 @@ describe('runQwenServe paired execution engines', () => {
         restoreAskUserQuestion: true,
         maxPendingPromptsPerSession: 7,
         eventRingSize: 1234,
+        eventRingMaxBytes: 1_234_567,
         compactedReplayMaxBytes: 2_345_678,
         maxJournalEvents: 3456,
         maxJournalBytes: 4_567_890,
@@ -6930,6 +6937,9 @@ describe('runQwenServe paired execution engines', () => {
       expect(scratch.status).toBe(201);
       const scratchCwd = ((await scratch.json()) as { cwd: string }).cwd;
       expect(createBridge).toHaveBeenCalledTimes(4);
+      for (const [options] of createBridge.mock.calls) {
+        expect(options.eventRingMaxBytes).toBe(1_234_567);
+      }
       const factoryStorage = spawnFactoryStorage();
       return {
         options: createBridge.mock.calls.map(([options]) => options),
@@ -8962,6 +8972,14 @@ describe('runQwenServe pre-listen bridge option validation', () => {
     ['maxTotalSessions', Number.NaN, /maxTotalSessions/],
     ['maxTotalSessions', -1, /maxTotalSessions/],
     ['maxTotalSessions', 1.5, /maxTotalSessions/],
+    ['eventRingMaxBytes', 0, /eventRingMaxBytes/],
+    ['eventRingMaxBytes', -1, /eventRingMaxBytes/],
+    ['eventRingMaxBytes', 1.5, /eventRingMaxBytes/],
+    ['eventRingMaxBytes', Number.NaN, /eventRingMaxBytes/],
+    ['eventRingMaxBytes', Number.POSITIVE_INFINITY, /eventRingMaxBytes/],
+    ['eventRingMaxBytes', Number.NEGATIVE_INFINITY, /eventRingMaxBytes/],
+    ['eventRingMaxBytes', Number.MAX_SAFE_INTEGER + 1, /eventRingMaxBytes/],
+    ['eventRingMaxBytes', 256 * 1024 * 1024 + 1, /eventRingMaxBytes/],
     ['eventRingSize', 0, /eventRingSize/],
     ['eventRingSize', 1.5, /eventRingSize/],
     ['eventRingSize', Number.POSITIVE_INFINITY, /eventRingSize/],
@@ -8979,6 +8997,8 @@ describe('runQwenServe pre-listen bridge option validation', () => {
       tmpDir = fs.realpathSync(
         fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bridge-opt-')),
       );
+      const listen = vi.spyOn(net.Server.prototype, 'listen');
+      const createBridge = vi.spyOn(acpBridge, 'createAcpSessionBridge');
       const stdoutWrites: string[] = [];
       vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
         stdoutWrites.push(String(chunk));
@@ -8995,6 +9015,8 @@ describe('runQwenServe pre-listen bridge option validation', () => {
         }),
       ).rejects.toThrow(message);
       expect(stdoutWrites.join('')).not.toContain('qwen serve listening on');
+      expect(listen).not.toHaveBeenCalled();
+      expect(createBridge).not.toHaveBeenCalled();
     },
   );
 
@@ -14371,6 +14393,37 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it.each([undefined, 1, 1024 * 1024, 256 * 1024 * 1024])(
+    'advertises resolved eventRingMaxBytes=%s before runtime startup',
+    async (eventRingMaxBytes) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ring-bytes-')),
+      );
+      const { handle, createBridge } = await startDeferredDaemon(tmpDir, {
+        serveOptions: { eventRingMaxBytes, serveWebShell: false },
+      });
+      try {
+        const resolved = eventRingMaxBytes ?? 8 * 1024 * 1024;
+        expect(createBridge).not.toHaveBeenCalled();
+        const response = await fetch(`${handle.url}/daemon/status`, {
+          headers: { Authorization: 'Bearer secret-token' },
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+          limits: { eventRingMaxBytes: resolved },
+          runtime: { loading: true },
+        });
+        await fetch(`${handle.url}/health`);
+        await handle.runtimeReady;
+        expect(createBridge.mock.calls[0]?.[0].eventRingMaxBytes).toBe(
+          resolved,
+        );
+      } finally {
+        await handle.close();
+      }
+    },
+  );
+
   it('reports bootstrap status and capabilities when fast path resolves on listen', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-')),
@@ -14532,6 +14585,7 @@ describe('runQwenServe runtime startup failures', () => {
           maxPendingPromptsPerSession: 5,
           listenerMaxConnections: 256,
           eventRingSize: 8_000,
+          eventRingMaxBytes: 8 * 1024 * 1024,
           compactedReplayMaxBytes: 4 * 1024 * 1024,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
