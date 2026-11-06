@@ -816,6 +816,9 @@ const EXPECTED_REGISTERED_FEATURES = [
   // they appear here in their registry-declaration order, not the
   // stage1 order.
   ...EXPECTED_STAGE1_FEATURES.flatMap((feature) => {
+    if (feature === 'workspace_skill_settings_batch_toggle') {
+      return [feature, 'user_skill_activation'];
+    }
     if (feature === 'session_create') {
       return [
         feature,
@@ -825,6 +828,9 @@ const EXPECTED_REGISTERED_FEATURES = [
     }
     if (feature === 'workspace_skills') {
       return [feature, 'workspace_skills_config_runtime'];
+    }
+    if (feature === 'workspace_skill_manage') {
+      return [feature, 'skill_archive_install', 'skill_zip_file_source'];
     }
     if (feature === 'session_artifacts') {
       return [
@@ -4079,7 +4085,9 @@ describe('createServeApp', () => {
         }
         if (
           feature === 'workspace_runtime' ||
-          feature === 'workspace_skills_config_runtime'
+          feature === 'workspace_skills_config_runtime' ||
+          feature === 'skill_archive_install' ||
+          feature === 'skill_zip_file_source'
         ) {
           expect(predicate({ workspaceRuntimeAvailable: true })).toBe(true);
           expect(predicate({ workspaceRuntimeAvailable: false })).toBe(false);
@@ -4376,6 +4384,27 @@ describe('createServeApp', () => {
               workspaceDirectoriesAvailable: true,
             }),
           ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'user_skill_activation') {
+          expect(predicate({ userSkillActivationAvailable: true })).toBe(true);
+          expect(predicate({ userSkillActivationAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              userSkillActivationAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              userSkillActivationAvailable: false,
+            }),
+          ).not.toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
           );
