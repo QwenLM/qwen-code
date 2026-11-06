@@ -60,6 +60,37 @@ it('resolves and pins Harness capability once without acquiring or warming a Run
   expect(broker.runtime).toBeUndefined();
 });
 
+it('reads a fresh saved Workspace context after capabilities were cached', async () => {
+  let generation = 0;
+  const broker = await fixture(() => ({
+    body: {
+      protocolVersion: 1,
+      harnessSessionId: 'session',
+      scope: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        workspaceGeneration: '1',
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+        isolationClass: 'session',
+      },
+      workspaceContext: {
+        cwdRelative: `project-${++generation}`,
+        contextRevision: String(generation),
+      },
+    },
+  }));
+  await broker.resolveCapabilities();
+  expect(await broker.readWorkspaceContext()).toEqual({
+    cwdRelative: 'project-2',
+    contextRevision: '2',
+  });
+  expect(await broker.readWorkspaceContext()).toEqual({
+    cwdRelative: 'project-3',
+    contextRevision: '3',
+  });
+  expect(broker.acquired).toBe(false);
+});
+
 it.each(['http503', 'connection-drop', 'scope-mismatch'])(
   'retries capability resolution after %s while sharing concurrent reads',
   async (failure) => {

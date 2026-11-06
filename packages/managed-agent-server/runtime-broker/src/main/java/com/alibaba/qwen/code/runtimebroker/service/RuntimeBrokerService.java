@@ -942,7 +942,18 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         String harnessId = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
                 "harnessSessionId");
-        return resolveScope(harnessId, true, authority);
+        return capabilitiesContext(harnessId, authority).thenApply(HarnessSessionResolver.Capabilities::scope);
+    }
+
+    @Override
+    public CompletionStage<HarnessSessionResolver.Capabilities> capabilitiesContext(String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        requireOpen(closed);
+        String id = BrokerValues.requirePathSafe(BrokerValues.requireId(harnessSessionId, "harnessSessionId"), "harnessSessionId");
+        return mapFailure(safeStage(() -> sessionResolver.resolveCapabilities(id, authority)),
+                "runtime_scope_resolution_failed", "Runtime scope resolution failed").thenApply(value -> {
+                    if (value == null || value.scope() == null) throw unavailable("runtime_scope_resolution_failed", "Runtime scope resolver returned no scope");
+                    return value;
+                });
     }
 
     public CompletionStage<List<Map<String, Object>>> mcpDefinitions(String harnessSessionId, String runtimeSessionId) {

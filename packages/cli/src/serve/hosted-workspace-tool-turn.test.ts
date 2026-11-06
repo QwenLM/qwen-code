@@ -92,6 +92,10 @@ import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import {
+  enableManagedExecutionDiagnostics,
+  parseManagedExecutionEvidence,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
+import {
   RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
   WORKSPACE_CAPABILITY_DIGEST,
 } from './managed-workspace-activation.js';
@@ -102,6 +106,7 @@ const broker = vi.hoisted(() => ({
   fileHistory: vi.fn(),
   authorizeLifecycle: vi.fn(),
   workspaceContext: vi.fn(),
+  readWorkspaceContext: vi.fn(),
   warm: vi.fn(),
   resolveCapabilities: vi.fn(),
   acquire: vi.fn(),
@@ -138,6 +143,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     fileHistory = broker.fileHistory;
     authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;
+    readWorkspaceContext = broker.readWorkspaceContext;
     warm = broker.warm;
     resolveCapabilities = broker.resolveCapabilities;
     acquire = (...args: unknown[]) => {
@@ -315,31 +321,38 @@ beforeEach(async () => {
   harness = createManagedHarnessHandle(session);
   await harness.ensureRunnable();
   broker.workspaceContext.mockResolvedValue([]);
+  broker.readWorkspaceContext.mockResolvedValue({
+    cwdRelative: '.',
+    contextRevision: '1',
+  });
   broker.prepare.mockImplementation(async () => randomUUID());
   broker.execute.mockResolvedValue({
     executionStatus: 'success',
     responseParts: [{ text: 'original result' }],
   });
-  commit = async (type, messageParts, model, identity) => {
+  commit = async (type, messageParts, model, identity, diagnostics) => {
     const uuid = identity?.uuid ?? randomUUID();
-    await session.sink.write({
-      uuid,
-      parentUuid: null,
-      sessionId: sessionKey.sessionId,
-      timestamp: identity?.timestamp ?? new Date().toISOString(),
-      model,
-      type,
-      cwd: root,
-      version: 'test',
-      daemonPromptId: 'prompt',
-      ...(identity?.clientInitiatedSkills
-        ? { clientInitiatedSkills: true }
-        : {}),
-      message: {
-        role: type === 'assistant' ? 'model' : 'user',
-        parts: messageParts,
+    await session.sink.write(
+      {
+        uuid,
+        parentUuid: null,
+        sessionId: sessionKey.sessionId,
+        timestamp: identity?.timestamp ?? new Date().toISOString(),
+        model,
+        type,
+        cwd: root,
+        version: 'test',
+        daemonPromptId: 'prompt',
+        ...(identity?.clientInitiatedSkills
+          ? { clientInitiatedSkills: true }
+          : {}),
+        message: {
+          role: type === 'assistant' ? 'model' : 'user',
+          parts: messageParts,
+        },
       },
-    });
+      diagnostics,
+    );
     return uuid;
   };
   messageFitsInline.mockReturnValue(true);
@@ -424,6 +437,7 @@ it.each(['none', 'public', 'member'] as const)(
 );
 
 it('persists the model-facing Skill batch budget so replay cannot restore discarded text', async () => {
+  await enableManagedExecutionDiagnostics(session);
   const body = 'FIRST_MARKER' + 'x'.repeat(400 * 1024) + 'LAST_MARKER';
   const skills = new HostedSkillCatalog([
     { name: 'first', description: 'First', body, model_invocable: false },
@@ -460,7 +474,77 @@ it('persists the model-facing Skill batch budget so replay cannot restore discar
     JSON.parse(JSON.stringify(result)),
   );
   expect(skills.response({ skill: 'first' })).toContain(body);
+  const evidence = await Promise.all(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter(
+        (event) =>
+          event.kind === 'message.committed' &&
+          event.payload['role'] === 'tool_result',
+      )
+      .map(async (event) =>
+        parseManagedExecutionEvidence(
+          await session.resources.read(
+            assertManagedSessionDurableRef(
+              event.payload['diagnosticsRef'],
+              'diagnosticsRef',
+            ),
+          ),
+        ),
+      ),
+  );
+  expect(
+    evidence
+      .flatMap((value) => value.observations)
+      .map((value) => [
+        value.execution,
+        value.skill?.origin,
+        value.skill?.delivery,
+      ]),
+  ).toEqual([
+    ['success', 'user', 'partial'],
+    ['success', 'user', 'partial'],
+  ]);
 });
+
+it.each([
+  [{ cwdRelative: 'docs', contextRevision: '7' }, 'docs/file.txt'],
+  [null, null],
+])(
+  'records explicit read diagnostics with execution-time cwd %j',
+  async (context, expectedPath) => {
+    await enableManagedExecutionDiagnostics(session);
+    broker.readWorkspaceContext.mockResolvedValue(context);
+    await turn.execute(
+      [calls[0]],
+      [parts[0]],
+      'model',
+      new AbortController().signal,
+    );
+    const event = session.authority.lastEventOfKind('message.committed')!;
+    const evidence = parseManagedExecutionEvidence(
+      await session.resources.read(
+        assertManagedSessionDurableRef(
+          event.payload['diagnosticsRef'],
+          'diagnosticsRef',
+        ),
+      ),
+    );
+    expect(evidence.observations).toEqual([
+      expect.objectContaining({
+        admission: 'allowed',
+        execution: 'success',
+        delivery: 'complete',
+        toolKind: 'builtin',
+        file: expect.objectContaining({
+          operation: 'read',
+          path: expectedPath,
+        }),
+      }),
+    ]);
+    expect(session.authority.lastEventOfKind('tool.receipt')).toBeUndefined();
+  },
+);
 
 it('refuses a mixed Skill and Workspace batch before approval Hooks or tool dispatch', async () => {
   const fire = vi.fn<HostedHookSession['fire']>().mockResolvedValue(undefined);
@@ -654,6 +738,7 @@ it.each([
 );
 
 it('recovers the original Skill body after the assistant commits but its result does not', async () => {
+  await enableManagedExecutionDiagnostics(session);
   const skills = publishedSkills();
   const originalCommit = commit;
   commit = async (...args) => {
@@ -692,6 +777,25 @@ it('recovers the original Skill body after the assistant commits but its result 
   expect(broker.acquire).not.toHaveBeenCalled();
   expect(broker.prepare).not.toHaveBeenCalled();
   expect(broker.execute).not.toHaveBeenCalled();
+  const event = session.authority.lastEventOfKind('message.committed')!;
+  const evidence = parseManagedExecutionEvidence(
+    await session.resources.read(
+      assertManagedSessionDurableRef(
+        event.payload['diagnosticsRef'],
+        'diagnosticsRef',
+      ),
+    ),
+  );
+  expect(evidence.observations[0]).toMatchObject({
+    execution: 'success',
+    skill: {
+      resourceKind: 'skill',
+      name: 'review',
+      origin: 'model',
+      delivery: 'complete',
+    },
+  });
+  expect(evidence.observations[0].skill?.pin).toMatch(/^[0-9a-f]{64}$/);
 });
 
 it('preserves a mixed-batch Skill refusal when its result was not committed', async () => {

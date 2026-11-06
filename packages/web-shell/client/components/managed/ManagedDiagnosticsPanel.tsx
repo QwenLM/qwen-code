@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import { ManagedActivityView } from './ManagedActivityView';
+import { ManagedInvocationTree } from './ManagedInvocationTree';
 import type { ReactNode } from 'react';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
@@ -58,7 +60,7 @@ function CoverageReasons({ reasons }: { reasons: string[] }) {
     invalid_resource: 'invalidResource',
     resource_unavailable: 'resourceUnavailable',
     public_output_limit: 'publicOutputLimit',
-    child_unavailable: 'childUnavailable',
+    child_unavailable: 'childrenUnavailable',
     description_unavailable: 'descriptionUnavailable',
     invocation_unavailable: 'invocationUnavailable',
   } as const;
@@ -406,13 +408,17 @@ export function ManagedDiagnosticsPanel({
 }) {
   const t = useManagedDiagnosticsText();
   const [tab, setTab] = useState<ManagedDiagnosticsTab>('context');
+  const [statisticsKind, setStatisticsKind] = useState<
+    'model' | 'tools' | 'files' | 'skills'
+  >('model');
   const read = useManagedDiagnostics({
     provider,
     sessionId,
     clientId,
     tab,
-    running,
+    running: running || tab === 'agents',
     revision,
+    enabled: tab !== 'statistics' || statisticsKind === 'model',
   });
   const snapshot = read.snapshot;
   return (
@@ -462,91 +468,116 @@ export function ManagedDiagnosticsPanel({
             className="min-h-0 flex-1 space-y-4 overflow-auto"
             aria-busy={read.loading}
           >
-            {read.error && <p role="alert">{t('failed')}</p>}
-            {read.loading && !snapshot && <p role="status">{t('loading')}</p>}
-            {snapshot?.value.availability === 'partial' && (
-              <p role="status" className="text-sm text-muted-foreground">
-                {t('partial')}
-              </p>
+            {tab === 'statistics' && (
+              <div
+                className="flex flex-wrap gap-2"
+                aria-label={t('statistics')}
+              >
+                {(['model', 'tools', 'files', 'skills'] as const).map(
+                  (kind) => (
+                    <Button
+                      key={kind}
+                      size="sm"
+                      variant={statisticsKind === kind ? 'default' : 'outline'}
+                      aria-pressed={statisticsKind === kind}
+                      onClick={() => setStatisticsKind(kind)}
+                    >
+                      {t(
+                        kind === 'model'
+                          ? 'modelStatistics'
+                          : kind === 'skills'
+                            ? 'skillLoads'
+                            : kind,
+                      )}
+                    </Button>
+                  ),
+                )}
+              </div>
             )}
-            {snapshot && (
-              <CoverageReasons
-                reasons={[
-                  ...snapshot.value.coverageReasons,
-                  ...(snapshot.kind === 'statistics'
-                    ? (snapshot.value.statistics?.coverage.gaps ?? [])
-                    : []),
-                  ...(snapshot.kind === 'context' &&
-                  snapshot.value.context?.attributionComplete === false
-                    ? ['attribution_incomplete']
-                    : []),
-                ]}
+            {tab === 'statistics' && statisticsKind !== 'model' ? (
+              <ManagedActivityView
+                provider={provider}
+                sessionId={sessionId}
+                clientId={clientId}
+                kind={statisticsKind}
+                running={running}
               />
-            )}
-            {snapshot?.value.availability === 'unsupported' ? (
-              <p>{t('unsupported')}</p>
-            ) : snapshot?.value.availability === 'not_recorded' ? (
-              <p>{t('not_recorded')}</p>
-            ) : snapshot?.kind === 'context' ? (
-              <ContextSnapshot value={snapshot.value} />
-            ) : snapshot?.kind === 'statistics' ? (
-              <StatisticsSnapshot value={snapshot.value} />
-            ) : snapshot?.kind === 'resources' ? (
-              <ResourcesSnapshot value={snapshot.value} />
-            ) : snapshot?.kind === 'agents' ? (
-              <div className="space-y-3">
-                <p className="text-sm text-muted-foreground">
-                  {t('directOnly')}
-                </p>
-                {snapshot.value.items.length === 0 && <p>{t('empty')}</p>}
-                {snapshot.value.items.map((task) => (
-                  <div
-                    key={task.taskId}
-                    className="space-y-2 rounded-md border p-3"
-                  >
-                    <p className="break-words font-medium">
-                      {task.description ?? task.taskId}
+            ) : (
+              <>
+                {read.error && <p role="alert">{t('failed')}</p>}
+                {read.loading && !snapshot && (
+                  <p role="status">{t('loading')}</p>
+                )}
+                {snapshot?.value.availability === 'partial' && (
+                  <p role="status" className="text-sm text-muted-foreground">
+                    {t('partial')}
+                  </p>
+                )}
+                {snapshot && (
+                  <CoverageReasons
+                    reasons={[
+                      ...snapshot.value.coverageReasons,
+                      ...(snapshot.kind === 'statistics'
+                        ? (snapshot.value.statistics?.coverage.gaps ?? [])
+                        : []),
+                      ...(snapshot.kind === 'context' &&
+                      snapshot.value.context?.attributionComplete === false
+                        ? ['attribution_incomplete']
+                        : []),
+                    ]}
+                  />
+                )}
+                {snapshot?.value.availability === 'unsupported' ? (
+                  <p>{t('unsupported')}</p>
+                ) : snapshot?.value.availability === 'not_recorded' ? (
+                  <p>{t('not_recorded')}</p>
+                ) : snapshot?.kind === 'context' ? (
+                  <ContextSnapshot value={snapshot.value} />
+                ) : snapshot?.kind === 'statistics' ? (
+                  <StatisticsSnapshot value={snapshot.value} />
+                ) : snapshot?.kind === 'resources' ? (
+                  <ResourcesSnapshot value={snapshot.value} />
+                ) : snapshot?.kind === 'agents' ? (
+                  <div className="space-y-3">
+                    <p className="text-sm text-muted-foreground">
+                      {t('ownOnly')}
                     </p>
-                    <Field label={t('state')}>{task.state}</Field>
-                    <Field label={t('createdAt')}>
-                      {new Date(task.createdAt).toLocaleString()}
-                    </Field>
-                    {task.childSessionId && onOpenChild && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => onOpenChild(task.childSessionId!)}
-                      >
-                        {t('openChild')}
-                      </Button>
-                    )}
+                    {snapshot.value.items.length === 0 && <p>{t('empty')}</p>}
+                    <ManagedInvocationTree
+                      provider={provider}
+                      sessionId={sessionId}
+                      clientId={clientId}
+                      running={running}
+                      onOpenChild={onOpenChild}
+                      items={snapshot.value.items}
+                    />
                   </div>
-                ))}
-              </div>
-            ) : null}
-            {tab === 'agents' && (
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={read.loading || !read.hasPrevious}
-                  onClick={read.previous}
-                >
-                  {t('previous')}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={
-                    read.loading ||
-                    snapshot?.kind !== 'agents' ||
-                    !snapshot.value.hasMore
-                  }
-                  onClick={read.next}
-                >
-                  {t('next')}
-                </Button>
-              </div>
+                ) : null}
+                {tab === 'agents' && (
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={read.loading || !read.hasPrevious}
+                      onClick={read.previous}
+                    >
+                      {t('previous')}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={
+                        read.loading ||
+                        snapshot?.kind !== 'agents' ||
+                        !snapshot.value.hasMore
+                      }
+                      onClick={read.next}
+                    >
+                      {t('next')}
+                    </Button>
+                  </div>
+                )}
+              </>
             )}
           </TabsContent>
         </Tabs>

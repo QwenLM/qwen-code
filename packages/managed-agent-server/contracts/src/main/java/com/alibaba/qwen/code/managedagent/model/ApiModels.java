@@ -416,6 +416,9 @@ public final class ApiModels {
     public record WebShellSessionRequest(@NotBlank String sessionId) {
     }
 
+    public record WebShellActivityQueryRequest(@NotBlank String sessionId, @NotBlank String kind,
+            String cursor, Integer limit) { }
+
     public record ManagedMcpServerPin(@NotBlank @Pattern(regexp = "[A-Za-z0-9._:-]{1,128}") String serverId,
             @Min(1) @Max(9_007_199_254_740_991L) long serverRevision,
             @NotBlank @Pattern(regexp = "[a-f0-9]{64}") String definitionDigest) { }

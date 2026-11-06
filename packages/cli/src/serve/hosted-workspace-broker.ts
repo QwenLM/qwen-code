@@ -231,6 +231,35 @@ export class HostedWorkspaceBroker {
       }));
   }
 
+  async readWorkspaceContext(): Promise<{
+    cwdRelative: string;
+    contextRevision: string;
+  } | null> {
+    const response = await this.harnessRequest('/runtimes:capabilities', {});
+    this.readRuntime(response);
+    if (response['workspaceContext'] == null) return null;
+    const context = object(response['workspaceContext']);
+    const cwd = context['cwdRelative'];
+    const revision = context['contextRevision'];
+    if (
+      typeof cwd === 'string' &&
+      [...cwd].some((character) => character.codePointAt(0)! < 32)
+    )
+      throw new Error('Invalid saved Workspace context.');
+    if (
+      typeof cwd !== 'string' ||
+      !cwd ||
+      cwd.startsWith('/') ||
+      cwd.includes('\\') ||
+      cwd.includes('://') ||
+      cwd.split('/').some((part) => !part || part === '..') ||
+      typeof revision !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/.test(revision)
+    )
+      throw new Error('Invalid saved Workspace context.');
+    return { cwdRelative: cwd, contextRevision: revision };
+  }
+
   async mcpDefinitions(
     originalOwner = false,
   ): Promise<readonly HostedPublishedMcpServer[]> {

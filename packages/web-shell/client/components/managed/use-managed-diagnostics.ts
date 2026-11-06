@@ -25,6 +25,7 @@ export function useManagedDiagnostics({
   tab,
   running,
   revision,
+  enabled = true,
 }: {
   provider: ManagedDiagnosticsProvider;
   sessionId: string;
@@ -32,6 +33,7 @@ export function useManagedDiagnostics({
   tab: ManagedDiagnosticsTab;
   running: boolean;
   revision?: string;
+  enabled?: boolean;
 }) {
   const owner = useMemo(
     () => ({ provider, sessionId, clientId, tab }),
@@ -53,6 +55,7 @@ export function useManagedDiagnostics({
   const current = frame?.owner === owner ? frame : undefined;
 
   useEffect(() => {
+    if (!enabled) return;
     const abort = new AbortController();
     let inFlight = false;
     const read = async (): Promise<ManagedDiagnosticsSnapshot> => {
@@ -135,6 +138,7 @@ export function useManagedDiagnostics({
     running,
     revision,
     refreshRevision,
+    enabled,
   ]);
 
   return {
