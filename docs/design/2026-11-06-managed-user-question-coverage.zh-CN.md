@@ -36,7 +36,7 @@
 
 匹配 cleanup descriptor、binding/generation，并通过执行的持久化 tool-input 封套证明 Runtime Session，不能仅靠 command 参数。未知／blocked 仍阻塞。纯读 status 重新核对逐项分类和 committed sequence，不执行 release/acquire。历史 active-holds 清单仅恢复 drain 责任，冷 load 经清理 reconciliation 取得新分类。
 
-普通清理、重试、原 owner 恢复和 held-runtime release 均消费分类；cleanup 后登记保留责任。关闭可对已证明保留推进至 drain，但必须实际释放并 reconciliation 后才能完成。
+普通清理、重试、原 owner 恢复和 held-runtime release 均消费分类；cleanup 后登记保留责任。关闭可对已证明保留推进至 drain，但必须实际释放并 reconciliation 后才能完成。保留未终态 Turn 的既有 detach／replacement 交接语义：其清理责任仍为 owed，直到恢复流程结算原 Turn。最终 drain 即使面对其他未结算输入，也逐项清理已终态 owner，传播真实释放失败，不会确认延期的非终态欠账。纯恢复状态查询继续因该欠账阻塞。
 
 ## WebShell 交互
 

@@ -36,7 +36,7 @@ Membership handback does not discharge final cleanup. Preserve durable owed-to-c
 
 Match cleanup descriptor, binding/generation and Runtime Session through the execution's durable tool-input envelope, not command arguments alone. Unknown/blocked records remain blocking. Pure status revalidates scoped classification and committed sequence without release/acquire. Historical active-holds inventory restores drain responsibility only. Cold load obtains fresh classification through cleanup reconciliation.
 
-Consume classification in ordinary cleanup, retries, original-owner recovery and held-runtime release; register held responsibility after cleanup. Close can advance to drain for proven holds but must reconcile actual release before completion.
+Consume classification in ordinary cleanup, retries, original-owner recovery and held-runtime release; register held responsibility after cleanup. Close can advance to drain for proven holds but must reconcile actual release before completion. Preserve the existing detach/replacement handoff for nonterminal turns: their cleanup remains owed until the original turn settles during recovery. Final drain reconciles each terminal owner even when another input is unsettled, propagates real release failures, and never confirms the deferred nonterminal debt. Pure recovery status continues to block on that debt.
 
 ## WebShell interaction
 

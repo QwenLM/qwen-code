@@ -2578,8 +2578,9 @@ function retainHostedCleanupHolds(
 async function retryHostedCleanup(
   session: HostedSession,
   options: HostedWorkspaceBrokerOptions,
+  drain = false,
 ): Promise<void> {
-  if (unsettledPromptId(session)) return;
+  if (!drain && unsettledPromptId(session)) return;
   try {
     session.cleanupHolds?.clear();
     if (hasHostedCleanupDebt(session.managed)) {
@@ -2587,7 +2588,12 @@ async function retryHostedCleanup(
       // record before reconciliation can release their Runtime.
       retainHostedCleanupHolds(
         session,
-        await reconcileHostedTurnCleanup(session.managed, options),
+        await reconcileHostedTurnCleanup(
+          session.managed,
+          options,
+          undefined,
+          drain,
+        ),
       );
     }
     if (session.cleanupBlocked) liftRecoveryBlock(session);
@@ -8253,11 +8259,15 @@ export function registerHostedHarnessSessionRoutes(
           await session.backgroundLane?.publisher?.close();
           await session.mcp?.closeResources();
           if (brokerOptions)
-            await retryHostedCleanup(session, {
-              ...brokerOptions,
-              lifecycleAuthority: () => session.lifecycle,
-            });
-          if (hasHostedCleanupDebt(session.managed))
+            await retryHostedCleanup(
+              session,
+              {
+                ...brokerOptions,
+                lifecycleAuthority: () => session.lifecycle,
+              },
+              true,
+            );
+          else if (hasHostedCleanupDebt(session.managed))
             throw new Error('Runtime cleanup remains owed after drain.');
         }
         res.json({
@@ -12967,8 +12977,11 @@ export function registerHostedHarnessSessionRoutes(
         for (const loop of session.backgroundLane?.monitorLoops?.values() ?? [])
           await loop.stop(stopSettle);
         if (heldDrainFailed !== null) throw heldDrainFailed;
-        if (brokerOptions) await retryHostedCleanup(session, brokerOptions);
-        if (hasHostedCleanupDebt(session.managed))
+        // Nonterminal owners keep their durable debt for replacement recovery.
+        // Every terminal owner must complete the actual drain before closing.
+        if (brokerOptions)
+          await retryHostedCleanup(session, brokerOptions, true);
+        else if (hasHostedCleanupDebt(session.managed))
           throw new Error('Runtime cleanup remains owed after drain.');
         // The drains above stopped the Session's background Shells and
         // watches, and their exits settled through this publisher; it

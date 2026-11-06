@@ -22238,6 +22238,73 @@ describe('Hosted Harness no-tool session', () => {
     return { server, authorize, submit, status, idle, resident, owe };
   }
 
+  it.each(['DELETE', 'lifecycle'] as const)(
+    'keeps terminal cleanup owed until %s drain really releases its owner',
+    async (exit) => {
+      const toolProfile =
+        exit === 'lifecycle'
+          ? 'hosted-workspace-shell/1'
+          : 'hosted-workspace-files/1';
+      const f = await recoveryFileSession(toolProfile);
+      await f.submit();
+      await f.idle();
+      f.resident.monitorWake?.close();
+      await f.owe();
+      const cleanupStates = () =>
+        f.resident.managed.authority
+          .eventsInSequenceRange(
+            1,
+            f.resident.managed.authority.committedSequence,
+          )
+          .filter((event) => event.kind === 'hosted.cleanup')
+          .map((event) => event.payload['state']);
+      const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+      release.mockClear();
+      release.mockRejectedValueOnce(
+        new HostedWorkspaceBrokerRejection(409, 'runtime_session_held'),
+      );
+      const authority = { operationId: 'close-drain', claimGeneration: 1 };
+      const close = () =>
+        exit === 'DELETE'
+          ? f.authorize(supertest(f.server).delete(`/session/${SESSION_ID}`))
+          : f
+              .authorize(
+                supertest(f.server).post(`/session/${SESSION_ID}/lifecycle`),
+              )
+              .send({
+                protocolVersion: 2,
+                phase: 'settle_resources',
+                kind: 'close',
+                toolProfile,
+                sessionKey:
+                  f.resident.managed.authority.sessionHeader.sessionKey,
+                authority,
+              });
+      await close().expect(503);
+      expect(release).toHaveBeenCalledExactlyOnceWith({
+        bindingId: 'binding',
+        generation: '1',
+        drain: true,
+      });
+      expect(cleanupStates()).toEqual(['owed']);
+      expect(f.resident.managed.authority.writerSealed).toBe(false);
+
+      await close().expect(exit === 'DELETE' ? 204 : 200);
+      expect(release).toHaveBeenCalledTimes(2);
+      expect(release).toHaveBeenLastCalledWith({
+        bindingId: 'binding',
+        generation: '1',
+        drain: true,
+      });
+      expect(cleanupStates()).toEqual(['owed', 'confirmed']);
+      if (exit === 'lifecycle')
+        await f
+          .authorize(supertest(f.server).post(`/session/${SESSION_ID}/detach`))
+          .send({ authority })
+          .expect(204);
+    },
+  );
+
   it.each([false, true])(
     'keeps a later active Turn safe from a delayed original cancellation (public children: %s)',
     async (publicChildren) => {
