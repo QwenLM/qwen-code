@@ -945,14 +945,14 @@ describe('Browser Launch and Error Handling', () => {
 
     expect(await completeDeviceFlow(s.config)).toBeInstanceOf(Object);
     expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
-      'https://chat.qwen.ai/device?code=TEST123',
+      'https://chat.qwen.ai/device?code=TEST123&client=cli',
     );
   });
 
   it('should launch the device flow URL through the shared browser helper', async () => {
     expect(await completeDeviceFlow(s.config)).toBeInstanceOf(Object);
     expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
-      'https://chat.qwen.ai/device?code=TEST123',
+      'https://chat.qwen.ai/device?code=TEST123&client=cli',
     );
   });
 });

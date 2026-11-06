@@ -422,6 +422,8 @@ export interface DaemonClientOptions {
   baseUrl: string;
   /** Bearer token; required for non-loopback daemon binds. */
   token?: string;
+  /** Host tag for Qwen subscription browser links. Defaults to desktop on the daemon. */
+  subscriptionClient?: 'cli' | 'desktop' | 'plugin';
   /**
    * Override the global `fetch` for tests. Defaults to `globalThis.fetch`.
    * Note: AbortController/AbortSignal must be Node-native for the default
@@ -915,6 +917,7 @@ export class DaemonClient {
     Promise<DaemonWorkspaceProvidersStatus>
   >();
   private readonly promptLimit: number;
+  private readonly subscriptionClientQuery: string;
   private readonly promptCounts: Record<string, number> = Object.create(null);
   /**
    * Pluggable transport layer. Defaults to `RestSseTransport` when
@@ -940,6 +943,9 @@ export class DaemonClient {
 
   constructor(opts: DaemonClientOptions) {
     this.baseUrl = stripTrailingSlashes(opts.baseUrl);
+    this.subscriptionClientQuery = opts.subscriptionClient
+      ? `?client=${encodeURIComponent(opts.subscriptionClient)}`
+      : '';
     // When no explicit token is passed, fall back to
     // QWEN_SERVER_TOKEN env var so clients with
     // `export QWEN_SERVER_TOKEN=...` in their shell don't have to
@@ -7230,7 +7236,7 @@ export class DaemonClient {
     opts: { signal?: AbortSignal } = {},
   ): Promise<DaemonSubscriptionConfig> {
     return this.fetchWithTimeout(
-      `${this.baseUrl}/auth/subscription`,
+      `${this.baseUrl}/auth/subscription${this.subscriptionClientQuery}`,
       { headers: this.headers({}), signal: opts.signal },
       async (res) => {
         if (!res.ok)
@@ -7242,7 +7248,7 @@ export class DaemonClient {
 
   async startSubscriptionLogin(): Promise<DaemonSubscriptionFlow> {
     return this.fetchWithTimeout(
-      `${this.baseUrl}/auth/subscription/flows`,
+      `${this.baseUrl}/auth/subscription/flows${this.subscriptionClientQuery}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),

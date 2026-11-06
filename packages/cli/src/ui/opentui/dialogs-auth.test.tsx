@@ -93,7 +93,7 @@ const subscription = vi.hoisted(() => ({
   email: 'real@example.com',
   deviceAuth: {
     verification_uri_complete:
-      'https://chat.qwen.ai/authorize?user_code=REAL-CODE&client=qwen-code',
+      'https://chat.qwen.ai/authorize?user_code=REAL-CODE&client=cli',
   },
   checking: false,
   connecting: false,
@@ -1689,7 +1689,7 @@ describe('real subscription entry', () => {
     await press('return');
     expect(screen.getByText('Waiting for sign-in…')).toBeTruthy();
     expect(document.body.textContent).toContain(
-      'user_code=REAL-CODE&client=qwen-code',
+      'user_code=REAL-CODE&client=cli',
     );
     expect(document.body.textContent).not.toContain('Local Mock');
     expect(config.refreshAuth).not.toHaveBeenCalled();

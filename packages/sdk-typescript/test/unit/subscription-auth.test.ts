@@ -7,7 +7,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { DaemonClient } from '../../src/daemon/DaemonClient.js';
 
 const baseUrl = 'http://127.0.0.1:3131';
-function clientWith(status = 200, body: unknown = {}) {
+function clientWith(
+  status = 200,
+  body: unknown = {},
+  subscriptionClient?: 'cli' | 'desktop' | 'plugin',
+) {
   const fetch = vi
     .fn<typeof globalThis.fetch>()
     .mockImplementation(
@@ -15,35 +19,44 @@ function clientWith(status = 200, body: unknown = {}) {
         new Response(status === 204 ? null : JSON.stringify(body), { status }),
     );
   return {
-    client: new DaemonClient({ baseUrl, token: 'daemon-token', fetch }),
+    client: new DaemonClient({
+      baseUrl,
+      token: 'daemon-token',
+      fetch,
+      subscriptionClient,
+    }),
     fetch,
   };
 }
 describe('Subscription transport', () => {
-  it('uses process-global routes and daemon credentials', async () => {
-    const { client, fetch } = clientWith();
-    await client.getSubscriptionConfig();
-    await client.startSubscriptionLogin();
-    await client.getSubscriptionLogin('flow/id');
-    fetch.mockResolvedValueOnce(new Response(null, { status: 204 }));
-    await client.cancelSubscriptionLogin('flow/id');
-    await client.getSubscriptionUserInfo();
-    await client.signOutSubscription();
-    expect(
-      fetch.mock.calls.map(([url, init]) => [url, init?.method ?? 'GET']),
-    ).toEqual([
-      [`${baseUrl}/auth/subscription`, 'GET'],
-      [`${baseUrl}/auth/subscription/flows`, 'POST'],
-      [`${baseUrl}/auth/subscription/flows/flow%2Fid`, 'GET'],
-      [`${baseUrl}/auth/subscription/flows/flow%2Fid`, 'DELETE'],
-      [`${baseUrl}/auth/subscription/userinfo`, 'POST'],
-      [`${baseUrl}/auth/subscription/revoke`, 'POST'],
-    ]);
-    for (const [, init] of fetch.mock.calls)
-      expect(new Headers(init?.headers).get('Authorization')).toBe(
-        'Bearer daemon-token',
-      );
-  });
+  it.each([undefined, 'plugin'] as const)(
+    'uses process-global routes and daemon credentials with client %s',
+    async (subscriptionClient) => {
+      const { client, fetch } = clientWith(200, {}, subscriptionClient);
+      const query = subscriptionClient ? '?client=plugin' : '';
+      await client.getSubscriptionConfig();
+      await client.startSubscriptionLogin();
+      await client.getSubscriptionLogin('flow/id');
+      fetch.mockResolvedValueOnce(new Response(null, { status: 204 }));
+      await client.cancelSubscriptionLogin('flow/id');
+      await client.getSubscriptionUserInfo();
+      await client.signOutSubscription();
+      expect(
+        fetch.mock.calls.map(([url, init]) => [url, init?.method ?? 'GET']),
+      ).toEqual([
+        [`${baseUrl}/auth/subscription${query}`, 'GET'],
+        [`${baseUrl}/auth/subscription/flows${query}`, 'POST'],
+        [`${baseUrl}/auth/subscription/flows/flow%2Fid`, 'GET'],
+        [`${baseUrl}/auth/subscription/flows/flow%2Fid`, 'DELETE'],
+        [`${baseUrl}/auth/subscription/userinfo`, 'POST'],
+        [`${baseUrl}/auth/subscription/revoke`, 'POST'],
+      ]);
+      for (const [, init] of fetch.mock.calls)
+        expect(new Headers(init?.headers).get('Authorization')).toBe(
+          'Bearer daemon-token',
+        );
+    },
+  );
   it('preserves safe backend error codes in the standard error body', async () => {
     const { client } = clientWith(502, { code: 'invalid_grant' });
     await expect(client.getSubscriptionUserInfo()).rejects.toMatchObject({

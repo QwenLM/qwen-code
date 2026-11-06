@@ -2254,7 +2254,10 @@ export class WebViewProvider {
           return true;
         }
         this.subscriptionRuntime = {
-          client: new DaemonClient(runtime),
+          client: new DaemonClient({
+            ...runtime,
+            subscriptionClient: 'plugin',
+          }),
           workspaceCwd: canonicalWorkspaceCwd,
           sessionId: restoredSessionId,
         };

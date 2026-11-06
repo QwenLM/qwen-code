@@ -24,8 +24,36 @@ export function getQwenOAuthConfig(): {
   };
 }
 
-export function getQwenSubscriptionPlansUrl(): string {
+export type QwenChatClient = 'cli' | 'desktop' | 'plugin';
+
+export function withQwenChatClient(
+  rawUrl: string,
+  client: QwenChatClient,
+): string {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return rawUrl;
+  }
+  if (url.origin !== getQwenOAuthConfig().webOrigin) return rawUrl;
+  url.searchParams.set('client', client);
+  return url.toString();
+}
+
+export function getQwenSubscriptionAuthorizationUrl(
+  userCode: string,
+  client: QwenChatClient,
+): string {
+  const url = new URL('/authorize', getQwenOAuthConfig().webOrigin);
+  url.searchParams.set('user_code', userCode);
+  url.searchParams.set('client', client);
+  return url.toString();
+}
+
+export function getQwenSubscriptionPlansUrl(client: QwenChatClient): string {
   const url = new URL('/', getQwenOAuthConfig().webOrigin);
   url.searchParams.set('memberPlan', 'qwen_code');
+  url.searchParams.set('client', client);
   return url.toString();
 }

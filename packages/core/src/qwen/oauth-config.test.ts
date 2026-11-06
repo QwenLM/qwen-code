@@ -8,16 +8,32 @@ import { afterEach, expect, it, vi } from 'vitest';
 import {
   getQwenOAuthConfig,
   getQwenSubscriptionPlansUrl,
+  withQwenChatClient,
 } from './oauth-config.js';
 
 afterEach(() => vi.unstubAllEnvs());
 
 it('opens Code plans on the web home without device authorization parameters', () => {
-  const url = new URL(getQwenSubscriptionPlansUrl());
+  const url = new URL(getQwenSubscriptionPlansUrl('cli'));
   expect(url.origin).toBe(getQwenOAuthConfig().webOrigin);
   expect(url.pathname).toBe('/');
-  expect([...url.searchParams]).toEqual([['memberPlan', 'qwen_code']]);
+  expect([...url.searchParams]).toEqual([
+    ['memberPlan', 'qwen_code'],
+    ['client', 'cli'],
+  ]);
   expect(url.hash).toBe('');
+});
+
+it('replaces stale web client tags without losing device parameters or fragments', () => {
+  const url = withQwenChatClient(
+    'https://chat.qwen.ai/device?code=123&client=cli&client=qwen-code#confirm',
+    'plugin',
+  );
+  expect(url).toBe(
+    'https://chat.qwen.ai/device?code=123&client=plugin#confirm',
+  );
+  const other = 'https://chat.qwen.ai.example.test/device?code=123';
+  expect(withQwenChatClient(other, 'plugin')).toBe(other);
 });
 
 it('uses the production configuration without environment setup', () => {

@@ -17,7 +17,7 @@ const ready: DaemonSubscriptionFlow = {
   userInfo: user,
 };
 const authorizationUrl =
-  'https://chat.qwen.ai/authorize?user_code=TEST-CODE&client=qwen-code';
+  'https://chat.qwen.ai/authorize?user_code=TEST-CODE&client=desktop';
 const transport = {
   getSubscriptionConfig: vi.fn(),
   startSubscriptionLogin: vi.fn(),
@@ -36,7 +36,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   transport.getSubscriptionConfig.mockResolvedValue({
     enabled: true,
-    plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
+    plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code&client=desktop',
   });
   transport.startSubscriptionLogin.mockResolvedValue(ready);
   transport.getSubscriptionUserInfo.mockResolvedValue(user);
@@ -160,7 +160,7 @@ it('starts authorization directly after the native picker selection and opens th
   await click('View Plans');
   expect(open.mock.calls.map(([url]) => url)).toEqual([
     authorizationUrl,
-    'https://chat.qwen.ai/?memberPlan=qwen_code',
+    'https://chat.qwen.ai/?memberPlan=qwen_code&client=desktop',
   ]);
 });
 
@@ -195,7 +195,7 @@ it.each(
     });
     expect(open.mock.calls.map(([url]) => url)).toEqual([
       authorizationUrl,
-      'https://chat.qwen.ai/?memberPlan=qwen_code',
+      'https://chat.qwen.ai/?memberPlan=qwen_code&client=desktop',
     ]);
   },
 );

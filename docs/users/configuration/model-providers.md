@@ -12,7 +12,7 @@ Use `modelProviders` to declare models per provider id that the `/model` picker 
 
 > [!note]
 >
-> Configure API-key providers through `modelProviders`, then select them with `/model`. For Qwen account sign-in, choose [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code) in `/auth`; no API key or manual `modelProviders` configuration is needed. Use `/model` to choose from the models available with your subscription. See [Authentication](./auth.md) for sign-in instructions.
+> Configure API-key providers through `modelProviders`, then select them with `/model`. For Qwen account sign-in, choose [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&client=cli) in `/auth`; no API key or manual `modelProviders` configuration is needed. Use `/model` to choose from the models available with your subscription. See [Authentication](./auth.md) for sign-in instructions.
 
 > [!note]
 >
@@ -733,7 +733,7 @@ The effective auth/model/credential values are chosen per field using the follow
 | Settings (`settings.json`) | `security.auth.selectedType`        | `model.name`                                    | `security.auth.apiKey`                            | `security.auth.baseUrl`                            | —                      | —                                 |
 | Default / computed         | Falls back to `AuthType.QWEN_OAUTH` | Built-in default (OpenAI ⇒ `qwen3.5-plus`)      | —                                                 | —                                                  | —                      | `Config.getProxy()` if configured |
 
-\*When present, CLI auth flags override settings. Otherwise, `security.auth.selectedType` or the implicit default determine the auth type. See [Authentication](./auth.md) for sign-in options. The legacy free Qwen OAuth provider is separate from [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code).
+\*When present, CLI auth flags override settings. Otherwise, `security.auth.selectedType` or the implicit default determine the auth type. See [Authentication](./auth.md) for sign-in options. The legacy free Qwen OAuth provider is separate from [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code&client=cli).
 
 > [!note]
 >
