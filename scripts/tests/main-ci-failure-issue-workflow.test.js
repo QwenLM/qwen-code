@@ -103,7 +103,8 @@ describe('main CI failure issue workflow', () => {
         "(github.event.workflow_run.event == 'push' || " +
         "(github.event.workflow_run.event == 'schedule' && " +
         'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]\'), github.event.workflow.name)))) || ' +
-        "(github.event.workflow_run.conclusion == 'failure' && " +
+        "((github.event.workflow_run.conclusion == 'failure' || " +
+        "github.event.workflow_run.conclusion == 'cancelled') && " +
         "github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') || " +
         "(github.event.workflow_run.conclusion == 'failure' && " +
         "github.event.workflow.name == 'Managed Agent gate' && " +
@@ -123,6 +124,9 @@ describe('main CI failure issue workflow', () => {
   it.each([
     ['SDK Java', 'workflow_dispatch', 'main', 'failure', true],
     ['SDK Java', 'workflow_dispatch', 'feature', 'failure', true],
+    // A hand-dispatched SDK Java run that hits its cap concludes `cancelled`,
+    // and a dispatch is not superseded by a newer push, so it must be admitted.
+    ['SDK Java', 'workflow_dispatch', 'main', 'cancelled', true],
     ['SDK Python', 'workflow_dispatch', 'main', 'failure', false],
     ['SDK Java', 'schedule', 'main', 'failure', true],
     ['tui-parity', 'schedule', 'main', 'failure', true],
