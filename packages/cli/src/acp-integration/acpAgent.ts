@@ -3732,9 +3732,17 @@ function normalizeAcpSessionListSize(value: unknown): number | undefined {
 
 function parseAcpSessionListCursor(
   value: string | null | undefined,
-): number | undefined {
+): number | string | undefined {
   if (value == null || value === '') return undefined;
   const trimmed = value.trim();
+  // Composite cursors ("<mtime>|<name>") are minted by listSessions when a page
+  // ends inside a group of files sharing an mtime; they must survive the round
+  // trip or the client cannot fetch page 2.
+  const separator = trimmed.indexOf('|');
+  if (separator > 0 && separator < trimmed.length - 1) {
+    const mtime = Number(trimmed.slice(0, separator));
+    if (Number.isFinite(mtime) && mtime >= 0) return trimmed;
+  }
   const parsedCursor = Number(trimmed);
   if (
     trimmed === '' ||
@@ -3744,7 +3752,7 @@ function parseAcpSessionListCursor(
   ) {
     throw RequestError.invalidParams(
       undefined,
-      `Invalid cursor: "${value}" is not a valid numeric cursor`,
+      `Invalid cursor: "${value}" is not a valid cursor`,
     );
   }
   return parsedCursor;
