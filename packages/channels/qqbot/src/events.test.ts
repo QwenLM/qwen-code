@@ -467,6 +467,21 @@ describe('handleC2C', () => {
     expect(env.text).toContain('你好，帮我查一下天气');
   });
 
+  it('tags a non-boolean bot flag (truthiness, same as the drop guard)', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({
+        author: { bot: 1 as unknown as boolean, user_openid: 'bot-1' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.text).toContain('[bot] ');
+    expect(env.senderTag).toBe('bot');
+  });
+
   it('forwards a routed bot !command to the model instead of the shell', async () => {
     const ch = makeChannel({
       forwardBotMessages: true,
@@ -839,6 +854,25 @@ describe('handleGroup', () => {
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env['text']).toContain('[bot] ');
     expect(env['text']).toContain('auto reply');
+  });
+
+  it('tags a group author whose bot flag is truthy but not boolean', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> auto reply',
+        author: {
+          member_openid: 'bot-1',
+          bot: 1 as unknown as boolean,
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('[bot] ');
+    expect(env['senderTag']).toBe('bot');
   });
 
   it('forwarded bot slash messages in a group reach the model, not the command table', async () => {
@@ -1567,6 +1601,26 @@ describe('handleGroupAll', () => {
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env['text']).toContain('[bot] ');
     expect(env['text']).toContain('auto reply');
+  });
+
+  it('group-all routed bot messages keep route matching and carry the marker', async () => {
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      forwardBotMessages: true,
+      messageRoutes: { '/proj': '/proj' },
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: 'route me',
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe('route me');
+    expect(env['senderTag']).toBe('bot');
   });
 
   it('bot 消息默认不被 handleGroupAll 转发', async () => {
@@ -2647,6 +2701,51 @@ describe('connect() default instructions', () => {
     mockFetchAccessToken.mockReset();
     stderrSpy.mockRestore();
   });
+
+  it('does not surface the [bot] meaning when forwardBotMessages is off', async () => {
+    mockFetchAccessToken.mockRejectedValue(new Error('offline'));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel();
+    const connectPromise = ch.connect().catch(() => undefined);
+    const config = (ch as unknown as Record<string, unknown>)['config'] as {
+      instructions?: string;
+    };
+    expect(config.instructions).not.toContain('消息前缀 [bot]');
+    await vi.advanceTimersByTimeAsync(4000);
+    await connectPromise;
+    mockFetchAccessToken.mockReset();
+    stderrSpy.mockRestore();
+  });
+
+  it('appends the brake to operator instructions once, across reconnects', async () => {
+    mockFetchAccessToken.mockRejectedValue(new Error('offline'));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({
+      forwardBotMessages: true,
+      instructions: '回答要简洁',
+    });
+    const config = (ch as unknown as Record<string, unknown>)['config'] as {
+      instructions?: string;
+    };
+    const first = ch.connect().catch(() => undefined);
+    expect(config.instructions).toContain('回答要简洁');
+    expect(config.instructions).toContain('消息前缀 [bot]');
+    expect(config.instructions).toContain('<noreply>');
+    await vi.advanceTimersByTimeAsync(4000);
+    await first;
+    // connect() re-runs on reconnect: the append must not stack.
+    const second = ch.connect().catch(() => undefined);
+    expect(config.instructions?.split('消息前缀 [bot]').length).toBe(2);
+    expect(config.instructions?.split('<noreply>').length).toBe(2);
+    await vi.advanceTimersByTimeAsync(4000);
+    await second;
+    mockFetchAccessToken.mockReset();
+    stderrSpy.mockRestore();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -3398,6 +3497,51 @@ describe('inbound media', () => {
     expect(env.attachments?.[0]?.filePath).toBeUndefined();
     expect(env.attachments?.[1]?.type).toBe('file');
     expect(env.attachments?.[1]?.filePath).toBeDefined();
+  });
+
+  it('leaves a media-only forwarded bot group message for the base attribution', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT>',
+        attachments: [imageAttachment()],
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true, scope: 'single' },
+        ],
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.senderTag).toBe('bot');
+    // No self-prefix to keep: the base renders the [bot] attribution instead.
+    expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
+  it('leaves a media-only forwarded bot group-all message for the base attribution', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel({ groupAllPolicy: 'all', forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: '',
+        attachments: [imageAttachment()],
+        mentions: [{ is_you: true }],
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.senderTag).toBe('bot');
+    expect(env.alreadyPrefixed).toBeUndefined();
   });
 
   it('keeps the caption as user text when an image is attached', async () => {

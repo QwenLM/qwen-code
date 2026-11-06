@@ -1146,6 +1146,20 @@ export class QQChannel extends ChannelBase {
         );
       }
       this.config.instructions = parts.join('\n');
+    } else if (this.qqConfig.forwardBotMessages === true) {
+      // Operator-supplied instructions replace the default prompt wholesale,
+      // which would drop the feature's own brake (what `[bot]` means and how to
+      // stay silent). Attach it to the operator text. Per-line `includes` guard
+      // makes the append idempotent: connect() re-runs on every reconnect.
+      const supplements = [
+        '消息前缀 [bot] 表示该消息来自另一个机器人（不是人类成员）；是否回复由你自主判断。',
+        '不想回复时只输出 <noreply> 即可，消息不会发出。',
+      ];
+      const existing = this.config.instructions;
+      const missing = supplements.filter((line) => !existing.includes(line));
+      if (missing.length > 0) {
+        this.config.instructions = [existing, ...missing].join('\n');
+      }
     }
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -6057,8 +6071,10 @@ export class QQChannel extends ChannelBase {
     // A forwarded bot message must reach the model instead of the channel's
     // local command table: a peer bot's `/clear` or `!cmd` is another bot
     // talking, not this channel being commanded.
+    // Same truthiness predicate as the three drop guards above, so a malformed
+    // non-boolean `author.bot` can never be forwarded untagged.
     const forwardedBot =
-      event.author?.bot === true && this.qqConfig.forwardBotMessages === true;
+      Boolean(event.author?.bot) && this.qqConfig.forwardBotMessages === true;
     const isSlash =
       effectiveIsAtBot && !forwardedBot && rawCommandText.startsWith('/');
     const commandText = sanitizePromptText(rawCommandText);
@@ -6295,8 +6311,9 @@ export class QQChannel extends ChannelBase {
     // resolved and would consume the ring's shared 256-chat budget.
     const senderName = event.author.username || event.author.id || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
+    // Same truthiness predicate as the drop guard above (see prepareGroupMessage).
     const forwardedBot =
-      event.author.bot === true && this.qqConfig.forwardBotMessages === true;
+      Boolean(event.author.bot) && this.qqConfig.forwardBotMessages === true;
     const botTag = forwardedBot ? QQ_BOT_TAG : '';
     const cleanText = rawContent.trim();
     // Strip system-reserved tags that could be forged by users
@@ -6432,7 +6449,10 @@ export class QQChannel extends ChannelBase {
       isMentioned: true,
       isReplyToBot: true,
       ...(mediaOnly ? { syntheticText: true as const } : {}),
-      ...(isSlash || this.config.messageRoutes
+      // A forwarded bot's media-only text is a bare placeholder with no sender
+      // line, so leave it unprefixed: ChannelBase then renders the senderTag
+      // attribution. Every other self-prefixed path keeps the flag.
+      ...(isSlash || this.config.messageRoutes || (forwardedBot && mediaOnly)
         ? {}
         : { alreadyPrefixed: true as const }),
     };
@@ -6606,7 +6626,10 @@ export class QQChannel extends ChannelBase {
       isMentioned: isAtBot,
       isReplyToBot: isAtBot,
       ...(mediaOnly ? { syntheticText: true as const } : {}),
-      ...(isSlash || this.config.messageRoutes
+      // A forwarded bot's media-only text is a bare placeholder with no sender
+      // line, so leave it unprefixed: ChannelBase then renders the senderTag
+      // attribution. Every other self-prefixed path keeps the flag.
+      ...(isSlash || this.config.messageRoutes || (forwardedBot && mediaOnly)
         ? {}
         : { alreadyPrefixed: true as const }),
     };
