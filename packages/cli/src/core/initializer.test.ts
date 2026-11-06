@@ -21,7 +21,6 @@ vi.mock('./theme.js', () => ({
 
 vi.mock('../i18n/index.js', () => ({
   initializeI18n: (...args: unknown[]) => mockInitializeI18n(...args),
-  t: (message: string) => message,
   resolveLanguageSetting: (settingsLang?: string) =>
     process.env['QWEN_CODE_LANG'] || settingsLang || 'auto',
 }));
@@ -114,19 +113,17 @@ describe('initializeApp', () => {
 
     expect(result.authError).toBe('Auth failed');
     expect(result.shouldOpenAuthDialog).toBe(true);
+    expect(result.skipStartupAuthDialog).toBeUndefined();
     // initializeApp does not clear the selected auth type on failure
     expect(mockSettings.setValue).not.toHaveBeenCalled();
   });
 
   it.each([
-    [null, 'Run /auth to sign in again'],
-    [
-      'The selected model, saved-model, is no longer available. Run /model to choose another model.',
-      'Run /model to choose another model',
-    ],
+    null,
+    'The selected model, saved-model, is no longer available. Run /model to choose another model.',
   ])(
-    'uses a startup notice for a configured subscription (%s)',
-    async (error, hint) => {
+    'keeps the composer open for a configured subscription (%s)',
+    async (error) => {
       mockConfig
         .getModelsConfig()
         .getCurrentAuthType.mockReturnValue('qwen-subscription');
@@ -135,7 +132,8 @@ describe('initializeApp', () => {
         mockConfig as never,
         mockSettings as never,
       );
-      expect(result.authNotice).toContain(hint);
+      expect(result.skipStartupAuthDialog).toBe(true);
+      expect(result.authNotice).toBe(error ?? undefined);
       expect(result.authError).toBe(error);
     },
   );

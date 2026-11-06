@@ -618,7 +618,7 @@ export async function startOpenTuiUI(
     const capturedText = drainCapturedInputAsText();
 
     const initialDialog: OpenTuiDialogRequest | null =
-      !initializationResult.authNotice &&
+      !initializationResult.skipStartupAuthDialog &&
       (initializationResult.authError || config.getAuthType() === undefined)
         ? {
             dialog: 'auth',

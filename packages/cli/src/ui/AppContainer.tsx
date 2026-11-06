@@ -1858,14 +1858,16 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     historyManager.addItem,
     handleAuthChange,
-    Boolean(initializationResult.authNotice),
+    initializationResult.skipStartupAuthDialog,
   );
   const { state: authState, actions: authActions } = auth;
   const { onAuthError, openAuthDialog, closeAuthDialog } = authActions;
   const { isAuthDialogOpen, isAuthenticating, pendingAuthType } = authState;
 
   useInitializationAuthError(
-    initializationResult.authNotice ? null : initializationResult.authError,
+    initializationResult.skipStartupAuthDialog
+      ? null
+      : initializationResult.authError,
     onAuthError,
   );
 
