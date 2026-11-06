@@ -3646,6 +3646,9 @@ const EN: Messages = {
   'skills.install.recoveryRequired':
     'Installation recovery is required. Preserve the recovery paths shown below.',
   'skills.install.checkResult': 'Check result',
+  'skills.install.stopChecking': 'Stop checking',
+  'skills.install.stoppedChecking':
+    'Stopped checking. This does not cancel or undo the installation. Verify its outcome before uploading again.',
   'skills.install.cancelRequest': 'Cancel installation',
   'skills.install.activationWarning': (v) =>
     `Installed, but runtime activation failed: ${v?.detail ?? ''}`,
@@ -8412,6 +8415,9 @@ const ZH: Messages = {
   'skills.install.notCommitted': '本次归档未安装。',
   'skills.install.recoveryRequired': '安装需要恢复处理，请保留下列恢复路径。',
   'skills.install.checkResult': '检查结果',
+  'skills.install.stopChecking': '停止查询',
+  'skills.install.stoppedChecking':
+    '已停止查询，但这不会取消或撤销安装。请先确认原安装结果，再次上传。',
   'skills.install.cancelRequest': '取消安装',
   'skills.install.activationWarning': (v) =>
     `已安装，但运行时激活失败：${v?.detail ?? ''}`,

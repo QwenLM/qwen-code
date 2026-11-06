@@ -319,6 +319,106 @@ describe('native Skill archive dialog', () => {
     },
   );
 
+  it.each(['unknown', 'lookup error'] as const)(
+    'explicitly stops checking an unconfirmable %s result without resending',
+    async (outcome) => {
+      const api = archive();
+      api.install.mockRejectedValueOnce(
+        new DaemonSkillInstallError(attemptId, new TypeError('disconnected')),
+      );
+      if (outcome === 'unknown') {
+        api.lookup.mockResolvedValue(undefined);
+      } else {
+        api.lookup.mockRejectedValue(new Error('Workspace is inaccessible'));
+      }
+      await renderDialog('en', api);
+      await selectZip();
+      await submit();
+      const findButton = (label: string) =>
+        Array.from(document.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === label,
+        );
+      expect(document.body.textContent).toContain('could not be confirmed');
+      expect(findButton('Upload')?.disabled).toBe(true);
+      await act(async () => findButton('Check result')!.click());
+      await act(async () => findButton('close')!.click());
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+      for (const open of [false, true]) {
+        await act(async () => {
+          root.render(
+            <I18nProvider language="en">
+              <SkillInstallDialog
+                open={open}
+                onOpenChange={onOpenChange}
+                onInstall={onInstall}
+                archive={api}
+              />
+            </I18nProvider>,
+          );
+        });
+      }
+      const name = document.querySelector<HTMLInputElement>(
+        'input[placeholder="my-skill"]',
+      )!;
+      expect(name.value).toBe('demo');
+      expect(name.disabled).toBe(true);
+      expect(findButton('Upload')?.disabled).toBe(true);
+      expect(api.lookup).toHaveBeenCalledTimes(2);
+      expect(api.install).toHaveBeenCalledOnce();
+      const stop = findButton('Stop checking');
+      expect(stop).toBeDefined();
+      expect(stop!.disabled).toBe(false);
+      await act(async () => stop!.click());
+
+      expect(name.value).toBe('');
+      expect(name.disabled).toBe(false);
+      expect(findButton('Upload')?.disabled).toBe(false);
+      expect(findButton('Check result')).toBeUndefined();
+      expect(document.querySelector('input[type="file"]')).toBeNull();
+      expect(document.body.textContent).not.toContain('Selected: demo.zip');
+      expect(document.body.textContent).not.toContain(
+        'This archive was not installed',
+      );
+      expect(document.body.textContent).toMatch(/does not cancel or undo/i);
+      expect(document.body.textContent).toMatch(/verify.*before.*upload/i);
+      const github = Array.from(document.querySelectorAll('[role="tab"]')).find(
+        (tab) => tab.textContent === 'GitHub',
+      );
+      expect(github?.getAttribute('data-state')).toBe('active');
+      expect(api.install).toHaveBeenCalledOnce();
+      expect(api.lookup).toHaveBeenCalledTimes(2);
+      expect(api.committed).not.toHaveBeenCalled();
+      expect(onInstall).not.toHaveBeenCalled();
+    },
+  );
+
+  it('disables Stop checking while a result lookup is in flight', async () => {
+    const api = archive();
+    api.install.mockRejectedValueOnce(
+      new DaemonSkillInstallError(attemptId, new TypeError('disconnected')),
+    );
+    let finishLookup!: (value: undefined) => void;
+    api.lookup.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishLookup = resolve;
+      }),
+    );
+    await renderDialog('en', api);
+    await selectZip();
+    await submit();
+    const stop = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Stop checking',
+    );
+    expect(stop).toBeDefined();
+    expect(stop!.disabled).toBe(true);
+    await act(async () => stop!.click());
+    expect(api.lookup).toHaveBeenCalledOnce();
+    expect(api.install).toHaveBeenCalledOnce();
+    await act(async () => finishLookup(undefined));
+    expect(stop!.disabled).toBe(false);
+    expect(document.body.textContent).toContain('could not be confirmed');
+  });
+
   it.each(['not_committed', 'recovery_required'] as const)(
     'shows a confirmed %s outcome without retrying',
     async (state) => {

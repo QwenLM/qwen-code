@@ -498,6 +498,18 @@ export function SkillInstallDialog({
           </Button>
           {pending ? (
             <Button
+              variant="ghost"
+              disabled={installing}
+              onClick={() => {
+                reset();
+                setResultNotice(t('skills.install.stoppedChecking'));
+              }}
+            >
+              {t('skills.install.stopChecking')}
+            </Button>
+          ) : null}
+          {pending ? (
+            <Button
               onClick={() => void checkResult(pending)}
               disabled={installing}
             >
