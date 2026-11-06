@@ -120,6 +120,17 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^doubao-seed/, { image: true }],
   [/^doubao-.*(vision|vl)/, { image: true }],
   [/^doubao/, {}],
+
+  // -------------------
+  // Other open-weight vision models, commonly served through Ollama, vLLM and
+  // other OpenAI-compatible servers: Meta's Llama 3.2 Vision and Llama 4,
+  // LLaVA, and Mistral's Pixtral and Small 3.1 / 3.2 all accept images.
+  // -------------------
+  [/^llama-?3\.2-(?:\d+b-)?vision/, { image: true }],
+  [/^llama-?4(?:-|$)/, { image: true }],
+  [/^llava/, { image: true }],
+  [/^pixtral/, { image: true }],
+  [/^mistral-small-?3\.[12](?:-|$)/, { image: true }],
 ];
 
 /**
