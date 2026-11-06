@@ -431,6 +431,10 @@ function safeReason(reason) {
   return (
     reason
       .trim()
+      // A newline lets a reason open a block-level Markdown construct: a
+      // line-start fence swallows the folded Chinese block and renders the
+      // tracking marker as visible code. Keep the reason a single line.
+      .replace(/\s*\n\s*/g, ' ')
       // Bidi overrides can visually rewrite a notice maintainers trust when
       // deciding whether to update a branch; the reason is classifier output
       // derived from untrusted logs, so drop them like the markup below.

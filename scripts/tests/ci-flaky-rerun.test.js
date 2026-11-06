@@ -558,6 +558,7 @@ describe('ci flaky rerun patrol', () => {
     expect(body).toContain('No Update Branch');
     expect(body).toContain('<summary>中文说明</summary>');
     expect(body).toContain('runner 超时');
+    expect(body.split('</details>').length - 1).toBe(1);
     expect(body).toMatch(/<!-- .*action=rerun.* -->$/);
   });
 
@@ -587,10 +588,19 @@ describe('ci flaky rerun patrol', () => {
       }),
     );
     expect(c.calls).toHaveLength(1);
-    expect(c.calls[0][2]).toContain('TypeScript cannot resolve');
-    expect(c.calls[0][2]).toContain('<details>');
-    expect(c.calls[0][2]).toContain('TypeScript 无法解析');
-    expect(c.calls[0][2]).toContain('action=comment');
+    const body = c.calls[0][2];
+    expect(body).toContain('TypeScript cannot resolve');
+    expect(body).toContain('<details>');
+    expect(body).toContain('TypeScript 无法解析');
+    expect(body).toContain('action=comment');
+    // Pin the bilingual placement, not just the presence of both strings:
+    // English before the fold, Chinese inside it.
+    const enIndex = body.indexOf('TypeScript cannot resolve');
+    const foldIndex = body.indexOf('<summary>中文说明</summary>');
+    const zhIndex = body.indexOf('TypeScript 无法解析');
+    expect(enIndex).toBeLessThan(foldIndex);
+    expect(foldIndex).toBeLessThan(zhIndex);
+    expect(body.split('</details>').length - 1).toBe(1);
   });
 
   it('records no_action with a visible manual-review notice', async () => {
@@ -606,6 +616,7 @@ describe('ci flaky rerun patrol', () => {
     expect(body).toContain('runner timeout');
     expect(body).toContain('<summary>中文说明</summary>');
     expect(body).toContain('未采取自动动作');
+    expect(body.split('</details>').length - 1).toBe(1);
     expect(body).toMatch(/<!-- .*action=no_action.* -->$/);
   });
 
@@ -653,14 +664,31 @@ describe('ci flaky rerun patrol', () => {
   it('strips bidi overrides that could visually rewrite a notice', async () => {
     // The reason is classifier output derived from untrusted logs; a bidi
     // override could make "no Update Branch needed" read as its opposite.
+    // Every member of the Unicode Bidi_Control set is also fed individually
+    // so narrowing the strip class cannot survive this pin.
+    const bidiControls = [
+      '\u061C',
+      '\u200E',
+      '\u200F',
+      '\u202A',
+      '\u202B',
+      '\u202C',
+      '\u202D',
+      '\u202E',
+      '\u2066',
+      '\u2067',
+      '\u2068',
+      '\u2069',
+    ];
     for (const action of ['rerun', 'comment', 'no_action']) {
+      const confidence = action === 'no_action' ? 'low' : 'high';
       const c = client();
       await actOnDecision(
         c,
         target(),
         decision({
           action,
-          confidence: action === 'no_action' ? 'low' : 'high',
+          confidence,
           reason_en: 'safe \u202Ereversed\u202C text',
           reason_zh: '安全 \u2066隔离\u2069 \u061C文本',
         }),
@@ -671,6 +699,50 @@ describe('ci flaky rerun patrol', () => {
       );
       expect(body).toContain('safe reversed text');
       expect(body).toContain('安全 隔离 文本');
+      for (const ch of bidiControls) {
+        const cc = client();
+        await actOnDecision(
+          cc,
+          target(),
+          decision({
+            action,
+            confidence,
+            reason_en: `a${ch}b`,
+            reason_zh: `a${ch}b`,
+          }),
+        );
+        const single = cc.calls.find((call) => call[0] === 'comment')[2];
+        expect(single).not.toContain(ch);
+        expect(single).toContain('ab');
+      }
+    }
+  });
+
+  it('collapses newlines so a reason cannot open a block-level fence', async () => {
+    // A line-start fence in a reason swallows the folded Chinese block and
+    // renders the tracking marker as visible code; keep reasons single-line.
+    for (const action of ['rerun', 'comment', 'no_action']) {
+      const c = client();
+      await actOnDecision(
+        c,
+        target(),
+        decision({
+          action,
+          confidence: action === 'no_action' ? 'low' : 'high',
+          reason_en: 'npm error:\n```\nnpm error code ETIMEDOUT',
+          reason_zh: 'npm 错误：\n```\nnpm error code ETIMEDOUT',
+        }),
+      );
+      const body = c.calls.find((call) => call[0] === 'comment')[2];
+      expect(body).not.toMatch(/^```/m);
+      expect(body).toContain('npm error: ``` npm error code ETIMEDOUT');
+      expect(body.split('</details>').length - 1).toBe(1);
+      const posted = {
+        body,
+        createdAt: '2026-07-12T07:25:00.000Z',
+        author: { login: 'patrol-bot' },
+      };
+      expect(alreadyHandled([posted], target(), 'patrol-bot')).toBe(true);
     }
   });
 
