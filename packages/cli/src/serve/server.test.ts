@@ -46045,15 +46045,14 @@ describe('Live conversation runtime lifecycle', () => {
   }
 
   it.each([
-    ['qwen3.8-max(qwen-subscription)', 'applied', 200],
-    ['qwen3.8-max(qwen-subscription)', 'failed', 500],
-    ['qwen3.8-max(qwen-subscription)', 'deferred', 500],
-    ['existing(openai)', 'applied', 200],
+    ['qwen3.8-max(qwen-subscription)', 'standalone-client', 200],
+    ['qwen3.8-max(qwen-subscription)', 'unregistered-client', 400],
+    ['existing(openai)', 'standalone-client', 200],
   ] as const)(
-    'refreshes the standalone owner before selecting %s (reload=%s)',
-    async (modelId, status, expectedStatus) => {
+    'switches standalone model %s through its owner for %s',
+    async (modelId, clientId, expectedStatus) => {
       const sessionId = 'standalone-subscription';
-      const reloadModelProviders = vi.fn(async () => ({ status }));
+      const reloadModelProviders = vi.fn(async () => ({ status: 'failed' }));
       const setup = setupLiveRuntime({
         summaryImpl: (id) => ({
           sessionId: id,
@@ -46063,9 +46062,11 @@ describe('Live conversation runtime lifecycle', () => {
           clientCount: 0,
           hasActivePrompt: false,
         }),
-        setModelImpl: async () => {
-          if (modelId.includes('qwen-subscription')) {
-            expect(reloadModelProviders).toHaveBeenCalledOnce();
+        setModelImpl: async (id, _params, context) => {
+          expect(id).toBe(sessionId);
+          expect(context?.clientId).toBe(clientId);
+          if (context?.clientId !== 'standalone-client') {
+            throw new InvalidClientIdError(id, clientId);
           }
           return {};
         },
@@ -46078,23 +46079,14 @@ describe('Live conversation runtime lifecycle', () => {
       const response = await request(setup.app)
         .post(`/session/${sessionId}/model`)
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .set('X-Qwen-Client-Id', 'standalone-client')
+        .set('X-Qwen-Client-Id', clientId)
         .send({ modelId });
 
       expect(response.status).toBe(expectedStatus);
-      if (modelId.includes('qwen-subscription')) {
-        expect(reloadModelProviders).toHaveBeenCalledExactlyOnceWith({
-          route: 'POST /session/:id/model',
-          workspaceCwd: setup.root.canonicalRoot,
-          sessionId,
-          originatorClientId: 'standalone-client',
-        });
-      } else {
-        expect(reloadModelProviders).not.toHaveBeenCalled();
-      }
-      expect(setup.liveBridge.setModelCalls).toHaveLength(
-        expectedStatus === 200 ? 1 : 0,
-      );
+      if (expectedStatus === 400)
+        expect(response.body.code).toBe('invalid_client_id');
+      expect(reloadModelProviders).not.toHaveBeenCalled();
+      expect(setup.liveBridge.setModelCalls).toHaveLength(1);
       expect(setup.primaryBridge.setModelCalls).toHaveLength(0);
     },
   );

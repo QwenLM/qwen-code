@@ -194,7 +194,7 @@ export function AuthMessage({
   const getSubscriptionContext = useCallback(() => {
     const current = connectionRef.current;
     const workspaceCwd = standalone
-      ? catalog?.workspaceCwd
+      ? undefined
       : getWorkspaceCwd
         ? getWorkspaceCwd()
         : current.workspaceCwd;
@@ -209,7 +209,7 @@ export function AuthMessage({
       sessionWorkspaceCwd: sessionId ? current.workspaceCwd : undefined,
       standalone,
     };
-  }, [catalog?.workspaceCwd, getWorkspaceCwd, standalone]);
+  }, [getWorkspaceCwd, standalone]);
   const {
     workspaceCwd: subscriptionWorkspace,
     sessionId: subscriptionSession,
@@ -1347,10 +1347,8 @@ export function AuthMessage({
         desktopSuccess={dialog && isDesktopShell()}
         transport={workspaceActions}
         onActivate={async (signal, onSettingsSaved) => {
-          const { workspaceCwd, sessionId, sessionWorkspaceCwd } =
+          const { workspaceCwd, sessionId, sessionWorkspaceCwd, standalone } =
             subscriptionTarget;
-          if (!workspaceCwd)
-            throw new Error('Subscription activation requires a workspace.');
           const assertTarget = () => {
             signal.throwIfAborted();
             const current = getSubscriptionContext();
@@ -1358,7 +1356,7 @@ export function AuthMessage({
               current.workspaceCwd !== workspaceCwd ||
               current.sessionId !== sessionId ||
               current.sessionWorkspaceCwd !== sessionWorkspaceCwd ||
-              current.standalone !== subscriptionTarget.standalone
+              current.standalone !== standalone
             )
               throw new DOMException(
                 'Subscription target changed.',
@@ -1366,6 +1364,25 @@ export function AuthMessage({
               );
           };
           assertTarget();
+          if (standalone) {
+            const { modelId } =
+              await workspaceActions.getSubscriptionDefaultModel({ signal });
+            assertTarget();
+            const selector = `${modelId}(qwen-subscription)`;
+            if (sessionId) {
+              await activateSessionSubscriptionModel(
+                sessionWorkspaceCwd,
+                sessionId,
+                selector,
+              );
+              assertTarget();
+            } else {
+              onModelActivated?.(selector);
+            }
+            return modelId;
+          }
+          if (!workspaceCwd)
+            throw new Error('Subscription activation requires a workspace.');
           const result = await workspaceActions.activateSubscription({
             workspaceCwd,
             signal,

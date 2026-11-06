@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings } from '../../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -53,7 +53,7 @@ beforeEach(() => {
   mocks.createAdapter.mockReset().mockReturnValue(mocks.adapter);
 });
 afterEach(() => vi.unstubAllEnvs());
-it('installs the subscription through the ordinary model settings adapter', async () => {
+it('installs the subscription in the current project settings', async () => {
   const runtime = config();
   const signal = new AbortController().signal;
   await activateSubscription(settings, runtime, signal);
@@ -67,7 +67,10 @@ it('installs the subscription through the ordinary model settings adapter', asyn
     },
   });
   expect(callbacks.settings).toBe(mocks.adapter);
-  expect(mocks.createAdapter).toHaveBeenCalledWith(settings);
+  expect(mocks.createAdapter).toHaveBeenCalledWith(
+    settings,
+    SettingScope.Workspace,
+  );
   expect(settings.setValues).not.toHaveBeenCalled();
   callbacks.syncAuthState(
     plan.authType,
@@ -173,13 +176,15 @@ it('rejects an untrusted workspace without falling back to user settings', async
   expect(mocks.apply).not.toHaveBeenCalled();
 });
 
-it('supports activation when only user settings are active', async () => {
+it('requires project settings before activation', async () => {
   const userOnly = {
     ...settings,
     workspaceSettingsActive: false,
   } as LoadedSettings;
-  await activateSubscription(userOnly, config(), new AbortController().signal);
-  expect(mocks.createAdapter).toHaveBeenCalledWith(userOnly);
+  await expect(
+    activateSubscription(userOnly, config(), new AbortController().signal),
+  ).rejects.toThrow('Open a project folder');
+  expect(mocks.createAdapter).not.toHaveBeenCalled();
 });
 
 it('keeps committed disk settings and runtime consistent when the dialog closes during refresh', async () => {

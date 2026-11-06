@@ -17,6 +17,7 @@ const { actions, ownerGuard, ownerState, sessionState, sessionActions } =
         getSubscriptionLogin: vi.fn(),
         cancelSubscriptionLogin: vi.fn(),
         getSubscriptionUserInfo: vi.fn(),
+        getSubscriptionDefaultModel: vi.fn(),
         signOutSubscription: vi.fn(),
         activateSubscription: vi.fn(),
         loadProviders: vi.fn(),
@@ -70,6 +71,9 @@ beforeEach(() => {
   sessionActions.setModel.mockReset().mockResolvedValue({});
   sessionActions.refreshModels.mockReset().mockResolvedValue(undefined);
   actions.cancelSubscriptionLogin.mockReset().mockResolvedValue(undefined);
+  actions.getSubscriptionDefaultModel
+    .mockReset()
+    .mockResolvedValue({ modelId: 'qwen3.8-max' });
   actions.activateSubscription.mockReset().mockResolvedValue({
     authType: 'qwen-subscription',
     modelId: 'qwen3.8-max',
@@ -1241,7 +1245,7 @@ describe('subscription development entry', () => {
   });
 
   it.each(['draft', 'connected', 'connecting'] as const)(
-    'activates a no-workspace %s using the provider catalog workspace',
+    'activates a no-workspace %s without writing workspace settings',
     async (target) => {
       sessionState.workspaceCwd =
         target === 'draft' ? undefined : '/private/standalone';
@@ -1268,10 +1272,10 @@ describe('subscription development entry', () => {
       )!;
       await act(async () => entry.click());
 
-      expect(actions.activateSubscription).toHaveBeenCalledExactlyOnceWith({
-        workspaceCwd: '/workspace',
-        signal: expect.any(AbortSignal),
-      });
+      expect(
+        actions.getSubscriptionDefaultModel,
+      ).toHaveBeenCalledExactlyOnceWith({ signal: expect.any(AbortSignal) });
+      expect(actions.activateSubscription).not.toHaveBeenCalled();
       if (target === 'draft') {
         expect(completion.onModelActivated).toHaveBeenCalledExactlyOnceWith(
           'qwen3.8-max(qwen-subscription)',
@@ -1314,14 +1318,10 @@ describe('subscription development entry', () => {
         },
       });
       let finishActivation!: () => void;
-      actions.activateSubscription.mockImplementation(
+      actions.getSubscriptionDefaultModel.mockImplementation(
         () =>
           new Promise((resolve) => {
-            finishActivation = () =>
-              resolve({
-                modelId: 'qwen3.8-max',
-                runtimeSync: { status: 'applied' },
-              });
+            finishActivation = () => resolve({ modelId: 'qwen3.8-max' });
           }),
       );
       let composerWorkspace: string | undefined;
@@ -1335,7 +1335,7 @@ describe('subscription development entry', () => {
         'button[aria-label="Qwen Account with Subscription"]',
       )!;
       await act(async () => entry.click());
-      expect(actions.activateSubscription).toHaveBeenCalledOnce();
+      expect(actions.getSubscriptionDefaultModel).toHaveBeenCalledOnce();
       if (change === 'session') sessionState.sessionId = 'other-standalone';
       else composerWorkspace = '/workspace';
       await completion.rerender(change !== 'project');

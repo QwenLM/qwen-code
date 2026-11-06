@@ -95,19 +95,20 @@ for (const target of ['draft', 'session'] as const) {
     await page.route('**/auth/subscription/flows/signed-in', (route) =>
       route.fulfill({ status: 204 }),
     );
-    const activations: string[] = [];
+    const workspaceActivations: string[] = [];
+    let accountModelRequests = 0;
     await page.route('**/workspaces/*/auth/subscription', async (route) => {
-      activations.push(new URL(route.request().url()).pathname);
+      workspaceActivations.push(new URL(route.request().url()).pathname);
+      await route.fulfill({ status: 403 });
+    });
+    await page.route('**/auth/subscription/model', async (route) => {
+      accountModelRequests++;
       scenario.state.models = {
         currentModelId: scenario.currentModel,
         availableModels: [{ modelId, name: 'Qwen Max' }],
       };
       await route.fulfill({
-        json: {
-          authType: 'qwen-subscription',
-          modelId: 'qwen3.8-max',
-          runtimeSync: { status: 'applied' },
-        },
+        json: { modelId: 'qwen3.8-max' },
       });
     });
 
@@ -135,9 +136,8 @@ for (const target of ['draft', 'session'] as const) {
     const outcome = success.or(retry).first();
     await expect(outcome).toBeVisible();
     expect(await outcome.textContent()).toContain('Qwen Pro');
-    expect(activations).toEqual([
-      `/workspaces/${encodeURIComponent(scenario.workspaceCwd)}/auth/subscription`,
-    ]);
+    expect(workspaceActivations).toEqual([]);
+    expect(accountModelRequests).toBe(1);
     if (target === 'session') {
       expect(daemon.modelRequests()).toEqual([
         expect.objectContaining({

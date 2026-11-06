@@ -1217,6 +1217,11 @@ export function createDaemonWorkspaceActions({
         client.getSubscriptionUserInfo(options),
       );
     },
+    getSubscriptionDefaultModel(options) {
+      return subscriptionRequest((client) =>
+        client.getSubscriptionDefaultModel(options),
+      );
+    },
     signOutSubscription() {
       return subscriptionRequest((client) => client.signOutSubscription());
     },

@@ -14320,35 +14320,58 @@ describe('Session', () => {
       },
     );
 
-    it('does not persist a shared model default for a standalone session', async () => {
-      session.dispose();
-      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
-      session = new Session(
-        'test-session-id',
-        mockConfig,
-        mockClient,
-        mockSettings,
-      );
+    it.each([
+      [AuthType.USE_OPENAI, 'qwen3-coder-flash', false],
+      [AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max', true],
+    ] as const)(
+      'switches standalone %s using only the session config',
+      async (authType, modelId, refresh) => {
+        session.dispose();
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+          'standalone',
+        );
+        const refreshSubscriptionModels = vi.fn().mockResolvedValue({
+          models: [modelId],
+          cached: false,
+        });
+        Object.assign(mockConfig, { refreshSubscriptionModels });
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
 
-      await session.setModel(
-        {
-          sessionId: 'test-session-id',
-          modelId: `qwen3-coder-flash(${AuthType.USE_OPENAI})`,
-        },
-        { persistDefault: true },
-      );
+        await session.setModel(
+          {
+            sessionId: 'test-session-id',
+            modelId: `${modelId}(${authType})`,
+          },
+          { persistDefault: true },
+        );
 
-      expect(mockConfig.switchModel).toHaveBeenCalledWith(
-        AuthType.USE_OPENAI,
-        'qwen3-coder-flash',
-        undefined,
-      );
-      expect(mockSettings.setValue).not.toHaveBeenCalled();
-      expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
-        modelId: 'qwen3-coder-flash',
-        authType: AuthType.USE_OPENAI,
-      });
-    });
+        expect(mockConfig.switchModel).toHaveBeenCalledWith(
+          authType,
+          modelId,
+          undefined,
+        );
+        expect(mockSettings.setValue).not.toHaveBeenCalled();
+        if (refresh) {
+          expect(refreshSubscriptionModels).toHaveBeenCalledOnce();
+          expect(refreshSubscriptionModels).toHaveBeenCalledBefore(
+            switchModelSpy,
+          );
+        } else {
+          expect(refreshSubscriptionModels).not.toHaveBeenCalled();
+        }
+        expect(
+          mockChatRecordingService.recordSessionModel,
+        ).toHaveBeenCalledWith({
+          modelId,
+          authType,
+        });
+      },
+    );
 
     it('propagates errors from config.switchModel', async () => {
       const configError = new Error('Invalid model');

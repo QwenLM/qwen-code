@@ -15092,6 +15092,14 @@ export class Session implements SessionContext {
       );
     }
 
+    if (
+      this.requiresManagedConversationBinding &&
+      selectedAuthType === AuthType.QWEN_SUBSCRIPTION &&
+      !resolvedRoute
+    ) {
+      await this.config.refreshSubscriptionModels();
+    }
+
     const requireCachedCredentials =
       selectedAuthType !== previousAuthType &&
       selectedAuthType === AuthType.QWEN_OAUTH;

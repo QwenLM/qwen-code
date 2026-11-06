@@ -7453,6 +7453,25 @@ export class DaemonClient {
     );
   }
 
+  async getSubscriptionDefaultModel(
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<{ modelId: string }> {
+    const route = '/auth/subscription/model';
+    return this.fetchWithTimeout(
+      `${this.baseUrl}${route}`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: '{}',
+        signal: opts.signal,
+      },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, `POST ${route}`);
+        return (await res.json()) as { modelId: string };
+      },
+    );
+  }
+
   async signOutSubscription(): Promise<void> {
     return this.fetchWithTimeout(
       `${this.baseUrl}/auth/subscription/revoke`,

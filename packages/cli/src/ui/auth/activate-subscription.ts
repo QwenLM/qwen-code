@@ -11,7 +11,7 @@ import type { SubscriptionUserInfo } from '@qwen-code/qwen-code-core/qwen/subscr
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import { selectSubscriptionModel } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
-import type { LoadedSettings } from '../../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 
 export async function activateSubscription(
@@ -22,6 +22,9 @@ export async function activateSubscription(
   signal.throwIfAborted();
   if (!settings.isTrusted) {
     throw new Error('Workspace is not trusted.');
+  }
+  if (!settings.workspaceSettingsActive) {
+    throw new Error('Open a project folder to activate Qwen Subscription.');
   }
   const enforced = settings.merged.security?.auth?.enforcedType;
   if (enforced && enforced !== AuthType.QWEN_SUBSCRIPTION) {
@@ -47,7 +50,7 @@ export async function activateSubscription(
       },
     },
     {
-      settings: createLoadedSettingsAdapter(settings),
+      settings: createLoadedSettingsAdapter(settings, SettingScope.Workspace),
       syncAuthState: (authType, modelId, baseUrl) => {
         config.syncModelSelection(authType, modelId, baseUrl);
       },

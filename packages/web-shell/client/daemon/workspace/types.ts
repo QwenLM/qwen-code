@@ -527,6 +527,7 @@ export interface DaemonWorkspaceActions
     | 'getSubscriptionLogin'
     | 'cancelSubscriptionLogin'
     | 'getSubscriptionUserInfo'
+    | 'getSubscriptionDefaultModel'
     | 'signOutSubscription'
   > {
   activateSubscription(options?: {
