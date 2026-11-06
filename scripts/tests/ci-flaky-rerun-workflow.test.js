@@ -1,5 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -106,7 +112,19 @@ describe('ci failure patrol workflow', () => {
     const classifier = yml.jobs.classify.steps.find((step) =>
       step.uses?.includes('qwen-code-action'),
     );
-    expect(classifier.env).toEqual({ GH_TOKEN: '', GITHUB_TOKEN: '' });
+    // The classifier reads untrusted CI logs, so it gets no GitHub credential.
+    // Non-secret sandbox plumbing shares this env block now that the job runs
+    // on the shared ECS pool; the key set stays an exact pin so nothing that
+    // could authenticate can be added without updating this allowlist.
+    expect(Object.keys(classifier.env).sort()).toEqual([
+      'DOCKER_CONTEXT',
+      'DOCKER_HOST',
+      'GH_TOKEN',
+      'GITHUB_TOKEN',
+      'QWEN_SANDBOX_IMAGE',
+    ]);
+    expect(classifier.env.GH_TOKEN).toBe('');
+    expect(classifier.env.GITHUB_TOKEN).toBe('');
     expect(JSON.stringify(classifier)).not.toContain('CI_BOT_PAT');
     expect(yml.jobs.act.permissions).toEqual({
       actions: 'read',
@@ -164,5 +182,218 @@ describe('ci failure patrol workflow', () => {
     expect(skill).toContain('main-branch failures');
     expect(skill).toContain('changedFiles');
     expect(skill).toContain('ci-flaky-decisions.json');
+  });
+
+  it('routes both jobs to the ECS pool, keeping the kill switch and hosted fallback', () => {
+    // Observed 2026-11-06 on ubuntu-latest: one round waited 2h09m for a
+    // runner, and 17 of 20 recent ticks were cancelled with zero jobs — they
+    // never received one. The ECS pool had 199 idle hosts at the same time.
+    for (const job of [yml.jobs.classify, yml.jobs.act]) {
+      const runsOn = job['runs-on'];
+      expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+      expect(runsOn).toContain('"ecs-qwen"');
+      expect(runsOn).toContain('"ubuntu-latest"');
+    }
+  });
+
+  it('enforces the pool allowlist before any step is handed a secret', () => {
+    for (const job of [yml.jobs.classify, yml.jobs.act]) {
+      const guard = job.steps[0];
+      expect(guard.name).toBe('Check runner environment');
+      expect(guard.run).toContain('ecs-qwen-*');
+      expect(guard.run).toContain('refusing to run here');
+      // The guard itself must not need a credential to run.
+      expect(JSON.stringify(guard)).not.toContain('secrets.');
+    }
+    // classify additionally preflights docker: without a daemon the sandboxed
+    // classifier would otherwise burn its whole 5-minute budget before failing.
+    expect(yml.jobs.classify.steps[0].run).toContain('docker info');
+    // act never starts a sandbox, so it must not require a daemon.
+    expect(yml.jobs.act.steps[0].run).not.toContain('docker info');
+  });
+
+  it('behaviorally proves the guard rejects unapproved and daemon-less hosts', () => {
+    // Structural assertions cannot catch a shell quoting bug that silently
+    // disables the allowlist, so run the real step body against a stub docker.
+    const runGuard = (step, { environment, name, dockerOk }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'patrol-guard-'));
+      writeFileSync(
+        join(dir, 'docker'),
+        `#!/bin/sh\nexit ${dockerOk ? 0 : 1}\n`,
+      );
+      chmodSync(join(dir, 'docker'), 0o755);
+      let status = 0;
+      try {
+        execFileSync('bash', ['-c', step.run], {
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            RUNNER_ENVIRONMENT: environment,
+            RUNNER_NAME: name,
+          },
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (e) {
+        status = e.status;
+      }
+      rmSync(dir, { recursive: true, force: true });
+      return status;
+    };
+    const classifyGuard = yml.jobs.classify.steps[0];
+    const actGuard = yml.jobs.act.steps[0];
+    const approved = { environment: 'self-hosted', name: 'ecs-qwen-hk1-1' };
+
+    expect(runGuard(classifyGuard, { ...approved, dockerOk: true })).toBe(0);
+    // A pool member without a usable daemon must fail before the classifier
+    // spends its budget, not after.
+    expect(runGuard(classifyGuard, { ...approved, dockerOk: false })).toBe(1);
+    // The label routes; the registration name is what the allowlist checks.
+    expect(
+      runGuard(classifyGuard, {
+        environment: 'self-hosted',
+        name: 'rogue-host',
+        dockerOk: true,
+      }),
+    ).toBe(1);
+    // Hosted fallback needs no daemon at all.
+    expect(
+      runGuard(classifyGuard, {
+        environment: 'github-hosted',
+        name: 'hosted',
+        dockerOk: false,
+      }),
+    ).toBe(0);
+    expect(
+      runGuard(classifyGuard, {
+        environment: '',
+        name: 'ecs-qwen-hk1-1',
+        dockerOk: true,
+      }),
+    ).toBe(1);
+    // act holds the write-capable PAT, so it keeps the allowlist...
+    expect(
+      runGuard(actGuard, {
+        environment: 'self-hosted',
+        name: 'rogue-host',
+        dockerOk: true,
+      }),
+    ).toBe(1);
+    // ...but must not inherit classify's daemon requirement.
+    expect(runGuard(actGuard, { ...approved, dockerOk: false })).toBe(0);
+  });
+
+  it('pulls the sandbox image outside the classifier budget and times it', () => {
+    const classify = yml.jobs.classify;
+    const names = classify.steps.map((step) => step.name);
+    const resolve = classify.steps.find(
+      (step) => step.name === 'Resolve sandbox image',
+    );
+    expect(names.indexOf(resolve.name)).toBeLessThan(
+      names.indexOf('Classify with ci-flaky-patrol skill'),
+    );
+    expect(resolve.run).toContain('resolve-sandbox-image.mjs');
+    expect(resolve.env.SANDBOX_COMMAND).toBe('/usr/bin/docker');
+    // A slow pull is the measurement this step exists to surface, so the
+    // timing must be reported even when the resolver exits non-zero.
+    expect(resolve.run).toContain('SECONDS');
+    expect(resolve.run).toContain('|| status=$?');
+    expect(resolve.run).toContain('exit "${status}"');
+
+    // Bind the digest-pinned step output, not the appendable $GITHUB_ENV copy,
+    // and pin the daemon endpoint the sandbox will spawn against.
+    const classifier = classify.steps.find((step) =>
+      step.uses?.includes('qwen-code-action'),
+    );
+    expect(classifier.env.QWEN_SANDBOX_IMAGE).toBe(
+      '${{ steps.sandbox_image.outputs.image }}',
+    );
+    expect(classifier.env.DOCKER_HOST).toBe('');
+    expect(classifier.env.DOCKER_CONTEXT).toBe('default');
+
+    // The job cap must cover the resolver's own 10-minute pull budget plus the
+    // classifier step, or a cold host gets killed mid-pull and produces nothing.
+    expect(classify['timeout-minutes']).toBeGreaterThanOrEqual(
+      classifier['timeout-minutes'] + 10,
+    );
+  });
+
+  it('behaviorally proves the resolve step reports timing and propagates failure', () => {
+    // The whole point of moving the pull out of the classifier budget is to
+    // learn where the time goes. A wrapper that swallowed the exit status, or
+    // skipped the notice on failure, would report a green round and measure
+    // nothing — so run the real body against a stub node.
+    const resolve = yml.jobs.classify.steps.find(
+      (step) => step.name === 'Resolve sandbox image',
+    );
+    const runResolve = (exitCode) => {
+      const dir = mkdtempSync(join(tmpdir(), 'patrol-resolve-'));
+      writeFileSync(join(dir, 'node'), `#!/bin/sh\nexit ${exitCode}\n`);
+      chmodSync(join(dir, 'node'), 0o755);
+      let status = 0;
+      let stdout = '';
+      try {
+        stdout = execFileSync('bash', ['-ec', resolve.run], {
+          env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (e) {
+        status = e.status;
+        stdout = `${e.stdout ?? ''}`;
+      }
+      rmSync(dir, { recursive: true, force: true });
+      return { status, stdout };
+    };
+
+    const ok = runResolve(0);
+    expect(ok.status).toBe(0);
+    expect(ok.stdout).toContain('::notice::Sandbox image resolve took');
+    expect(ok.stdout).toContain('(exit 0)');
+
+    // A failed pull must still surface its duration AND fail the step, so the
+    // round is not recorded as a clean no-op.
+    const failed = runResolve(7);
+    expect(failed.status).toBe(7);
+    expect(failed.stdout).toContain('::notice::Sandbox image resolve took');
+    expect(failed.stdout).toContain('(exit 7)');
+  });
+
+  it('reuses the pool CLI rather than a hard-coded version the pool does not keep warm', () => {
+    const classify = yml.jobs.classify;
+    const ensure = classify.steps.find((step) => step.id === 'ensure_qwen');
+    expect(ensure.run).toContain('command -v qwen');
+    expect(ensure.run).toContain('version=$(qwen --version)');
+    const classifier = classify.steps.find((step) =>
+      step.uses?.includes('qwen-code-action'),
+    );
+    expect(classifier.with.qwen_cli_version).toBe(
+      '${{ steps.ensure_qwen.outputs.version }}',
+    );
+    // Most ticks find no candidate. Resolving the CLI before the scan, or
+    // ungated, makes the hosted fallback pay a global npm install every round.
+    expect(ensure.if).toContain("steps.scan.outputs.target_found == 'true'");
+    const names = classify.steps.map((step) => step.name);
+    expect(names.indexOf('Scan stale PR failures')).toBeLessThan(
+      names.indexOf('Ensure Qwen Code'),
+    );
+    expect(names.indexOf('Ensure Qwen Code')).toBeLessThan(
+      names.indexOf('Classify with ci-flaky-patrol skill'),
+    );
+  });
+
+  it("clears the previous round's state before classifying on a persistent workspace", () => {
+    // The ECS workspace survives across jobs. A decisions file left by an
+    // earlier round would pass Validate and be acted on even when this round's
+    // classifier timed out without writing anything — acting on stale reruns.
+    const classify = yml.jobs.classify;
+    const scan = classify.steps.find((step) => step.id === 'scan');
+    expect(scan.run).toContain('rm -f "${WORKDIR}/ci-flaky-decisions.json"');
+    expect(scan.run).toContain('rm -rf "${QWEN_HOME}"');
+    expect(classify.env.QWEN_HOME).toContain('runner.temp');
+    const names = classify.steps.map((step) => step.name);
+    expect(names.indexOf('Scan stale PR failures')).toBeLessThan(
+      names.indexOf('Classify with ci-flaky-patrol skill'),
+    );
   });
 });

@@ -22,8 +22,19 @@ jobs:
   classify:
     name: 'Classify stale PR failures'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    runs-on: 'ubuntu-latest'
-    timeout-minutes: 10
+    # Schedule and dispatch only, and both check out github.sha (the default
+    # branch), so there is no fork-PR trust gate to add here. Observed on the
+    # hosted pool: one round waited 2h09m for a runner, and 17 of 20 recent
+    # ticks were cancelled with zero jobs — they never received one at all.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Covers the cold-host worst case: the image resolver budgets 10 minutes
+    # for the pull, scan ~2, classifier 5. Warm rounds are far shorter. A cap
+    # below that sum kills the pull mid-flight and the round produces nothing.
+    timeout-minutes: 20
+    env:
+      # The ECS workspace persists across jobs, so the agent home must be
+      # per-run or one round's session state leaks into the next.
+      QWEN_HOME: '${{ runner.temp }}/qwen-patrol-home'
     permissions:
       actions: 'read'
       contents: 'read'
@@ -34,6 +45,40 @@ jobs:
       input_sha: '${{ steps.scan.outputs.input_sha }}'
       has_decisions: '${{ steps.decisions.outputs.has_decisions }}'
     steps:
+      # First step on purpose: 'Resolve patrol identity' below already holds
+      # CI_BOT_PAT, so the pool allowlist must be enforced before any secret is
+      # handed to the runner.
+      - name: 'Check runner environment'
+        env:
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+          RUNNER_NAME: '${{ runner.name }}'
+        run: |-
+          case "${RUNNER_ENVIRONMENT}" in
+            github-hosted|self-hosted) ;;
+            *)
+              echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
+              exit 1
+              ;;
+          esac
+          if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
+            # The routing label is not a registration name; keep the approved
+            # pool allowlist so a stray registration cannot run this job.
+            case "${RUNNER_NAME}" in
+              ecs-qwen-*) ;;
+              *)
+                echo "::error::self-hosted runner '${RUNNER_NAME}' is not an approved patrol pool member; refusing to run here."
+                exit 1
+                ;;
+            esac
+            # The classifier runs inside the docker sandbox. Without a daemon
+            # that otherwise surfaces only after the classifier's 5-minute
+            # budget is already spent. Fail in seconds instead.
+            if ! docker info > /dev/null 2>&1; then
+              echo "::error::docker daemon is not reachable on this runner; the sandboxed classifier cannot start."
+              exit 1
+            fi
+          fi
+
       - name: 'Resolve patrol identity'
         id: 'identity'
         env:
@@ -60,6 +105,12 @@ jobs:
           GH_TOKEN: '${{ github.token }}'
         run: |-
           mkdir -p "${WORKDIR}"
+          # The ECS workspace persists across jobs. A decisions file left by an
+          # earlier round would pass Validate and be acted on even when this
+          # round's classifier timed out without writing anything.
+          rm -f "${WORKDIR}/ci-flaky-decisions.json"
+          rm -rf "${QWEN_HOME}"
+          mkdir -p "${QWEN_HOME}"
           node .github/scripts/ci-flaky-rerun.mjs scan \
             --repo "${{ github.repository }}" \
             --workdir "${WORKDIR}" \
@@ -68,6 +119,44 @@ jobs:
             --max-candidates "${MAX_CANDIDATES_PER_RUN}" \
             --trusted-marker-login "${{ steps.identity.outputs.bot_login }}" > "${WORKDIR}/scan.out"
           grep -E '^(target_found|input_sha)=' "${WORKDIR}/scan.out" >> "${GITHUB_OUTPUT}"
+
+      # After scan and gated on it: most ticks find no candidate, and the
+      # hosted fallback must not pay a global npm install on those rounds.
+      - name: 'Ensure Qwen Code'
+        id: 'ensure_qwen'
+        if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        run: |-
+          set -euo pipefail
+          if command -v qwen >/dev/null 2>&1; then
+            echo "qwen already installed:"
+          else
+            npm install -g --loglevel=error --no-audit @qwen-code/qwen-code@latest
+          fi
+          qwen --version
+          echo "version=$(qwen --version)" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Resolve sandbox image'
+        id: 'sandbox_image'
+        if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        env:
+          # Absolute path so a planted '${RUNNER_TEMP}/qwen-bin' or $GITHUB_PATH
+          # entry cannot shadow the binary the resolver spawns.
+          SANDBOX_COMMAND: '/usr/bin/docker'
+        run: |-
+          # Pull the sandbox image HERE, outside the classifier's 5-minute
+          # budget, and report how long it takes. Observed on the hosted pool:
+          # the one round that received a runner spent 304s in the classifier,
+          # hit the step timeout and produced no decisions, with a docker
+          # process still alive at job cleanup. Whether those 304s went to a
+          # cold image pull or to inference is NOT established — this timing is
+          # what settles it. Reported on failure too, because a slow pull is
+          # exactly the case worth measuring.
+          start="${SECONDS}"
+          status=0
+          node .github/scripts/resolve-sandbox-image.mjs \
+            "$(node -p "require('./package.json').config.sandboxImageUri")" || status=$?
+          echo "::notice::Sandbox image resolve took $((SECONDS - start))s (exit ${status})."
+          exit "${status}"
 
       - name: 'Classify with ci-flaky-patrol skill'
         if: "${{ steps.scan.outputs.target_found == 'true' }}"
@@ -78,18 +167,33 @@ jobs:
         # (28 of 30 runs cancelled; the 2 that passed took ~2 minutes at 00:0x
         # when the model was idle). Bounding the STEP below the job turns a
         # slow model into one wasted cycle instead of a dead patrol - the next
-        # tick simply tries again.
+        # tick simply tries again. The image pull now happens in the preceding
+        # step, so this budget is the model's alone.
         timeout-minutes: 5
         continue-on-error: true
         env:
           GH_TOKEN: ''
           GITHUB_TOKEN: ''
+          # Bind the resolver's digest-pinned step output, not the $GITHUB_ENV
+          # value it also writes: step env outranks that appendable file, which
+          # anything running at the runner's uid on the shared pool can edit.
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
+          # Pin the daemon endpoint for the sandbox this step spawns. An empty
+          # DOCKER_HOST is skipped by the docker CLI and falls through to the
+          # pool-shared currentContext, so name the context explicitly.
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
         uses: 'QwenLM/qwen-code-action@05f81718976f3b7da657422e6e8e4d372b8621d7'
         with:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          qwen_cli_version: '0.19.9'
+          # Pin the action's unconditional global reinstall to the version this
+          # job already runs, which on the ECS pool is the preinstalled one.
+          # Left at `latest` the action resolves the dist-tag from the runner's
+          # persistent npm cache, which lags npm publishes; the old hard-coded
+          # 0.19.9 pin instead forced a version the pool does not keep warm.
+          qwen_cli_version: '${{ steps.ensure_qwen.outputs.version }}'
           settings: |-
             {
               "tools": {
@@ -135,7 +239,7 @@ jobs:
     name: 'Act on classified PR failures'
     needs: 'classify'
     if: "${{ needs.classify.result == 'success' && needs.classify.outputs.has_decisions == 'true' }}"
-    runs-on: 'ubuntu-latest'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 10
     # GitHub writes use CI_BOT_PAT; keep the generated GITHUB_TOKEN read-only.
     permissions:
@@ -143,6 +247,31 @@ jobs:
       contents: 'read'
       pull-requests: 'read'
     steps:
+      # This job holds the write-capable CI_BOT_PAT, so it gets the same pool
+      # allowlist as classify. No docker preflight: act only runs the driver's
+      # GitHub reads and writes, never a sandboxed agent.
+      - name: 'Check runner environment'
+        env:
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+          RUNNER_NAME: '${{ runner.name }}'
+        run: |-
+          case "${RUNNER_ENVIRONMENT}" in
+            github-hosted|self-hosted) ;;
+            *)
+              echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
+              exit 1
+              ;;
+          esac
+          if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
+            case "${RUNNER_NAME}" in
+              ecs-qwen-*) ;;
+              *)
+                echo "::error::self-hosted runner '${RUNNER_NAME}' is not an approved patrol pool member; refusing to run here."
+                exit 1
+                ;;
+            esac
+          fi
+
       - name: 'Checkout trusted event commit'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
         with:
