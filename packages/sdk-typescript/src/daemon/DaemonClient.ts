@@ -237,6 +237,8 @@ import type {
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
   DaemonSkillBatchToggleResult,
+  DaemonUserSkillActivation,
+  DaemonUserSkillsActivationResult,
   DaemonSkillToggleResult,
   DaemonSkillRefreshResult,
   DaemonSkillInstallRequest,
@@ -5660,6 +5662,20 @@ export class DaemonClient {
         return (await res.json()) as DaemonSkillBatchToggleResult;
       },
     );
+  }
+
+  /** Save User Skill preferences by exact name; runtime propagation is asynchronous. */
+  setUserSkillsActivation(
+    skillNames: readonly string[],
+    activation: DaemonUserSkillActivation,
+    opts?: { clientId?: string },
+  ): Promise<DaemonUserSkillsActivationResult> {
+    return this.jsonRequest('/skills/activation', 'PUT /skills/activation', {
+      method: 'PUT',
+      body: { skillNames, ...activation },
+      clientId: opts?.clientId,
+      mode: 'rest',
+    });
   }
 
   installWorkspaceSkill(
