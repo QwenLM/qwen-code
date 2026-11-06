@@ -79,6 +79,8 @@ const live = vi.hoisted(() => ({
   script: new Map<number, Array<Record<string, unknown>>>(),
   holds: new Set<number>(),
   errors: new Map<number, Error>(),
+  /** Turns that fail before their request reaches the model client. */
+  unsent: new Map<number, Error>(),
   holdAfterEvents: new Set<number>(),
 }));
 
@@ -93,6 +95,7 @@ vi.mock('./live-session.js', () => ({
     live.signals.push(signal);
     live.turns.push({ prompt, options });
     const turn = live.turns.length;
+    if (live.unsent.has(turn)) throw live.unsent.get(turn);
     (options as LivePromptOptions).onPreparedRequest?.({
       content: prompt as never,
       modelOverride: (options as LivePromptOptions).modelOverride,
@@ -197,6 +200,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     live.script.clear();
     live.holds.clear();
     live.errors.clear();
+    live.unsent.clear();
     live.holdAfterEvents.clear();
   });
 
@@ -2186,6 +2190,7 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
     live.script.clear();
     live.holds.clear();
     live.errors.clear();
+    live.unsent.clear();
     live.holdAfterEvents.clear();
     vi.restoreAllMocks();
   });
@@ -2206,6 +2211,7 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
       stopSubmittedPrompts: vi.fn(),
       notePersonPrompt: vi.fn(),
       returnSubmittedPrompt: vi.fn(),
+      subscribePrompts: (_listener: () => void) => () => {},
       takeSubmittedPrompt: vi.fn(() => submitted.shift()),
     };
     vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue(
@@ -2469,20 +2475,29 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
     expect(calls).toEqual(['note', 'stop', 'note']);
   });
 
-  it("puts back a Mod's prompt whose turn ended before admission, until the next turn", async () => {
+  it("puts back a Mod's prompt whose turn could not start, until the next turn or prompt", async () => {
     const { mods, submitted } = installMods();
+    const listeners = new Set<() => void>();
+    Object.assign(mods, {
+      subscribePrompts: (listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    });
     mods.returnSubmittedPrompt.mockImplementation((prompt: ModQueuedPrompt) =>
       submitted.unshift(prompt),
     );
     const { result } = renderHook(() =>
       useOpenTuiLiveTurn({ config: modConfig().config }),
     );
-    live.errors.set(1, new Error('prepare failed'));
-    live.holds.add(1);
+    const failBeforeSend = async (turn: number) => {
+      live.unsent.set(turn, new Error('prepare failed'));
+      act(() => expect(result.current.runModPrompt()).toBe(true));
+      await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    };
     const prompt = { plugin: 'followup-mod', text: 'one' };
     submitted.push(prompt);
-    act(() => expect(result.current.runModPrompt()).toBe(true));
-    await settle(result);
+    await failBeforeSend(1);
     expect(mods.returnSubmittedPrompt).toHaveBeenCalledExactlyOnceWith(prompt);
     // No line for a prompt that never ran, and nothing for Ctrl+Y to resend.
     expect(result.current.items.some((item) => item.kind === 'info')).toBe(
@@ -2490,17 +2505,48 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
     );
     act(() => result.current.retryLastPrompt());
     expect(live.turns).toHaveLength(1);
-    // It waits for the next turn to end rather than fail again in a loop.
+    // It waits rather than fail again in a loop on the busy edge...
     act(() => expect(result.current.runModPrompt()).toBe(false));
-    live.holds.add(2);
+    // ...until a Mod submits again,
+    act(() => listeners.forEach((listener) => listener()));
+    await failBeforeSend(2);
+    expect(mods.returnSubmittedPrompt).toHaveBeenCalledTimes(2);
+    act(() => expect(result.current.runModPrompt()).toBe(false));
+    // or the person's next turn.
+    live.holds.add(3);
     act(() => result.current.submit('person'));
     await settle(result);
-    live.holds.add(3);
+    live.holds.add(4);
     act(() => expect(result.current.runModPrompt()).toBe(true));
-    expect(options(3).modPrompt).toBe(prompt);
-    options(3).onPromptAdmitted?.();
+    expect(options(4).modPrompt).toBe(prompt);
+    act(() => options(4).onPromptAdmitted?.());
     await settle(result);
-    expect(mods.returnSubmittedPrompt).toHaveBeenCalledTimes(1);
+    expect(mods.returnSubmittedPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it("spends a Mod's prompt that reached the model client, as ink does", async () => {
+    const { mods, submitted } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: modConfig().config }),
+    );
+    // A UserPromptSubmit hook that blocks or fails it never admits it.
+    live.errors.set(1, new Error('UserPromptSubmit hook failed'));
+    submitted.push({ plugin: 'followup-mod', text: 'one' });
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    await settle(result);
+    expect(mods.returnSubmittedPrompt).not.toHaveBeenCalled();
+  });
+
+  it("counts the person's steering as their prompt", async () => {
+    const { mods } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => result.current.submit('first'));
+    expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+    act(() => options(1).onAcceptedSteering?.(['also check tests']));
+    expect(mods.notePersonPrompt).toHaveBeenCalledTimes(2);
+    await settle(result);
   });
 
   it("stops the Mods' prompts when the person stops a turn, not when a Mod ends it", async () => {
@@ -2559,6 +2605,7 @@ describe('useOpenTuiLiveTurn streaming counters', () => {
     live.script.clear();
     live.holds.clear();
     live.errors.clear();
+    live.unsent.clear();
   });
 
   function renderTurn() {
@@ -2661,6 +2708,7 @@ describe('live-turn dual-output ownership', () => {
     live.holds.clear();
     live.declines.clear();
     live.errors.clear();
+    live.unsent.clear();
   });
 
   it.each(['reset', 'unmount'] as const)(
@@ -2776,6 +2824,7 @@ describe('clipboard source queue restoration', () => {
     live.script.clear();
     live.holds.clear();
     live.errors.clear();
+    live.unsent.clear();
     live.holdAfterEvents.clear();
   });
 
@@ -2882,6 +2931,7 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
     live.script.clear();
     live.holds.clear();
     live.errors.clear();
+    live.unsent.clear();
     live.holdAfterEvents.clear();
     vi.restoreAllMocks();
   });
@@ -2908,6 +2958,7 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
       stopSubmittedPrompts: vi.fn(),
       notePersonPrompt: vi.fn(),
       returnSubmittedPrompt: vi.fn(),
+      subscribePrompts: (_listener: () => void) => () => {},
     } as unknown as ReturnType<
       typeof interactiveMods.getInteractiveModSession
     >);
@@ -3292,6 +3343,7 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
       stopSubmittedPrompts: vi.fn(),
       notePersonPrompt: vi.fn(),
       returnSubmittedPrompt: vi.fn(),
+      subscribePrompts: (_listener: () => void) => () => {},
       ready,
       submitPrompt,
       startTurn: vi.fn(() => ({ id: 't', saw: vi.fn(), complete: vi.fn() })),

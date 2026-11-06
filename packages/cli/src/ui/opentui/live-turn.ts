@@ -334,10 +334,17 @@ export function useOpenTuiLiveTurn(
     promptId: string;
     options?: OpenTuiSubmitOptions;
   } | null>(null);
-  // A Mod's prompt went back after its turn ended before admission; it waits
-  // for the next turn to end rather than retry at once and fail the same way
-  // in a loop, as ink's does.
+  // A Mod's prompt went back after its turn could not start; it waits for the
+  // next turn, or the next prompt a Mod submits, rather than retry at once on
+  // the busy edge and fail the same way in a loop, as ink's does.
   const modPromptHeldRef = useRef(false);
+  useEffect(
+    () =>
+      getInteractiveModSession(config)?.subscribePrompts(() => {
+        modPromptHeldRef.current = false;
+      }),
+    [config],
+  );
   const activeTurnRef = useRef<{
     seq: number;
     prompt?: OpenTuiInputSubmission;
@@ -560,7 +567,9 @@ export function useOpenTuiLiveTurn(
         // counts when it runs, after any stop the turn before it made.
         if (!retry && !turnOptions?.toolCall) mods?.notePersonPrompt();
       }
-      let admitted = false;
+      // Whether the request reached the model client: a Mod's prompt that a
+      // UserPromptSubmit hook blocked there is spent, as in ink.
+      let sent = false;
       let modTurn: ModTurn | undefined;
       let modEnded = false;
       // Declining every tool ends the turn as a cancel, as it does in ink.
@@ -727,6 +736,8 @@ export function useOpenTuiLiveTurn(
           retry,
           onAcceptedSteering: (messages) => {
             if (seq !== turnSeqRef.current) return;
+            // The person's words reached the model inside this turn.
+            mods?.notePersonPrompt();
             active.canUndoLog = false;
             for (const message of messages) {
               void logger
@@ -737,6 +748,7 @@ export function useOpenTuiLiveTurn(
             }
           },
           onPreparedRequest: (request) => {
+            sent = true;
             if (seq === turnSeqRef.current) prepared = request;
           },
           submittedPrompt: turnOptions?.submittedPrompt,
@@ -748,7 +760,6 @@ export function useOpenTuiLiveTurn(
           isCurrentTurn: () => seq === turnSeqRef.current,
           ...(mods && {
             onPromptAdmitted: () => {
-              admitted = true;
               // A notice naming the Mod, not a row the person typed: it is not
               // recalled, rewound to or logged as the person's input. It shows
               // once the prompt is admitted, so one that goes back has none.
@@ -886,10 +897,11 @@ export function useOpenTuiLiveTurn(
               ? 'error'
               : undefined,
         );
-        // A Mod's prompt that never reached the model goes back to the queue
-        // and no longer counts toward the limit, as in ink; one the person
-        // stopped is dropped there.
-        const returned = !!modPrompt && !admitted;
+        // A Mod's prompt whose turn could not start (the Mods failed, the
+        // prompt failed to prepare, the transcript was reset) goes back to the
+        // queue and no longer counts toward the limit, as in ink; one the
+        // person stopped is dropped there.
+        const returned = !!modPrompt && !sent;
         if (returned && mods) {
           mods.returnSubmittedPrompt(modPrompt);
           modPromptHeldRef.current = true;
@@ -1258,6 +1270,7 @@ export function useOpenTuiLiveTurn(
   const resetTranscript = useCallback(
     (events: readonly OpenTuiStreamEvent[]) => {
       const onReset = activeTurnRef.current?.onCancelSettled;
+      modPromptHeldRef.current = false;
       skipRetryDelayRef.current = undefined;
       failedRequestRef.current = null;
       // Commit the accepted partial before invalidating its generation; a late

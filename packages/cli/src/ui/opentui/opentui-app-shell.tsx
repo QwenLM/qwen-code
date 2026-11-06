@@ -1245,7 +1245,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   // The person's own command or `!` command lets the Mods' prompts start
   // turns again once it runs; a prompt does so when its turn starts (ink's
-  // submitQuery), so input that is refused or only queued resets nothing.
+  // submitQuery), so input the shell refuses or only queues resets nothing.
+  // A `?`-form counts once the dispatcher takes it, even when a Mod's hook
+  // then drops it, as in ink.
   const notePersonPrompt = useCallback(
     () => getInteractiveModSession(config)?.notePersonPrompt(),
     [config],
