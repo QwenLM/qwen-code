@@ -333,7 +333,7 @@ The optional top-level `/capabilities` field `sessionLiveStatePollIntervalMs` ad
 
 `session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived. `session_archive_idle_guard` advertises the additive `requireIdle` archive option: the owning runtime checks that active work is confirmed idle immediately before it begins the close, and leaves the active transcript in place otherwise. `session_storage_conflict_repair` advertises the additive `resolveConflicts` request option and `resolvedConflicts` response bucket described below.
 
-`workspace_qualified_rest_core` advertises plural core REST routes under `/workspaces/:workspace/...`. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization. Newer single-workspace daemons include the primary runtime in `workspaces[]` even when `multi_workspace_sessions` is absent, allowing clients to discover the id required by workspace-qualified routes; clients should fall back to `capabilities.workspaceCwd` for older daemons that omit the array. Trust status and trust request routes are available for registered untrusted workspaces; file read routes follow the existing filesystem read policy. Registered untrusted secondary workspaces also expose persisted-only session and session-group catalogs: these reads do not attach to a session, start ACP, or merge live bridge state. File writes, catalog mutations, and other plural core routes require a trusted workspace unless a separate capability documents a narrower policy: `workspace_persisted_transcript` (read-only), or the trust grant mutation, which is accepted for a registered untrusted workspace whether or not `workspace_trust_grant` is advertised — that tag reports only whether trust hot-reload is wired, so a recorded decision can reach the running runtime without a daemon restart; it never reports whether the route is served. An untrusted primary continues to receive `403 { code: "untrusted_workspace" }` from the plural catalog and transcript routes; legacy singular primary routes keep their existing compatibility behavior. This tag covers the core file, status, settings, permissions, trust, lifecycle, MCP control, tool and skill toggles, memory, workspace agent CRUD, and session storage surfaces. It does not cover auth, voice, extensions, ACP/WebSocket transport, channel-worker routing, or workspace-qualified session export; pre-flight `workspace_session_export` or `workspace_archived_session_export` separately. Workspace trust is not an ACL: a client holding the daemon token can read every registered workspace surface allowed by this policy.
+`workspace_qualified_rest_core` advertises plural core REST routes under `/workspaces/:workspace/...`. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization. Newer single-workspace daemons include the primary runtime in `workspaces[]` even when `multi_workspace_sessions` is absent, allowing clients to discover the id required by workspace-qualified routes; clients should fall back to `capabilities.workspaceCwd` for older daemons that omit the array. Trust status and trust request routes are available for registered untrusted workspaces; the qualified hooks status read (`GET /workspaces/:workspace/hooks`) is also served for registered untrusted workspaces because it reports the pending project-hooks trust decision, matching the qualified approve mutation; file read routes follow the existing filesystem read policy. Registered untrusted secondary workspaces also expose persisted-only session and session-group catalogs: these reads do not attach to a session, start ACP, or merge live bridge state. File writes, catalog mutations, and other plural core routes require a trusted workspace unless a separate capability documents a narrower policy: `workspace_persisted_transcript` (read-only), or the trust grant mutation, which is accepted for a registered untrusted workspace whether or not `workspace_trust_grant` is advertised — that tag reports only whether trust hot-reload is wired, so a recorded decision can reach the running runtime without a daemon restart; it never reports whether the route is served. An untrusted primary continues to receive `403 { code: "untrusted_workspace" }` from the plural catalog and transcript routes; legacy singular primary routes keep their existing compatibility behavior. This tag covers the core file, status, settings, permissions, trust, lifecycle, MCP control, tool and skill toggles, memory, workspace agent CRUD, and session storage surfaces. It does not cover auth, voice, extensions, ACP/WebSocket transport, channel-worker routing, or workspace-qualified session export; pre-flight `workspace_session_export` or `workspace_archived_session_export` separately. Workspace trust is not an ACL: a client holding the daemon token can read every registered workspace surface allowed by this policy.
 
 `workspace_qualified_voice` advertises Voice routes selected by a trusted workspace runtime: `GET` and `POST /workspaces/:workspace/voice`, `POST /workspaces/:workspace/voice/transcribe`, and `WS /workspaces/:workspace/voice/stream`. It is advertised only when multi-workspace runtimes and the shared ACP/Voice WebSocket listener are both enabled. The selector follows the same id-or-encoded-absolute-cwd rules as other plural routes. For REST, an unknown selector returns `400 { code: "workspace_mismatch" }` and an untrusted selector returns `403 { code: "untrusted_workspace" }`; WebSocket upgrade rejection exposes the corresponding HTTP 400/403 status without a structured JSON envelope. Neither transport falls back to primary. Legacy `/workspace/voice`, `/workspace/voice/transcribe`, and `/voice/stream` remain primary-only. Clients use `workspace_qualified_voice` for all qualified Voice modalities and let the selected runtime report configuration-specific errors. The legacy `workspace_voice`, `workspace_voice_transcription`, and `voice_transcribe` tags describe only the primary-bound routes and must not hide a qualified secondary configuration.
 
@@ -826,11 +826,42 @@ launcher; clients cannot supply a version or command.
 - `POST /daemon/update/restart` requires a prepared update, otherwise it returns
   `409 update_not_ready`. It responds with `202` and `state: "restarting"` before
   activating the update, gracefully closing the daemon, and replacing the process
-  with the updated launcher. Repeated clicks share one restart. The replacement
+  with the updated launcher. Repeated clicks share one restart. After responding,
+  the daemon re-resolves the current release once: if it is newer than the
+  prepared one and one-click covers it, the newer release is staged and the
+  prepared payload is discarded, so a long-lived daemon lands on the current
+  latest rather than on whatever was latest when it first prepared. The newer
+  payload is committed to before the superseded one is discarded, and that
+  discard is best-effort: a failed discard leaks disk but never orphans the
+  newer payload or falls back to one that may be half removed. `latestVersion`
+  then reports the newer target while `state` stays `restarting`. A failed
+  re-resolve or staging applies the prepared release instead; the click is never
+  stranded on the running version by a registry failure. The replacement
   preserves PID, working directory, CLI options, bound port, and effective daemon
   token, clears old version pins, and does not reopen a browser. The client polls
   GET until `currentVersion` changes, then reloads the document at the URL
-  captured when the update was requested. Standalone launcher validation runs before closing
+  captured when the update was requested. Because staging runs after the `202`
+  and can take minutes, the client measures its restart deadline from continuous
+  unreachability, not from the click: a daemon that keeps answering is still
+  working. A generous absolute cap (20 minutes) backstops a daemon
+  that stays reachable but never leaves `restarting`. It sits above the whole
+  staging chain, not above a single timeout constant: a standalone archive
+  download tries OSS and then GitHub sequentially with a five-minute budget
+  _each_, and the checksum and signature fetches add up to two more minutes, so
+  one restage can spend about twelve minutes downloading and verifying before
+  activation; the managed npm child is capped at ten. Every give-up path keeps a
+  retryable entry on screen, because a wedged daemon keeps reporting
+  `restarting`, which the control does not otherwise display. Once the restart is
+  acknowledged, `restarting` is sticky until the
+  process is replaced, so a reachable daemon that reports any other state with an
+  unchanged `currentVersion` means the replacement did not land on the new build;
+  the client stops waiting, publishes that settled state, and reports a failure
+  rather than waiting forever for a version change. That check applies only to a
+  poll _initiated_ after the acknowledgement: the status and restart requests are
+  independent, so a poll started earlier can deliver a pre-restart snapshot
+  afterwards, and reading that as a settled daemon would report a false failure
+  and suppress the reload a successful update still owes the user.
+  Standalone launcher validation runs before closing
   services; a failed check leaves the daemon running. Failures after shutdown
   begins or during process replacement are not guaranteed to recover.
 
@@ -839,10 +870,18 @@ background, and displays its version-adjacent update button when a prepared
 update is ready or when an available update carries manual instructions. In the
 manual-instructions state the button opens a popover with the instructions from
 the check and never prepares or restarts. Preparation and readiness survive workspace runtime
-reloads. Ordinary daemon shutdown discards the prepared download. Activation
+reloads. A prepared update pins its target: polling GET, including
+`?refresh=true`, keeps reporting the prepared `latestVersion` and never
+re-downloads, so a daemon that stays alive across several releases does not
+churn downloads in the background. Only the restart re-resolves the target.
+Ordinary daemon shutdown discards the prepared download. Activation
 failures keep the daemon running and report `error`; the next check after the
 one-minute error cache can prepare a new download for retry. Disabling automatic
 updates removes readiness and cleans the download before a restart can begin.
+Once a restart is in flight it is undisturbed: while the state is `restarting`
+the status, prepare and restart routes all return without consulting the
+operator setting, and shutdown cleanup is a no-op, so a restage that takes
+minutes cannot have its payload pulled out from under it.
 Clicking the button in the ready state explicitly restarts the entire daemon
 and interrupts its active sessions.
 
@@ -1259,12 +1298,22 @@ user or system settings. The member is omitted entirely when no channel
 resolves, and older daemons never send it; a settings read failure degrades
 to its absence rather than failing the journal read. Each event records what a Channel did — an inbound
 message it accepted or skipped (with the machine reason: `reason_filter`,
-`mention_required`, `duplicate`, a sender-gate rejection), a publication
+`mention_required`, `duplicate`, a sender-gate rejection, `github_api_error`),
+a GitHub thread whose handling failed and that it will read again (`failed`
+with `github_api_error`: a GitHub error, or a local error while the channel
+cannot read or write its own state or one of the thread's tasks is unfinished),
+a publication
 outcome, an inbound task transition, or a poll result — and never carries
 message text. A GitHub poll that filters more than 20 notifications journals
 the first 20 individually and one further `reason_filter` row whose
 `detail.filtered` counts the rest, so a pinned poll cursor cannot flood the
-journal with repeats of the same batch. Query parameters: `limit` (1-500, default 100), `type`
+journal with repeats of the same batch. While the cursor is held, a comment the
+poll reads again is journaled as `duplicate` or `mention_required` once per
+window, and a failing thread as `github_api_error` on its first failing poll in
+the window and on every tenth failing poll (a rate limit or credential failure:
+its first and every tenth poll), and once when it is skipped. The once-per-window
+rows are tracked under up to 8,192 keys; a row whose key no longer fits is
+journaled on every poll. Query parameters: `limit` (1-500, default 100), `type`
 (comma-separated `inbound`, `outbound`, `task`, `poll`), `channel`
 (repeat the parameter once per instance name), and `since` (ISO 8601). The route needs no
 operator authority. Journal reads are asynchronous and bounded: the current journal plus one

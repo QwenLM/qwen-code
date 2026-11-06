@@ -16,6 +16,7 @@ import {
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   isPrivateProvenanceEnvKey,
+  keepsEmptyHomeEnvValue,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
@@ -248,7 +249,11 @@ function readHomeEnvInto(file: string): void {
   try {
     const parsed = dotenv.parse(fs.readFileSync(file, 'utf-8'));
     for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
-      if (parsed[key] && !Object.hasOwn(process.env, key)) {
+      if (
+        (parsed[key] ||
+          (keepsEmptyHomeEnvValue(key) && parsed[key] !== undefined)) &&
+        !Object.hasOwn(process.env, key)
+      ) {
         process.env[key] = parsed[key];
       }
     }
@@ -818,7 +823,8 @@ export function loadEnvironment(
 
       const existingValue = process.env[key];
       const isEffectivelyUnset =
-        !Object.hasOwn(process.env, key) || existingValue === '';
+        !Object.hasOwn(process.env, key) ||
+        (existingValue === '' && !keepsEmptyHomeEnvValue(key));
       if (isEffectivelyUnset) {
         process.env[key] = envFile.parsedEnv[key];
         dotEnvSourcedKeys.add(key);
