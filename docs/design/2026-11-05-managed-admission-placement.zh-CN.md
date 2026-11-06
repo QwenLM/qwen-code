@@ -31,6 +31,7 @@
 
 1. **drain 获取 Session root。** `requestHarnessDrain` 在 placement 之后、写 head 行之前锁 Session root（`ma_session ... FOR UPDATE`）。placement → root 是所有 placement 持有者已经在用的顺序。调用方（`ManagedRuntimeCoordinator.requestWorkspaceClose`，经由 `SessionLifecycleCoordinator`）在独立事务中调用它，外层没有数据库事务。没有 root 的 harness Session 保持现状。
 2. **不经 placement 的准入。** 在事务开始前、紧挨现有的 `findById`，用独立连接做几次普通读，决定准入能否跳过 placement。要求同时满足：
+
    - binding 不属于 CSI files profile，也不是常驻工作区；
    - `isolationClass = session`，且不共享 Runtime Session；
    - 没有 lifecycle authority（这种检查已经对 head 行加共享锁）；
@@ -59,6 +60,20 @@
 | Runtime retention      | placement → slot → binding → execution → Runtime Session                   |
 
 准入和 retention、派发一样，先锁 binding，再锁 Runtime Session 和 execution。它最先锁 root，而没有任何不持 guard 的路径会先锁 binding、再锁 root。
+
+## 发现：storage alias 行
+
+实现前的复查发现了上面审计漏掉的一把锁。对带 storage id 的 binding，准入（`requireStorageAdmission` → `requirePhysicalStorageAdmission` → `localStorageOwnerKey`）会在 binding 之后对 `ma_storage` 的 alias 行加 `FOR UPDATE`。只要存储有 alias 行就会加，不只限于 `LOCAL` 存储。绑定了工作区的 Session 总是带 storage id。
+
+placement 持有者以两种相反的顺序锁这一行和 binding：
+
+- **先 binding 后 alias：** `createSession` 和准入；
+- **先 alias 后 binding：** `completeStoppedSessionRelease`（alias → storage owner → binding → Runtime Session）。
+
+今天靠 placement 把它们隔开。不经 placement 的准入无论放在哪种顺序，都会和其中一条形成环，所以快速路径不能直接覆盖带存储的 binding。有两条路：
+
+- **(b1) 只覆盖没有存储的 binding。** 快速路径额外要求没有 storage id，加锁顺序就与派发相同。改动小且安全，但覆盖不到绑定工作区的 Session。
+- **(b2) 先统一存储相关的加锁顺序。** 所有 placement 持有者都先锁 binding，再锁 alias 和 storage owner 行。`completeStoppedSessionRelease` 把 binding 锁提前；其他锁 alias 的路径逐一审计：`LocalStorageOwners`、`WorkspaceFileUploadStore`、迁移、SSH、CSI。之后快速路径的顺序是 root → binding → alias → storage owner → Runtime Session。同一工作区的准入仍会在它的 alias 行上串行，与今天相同；收益在于同一租户内不同工作区之间可以并发。
 
 ## 验证计划
 

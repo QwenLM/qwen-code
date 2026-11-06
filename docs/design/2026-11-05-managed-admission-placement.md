@@ -54,6 +54,7 @@ binding, the Runtime Session and the new execution.
 2. **Placement-free admission.** Before the transaction, next to the existing
    `findById`, plain reads on their own connection decide whether admission may skip
    placement. They require all of these:
+
    - the binding is outside the CSI files profile and not a Resident Workspace;
    - `isolationClass = session`, and it does not share Runtime Sessions;
    - no lifecycle authority (such a check already share-locks the head row);
@@ -93,6 +94,35 @@ binding, the Runtime Session and the new execution.
 Admission keeps the binding before the Runtime Session and the execution, like
 retention and dispatch. It takes the root first, and no guard-free path locks a binding
 and then a root.
+
+## Finding: the storage alias row
+
+Implementation review found a lock that the audit above missed. For a binding with a
+storage id, admission (`requireStorageAdmission` → `requirePhysicalStorageAdmission` →
+`localStorageOwnerKey`) locks the `ma_storage` alias row `FOR UPDATE` after the
+binding. It does so for every storage with an alias row, not only `LOCAL` ones.
+Workspace-bound Sessions always carry a storage id.
+
+Placement owners lock that row and the binding in both orders:
+
+- **binding, then alias:** `createSession` and admission;
+- **alias, then binding:** `completeStoppedSessionRelease` (alias → storage owner →
+  binding → Runtime Session).
+
+Placement keeps them apart today. A placement-free admission would close a cycle with
+one of them in either position, so the fast path cannot simply include storage-backed
+bindings. Two ways forward:
+
+- **(b1) Storage-less bindings only.** The fast path additionally requires no storage
+  id. Its order is then the same as dispatch. It is small and safe, but it does not
+  reach workspace-bound Sessions.
+- **(b2) Unify the storage order first.** Every placement owner locks the binding
+  before the alias and storage owner rows. `completeStoppedSessionRelease` moves its
+  binding lock first, and the other alias lockers are audited: `LocalStorageOwners`,
+  `WorkspaceFileUploadStore`, migration, SSH and CSI. The fast path then takes
+  root → binding → alias → storage owner → Runtime Session. Admissions of one Workspace
+  still serialize on its alias row, as they do today. What the change gains is
+  concurrency across the Workspaces of a tenant.
 
 ## Verification plan
 
