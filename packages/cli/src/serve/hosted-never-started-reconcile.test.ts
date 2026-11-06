@@ -48,6 +48,7 @@ vi.mock(
           );
         }
         if (
+          kind !== 'shell' &&
           !(
             actual.MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS as readonly string[]
           ).includes(kind)
@@ -674,6 +675,24 @@ describe('reconcileNeverStartedChildRuns', () => {
       kind: 'shell',
       run: { state: 'admitted', execution: 'intent' },
     });
+  });
+
+  it('refuses a shell admit when the fixture explicitly disables its kind', async () => {
+    await open();
+    await createManagedHarnessHandle(session!).ensureRunnable();
+    enablement.childRun = false;
+
+    await expect(
+      orchestratorOf(session!).admit({
+        shellId: 'shell-1',
+        ownerScopeId: 'scope-main',
+        executionCallId: 'shell-1',
+        args: { command: 'printf hi', is_background: true },
+      }),
+    ).rejects.toThrow('registered but not enabled');
+    expect(
+      session!.authority.extensionRecord('child_run', 'shell-1'),
+    ).toBeUndefined();
   });
 
   it('never scans a child_agent record, the one kind production can commit today', async () => {
