@@ -127,6 +127,32 @@ describe('qwen pr review runner routing', () => {
     expect(runsOn).not.toContain('ecs-qwen');
     expect(runsOn).not.toContain('ecs-agent');
   });
+
+  it('routes the command gate to ECS for payload-less events, keeps the fork guard', () => {
+    // authorize is the write-permission gate for /review and /resolve. It
+    // loads CI_BOT_PAT but checks out nothing and runs no agent, so the
+    // persistent pool is safe whenever the trigger carries no fork code.
+    // issue_comment and workflow_dispatch have no github.event.pull_request
+    // payload: the old same-repo-only guard fell through to ubuntu-latest for
+    // every command, parking the gate in the hosted queue for hours (#15286).
+    // Pin the exact expression so neither the new ECS disjuncts nor the fork
+    // guard / hosted fallback can be dropped silently.
+    const runsOn = String(parse(workflow).jobs['authorize']['runs-on']);
+
+    expect(runsOn).toBe(
+      "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch')) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}",
+    );
+    // The command events must reach the persistent pool...
+    expect(runsOn).toContain("github.event_name == 'issue_comment'");
+    expect(runsOn).toContain("github.event_name == 'workflow_dispatch'");
+    // ...while PR-payload events keep the same-repo fork guard, and the
+    // hosted fallback + ECS kill switch stay for forks / disabled routing.
+    expect(runsOn).toContain(
+      'github.event.pull_request.head.repo.full_name == github.repository',
+    );
+    expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+    expect(runsOn).toContain('fromJSON(\'["ubuntu-latest"]\')');
+  });
 });
 
 function runReviewStep() {

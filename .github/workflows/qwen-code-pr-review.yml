@@ -351,12 +351,24 @@ jobs:
         startsWith(github.event.comment.body, '@qwen-code /review')) ||
        (github.event_name == 'pull_request_review' &&
         startsWith(github.event.review.body, '@qwen-code /review')))
-    # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
-    # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
-    # use the persistent ECS runner. The job IS the write-permission check, so
-    # it cannot route on its own output; downstream jobs already route on the
-    # repository guard alone.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Runner routing for the write-permission gate. This job loads CI_BOT_PAT
+    # but runs no agent, checks out nothing, and processes no untrusted PR
+    # content — it only reads event metadata and calls one read API — so it is
+    # safe on the persistent ECS pool whenever the trigger cannot carry fork
+    # code into it:
+    # - PR-payload events (pull_request_target / pull_request_review /
+    #   pull_request_review_comment) keep the canonical same-repo guard: a fork
+    #   head stays on hosted (ephemeral), an in-repo head uses ECS.
+    # - issue_comment (/review, /resolve) and workflow_dispatch carry no
+    #   github.event.pull_request payload at all, so the same-repo guard alone
+    #   fell through to ubuntu-latest for EVERY command — the gate then sat in
+    #   the hosted queue for hours (PR #15286: 3h10m for a 4-second job) while
+    #   the ECS pool was idle. Route them to ECS like qwen-autofix.yml's
+    #   route/review-scan, which apply the same "no PR payload → no fork code →
+    #   persistent pool" rule to their PAT-bearing API-only steps.
+    # The job IS the write-permission check, so it cannot route on its own
+    # output; downstream jobs already route on the repository guard alone.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == ''issue_comment'' || github.event_name == ''workflow_dispatch'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
