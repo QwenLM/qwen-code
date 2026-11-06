@@ -46,6 +46,10 @@ import { hostedPromptKey } from './hosted-member-chain.js';
 import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
 import { HOSTED_TOOL_APPROVAL_POLICY } from './hosted-tool-approval.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+import {
+  RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+  WORKSPACE_CAPABILITY_DIGEST,
+} from './managed-workspace-activation.js';
 
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
 const PROMPT_ID = '33333333-3333-4333-8333-333333333333';
@@ -134,6 +138,7 @@ describe('recoverHostedRuntimeTurn', () => {
     withIntent = true,
     extraExecutionId?: string,
     runtimeSessionId = PROMPT_ID,
+    readFileInput?: { file_path: string; pages?: string },
   ): Promise<ManagedSession> {
     const session = await open(
       'boot-1',
@@ -191,7 +196,10 @@ describe('recoverHostedRuntimeTurn', () => {
               toolName === 'glob'
                 ? { pattern: '**/*.ts' }
                 : toolName === 'read_file'
-                  ? { file_path: `${ordinal}.pdf`, pages: '1-3' }
+                  ? (readFileInput ?? {
+                      file_path: `${ordinal}.pdf`,
+                      pages: '1-3',
+                    })
                   : { file_path: `${ordinal}.txt`, content: 'x' },
           }),
         }),
@@ -2786,15 +2794,40 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it.each(['write_file', 'read_file', 'glob'])(
-    'bounds an oversized recovered %s output without replaying it again',
-    async (toolName) => {
-      await parkAtAwaitRuntime(toolName);
+  it.each([
+    { toolName: 'write_file', resident: false },
+    { toolName: 'read_file', resident: false },
+    { toolName: 'read_file', resident: true },
+    { toolName: 'glob', resident: false },
+  ])(
+    'bounds an oversized recovered $toolName output without replaying it again (resident=$resident)',
+    async ({ toolName, resident }) => {
+      const readFileInput = resident
+        ? { file_path: '0.txt' }
+        : { file_path: '0.pdf', pages: '1-3' };
+      await parkAtAwaitRuntime(
+        toolName,
+        false,
+        false,
+        true,
+        undefined,
+        PROMPT_ID,
+        readFileInput,
+      );
       const paths = Array.from(
         { length: 100 },
         (_, index) => 'nested/'.repeat(120) + `file-${index}.ts`,
       );
       vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'capabilityDigest',
+        'get',
+      ).mockReturnValue(
+        resident
+          ? RESIDENT_WORKSPACE_CAPABILITY_DIGEST
+          : WORKSPACE_CAPABILITY_DIGEST,
+      );
       const execute = vi
         .spyOn(HostedWorkspaceBroker.prototype, 'execute')
         .mockResolvedValue({
@@ -2855,12 +2888,14 @@ describe('recoverHostedRuntimeTurn', () => {
           if (toolName === 'read_file') {
             expect(JSON.parse(execute.mock.calls[0][1])).toEqual({
               toolName: 'read_file',
-              input: { file_path: '0.pdf', pages: '1-3' },
+              input: readFileInput,
             });
-            expect(response?.['error']).toContain(
-              'offset/limit range for text',
-            );
-            expect(response?.['error']).toContain('pages range for PDFs');
+            expect(response?.['error']).toContain('offset/limit range');
+            if (resident) {
+              expect(response?.['error']).not.toContain('pages');
+            } else {
+              expect(response?.['error']).toContain('pages range for PDFs');
+            }
           }
         }
       } finally {
