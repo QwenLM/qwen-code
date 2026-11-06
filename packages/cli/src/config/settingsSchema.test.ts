@@ -314,6 +314,9 @@ describe('SettingsSchema', () => {
           'screenshotTriggerThreshold',
         ].sort(),
       );
+      // Every declared default is pinned: nothing else in the repo compares a
+      // numeric schema default against core's constant, so an unpinned one
+      // can drift from the value the runtime actually uses.
       expect(properties.imagePayloadThreshold).toMatchObject({
         type: 'integer',
         default: 20,
@@ -321,18 +324,28 @@ describe('SettingsSchema', () => {
       });
       expect(properties.maxRecentFilesToRetain).toMatchObject({
         type: 'integer',
+        default: 5,
         minimum: 0,
       });
       expect(properties.maxRecentImagesToRetain).toMatchObject({
         type: 'integer',
+        default: 3,
         minimum: 0,
       });
       expect(properties.screenshotTriggerThreshold).toMatchObject({
         type: 'integer',
+        default: 20,
         minimum: 1,
       });
-      expect(properties.enableScreenshotTrigger.type).toBe('boolean');
-      expect(properties.imageTokenEstimate.type).toBe('number');
+      expect(properties.enableScreenshotTrigger).toMatchObject({
+        type: 'boolean',
+        default: true,
+      });
+      expect(properties.imageTokenEstimate).toMatchObject({
+        type: 'number',
+        default: 1600,
+        minimum: 1,
+      });
     });
 
     it('should have sandboxImage setting under tools', () => {

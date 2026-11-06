@@ -5657,9 +5657,14 @@ type InferSettings<T extends SettingsSchema> = {
         : T[K]['options'] extends readonly SettingEnumOption[]
           ? T[K]['options'][number]['value']
           : T[K]['default']
-      : T[K]['default'] extends boolean
-        ? boolean
-        : T[K]['default'];
+      : T[K]['type'] extends 'number' | 'integer'
+        ? // A declared `properties` block gives these fields a `default`, and
+          // the branch above would then infer that literal type (`20`), so a
+          // caller could not write a different in-range value.
+          number
+        : T[K]['default'] extends boolean
+          ? boolean
+          : T[K]['default'];
 };
 
 export type Settings = InferSettings<SettingsSchemaType>;
