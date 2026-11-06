@@ -13988,6 +13988,17 @@ export function App({
     workspaceSettings.find(
       (setting) => setting.key === 'ui.accessibility.enableLoadingPhrases',
     )?.values.effective !== false;
+  // Only the automatic recap is gated; the manual /recap path is not.
+  const showSessionRecap =
+    workspaceSettings.find(
+      (setting) => setting.key === 'general.showSessionRecap',
+    )?.values.effective === true;
+  const recapAwayThresholdMinutes = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'general.sessionRecapAwayThresholdMinutes',
+    )?.values.effective;
+    return typeof value === 'number' && value > 0 ? value : 5;
+  })();
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -15372,7 +15383,9 @@ export function App({
   const liveGoalSnapshot =
     goalSnapshot?.goal?.status === 'complete' ? null : goalSnapshot;
 
-  // Auto-recap: fire when the user returns after being away ≥ 3 minutes
+  // Auto-recap: fire when the user returns after being away for longer than
+  // `general.sessionRecapAwayThresholdMinutes`, but only when
+  // `general.showSessionRecap` opted in — same contract as the terminal CLI.
   const hiddenAtRef = useRef<number | null>(null);
   const lastRecapBlockCountRef = useRef(0);
   const autoRecapVersionRef = useRef(0);
@@ -15381,7 +15394,7 @@ export function App({
     autoRecapVersionRef.current += 1;
   }, [logicalSessionKey]);
   useEffect(() => {
-    const AWAY_THRESHOLD_MS = 3 * 60 * 1000;
+    const AWAY_THRESHOLD_MS = recapAwayThresholdMinutes * 60 * 1000;
     const MIN_NEW_BLOCKS = 4;
     function onVisibilityChange() {
       if (document.hidden) {
@@ -15391,6 +15404,7 @@ export function App({
       const hiddenAt = hiddenAtRef.current;
       hiddenAtRef.current = null;
       if (hiddenAt === null) return;
+      if (!showSessionRecap) return;
       if (Date.now() - hiddenAt < AWAY_THRESHOLD_MS) return;
       if (sessionWriteBlocked) return;
       if (streamingStateRef.current !== 'idle') return;
@@ -15452,10 +15466,12 @@ export function App({
       document.removeEventListener('visibilitychange', onVisibilityChange);
   }, [
     connection.sessionId,
+    recapAwayThresholdMinutes,
     sessionActions,
     sessionOwnerGuard,
     sessionWriteBlocked,
     showRecapMessage,
+    showSessionRecap,
     store,
     t,
   ]);

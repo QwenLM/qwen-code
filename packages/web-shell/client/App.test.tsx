@@ -12171,6 +12171,30 @@ function visibleRecapTexts(): string[] {
   );
 }
 
+function sessionRecapSetting(effective: boolean): DaemonSettingDescriptor {
+  return {
+    key: 'general.showSessionRecap',
+    type: 'boolean',
+    label: 'Show Session Recap',
+    category: 'General',
+    requiresRestart: false,
+    default: false,
+    values: { effective },
+  };
+}
+
+function recapAwayThresholdSetting(effective: number): DaemonSettingDescriptor {
+  return {
+    key: 'general.sessionRecapAwayThresholdMinutes',
+    type: 'number',
+    label: 'Session Recap Away Threshold (minutes)',
+    category: 'General',
+    requiresRestart: false,
+    default: 5,
+    values: { effective },
+  };
+}
+
 async function triggerAutoRecap(): Promise<{
   recap: ReturnType<
     typeof deferred<{ sessionId: string; recap: string | null }>
@@ -12178,6 +12202,7 @@ async function triggerAutoRecap(): Promise<{
   container: HTMLElement;
   rerender: (nextProps?: React.ComponentProps<typeof App>) => void;
 }> {
+  testState.settings = [sessionRecapSetting(true)];
   const recap = deferred<{ sessionId: string; recap: string | null }>();
   mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
   testState.blocks = [{}, {}, {}, {}];
@@ -12192,7 +12217,7 @@ async function triggerAutoRecap(): Promise<{
   const { container, rerender } = renderApp();
   await flush();
   act(() => document.dispatchEvent(new Event('visibilitychange')));
-  now += 3 * 60 * 1000;
+  now += 6 * 60 * 1000;
   hidden = false;
   act(() => document.dispatchEvent(new Event('visibilitychange')));
   expect(mockSessionActions.recapSession).toHaveBeenCalledOnce();
@@ -26872,6 +26897,83 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('does not fire an automatic recap while general.showSessionRecap is unset', async () => {
+    const recap = deferred<{ sessionId: string; recap: string | null }>();
+    mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
+    testState.blocks = [{}, {}, {}, {}];
+    let hidden = true;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    let now = 1;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    renderApp();
+    await flush();
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    now += 10 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+
+    expect(mockSessionActions.recapSession).not.toHaveBeenCalled();
+  });
+
+  it('does not fire an automatic recap when general.showSessionRecap is false', async () => {
+    testState.settings = [sessionRecapSetting(false)];
+    const recap = deferred<{ sessionId: string; recap: string | null }>();
+    mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
+    testState.blocks = [{}, {}, {}, {}];
+    let hidden = true;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    let now = 1;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    renderApp();
+    await flush();
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    now += 10 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+
+    expect(mockSessionActions.recapSession).not.toHaveBeenCalled();
+  });
+
+  it('honors general.sessionRecapAwayThresholdMinutes when recap is enabled', async () => {
+    testState.settings = [
+      sessionRecapSetting(true),
+      recapAwayThresholdSetting(10),
+    ];
+    const recap = deferred<{ sessionId: string; recap: string | null }>();
+    mockSessionActions.recapSession.mockReturnValue(recap.promise);
+    testState.blocks = [{}, {}, {}, {}];
+    let hidden = true;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    let now = 1;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    renderApp();
+    await flush();
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    now += 6 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(mockSessionActions.recapSession).not.toHaveBeenCalled();
+
+    hidden = true;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    now += 10 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(mockSessionActions.recapSession).toHaveBeenCalledOnce();
+  });
+
   it('shows an automatic recap when the session remains active', async () => {
     const { recap } = await triggerAutoRecap();
     await act(async () => {
@@ -27036,6 +27138,7 @@ describe('App session callbacks', () => {
   });
 
   it('keeps only the newest automatic recap across away cycles', async () => {
+    testState.settings = [sessionRecapSetting(true)];
     const first = deferred<{ sessionId: string; recap: string | null }>();
     const second = deferred<{ sessionId: string; recap: string | null }>();
     mockSessionActions.recapSession
@@ -27053,7 +27156,7 @@ describe('App session callbacks', () => {
     renderApp();
     await flush();
     act(() => document.dispatchEvent(new Event('visibilitychange')));
-    now += 3 * 60 * 1000;
+    now += 6 * 60 * 1000;
     hidden = false;
     act(() => document.dispatchEvent(new Event('visibilitychange')));
     await act(async () => {
@@ -27067,7 +27170,7 @@ describe('App session callbacks', () => {
     hidden = true;
     act(() => document.dispatchEvent(new Event('visibilitychange')));
     testState.blocks = Array.from({ length: 8 }, () => ({}));
-    now += 3 * 60 * 1000;
+    now += 6 * 60 * 1000;
     hidden = false;
     act(() => document.dispatchEvent(new Event('visibilitychange')));
     expect(mockSessionActions.recapSession).toHaveBeenCalledTimes(2);
@@ -27132,6 +27235,7 @@ describe('App session callbacks', () => {
   });
 
   it('does not strand the manual recap placeholder when a newer request supersedes it', async () => {
+    testState.settings = [sessionRecapSetting(true)];
     const manual = deferred<{ sessionId: string; recap: string | null }>();
     const auto = deferred<{ sessionId: string; recap: string | null }>();
     mockSessionActions.recapSession
@@ -27160,7 +27264,7 @@ describe('App session callbacks', () => {
     testState.blocks = [{}, {}, {}, {}];
     hidden = true;
     act(() => document.dispatchEvent(new Event('visibilitychange')));
-    now += 3 * 60 * 1000;
+    now += 6 * 60 * 1000;
     hidden = false;
     act(() => document.dispatchEvent(new Event('visibilitychange')));
     expect(mockSessionActions.recapSession).toHaveBeenCalledTimes(2);
