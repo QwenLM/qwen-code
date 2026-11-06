@@ -586,22 +586,23 @@ class Query:
         self._closed = True
         self._cancel_event.set()
 
-        error = RuntimeError("Query is closed")
-        self._fail_pending_control_requests(error)
-        await self._cancel_incoming_control_requests()
+        try:
+            error = RuntimeError("Query is closed")
+            self._fail_pending_control_requests(error)
+            await self._cancel_incoming_control_requests()
 
-        await self._transport.close()
+            await self._transport.close()
 
-        if self._input_task is not None:
-            self._input_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._input_task
+            if self._input_task is not None:
+                self._input_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await self._input_task
 
-        if self._router_task is not None:
-            with contextlib.suppress(Exception):
-                await self._router_task
-
-        await self._finish()
+            if self._router_task is not None:
+                with contextlib.suppress(Exception):
+                    await self._router_task
+        finally:
+            await self._finish()
 
     async def _finish(self) -> None:
         if self._terminal_event_sent:
@@ -615,11 +616,13 @@ class Query:
         self._closed = True
         self._terminal_event_sent = True
         self._cancel_event.set()
-        self._fail_pending_control_requests(exc)
-        await self._cancel_incoming_control_requests()
-        await self._transport.close()
-        await self._message_queue.put(exc)
-        await self._message_queue.put(_DONE)
+        try:
+            self._fail_pending_control_requests(exc)
+            await self._cancel_incoming_control_requests()
+            await self._transport.close()
+        finally:
+            await self._message_queue.put(exc)
+            await self._message_queue.put(_DONE)
 
     def __aiter__(self) -> Query:
         return self
@@ -627,7 +630,8 @@ class Query:
     async def __anext__(self) -> SDKMessage:
         if self._exhausted:
             raise StopAsyncIteration
-        await self._ensure_started()
+        if not self._started:
+            await self._ensure_started()
         item = await self._message_queue.get()
 
         if item is _DONE:
