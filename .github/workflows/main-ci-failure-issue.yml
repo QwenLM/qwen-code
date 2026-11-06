@@ -386,6 +386,7 @@ jobs:
           REPO: '${{ github.repository }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
           RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
+          CANCELLATION_KIND: '${{ steps.live.outputs.cancellation_kind }}'
         run: |-
           log_dir="${RUNNER_TEMP}/failed-logs"
           mkdir -p "${log_dir}"
@@ -426,24 +427,53 @@ jobs:
           # Both bodies read this list; the flag lets them say when it is short.
           echo "jobs_complete=${jobs_complete}" >> "${GITHUB_OUTPUT}"
 
-          # A cancelled job is in the list because a job timeout cancels the
-          # run; the others are cancelled with it and carry nothing. Without
-          # it a timed-out run names no job at all, which is what makes the
-          # timeout itself hard to see in the report.
+          # A job timeout cancels the whole run, so its siblings are
+          # concluded `cancelled` too and carry nothing. Admitting all of them
+          # would make a five-shard matrix report five failures for the one
+          # lane that exceeded its cap, bury the timeout line, and fetch every
+          # sibling's log inside this job's ten-minute budget. Admit a
+          # cancelled job only when its own annotation named the timeout —
+          # the same evidence the classifier used above.
+          timed_out_job_ids="${RUNNER_TEMP}/timed-out-job-ids"
+          : > "${timed_out_job_ids}"
+          if [[ "${CANCELLATION_KIND:-}" == 'timeout' ]]; then
+            while IFS=$'\t' read -r job_name job_id job_check_run; do
+              [[ -n "${job_check_run}" ]] || continue
+              if job_annotations="$(
+                gh api --paginate \
+                  "repos/${REPO}/check-runs/${job_check_run##*/}/annotations" \
+                  --jq '[.[].message] | join("\n")' 2>/dev/null
+              )" && grep -qiE 'exceeded the maximum execution time' <<< "${job_annotations}"; then
+                printf '%s\n' "${job_id}" >> "${timed_out_job_ids}"
+              fi
+            done < <(
+              jq -r '.jobs[] | select(.conclusion == "cancelled") | [.name, (.id | tostring), (.check_run_url // "")] | @tsv' \
+                "${jobs_json}" 2>/dev/null
+            )
+          fi
+
           job_ids=()
           while IFS= read -r job_id; do
             job_ids+=("${job_id}")
           done < <(
-            jq -r '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .id' \
+            jq -r '.jobs[] | select(.conclusion == "failure") | .id' \
               "${jobs_json}" 2>/dev/null
+            cat "${timed_out_job_ids}"
           )
           echo "Failed jobs: ${#job_ids[@]}"
 
           # Even without test results, the jobs payload names the failed job
           # and step. A missing listing costs detail, never the failure report.
-          jq -r '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.name] + [.steps[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .name] | @tsv' \
-            "${jobs_json}" 2>/dev/null \
-            > "${RUNNER_TEMP}/failed-jobs.tsv" || true
+          # A cancelled sibling is named only when it timed out, for the same
+          # reason it is downloaded only then.
+          {
+            jq -r '.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .name] | @tsv' \
+              "${jobs_json}" 2>/dev/null
+            while IFS= read -r job_id; do
+              jq -r --arg id "${job_id}" '.jobs[] | select((.id | tostring) == $id) | [.name] + [(.steps // [])[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .name] | @tsv' \
+                "${jobs_json}" 2>/dev/null
+            done < "${timed_out_job_ids}"
+          } > "${RUNNER_TEMP}/failed-jobs.tsv" || true
 
           # gh >= 2.97.0 (GHSA-3m3g-3wcr-px46) refuses to print a response
           # carrying terminal escape sequences unless opted in, and the

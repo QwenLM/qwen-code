@@ -10,6 +10,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -2224,7 +2225,7 @@ fi
     // the array on one side loses failing-test details while the job/step
     // summary still renders.
     expect(download).toContain(
-      'job_ids=() while IFS= read -r job_id; do job_ids+=("${job_id}") done < <( jq -r \'.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .id\' "${jobs_json}" 2>/dev/null )',
+      'job_ids=() while IFS= read -r job_id; do job_ids+=("${job_id}") done < <( jq -r \'.jobs[] | select(.conclusion == "failure") | .id\' "${jobs_json}" 2>/dev/null cat "${timed_out_job_ids}" )',
     );
     expect(download).toContain(
       'for job_id in ${job_ids[@]+"${job_ids[@]}"}; do',
@@ -2234,8 +2235,9 @@ fi
     // before a failure summary is rendered, and the `2>/dev/null` that keeps the
     // resulting jq parse error out of the log.
     expect(download).toContain(
-      'jq -r \'.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.name] + [.steps[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .name] | @tsv\' "${jobs_json}" 2>/dev/null > "${RUNNER_TEMP}/failed-jobs.tsv" || true',
+      'jq -r \'.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .name] | @tsv\' "${jobs_json}" 2>/dev/null',
     );
+    expect(download).toContain('> "${RUNNER_TEMP}/failed-jobs.tsv" || true');
     // Keep the TSV job details in the analysis payload. The span ends at the
     // first analysis redirect, so the later comment invocation cannot satisfy it.
     const analyzeInvocation = summary.match(
@@ -2244,6 +2246,68 @@ fi
     expect(analyzeInvocation, 'the analyze invocation').toContain(
       '--jobs "${RUNNER_TEMP}/failed-jobs.tsv"',
     );
+  });
+
+  it('counts only the cancelled job that timed out, not its siblings', () => {
+    // A job timeout cancels the whole run, so GitHub concludes every in-flight
+    // sibling `cancelled` as well. Admitting all of them reports one failure
+    // per shard for the single lane that exceeded its cap and downloads every
+    // sibling's log inside this job's ten-minute budget.
+    const step = jobs.analyze.steps.find(
+      (candidate) => candidate.name === 'Download failed job logs',
+    );
+    const tmp = mkdtempSync(join(tmpdir(), 'java-ci-download-'));
+    try {
+      writeFileSync(
+        join(tmp, 'gh'),
+        `#!/usr/bin/env bash
+case "$*" in
+  *"/jobs?per_page"*)
+    printf '%s\n' '{"jobs":[
+      {"id":101,"name":"shard 1","conclusion":"cancelled","check_run_url":"https://api.github.com/repos/o/r/check-runs/9001"},
+      {"id":102,"name":"shard 2","conclusion":"cancelled","check_run_url":"https://api.github.com/repos/o/r/check-runs/9002"}
+    ],"total_count":2}'
+    ;;
+  *"jobs/101/logs"*)
+    printf '%s\n' 'shard 1 log'
+    ;;
+  *"check-runs/9001/annotations"*)
+    printf '%s\n' '[{"message":"The job has exceeded the maximum execution time of 1h0m0s"}]'
+    ;;
+  *"check-runs/9002/annotations"*)
+    printf '%s\n' '[{"message":"The job was cancelled."}]'
+    ;;
+  *)
+    printf '%s\n' ''
+    ;;
+esac
+`,
+      );
+      chmodSync(join(tmp, 'gh'), 0o755);
+      const result = spawnSync('bash', ['-eo', 'pipefail', '-c', step.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${tmp}:${process.env.PATH}`,
+          RUNNER_TEMP: tmp,
+          REPO: 'QwenLM/qwen-code',
+          WORKFLOW_RUN_ID: '39237270547',
+          RUN_ATTEMPT: '1',
+          CANCELLATION_KIND: 'timeout',
+          GITHUB_OUTPUT: join(tmp, 'output'),
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const downloaded = existsSync(join(tmp, 'failed-logs'))
+        ? readdirSync(join(tmp, 'failed-logs'))
+        : [];
+      expect(downloaded).toEqual(['101.log']);
+      const tsv = readFileSync(join(tmp, 'failed-jobs.tsv'), 'utf8');
+      expect(tsv).toContain('shard 1');
+      expect(tsv).not.toContain('shard 2');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   it('reads the jobs of the event attempt, not the latest attempt', () => {
