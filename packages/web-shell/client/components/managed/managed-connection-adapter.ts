@@ -20,10 +20,7 @@ import type {
   DaemonConnectionState,
   DaemonConnectionStatus,
 } from '../../daemon/session/types.js';
-import type {
-  ManagedAgentSessionPhase,
-  ManagedAgentSessionSummary,
-} from './managed-agent-provider.js';
+import type { ManagedAgentSessionSummary } from './managed-agent-provider.js';
 
 /**
  * Managed 会话阶段 → daemon 连接状态。
