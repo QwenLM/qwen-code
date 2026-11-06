@@ -20,6 +20,7 @@ import {
   resolveReasoningCapabilities,
   resolveReasoningForModel,
 } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -945,12 +946,25 @@ describe('model configuration manifest', () => {
     },
   );
 
-  it.each(['qwen3.8-max', 'qwen3.8-flash'])(
-    'wraps the stable %s default option for workspace preview',
+  it.each([
+    'qwen3.8-max',
+    'qwen3.8-flash',
+    'qwen3.7-plus',
+    'future-served-model',
+  ])(
+    'shows the subscription default for %s in the workspace preview',
     (modelId) => {
-      expect(buildModelReasoningConfigPreview(modelId)).toEqual([
-        buildModelReasoningConfigOption(modelId),
-      ]);
+      const generation = {
+        model: modelId,
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      };
+      const reasoning = resolveReasoningForModel(undefined, generation);
+      expect(
+        buildModelReasoningRoutePreview(generation, reasoning, undefined, true),
+      ).toMatchObject([{ currentValue: 'medium' }]);
+      expect(
+        buildModelReasoningRoutePreview(generation, reasoning, 'xhigh', true),
+      ).toMatchObject([{ currentValue: 'xhigh' }]);
     },
   );
 

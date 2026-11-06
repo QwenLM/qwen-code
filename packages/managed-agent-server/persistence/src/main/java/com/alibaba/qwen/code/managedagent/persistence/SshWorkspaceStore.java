@@ -168,7 +168,6 @@ public class SshWorkspaceStore
 
     public void complete(Intent intent, String owner) {
         transaction.executeWithoutResult(status -> {
-            WorkspaceStorageKindGuard.lockDomain(jdbc, intent.tenantId());
             requireClaim(intent, owner);
             publish(intent);
             if (finish(intent, owner, "COMPLETED", null) != 1) {
@@ -180,14 +179,17 @@ public class SshWorkspaceStore
     /** Turns the reserved storage into the registered Workspace. */
     private void publish(Intent intent) {
         String alias = JdbcRuntimeBindingRepository.storageAliasKey(intent.tenantId(), intent.storageId());
-        var rows = jdbc.queryForList("SELECT registration_json FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL' FOR UPDATE", alias);
+        var rows = jdbc.queryForList("SELECT physical_key FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL' FOR UPDATE", alias);
         if (rows.size() != 1) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
         jdbc.update("UPDATE ma_storage SET registration_state = 'REGISTERED', mount_revision = 1 WHERE alias_key = ?", alias);
-        jdbc.update("UPDATE ma_storage_owner SET mount_state = 'READY', mount_revision = 1,"
-                        + " mount_completed_operation_id = ?, mount_operation_id = NULL WHERE mount_registration_id = ? AND storage_kind = 'SSH_LOCAL'",
-                intent.registrationId(), intent.registrationId());
+        if (jdbc.update("UPDATE ma_storage_owner SET mount_state = 'READY', mount_revision = 1,"
+                        + " mount_completed_operation_id = ?, mount_operation_id = NULL WHERE storage_key = ?"
+                        + " AND mount_registration_id = ? AND storage_kind = 'SSH_LOCAL'",
+                intent.registrationId(), rows.getFirst().get("physical_key"), intent.registrationId()) != 1) {
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        }
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, ?, 1, ?, ?, ?, ?, 'ACTIVE')", intent.tenantId(), intent.workspaceId(), intent.storageId(),
                 intent.displayName(), WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
@@ -245,7 +247,6 @@ public class SshWorkspaceStore
      */
     public boolean completeParked(String tenant, String operationId) {
         return Boolean.TRUE.equals(transaction.execute(status -> {
-            WorkspaceStorageKindGuard.lockDomain(jdbc, tenant);
             Parked parked = parkedRow(tenant, operationId, true).orElse(null);
             if (parked == null || !parked.reserved()) {
                 return false;
@@ -262,7 +263,6 @@ public class SshWorkspaceStore
      */
     public boolean releaseParked(String tenant, String operationId, String code) {
         return Boolean.TRUE.equals(transaction.execute(status -> {
-            WorkspaceStorageKindGuard.lockDomain(jdbc, tenant);
             Parked parked = parkedRow(tenant, operationId, true).orElse(null);
             if (parked == null) {
                 return false;

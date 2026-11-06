@@ -97,7 +97,7 @@ export const upgradeCommand: SlashCommand = {
         ),
       };
     }
-    const url = getQwenSubscriptionPlansUrl();
+    const url = getQwenSubscriptionPlansUrl('cli');
     if (!context.services.config?.isBrowserLaunchSuppressed()) {
       try {
         await openBrowserSecurely(url);
