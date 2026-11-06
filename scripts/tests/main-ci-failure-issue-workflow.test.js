@@ -3219,3 +3219,120 @@ fi
     expect(privilegedJobs[0][1].needs).toEqual(['analyze', 'rerun_infra']);
   });
 });
+
+describe('cancelled-run classifier (real script)', () => {
+  // Runs .github/scripts/ci/classify-cancelled-run.sh itself against a stubbed
+  // gh, so the verdict precedence is measured in the shipped script rather
+  // than re-implemented here (#16280 R5-1).
+  const script = readFileSync(
+    '.github/scripts/ci/classify-cancelled-run.sh',
+    'utf8',
+  );
+  const cancelledJob = (id, checkId) => ({
+    id,
+    conclusion: 'cancelled',
+    check_run_url: `https://api.github.com/repos/QwenLM/qwen-code/check-runs/${checkId}`,
+    steps: [{ name: 'Run tests', conclusion: 'cancelled' }],
+  });
+  const classify = (jobs, annotations, unreadableIds = []) => {
+    const tmp = mkdtempSync(join(tmpdir(), 'cancel-classify-'));
+    try {
+      const bin = join(tmp, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'args="$*"',
+          'if [[ "${args}" == *"/jobs?per_page=100"* ]]; then',
+          '  cat "${JOBS_JSON}"',
+          '  exit 0',
+          'fi',
+          'id="$(printf \'%s \' "$@" | grep -oE \'check-runs/[0-9]+\' | cut -d/ -f2)"',
+          'if [[ -f "${ANN_DIR}/${id}.fail" ]]; then exit 1; fi',
+          'jq -r \'.[].message\' "${ANN_DIR}/${id}.json" 2>/dev/null || true',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const annDir = join(tmp, 'annotations');
+      mkdirSync(annDir);
+      for (const [id, message] of Object.entries(annotations)) {
+        writeFileSync(
+          join(annDir, `${id}.json`),
+          JSON.stringify([{ message }]),
+        );
+      }
+      for (const id of unreadableIds) {
+        writeFileSync(join(annDir, `${id}.fail`), '');
+      }
+      const jobsJson = join(tmp, 'jobs.json');
+      writeFileSync(
+        jobsJson,
+        JSON.stringify({ total_count: jobs.length, jobs }),
+      );
+      const result = spawnSync(
+        'bash',
+        ['-c', script, 'classify-cancelled-run.sh', '123', '1'],
+        {
+          env: {
+            PATH: `${bin}:${process.env.PATH}`,
+            RUNNER_TEMP: tmp,
+            REPO: 'QwenLM/qwen-code',
+            JOBS_JSON: jobsJson,
+            ANN_DIR: annDir,
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  };
+
+  it('keeps a confirmed timeout when a sibling annotation read fails', () => {
+    // R5-1: the old early-exit downgraded this run to unreadable and buried
+    // the timeout evidence this PR exists to surface.
+    expect(
+      classify(
+        [cancelledJob(1001, 9001), cancelledJob(1002, 9002)],
+        { 9001: 'The job exceeded the maximum execution time of 360 minutes' },
+        [9002],
+      ),
+    ).toBe('timeout');
+  });
+
+  it('still reports unreadable when no timeout was confirmed', () => {
+    expect(classify([cancelledJob(1001, 9001)], {}, [9001])).toBe('unreadable');
+  });
+
+  it('does not certify a supersede over an unread sibling', () => {
+    // The unread job could have carried the timeout annotation, so a
+    // concurrency verdict from the readable job is not certifiable.
+    expect(
+      classify(
+        [cancelledJob(1001, 9001), cancelledJob(1002, 9002)],
+        { 9001: 'The runner has received a shutdown signal' },
+        [9002],
+      ),
+    ).toBe('unreadable');
+  });
+
+  it('keeps the readable verdicts unchanged', () => {
+    expect(
+      classify([cancelledJob(1001, 9001), cancelledJob(1002, 9002)], {
+        9001: 'The job exceeded the maximum execution time of 360 minutes',
+        9002: 'The runner has received a shutdown signal',
+      }),
+    ).toBe('timeout');
+    expect(
+      classify([cancelledJob(1001, 9001)], {
+        9001: 'Canceling since a higher priority run is waiting',
+      }),
+    ).toBe('concurrency');
+    expect(
+      classify([cancelledJob(1001, 9001)], { 9001: 'Some unrelated note' }),
+    ).toBe('unknown');
+  });
+});

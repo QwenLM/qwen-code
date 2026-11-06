@@ -21,7 +21,10 @@
 #                      could not be certified complete. Callers fail open on
 #                      this too, but it says nothing about what the run
 #                      concluded, so the successor check must not defer to it
-#                      (#16280 R4-1).
+#                      (#16280 R4-1). A confirmed timeout still wins over a
+#                      sibling job's failed annotation read: positive evidence
+#                      is not downgraded by an unrelated read error (#16280
+#                      R5-1).
 set -uo pipefail
 
 REPO="${REPO:?REPO must name the repository}"
@@ -64,6 +67,7 @@ timeout_found=false
 concurrency_found=false
 cancelled_seen=false
 executed_seen=false
+read_failed=false
 while IFS=$'\t' read -r _ check_run_id steps_run; do
   [[ -n "${check_run_id}" ]] || continue
   cancelled_seen=true
@@ -75,8 +79,11 @@ while IFS=$'\t' read -r _ check_run_id steps_run; do
       "repos/${REPO}/check-runs/${check_run_id}/annotations" \
       --jq '[.[].message] | join("\n")' 2>/dev/null
   )"; then
-    echo unreadable
-    exit 0
+    # Keep scanning: a sibling's failed read must not bury a timeout another
+    # job already evidenced; the verdict block falls back to unreadable only
+    # when no timeout was found (#16280 R5-1).
+    read_failed=true
+    continue
   fi
   if grep -qiE 'exceeded the maximum execution time' <<< "${annotations}"; then
     timeout_found=true
@@ -91,6 +98,10 @@ done < <(
 
 if [[ "${timeout_found}" == 'true' ]]; then
   echo timeout
+elif [[ "${read_failed}" == 'true' ]]; then
+  # Without a confirmed timeout the unread job could have carried one, so no
+  # weaker verdict can be certified.
+  echo unreadable
 elif [[ "${concurrency_found}" == 'true' ]]; then
   echo concurrency
 elif [[ "${cancelled_seen}" != 'true' || "${executed_seen}" != 'true' ]]; then
