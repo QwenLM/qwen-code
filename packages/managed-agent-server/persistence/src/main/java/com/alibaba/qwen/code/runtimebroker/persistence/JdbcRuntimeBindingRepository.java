@@ -1779,8 +1779,7 @@ public final class JdbcRuntimeBindingRepository
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
-                    BindingControl control =
-                            lockBindingControl(connection, expected.getBindingId());
+                    BindingControl control = lockBindingControl(connection, expected.getBindingId(), false);
                     lockPlacementDomain(connection, expected.getRequest().getScope().getTenantId());
                     String key = JdbcRepositorySupport.requestKey(expected.getRequest());
                     Slot slot = selectSlot(connection, key, true);
@@ -1865,7 +1864,7 @@ public final class JdbcRuntimeBindingRepository
                     if (hint != null && ResidentWorkspaceProfile.selects(hint.getRequest())) {
                         lockPlacementDomain(connection, hint.getRequest().getScope().getTenantId());
                     }
-                    BindingControl control = lockBindingControl(connection, id);
+                    BindingControl control = lockBindingControl(connection, id, true);
                     RuntimeBindingRecord current = selectById(connection, id, true);
                     requireControlBinding(control, current);
                     Instant now = controlTime(connection, control);
@@ -1906,7 +1905,7 @@ public final class JdbcRuntimeBindingRepository
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
-                    BindingControl control = lockBindingControl(connection, id);
+                    BindingControl control = lockBindingControl(connection, id, true);
                     RuntimeBindingRecord current = selectById(connection, id, true);
                     requireControlBinding(control, current);
                     Instant now = controlTime(connection, control);
@@ -1937,7 +1936,7 @@ public final class JdbcRuntimeBindingRepository
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
-                    BindingControl control = lockBindingControl(connection, id);
+                    BindingControl control = lockBindingControl(connection, id, true);
                     RuntimeBindingRecord current = selectById(connection, id, true);
                     requireControlBinding(control, current);
                     controlTime(connection, control);
@@ -1956,9 +1955,10 @@ public final class JdbcRuntimeBindingRepository
                 });
     }
 
-    private static BindingControl lockBindingControl(Connection connection, String bindingId)
+    private static BindingControl lockBindingControl(Connection connection, String bindingId, boolean lease)
             throws SQLException {
-        var original = JdbcCsiFilesRetirementGuard.lockBindingControl(connection, bindingId);
+        var original = lease ? JdbcCsiFilesRetirementGuard.lockExecutionControl(connection, bindingId)
+                : JdbcCsiFilesRetirementGuard.lockBindingControl(connection, bindingId);
         if (original == null) {
             return null;
         }
