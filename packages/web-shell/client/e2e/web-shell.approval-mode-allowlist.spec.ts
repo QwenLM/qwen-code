@@ -188,6 +188,40 @@ test('empty allowlist keeps Plan independently dismissible @smoke', async ({
   await expect(page.locator('[data-web-shell-plan-chip]')).toHaveCount(0);
 });
 
+test('Plan menu keeps its checked state visible in forced colors @smoke', async ({
+  page,
+}, info) => {
+  await page.emulateMedia({ forcedColors: 'active' });
+  const daemon = await openShell(page, info, { currentMode: 'plan' });
+  const trigger = page.getByTestId('composer-add-menu-trigger');
+  const plan = page.getByTestId('composer-add-menu-plan');
+  const indicator = plan.locator('[data-checked]');
+  const thumb = indicator.locator(':scope > span');
+  const visibleIndicator = async () => {
+    const colors = await indicator.evaluate((element) => ({
+      track: getComputedStyle(element).backgroundColor,
+      thumb: getComputedStyle(element.firstElementChild!).backgroundColor,
+      outline: getComputedStyle(element).outlineStyle,
+    }));
+    expect(colors.thumb).not.toBe(colors.track);
+    expect(colors.outline).toBe('solid');
+    return (await thumb.boundingBox())!.x - (await indicator.boundingBox())!.x;
+  };
+
+  await trigger.click();
+  await expect(plan).toHaveAttribute('aria-checked', 'true');
+  const checkedPosition = await visibleIndicator();
+  await plan.screenshot({ path: info.outputPath('plan-forced-checked.png') });
+  await plan.click();
+  await expect.poll(() => modeRequests(daemon).length).toBe(1);
+  await expect(trigger).toBeEnabled();
+  await trigger.click();
+  await expect(plan).toHaveAttribute('aria-checked', 'false');
+  const uncheckedPosition = await visibleIndicator();
+  expect(checkedPosition).toBeGreaterThan(uncheckedPosition);
+  await plan.screenshot({ path: info.outputPath('plan-forced-unchecked.png') });
+});
+
 test('dynamic host changes update an open picker @smoke', async ({
   page,
 }, info) => {
