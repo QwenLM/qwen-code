@@ -61,6 +61,7 @@ import {
 } from './managed-recovery-handoff';
 import { useManagedSessionRename } from './use-managed-session-rename';
 import { useManagedActions } from './use-managed-actions';
+import { ManagedQuestionForm } from './ManagedQuestionForm';
 import { useManagedContextCompression } from './use-managed-context-compression';
 import { useManagedModelChange } from './use-managed-model-change';
 import { useManagedApprovalChange } from './use-managed-approval-change';
@@ -2190,55 +2191,71 @@ function ManagedSessionsContent({
                   {approvals.action?.sessionId}
                 </p>
               )}
-              <ToolApproval
-                request={pendingApproval}
-                planExecutionMode={
-                  approvals.action?.sessionId === sessionId &&
-                  approvals.action?.toolName === 'exit_plan_mode' &&
-                  approvals.action.turnId === detail.summary?.activeTurnId
-                    ? detail.summary?.approvalMode
-                    : undefined
-                }
-                variant="floating"
-                keyboardActive={false}
-                // Answering needs the Session's owner or a Workspace
-                // operator; once the service refuses this viewer, that
-                // holds for every approval this Session raises — until an
-                // explicit retry re-probes, so the latch is scoped to the
-                // Session rather than the Action.
-                disabled={approvals.respondForbidden || compression.blocked}
-                extraDescriptionId={
-                  [
-                    pendingApproval.rawInput === undefined
-                      ? argumentsCaveatId
-                      : null,
-                    answerNoticeShown ? answerNoticeId : null,
-                  ]
-                    .filter(Boolean)
-                    .join(' ') || undefined
-                }
-                onConfirm={(actionId, optionId) => {
-                  if (!compression.isBlocked())
-                    return approvals.respond(actionId, optionId);
-                  return Promise.resolve();
-                }}
-              />
-              {pendingApproval.rawInput === undefined && (
-                <p
-                  id={argumentsCaveatId}
-                  role="status"
-                  className="text-sm text-muted-foreground"
-                >
-                  {approvals.action?.inputPreview
-                    ? t(
-                        approvals.action.inputPreview.truncated
-                          ? 'managed.approval.previewTruncated'
-                          : 'managed.approval.previewComplete',
-                        { bytes: approvals.action.inputPreview.byteLength },
-                      )
-                    : t('managed.approval.argumentsUnavailable')}
-                </p>
+              {approvals.action?.kind === 'question' ? (
+                <ManagedQuestionForm
+                  key={`${provider.storageKey}:${approvals.action.sessionId}:${approvals.action.actionId}:${approvals.action.inputRevision}:${approvals.action.policyRevision}`}
+                  action={approvals.action}
+                  disabled={approvals.respondForbidden || compression.blocked}
+                  onSubmit={(response) => {
+                    if (compression.isBlocked())
+                      return Promise.reject(
+                        new Error('Context compression is pending'),
+                      );
+                    return approvals.respond(pendingApproval.id, response);
+                  }}
+                />
+              ) : (
+                <ToolApproval
+                  request={pendingApproval}
+                  planExecutionMode={
+                    approvals.action?.sessionId === sessionId &&
+                    approvals.action?.toolName === 'exit_plan_mode' &&
+                    approvals.action.turnId === detail.summary?.activeTurnId
+                      ? detail.summary?.approvalMode
+                      : undefined
+                  }
+                  variant="floating"
+                  keyboardActive={false}
+                  // Answering needs the Session's owner or a Workspace
+                  // operator; once the service refuses this viewer, that
+                  // holds for every approval this Session raises — until an
+                  // explicit retry re-probes, so the latch is scoped to the
+                  // Session rather than the Action.
+                  disabled={approvals.respondForbidden || compression.blocked}
+                  extraDescriptionId={
+                    [
+                      pendingApproval.rawInput === undefined
+                        ? argumentsCaveatId
+                        : null,
+                      answerNoticeShown ? answerNoticeId : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' ') || undefined
+                  }
+                  onConfirm={(actionId, optionId) => {
+                    if (!compression.isBlocked())
+                      return approvals.respond(actionId, optionId);
+                    return Promise.resolve();
+                  }}
+                />
               )}
+              {approvals.action?.kind !== 'question' &&
+                pendingApproval.rawInput === undefined && (
+                  <p
+                    id={argumentsCaveatId}
+                    role="status"
+                    className="text-sm text-muted-foreground"
+                  >
+                    {approvals.action?.inputPreview
+                      ? t(
+                          approvals.action.inputPreview.truncated
+                            ? 'managed.approval.previewTruncated'
+                            : 'managed.approval.previewComplete',
+                          { bytes: approvals.action.inputPreview.byteLength },
+                        )
+                      : t('managed.approval.argumentsUnavailable')}
+                  </p>
+                )}
             </div>
           )}
           {approvals.loadError !== undefined && (
@@ -2273,8 +2290,12 @@ function ManagedSessionsContent({
               >
                 {t(
                   approvals.respondForbidden
-                    ? 'managed.approval.forbidden'
-                    : 'managed.approval.failed',
+                    ? approvals.action?.kind === 'question'
+                      ? 'managed.question.forbidden'
+                      : 'managed.approval.forbidden'
+                    : approvals.action?.kind === 'question'
+                      ? 'managed.question.failed'
+                      : 'managed.approval.failed',
                 )}
               </p>
               {approvals.respondForbidden && (
