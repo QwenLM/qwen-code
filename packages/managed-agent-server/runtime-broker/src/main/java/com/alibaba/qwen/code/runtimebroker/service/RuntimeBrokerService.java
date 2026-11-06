@@ -2189,24 +2189,44 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                     throw conflict("runtime_session_conflict",
                             "Mount claim was superseded by a later acquire");
                 }
-                if (context.hasActiveControl()
-                        || executionRepository.hasActiveByRuntimeSession(
-                                context.binding().getBindingId(),
-                                context.binding().getGeneration(), runtimeId)) {
-                    throw conflict("runtime_session_busy",
-                            "Runtime Session has an active operation");
-                }
-                if (executionRepository.hasUnprovenCaptureByRuntimeSession(
-                        context.binding().getBindingId(),
-                        context.binding().getGeneration(), runtimeId)) {
-                    throw conflict("workspace_writer_unproven",
-                            "A settled execution never proved its writer stopped");
-                }
-                return safeStage(() -> transport.releaseMount(context.lease(),
-                        context.session())).toCompletableFuture();
             } finally {
                 context.unlock();
             }
+            // R17-2: a Hook-configured Shell turn shares this broker and its
+            // finish() skips the release, so a background run that outlives the
+            // turn holds the Runtime. Sweep the unproven background rows (issuing
+            // each row's stop) before the busy check, mirroring the drain release,
+            // so a routine detach hands the mount back instead of wedging on
+            // runtime_session_busy. This stays a mount handback — the owner id is
+            // not tombstoned and remains re-acquirable (R13-1).
+            return executionRecovery.settleUnprovenBackgroundRows(context, true)
+                    .thenCompose(ignored -> {
+                        context.lock();
+                        try {
+                            if (!claimId.equals(context.mountClaim())) {
+                                throw conflict("runtime_session_conflict",
+                                        "Mount claim was superseded by a later acquire");
+                            }
+                            if (context.hasActiveControl()
+                                    || executionRepository.hasActiveByRuntimeSession(
+                                            context.binding().getBindingId(),
+                                            context.binding().getGeneration(), runtimeId,
+                                            new java.util.HashSet<>(context.backgroundProcesses()))) {
+                                throw conflict("runtime_session_busy",
+                                        "Runtime Session has an active operation");
+                            }
+                            if (executionRepository.hasUnprovenCaptureByRuntimeSession(
+                                    context.binding().getBindingId(),
+                                    context.binding().getGeneration(), runtimeId)) {
+                                throw conflict("workspace_writer_unproven",
+                                        "A settled execution never proved its writer stopped");
+                            }
+                            return safeStage(() -> transport.releaseMount(context.lease(),
+                                    context.session())).toCompletableFuture();
+                        } finally {
+                            context.unlock();
+                        }
+                    });
         });
     }
 

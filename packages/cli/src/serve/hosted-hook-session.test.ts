@@ -4060,6 +4060,59 @@ it('terminally releases the deterministic owner on DELETE of a reloaded, never-a
   expect(releasedIds.filter((id) => id === owner)).toHaveLength(1);
 });
 
+it('absorbs a 404 on terminal release of a never-acquired deterministic owner (R17-1)', async () => {
+  const owner = `extensions-components-${'e'.repeat(64)}`;
+  // A reloaded instance that never acquired: mountHeld stays false and no
+  // Runtime Session row exists under the deterministic id, so the Broker's
+  // terminal release answers 404. close() must book the owner released and
+  // resolve instead of letting the refusal escape and wedging the session
+  // undeletable.
+  const absent = new HostedHookSession(
+    options,
+    session,
+    pin,
+    undefined,
+    () => false,
+    owner,
+  );
+  expect(absent.mountHeld).toBe(false);
+  vi.mocked(HostedWorkspaceBroker.prototype.release).mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(404, 'runtime_session_not_found'),
+  );
+  await absent.close({ terminal: true });
+});
+
+it('absorbs a 503 reconciliation on terminal release of a never-acquired deterministic owner (R17-1)', async () => {
+  // After a Broker restart a never-acquired deterministic owner can answer 503
+  // reconciliation-required; that is benign for an un-acquired owner too.
+  const restarted = new HostedHookSession(
+    options,
+    session,
+    pin,
+    undefined,
+    () => false,
+    `extensions-components-${'d'.repeat(64)}`,
+  );
+  expect(restarted.mountHeld).toBe(false);
+  // Only the deterministic owner's terminal release answers 503; the per-load
+  // earlier-owner releases resolve so the witness isolates the terminal arm.
+  const restartedOwner = `extensions-components-${'d'.repeat(64)}`;
+  vi.mocked(HostedWorkspaceBroker.prototype.release).mockImplementation(
+    async function (this: HostedWorkspaceBroker) {
+      if (this.runtimeSessionId === restartedOwner)
+        throw new HostedWorkspaceBrokerRejection(
+          503,
+          'runtime_reconciliation_required',
+        );
+      Object.defineProperty(this, 'acquired', {
+        value: false,
+        configurable: true,
+      });
+    },
+  );
+  await restarted.close({ terminal: true });
+});
+
 it('keeps a shared Hook+MCP deterministic owner re-acquirable on a non-terminal close (R14-1)', async () => {
   // The load builds the MCP first and hands its broker to the Hook, so the
   // Hook borrows (ownsBroker=false) and the MCP owns the shared deterministic

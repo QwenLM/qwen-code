@@ -2076,6 +2076,30 @@ export class HostedHookSession {
       try {
         await this.broker.release({ drain: true });
       } catch (cause) {
+        // A DELETE of a never-acquired deterministic owner can answer 404 (no
+        // stored row exists) or, after a Broker restart, 503 reconciliation-
+        // required. Both are benign for an un-acquired owner: book it released
+        // exactly as releaseOwner does, instead of letting the refusal escape
+        // close() and wedge the session undeletable (R17-1). An acquired mount
+        // keeps the strict behavior — a missing row there is not routine. The
+        // release itself still runs, so a stored ACQUIRING row of a reloaded
+        // instance is terminally released as before (R15-4).
+        const rejection =
+          cause instanceof HostedWorkspaceBrokerRejection ? cause : undefined;
+        if (
+          !this.mountHeld &&
+          rejection !== undefined &&
+          ((rejection.status === 404 &&
+            rejection.code === 'runtime_session_not_found') ||
+            (rejection.status === 503 &&
+              rejection.code === 'runtime_reconciliation_required'))
+        ) {
+          debugLogger.debug(
+            `qwen serve: Hook owner terminal release ${rejection.status} ${rejection.code} (owner un-acquired, booked released): ${this.broker.runtimeSessionId}`,
+          );
+          this.acquired = false;
+          return;
+        }
         // A Runtime that settled an abandoned module evaluation as cancelled
         // lets drain() pass while the evaluation still runs, so this release
         // can be hold-fenced. Name that condition instead of letting a bare

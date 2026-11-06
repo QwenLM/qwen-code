@@ -9163,6 +9163,15 @@ export function registerHostedHarnessSessionRoutes(
                 session.managed.authority.sessionHeader.sessionKey,
                 ownerId,
               );
+            // A non-terminal discard can leave drained rows under a superseded
+            // owner; release them before constructing so a live off->on->off->on
+            // toggle does not accumulate owners.size>1 (R15-3, the live-path
+            // counterpart of the cold-load sweep). The active owner's own drained
+            // rows are untouched, so a failed apply is never stranded.
+            await HostedMcpSession.releaseSupersededDrained(
+              session.managed,
+              ownerId,
+            );
             session.mcp = new HostedMcpSession(
               options,
               session.managed,
