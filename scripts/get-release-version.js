@@ -335,24 +335,25 @@ function getNightlyVersion() {
 function bumpPastPublishedLatest(baseVersion, label, target, refBase) {
   const latestStable =
     getAndVerifyTags('latest', 'v[0-9].[0-9].[0-9]')?.latestVersion ?? '';
+  // A ref behind the published stable would publish its own content
+  // under a version it never contained, whether the preview base is ahead of
+  // latest (a release/0.25 dispatch mid-cycle) or behind it. Check before the
+  // no-bump early return so both states are caught.
+  if (
+    refBase &&
+    semver.valid(latestStable) &&
+    semver.lt(refBase, latestStable)
+  ) {
+    throw new Error(
+      `Published latest ${latestStable} is ahead of the checked-out package.json version ${refBase}. Refusing a stale or cross-line stable release.`,
+    );
+  }
   if (
     !semver.valid(latestStable) ||
     !semver.valid(baseVersion) ||
     semver.lt(latestStable, baseVersion)
   ) {
     return baseVersion;
-  }
-  // A dispatch from an older release branch resolves against the global
-  // dist-tags, which may already be on a newer line; bumping there would
-  // publish the old branch's content under the newer version.
-  if (
-    refBase &&
-    (semver.major(refBase) !== semver.major(latestStable) ||
-      semver.minor(refBase) !== semver.minor(latestStable))
-  ) {
-    throw new Error(
-      `Published latest ${latestStable} and the checked-out package.json version ${refBase} are on different release lines. Refusing a cross-line stable release.`,
-    );
   }
   const bumped = semver.inc(latestStable, 'patch');
   console.error(
