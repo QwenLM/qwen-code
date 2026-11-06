@@ -26,6 +26,10 @@ import { AuthType } from './contentGenerator.js';
 import { reportError } from '../utils/errorReporting.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { getErrorMessage } from '../utils/errors.js';
+import {
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
+} from '../agents/runtime/agent-context.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
@@ -65,10 +69,17 @@ vi.mock('./contentGenerator.js', async (importOriginal) => {
 });
 
 const mockBuildAgentContentGeneratorConfig = vi.fn();
-vi.mock('../models/content-generator-config.js', () => ({
-  buildAgentContentGeneratorConfig: (...args: unknown[]): unknown =>
-    mockBuildAgentContentGeneratorConfig(...args),
-}));
+vi.mock('../models/content-generator-config.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../models/content-generator-config.js')
+    >();
+  return {
+    ...actual,
+    buildAgentContentGeneratorConfig: (...args: unknown[]): unknown =>
+      mockBuildAgentContentGeneratorConfig(...args),
+  };
+});
 
 const mockGenerateContent = vi.fn();
 const mockGenerateContentStream = vi.fn();
@@ -815,6 +826,12 @@ describe('BaseLlmClient', () => {
             : [{ id: fastModel, authType: AuthType.USE_ANTHROPIC }],
         ),
         getModelsConfig: vi.fn().mockReturnValue({ getResolvedModel }),
+        // The session's own map; a per-model view must not hand it out.
+        getContentGeneratorConfigSources: vi.fn().mockReturnValue({
+          modalities: { kind: 'settings' },
+        }),
+        getModelProvidersConfig: vi.fn().mockReturnValue(undefined),
+        getAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
       } as unknown as Mocked<Config>;
     });
 
@@ -1079,6 +1096,28 @@ describe('BaseLlmClient', () => {
       await c.resolveForModel(fastModel);
 
       expect(mockCreateContentGenerator).toHaveBeenCalledTimes(2);
+    });
+
+    it('carries its own modalities source into the frame it runs in', async () => {
+      // A frame around this view must not read the session's sources: those
+      // describe the primary model, and this generator serves another one
+      // (QwenLM/qwen-code#16185).
+      getResolvedModel.mockReturnValue(anthropicKey());
+      const resolved = await resolve('other-model');
+
+      // The view carries its own map, derived from the target's provider
+      // entry rather than the session's `settings` source. `Config` returns
+      // this map while the frame is active, which is what keeps `read_file`
+      // from naming a setting that describes the primary model.
+      expect(resolved.configSources?.['modalities']).toEqual({
+        kind: 'computed',
+        detail: "auto-detected from 'fast-model'",
+      });
+      await runWithRuntimeContentGenerator(resolved, async () => {
+        expect(getRuntimeContentGenerator()?.configSources).toBe(
+          resolved.configSources,
+        );
+      });
     });
 
     it('falls back to the main generator when the target model is not in the registry', async () => {

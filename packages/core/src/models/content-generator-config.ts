@@ -222,7 +222,7 @@ function applyAgentReasoningEffort(
  * modalities with the name-based default, which would make every model look
  * provider-declared.
  */
-function resolveAgentModalitiesSource(
+export function resolveAgentModalitiesSource(
   base: Config,
   authOverrides: AuthOverrides,
   model: string,
