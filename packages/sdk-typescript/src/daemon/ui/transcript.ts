@@ -1775,7 +1775,9 @@ function appendStatusBlock(
     ...((event?.type === 'status' || event?.type === 'debug') && event.source
       ? { source: event.source }
       : {}),
-    ...((event?.type === 'status' || event?.type === 'debug') &&
+    ...((event?.type === 'status' ||
+      event?.type === 'debug' ||
+      event?.type === 'error') &&
     event.data !== undefined
       ? { data: event.data }
       : {}),

@@ -68,7 +68,7 @@ class WorkspaceProfileLifecycleMySqlIT extends WorkspaceProfileLifecycleTest {
     @org.junit.jupiter.api.Test
     void expiredWriterRenewalAndColdAcquireCannotBothOwnTheHead() throws Exception {
         var f = fixture();
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(f.jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(f.jdbc);
         var writer = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32),
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "resident", 60_000L)));
         var operation = admit(f, WorkspaceToolProfiles.SHELL, StoreModels.OperationKind.DELETE);

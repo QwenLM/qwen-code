@@ -82,6 +82,7 @@ class ManagedMessagePagingTest {
         seed(10000, false);
         var page = read(null, 2, true);
         assertThat(page.items()).extracting(StoreModels.ItemRecord::itemId).containsExactly(id(9999), id(10000));
+        assertThatThrownBy(() -> page.items().clear()).isInstanceOf(UnsupportedOperationException.class);
         assertThat(page.hasMore()).isTrue();
         assertThat(jdbc.messageReads).isEqualTo(2);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Long.class)).isZero();
@@ -227,7 +228,7 @@ class ManagedMessagePagingTest {
     void includesOnlyLatestControlStatesOfTheSelectedTurns() {
         seed(3, false);
         jdbc.update("INSERT INTO ma_public_event(tenant_id,session_id,sequence_id,event_id,turn_id,event_type,data_json,"
-                + "terminal,gmt_create) VALUES(?,?,3,'terminal','turn','turn.completed','{}',TRUE,0)", "tenant", "session");
+                + "is_terminal,gmt_create) VALUES(?,?,3,'terminal','turn','turn.completed','{}',TRUE,0)", "tenant", "session");
         var page = read(null, 1, true);
         assertThat(page.events()).extracting(StoreModels.EventRecord::type).containsExactly("turn.completed");
         assertThat(page.events().getFirst().sequence()).isEqualTo(3);

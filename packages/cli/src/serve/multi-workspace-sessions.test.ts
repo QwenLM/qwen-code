@@ -3194,9 +3194,11 @@ describe('multi-workspace session dispatch', () => {
       .set('Host', host())
       .send({ cwd: UNKNOWN_CWD });
 
-    expect(unknownRes.status).toBe(400);
-    expect(unknownRes.body.code).toBe('workspace_mismatch');
-    expect(unknownRes.body.workspaceCount).toBe(2);
+    // An explicit cwd with no registry entry is a permanent absence: 404
+    // workspace_not_found (the channel wake path keys Gone on it), not the
+    // reversible-state 400 workspace_mismatch.
+    expect(unknownRes.status).toBe(404);
+    expect(unknownRes.body.code).toBe('workspace_not_found');
     expect(unknownRes.body.boundWorkspace).toBe(PRIMARY_CWD);
     expect(unknownRes.body.requestedWorkspace).toBe(UNKNOWN_CWD);
     expect(unknown.primaryBridge.restoreCalls).toEqual([]);
@@ -8452,9 +8454,8 @@ describe('workspace session live-state route', () => {
       generation: expect.any(String),
       revision: expect.any(Number),
     });
-    // Exactly the volatile overlay plus the activity watermark — the static
-    // catalog field (displayName) and the deliberately excluded volatile
-    // extras (pendingInteractionCount, hasTurnError) all stay out.
+    // The overlay includes turn errors but excludes static catalog fields
+    // and interaction details.
     expect(res.body.sessions).toEqual([
       {
         sessionId: '11111111-1111-4111-a111-111111111111',
@@ -8462,6 +8463,7 @@ describe('workspace session live-state route', () => {
         hasActivePrompt: true,
         isWaitingForPermission: true,
         isWaitingForUserQuestion: false,
+        hasTurnError: true,
         updatedAt: '2026-07-08T00:02:00.000Z',
       },
     ]);
@@ -8563,8 +8565,8 @@ describe('workspace session live-state route', () => {
     expect(res.body.sessions[0]).not.toHaveProperty('updatedAt');
   });
 
-  it('defaults both wait flags to false when the bridge omits them', async () => {
-    // BridgeSessionSummary types both wait flags optional; a bridge that omits
+  it('defaults wait and error flags to false when the bridge omits them', async () => {
+    // BridgeSessionSummary types these flags optional; a bridge that omits
     // them must not serialize a missing key where the SDK snapshot promises a
     // boolean.
     const { app } = makeHarness({
@@ -8585,6 +8587,7 @@ describe('workspace session live-state route', () => {
         hasActivePrompt: false,
         isWaitingForPermission: false,
         isWaitingForUserQuestion: false,
+        hasTurnError: false,
         updatedAt: '2026-07-08T00:01:00.000Z',
       },
     ]);

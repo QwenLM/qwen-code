@@ -91,6 +91,124 @@ const TOKEN_B = 'b'.repeat(32);
 describe('HTTP Managed Session store', () => {
   const temporaryDirectories: string[] = [];
 
+  it('reads a model configuration only with an acquired writer and a bound digest', async () => {
+    const server = new FakeManagedSessionStore();
+    const digest = `sha256:${'a'.repeat(64)}`;
+    const response = { digest, config: { api_key: 'synthetic-key' } };
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+      requestUrl(input).endsWith('/model-config:query')
+        ? jsonResponse(response)
+        : server.fetch(input, init),
+    );
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      await expect(stores.modelConfig(digest)).rejects.toThrow();
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await expect(stores.modelConfig('invalid')).rejects.toThrow();
+      await expect(stores.modelConfig(digest)).resolves.toEqual(response);
+      const requests = fetchFn.mock.calls.filter(([input]) =>
+        requestUrl(input).endsWith('/model-config:query'),
+      );
+      expect(requests).toHaveLength(1);
+      const init = requests[0]![1];
+      expect(JSON.parse(String(init?.body))).toEqual({
+        workspaceId: SESSION_KEY.workspaceId,
+        writerId: 'harness-a',
+        writerGeneration: 1,
+        expectedDigest: digest,
+      });
+      expect(
+        new Headers(init?.headers).get('X-Qwen-Managed-Writer-Token'),
+      ).toBe(TOKEN_A);
+      await stores.modelConfig(digest, 'legacy-close');
+      expect(
+        JSON.parse(String(fetchFn.mock.calls.at(-1)?.[1]?.body)),
+      ).toMatchObject({ kind: 'legacy-close', expectedDigest: digest });
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
+  it.each([
+    [
+      'synthetic-secret-invalid-json',
+      'Model configuration response is invalid JSON.',
+    ],
+    ['x'.repeat(17000), 'Model configuration response exceeds its byte limit.'],
+  ])(
+    'bounds and redacts an invalid private model response',
+    async (body, message) => {
+      const server = new FakeManagedSessionStore();
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn: async (input, init) =>
+          requestUrl(input).endsWith('/model-config:query')
+            ? new Response(body, { headers: { 'Cache-Control': 'no-store' } })
+            : server.fetch(input, init),
+      });
+      try {
+        await stores.journalStore.open({ sessionKey: SESSION_KEY });
+        const failure = await stores
+          .modelConfig(`sha256:${'a'.repeat(64)}`)
+          .catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(Error);
+        expect((failure as Error).message).toContain(message);
+        expect(String(failure)).not.toContain(body);
+      } finally {
+        await stores.stopLocal();
+      }
+    },
+  );
+
+  it('retries and classifies private model response stream failures without exposing transport details', async () => {
+    const server = new FakeManagedSessionStore();
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+      requestUrl(input).endsWith('/model-config:query')
+        ? new Response(
+            new ReadableStream({
+              pull() {
+                throw new TypeError('synthetic-private-transport-detail');
+              },
+            }),
+            { headers: { 'Cache-Control': 'no-store' } },
+          )
+        : server.fetch(input, init),
+    );
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      const failure = await stores
+        .modelConfig(`sha256:${'a'.repeat(64)}`)
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ManagedSessionStoreTransportError);
+      expect(String(failure)).not.toContain(
+        'synthetic-private-transport-detail',
+      );
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/model-config:query'),
+        ),
+      ).toHaveLength(3);
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
   it.each([false, true])(
     'claims user messages with the current writer and initialOnly=%s',
     async (initialOnly) => {
@@ -4365,7 +4483,10 @@ describe('HTTP Managed Session store', () => {
       fetchFn,
     });
     try {
-      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      expect(journal.writerSealed).toBe(false);
       const bytes = Buffer.from('{"retained":true}');
       const ref = await stores.resourceStore.publish('managed-input', bytes);
       await vi.advanceTimersByTimeAsync(500);
@@ -4377,9 +4498,11 @@ describe('HTTP Managed Session store', () => {
       expect(joined).toBe(false);
       finishRenewal();
       await stopped;
+      expect(journal.writerSealed).toBe(false);
       await vi.advanceTimersByTimeAsync(5000);
       await expect(stores.assertWritable()).rejects.toThrow('locally stopped');
       await expect(stores.close()).rejects.toThrow('locally stopped');
+      expect(journal.writerSealed).toBe(false);
       expect(
         fetchFn.mock.calls.filter(([input]) =>
           requestUrl(input).endsWith('/writers:renew'),
@@ -4421,7 +4544,10 @@ describe('HTTP Managed Session store', () => {
       fetchFn,
     });
     try {
-      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      expect(journal.writerSealed).toBe(false);
       await vi.advanceTimersByTimeAsync(500);
       expect(
         fetchFn.mock.calls.some(([input]) =>
@@ -4431,8 +4557,11 @@ describe('HTTP Managed Session store', () => {
       const closing = stores.close();
       finishRenewal();
       await vi.advanceTimersByTimeAsync(0);
+      expect(server.sealCount).toBe(1);
+      expect(journal.writerSealed).toBe(false);
       finishSeal();
       await closing;
+      expect(journal.writerSealed).toBe(true);
       await vi.advanceTimersByTimeAsync(1000);
       expect(
         fetchFn.mock.calls.filter(([input]) =>
@@ -4447,6 +4576,55 @@ describe('HTTP Managed Session store', () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(['mismatched generation', 'unsealed state', 'invalid JSON'])(
+    'keeps the external writer unsealed after a seal receipt with %s',
+    async (failure) => {
+      const server = new FakeManagedSessionStore();
+      let invalidReceipt = true;
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+        const response = await server.fetch(input, init);
+        if (!requestUrl(input).endsWith('/writers:seal') || !invalidReceipt)
+          return response;
+        if (failure === 'invalid JSON') {
+          return new Response('not JSON', {
+            headers: response.headers,
+          });
+        }
+        return jsonResponse({
+          ...(await response.json()),
+          ...(failure === 'mismatched generation'
+            ? { writerGeneration: 2 }
+            : { state: 'ACTIVE' }),
+        });
+      });
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn,
+      });
+      try {
+        const journal = await stores.journalStore.open({
+          sessionKey: SESSION_KEY,
+        });
+        expect(journal.writerSealed).toBe(false);
+        await expect(stores.close()).rejects.toThrow(
+          failure === 'invalid JSON'
+            ? 'invalid JSON'
+            : 'seal receipt does not match the active writer',
+        );
+        expect(journal.writerSealed).toBe(false);
+        invalidReceipt = false;
+        await stores.close();
+        expect(journal.writerSealed).toBe(true);
+        expect(server.sealCount).toBe(2);
+      } finally {
+        await stores.stopLocal();
+      }
+    },
+  );
 
   // Regression for R1-38: a failed close-time seal must not keep the grant
   // on the renewal cadence. The backend re-issues the same writer generation
@@ -4469,12 +4647,16 @@ describe('HTTP Managed Session store', () => {
     const first = createHttpManagedSessionStores(options);
     const second = createHttpManagedSessionStores(options);
     try {
-      await first.journalStore.open({ sessionKey: SESSION_KEY });
+      const firstJournal = await first.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      expect(firstJournal.writerSealed).toBe(false);
       await vi.advanceTimersByTimeAsync(30_000);
       expect(server.renewCount).toBe(1);
 
       server.sealFailuresRemaining = 1;
       await expect(first.close()).rejects.toThrow('backend down');
+      expect(firstJournal.writerSealed).toBe(false);
       expect(server.sealCount).toBe(1);
       expect(server.state).toBe('ACTIVE');
       // `first` is the only writer in this window, so any renewal here is
@@ -4501,6 +4683,7 @@ describe('HTTP Managed Session store', () => {
       // The lapsed grant stays sealable by its own writer, so a caller that
       // retries close() still converges the journal to SEALED.
       await first.close();
+      expect(firstJournal.writerSealed).toBe(true);
       expect(server.state).toBe('SEALED');
     } finally {
       await first.close().catch(() => undefined);
