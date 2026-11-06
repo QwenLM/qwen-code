@@ -90,6 +90,7 @@ import {
   hostedRouteAnswer,
   hostedTeamJoinedText,
   hostedRuntimeSessionId,
+  hostedReadRangeGuidance,
   journaledToolResultIds,
   truncateHostedGlobResponse,
   type HostedShellTurnOptions,
@@ -2797,7 +2798,7 @@ export async function recoverHostedRuntimeTurn(input: {
               [],
               `Tool execution settled as ${result.executionStatus}, but its output exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte durable Session limit and was omitted.` +
                 (item.toolName === 'read_file'
-                  ? ' Request a smaller offset/limit range.'
+                  ? hostedReadRangeGuidance(false)
                   : ''),
             );
             const omittedResponse = omitted[0]?.functionResponse;

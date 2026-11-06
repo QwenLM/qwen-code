@@ -49,7 +49,8 @@ that already exists; it does not add a tool name. Resident/CSI declarations stay
 unchanged. Core remains responsible for page validation and extraction: page
 numbers start at 1, single pages and closed ranges are supported, and one request
 may select at most 20 pages. Result budgets do not change. Oversized PDF results
-suggest a smaller `pages` range; text results retain `offset`/`limit` guidance.
+suggest a smaller `pages` range in both live and recovered turns; text results
+retain `offset`/`limit` guidance.
 The declaration uses Core's page-limit constant so its guidance stays aligned
 with execution.
 
@@ -106,3 +107,9 @@ Fixture success is not real-model or production acceptance.
 The main risks are exposing ordinary tools to restricted CSI sessions and
 accepting outdated saved schemas. Verify the declarations and execution refusal
 paths separately. There are no unresolved product decisions within this scope.
+
+Deploy matching control-plane, Harness and Runtime artifacts together before
+enabling these capabilities. The default `files/1` identifier now includes
+`glob`; an older Runtime's capability identity alone does not prove it can
+execute that tool. Existing identifiers do not negotiate mixed-version tool
+sets. Recreate development Sessions whose saved declarations are incompatible.

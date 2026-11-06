@@ -190,7 +190,9 @@ describe('recoverHostedRuntimeTurn', () => {
             input:
               toolName === 'glob'
                 ? { pattern: '**/*.ts' }
-                : { file_path: `${ordinal}.txt`, content: 'x' },
+                : toolName === 'read_file'
+                  ? { file_path: `${ordinal}.pdf`, pages: '1-3' }
+                  : { file_path: `${ordinal}.txt`, content: 'x' },
           }),
         }),
       );
@@ -2850,8 +2852,16 @@ describe('recoverHostedRuntimeTurn', () => {
           expect(JSON.stringify(response)).not.toContain(
             'Narrow the pattern or path.',
           );
-          if (toolName === 'read_file')
-            expect(JSON.stringify(response)).toContain('offset/limit');
+          if (toolName === 'read_file') {
+            expect(JSON.parse(execute.mock.calls[0][1])).toEqual({
+              toolName: 'read_file',
+              input: { file_path: '0.pdf', pages: '1-3' },
+            });
+            expect(response?.['error']).toContain(
+              'offset/limit range for text',
+            );
+            expect(response?.['error']).toContain('pages range for PDFs');
+          }
         }
       } finally {
         await replacement.close();

@@ -5791,9 +5791,7 @@ export class HostedWorkspaceToolTurn {
                   error:
                     `Tool execution settled as ${result.executionStatus}, but its output exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte durable Session limit and was omitted.` +
                     (request.call.name === 'read_file'
-                      ? this.residentWorkspace
-                        ? ' Request a smaller offset/limit range.'
-                        : ' Request a smaller offset/limit range for text, or a smaller pages range for PDFs.'
+                      ? hostedReadRangeGuidance(this.residentWorkspace)
                       : ''),
                   executionStatus: result.executionStatus,
                   outputOmitted: true,
@@ -9320,6 +9318,12 @@ export class HostedWorkspaceToolTurn {
   }
 
   async close(): Promise<void> {}
+}
+
+export function hostedReadRangeGuidance(resident: boolean): string {
+  return resident
+    ? ' Request a smaller offset/limit range.'
+    : ' Request a smaller offset/limit range for text, or a smaller pages range for PDFs.';
 }
 
 const HOSTED_GLOB_TRUNCATION_HINT =

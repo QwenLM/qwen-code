@@ -3451,6 +3451,14 @@ it.each([
     },
   },
   {
+    label: 'resident text output',
+    resident: true,
+    result: {
+      executionStatus: 'success',
+      responseParts: [{ text: '中'.repeat(25_000) }],
+    },
+  },
+  {
     label: 'PDF pages',
     args: { file_path: 'document.pdf', pages: '1-3' },
     result: {
@@ -3460,7 +3468,11 @@ it.each([
   },
 ])(
   'persists a small receipt for oversized settled $label',
-  async ({ result, args }) => {
+  async ({ result, args, resident }) => {
+    if (resident) {
+      broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+      turn = createTurn();
+    }
     broker.execute.mockResolvedValue(result);
     const publish = vi.spyOn(session.resources, 'publish');
     const call = { ...calls[0], args: args ?? calls[0].args };
@@ -3474,9 +3486,13 @@ it.each([
     expect(response?.['outputOmitted']).toBe(true);
     expect(response?.['executionStatus']).toBe(result.executionStatus);
     expect(response?.['error']).toContain('durable Session limit');
-    expect(response?.['error']).toContain(
-      args ? 'pages range for PDFs' : 'offset/limit range for text',
-    );
+    if (resident) {
+      expect(response?.['error']).toContain('smaller offset/limit range.');
+      expect(response?.['error']).not.toContain('pages');
+    } else {
+      expect(response?.['error']).toContain('offset/limit range for text');
+      expect(response?.['error']).toContain('pages range for PDFs');
+    }
     expect(response).not.toHaveProperty('output');
     expect(response).not.toHaveProperty('runtimeError');
     const outcome = publish.mock.calls.find(
@@ -3684,6 +3700,9 @@ it.each(['files', 'shell', 'mcp'])(
       tools: () => [remote],
     };
     const original = structuredClone(HOSTED_WORKSPACE_FILE_TOOLS);
+    const originalReadSchema = original[0].parametersJsonSchema as {
+      properties: Record<string, unknown>;
+    };
     const described = new HostedWorkspaceToolTurn(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       session,
@@ -3741,12 +3760,16 @@ it.each(['files', 'shell', 'mcp'])(
       ]);
       expect(declarations.at(-1)).toEqual(remote);
     }
-    expect(
-      declarations.find((tool) => tool.name === 'read_file'),
-    ).toMatchObject(original[0]);
-    expect(
-      declarations.find((tool) => tool.name === 'read_file'),
-    ).toHaveProperty('parametersJsonSchema.properties.pages');
+    expect(declarations.find((tool) => tool.name === 'read_file')).toEqual({
+      ...original[0],
+      parametersJsonSchema: {
+        ...originalReadSchema,
+        properties: {
+          ...originalReadSchema.properties,
+          pages: { type: ['string', 'null'], description: expect.any(String) },
+        },
+      },
+    });
     expect(HOSTED_WORKSPACE_FILE_TOOLS).toEqual(original);
     await described.close();
   },
@@ -5622,8 +5645,8 @@ it('admits exactly the declared native tools to the version 3 input preview', ()
   // set is pinned here and each name must still be a declared native tool —
   // the child launch declares through HOSTED_AGENT_TOOL, a session message
   // through its two send_message declarations and the team board through
-  // HOSTED_TEAM_TOOLS, not the shell set. `todo_write` is appended only for
-  // `files/3` (which is not a shell profile), so it joins the set on its own.
+  // HOSTED_TEAM_TOOLS, not the shell set. `todo_write` is appended for `files/3`
+  // and `shell/1`, but is absent from HOSTED_WORKSPACE_SHELL_TOOLS itself.
   expect(HOSTED_INPUT_PREVIEW_TOOLS).toEqual([
     'web_fetch',
     'read_file',
