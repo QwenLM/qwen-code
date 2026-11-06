@@ -8,7 +8,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import {
   getQwenOAuthConfig,
   getQwenSubscriptionPlansUrl,
-  withQwenChatClient,
+  withQwenChatTracking,
 } from './oauth-config.js';
 
 afterEach(() => vi.unstubAllEnvs());
@@ -19,21 +19,22 @@ it('opens Code plans on the web home without device authorization parameters', (
   expect(url.pathname).toBe('/');
   expect([...url.searchParams]).toEqual([
     ['memberPlan', 'qwen_code'],
-    ['client', 'qwen_code_cli'],
+    ['entry', 'qwen_code'],
+    ['paywallScene', 'cli'],
   ]);
   expect(url.hash).toBe('');
 });
 
-it('replaces stale web client tags without losing device parameters or fragments', () => {
-  const url = withQwenChatClient(
-    'https://chat.qwen.ai/device?code=123&client=cli&client=qwen-code#confirm',
+it('updates the paywall scene on a legacy Qwen link without changing its client', () => {
+  const url = withQwenChatTracking(
+    'https://chat.qwen.ai/device?code=123&client=original&entry=qwen_code&paywallScene=cli#confirm',
     'plugin',
   );
   expect(url).toBe(
-    'https://chat.qwen.ai/device?code=123&client=qwen_code_plugin#confirm',
+    'https://chat.qwen.ai/device?code=123&client=original&entry=qwen_code&paywallScene=plugin#confirm',
   );
   const other = 'https://chat.qwen.ai.example.test/device?code=123';
-  expect(withQwenChatClient(other, 'plugin')).toBe(other);
+  expect(withQwenChatTracking(other, 'plugin')).toBe(other);
 });
 
 it('uses the production configuration without environment setup', () => {

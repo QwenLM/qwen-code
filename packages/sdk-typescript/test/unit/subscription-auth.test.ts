@@ -10,7 +10,7 @@ const baseUrl = 'http://127.0.0.1:3131';
 function clientWith(
   status = 200,
   body: unknown = {},
-  subscriptionClient?: 'cli' | 'desktop' | 'plugin',
+  subscriptionPaywallScene?: 'cli' | 'desktop' | 'plugin',
 ) {
   const fetch = vi
     .fn<typeof globalThis.fetch>()
@@ -23,17 +23,17 @@ function clientWith(
       baseUrl,
       token: 'daemon-token',
       fetch,
-      subscriptionClient,
+      subscriptionPaywallScene,
     }),
     fetch,
   };
 }
 describe('Subscription transport', () => {
   it.each([undefined, 'plugin'] as const)(
-    'uses process-global routes and daemon credentials with client %s',
-    async (subscriptionClient) => {
-      const { client, fetch } = clientWith(200, {}, subscriptionClient);
-      const query = subscriptionClient ? '?client=plugin' : '';
+    'uses process-global routes and daemon credentials with paywall scene %s',
+    async (scene) => {
+      const { client, fetch } = clientWith(200, {}, scene);
+      const query = scene ? '?paywallScene=plugin' : '';
       await client.getSubscriptionConfig();
       await client.startSubscriptionLogin();
       await client.getSubscriptionLogin('flow/id');

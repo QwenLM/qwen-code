@@ -2256,7 +2256,7 @@ export class WebViewProvider {
         this.subscriptionRuntime = {
           client: new DaemonClient({
             ...runtime,
-            subscriptionClient: 'plugin',
+            subscriptionPaywallScene: 'plugin',
           }),
           workspaceCwd: canonicalWorkspaceCwd,
           sessionId: restoredSessionId,

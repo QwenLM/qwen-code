@@ -66,9 +66,9 @@ VS Code 打开订阅授权时在 WebShellWithProviders 上设置 `viewHidden`，
 | 身份/会员       | `GET /api/oauth/userinfo`     |
 | 撤销            | `POST /api/oauth/revoke`      |
 
-订阅认证域名为 `https://auth.qwen.ai`，OAuth `client_id=qwen-code-cli`。网页授权地址 `https://chat.qwen.ai/authorize` 携带 `user_code` 和 `client`。升级和购买共用 `https://chat.qwen.ai/`，携带 `memberPlan=qwen_code` 和 `client`。两个网页入口都需要登录网页账号。
+订阅认证域名为 `https://auth.qwen.ai`，OAuth `client_id=qwen-code-cli`。跳往 `chat.qwen.ai` 的网页链接携带 `entry=qwen_code` 和 `paywallScene`。授权地址 `/authorize` 还带 `user_code` 和 `client`，其中 `client` 与 `paywallScene` 取值一致。升级和购买共用 `/`，还带 `memberPlan=qwen_code`。两个网页入口都需要登录网页账号。
 
-终端使用 `client=qwen_code_cli`，Desktop 和独立 Web Shell 使用 `client=qwen_code_desktop`，VS Code 插件使用 `client=qwen_code_plugin`。daemon 从订阅能力查询和授权流程创建请求接收 client，默认取 `desktop`，轮询同一流程时沿用创建时生成的授权链接。打开前就生成最终链接，保证展示和复制的值一致。旧版 Qwen 授权链接指向 `chat.qwen.ai` 时也使用对应的来源参数。
+终端和文档使用 `paywallScene=cli`，Desktop 和独立 Web Shell 使用 `paywallScene=desktop`，VS Code 插件使用 `paywallScene=plugin`。daemon 从订阅能力查询和授权流程创建请求接收 `paywallScene`，默认取 `desktop`，轮询同一流程时沿用创建时生成的授权链接。指向 `chat.qwen.ai` 的旧版网页授权链接也加相同的归因字段，并保留原有查询参数。
 
 Core 负责私有权限的原子存储、恢复、跨进程刷新锁和撤销。宿主只在有效 `QWEN_HOME` 相同时共享会话。会员与旧 OAuth 分开存储；刷新替换完整 Token 对；Token 和设备码不进入 GUI 响应。
 
@@ -104,7 +104,7 @@ CLI 监听模型和凭据文件变化；其他进程移除凭据时也清理缓�
 
 ### 显式登录、工作区默认值与退出
 
-每次显式选择 Qwen 登录都重新发起设备授权，访问 `/authorize?user_code=…&client=qwen_code_<host>`，即使本地凭证仍有效。本地 OAuth 凭证不能证明浏览器仍处于登录状态。设备授权期间保留原账号的 token、revision 和模型目录。取消、拒绝、过期或兑换失败时保留原会话。退出登录或发起更新的登录会使较早的尝试失效。兑换成功后原子保存新的 token 对和 revision，清除旧目录，并拒绝旧账号迟到的目录响应。CLI 及 Desktop、VS Code 共用的进程级 daemon 流程都必须等待本次授权完成，才能确认会员状态或激活模型。普通启动仍自动恢复已保存凭证，不发起授权。成功摘要在模型与常用命令之间保留本次实际授权链接，不再生成 `/authorize/success` 链接。本次客户端修复不修改网页及已有路由；登录回跳、购买顺序及授权页的成功卡片仍由网页负责。
+每次显式选择 Qwen 登录都重新发起设备授权，访问 `/authorize`，即使本地凭证仍有效。本地 OAuth 凭证不能证明浏览器仍处于登录状态。设备授权期间保留原账号的 token、revision 和模型目录。取消、拒绝、过期或兑换失败时保留原会话。退出登录或发起更新的登录会使较早的尝试失效。兑换成功后原子保存新的 token 对和 revision，清除旧目录，并拒绝旧账号迟到的目录响应。CLI 及 Desktop、VS Code 共用的进程级 daemon 流程都必须等待本次授权完成，才能确认会员状态或激活模型。普通启动仍自动恢复已保存凭证，不发起授权。成功摘要在模型与常用命令之间保留本次实际授权链接，不再生成 `/authorize/success` 链接。本次客户端修复不修改网页及已有路由；登录回跳、购买顺序及授权页的成功卡片仍由网页负责。
 
 显式登录优先选 Max，目录没有 Max 时取第一项。保存层级和普通模型选择一致。受信任的项目拥有供应商配置时写项目，供应商配置在用户级或首次没有配置时写用户。项目已有订阅选择时仍写原项目。其他活跃会话继续使用各自的运行时模型，新会话按生效设置取默认。CLI `/auth` 菜单初始高亮 Qwen 会员账号。Desktop 在授权第二步展示账号、套餐、已激活模型和手动链接。
 

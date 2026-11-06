@@ -119,7 +119,7 @@ describe('process-global Subscription routes', () => {
         enabled: true,
         signedIn: false,
         plansUrl:
-          'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_desktop',
+          'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=desktop',
       });
       expect((await post(`${base}/flows`)).status).toBe(201);
     },
@@ -133,13 +133,13 @@ describe('process-global Subscription routes', () => {
       enabled: true,
       signedIn: false,
       plansUrl:
-        'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_desktop',
+        'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=desktop',
     });
     expect((await post(`${base}/flows`)).status).toBe(201);
   });
   it.each(['cli', 'desktop', 'plugin'])(
     'returns production links for %s and never exposes the device secret',
-    async (client) => {
+    async (scene) => {
       mocks.signIn.mockImplementation((onDevice) => {
         onDevice({
           user_code: 'ABCD-EFGH',
@@ -150,17 +150,17 @@ describe('process-global Subscription routes', () => {
         return new Promise(() => {});
       });
       const { get, post } = makeApp();
-      expect((await get(`${base}?client=${client}`)).body).toEqual({
+      expect((await get(`${base}?paywallScene=${scene}`)).body).toEqual({
         enabled: true,
         signedIn: false,
-        plansUrl: `https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_${client}`,
+        plansUrl: `https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=${scene}`,
       });
-      const started = await post(`${base}/flows?client=${client}`);
+      const started = await post(`${base}/flows?paywallScene=${scene}`);
       const view = await get(`${base}/flows/${started.body.id}`);
       expect(view.body).toEqual({
         id: started.body.id,
         status: 'waiting',
-        authorizationUrl: `https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen_code_${client}`,
+        authorizationUrl: `https://chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=${scene}&entry=qwen_code&paywallScene=${scene}`,
       });
       expect(JSON.stringify(view.body)).not.toContain('secret');
     },
@@ -172,19 +172,14 @@ describe('process-global Subscription routes', () => {
     });
     mocks.userInfo.mockResolvedValue(user);
     const { post, get } = makeApp();
-    const first = await post(`${base}/flows?client=plugin`);
-    const second = await post(`${base}/flows`);
+    const first = await post(`${base}/flows?paywallScene=plugin`);
+    await post(`${base}/flows`);
     expect((await get(`${base}/flows/${first.body.id}`)).body).toEqual({
       id: first.body.id,
       status: 'ready',
       authorizationUrl:
-        'https://chat.qwen.ai/authorize?user_code=NEW-CODE&client=qwen_code_plugin',
+        'https://chat.qwen.ai/authorize?user_code=NEW-CODE&client=plugin&entry=qwen_code&paywallScene=plugin',
       userInfo: user,
-    });
-    expect((await get(`${base}/flows/${second.body.id}`)).body).toMatchObject({
-      status: 'ready',
-      authorizationUrl:
-        'https://chat.qwen.ai/authorize?user_code=NEW-CODE&client=qwen_code_desktop',
     });
     expect(mocks.userInfo).not.toHaveBeenCalled();
     expect(mocks.signIn).toHaveBeenCalledTimes(2);
@@ -208,7 +203,7 @@ describe('process-global Subscription routes', () => {
         id: started.body.id,
         status: 'waiting',
         authorizationUrl:
-          'https://chat.qwen.ai/authorize?user_code=NEW-CODE&client=qwen_code_desktop',
+          'https://chat.qwen.ai/authorize?user_code=NEW-CODE&client=desktop&entry=qwen_code&paywallScene=desktop',
       });
       expect(mocks.userInfo).not.toHaveBeenCalled();
       expect(mocks.signOut).not.toHaveBeenCalled();

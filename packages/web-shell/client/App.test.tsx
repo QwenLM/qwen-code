@@ -12806,7 +12806,7 @@ describe('App subscription logout command', () => {
       enabled: true,
       signedIn: true,
       plansUrl:
-        'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_desktop',
+        'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=desktop',
     });
     testState.prompt = '/logout';
   });
@@ -12872,7 +12872,7 @@ describe('App subscription logout command', () => {
       await clickSubmit(container);
       await flush();
       expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
-        url: 'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_desktop',
+        url: 'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=desktop',
       });
       expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     } finally {

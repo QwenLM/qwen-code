@@ -185,13 +185,13 @@ it('opens the existing Qwen Code plans page from /upgrade', async () => {
   const context = memberContext();
   const result = await upgradeCommand.action!(context, '');
   expect(mocks.browser).toHaveBeenCalledWith(
-    'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_cli',
+    'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli',
   );
   expect(result).toMatchObject({
     type: 'message',
     messageType: 'info',
     content: expect.stringContaining(
-      'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_cli',
+      'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli',
     ),
   });
 });
@@ -214,7 +214,7 @@ it('provides a usable plans URL when browser launch is suppressed or fails', asy
   expect(await upgradeCommand.action!(memberContext(), '')).toMatchObject({
     messageType: 'error',
     content:
-      'Could not open your browser. Visit https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_cli',
+      'Could not open your browser. Visit https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli',
   });
 });
 

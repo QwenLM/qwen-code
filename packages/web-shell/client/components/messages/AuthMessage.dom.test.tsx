@@ -901,13 +901,13 @@ describe('subscription development entry', () => {
       actions.getSubscriptionConfig.mockResolvedValue({
         enabled: true,
         plansUrl:
-          'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_desktop',
+          'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=desktop',
       });
       actions.startSubscriptionLogin.mockResolvedValue({
         id: 'flow-1',
         status: 'waiting',
         authorizationUrl:
-          'https://chat.qwen.ai/authorize?user_code=123&client=qwen_code_desktop',
+          'https://chat.qwen.ai/authorize?user_code=123&client=desktop&entry=qwen_code&paywallScene=desktop',
       });
       actions.cancelSubscriptionLogin.mockResolvedValue(undefined);
       const open = vi.spyOn(window, 'open').mockReturnValue(null);
@@ -924,12 +924,12 @@ describe('subscription development entry', () => {
       expect(actions.startSubscriptionLogin).toHaveBeenCalledOnce();
       if (desktop) {
         expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
-          url: 'https://chat.qwen.ai/authorize?user_code=123&client=qwen_code_desktop',
+          url: 'https://chat.qwen.ai/authorize?user_code=123&client=desktop&entry=qwen_code&paywallScene=desktop',
         });
         expect(open).not.toHaveBeenCalled();
       } else {
         expect(open).toHaveBeenCalledWith(
-          'https://chat.qwen.ai/authorize?user_code=123&client=qwen_code_desktop',
+          'https://chat.qwen.ai/authorize?user_code=123&client=desktop&entry=qwen_code&paywallScene=desktop',
           '_blank',
           'noopener,noreferrer',
         );
@@ -1107,7 +1107,7 @@ describe('subscription development entry', () => {
       actions.getSubscriptionConfig.mockResolvedValue({
         enabled: true,
         plansUrl:
-          'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_desktop',
+          'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=desktop',
       });
       actions.startSubscriptionLogin.mockResolvedValue({
         id: 'paid-welcome',
@@ -1190,7 +1190,7 @@ describe('subscription development entry', () => {
       actions.getSubscriptionConfig.mockResolvedValue({
         enabled: true,
         plansUrl:
-          'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_desktop',
+          'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=desktop',
       });
       actions.startSubscriptionLogin.mockResolvedValue({
         id: 'paid',
@@ -1230,7 +1230,7 @@ describe('subscription development entry', () => {
     actions.getSubscriptionConfig.mockResolvedValue({
       enabled: true,
       plansUrl:
-        'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_desktop',
+        'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=desktop',
     });
     actions.startSubscriptionLogin.mockResolvedValue({
       id: 'paid',

@@ -15,11 +15,11 @@ import {
 import {
   getQwenSubscriptionAuthorizationUrl,
   getQwenSubscriptionPlansUrl,
-  type QwenChatClient,
+  type QwenPaywallScene,
 } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import type { DaemonSubscriptionFlow } from '@qwen-code/sdk/daemon';
 
-function subscriptionClient(value: unknown): QwenChatClient {
+function paywallScene(value: unknown): QwenPaywallScene {
   return value === 'cli' || value === 'plugin' ? value : 'desktop';
 }
 
@@ -102,7 +102,7 @@ export function registerSubscriptionAuthRoutes(
       enabled: !disposed,
       signedIn: !disposed && new QwenSubscriptionSession().isSignedIn(),
       plansUrl: getQwenSubscriptionPlansUrl(
-        subscriptionClient(req.query['client']),
+        paywallScene(req.query['paywallScene']),
       ),
     });
   });
@@ -120,7 +120,7 @@ export function registerSubscriptionAuthRoutes(
         return;
       }
       const id = randomUUID();
-      const client = subscriptionClient(req.query['client']);
+      const scene = paywallScene(req.query['paywallScene']);
       const controller = new AbortController();
       const flow = {
         view: { id, status: 'waiting' } as DaemonSubscriptionFlow,
@@ -141,7 +141,7 @@ export function registerSubscriptionAuthRoutes(
           controller.signal.throwIfAborted();
           const authorizationUrl = getQwenSubscriptionAuthorizationUrl(
             device.user_code,
-            client,
+            scene,
           );
           flow.view = { id, status: 'waiting', authorizationUrl };
         }, controller.signal);

@@ -443,7 +443,7 @@ export function EmbeddedApp() {
         ? new DaemonClient({
             baseUrl: daemonBaseUrl,
             token: daemonToken,
-            subscriptionClient: 'plugin',
+            subscriptionPaywallScene: 'plugin',
           })
         : null,
     [daemonBaseUrl, daemonToken],

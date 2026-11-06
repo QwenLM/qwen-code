@@ -16,7 +16,7 @@ import {
   type IQwenOAuth2Client,
   type QwenCredentials,
 } from '@qwen-code/qwen-code-core';
-import { withQwenChatClient } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
+import { withQwenChatTracking } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   brandSecret,
@@ -119,8 +119,8 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
       deviceCode: brandSecret(auth.device_code),
       pkceVerifier: brandSecret(code_verifier),
       userCode: auth.user_code,
-      verificationUri: withQwenChatClient(auth.verification_uri, 'cli'),
-      verificationUriComplete: withQwenChatClient(
+      verificationUri: withQwenChatTracking(auth.verification_uri, 'cli'),
+      verificationUriComplete: withQwenChatTracking(
         auth.verification_uri_complete,
         'cli',
       ),

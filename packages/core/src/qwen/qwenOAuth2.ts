@@ -15,7 +15,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { combineAbortSignals } from '../utils/abortController.js';
 import { openBrowserSecurely } from '../utils/secure-browser-launcher.js';
 import { osc8Hyperlink, supportsHyperlinks } from '../utils/osc8.js';
-import { withQwenChatClient } from './oauth-config.js';
+import { withQwenChatTracking } from './oauth-config.js';
 import {
   SharedTokenManager,
   TokenManagerError,
@@ -888,13 +888,16 @@ async function authWithQwenDeviceFlow(
     }
 
     // Emit device authorization event for UI integration immediately
-    const authorizationUrl = withQwenChatClient(
+    const authorizationUrl = withQwenChatTracking(
       deviceAuth.verification_uri_complete,
       'cli',
     );
     qwenOAuth2Events.emit(QwenOAuth2Event.AuthUri, {
       ...deviceAuth,
-      verification_uri: withQwenChatClient(deviceAuth.verification_uri, 'cli'),
+      verification_uri: withQwenChatTracking(
+        deviceAuth.verification_uri,
+        'cli',
+      ),
       verification_uri_complete: authorizationUrl,
     });
 

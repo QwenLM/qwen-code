@@ -24,16 +24,17 @@ export function getQwenOAuthConfig(): {
   };
 }
 
-export type QwenChatClient = 'cli' | 'desktop' | 'plugin';
+export type QwenPaywallScene = 'cli' | 'desktop' | 'plugin';
 
-function formatQwenChatUrl(url: URL, client: QwenChatClient): string {
-  url.searchParams.set('client', `qwen_code_${client}`);
+function formatQwenChatUrl(url: URL, scene: QwenPaywallScene): string {
+  url.searchParams.set('entry', 'qwen_code');
+  url.searchParams.set('paywallScene', scene);
   return url.toString();
 }
 
-export function withQwenChatClient(
+export function withQwenChatTracking(
   rawUrl: string,
-  client: QwenChatClient,
+  scene: QwenPaywallScene,
 ): string {
   let url: URL;
   try {
@@ -41,21 +42,23 @@ export function withQwenChatClient(
   } catch {
     return rawUrl;
   }
-  if (url.origin !== getQwenOAuthConfig().webOrigin) return rawUrl;
-  return formatQwenChatUrl(url, client);
+  return url.origin === getQwenOAuthConfig().webOrigin
+    ? formatQwenChatUrl(url, scene)
+    : rawUrl;
 }
 
 export function getQwenSubscriptionAuthorizationUrl(
   userCode: string,
-  client: QwenChatClient,
+  scene: QwenPaywallScene,
 ): string {
   const url = new URL('/authorize', getQwenOAuthConfig().webOrigin);
   url.searchParams.set('user_code', userCode);
-  return formatQwenChatUrl(url, client);
+  url.searchParams.set('client', scene);
+  return formatQwenChatUrl(url, scene);
 }
 
-export function getQwenSubscriptionPlansUrl(client: QwenChatClient): string {
+export function getQwenSubscriptionPlansUrl(scene: QwenPaywallScene): string {
   const url = new URL('/', getQwenOAuthConfig().webOrigin);
   url.searchParams.set('memberPlan', 'qwen_code');
-  return formatQwenChatUrl(url, client);
+  return formatQwenChatUrl(url, scene);
 }
