@@ -2583,17 +2583,12 @@ async function retryHostedCleanup(
   try {
     session.cleanupHolds?.clear();
     if (hasHostedCleanupDebt(session.managed)) {
+      // Unsettled wake turns need their recovery pump to commit the terminal
+      // record before reconciliation can release their Runtime.
       retainHostedCleanupHolds(
         session,
         await reconcileHostedTurnCleanup(session.managed, options),
       );
-      if (
-        await hasBlockingHostedCleanupDebt(
-          session.managed,
-          session.cleanupHolds,
-        )
-      )
-        throw new Error('Original Runtime cleanup is still owed.');
     }
     if (session.cleanupBlocked) liftRecoveryBlock(session);
     session.cleanupBlocked = false;
