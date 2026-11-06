@@ -1784,7 +1784,7 @@ class HostedPublicWorkspaceIT {
                 assertThat(tools).contains("read_file", "write_file", "edit", "run_shell_command");
                 assertThat(tools).doesNotContain("team_create", "workflow", "send_message");
             } else if (shell) {
-                var expectedTools = new ArrayList<>(List.of("read_file", "write_file", "edit", "web_fetch", "run_shell_command", "glob", "ask_user_question"));
+                var expectedTools = new ArrayList<>(List.of("read_file", "write_file", "edit", "web_fetch", "run_shell_command", "glob", "todo_write", "ask_user_question"));
                 if (shellLifecycleV2) {
                     expectedTools.add("monitor");
                 }
@@ -1797,7 +1797,7 @@ class HostedPublicWorkspaceIT {
             } else if (resident) {
                 assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
             } else {
-                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "web_fetch", "ask_user_question");
+                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "web_fetch", "glob", "ask_user_question");
             }
             // Count only this Turn's tool results, after the latest fixture prompt, so a later
             // Turn in the same Session runs the same write, edit and read sequence. Other user
