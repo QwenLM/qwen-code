@@ -618,9 +618,12 @@ function getWorkspaceName(workspaceCwd: string | undefined): string {
   return parts.at(-1) ?? workspaceCwd;
 }
 
-function getSessionLabel(session: DaemonSessionSummary): string {
+function getSessionLabel(
+  session: DaemonSessionSummary,
+  untitledLabel?: string,
+): string {
   const displayName = session.displayName?.trim();
-  return displayName || session.sessionId.slice(0, 8);
+  return displayName || untitledLabel || session.sessionId.slice(0, 8);
 }
 
 function getCompactSessionLabel(session: DaemonSessionSummary): string {
@@ -5010,7 +5013,7 @@ export function WebShellSidebar({
         (livePresence.coordinator?.sessionId === session.sessionId ||
           (livePresence.callId !== undefined &&
             session.sourceId === `realtime_voice:${livePresence.callId}`));
-      const label = getSessionLabel(session);
+      const label = getSessionLabel(session, t('sidebar.untitledSession'));
       const stamp = session.updatedAt || session.createdAt;
       // Rows stay text-only; the precise date lives in the hover popover.
       const time = stamp ? formatDateTime(stamp) : '';
@@ -7513,6 +7516,7 @@ export function WebShellSidebar({
                     )}
                     client={workspace.client}
                     editingSessionId={editingSessionIdForSections}
+                    untitledSessionLabel={t('sidebar.untitledSession')}
                     pendingSession={
                       livePresence &&
                       (!livePresence.coordinator ||
@@ -7723,6 +7727,7 @@ export function WebShellSidebar({
                             }
                             client={workspace.client}
                             editingSessionId={editingSessionIdForSections}
+                            untitledSessionLabel={t('sidebar.untitledSession')}
                             reloadToken={workspaceSessionsReloadToken}
                             untrustedLabel={t('sidebar.workspaceUntrusted')}
                             readOnlyLabel={t('sidebar.workspaceReadOnly')}

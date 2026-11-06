@@ -2823,6 +2823,8 @@ export class Session implements SessionContext {
   private unsubscribeApprovalModeChange?: () => void;
   private unsubscribeWorkflowModeChange?: () => void;
   private workflowModeUpdateQueue: Promise<void> = Promise.resolve();
+  private availableCommandsUpdateTail: Promise<void> = Promise.resolve();
+  private lastSuccessfulAvailableCommandsHash?: string;
   private unsubscribeRequestLifecycle?: () => void;
   private requestLifecycleSessionId: string;
   private readonly requestLifecycleExecutions = new Set<string>();
@@ -14896,7 +14898,18 @@ export class Session implements SessionContext {
     if (updateFailed) throw updateError;
   }
 
-  reloadSkillSettings(): void {
+  reloadSkillSettings(includeUserSettings = false): void {
+    if (includeUserSettings) {
+      if (
+        !this.settings.reloadScopesFromDiskAtomically([
+          SettingScope.Workspace,
+          SettingScope.User,
+        ])
+      ) {
+        throw new Error('Failed to reload user skill settings');
+      }
+      return;
+    }
     this.settings.reloadScopeFromDisk(SettingScope.Workspace);
   }
 
@@ -14909,24 +14922,41 @@ export class Session implements SessionContext {
     );
   }
 
-  private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
-    if (this.#isAutomaticWorkHeld()) return;
-    const { availableCommands, availableSkills, availableSkillDetails } =
-      await this.buildAvailableCommandsSnapshot();
-    this.config.refreshWorkflowMode?.();
-    const update: SessionUpdate = {
-      sessionUpdate: 'available_commands_update',
-      availableCommands,
-      ...(availableSkills !== undefined
-        ? {
-            _meta: {
-              availableSkills,
-              ...(availableSkillDetails ? { availableSkillDetails } : {}),
-            },
-          }
-        : {}),
-    };
-    await this.sendUpdate(update);
+  private sendAvailableCommandsUpdateOrThrow(): Promise<void> {
+    const pending = this.availableCommandsUpdateTail.then(async () => {
+      if (this.disposed || this.#isAutomaticWorkHeld()) return;
+      const { availableCommands, availableSkills, availableSkillDetails } =
+        await this.buildAvailableCommandsSnapshot();
+      if (this.disposed || this.#isAutomaticWorkHeld()) return;
+      this.config.refreshWorkflowMode?.();
+      const update: SessionUpdate = {
+        sessionUpdate: 'available_commands_update',
+        availableCommands,
+        ...(availableSkills !== undefined
+          ? {
+              _meta: {
+                availableSkills,
+                ...(availableSkillDetails ? { availableSkillDetails } : {}),
+              },
+            }
+          : {}),
+      };
+      const hash = createHash('sha256')
+        .update(JSON.stringify(update))
+        .digest('hex');
+      if (
+        hash === this.lastSuccessfulAvailableCommandsHash ||
+        this.disposed ||
+        this.#isAutomaticWorkHeld()
+      ) {
+        return;
+      }
+      await this.sendUpdate(update);
+      if (this.disposed || this.#isAutomaticWorkHeld()) return;
+      this.lastSuccessfulAvailableCommandsHash = hash;
+    });
+    this.availableCommandsUpdateTail = pending.catch(() => undefined);
+    return pending;
   }
 
   #withBackgroundPermission(

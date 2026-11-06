@@ -411,7 +411,15 @@ PR 3b-2a moves the TUI's stops into the batch. The batch ends only when no model
 
 Batches that wait for the streams join the queue that the end of the last stream drains, so the results of every batch completed during one stream go out in one continuation, as today, in the order the batches completed.
 
-The history repair, the split by interaction owner and the tool-use summary check what the next round sends, so they stay in the completion step for now. PR 3b-2b has the turn await the batch, and they run right before the next round.
+PR 3b-2b has the turn await its batch. The batch's completion step still stops the turn or sends its next round, and the turn awaits both, so the history repair, the split by interaction owner and the tool-use summary run in the turn, right before the next round:
+
+| The TUI today                                                                                          | With the setting on                                                                                           |
+| ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| a round returns once its stream ended, and its batch's completion step sends the next round            | the round's turn awaits the batch, its completion step and the round that step sends                          |
+| the scheduler starts no queued batch until the completion step returned, after the next round's stream | until the completion step stopped the turn or is about to send the next round, whose calls need the scheduler |
+| a batch whose executed calls history all answered sends nothing                                        | the same: the batch's replay answers do not go out alone                                                      |
+
+When the turn's stream ends while another stream is active, which may be the stream that sent its round, the turn does not wait: a response of provider replays alone sends its answers before its own stream closes. The batch then waits for the streams to end and completes on its own, as before, and batches that wait for the streams still go out in one continuation.
 
 ## Migration
 
