@@ -566,10 +566,7 @@ export interface DaemonSessionActions {
       workspaceCwd: string;
       sessionId?: string;
     }) => void | Promise<void>,
-    options?: {
-      reloadProviders?: boolean;
-      unavailableSubscriptionModelNotice?: string;
-    },
+    options?: { reloadProviders?: boolean },
   ): Promise<void>;
 
   setWorkflowMode(requested: boolean): Promise<void>;

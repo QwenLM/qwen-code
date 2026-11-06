@@ -260,30 +260,21 @@ export const useAuthCommand = (
 
   const handleSubscriptionSubmit = useCallback(
     async (signal: AbortSignal, authorizationUrl?: string) => {
-      const { info, modelSelectionRequired } = await activateSubscription(
-        settings,
-        config,
-        signal,
-      );
+      const info = await activateSubscription(settings, config, signal);
       signal.throwIfAborted();
       addItem(
         {
           type: MessageType.INFO,
           text: subscriptionSuccessMessage(
             info,
-            modelSelectionRequired ||
-              config.getAuthType() === AuthType.QWEN_SUBSCRIPTION
-              ? config.getModel()
-              : undefined,
+            config.getModel(),
             authorizationUrl,
-            modelSelectionRequired,
           ),
           presentation: 'subscription-success',
         },
         Date.now(),
       );
-      if (config.getAuthType()) completeAuthentication();
-      else setIsAuthDialogOpen(false);
+      completeAuthentication();
     },
     [settings, config, completeAuthentication, addItem],
   );

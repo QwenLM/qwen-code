@@ -93,9 +93,7 @@ type FlowProps = {
   onClose: () => void;
   onSignedOut?: () => void;
   onOtherProviders: () => void;
-  onActivate?: (
-    signal: AbortSignal,
-  ) => Promise<string | { modelSelectionRequired: true } | void>;
+  onActivate?: (signal: AbortSignal) => Promise<string | void>;
   onActivated?: (message?: string) => void;
   onModelsUnavailable?: () => void;
   onAuthError?: (message: string) => void;
@@ -103,7 +101,6 @@ type FlowProps = {
 
 export function QwenSubscriptionFlow(props: FlowProps) {
   const { t } = useI18n();
-  const modelSelectionHint = `${t('model.select')} (/model)`;
   const flow = useSubscription(props.transport, props.onOpenExternal);
   const expire = flow.expire;
   const mounted = useRef(true);
@@ -122,7 +119,6 @@ export function QwenSubscriptionFlow(props: FlowProps) {
     email: string;
     plan: string;
     model?: string;
-    modelSelectionRequired?: boolean;
     owner: AbortSignal;
   }>();
   const completionDelivered = useRef(false);
@@ -167,27 +163,20 @@ export function QwenSubscriptionFlow(props: FlowProps) {
     setConnectionError(undefined);
     try {
       const signal = AbortSignal.any([owner, controller.signal]);
-      const selection = await onActivate(signal);
-      const model = typeof selection === 'string' ? selection : undefined;
-      const modelSelectionRequired =
-        typeof selection === 'object' && selection?.modelSelectionRequired;
+      const model = await onActivate(signal);
       if (!owner.aborted && !controller.signal.aborted && mounted.current) {
         const result = {
           email: account.email,
           plan: account.plan,
         };
-        setCompleted({ ...result, model, modelSelectionRequired, owner });
+        setCompleted({ ...result, model: model ?? undefined, owner });
         if (!callbacks.current.desktopSuccess)
           callbacks.current.onActivated?.(
-            model
-              ? t('subscription.connected', {
-                  ...result,
-                  model,
-                  url: flow.authorizationUrl,
-                })
-              : modelSelectionRequired
-                ? modelSelectionHint
-                : t('subscription.successTitle'),
+            t('subscription.connected', {
+              ...result,
+              model: model ?? '',
+              url: flow.authorizationUrl,
+            }),
           );
       }
     } catch (error) {
@@ -257,7 +246,6 @@ export function QwenSubscriptionFlow(props: FlowProps) {
     flow.authorizationUrl,
     expire,
     connectionRetryAt,
-    modelSelectionHint,
     t,
   ]);
   const canActivate = props.onActivate !== undefined;
@@ -303,14 +291,11 @@ export function QwenSubscriptionFlow(props: FlowProps) {
       : undefined;
   const autoCompleting =
     canActivate && !props.desktopSuccess && !connectionError;
-  const showConnectionSuccess =
-    props.desktopSuccess && activeCompletion && !activeCompletion.model;
   return (
     <QwenSubscriptionView
       dialog={props.dialog}
       hideReadyStatus={
-        autoCompleting ||
-        (props.desktopSuccess && (!activeCompletion || showConnectionSuccess))
+        autoCompleting || (props.desktopSuccess && !activeCompletion)
       }
       state={
         flow.state.status === 'ready' && activeCompletion
@@ -337,13 +322,6 @@ export function QwenSubscriptionFlow(props: FlowProps) {
     >
       {flow.state.status === 'ready' && (
         <>
-          {showConnectionSuccess && (
-            <p role="status" data-subscription-success="">
-              {activeCompletion.modelSelectionRequired
-                ? modelSelectionHint
-                : t('subscription.successTitle')}
-            </p>
-          )}
           {connectionError && <p role="alert">{connectionError}</p>}
           {(connecting ||
             autoCompleting ||

@@ -2045,24 +2045,6 @@ export function createDaemonSessionActions({
             : current,
         );
         if (!readOnly) checkSubscriptionSelection(models.models);
-        if (
-          options?.unavailableSubscriptionModelNotice &&
-          status.state._meta?.['authType'] === 'qwen-subscription' &&
-          currentModel &&
-          !models.models.some(
-            (model) =>
-              model.authType === 'qwen-subscription' &&
-              (model.id === currentModel || model.baseModelId === currentModel),
-          )
-        ) {
-          addNotice({
-            severity: 'warning',
-            category: 'user_action',
-            code: 'subscription.model_unavailable',
-            message: options.unavailableSubscriptionModelNotice,
-            recoverable: true,
-          });
-        }
       } else {
         const providers = await workspace.workspaceProviders();
         if (!isCurrent()) return;

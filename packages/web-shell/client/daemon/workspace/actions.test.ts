@@ -25,10 +25,7 @@ describe('workspace actions', () => {
       baseUrl: 'http://localhost:3001',
       token: 'test-daemon-token',
     });
-    const options = {
-      signal: new AbortController().signal,
-      preserveModel: true,
-    };
+    const options = { signal: new AbortController().signal };
     await actions.getSubscriptionConfig(options);
     await actions.startSubscriptionLogin();
     await actions.getSubscriptionLogin('flow-1', options);

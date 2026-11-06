@@ -23865,6 +23865,32 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('uses the effective workspace model without saving it again on the first prompt', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.sessionContext = { kind: 'workspace', cwd: '/workspace' };
+    mockConnection.currentModel = 'fixture-openai(openai)';
+    mockConnection.providers = {
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: true,
+      current: { authType: 'openai', modelId: 'fixture-openai(openai)' },
+      providers: [],
+    };
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit(
+        'First prompt with the workspace model',
+      );
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
+    });
+    expect(mockSessionActions.setModel).not.toHaveBeenCalled();
+  });
+
   it('creates the first prompt in a newly selected secondary workspace', async () => {
     mockConnection.sessionId = undefined;
     mockConnection.sessionContext = { kind: 'workspace', cwd: '/tmp/project' };

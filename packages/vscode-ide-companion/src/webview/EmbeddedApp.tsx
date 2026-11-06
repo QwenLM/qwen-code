@@ -387,9 +387,7 @@ export function EmbeddedApp() {
   const subscriptionActivation = useRef<
     | {
         requestId: string;
-        resolve: (
-          selection: string | { modelSelectionRequired: true } | undefined,
-        ) => void;
+        resolve: (modelId: string) => void;
         reject: (error: unknown) => void;
       }
     | undefined
@@ -425,24 +423,6 @@ export function EmbeddedApp() {
   const historyButtonRef = useRef<HTMLButtonElement>(null);
   const appRootRef = useRef<HTMLDivElement>(null);
   const shellRef = useRef<WebShellApi | null>(null);
-  const [shellConnected, setShellConnected] = useState(false);
-  const [subscriptionSelection, setSubscriptionSelection] = useState<{
-    workspaceCwd: string;
-    sessionId?: string;
-    modelId: string;
-  }>();
-  const [refreshModelsAfterSignIn, setRefreshModelsAfterSignIn] =
-    useState(false);
-  useEffect(() => {
-    if (!refreshModelsAfterSignIn || subscriptionFlowId || !shellConnected)
-      return;
-    setRefreshModelsAfterSignIn(false);
-    void shellRef.current
-      ?.refreshModels({ reportUnavailableSubscriptionModel: true })
-      .catch((error: unknown) => {
-        console.error('Unable to refresh models after sign-in', error);
-      });
-  }, [refreshModelsAfterSignIn, subscriptionFlowId, shellConnected]);
   const composerRef = useRef<WebShellComposerApi | null>(null);
   const currentModelIdRef = useRef<string | undefined>(undefined);
   const transcriptBlocksRef = useRef<readonly DaemonTranscriptBlock[]>([]);
@@ -488,7 +468,6 @@ export function EmbeddedApp() {
     setAuthConnecting(false);
     setSignedOut(false);
     setSubscriptionFlowId(undefined);
-    setSubscriptionSelection(undefined);
     return () => {
       authRequest.current?.abort();
       subscriptionActivation.current?.reject(
@@ -534,46 +513,40 @@ export function EmbeddedApp() {
   };
 
   const activateSubscription = (signal: AbortSignal) =>
-    new Promise<string | { modelSelectionRequired: true } | undefined>(
-      (resolve, reject) => {
-        signal.throwIfAborted();
-        if (subscriptionActivation.current)
-          throw new Error('Subscription activation is already running.');
-        const flowId = subscriptionFlowRef.current;
-        if (!flowId) throw new DOMException('Cancelled', 'AbortError');
-        const requestId = crypto.randomUUID();
-        const cancel = () => {
-          if (subscriptionActivation.current?.requestId === requestId) {
-            subscriptionActivation.current = undefined;
-            vscode.postMessage({
-              type: 'qwenSubscriptionCancel',
-              data: { flowId },
-            });
-          }
-          reject(signal.reason);
-        };
-        subscriptionActivation.current = {
-          requestId,
-          resolve: (modelId) => {
-            signal.removeEventListener('abort', cancel);
-            resolve(modelId);
-          },
-          reject: (error) => {
-            signal.removeEventListener('abort', cancel);
-            reject(error);
-          },
-        };
-        signal.addEventListener('abort', cancel, { once: true });
-        vscode.postMessage({
-          type: 'qwenSubscriptionActivate',
-          data: {
-            flowId,
-            requestId,
-            selectedModelId: subscriptionSelection?.modelId,
-          },
-        });
-      },
-    );
+    new Promise<string>((resolve, reject) => {
+      signal.throwIfAborted();
+      if (subscriptionActivation.current)
+        throw new Error('Subscription activation is already running.');
+      const flowId = subscriptionFlowRef.current;
+      if (!flowId) throw new DOMException('Cancelled', 'AbortError');
+      const requestId = crypto.randomUUID();
+      const cancel = () => {
+        if (subscriptionActivation.current?.requestId === requestId) {
+          subscriptionActivation.current = undefined;
+          vscode.postMessage({
+            type: 'qwenSubscriptionCancel',
+            data: { flowId },
+          });
+        }
+        reject(signal.reason);
+      };
+      subscriptionActivation.current = {
+        requestId,
+        resolve: (modelId) => {
+          signal.removeEventListener('abort', cancel);
+          resolve(modelId);
+        },
+        reject: (error) => {
+          signal.removeEventListener('abort', cancel);
+          reject(error);
+        },
+      };
+      signal.addEventListener('abort', cancel, { once: true });
+      vscode.postMessage({
+        type: 'qwenSubscriptionActivate',
+        data: { flowId, requestId },
+      });
+    });
 
   const clearInsight = useCallback(() => {
     setInsightProgress(undefined);
@@ -1050,18 +1023,6 @@ export function EmbeddedApp() {
       ) {
         setAuthError(undefined);
         setAuthConnecting(false);
-        setShellConnected(false);
-        const runtime = runtimeRef.current;
-        const modelId = currentModelIdRef.current;
-        setSubscriptionSelection(
-          runtime?.workspaceCwd && modelId
-            ? {
-                workspaceCwd: runtime.workspaceCwd,
-                sessionId: runtime.sessionId,
-                modelId,
-              }
-            : undefined,
-        );
         setSubscriptionFlowId(subscriptionData.flowId);
       } else if (
         message.type === 'qwenSubscriptionClosed' &&
@@ -1085,12 +1046,8 @@ export function EmbeddedApp() {
                 body: subscriptionData.body,
               }),
             );
-          else if (subscriptionData.modelSelectionRequired === true)
-            pending.resolve({ modelSelectionRequired: true });
           else if (typeof subscriptionData.modelId === 'string')
             pending.resolve(subscriptionData.modelId);
-          else if (subscriptionData.modelId === null)
-            pending.resolve(undefined);
           else
             pending.reject(
               new Error('Subscription activation did not return a model.'),
@@ -1130,7 +1087,9 @@ export function EmbeddedApp() {
         setAuthConnecting(false);
         setAuthError(undefined);
         if (message.type === 'authSuccess') {
-          setRefreshModelsAfterSignIn(true);
+          void shellRef.current?.refreshModels().catch((error: unknown) => {
+            console.error('Unable to refresh models after sign-in', error);
+          });
           setHostNotice({
             tone: 'info',
             text:
@@ -1831,17 +1790,6 @@ export function EmbeddedApp() {
           className="qwen-code-vscode-web-shell"
           style={SHELL_STYLE}
           viewHidden={Boolean(subscriptionFlowId)}
-          initialWelcomeModel={
-            !runtime.sessionId &&
-            subscriptionSelection &&
-            !subscriptionSelection.sessionId &&
-            subscriptionSelection.workspaceCwd === runtime.workspaceCwd
-              ? subscriptionSelection.modelId
-              : undefined
-          }
-          onConnectionChange={(status) =>
-            setShellConnected(status === 'connected')
-          }
           theme={theme}
           // No `language` prop on purpose: the shell resolves its own UI
           // language (daemon setting, then browser locale), so a pick in its

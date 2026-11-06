@@ -274,16 +274,7 @@ describe('EmbeddedApp host wiring', () => {
     expect(document.body.textContent).toContain(
       'Qwen Code is ready. Model: qwen3.8-max.',
     );
-    expect(refreshModels).not.toHaveBeenCalled();
-    await act(async () => {
-      callback<(status: string) => void>(
-        props,
-        'onConnectionChange',
-      )('connected');
-    });
-    expect(refreshModels).toHaveBeenCalledExactlyOnceWith({
-      reportUnavailableSubscriptionModel: true,
-    });
+    expect(refreshModels).toHaveBeenCalledOnce();
   });
 
   it('keeps sign-in successful when refreshing models fails', async () => {
@@ -297,10 +288,6 @@ describe('EmbeddedApp host wiring', () => {
     shellRef.current = { refreshModels };
     try {
       await act(async () => {
-        callback<(status: string) => void>(
-          props,
-          'onConnectionChange',
-        )('connected');
         window.dispatchEvent(
           new MessageEvent('message', {
             data: {
@@ -463,14 +450,10 @@ describe('EmbeddedApp host wiring', () => {
       expect.soft(mocks.shellUnmounted).not.toHaveBeenCalled();
       expect(mocks.embeddedProps.current?.viewHidden).toBe(true);
       const panel = mocks.subscriptionProps.current!;
-      const refreshModels = vi.fn().mockResolvedValue(undefined);
-      const shellRef = props.shellRef as { current: unknown };
       if (outcome === 'complete') {
-        let activation!: Promise<string | undefined>;
+        let activation!: Promise<string>;
         await act(async () => {
-          activation = callback<
-            (signal: AbortSignal) => Promise<string | undefined>
-          >(
+          activation = callback<(signal: AbortSignal) => Promise<string>>(
             panel,
             'onActivate',
           )(new AbortController().signal);
@@ -482,27 +465,17 @@ describe('EmbeddedApp host wiring', () => {
             new MessageEvent('message', {
               data: {
                 type: 'qwenSubscriptionActivationResult',
-                data: { ...request, modelId: null },
+                data: { ...request, modelId: 'qwen3.8-max' },
               },
             }),
           );
-          await expect(activation).resolves.toBeUndefined();
+          await activation;
           callback<(message: string) => void>(
             panel,
             'onActivated',
           )('Qwen connected');
         });
         expect(postMessagesOfType('qwenSubscriptionComplete')).toHaveLength(1);
-        await act(async () => {
-          window.dispatchEvent(
-            new MessageEvent('message', {
-              data: {
-                type: 'authSuccess',
-                data: { message: 'Qwen connected' },
-              },
-            }),
-          );
-        });
       } else {
         act(() => callback<() => void>(panel, 'onClose')());
         expect(postMessagesOfType('qwenSubscriptionCancel')).toHaveLength(1);
@@ -516,80 +489,13 @@ describe('EmbeddedApp host wiring', () => {
             },
           }),
         );
-        shellRef.current = { refreshModels };
       });
       expect.soft(mocks.shellUnmounted).not.toHaveBeenCalled();
       expect(mocks.shellMounted).toHaveBeenCalledOnce();
       expect(mocks.embeddedProps.current?.sessionId).toBe('session-1');
       expect(mocks.embeddedProps.current?.viewHidden).toBe(false);
-      expect(refreshModels).not.toHaveBeenCalled();
-      await act(async () => {
-        callback<(status: string) => void>(
-          mocks.embeddedProps.current!,
-          'onConnectionChange',
-        )('connected');
-      });
-      expect(refreshModels).toHaveBeenCalledTimes(
-        outcome === 'complete' ? 1 : 0,
-      );
     },
   );
-
-  it('passes an unsaved welcome model to the subscription host and restores it', async () => {
-    const sessionId = document.body.dataset.qwenSessionId!;
-    delete document.body.dataset.qwenSessionId;
-    try {
-      const props = await renderApp();
-      const modelId = 'welcome-model(openai)';
-      callback<(options: { currentModel: string }) => unknown>(
-        props,
-        'renderComposerToolbarStart',
-      )({ currentModel: modelId });
-      await act(async () => {
-        window.dispatchEvent(
-          new MessageEvent('message', {
-            data: { type: 'qwenSubscriptionAuth', data: { flowId: 'flow-a' } },
-          }),
-        );
-      });
-      const panel = mocks.subscriptionProps.current!;
-      const controller = new AbortController();
-      const activation = callback<(signal: AbortSignal) => Promise<unknown>>(
-        panel,
-        'onActivate',
-      )(controller.signal);
-      const request = postMessagesOfType('qwenSubscriptionActivate')[0]!
-        .data as {
-        selectedModelId: string;
-        flowId: string;
-        requestId: string;
-      };
-      expect(request.selectedModelId).toBe(modelId);
-      await act(async () => {
-        window.dispatchEvent(
-          new MessageEvent('message', {
-            data: {
-              type: 'qwenSubscriptionActivationResult',
-              data: { ...request, modelId: null },
-            },
-          }),
-        );
-        await expect(activation).resolves.toBeUndefined();
-        window.dispatchEvent(
-          new MessageEvent('message', {
-            data: {
-              type: 'qwenSubscriptionClosed',
-              data: { flowId: 'flow-a' },
-            },
-          }),
-        );
-      });
-      expect(mocks.embeddedProps.current?.initialWelcomeModel).toBe(modelId);
-      expect(mocks.embeddedProps.current?.viewHidden).toBe(false);
-    } finally {
-      document.body.dataset.qwenSessionId = sessionId;
-    }
-  });
 
   it.each(['authenticated', 'signed-out'] as const)(
     'preserves the %s session after authorization fails and is retried',

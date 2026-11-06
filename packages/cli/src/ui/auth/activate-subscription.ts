@@ -11,14 +11,14 @@ import type { SubscriptionUserInfo } from '@qwen-code/qwen-code-core/qwen/subscr
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import { selectSubscriptionModel } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
-import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import type { LoadedSettings } from '../../config/settings.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 
 export async function activateSubscription(
   settings: LoadedSettings,
   config: Config,
   signal: AbortSignal,
-): Promise<{ info: SubscriptionUserInfo; modelSelectionRequired: boolean }> {
+): Promise<SubscriptionUserInfo> {
   signal.throwIfAborted();
   if (!settings.isTrusted) {
     throw new Error('Workspace is not trusted.');
@@ -34,31 +34,8 @@ export async function activateSubscription(
     throw new Error('An active Qwen Plus or Pro subscription is required.');
   }
   const { models } = await config.refreshSubscriptionModels(signal);
-  signal.throwIfAborted();
-  const activeAuthType = config.getAuthType();
-  const savedModel = settings.merged.model?.name;
-  if (activeAuthType || savedModel) {
-    if (
-      !activeAuthType &&
-      settings.merged.security?.auth?.selectedType ===
-        AuthType.QWEN_SUBSCRIPTION &&
-      savedModel === config.getModel() &&
-      models.includes(savedModel)
-    ) {
-      await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
-    }
-    const authType = config.getAuthType();
-    const modelSelectionRequired =
-      !authType ||
-      (authType === AuthType.QWEN_SUBSCRIPTION &&
-        !models.includes(config.getModel()));
-    config.setSubscriptionPlan(plan);
-    return { info, modelSelectionRequired };
-  }
-  if (!settings.workspaceSettingsActive) {
-    throw new Error('Open a project folder to activate Qwen Subscription.');
-  }
   const modelId = selectSubscriptionModel(models);
+  signal.throwIfAborted();
   // After committing settings, finish the runtime switch even if the dialog closes.
   await applyProviderInstallPlan(
     {
@@ -70,7 +47,7 @@ export async function activateSubscription(
       },
     },
     {
-      settings: createLoadedSettingsAdapter(settings, SettingScope.Workspace),
+      settings: createLoadedSettingsAdapter(settings),
       syncAuthState: (authType, modelId, baseUrl) => {
         config.syncModelSelection(authType, modelId, baseUrl);
       },
@@ -78,5 +55,5 @@ export async function activateSubscription(
     },
   );
   config.setSubscriptionPlan(plan);
-  return { info, modelSelectionRequired: false };
+  return info;
 }

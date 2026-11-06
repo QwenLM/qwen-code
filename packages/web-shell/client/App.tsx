@@ -1377,9 +1377,7 @@ export type SessionChangeEvent =
   | { type: 'turn_complete'; sessionId: string; error?: Error };
 
 export interface WebShellApi {
-  refreshModels: (options?: {
-    reportUnavailableSubscriptionModel?: boolean;
-  }) => Promise<void>;
+  refreshModels: () => Promise<void>;
   /** 按持久化记录 ID 定位当前会话消息，包含尚未渲染的历史。宿主先切换会话。 */
   navigateToMessage: (
     request: WebShellMessageNavigationRequest,
@@ -1421,8 +1419,6 @@ export type WebShellSlashCommandHandler = (
 ) => boolean | void;
 
 export interface WebShellProps {
-  /** Restore a host's unsaved model selection when mounting the welcome view. */
-  initialWelcomeModel?: string;
   /** Refresh and persist the host catalog before Qwen reloads models. No return data is required. */
   onRefreshModels?: WebShellCustomization['onRefreshModels'];
   /** Native settings-page presentation. Does not restrict commands or daemon access. */
@@ -3485,7 +3481,6 @@ function readScopedModelSetting(
 }
 
 export function App({
-  initialWelcomeModel,
   onRefreshModels,
   askUserFreeTextLabel,
   onSessionIdChange,
@@ -11950,11 +11945,18 @@ export function App({
           creationSessionContext?.kind === 'workspace'
             ? creationSessionContext.cwd
             : undefined;
+        const draftProviders = connectionRef.current.providers;
+        // Reapplying the effective workspace default would save it again,
+        // potentially overwriting a different default in user settings.
+        const useWorkspaceDefault =
+          !reasoningEffort &&
+          draftProviders?.workspaceCwd === catalogWorkspaceCwd &&
+          draftProviders?.current?.modelId === modelId;
         try {
           await createAndAttachSessionForPrompt({
             sessionActions: sessionActions as typeof sessionActions &
               SessionActionsWithCreate,
-            modelId,
+            modelId: useWorkspaceDefault ? undefined : modelId,
             reasoningEffort,
             modeId,
             planMode,
@@ -15172,12 +15174,6 @@ export function App({
     setCurrentModel((prev) => (wasLateHydration && prev ? prev : (next ?? '')));
   }, [connection.currentModel, logicalSessionKey]);
 
-  useLayoutEffect(() => {
-    if (initialWelcomeModel && !connectionRef.current.sessionId) {
-      selectWelcomeModel(initialWelcomeModel);
-    }
-  }, [initialWelcomeModel, selectWelcomeModel]);
-
   const prevModeSessionKeyRef = useRef(logicalSessionKey);
   useLayoutEffect(() => {
     const next = connection.currentMode;
@@ -16869,15 +16865,8 @@ export function App({
 
   const shellApi = useMemo<WebShellApi>(
     () => ({
-      refreshModels: (options) =>
-        sessionActions.refreshModels(undefined, {
-          reloadProviders: false,
-          ...(options?.reportUnavailableSubscriptionModel
-            ? {
-                unavailableSubscriptionModelNotice: `${t('model.select')} (/model)`,
-              }
-            : {}),
-        }),
+      refreshModels: () =>
+        sessionActions.refreshModels(undefined, { reloadProviders: false }),
       navigateToMessage,
       openSplitView: () => {
         closeMobileDrawer();
@@ -16904,7 +16893,6 @@ export function App({
       projectFeaturesAvailable,
       requestOpenSplitView,
       respondToPendingPermission,
-      t,
     ],
   );
   useEffect(() => {
@@ -20687,20 +20675,23 @@ export function App({
     ],
   );
 
-  const subscriptionModelRefreshes = useRef(new Set<string>());
+  const subscriptionModelRefreshes = useRef(new Map<string, string>());
   const refreshSubscriptionModels = useCallback(() => {
-    const { status, sessionId, workspaceCwd } = connectionRef.current;
+    const { status, sessionId, workspaceCwd, currentModel } =
+      connectionRef.current;
     const key = getLogicalSessionKey(sessionId, workspaceCwd);
+    const modelId = key && subscriptionModelRefreshes.current.get(key);
     if (
       status !== 'connected' ||
       !key ||
-      !subscriptionModelRefreshes.current.has(key)
+      !modelId ||
+      currentModel !== modelId
     ) {
       return;
     }
     const owner = sessionOwnerGuard.capture({ includeRecovery: true });
     if (!owner.isCurrent()) return;
-    void sessionActions
+    return sessionActions
       .refreshModels(
         (target) => {
           if (
@@ -20708,17 +20699,17 @@ export function App({
           )
             throw new Error('Session changed.');
         },
-        {
-          reloadProviders: false,
-          unavailableSubscriptionModelNotice: `${t('model.select')} (/model)`,
-        },
+        { reloadProviders: false },
       )
       .then(() => {
         const current = connectionRef.current;
         if (
           owner.isCurrent() &&
           current.status === 'connected' &&
-          getLogicalSessionKey(current.sessionId, current.workspaceCwd) === key
+          getLogicalSessionKey(current.sessionId, current.workspaceCwd) ===
+            key &&
+          current.currentModel === modelId &&
+          subscriptionModelRefreshes.current.get(key) === modelId
         ) {
           subscriptionModelRefreshes.current.delete(key);
         }
@@ -20726,19 +20717,39 @@ export function App({
       .catch(() => {
         // The model picker's refresh remains available if this read fails.
       });
-  }, [sessionActions, sessionOwnerGuard, t]);
+  }, [sessionActions, sessionOwnerGuard]);
   useEffect(() => {
-    refreshSubscriptionModels();
-  }, [connection.status, logicalSessionKey, refreshSubscriptionModels]);
+    void refreshSubscriptionModels();
+  }, [
+    connection.currentModel,
+    connection.status,
+    logicalSessionKey,
+    refreshSubscriptionModels,
+  ]);
 
-  const handleSessionSubscriptionActivated = useCallback(
-    (workspaceCwd: string, sessionId: string) => {
+  const activateSessionSubscriptionModel = useCallback(
+    async (workspaceCwd: string, sessionId: string, modelId: string) => {
       const key = getLogicalSessionKey(sessionId, workspaceCwd);
-      if (!key) return;
-      subscriptionModelRefreshes.current.add(key);
-      refreshSubscriptionModels();
+      const isTarget = () => {
+        const current = connectionRef.current;
+        return (
+          getLogicalSessionKey(current.sessionId, current.workspaceCwd) === key
+        );
+      };
+      if (!key || !isTarget()) {
+        throw new DOMException('Subscription target changed.', 'AbortError');
+      }
+      if (connectionRef.current.status === 'connected') {
+        await sessionActions.setModel(modelId);
+      } else {
+        // The daemon can switch a live session while its event stream reconnects.
+        await workspace.client.setSessionModel(sessionId, modelId);
+      }
+      if (!isTarget()) return;
+      subscriptionModelRefreshes.current.set(key, modelId);
+      await refreshSubscriptionModels();
     },
-    [refreshSubscriptionModels],
+    [refreshSubscriptionModels, sessionActions, workspace.client],
   );
 
   const handleWorkflowModeChange = useCallback(
@@ -22518,9 +22529,8 @@ export function App({
               dialog
               allowAdd={modelManagementPolicy.allowAdd}
               getWorkspaceCwd={getComposerWorkspaceCwd}
-              getSelectedModel={() => currentModelRef.current}
               onModelActivated={selectWelcomeModel}
-              onSessionSubscriptionActivated={handleSessionSubscriptionActivated}
+              activateSessionSubscriptionModel={activateSessionSubscriptionModel}
               onMessage={(text, type = 'status') => {
                 store.dispatch([
                   type === 'error'

@@ -14,8 +14,8 @@ import {
   SUBSCRIPTION_MODELS_UNAVAILABLE,
 } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
-import { SettingScope, loadSettings } from '../../config/settings.js';
-import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
+import { type SettingScope, loadSettings } from '../../config/settings.js';
+import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
   createBuildWorkspaceCtx,
@@ -77,13 +77,6 @@ export function registerWorkspaceSubscriptionRoutes(
           skipLoadEnvironment: true,
           workspaceTrusted: true,
         });
-        if (!settings.workspaceSettingsActive) {
-          res.status(409).json({
-            code: 'workspace_settings_unavailable',
-            message: 'Open a project folder to activate Qwen Subscription.',
-          });
-          return;
-        }
         const enforced = settings.merged.security?.auth?.enforcedType;
         if (enforced && enforced !== AuthType.QWEN_SUBSCRIPTION) {
           res.status(403).json({ code: 'auth_type_enforced' });
@@ -104,57 +97,29 @@ export function registerWorkspaceSubscriptionRoutes(
           controller.signal,
         );
         assertActive();
-        const currentSettings = loadSettings(runtime.workspaceCwd, {
-          skipLoadEnvironment: true,
-          workspaceTrusted: true,
-        });
-        const savedModel = currentSettings.merged.model?.name;
-        const selectedModel =
-          typeof req.body?.selectedModelId === 'string'
-            ? parseAcpModelOption(req.body.selectedModelId)
-            : undefined;
-        const savedSubscriptionModel =
-          currentSettings.merged.security?.auth?.selectedType ===
-          AuthType.QWEN_SUBSCRIPTION
-            ? savedModel
-            : undefined;
-        const subscriptionModel =
-          selectedModel?.authType === AuthType.QWEN_SUBSCRIPTION
-            ? selectedModel.modelId
-            : !selectedModel?.modelId ||
-                (!selectedModel.authType &&
-                  selectedModel.modelId === savedSubscriptionModel)
-              ? savedSubscriptionModel
-              : undefined;
-        const modelId =
-          req.body?.preserveModel === true ||
-          selectedModel?.modelId ||
-          savedModel
-            ? null
-            : selectSubscriptionModel(models);
-        if (modelId) {
-          await deps.persistSettings(
-            runtime.workspaceCwd,
-            [
-              {
-                scope: SettingScope.Workspace,
-                key: 'security.auth.selectedType',
-                value: AuthType.QWEN_SUBSCRIPTION,
-              },
-              {
-                scope: SettingScope.Workspace,
-                key: 'model.name',
-                value: modelId,
-              },
-              {
-                scope: SettingScope.Workspace,
-                key: 'model.baseUrl',
-                value: QWEN_SUBSCRIPTION_BASE_URL,
-              },
-            ],
-            assertActive,
-          );
-        }
+        const modelId = selectSubscriptionModel(models);
+        const scope = getPersistScopeForModelSelection(settings);
+        await deps.persistSettings(
+          runtime.workspaceCwd,
+          [
+            {
+              scope,
+              key: 'security.auth.selectedType',
+              value: AuthType.QWEN_SUBSCRIPTION,
+            },
+            {
+              scope,
+              key: 'model.name',
+              value: modelId,
+            },
+            {
+              scope,
+              key: 'model.baseUrl',
+              value: QWEN_SUBSCRIPTION_BASE_URL,
+            },
+          ],
+          assertActive,
+        );
         assertActive();
         const runtimeSync = await runtime.workspaceService.reloadModelProviders(
           createBuildWorkspaceCtx(runtime.workspaceCwd)(route, clientId),
@@ -163,9 +128,6 @@ export function registerWorkspaceSubscriptionRoutes(
         res.status(200).json({
           authType: AuthType.QWEN_SUBSCRIPTION,
           modelId,
-          ...(subscriptionModel && !models.includes(subscriptionModel)
-            ? { modelSelectionRequired: true }
-            : {}),
           runtimeSync,
         });
       } catch (error) {

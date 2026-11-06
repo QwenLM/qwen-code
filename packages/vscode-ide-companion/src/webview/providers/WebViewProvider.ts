@@ -1927,7 +1927,6 @@ export class WebViewProvider {
             flowId?: string;
             requestId?: string;
             message?: string;
-            selectedModelId?: string;
           }
         | undefined;
       const flow = this.sidebarSubscription;
@@ -1944,37 +1943,33 @@ export class WebViewProvider {
         };
         try {
           assertOwner();
-          const selectedModelId =
-            typeof data.selectedModelId === 'string'
-              ? data.selectedModelId
-              : undefined;
           const result = await owner.client
             .workspaceByCwd(owner.workspaceCwd)
             .activateSubscription({
               signal,
-              ...(owner.sessionId || selectedModelId
-                ? { preserveModel: true }
-                : {}),
-              ...(selectedModelId ? { selectedModelId } : {}),
             });
           assertOwner();
           if (result.runtimeSync.status === 'failed')
             throw new Error('Subscription runtime activation failed.');
-          const modelId = owner.sessionId ? null : result.modelId;
-          if (modelId) {
+          let modelId = result.modelId;
+          if (owner.sessionId) {
+            await owner.client.setSessionModel(
+              owner.sessionId,
+              `${result.modelId}(qwen-subscription)`,
+            );
+            assertOwner();
+          } else {
             const providers = await owner.client
               .workspaceByCwd(owner.workspaceCwd)
               .workspaceProviders();
             assertOwner();
-            if (
-              !providers.initialized ||
-              providers.current?.authType !== 'qwen-subscription' ||
-              ![modelId, `${modelId}(qwen-subscription)`].includes(
-                providers.current.modelId ?? '',
-              )
-            ) {
+            if (!providers.initialized) {
               throw new Error('Subscription runtime activation failed.');
             }
+            const current = providers.providers
+              .find((provider) => provider.current)
+              ?.models.find((model) => model.isCurrent);
+            modelId = current?.baseModelId ?? modelId;
           }
           this.sendMessageToWebView({
             type: 'qwenSubscriptionActivationResult',
@@ -1982,9 +1977,6 @@ export class WebViewProvider {
               flowId: flow.id,
               requestId: data.requestId,
               modelId,
-              ...(result.modelSelectionRequired
-                ? { modelSelectionRequired: true }
-                : {}),
             },
           });
         } catch (error) {

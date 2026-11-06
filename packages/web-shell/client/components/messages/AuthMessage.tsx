@@ -65,11 +65,11 @@ interface AuthMessageProps {
   onMessage: (text: string, type?: 'status' | 'error') => void;
   onModelActivated?: (modelId: string) => void;
   getWorkspaceCwd?: () => string | undefined;
-  getSelectedModel?: () => string;
-  onSessionSubscriptionActivated?: (
+  activateSessionSubscriptionModel: (
     workspaceCwd: string,
     sessionId: string,
-  ) => void;
+    modelId: string,
+  ) => Promise<void>;
   onClose: () => void;
 }
 
@@ -162,8 +162,7 @@ export function AuthMessage({
   onMessage,
   onModelActivated,
   getWorkspaceCwd,
-  getSelectedModel,
-  onSessionSubscriptionActivated,
+  activateSessionSubscriptionModel,
   onClose,
   allowAdd = true,
   dialog = false,
@@ -186,7 +185,6 @@ export function AuthMessage({
   const [subscriptionTarget, setSubscriptionTarget] = useState<{
     workspaceCwd: string | undefined;
     sessionId: string | undefined;
-    selectedModelId: string | undefined;
   }>();
   const getSubscriptionContext = useCallback(() => {
     const current = connectionRef.current;
@@ -209,14 +207,7 @@ export function AuthMessage({
     if (subscriptionTargetChanged) setSubscriptionTarget(undefined);
   }, [subscriptionTargetChanged]);
   const startSubscription = useCallback(() => {
-    const { workspaceCwd, sessionId } = getSubscriptionContext();
-    setSubscriptionTarget({
-      workspaceCwd,
-      sessionId,
-      selectedModelId: sessionId
-        ? connectionRef.current.currentModel
-        : undefined,
-    });
+    setSubscriptionTarget(getSubscriptionContext());
   }, [getSubscriptionContext]);
   const [subscriptionEnabled, setSubscriptionEnabled] = useState(false);
   useEffect(() => {
@@ -1355,57 +1346,35 @@ export function AuthMessage({
               );
           };
           assertTarget();
-          const selectedModelId = sessionId
-            ? (connectionRef.current.currentModel ??
-              subscriptionTarget.selectedModelId)
-            : getSelectedModel?.();
-          const preserveModel = Boolean(sessionId || selectedModelId);
           const result = await workspaceActions.activateSubscription({
             workspaceCwd,
             signal,
-            ...(preserveModel ? { preserveModel: true } : {}),
-            ...(selectedModelId ? { selectedModelId } : {}),
           });
           assertTarget();
           if (result.runtimeSync.status === 'failed')
             throw new Error('Subscription runtime activation failed.');
+          const modelId = `${result.modelId}(qwen-subscription)`;
           if (sessionId) {
-            onSessionSubscriptionActivated?.(workspaceCwd, sessionId);
-            return result.modelSelectionRequired
-              ? { modelSelectionRequired: true }
-              : undefined;
+            await activateSessionSubscriptionModel(
+              workspaceCwd,
+              sessionId,
+              modelId,
+            );
+            assertTarget();
+            return result.modelId;
           }
           if (
             connectionRef.current.status === 'connected' &&
             connectionRef.current.workspaceCwd === workspaceCwd
           ) {
-            await sessionActions
-              .refreshModels(
-                (target) => {
-                  if (target.sessionId || target.workspaceCwd !== workspaceCwd)
-                    throw new Error('Workspace changed.');
-                },
-                { reloadProviders: false },
-              )
-              .catch((error: unknown) => {
-                if (result.modelId) throw error;
-              });
+            await sessionActions.refreshModels(
+              (target) => {
+                if (target.sessionId || target.workspaceCwd !== workspaceCwd)
+                  throw new Error('Workspace changed.');
+              },
+              { reloadProviders: false },
+            );
             assertTarget();
-          }
-          if (result.modelSelectionRequired)
-            return { modelSelectionRequired: true };
-          if (preserveModel || !result.modelId) return;
-          const modelId = `${result.modelId}(qwen-subscription)`;
-          const providers = await workspaceActions.loadProviders(workspaceCwd);
-          assertTarget();
-          const selectedModel = getSelectedModel?.();
-          if (selectedModel && selectedModel !== modelId) return;
-          if (
-            !providers.initialized ||
-            providers.current?.authType !== 'qwen-subscription' ||
-            ![result.modelId, modelId].includes(providers.current.modelId ?? '')
-          ) {
-            throw new Error(t('subscription.connectFailed'));
           }
           onModelActivated?.(modelId);
           return result.modelId;

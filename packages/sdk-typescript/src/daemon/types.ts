@@ -6124,7 +6124,6 @@ export interface DaemonSubscriptionFlow {
 
 export interface DaemonSubscriptionActivation {
   authType: 'qwen-subscription';
-  modelId: string | null;
-  modelSelectionRequired?: boolean;
+  modelId: string;
   runtimeSync: DaemonModelProviderRuntimeSyncResult;
 }
