@@ -82,7 +82,10 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 1_970_000;
 // Recovery UI and availability consumers (#14980) add 1,787, measured
 // against merged main 65051590d9, so the merged build stays below this
 // ceiling.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_053_000;
+// The patched Zod 4 upgrade (#16434) measures 2,078,173 bytes. Rebuilding
+// the same candidate with Zod 3 alone measures 2,034,679 (+43,494 bytes);
+// the forbidden-input guard still passes. Leave less than 3 KB of headroom.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_081_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
@@ -111,7 +114,8 @@ const FORBIDDEN_DOCUMENT_INPUTS = [
       'resolved to src/document-echarts-stub.ts by the strip plugin below.',
   },
   {
-    pattern: /(^|\/)node_modules\/(mermaid|@mermaid-js|cytoscape)\//,
+    pattern:
+      /(^|\/)node_modules\/(mermaid|@mermaid-js|cytoscape)\/|web-shell[\\/]dist[\\/]mermaid\.core-[\w-]+\.js$/,
     why:
       'Exported transcripts render a ```mermaid fence as a plain <pre>, the ' +
       'same degradation CodeBlock already applies to syntax highlighting in ' +
@@ -150,6 +154,11 @@ const stripDocumentDeadModules = {
     build.onResolve({ filter: /^mermaid(\/|$)/ }, () => ({
       path: documentMermaidStub,
     }));
+    build.onResolve({ filter: /^\.\/mermaid\.core-[\w-]+\.js$/ }, (args) =>
+      /web-shell[\\/]dist[\\/]/.test(args.importer)
+        ? { path: documentMermaidStub }
+        : undefined,
+    );
   },
 };
 

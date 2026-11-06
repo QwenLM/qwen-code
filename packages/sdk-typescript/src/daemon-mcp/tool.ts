@@ -9,7 +9,7 @@
  */
 
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import type { z, ZodRawShape, ZodObject, ZodTypeAny } from 'zod';
+import type { z, ZodRawShape, ZodObject } from 'zod';
 
 /**
  * SDK MCP Tool Definition with Zod schema type inference
@@ -19,7 +19,7 @@ export type SdkMcpToolDefinition<Schema extends ZodRawShape = ZodRawShape> = {
   description: string;
   inputSchema: Schema;
   handler: (
-    args: z.infer<ZodObject<Schema, 'strip', ZodTypeAny>>,
+    args: z.infer<ZodObject<Schema>>,
     extra: unknown,
   ) => Promise<CallToolResult>;
 };
@@ -48,7 +48,7 @@ export function tool<Schema extends ZodRawShape>(
   description: string,
   inputSchema: Schema,
   handler: (
-    args: z.infer<ZodObject<Schema, 'strip', ZodTypeAny>>,
+    args: z.infer<ZodObject<Schema>>,
     extra: unknown,
   ) => Promise<CallToolResult>,
 ): SdkMcpToolDefinition<Schema> {
