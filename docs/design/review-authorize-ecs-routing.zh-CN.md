@@ -98,8 +98,9 @@ PR 载荷的事件（`pull_request_target`、`pull_request_review`、
    不传入 shell。因此把它路由到 ECS 并不扩大 fork 攻击面。
 
 2. **与仓库既有模式一致。** `qwen-autofix.yml` 的 `route` 与 `review-scan` job 早
-   已对其携带 PAT 的纯 API 步骤应用"无 PR 载荷 → 无 fork 代码 → 持久池"规则：它们的
-   路由把一切非 `pull_request`/`pull_request_review` 事件送往 ECS。`authorize` 形态
+   已对其纯 API 步骤应用"无 PR 载荷 → 无 fork 代码 → 持久池"规则：它们的路由把一切
+   非 `pull_request`/`pull_request_review` 事件送往 ECS。其中 `review-scan` 在此
+   同时加载 `CI_DEV_BOT_PAT`（`route` 只用只读的 `github.token`）。`authorize` 形态
    相同（纯 API、加载一个 bot PAT），故遵循同一规则。
 
 3. **外科手术式，而非重写。** 同仓守卫对 PR 载荷事件原样保留；两个新析取项只覆盖那
@@ -115,12 +116,20 @@ PR 载荷的事件（`pull_request_target`、`pull_request_review`、
 
 ## 风险
 
+- **命令触发对任何 GitHub 用户开放。** `issue_comment` 析取项使该门可以被任何人在
+  fork PR 上评论 `@qwen-code /review` 或 `@qwen-code /resolve` 触发；
+  `workflow_dispatch` 仍要求写权限。该门不运行该 PR 的任何内容，故未新增执行路径
+  ——但它确实把 `CI_BOT_PAT` 与该 job 的 `should_review` 决定，放到了由外部人员排程
+  的一次运行所在的共享池上，而 `should_review` 正是每个下游 job 不经重新推导即消费
+  的授权事实。两者都属于
+  [autofix-gate-runner-isolation.md](autofix-gate-runner-isolation.md) 跟踪的同一
+  共享主机类别；本条记录这次触发面扩大，以免被误认为触发集未变。
 - **共享主机上的 PAT 暴露。** `authorize` 加载 `CI_BOT_PAT`。在持久池上，先前 job
-  的同驻幸存进程原则上可能以它为目标。这与 `route`/`review-scan` 已被接受的暴露相
-  同（它们在同一池上加载 `CI_DEV_BOT_PAT`），且 `authorize` 严格更轻（一个只读
-  API、无 checkout）。共享池上携带 PAT 步骤的结构性收口在
-  [autofix-gate-runner-isolation.md](autofix-gate-runner-isolation.md) 中单独跟踪；
-  本改动不使其倒退。
+  的同驻幸存进程原则上可能以它为目标。这与 `review-scan` 已被接受的暴露相同（它在
+  同一池上加载 `CI_DEV_BOT_PAT`；`route` 只加载只读的 `github.token`），且
+  `authorize` 严格更轻（一个只读 API、无 checkout）。共享池上携带 PAT 步骤的结构性
+  收口在 [autofix-gate-runner-isolation.md](autofix-gate-runner-isolation.md) 中单独
+  跟踪；本改动不使其倒退。
 - **下游仍有托管队列。** `resolve-pr` 与 `publish-resolution` 仍在托管上运行，因此
   饱和的托管池仍可能延迟 agent 与推送。本改动只消除门口等待，并不宣称 `/resolve` 变
   得无队列。

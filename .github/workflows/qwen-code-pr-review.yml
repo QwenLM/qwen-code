@@ -365,7 +365,8 @@ jobs:
     #   the hosted queue for hours (PR #15286: 3h10m for a 4-second job) while
     #   the ECS pool was idle. Route them to ECS like qwen-autofix.yml's
     #   route/review-scan, which apply the same "no PR payload → no fork code →
-    #   persistent pool" rule to their PAT-bearing API-only steps.
+    #   persistent pool" rule to their API-only steps (review-scan there loads
+    #   CI_DEV_BOT_PAT; route only the read-only github.token).
     # The job IS the write-permission check, so it cannot route on its own
     # output; downstream jobs already route on the repository guard alone.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == ''issue_comment'' || github.event_name == ''workflow_dispatch'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'

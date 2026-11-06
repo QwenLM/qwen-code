@@ -108,9 +108,11 @@ Only the last two rows change.
 
 2. **Matches the repo's existing pattern.** `qwen-autofix.yml`'s `route` and
    `review-scan` jobs already apply the rule "no PR payload → no fork code →
-   persistent pool" to their PAT-bearing API-only steps: their routing sends
-   every non-`pull_request`/`pull_request_review` event to ECS. `authorize` is
-   the same shape (API-only, loads a bot PAT), so it follows the same rule.
+   persistent pool" to their API-only steps: their routing sends every
+   non-`pull_request`/`pull_request_review` event to ECS. `review-scan` does so
+   while loading `CI_DEV_BOT_PAT` (`route` uses only the read-only
+   `github.token`). `authorize` is the same shape (API-only, loads a bot PAT),
+   so it follows the same rule.
 
 3. **Surgical, not a rewrite.** The same-repo guard is retained verbatim for the
    PR-payload events; the two new disjuncts only cover events that have no
@@ -126,12 +128,24 @@ Only the last two rows change.
 
 ## Risks
 
+- **The command triggers are open to any GitHub user.** The `issue_comment`
+  disjunct makes the gate fireable by anyone commenting `@qwen-code /review` or
+  `@qwen-code /resolve` on a fork PR; `workflow_dispatch` still requires write
+  access. The gate runs none of that PR's content, so this adds no execution
+  path — but it does put `CI_BOT_PAT` and this job's `should_review` decision on
+  the shared pool for a run an outsider scheduled, and `should_review` is the
+  authorization fact every downstream job consumes without re-deriving it. Both
+  are the same shared-host class tracked in
+  [autofix-gate-runner-isolation.md](autofix-gate-runner-isolation.md); this
+  bullet records the widening so it is not mistaken for an unchanged trigger
+  set.
 - **PAT exposure on a shared host.** `authorize` loads `CI_BOT_PAT`. On the
   persistent pool a co-resident survivor from an earlier job could in principle
-  target it. This is the same exposure already accepted for `route`/`review-scan`
-  (which load `CI_DEV_BOT_PAT` on the same pool), and `authorize` is strictly
-  lighter (one read API, no checkout). The structural close for PAT-bearing
-  steps on the shared pool is tracked separately in
+  target it. This is the same exposure already accepted for `review-scan`
+  (which loads `CI_DEV_BOT_PAT` on the same pool; `route` loads only the
+  read-only `github.token`), and `authorize` is strictly lighter (one read API,
+  no checkout). The structural close for PAT-bearing steps on the shared pool
+  is tracked separately in
   [autofix-gate-runner-isolation.md](autofix-gate-runner-isolation.md); this
   change does not regress it.
 - **Residual hosted queue downstream.** `resolve-pr` and `publish-resolution`

@@ -152,6 +152,13 @@ describe('qwen pr review runner routing', () => {
     );
     expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
     expect(runsOn).toContain('fromJSON(\'["ubuntu-latest"]\')');
+    // The ECS routing above is only safe while authorize stays checkout-free:
+    // a `uses:` step (e.g. actions/checkout to read a label or config) would
+    // execute contributor-authored files on the persistent pool with
+    // CI_BOT_PAT in the step env while the expression pin stayed green. Scope
+    // to authorize — other jobs in this workflow legitimately check out.
+    const authorizeJob = parse(workflow).jobs['authorize'];
+    expect(authorizeJob.steps.every((s) => s.uses === undefined)).toBe(true);
   });
 });
 
