@@ -51,7 +51,9 @@ describe('remote connections', () => {
 
     expect(readRemoteConnections()).toEqual(['https://two.example']);
 
-    forgetRemoteConnection('https://two.example');
+    // The dialog renders this return value, so it must stay the filtered view:
+    // the stored entry above is a saved connection, not a host to act on.
+    expect(forgetRemoteConnection('https://two.example')).toEqual([]);
 
     // The page origin is hidden from the list this launch shows, but it is a
     // saved connection: persisting the hidden view would delete it for good,

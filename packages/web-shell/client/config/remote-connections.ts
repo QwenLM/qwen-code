@@ -77,7 +77,9 @@ export function forgetRemoteConnection(origin: string): string[] {
   // Its saved workspace identities must go too: fan-out groups union both
   // catalogs, so clearing only this one keeps the host listed.
   forgetWorkspaceHost(origin);
-  return connections;
+  // Callers render this list. The stored one still names this launch's origin,
+  // and a row for it would delete the live token and this host's workspaces.
+  return readRemoteConnections();
 }
 
 /** Saved connection origins, kept in sync with catalog updates. */
