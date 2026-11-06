@@ -1858,10 +1858,12 @@ describe('useComposerCore paste', () => {
   it('captures type-anywhere keystrokes when focus parks on a marked focus region', async () => {
     await mount();
     // The managed page wrapper is a non-interactive tabindex=-1 parking spot
-    // for discard/task-panel focus; typing there must still reach the editor.
+    // for discard/task-panel focus, and it wraps the composer; typing there
+    // must still reach the editor.
     const region = document.createElement('div');
     region.tabIndex = -1;
     region.setAttribute('data-web-shell-focus-region', '');
+    region.appendChild(container!);
     document.body.appendChild(region);
     try {
       act(() => region.focus());
@@ -1885,11 +1887,11 @@ describe('useComposerCore paste', () => {
     const host = document.createElement('div');
     const shadow = host.attachShadow({ mode: 'open' });
     document.body.appendChild(host);
-    shadow.appendChild(container!);
     const region = document.createElement('div');
     region.tabIndex = -1;
     region.setAttribute('data-web-shell-focus-region', '');
-    container!.appendChild(region);
+    region.appendChild(container!);
+    shadow.appendChild(region);
     try {
       act(() => region.focus());
       expect(document.activeElement).toBe(host);
@@ -1901,6 +1903,39 @@ describe('useComposerCore paste', () => {
       });
       act(() => region.dispatchEvent(event));
       expect(latest!.getText()).toBe('a');
+    } finally {
+      host.remove();
+    }
+  });
+
+  it('leaves keystrokes to the shell that owns the parked focus region', async () => {
+    await mount();
+    // Two managed shells can share one shadow root and park focus on sibling
+    // wrappers; only the shell whose wrapper contains this composer may take
+    // the keystroke, otherwise it lands in the wrong conversation.
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    document.body.appendChild(host);
+    const ownRegion = document.createElement('div');
+    ownRegion.tabIndex = -1;
+    ownRegion.setAttribute('data-web-shell-focus-region', '');
+    ownRegion.appendChild(container!);
+    const foreignRegion = document.createElement('div');
+    foreignRegion.tabIndex = -1;
+    foreignRegion.setAttribute('data-web-shell-focus-region', '');
+    shadow.appendChild(foreignRegion);
+    shadow.appendChild(ownRegion);
+    try {
+      act(() => foreignRegion.focus());
+      expect(shadow.activeElement).toBe(foreignRegion);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      act(() => foreignRegion.dispatchEvent(event));
+      expect(latest!.getText()).toBe('');
     } finally {
       host.remove();
     }

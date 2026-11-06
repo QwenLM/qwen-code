@@ -4602,11 +4602,15 @@ export function useComposerCore(
       // The focused element must be read from the container's own root: in a
       // shadow-root mount `document.activeElement` and `event.target` both
       // retarget to the host, which would make a parked focus region look
-      // unfocused and silence "type anywhere".
+      // unfocused and silence "type anywhere". The region must also wrap this
+      // composer: two managed shells can share one shadow root, and their
+      // parked wrappers are then siblings, so the attribute alone would let
+      // one shell capture the keystrokes aimed at the other.
       const activeRegion = getShadowAwareActiveElement(containerRef.current);
       const isBodyFocused =
         document.activeElement === document.body ||
-        activeRegion?.hasAttribute('data-web-shell-focus-region') === true;
+        (activeRegion?.hasAttribute('data-web-shell-focus-region') === true &&
+          activeRegion.contains(containerRef.current));
       if (!isWithinContainer && !isBodyFocused) return;
       const view = viewRef.current;
       const followup = followupStateRef.current;
