@@ -4584,6 +4584,14 @@ describe('runNonInteractive', () => {
           initialize: vi.fn().mockResolvedValue(undefined),
           flushLogs: vi.fn(),
           flushOutput,
+          discardSubmittedPrompts: () => {},
+          notePersonPrompt: () => {},
+          submitPrompt: () => ({ text: '', context: undefined }),
+          hasSubmittedPrompts: () => false,
+          takeSubmittedPrompt: () => undefined,
+          hasToolHooks: () => false,
+          syncSession: () => Promise.resolve(undefined),
+          startTurn: () => undefined,
         } as unknown as ModSession;
         const onResultEmitted = vi.fn();
         let settled = false;
@@ -5370,6 +5378,14 @@ describe('runNonInteractive', () => {
           initialize: vi.fn().mockResolvedValue(undefined),
           flushLogs: vi.fn(),
           flushOutput,
+          discardSubmittedPrompts: () => {},
+          notePersonPrompt: () => {},
+          submitPrompt: () => ({ text: '', context: undefined }),
+          hasSubmittedPrompts: () => false,
+          takeSubmittedPrompt: () => undefined,
+          hasToolHooks: () => false,
+          syncSession: () => Promise.resolve(undefined),
+          startTurn: () => undefined,
         } as unknown as ModSession;
         const onResultEmitted = vi.fn();
         let settled = false;
@@ -5456,6 +5472,14 @@ describe('runNonInteractive', () => {
           initialize: vi.fn().mockResolvedValue(undefined),
           flushLogs: vi.fn(),
           flushOutput,
+          discardSubmittedPrompts: () => {},
+          notePersonPrompt: () => {},
+          submitPrompt: () => ({ text: '', context: undefined }),
+          hasSubmittedPrompts: () => false,
+          takeSubmittedPrompt: () => undefined,
+          hasToolHooks: () => false,
+          syncSession: () => Promise.resolve(undefined),
+          startTurn: () => undefined,
         } as unknown as ModSession;
         const onResultEmitted = vi.fn();
         let settled = false;
