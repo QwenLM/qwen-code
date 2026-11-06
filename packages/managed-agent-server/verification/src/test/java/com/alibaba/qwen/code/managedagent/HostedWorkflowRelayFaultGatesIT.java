@@ -804,10 +804,9 @@ class HostedWorkflowRelayFaultGatesIT {
         return attempts == null ? 0 : attempts;
     }
 
-    /** The lead's record settled and its delivery consumed, and the
-     * relay classified its ledger row — the record's consumed revision
-     * lands before the row's classification: the whole walk ran, through
-     * the wake Turn's read. */
+    /** Wait for the lead's consuming revision and the relay ledger's
+     * matching terminal state. Classification can precede consumption;
+     * the consuming revision corrects that mirror in its own commit. */
     private void awaitConsumed(String lead) {
         waiting().atMost(Duration.ofSeconds(150))
                 .pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
@@ -818,8 +817,8 @@ class HostedWorkflowRelayFaultGatesIT {
                             .isEqualTo("settled");
                     assertThat(record.path("run").path("delivery")
                             .path("state").asText()).isEqualTo("consumed");
-                    assertThat(childResultRows()).isNotEmpty()
-                            .allMatch(row -> row.endsWith("/consumed"));
+                    assertThat(childResultRows())
+                            .containsExactly("delivered/accepted/consumed");
                 });
     }
 
