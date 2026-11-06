@@ -13,6 +13,7 @@ import {
 import { createPortal } from 'react-dom';
 import { BrandProvider, type WebShellBrand } from './brandContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import type { ManagedArchivedSessionsStatus } from './components/managed/ManagedArchivedSessions';
 import { ManagedSessionsPage } from './components/managed/ManagedSessionsPage';
 import {
   createJavaManagedAgentProvider,
@@ -149,14 +150,39 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   // finishes before any passive effect, so a child effect of that same
   // commit still reads the fresh callbacks.
   const archivedStatusRef = useRef(onArchivedSessionsStatusChange);
+  const stableArchivedCallbackRef = useRef(onArchivedSessionsStatusChange);
+  const lastArchivedStatusRef = useRef<
+    ManagedArchivedSessionsStatus | undefined
+  >(undefined);
   const handleArchivedStatusChange = useRef<
     NonNullable<
       ManagedSessionsNavigationProps['onArchivedSessionsStatusChange']
     >
-  >((status) => archivedStatusRef.current?.(status));
+  >((status) => {
+    lastArchivedStatusRef.current = status;
+    archivedStatusRef.current?.(status);
+  });
   const callbacksRef = useRef({ fetchImpl, getHeaders, saveArtifact });
   useLayoutEffect(() => {
     callbacksRef.current = { fetchImpl, getHeaders, saveArtifact };
+    const previous = archivedStatusRef.current;
+    const changed = previous !== onArchivedSessionsStatusChange;
+    // The child's reporting effect keys on the forwarded identity, which is
+    // frozen, so a swapped handler would never see the already-current
+    // status. Re-emit it — but only when the replaced callback was stable
+    // (the initial one, or one that survived an unchanged commit). Inline
+    // closures change identity every render and never qualify, so this
+    // cannot rebuild the unbounded render loop the frozen identity prevents.
+    if (
+      changed &&
+      previous !== undefined &&
+      previous === stableArchivedCallbackRef.current &&
+      onArchivedSessionsStatusChange &&
+      lastArchivedStatusRef.current
+    ) {
+      onArchivedSessionsStatusChange(lastArchivedStatusRef.current);
+    }
+    if (!changed) stableArchivedCallbackRef.current = previous;
     archivedStatusRef.current = onArchivedSessionsStatusChange;
   });
   const hasFetch = fetchImpl !== undefined;
@@ -261,6 +287,10 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   // changed (the provider arrives later, hostSessionOnly flips, the provider
   // identity remounts the page), so the ref callback themes the element it
   // just saw instead of relying on the effect to notice the mount.
+  const slotTokenNames = useMemo(
+    () => new WeakMap<HTMLElement, Set<string>>(),
+    [],
+  );
   const syncSlot = useCallback(
     (slot: HTMLElement) => {
       const root = shellRootRef.current;
@@ -268,13 +298,22 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
       const computed = getComputedStyle(root);
       slot.classList.toggle('dark', theme === WebShellThemeId.Dark);
       slot.lang = resolvedLanguage;
+      const applied = slotTokenNames.get(slot) ?? new Set<string>();
+      const current = new Set<string>();
       for (let index = 0; index < computed.length; index += 1) {
         const name = computed[index];
-        if (name.startsWith('--'))
-          slot.style.setProperty(name, computed.getPropertyValue(name));
+        if (!name.startsWith('--')) continue;
+        current.add(name);
+        slot.style.setProperty(name, computed.getPropertyValue(name));
       }
+      // A token the root no longer defines must not stay pinned here: an
+      // inline declaration on our own wrapper outranks the host's cascade,
+      // so a withdrawn host token would otherwise outlive its source.
+      for (const name of applied)
+        if (!current.has(name)) slot.style.removeProperty(name);
+      slotTokenNames.set(slot, current);
     },
-    [theme, resolvedLanguage],
+    [theme, resolvedLanguage, slotTokenNames],
   );
   const registerHostSlot = useCallback(
     (element: HTMLDivElement | null) => {

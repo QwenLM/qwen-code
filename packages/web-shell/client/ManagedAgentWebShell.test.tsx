@@ -865,6 +865,129 @@ describe('ManagedAgentWebShell', () => {
     expect(onArchivedSessionsStatusChange).toHaveBeenCalledTimes(1);
   });
 
+  it('delivers the current archived status when the host swaps stable handlers', async () => {
+    const provider = { storageKey: 'status-swap' } as ManagedAgentProvider;
+    const archivedNavigationTarget = document.createElement('section');
+    const first = vi.fn();
+    const second = vi.fn();
+    const shellProps = {
+      managedAgentProvider: provider,
+      archivedNavigationTarget,
+    };
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          {...shellProps}
+          onArchivedSessionsStatusChange={first}
+        />,
+      ),
+    );
+    const forwardedStatus = (
+      captured.props as {
+        onArchivedSessionsStatusChange: NonNullable<
+          ComponentProps<
+            typeof ManagedAgentWebShell
+          >['onArchivedSessionsStatusChange']
+        >;
+      }
+    ).onArchivedSessionsStatusChange;
+    const status = { count: 2, loading: false, error: false };
+    await act(async () => forwardedStatus(status));
+    expect(first).toHaveBeenCalledWith(status);
+    // The archive page is unchanged, so the child's identity-keyed reporting
+    // effect does not re-run: the shell must hand the current status to the
+    // new handler itself while keeping the forwarded identity frozen.
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          {...shellProps}
+          onArchivedSessionsStatusChange={second}
+        />,
+      ),
+    );
+    expect(second).toHaveBeenCalledWith(status);
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(captured.props).toMatchObject({
+      onArchivedSessionsStatusChange: forwardedStatus,
+    });
+  });
+
+  it('does not replay archived status into churning inline callbacks', async () => {
+    const provider = { storageKey: 'status-inline' } as ManagedAgentProvider;
+    const archivedNavigationTarget = document.createElement('section');
+    const calls: Array<{ count: number; loading: boolean; error: boolean }> =
+      [];
+    const renderWithInline = () =>
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          archivedNavigationTarget={archivedNavigationTarget}
+          onArchivedSessionsStatusChange={(status) => calls.push(status)}
+        />,
+      );
+    await act(async () => renderWithInline());
+    // One identity churn before any status exists, then a report: from here
+    // on, every host re-render brings a fresh inline identity and none of
+    // them may trigger a replay, or delivery would feed the render loop the
+    // frozen wrapper exists to stop.
+    await act(async () => renderWithInline());
+    const forwardedStatus = (
+      captured.props as {
+        onArchivedSessionsStatusChange: NonNullable<
+          ComponentProps<
+            typeof ManagedAgentWebShell
+          >['onArchivedSessionsStatusChange']
+        >;
+      }
+    ).onArchivedSessionsStatusChange;
+    const status = { count: 1, loading: false, error: false };
+    await act(async () => forwardedStatus(status));
+    expect(calls).toEqual([status]);
+    for (let index = 0; index < 3; index += 1)
+      await act(async () => renderWithInline());
+    expect(calls).toEqual([status]);
+  });
+
+  it('drops a host token from the slot when the shell root stops defining it', async () => {
+    const provider = { storageKey: 'slot-token-drop' } as ManagedAgentProvider;
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAgentWebShell
+            managedAgentProvider={provider}
+            navigationTarget={target}
+            style={{ ['--brand-accent' as string]: 'oklch(0.6 0.2 20)' }}
+          />,
+        ),
+      );
+      const slot = target.querySelector<HTMLElement>(
+        '[data-web-shell-portal-root]',
+      )!;
+      expect(slot.style.getPropertyValue('--brand-accent')).toBe(
+        'oklch(0.6 0.2 20)',
+      );
+      // A tenant switch withdraws the token and flips the theme, so the sync
+      // runs again: the stale inline value must not outlive its source and
+      // override the host's cascade, and the wrapper's box suppression stays.
+      await act(async () =>
+        root.render(
+          <ManagedAgentWebShell
+            managedAgentProvider={provider}
+            navigationTarget={target}
+            theme="light"
+            style={{}}
+          />,
+        ),
+      );
+      expect(slot.style.getPropertyValue('--brand-accent')).toBe('');
+      expect(slot.style.display).toBe('contents');
+    } finally {
+      target.remove();
+    }
+  });
+
   it('accepts an injected provider without a Java base URL', async () => {
     const provider = { storageKey: 'injected' } as ManagedAgentProvider;
     const props: ComponentProps<typeof ManagedAgentWebShell> = {

@@ -4178,6 +4178,33 @@ describe('ManagedSessionsPage', () => {
     expect(sessionStorage.getItem(`${base}:host:s1`)).not.toBeNull();
   });
 
+  it('rejects a restored pending record whose workspaceId is not a string', async () => {
+    const host = { hostSessionOnly: true };
+    const base = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        capabilities: {
+          canSend: false,
+          canCancel: false,
+        },
+      }),
+    );
+    sessionStorage.setItem(
+      `${base}:host:s1`,
+      JSON.stringify({
+        idempotencyKey: 'host-s1',
+        sessionId: 's1',
+        text: 'Corrupt workspace reference',
+        workspaceId: 42,
+      }),
+    );
+    await render('s1', 'en', provider, undefined, true, host);
+    // A non-string workspaceId must fail validation like its sibling fields:
+    // accepting it would hand a number to the host's workspace selection
+    // instead of falling back to the session's own workspace.
+    expect(container.textContent).not.toContain('not confirmed as submitted');
+  });
+
   it('drops a host notice when the host switches to another Session', async () => {
     const host = { hostSessionOnly: true };
     const base = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;

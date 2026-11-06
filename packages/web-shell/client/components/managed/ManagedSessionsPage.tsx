@@ -164,6 +164,11 @@ function readPending(
       typeof pending['draftText'] !== 'string'
     )
       return undefined;
+    if (
+      pending['workspaceId'] !== undefined &&
+      typeof pending['workspaceId'] !== 'string'
+    )
+      return undefined;
     return value as PendingPrompt;
   } catch {
     return undefined;
@@ -1645,6 +1650,10 @@ function ManagedSessionsContent({
     <div
       ref={pageRef}
       tabIndex={-1}
+      // A non-interactive focus parking spot (discard/task-panel fallback):
+      // the composer's global keydown gate treats focus here like body focus
+      // so "type anywhere" keeps working after a click inside the pane.
+      data-web-shell-focus-region
       className={`flex h-full min-h-0 flex-col ${home ? '' : 'gap-3'}`}
     >
       {/* The uncertain-request row unmounts on the Discard click itself, so

@@ -1733,6 +1733,49 @@ describe('useComposerCore paste', () => {
     expect(latest!.getText()).toBe('!');
   });
 
+  it('captures type-anywhere keystrokes when focus parks on a marked focus region', async () => {
+    await mount();
+    // The managed page wrapper is a non-interactive tabindex=-1 parking spot
+    // for discard/task-panel focus; typing there must still reach the editor.
+    const region = document.createElement('div');
+    region.tabIndex = -1;
+    region.setAttribute('data-web-shell-focus-region', '');
+    document.body.appendChild(region);
+    try {
+      act(() => region.focus());
+      expect(document.activeElement).toBe(region);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => region.dispatchEvent(event));
+      expect(latest!.getText()).toBe('a');
+    } finally {
+      region.remove();
+    }
+  });
+
+  it('leaves keystrokes alone when focus parks on an unmarked focusable element', async () => {
+    await mount();
+    const outside = document.createElement('div');
+    outside.tabIndex = -1;
+    document.body.appendChild(outside);
+    try {
+      act(() => outside.focus());
+      expect(document.activeElement).toBe(outside);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => outside.dispatchEvent(event));
+      expect(latest!.getText()).toBe('');
+    } finally {
+      outside.remove();
+    }
+  });
+
   it('leaves a long paste inline in shell mode', async () => {
     await mount();
     act(() => latest!.toggleShellMode());

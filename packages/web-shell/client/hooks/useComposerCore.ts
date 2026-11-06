@@ -4565,10 +4565,16 @@ export function useComposerCore(
       if (disabledRef.current || searchMode || dialogOpen) return;
       if (event.defaultPrevented) return;
       // Only capture keystrokes if the target is within the web-shell container
-      // or if no specific element has focus (document.body is active)
+      // or if no specific element has focus (document.body is active). A
+      // marked focus region (the managed page's non-interactive tabindex=-1
+      // wrapper) parks focus without intent to interact, so it counts as
+      // body focus too — otherwise clicking the pane silences "type anywhere".
       const target = event.target as Node;
       const isWithinContainer = containerRef.current?.contains(target);
-      const isBodyFocused = document.activeElement === document.body;
+      const isBodyFocused =
+        document.activeElement === document.body ||
+        document.activeElement?.hasAttribute('data-web-shell-focus-region') ===
+          true;
       if (!isWithinContainer && !isBodyFocused) return;
       const view = viewRef.current;
       const followup = followupStateRef.current;
