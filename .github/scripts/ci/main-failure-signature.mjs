@@ -422,7 +422,12 @@ export function renderFailureComment({
     // what marks it as the lane to name. (Run 42227747366 has both shapes.)
     const steps = job.steps ?? [];
     if (!steps.length) return true;
-    return steps.some((step) => !['success', 'skipped', 'pending', 'cancelled'].includes(step.conclusion));
+    return steps.some(
+      (step) =>
+        !['success', 'skipped', 'pending', 'cancelled'].includes(
+          step.conclusion,
+        ),
+    );
   });
   return [
     `<!-- qwen-managed-agent-ci-failure:${occurrence.runId} -->`,
