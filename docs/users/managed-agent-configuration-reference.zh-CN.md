@@ -25,7 +25,7 @@ mvn -f packages/managed-agent-server/pom.xml -DskipTests clean process-classes &
 | `server.port` | `SERVER_PORT` | 整数 | `8080` | 公共监听端口，API 和 `/actuator/health` 都在该端口上提供。Spring Boot 从 `SERVER_PORT` 读取。 |
 | `spring.datasource.druid.max-active` | `QWEN_MANAGED_AGENT_DB_MAX_POOL_SIZE` | 整数 | `20` | 控制面 Druid 数据库连接池最多可持有的连接数。连接全部占用时，获取连接的请求最多等待 30 秒，随后失败。`managed-local` profile 下不生效，其连接池固定为 20。 |
 | `spring.datasource.password` | `SPRING_DATASOURCE_PASSWORD` | 字符串 | *（空）* | `spring.datasource.username` 的密码。属于机密：应放在 `server.env` 这类私有环境文件中，不要写在命令行上。 |
-| `spring.datasource.url` | `SPRING_DATASOURCE_URL` | 字符串 | `jdbc:mysql://127.0.0.1:3306/qwen_managed_agent` | 存放控制面状态的 MySQL 8 数据库的 JDBC URL；启动时 Flyway 会对其执行 schema 迁移。`managed-local` profile 改用私有 H2 文件数据库，其他 URL 启动时拒绝。 |
+| `spring.datasource.url` | `SPRING_DATASOURCE_URL` | 字符串 | `jdbc:mysql://127.0.0.1:3306/qwen_managed_agent` | 存放控制面状态的 MySQL 8 数据库的 JDBC URL；启动时 Flyway 会对其执行 schema 迁移。`managed-local` profile 改用私有 H2 文件数据库，其他 URL 启动时拒绝。对 `jdbc:mysql:` URL，服务端会开启 Connector/J 的语句解析缓存：以连接属性加上 `cachePrepStmts=true`、`prepStmtCacheSize=512` 和 `prepStmtCacheSqlLimit=8192`，每一项只在该 URL 和 Druid 连接属性（`spring.datasource.druid.connect-properties` 或 `connection-properties`）都没有设置它时才加；任一处提到 `useServerPrepStmts` 或 `useCursorFetch` 时，无论取值如何，一项都不加，因为二者都可能让 Connector/J 在服务端准备语句。在 URL 里写 `cachePrepStmts=false` 即可关闭缓存。 |
 | `spring.datasource.username` | `SPRING_DATASOURCE_USERNAME` | 字符串 | `qwen` | 控制面连接数据库所用的用户。除控制面数据库的权限外，还需要 `performance_schema.user_variables_by_thread` 的 `SELECT` 权限，预检 `--check` 会校验该权限。 |
 
 ## `qwen.managed-agent`
