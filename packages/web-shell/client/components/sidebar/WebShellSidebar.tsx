@@ -1996,10 +1996,21 @@ export function WebShellSidebar({
   }, [workspace.client, lockedWorkspaceCwd, activityEnabled]);
   const toggleActivity = useCallback(() => {
     if (!activityEnabled) return;
+    if (!activityOpen) {
+      setSearchOpen(false);
+      setSearchQuery('');
+    }
     setActivityOpen((value) => !value);
     if (collapsed) onCollapsedChange(false);
     if (homeHidden) onOpenHome?.();
-  }, [activityEnabled, collapsed, homeHidden, onCollapsedChange, onOpenHome]);
+  }, [
+    activityEnabled,
+    activityOpen,
+    collapsed,
+    homeHidden,
+    onCollapsedChange,
+    onOpenHome,
+  ]);
   useEffect(() => {
     if (!activityEnabled) return;
     const listener = (event: KeyboardEvent) => {
@@ -6333,6 +6344,60 @@ export function WebShellSidebar({
     standaloneSessionsVisible,
     t,
   ]);
+  const searchEnabled = !liveView && !hideProjectHeader;
+  // The activity panel replaces the session list, so a query typed there
+  // filters rows the panel never shows.
+  const topRowSearchVisible =
+    searchEnabled &&
+    !activityOpen &&
+    (!collapsed || mobileOpen || homePreviewOpen);
+  // A narrow column cannot fit a usable field beside the icon buttons, so
+  // there the field drops to a full-width row under the brand row instead.
+  const topRowColumnWidth =
+    sidebarWidth - (railLayout ? SIDEBAR_RAIL_WIDTH : 0);
+  const inlineTopRowSearch =
+    topRowSearchVisible && !mobileOpen && topRowColumnWidth >= 285;
+  // The top row owns the search control whenever it is visible. Hosts that
+  // hide the brand row, and the collapsed strip (whose session list lives in
+  // a popover), fall back to the older Projects-header placement.
+  const searchInProjectHeader =
+    !shouldRenderBrand || (!railLayout && collapsed && !mobileOpen);
+  const renderSearchField = (className?: string) => (
+    <div className={cx(styles.projectSearch, className)}>
+      <SearchIcon aria-hidden="true" />
+      <Input
+        value={searchQuery}
+        placeholder={t('sidebar.searchPlaceholder')}
+        aria-label={t('sidebar.search')}
+        autoFocus
+        onChange={(event) => setSearchQuery(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            setSearchQuery('');
+            setSearchOpen(false);
+          }
+        }}
+      />
+    </div>
+  );
+  const renderSearchToggle = (className: string) => (
+    <button
+      type="button"
+      className={className}
+      title={t('sidebar.search')}
+      aria-label={t('sidebar.search')}
+      aria-expanded={searchOpen}
+      onClick={() => {
+        setSearchOpen((open) => {
+          if (open) setSearchQuery('');
+          return !open;
+        });
+        setProjectsExpanded(true);
+      }}
+    >
+      <SearchIcon size={18} strokeWidth={1.5} />
+    </button>
+  );
   const primaryNavigation = hasScrollingPrimaryNav && (
     <div className={styles.primaryNav}>
       {projectFeaturesEnabled &&
@@ -7274,9 +7339,35 @@ export function WebShellSidebar({
           }}
         >
           {sectionView && (
-            <div className={styles.sectionHeader}>
-              {t(liveView ? 'sidebar.live' : 'sidebar.channels')}
-            </div>
+            <>
+              <div className={styles.sectionHeader}>
+                {t(liveView ? 'sidebar.live' : 'sidebar.channels')}
+                {channelView && searchEnabled && shouldRenderBrand && (
+                  <div
+                    className={cx(
+                      styles.topRowActions,
+                      searchOpen &&
+                        inlineTopRowSearch &&
+                        styles.topRowActionsSearching,
+                    )}
+                  >
+                    {searchOpen &&
+                      inlineTopRowSearch &&
+                      renderSearchField(styles.topRowSearchField)}
+                    {renderSearchToggle(styles.searchToggle)}
+                  </div>
+                )}
+              </div>
+              {channelView &&
+                searchEnabled &&
+                shouldRenderBrand &&
+                searchOpen &&
+                !inlineTopRowSearch && (
+                  <div className={styles.topRowSearchRow}>
+                    {renderSearchField()}
+                  </div>
+                )}
+            </>
           )}
           {liveView &&
             !homeHidden &&
@@ -7288,57 +7379,86 @@ export function WebShellSidebar({
               />
             )}
           {!sectionView && shouldRenderBrand && (
-            <div className={styles.topRow}>
-              {branding?.render ? (
-                branding.render()
-              ) : (
-                <>
-                  <span className={styles.brandLogo} aria-hidden="true">
-                    {brand.logo ||
-                      (brand.logoDataUri ? (
-                        // `key` remounts on a new URI: after one decode failure,
-                        // the failed state must not stick to the next logo.
-                        <BrandLogoImage
-                          key={brand.logoDataUri}
-                          dataUri={brand.logoDataUri}
-                        />
-                      ) : (
-                        <IconQwenLogo />
-                      ))}
-                  </span>
-                  {(!collapsed || mobileOpen || homePreviewOpen) && (
-                    <span className={styles.brandName}>{brandName}</span>
-                  )}
-                </>
-              )}
-              {activityEnabled && (!railLayout || !collapsed || mobileOpen) && (
-                <button
-                  type="button"
+            <>
+              <div className={styles.topRow}>
+                {branding?.render ? (
+                  searchOpen && inlineTopRowSearch ? null : (
+                    branding.render()
+                  )
+                ) : (
+                  <>
+                    <span className={styles.brandLogo} aria-hidden="true">
+                      {brand.logo ||
+                        (brand.logoDataUri ? (
+                          // `key` remounts on a new URI: after one decode
+                          // failure, the failed state must not stick to the
+                          // next logo.
+                          <BrandLogoImage
+                            key={brand.logoDataUri}
+                            dataUri={brand.logoDataUri}
+                          />
+                        ) : (
+                          <IconQwenLogo />
+                        ))}
+                    </span>
+                    {(!collapsed || mobileOpen || homePreviewOpen) &&
+                      !(searchOpen && inlineTopRowSearch) && (
+                        <span className={styles.brandName}>{brandName}</span>
+                      )}
+                  </>
+                )}
+                <div
                   className={cx(
-                    'ml-auto relative rounded-lg p-2 hover:bg-accent',
-                    styles.activityToggle,
+                    styles.topRowActions,
+                    searchOpen &&
+                      inlineTopRowSearch &&
+                      styles.topRowActionsSearching,
                   )}
-                  aria-label={t(
-                    activityOpen ? 'activity.close' : 'activity.open',
-                  )}
-                  title={`${t(activityOpen ? 'activity.close' : 'activity.open')} (⌥⌘U / Ctrl+Alt+U)`}
-                  aria-pressed={activityOpen}
-                  onClick={toggleActivity}
                 >
-                  <BellIcon size={18} strokeWidth={1.5} />
-                  {activityEntries.some(
-                    (entry) =>
-                      isActivityEligible(entry, activityPreferences) &&
-                      activityNeedsAttention(entry),
-                  ) && (
-                    <span
-                      className="absolute right-1 top-1 size-1.5 rounded-full bg-primary"
-                      data-activity-attention
-                    />
+                  {topRowSearchVisible && (
+                    <>
+                      {searchOpen &&
+                        inlineTopRowSearch &&
+                        renderSearchField(styles.topRowSearchField)}
+                      {renderSearchToggle(styles.searchToggle)}
+                    </>
                   )}
-                </button>
+                  {activityEnabled &&
+                    (!railLayout || !collapsed || mobileOpen) && (
+                      <button
+                        type="button"
+                        className={cx(
+                          'relative rounded-lg p-2 hover:bg-accent',
+                          styles.activityToggle,
+                        )}
+                        aria-label={t(
+                          activityOpen ? 'activity.close' : 'activity.open',
+                        )}
+                        title={`${t(activityOpen ? 'activity.close' : 'activity.open')} (⌥⌘U / Ctrl+Alt+U)`}
+                        aria-pressed={activityOpen}
+                        onClick={toggleActivity}
+                      >
+                        <BellIcon size={18} strokeWidth={1.5} />
+                        {activityEntries.some(
+                          (entry) =>
+                            isActivityEligible(entry, activityPreferences) &&
+                            activityNeedsAttention(entry),
+                        ) && (
+                          <span
+                            className="absolute right-1 top-1 size-1.5 rounded-full bg-primary"
+                            data-activity-attention
+                          />
+                        )}
+                      </button>
+                    )}
+                </div>
+              </div>
+              {topRowSearchVisible && searchOpen && !inlineTopRowSearch && (
+                <div className={styles.topRowSearchRow}>
+                  {renderSearchField()}
+                </div>
               )}
-            </div>
+            </>
           )}
           {!sectionView && primaryNavItems.has('newTask') && (
             <div
@@ -7633,21 +7753,9 @@ export function WebShellSidebar({
                           <FolderKanbanIcon />
                         </button>
                       )}
-                    <button
-                      className={styles.projectsHeaderAction}
-                      type="button"
-                      title={t('sidebar.search')}
-                      aria-label={t('sidebar.search')}
-                      onClick={() => {
-                        setSearchOpen((open) => {
-                          if (open) setSearchQuery('');
-                          return !open;
-                        });
-                        setProjectsExpanded(true);
-                      }}
-                    >
-                      <SearchIcon />
-                    </button>
+                    {searchEnabled &&
+                      searchInProjectHeader &&
+                      renderSearchToggle(styles.projectsHeaderAction)}
                     {!channelView &&
                       !lockedWorkspaceCwd &&
                       onOpenAddWorkspace && (
@@ -7664,24 +7772,10 @@ export function WebShellSidebar({
                   </div>
                 </div>
               )}
-              {!liveView && searchOpen && !hideProjectHeader && (
-                <div className={styles.projectSearch}>
-                  <SearchIcon aria-hidden="true" />
-                  <Input
-                    value={searchQuery}
-                    placeholder={t('sidebar.searchPlaceholder')}
-                    aria-label={t('sidebar.search')}
-                    autoFocus
-                    onChange={(event) => setSearchQuery(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Escape') {
-                        setSearchQuery('');
-                        setSearchOpen(false);
-                      }
-                    }}
-                  />
-                </div>
-              )}
+              {searchEnabled &&
+                searchOpen &&
+                searchInProjectHeader &&
+                renderSearchField()}
               {/* Managed 历史由外部 App Host 注入，不受本地 Workspaces
                   折叠状态控制；否则折叠分组会把仍有效的 Managed 会话一起隐藏。 */}
               {!channelView && !liveView && managedWorkspaces}
