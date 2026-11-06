@@ -40,6 +40,7 @@ import javax.net.ssl.SSLContext;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -50,6 +51,8 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 public class QwenHostedHarnessConnector implements HarnessConnector {
+    private static final com.fasterxml.jackson.databind.ObjectMapper LIFECYCLE_JSON =
+            new com.fasterxml.jackson.databind.ObjectMapper();
     private final ManagedAgentSettings settings;
     private final ManagedAgentSettings.Harness properties;
     private final ManagedAgentSettings.SessionStore sessionStore;
@@ -341,7 +344,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             request.put("toolProfile", session.toolProfile());
         }
         try {
-            return new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(client().settleLifecycle(ref, request));
+            return LIFECYCLE_JSON.valueToTree(client().settleLifecycle(ref, request));
         } catch (DaemonHttpException error) {
             // A lost detach ACK can leave this reference cached after the
             // Harness sealed and removed it. Retry through a current-claim
@@ -1087,12 +1090,31 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     session.workspace() != null || workspaceExecution.verifiedRecoveryEnabled(), true);
             ref = attachments.get(key);
         }
-        client().resolveAction(
+        if (response.has("answers")) {
+            List<Map<String, Object>> answers = new ArrayList<>();
+            for (JsonNode answer : response.get("answers")) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("questionId", answer.path("questionId").textValue());
+                if (answer.has("optionIds")) {
+                    List<String> options = new ArrayList<>();
+                    answer.get("optionIds").forEach(option -> options.add(option.textValue()));
+                    item.put("optionIds", options);
+                }
+                if (answer.has("text")) {
+                    item.put("text", answer.get("text").textValue());
+                }
+                answers.add(item);
+            }
+            client().resolveQuestion(ref, actionId, answers, response.path("inputRevision").asLong(),
+                    response.path("policyRevision").asText());
+        } else {
+            client().resolveAction(
                         ref,
                         actionId,
                         response.path("optionId").asText(),
                         response.path("inputRevision").asLong(),
                         response.path("policyRevision").asText());
+        }
     }
 
     @Override
