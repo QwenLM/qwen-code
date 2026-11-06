@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { ROOT_CONTEXT, type Attributes, type Span } from '@opentelemetry/api';
 import {
+  createGenAiExchange,
   createGenAiRequestObserverContext,
   extractAnthropicRequestAttributes,
   extractLlmRequestAttributes,
@@ -24,6 +25,11 @@ function createSpan(options: { recording?: boolean; throws?: boolean } = {}): {
     setAttributes: (values: Attributes) => {
       if (options.throws) throw new Error('setAttributes failed');
       Object.assign(attributes, values);
+      return span;
+    },
+    setAttribute: (key: string, value: unknown) => {
+      if (options.throws) throw new Error('setAttribute failed');
+      attributes[key] = value as Attributes[string];
       return span;
     },
   } as unknown as Span;
@@ -330,6 +336,93 @@ describe('GenAI request observer', () => {
   it('does nothing without an observer', () => {
     expect(() =>
       reportOpenAiRequest({ temperature: 0.5 }, ROOT_CONTEXT),
+    ).not.toThrow();
+  });
+});
+
+describe('GenAI response attributes', () => {
+  /** A live observer whose span collects attributes, plus its handle. */
+  function observed() {
+    const { span, attributes } = createSpan();
+    const exchange = createGenAiExchange(ROOT_CONTEXT, span, {
+      captureContent: false,
+      sensitiveAttributeMaxLength: 1024,
+    });
+    const handle = reportOpenAiRequest({}, exchange.context);
+    return { span, attributes, controller: exchange.controller, handle };
+  }
+
+  it('writes a response attribute onto the span', () => {
+    const { attributes, controller, handle } = observed();
+    controller.recordResponseAttribute(
+      handle,
+      'openrouter.provider',
+      'Parasail',
+    );
+    expect(attributes).toEqual({ 'openrouter.provider': 'Parasail' });
+  });
+
+  it('overwrites an earlier value so a retry reports the answering attempt', () => {
+    const { attributes, controller, handle } = observed();
+    controller.recordResponseAttribute(handle, 'openrouter.provider', 'Stale');
+    controller.recordResponseAttribute(handle, 'openrouter.provider', 'Fresh');
+    expect(attributes['openrouter.provider']).toBe('Fresh');
+  });
+
+  it('ignores an undefined value', () => {
+    const { attributes, controller, handle } = observed();
+    controller.recordResponseAttribute(
+      handle,
+      'openrouter.provider',
+      undefined,
+    );
+    expect(attributes).toEqual({});
+  });
+
+  it('ignores a missing handle', () => {
+    const { attributes, controller } = observed();
+    expect(() =>
+      controller.recordResponseAttribute(undefined, 'openrouter.provider', 'x'),
+    ).not.toThrow();
+    expect(attributes).toEqual({});
+  });
+
+  it('refuses a handle from a different generation', () => {
+    const { attributes, controller, handle } = observed();
+    const exchange = createGenAiExchange(ROOT_CONTEXT, createSpan().span, {
+      captureContent: false,
+      sensitiveAttributeMaxLength: 1024,
+    });
+    controller.recordResponseAttribute(handle, 'openrouter.provider', 'ok');
+    // A foreign controller's handle must not reach this controller's span.
+    exchange.controller.recordResponseAttribute(
+      handle,
+      'openrouter.provider',
+      'foreign',
+    );
+    expect(attributes).toEqual({ 'openrouter.provider': 'ok' });
+  });
+
+  it('refuses to write after the exchange is finalized', () => {
+    const { attributes, controller, handle } = observed();
+    controller.finalize(true);
+    controller.recordResponseAttribute(handle, 'openrouter.provider', 'late');
+    expect(attributes['openrouter.provider']).toBeUndefined();
+  });
+
+  it('does not let span failures escape', () => {
+    const { span } = createSpan({ throws: true });
+    const exchange = createGenAiExchange(ROOT_CONTEXT, span, {
+      captureContent: false,
+      sensitiveAttributeMaxLength: 1024,
+    });
+    const handle = reportOpenAiRequest({}, exchange.context);
+    expect(() =>
+      exchange.controller.recordResponseAttribute(
+        handle,
+        'openrouter.provider',
+        'x',
+      ),
     ).not.toThrow();
   });
 });
