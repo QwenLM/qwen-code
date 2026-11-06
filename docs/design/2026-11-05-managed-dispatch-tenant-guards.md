@@ -2,7 +2,8 @@
 
 [English](2026-11-05-managed-dispatch-tenant-guards.md) | [简体中文](2026-11-05-managed-dispatch-tenant-guards.zh-CN.md)
 
-Status: part (a) implemented; part (b) is a proposal.
+Status: parts (a) and (b) implemented. Part (b) is designed in
+[2026-11-05-managed-admission-placement](2026-11-05-managed-admission-placement.md).
 
 ## Problem
 
@@ -79,14 +80,14 @@ that lock a slot and binding without the root (`findOrCreate` for an ordinary re
 `recoverLost`, Runtime retention) never wait for a root. Binding control and
 `requireProvisionPin` keep both guards, so their behavior beyond the order is unchanged.
 
-## (b) Admission placement (proposal)
+## (b) Admission placement
 
 `admitExecution` still takes placement first. Placement orders admission against the
 harness drain fence. `requestHarnessDrain` inserts the drain row under placement, and
 admission reads that row without a lock (`requireHarnessAdmission`). Removing placement
-needs a row-level handshake. One option: admission materializes and share-locks the
-harness head row, and drain locks it exclusively. That is a protocol change with its own
-design and tests, so it is not part of (a).
+needs a row-level handshake. The head row also carries the journal writer, so (b) has
+the drain take the Session root that admission already holds instead. See
+[2026-11-05-managed-admission-placement](2026-11-05-managed-admission-placement.md).
 
 ## Verification
 
