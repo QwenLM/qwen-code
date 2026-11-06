@@ -1475,11 +1475,14 @@ jobs:
             echo "::warning::could not determine runner UID; skipping ownership restore"
           fi
 
-  # Publish the triage agent's drafts. Runs on a clean runner with the write
-  # PAT and never executes agent-provided code — only validated data. The
-  # triage job above holds no write credential in the agent environment; this
-  # job is the sole writer to GitHub for the triage lane. Same isolation
-  # shape as publish-tmux / publish-verify.
+  # Publish the triage agent's drafts with the write PAT. Like publish-tmux,
+  # this job may land on the persistent pool; it is safe there because it
+  # runs only trusted base-repo code — a sparse checkout pinned to
+  # github.sha, never agent-provided code — and the publisher imports only
+  # node builtins plus one relative helper, so a reused workspace offers no
+  # bare-specifier node_modules to hijack. The triage job above holds no
+  # write credential in the agent environment; this job is the sole writer
+  # to GitHub for the triage lane.
   publish-triage:
     needs: ['triage']
     # Publish even when the agent run failed or timed out: drafts written
