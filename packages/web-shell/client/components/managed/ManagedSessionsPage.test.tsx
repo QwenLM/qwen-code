@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isShellResultDisplay } from '@qwen-code/sdk/daemon';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import { getManagedClientId } from './managed-session-storage';
+import { webcrypto } from 'node:crypto';
+import { pendingQuestion } from './managed-question.test-fixtures';
 import * as pendingStorage from './managed-pending-storage';
 import { I18nProvider } from '../../i18n';
 import type {
@@ -288,6 +290,7 @@ describe('ManagedSessionsPage', () => {
     await act(async () => root.unmount());
     container.remove();
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   async function render(
@@ -3275,6 +3278,71 @@ describe('ManagedSessionsPage', () => {
     ).toBe('null');
   });
 
+  it('shows a question without approval buttons and retains its answers until confirmed', async () => {
+    vi.stubGlobal('crypto', webcrypto);
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      }),
+    );
+    const question = { ...pendingQuestion(), sessionId: 's1' };
+    const respond = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('unconfirmed'))
+      .mockResolvedValue(undefined);
+    const listPending = vi.fn().mockResolvedValue([question]);
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    await act(async () => flush());
+    const card = container.querySelector('[data-testid="managed-approval"]')!;
+    expect(card.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(card.textContent).not.toContain('Yes, allow once');
+    expect(card.textContent).not.toContain('Tool arguments are unavailable');
+    await act(async () => {
+      for (const [index, input] of card
+        .querySelectorAll('textarea')
+        .entries()) {
+        Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )!.set!.call(input, `Custom answer ${index}`);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    });
+    const submitQuestion = () =>
+      card
+        .querySelector('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    await act(async () => {
+      submitQuestion();
+      await flush();
+    });
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+    await act(async () => flush());
+    expect(card.querySelector('textarea')?.value).toBe('Custom answer 0');
+    expect(container.textContent).toContain('Retry the same answers');
+    await act(async () => {
+      submitQuestion();
+      await flush();
+    });
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(2));
+    await act(async () => flush());
+    expect(respond.mock.calls[0]).toEqual(respond.mock.calls[1]);
+    expect(respond.mock.calls[0][1]).toEqual({
+      kind: 'question',
+      answers: [
+        { questionId: 'q1', text: 'Custom answer 0' },
+        { questionId: 'q2', text: 'Custom answer 1' },
+      ],
+    });
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+  });
+
   it.each([
     ['write_file', { file_path: 'notes.md', content: 'approval-write-body' }],
     [
@@ -3396,13 +3464,13 @@ describe('ManagedSessionsPage', () => {
     provider = { ...provider, actions: { listPending, respond } };
     await render('s1');
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
-      'Pending approvals could not be loaded',
+      'Pending requests could not be loaded',
     );
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).toBeNull();
     const retry = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent === 'Retry loading approvals',
+      (button) => button.textContent === 'Retry loading requests',
     );
     expect(retry).toBeDefined();
     await act(async () => {
@@ -3466,7 +3534,7 @@ describe('ManagedSessionsPage', () => {
       container.querySelector('[data-testid="managed-approval"]'),
     ).not.toBeNull();
     const alert = container.querySelector('[role="alert"]')?.textContent ?? '';
-    expect(alert).toContain('Pending approvals could not be refreshed');
+    expect(alert).toContain('Pending requests could not be refreshed');
     expect(alert).not.toContain('could not be loaded');
   });
 
@@ -3545,7 +3613,7 @@ describe('ManagedSessionsPage', () => {
     // The latched refusal got its own re-probe affordance, rendered with no
     // `loadError` in play, so a grant raised while the page is open can stick.
     const again = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent?.includes('Retry loading approvals'),
+      (button) => button.textContent?.includes('Retry loading requests'),
     ) as HTMLButtonElement;
     expect(again).toBeTruthy();
     await act(async () => {
