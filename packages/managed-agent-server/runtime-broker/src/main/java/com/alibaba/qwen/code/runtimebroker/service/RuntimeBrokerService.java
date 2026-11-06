@@ -84,6 +84,7 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.r
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.renewalDelayMillis;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sameReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sshNoStartReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unavailable;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unwrap;
@@ -1979,44 +1980,6 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                     }), "runtime_execution_ack_failed", "Tool v3 acknowledgement failed")
                             .whenComplete((ignored, error) -> context.endControl());
                 })));
-    }
-
-    private static boolean sameReceipt(Map<String, Object> expected,
-            Map<String, Object> actual) {
-        if (actual == null || !actual.keySet().equals(Set.of("executionCallId", "manifest",
-                "deliveryStatus", "historyRevision"))
-                || !java.util.Objects.equals(expected.get("executionCallId"), actual.get("executionCallId"))
-                || !java.util.Objects.equals(expected.get("deliveryStatus"), actual.get("deliveryStatus"))) {
-            return false;
-        }
-        Object leftRevision = expected.get("historyRevision");
-        Object rightRevision = actual.get("historyRevision");
-        if (leftRevision == null ? rightRevision != null
-                : !(rightRevision instanceof Number number)
-                        || ((Number) leftRevision).longValue() != number.longValue()) {
-            return false;
-        }
-        Object left = expected.get("manifest");
-        Object right = actual.get("manifest");
-        if (left == null || right == null) {
-            return left == right;
-        }
-        if (!(left instanceof Map<?, ?> saved) || !(right instanceof Map<?, ?> received)
-                || !saved.keySet().equals(received.keySet())) {
-            return false;
-        }
-        for (String field : List.of("resourceId", "kind", "digest")) {
-            if (!java.util.Objects.equals(saved.get(field), received.get(field))) {
-                return false;
-            }
-        }
-        for (String field : List.of("schemaVersion", "byteLength")) {
-            if (!(saved.get(field) instanceof Number a) || !(received.get(field) instanceof Number b)
-                    || a.longValue() != b.longValue()) {
-                return false;
-            }
-        }
-        return true;
     }
 
     public CompletionStage<ToolExecutionRecord> cancelExecution(

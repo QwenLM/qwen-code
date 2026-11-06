@@ -75,6 +75,9 @@ public interface ManagedActionStore {
     }
 
     public static String decisionDigest(JsonNode response) {
+        if (response.has("answers")) {
+            return com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedUserQuestions.decisionDigest(response);
+        }
         Map<String, Object> decision = new LinkedHashMap<>();
         decision.put("v", 1);
         decision.put("optionId", response.path("optionId").asText());

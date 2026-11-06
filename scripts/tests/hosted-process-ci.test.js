@@ -267,11 +267,23 @@ describe('Hosted real-process gates', () => {
       (step) => step.name === 'Install Dependencies',
     );
     expect(install.run).toContain('corepack pnpm install --frozen-lockfile');
-    expect(install.env?.QWEN_SKIP_PREPARE).toBeUndefined();
-    expect(pkg.scripts.prepare).toBe('node scripts/prepare.js');
-    const prepare = read('scripts/prepare.js');
-    expect(prepare).toContain("run('npm', ['run', 'build'])");
-    expect(prepare).toContain("run('npm', ['run', 'bundle'])");
+    // The packaged CLI comes from test_build's tree, built and bundled once
+    // for every lane, not from `prepare` during this job's install.
+    expect(install.env?.QWEN_SKIP_PREPARE).toBe('1');
+    expect(job.needs).toContain('test_build');
+    const download = job.steps.find(
+      (step) => step.name === 'Download the built tree',
+    );
+    expect(download.with.name).toBe('unit-test-tree');
+    expect(
+      job.steps.find((step) => step.name === 'Unpack the built tree').run,
+    ).toContain('unit-test-tree.tgz');
+    expect(
+      ci.jobs.test_build.steps.find((step) => step.name === 'Build').run,
+    ).toBe('node scripts/ci-build-cache.mjs build .qwen-build-cache');
+    const buildCache = read('scripts/ci-build-cache.mjs');
+    expect(buildCache).toContain("run('npm run build')");
+    expect(buildCache).toContain("run('npm run bundle')");
     const run = job.steps.find(
       (step) => step.name === 'Run required no-AK integration gate',
     );

@@ -15,6 +15,7 @@ import {
   HostedCompressionRefusal,
 } from './hosted-context-compression.js';
 import { extensionInstructionText } from './hosted-extension-tool-context.js';
+import { parseHostedTodoState } from './hosted-todo-session.js';
 import {
   parseHostedModelConfig,
   parseHostedModelConfigDigest,
@@ -75,6 +76,7 @@ import {
   parseHostedActionOptions,
   hostedLiveApprovalPoll,
 } from './hosted-tool-approval.js';
+import { readHostedQuestionDecision } from './hosted-user-question.js';
 
 import {
   HOSTED_RECOVERY_RESOURCE_KINDS,
@@ -408,6 +410,7 @@ const RESTORE_CONTAINER_KINDS = new Set([
   'managed-extension-contributions',
   'managed-extension-root',
   'managed-file_history',
+  'managed-todo_state',
   'managed-tool-outcome',
   'managed-tool-result-manifest',
   'managed-checkpoint',
@@ -2668,6 +2671,19 @@ async function verifyWorkspaceRestore(
     const bytes = await resources.read(ref);
     if (ref.kind === 'managed-tool-result-manifest')
       manifests.set(ref.resourceId, ref);
+    if (ref.kind === 'managed-todo_state') {
+      parseHostedTodoState(bytes);
+      const previous = object(JSON.parse(bytes.toString('utf8')))?.[
+        'previousRecordRef'
+      ];
+      if (previous)
+        await readRef(
+          assertManagedSessionDurableRef(
+            previous as ManagedSessionJsonValue,
+            'previous Todo state',
+          ),
+        );
+    }
     if (
       ref.kind === 'managed-session_metadata' ||
       ref.kind === 'managed-file_history'
@@ -2814,6 +2830,7 @@ async function verifyWorkspaceRestore(
         'hook_execution',
         'file_history',
         'history_maintenance',
+        'todo_state',
         ...(session.mcp ? ['mcp_configuration', 'mcp_operation'] : []),
         // H3 families: an admitted child_run or monitor_run journal is
         // exactly what a workspace-profile load must restore, driven by
@@ -3634,8 +3651,11 @@ async function executeHostedTurn(
         );
       const action = authority.action(actionId)!;
       await harness.resolveDurableWait();
+      if (action.state === 'decided' && options.v === 4)
+        await readHostedQuestionDecision(session.managed, action, options);
       if (
         action.state === 'decided' &&
+        options.v !== 4 &&
         !hostedActionAllowed(action, options.policyRevision) &&
         !hostedActionDenied(action, options.policyRevision)
       )
@@ -3646,9 +3666,11 @@ async function executeHostedTurn(
         index === plan.approvalOrdinal
           ? {
               ...item,
-              refusal: hostedActionAllowed(action, options.policyRevision)
-                ? null
-                : 'Original approval denied the call.',
+              refusal:
+                (options.v === 4 && action.state === 'decided') ||
+                hostedActionAllowed(action, options.policyRevision)
+                  ? null
+                  : 'Original approval denied the call.',
             }
           : item,
       );
@@ -3866,6 +3888,7 @@ async function executeHostedTurn(
                   monitors: session.monitors,
                   backgroundLane: session.backgroundLane,
                   childAgents: childAgentsOf(session),
+                  childDepth: session.childDepth,
                   messages: session.messages,
                   teams: session.teams,
                   commands: session.commands,
@@ -11091,6 +11114,7 @@ export function registerHostedHarnessSessionRoutes(
             monitors: session.monitors,
             backgroundLane: session.backgroundLane,
             childAgents: childAgentsOf(session),
+            childDepth: session.childDepth,
             messages: session.messages,
             teams: session.teams,
             commands: session.commands,

@@ -208,6 +208,12 @@ interface ChannelMemoryReadToken {
 
 interface PreflightInboundOptions {
   deferPairingRequests?: boolean;
+  /**
+   * Admit a group message that only fails the group's mention requirement.
+   * For private deliveries: the requirement keeps ambient chatter out of
+   * public replies. Every other group, sender and pairing check still runs.
+   */
+  waiveGroupMention?: boolean;
 }
 
 interface ChannelMemoryRecallCacheEntry {
@@ -332,6 +338,13 @@ export interface ChannelLoopController {
     channelName: string,
     target: SessionTarget,
   ): Promise<ChannelLoop[]>;
+  /**
+   * List every loop in a chat regardless of sender, thread or route. Optional:
+   * `listForTarget` needs the creator's exact target, which chat-wide state
+   * changes (the bot was removed from a group, a group's active messages were
+   * disabled) cannot supply.
+   */
+  listForChat?(channelName: string, chatId: string): Promise<ChannelLoop[]>;
   disable(id: string): Promise<boolean>;
   validateCron(cron: string): void;
   nextFireTime?(job: ChannelLoop): Date;
@@ -3153,6 +3166,17 @@ export abstract class ChannelBase {
     return this.activePrompts.get(sessionId)?.sourceLabel;
   }
 
+  /**
+   * True while the session's live turn is an unattended one (loop or webhook
+   * task). Base delivers such a turn once, in full, through pushProactive and
+   * never calls onResponseComplete, so an adapter whose sink flushes streamed
+   * chunks would post the same text twice. Adapters without an inbound anchor
+   * (QQ) gate on this; the base chunk bookkeeping still runs either way.
+   */
+  protected isProactivePromptTurn(sessionId: string): boolean {
+    return this.activePrompts.get(sessionId)?.loopPrompt === true;
+  }
+
   protected getInboundErrorSourceLabel(envelope: Envelope): string | undefined {
     return this.inboundErrorSourceLabels.get(envelope);
   }
@@ -4866,6 +4890,25 @@ export abstract class ChannelBase {
     return `Loop ${job.id}: ${job.cron}`;
   }
 
+  /**
+   * Disable every enabled loop in a chat. Adapters call this when the chat can
+   * no longer receive proactive messages (the bot was removed from a group, or
+   * a group's active messages were disabled), so orphaned loops stop burning
+   * unattended turns. Needs the chat-scoped controller lookup; returns how many
+   * jobs were disabled.
+   */
+  protected async disableLoopJobsForChat(chatId: string): Promise<number> {
+    if (!this.loopController?.listForChat) return 0;
+    const jobs = await this.loopController.listForChat(this.name, chatId);
+    let disabled = 0;
+    for (const job of jobs) {
+      if (job.enabled && (await this.loopController.disable(job.id))) {
+        disabled++;
+      }
+    }
+    return disabled;
+  }
+
   private async listLoopsFromTool(
     sessionId: string,
   ): Promise<string | ChannelLoopToolResult> {
@@ -6329,7 +6372,7 @@ export abstract class ChannelBase {
     );
   }
 
-  private groupSendersFor(target: { chatId: string }): GroupSenderPolicy {
+  protected groupSendersFor(target: { chatId: string }): GroupSenderPolicy {
     return (
       this.groupConfigFor(target.chatId)?.senders ??
       this.groupConfigFor('*')?.senders ??
@@ -6390,7 +6433,10 @@ export abstract class ChannelBase {
       options.deferPairingRequests === true &&
       groupResult.reason === 'pairing_trigger_required' &&
       (envelope.isMentioned || envelope.isReplyToBot);
-    if (!groupResult.allowed && !deferredGroupPairing) {
+    const waivedGroupMention =
+      options.waiveGroupMention === true &&
+      groupResult.reason === 'mention_required';
+    if (!groupResult.allowed && !deferredGroupPairing && !waivedGroupMention) {
       if (groupResult.pairing !== undefined) {
         this.logPreflightRejected('group_pairing_required', envelope);
         return this.onGroupPairingRequired(
@@ -6762,6 +6808,21 @@ export abstract class ChannelBase {
 
   protected markPreflighted(envelope: Envelope): void {
     this.preflightedEnvelopes.add(envelope);
+  }
+
+  /**
+   * Whether a message with this text passes the channel's message routes the
+   * way preflight would route it. Has no side effects.
+   */
+  protected admitsMessageRoute(text: string): boolean {
+    return (
+      this.messageRoutes.size === 0 ||
+      matchMessageRoute(
+        text,
+        this.messageRoutes,
+        this.config.defaultMessageRoute,
+      ) !== undefined
+    );
   }
 
   private applyMessageRoute(envelope: Envelope): boolean {

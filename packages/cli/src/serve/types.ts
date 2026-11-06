@@ -144,10 +144,16 @@ export interface ServeOptions {
    * `BridgeOptions.eventRingSize` and used at every `new EventBus(...)`
    * construction site. Defaults to 8000. Must be a positive
    * finite integer — `0` / `NaN` / negative fail at boot. Larger
-   * rings let clients with longer reconnect gaps replay more history
-   * at the cost of a few hundred KB extra RAM per session.
+   * rings let clients with longer reconnect gaps replay more history only
+   * while the separate `eventRingMaxBytes` budget has room.
    */
   eventRingSize?: number;
+  /**
+   * Per-session retained SSE ring byte cap, including the latest full commands
+   * snapshot. Threaded into `BridgeOptions.eventRingMaxBytes`. Defaults to
+   * 8 MiB. Must be a positive safe integer up to 256 MiB, never unlimited.
+   */
+  eventRingMaxBytes?: number;
   /**
    * Per-session in-memory compacted replay snapshot byte cap. Threaded into
    * `BridgeOptions.compactedReplayMaxBytes`. Defaults to 4 MiB. Must be a
@@ -563,6 +569,11 @@ export interface CapabilitiesEnvelope {
     sessionRestoreTimeoutMs?: number;
     /** Present when `workspace_file_upload` is advertised. */
     maxWorkspaceFileUploadBytes?: number;
+    /** Only raw Skill archives and zip-file sources; legacy limits are unchanged. */
+    maxSkillArchiveBytes?: number;
+    maxSkillArchiveExpandedBytes?: number;
+    maxSkillArchiveEntries?: number;
+    maxSkillArchiveManifestBytes?: number;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.

@@ -2592,6 +2592,23 @@ class ManagedSessionStoreHttpClient {
     const expired = this.grant;
     this.stopRenewal();
     await this.renewPromise?.catch(() => undefined);
+    // A renewal in flight may have answered after the caller saw the lease
+    // lapse; it moved the lease forward and re-armed the timer, so keep that
+    // grant. Dropping it for an acquire, which a Store holding the Session's
+    // lifecycle can delay, leaves authorizeLifecycle, and any caller that
+    // reads the grant without first waiting in ensureWriter, refusing
+    // locally until the acquire answers. Only a lease that moved past the
+    // lapsed one counts: a refused renewal leaves the lapsed lease in place,
+    // and a commit, a head adoption or a journal read copies it into a new
+    // grant; in either case a wall-clock step back could make the lapsed
+    // lease look live.
+    if (
+      expired !== undefined &&
+      this.grant !== undefined &&
+      this.grant.leaseUntil > expired.leaseUntil &&
+      this.grant.leaseUntil > Date.now()
+    )
+      return;
     this.grant = undefined;
     const acquire = (async () => {
       await this.acquireWriter();

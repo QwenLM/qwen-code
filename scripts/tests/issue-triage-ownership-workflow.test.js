@@ -48,8 +48,10 @@ describe('issue triage workflow ownership', () => {
 
   it('keeps edited issues under full triage for need-information cleanup', () => {
     expect(issueEventOwners('edited')).toEqual(['qwen-triage.yml']);
+    // Writes are drafts now: the cleanup is a labels action the publisher
+    // executes, not a direct gh issue edit.
     expect(issueWorkflow).toContain(
-      'gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "status/need-information"',
+      'jq -cn \'{action:"labels",add:[],remove:["status/need-information"]}\'',
     );
   });
 
