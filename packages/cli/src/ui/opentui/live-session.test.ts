@@ -2749,6 +2749,12 @@ describe('livePromptEvents', () => {
         .filter((part) => part.functionResponse)
         .map((part) => part.functionResponse?.id),
     ).toEqual(['r2-success', 'r2-cancel']);
+    const options = stream.mock.calls[1][3] as SendMessageOptions;
+    expect(options.toolResultParts).toHaveLength(2);
+    expect(
+      options.toolResultParts?.map((part) => part.functionResponse?.id),
+    ).toEqual(['r2-success', 'r2-cancel']);
+    options.toolResultParts?.forEach((part) => expect(parts).toContain(part));
     expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
   });
 
@@ -2838,10 +2844,12 @@ describe('livePromptEvents', () => {
 
   it.each(
     ['all-cancelled', 'steering-abort'].flatMap((path) =>
-      ['before', 'during-session', 'during-turn'].map((phase) => ({
-        path,
-        phase,
-      })),
+      ['before-session', 'before-turn', 'during-session', 'during-turn'].map(
+        (phase) => ({
+          path,
+          phase,
+        }),
+      ),
     ),
   )(
     'keeps $path retention inside its owner when it changes $phase',
@@ -2872,7 +2880,8 @@ describe('livePromptEvents', () => {
       );
       Object.assign(config, { getSessionId: () => sessionId });
       const stop = () => {
-        if (phase === 'before') sessionId = 'successor-session';
+        if (phase === 'before-session') sessionId = 'successor-session';
+        if (phase === 'before-turn') ownsTurn = false;
         controller.abort();
       };
       if (path === 'steering-abort') atMocks.hang = stop;
@@ -2892,7 +2901,7 @@ describe('livePromptEvents', () => {
         }
       })();
       try {
-        if (phase === 'before') {
+        if (phase === 'before-session' || phase === 'before-turn') {
           release();
           await pending;
           expect(admission).not.toHaveBeenCalled();

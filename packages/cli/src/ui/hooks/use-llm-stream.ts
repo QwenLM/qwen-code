@@ -6791,6 +6791,11 @@ export const useLlmStream = (
         pendingDuplicateResponses.length === 0 &&
         !sendsSharedReplayAnswers
       ) {
+        // The person declined every tool the turn asked for, which ends it as
+        // Esc does; Esc and a Mod's `$.turn.abort` already set the cancel.
+        // Stopping queued Mod prompts does not depend on receipt persistence.
+        if (!turnCancelledRef.current)
+          getInteractiveModSession(config)?.stopSubmittedPrompts();
         if (llmClient) {
           // We need to manually add the function responses to the history
           // so the model knows the tools were cancelled.
@@ -6811,10 +6816,6 @@ export const useLlmStream = (
           (toolCall) => toolCall.request.callId,
         );
         markToolsAsSubmitted(callIdsToMarkAsSubmitted);
-        // The person declined every tool the turn asked for, which ends it as
-        // Esc does; Esc and a Mod's `$.turn.abort` already set the cancel.
-        if (!turnCancelledRef.current)
-          getInteractiveModSession(config)?.stopSubmittedPrompts();
         if (toolGoalBinding) {
           // Every cancellation that reaches here originates in a user action:
           // either Esc through `cancelOngoingRequest`, or a declined tool

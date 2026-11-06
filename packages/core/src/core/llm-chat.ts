@@ -3836,6 +3836,7 @@ export class LlmChat {
               ...userContent,
               parts: guarded.flatMap((entry) => entry.responseParts),
             };
+            if (hasToolAdmission) retainedToolContent = userContent;
             // The cut is what goes into history, so anything asserting those
             // results are still resident has to be told — the same invalidation
             // `tryCompress` does for the same reason. A forked chat shares the

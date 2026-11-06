@@ -15125,84 +15125,161 @@ describe('useLlmStream', () => {
           release();
         });
 
-        it('drops the queued prompts when the person declines every tool the turn asked for', async () => {
-          const { mods, queue, queued } = installQueue();
-          admitted(async function* () {
-            yield {
-              type: ServerLlmEventType.ToolCallRequest,
-              value: {
-                callId: 'declined',
-                name: 'testTool',
-                args: {},
-                isClientInitiated: false,
-                prompt_id: 'prompt-declined',
-              },
-            };
-          });
-          const { result, rerenderWithToolCalls, completeToolRound } =
-            renderTestHook();
-          await act(async () => {
-            await result.current.submitQuery(
-              'run the tool',
-              SendMessageType.UserQuery,
-              'prompt-declined',
+        it.each(['no-hook', 'pending-hook', 'write-reject'] as const)(
+          'drops queued Mod prompts after every tool is declined: %s',
+          async (policy) => {
+            const { mods, queue, queued } = installQueue();
+            mockConfig.getDisableAllHooks = () => policy === 'no-hook';
+            mockConfig.getMessageBus = vi.fn(() => ({
+              request: vi.fn(),
+            })) as Config['getMessageBus'];
+            mockConfig.hasHooksForEvent = vi.fn(
+              (event) => event === 'UserPromptSubmit',
             );
-          });
-          await waitFor(() =>
-            expect(mockScheduleToolCalls).toHaveBeenCalledOnce(),
-          );
-          const request = {
-            callId: 'declined',
-            name: 'testTool',
-            args: {},
-            isClientInitiated: false,
-            prompt_id: 'prompt-declined',
-          };
-          const invocation = {
-            getDescription: () => 'Mock description',
-          } as unknown as AnyToolInvocation;
-          rerenderWithToolCalls([
-            {
-              request,
-              status: 'awaiting_approval',
-              responseSubmittedToLlm: false,
-              confirmationDetails: {
-                onConfirm: vi.fn(),
-                onCancel: vi.fn(),
-                message: 'Run it?',
-              },
-              tool: { name: 'testTool', displayName: 'testTool' },
-              invocation,
-            } as unknown as TrackedWaitingToolCall,
-          ]);
-          await queue({ plugin: 'lint', text: 'next' });
-          expect(mods.takeSubmittedPrompt).not.toHaveBeenCalled();
+            let release!: () => void;
+            const receipt = new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            const admission = vi.fn(async (parts: readonly Part[]) => {
+              await receipt;
+              if (policy === 'write-reject') throw new Error('receipt refused');
+              return [
+                {
+                  parts,
+                  decision:
+                    policy === 'pending-hook'
+                      ? {
+                          withheld:
+                            'The tool had already completed; its output was discarded.',
+                        }
+                      : ('admitted' as const),
+                },
+              ];
+            });
+            mockConfig.getChatRecordingService = vi.fn(() => ({
+              recordToolResult: vi.fn(),
+              recordToolResultAdmission: admission,
+            })) as Config['getChatRecordingService'];
+            admitted(async function* () {
+              yield {
+                type: ServerLlmEventType.ToolCallRequest,
+                value: {
+                  callId: 'declined',
+                  name: 'testTool',
+                  args: {},
+                  isClientInitiated: false,
+                  prompt_id: 'prompt-declined',
+                },
+              };
+            });
+            const { result, client, rerenderWithToolCalls, completeToolRound } =
+              renderTestHook();
+            await act(async () => {
+              await result.current.submitQuery(
+                'run the tool',
+                SendMessageType.UserQuery,
+                'prompt-declined',
+              );
+            });
+            await waitFor(() =>
+              expect(mockScheduleToolCalls).toHaveBeenCalledOnce(),
+            );
+            const request = {
+              callId: 'declined',
+              name: 'testTool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-declined',
+            };
+            const invocation = {
+              getDescription: () => 'Mock description',
+            } as unknown as AnyToolInvocation;
+            rerenderWithToolCalls([
+              {
+                request,
+                status: 'awaiting_approval',
+                responseSubmittedToLlm: false,
+                confirmationDetails: {
+                  onConfirm: vi.fn(),
+                  onCancel: vi.fn(),
+                  message: 'Run it?',
+                },
+                tool: { name: 'testTool', displayName: 'testTool' },
+                invocation,
+              } as unknown as TrackedWaitingToolCall,
+            ]);
+            await queue({ plugin: 'lint', text: 'next' });
+            expect(mods.takeSubmittedPrompt).not.toHaveBeenCalled();
 
-          // The dialog takes the Esc, so no cancel runs: the declined batch
-          // ends the turn.
-          await completeToolRound([
-            {
-              request,
-              status: 'cancelled',
-              response: {
-                callId: 'declined',
-                responseParts: [{ text: 'cancelled' }],
-                errorType: undefined,
+            // The dialog takes the Esc, so no cancel runs: the declined batch
+            // ends the turn.
+            const parts: Part[] = [
+              {
+                functionResponse: {
+                  id: 'declined',
+                  name: 'testTool',
+                  response: { output: 'PRIVATE_DECLINED' },
+                },
               },
-              responseSubmittedToLlm: false,
-              tool: { displayName: 'testTool' },
-              invocation,
-            } as TrackedCancelledToolCall,
-          ]);
+              { text: 'PRIVATE_COMPANION' },
+            ];
+            let failure: unknown;
+            const completing = completeToolRound([
+              {
+                request,
+                status: 'cancelled',
+                response: {
+                  callId: 'declined',
+                  responseParts: parts,
+                  errorType: undefined,
+                },
+                responseSubmittedToLlm: false,
+                tool: { displayName: 'testTool' },
+                invocation,
+              } as TrackedCancelledToolCall,
+            ]).catch((error: unknown) => {
+              failure = error;
+            });
+            try {
+              await waitFor(() => expect(admission).toHaveBeenCalledOnce());
+              expect(client.addHistory).not.toHaveBeenCalled();
+              expect(mods.takeSubmittedPrompt).not.toHaveBeenCalled();
+              expect(mockSendMessageStream).toHaveBeenCalledOnce();
+            } finally {
+              release();
+              await completing;
+            }
 
-          expect(mods.stopSubmittedPrompts).toHaveBeenCalledOnce();
-          expect(queued).toEqual([]);
-          rerenderWithToolCalls([]);
-          await act(async () => {
-            await new Promise((resolve) => setImmediate(resolve));
-          });
-          expect(mockSendMessageStream).toHaveBeenCalledOnce();
-        });
+            expect(admission.mock.calls[0][0]).toEqual(parts);
+            if (policy === 'write-reject') {
+              expect(failure).toBeDefined();
+              expect(client.addHistory).not.toHaveBeenCalled();
+            } else {
+              expect(failure).toBeUndefined();
+              const history = vi.mocked(client.addHistory).mock.calls[0][0];
+              if (policy === 'pending-hook') {
+                expect(JSON.stringify(history)).not.toContain('PRIVATE_');
+                expect(history.parts?.[0].functionResponse?.id).toBe(
+                  'declined',
+                );
+              } else expect(history).toEqual({ role: 'user', parts });
+            }
+
+            rerenderWithToolCalls([]);
+            await act(async () => {
+              await new Promise((resolve) => setImmediate(resolve));
+            });
+            expect(
+              mockSendMessageStream.mock.calls.slice(1).map((call, index) => ({
+                query: call[0],
+                type: options(index + 1)['type'],
+                submittedByMod: options(index + 1)['submittedByMod'],
+              })),
+            ).toEqual([]);
+            expect(mods.stopSubmittedPrompts).toHaveBeenCalledOnce();
+            expect(queued).toEqual([]);
+          },
+        );
 
         it('runs while a monitor update waits out its interval', async () => {
           const { queue } = installQueue();
@@ -25577,8 +25654,7 @@ describe('useLlmStream', () => {
     expect(event.turnCount).toBe(3);
   });
 
-  it('keeps the legacy non-Goal quota-switch history policy when the shared loop is disabled', async () => {
-    mockConfig.isUnifiedAgentLoopEnabled = vi.fn(() => false);
+  it('does not record admission when a non-Goal scheduler quota switch stops the turn', async () => {
     const recordToolResultAdmission = vi.fn();
     mockConfig.getChatRecordingService = vi.fn(() => ({
       recordToolResultAdmission,

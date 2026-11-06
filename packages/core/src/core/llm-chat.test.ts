@@ -868,6 +868,208 @@ describe('LlmChat', async () => {
     },
   );
 
+  it.each([
+    { stage: 'compression', outputSize: 20_000 },
+    { stage: 'history setup', outputSize: 20_000 },
+    { stage: 'success', outputSize: 20_000 },
+    { stage: 'success', outputSize: 128 },
+  ])(
+    'keeps the admitted send-guard output when $stage handles $outputSize characters',
+    async ({ stage, outputSize }) => {
+      mockConfig.getToolOutputBatchBudget = () => 1024;
+      const companion = { text: 'independent input' };
+      const independent = { text: companion.text };
+      const parts = attachToolOutputProvenance(
+        [
+          fnResponse(
+            'shell',
+            { output: 'x'.repeat(outputSize) },
+            'retained-cut',
+          ),
+          companion,
+        ],
+        {
+          callId: 'retained-cut',
+          toolName: 'shell',
+          promptId: 'guard-retention',
+          toolType: 'native',
+        },
+      );
+      const admission = vi
+        .fn()
+        .mockResolvedValue([{ parts, decision: 'admitted' }]);
+      const target = newChat({
+        recorder: {
+          recordToolResultAdmission: admission,
+          recordAssistantTurn: vi.fn(),
+        },
+      });
+      target.addHistory({
+        role: 'model',
+        parts: [fnCall('shell', {}, 'retained-cut')],
+      });
+      const failure = new Error(`failure during ${stage}`);
+      const compress = vi.spyOn(target, 'tryCompress').mockResolvedValue({
+        compressionStatus: CompressionStatus.NOOP,
+        originalTokenCount: 0,
+        newTokenCount: 0,
+      });
+      if (stage === 'compression') compress.mockRejectedValueOnce(failure);
+      if (stage === 'history setup') {
+        vi.spyOn(
+          target as unknown as { getRequestHistory: () => Content[] },
+          'getRequestHistory',
+        ).mockImplementationOnce(() => {
+          throw failure;
+        });
+      }
+      mockStream(textStream('done'));
+      const sending = target.sendMessageStream(
+        'test-model',
+        { message: [...parts, independent] },
+        'guard-retention',
+        undefined,
+        { toolResultParts: parts },
+      );
+      if (stage === 'success') await drain(await sending);
+      else await expect(sending).rejects.toBe(failure);
+
+      const guarded = compress.mock.calls[0][3]!.pendingUserMessage!;
+      const guardedResult = guarded.parts!.find(
+        (part) => part.functionResponse,
+      )!;
+      const guardedOutput = guardedResult.functionResponse!.response!['output'];
+      expect(typeof guardedOutput).toBe('string');
+      if (outputSize > 1024) {
+        expect((guardedOutput as string).length).toBeLessThanOrEqual(1024);
+        expect(getToolOutputProvenance(guardedResult)).toMatchObject({
+          callId: 'retained-cut',
+          toolName: 'shell',
+          truncated: true,
+          budgetSource: 'send_guard',
+        });
+      } else {
+        expect(guardedOutput).toBe('x'.repeat(outputSize));
+        expect(getToolOutputProvenance(guardedResult)?.truncated ?? false).toBe(
+          false,
+        );
+      }
+      const kept = target['history'].find((entry) =>
+        entry.parts?.some(
+          (part) => part.functionResponse?.id === 'retained-cut',
+        ),
+      )!;
+      expect(kept.parts).toEqual(guarded.parts);
+      expect(kept.parts).toContain(independent);
+      expect(kept.parts).toContain(parts[1]);
+      expect(getToolOutputProvenance(kept.parts![0])).toEqual(
+        getToolOutputProvenance(guardedResult),
+      );
+      expect(parts[0].functionResponse!.response!['output']).toBe(
+        'x'.repeat(outputSize),
+      );
+      expect(admission).toHaveBeenCalledOnce();
+      expect(target.getUserContentPushCount()).toBe(1);
+      expectStreamCalls(stage === 'success' ? 1 : 0);
+      if (stage === 'success') {
+        const dispatched = (requestAt(0).contents as Content[])
+          .flatMap((entry) => entry.parts ?? [])
+          .find((part) => part.functionResponse?.id === 'retained-cut')!;
+        expect(dispatched.functionResponse!.response!['output']).toBe(
+          guardedOutput,
+        );
+      }
+    },
+  );
+
+  it('restores a plan-exit notice separately from admitted guard output on pre-push failure', async () => {
+    mockConfig.getToolOutputBatchBudget = () => 1024;
+    const parts = [
+      fnResponse('shell', { output: 'x'.repeat(20_000) }, 'notice-cut'),
+    ];
+    const target = newChat({
+      recorder: {
+        recordToolResultAdmission: vi
+          .fn()
+          .mockResolvedValue([{ parts, decision: 'admitted' }]),
+        recordAssistantTurn: vi.fn(),
+      },
+    });
+    target.addHistory({
+      role: 'model',
+      parts: [fnCall('shell', {}, 'notice-cut')],
+    });
+    target.enableManualPlanExitNotices();
+    let pendingNotice = true;
+    let claimedNotice = false;
+    let failOnce = true;
+    const failure = new Error('catalog setup failed after claiming notice');
+    vi.mocked(mockConfig.takePendingManualPlanExitNotice).mockImplementation(
+      () => {
+        if (!pendingNotice) return undefined;
+        pendingNotice = false;
+        claimedNotice = true;
+        return { version: 19, currentMode: ApprovalMode.DEFAULT };
+      },
+    );
+    vi.mocked(mockConfig.restorePendingManualPlanExitNotice).mockImplementation(
+      () => {
+        pendingNotice = true;
+        claimedNotice = false;
+      },
+    );
+    mockConfig.getAutoMemoryContext = () => {
+      if (claimedNotice && failOnce) {
+        failOnce = false;
+        throw failure;
+      }
+      return '';
+    };
+    vi.spyOn(target, 'tryCompress').mockResolvedValue({
+      compressionStatus: CompressionStatus.NOOP,
+      originalTokenCount: 0,
+      newTokenCount: 0,
+    });
+    await expect(
+      target.sendMessageStream(
+        'test-model',
+        { message: parts },
+        'notice-cut',
+        undefined,
+        { toolResultParts: parts },
+      ),
+    ).rejects.toBe(failure);
+    const retained = target['history'].at(-1)!;
+    expect(
+      (retained.parts![0].functionResponse!.response!['output'] as string)
+        .length,
+    ).toBeLessThanOrEqual(1024);
+    const noticeText = 'changed outside the approved exit_plan_mode flow';
+    expect(JSON.stringify(retained)).not.toContain(noticeText);
+    expect(
+      mockConfig.restorePendingManualPlanExitNotice,
+    ).toHaveBeenCalledOnce();
+    expect(mockConfig.restorePendingManualPlanExitNotice).toHaveBeenCalledWith(
+      19,
+    );
+    mockStream(textStream('done'));
+    await sendDrain('next', 'after-notice-cut', target);
+    expect(
+      (requestAt(0).contents as Content[])
+        .flatMap((entry) => entry.parts ?? [])
+        .filter((part) => part.text?.includes(noticeText)),
+    ).toHaveLength(1);
+    expect(
+      target
+        .getHistory()
+        .flatMap((entry) => entry.parts ?? [])
+        .filter((part) => part.text?.includes(noticeText)),
+    ).toHaveLength(1);
+    expect(
+      mockConfig.restorePendingManualPlanExitNotice,
+    ).toHaveBeenCalledOnce();
+  });
+
   it('preserves an ordinary prompt cancelled before send for interrupted-turn recovery', async () => {
     const reason = new Error('user cancelled');
     const stream = await chat.sendMessageStream(

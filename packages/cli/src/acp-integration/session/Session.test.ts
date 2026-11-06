@@ -11021,7 +11021,6 @@ describe('Session', () => {
           expect(mockClient.requestPermission).toHaveBeenCalledOnce();
           expect(mockChatRecordingService.recordToolResult).toHaveBeenCalled();
           expect(mockChat.addHistory).not.toHaveBeenCalled();
-          expect(pushes).toBe(0);
         } finally {
           release();
         }

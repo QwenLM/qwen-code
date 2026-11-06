@@ -10741,6 +10741,72 @@ Other open files:
       expect(mockTurnRunFn.mock.calls[0]![1]).toEqual(expected);
     });
 
+    it.each([false, true])(
+      'keeps a retried date reminder outside tool admission when withheld=%s',
+      async (withheld) => {
+        const { settleToolResultHistory } = await vi.importActual<
+          typeof import('../services/tool-result-history.js')
+        >('../services/tool-result-history.js');
+        dateSession('2026-06-05T12:00:00Z');
+        installChat({
+          getHistory: vi
+            .fn()
+            .mockReturnValue([startupContext('Thursday, June 4, 2026')]),
+          getHistoryLength: vi.fn().mockReturnValue(1),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([
+              dateReminderTurn(CHANGED('Friday, June 5, 2026'), 'Question'),
+            ]),
+        });
+        const output: Part[] = [
+          fnResponse('read_file', { output: 'PRIVATE_RETRY' }),
+          { text: 'same companion and independent input' },
+        ];
+        const input = { text: 'same companion and independent input' };
+        await run([...output, input], 'prompt-date-tool-retry', {
+          type: SendMessageType.Retry,
+          toolResultParts: output,
+        });
+
+        const request = mockTurnRunFn.mock.calls[0][1] as Part[];
+        const owned = mockTurnConstructorFn.mock.calls[0][9] as Part[];
+        expect(owned).toBe(output);
+        expect(request[0]).toEqual(CHANGED('Friday, June 5, 2026'));
+        expect(request[0].partMetadata?.[DATE_REMINDER_METADATA]).toBe(
+          'Friday, June 5, 2026',
+        );
+        output.forEach((part, index) => expect(request[index + 1]).toBe(part));
+        expect(request.at(-1)).toBe(input);
+
+        const admission = vi.fn(async (parts: readonly Part[]) => [
+          {
+            parts,
+            decision: withheld
+              ? { withheld: 'policy refused' }
+              : ('admitted' as const),
+          },
+        ]);
+        const retained = await settleToolResultHistory(
+          { recordToolResultAdmission: admission },
+          { role: 'user', parts: request },
+          owned,
+        );
+        expect(admission).toHaveBeenCalledExactlyOnceWith(output, undefined);
+        expect(retained.parts?.[0]).toBe(request[0]);
+        expect(retained.parts?.at(-1)).toBe(input);
+        if (withheld) {
+          expect(JSON.stringify(retained)).not.toContain('PRIVATE_RETRY');
+          output.forEach((part) => expect(retained.parts).not.toContain(part));
+          expect(
+            retained.parts?.filter((part) => part.text === input.text),
+          ).toEqual([input]);
+        } else {
+          output.forEach((part) => expect(retained.parts).toContain(part));
+        }
+      },
+    );
+
     describe('output style turn reminder', () => {
       const stubOutputStyle = (
         name: Parameters<typeof getBuiltInOutputStyle>[0],
