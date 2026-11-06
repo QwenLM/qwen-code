@@ -124,16 +124,19 @@ describe('compactionInputSlimming', () => {
       process.env['QWEN_COMPACT_MAX_RECENT_IMAGES'] = '9';
       process.env['QWEN_COMPACT_SCREENSHOT_TRIGGER'] = '0';
       process.env['QWEN_COMPACT_SCREENSHOT_THRESHOLD'] = '99';
+      process.env['QWEN_IMAGE_PAYLOAD_THRESHOLD'] = '0';
       const t = resolveCompactionTuning({
         maxRecentFilesToRetain: 1,
         maxRecentImagesToRetain: 1,
         enableScreenshotTrigger: true,
         screenshotTriggerThreshold: 5,
+        imagePayloadThreshold: 5,
       });
       expect(t.maxRecentFiles).toBe(7);
       expect(t.maxRecentImages).toBe(9);
       expect(t.enableScreenshotTrigger).toBe(false);
       expect(t.screenshotTriggerThreshold).toBe(99);
+      expect(t.imagePayloadThreshold).toBe(0);
     });
 
     it('rejects fractional count-like env values', () => {

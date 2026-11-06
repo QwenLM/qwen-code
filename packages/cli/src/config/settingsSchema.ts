@@ -2041,7 +2041,7 @@ const SETTINGS_SCHEMA = {
             default: DEFAULT_IMAGE_PAYLOAD_THRESHOLD,
             minimum: 0,
             description:
-              'Inline image count at or above which historical image payloads are replaced with text references and only the most recent images are reattached. 0 disables eviction, keeping every image payload in history. Env override: QWEN_IMAGE_PAYLOAD_THRESHOLD.',
+              'Inline image count at or above which historical image payloads are replaced with text references and only the most recent images are reattached. 0 disables eviction, keeping every image payload in history; a route whose model does not declare image support may still receive text placeholders. Env override: QWEN_IMAGE_PAYLOAD_THRESHOLD.',
             showInDialog: false,
           },
         },
