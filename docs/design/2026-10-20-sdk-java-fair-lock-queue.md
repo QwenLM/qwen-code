@@ -115,12 +115,12 @@ fresh inodes instead of rewriting the host cache through a hardlink. Maven's
 tracking markers (`resolver-status.properties`, `*.lastUpdated`,
 `_remote.repositories`, `maven-metadata-local.xml`) are truncated and
 rewritten in place, so the seed drops those hardlinks too and Maven
-recreates them job-locally; the write-back never publishes them, so the
-next job's seed has no host-cache inode to unlink. The
-Maven runs run unlocked; the write-back holds one acquisition, and its `mkdir`
-and bounded `find`/`cp` children drop fd 9 so a survivor cannot retain the
-lock. A hold now measures the copy instead of the suite, and the fast tier's
-budget is again far above one hold.
+recreates them job-locally. The write-back does not publish newly created
+bookkeeping, while the seed still strips stale hardlinked markers left by
+older runs. The Maven runs run unlocked; the write-back holds one
+acquisition, and its `mkdir` and bounded `find`/`cp` children drop fd 9 so a
+survivor cannot retain the lock. A hold now measures the copy instead of the
+suite, and the fast tier's budget is again far above one hold.
 
 The test job follows the same rule. Its suite was the other long hold: on
 2026-10-22, run 39771949573's fast-tier job failed at its 5400-second budget

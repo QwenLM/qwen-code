@@ -26,11 +26,15 @@ const mocks = vi.hoisted(() => {
     ensureRuntime: vi.fn(),
     setWorkspaceConfigSkillEnabled: vi.fn(),
     installWorkspaceConfigSkill: vi.fn(),
+    installWorkspaceConfigSkillArchive: vi.fn(),
+    getWorkspaceSkillInstallAttempt: vi.fn(),
     deleteWorkspaceConfigSkill: vi.fn(),
   };
   const client = {
     workspaceByCwd: vi.fn(() => workspaceClient),
     installWorkspaceConfigSkill: vi.fn(),
+    installWorkspaceConfigSkillArchive: vi.fn(),
+    getWorkspaceSkillInstallAttempt: vi.fn(),
     deleteWorkspaceConfigSkill: vi.fn(),
   };
   const actions = {
@@ -98,6 +102,8 @@ describe('useDaemonSkills', () => {
       ...Object.values(mocks.actions),
       ...Object.values(mocks.workspaceClient),
       mocks.client.installWorkspaceConfigSkill,
+      mocks.client.installWorkspaceConfigSkillArchive,
+      mocks.client.getWorkspaceSkillInstallAttempt,
       mocks.client.deleteWorkspaceConfigSkill,
     ]) {
       fn.mockClear();
@@ -142,6 +148,85 @@ describe('useDaemonSkills', () => {
     expect(mocks.actions.setWorkspaceSkillEnabled).toHaveBeenCalledOnce();
     expect(mocks.actions.installWorkspaceSkill).toHaveBeenCalledOnce();
     expect(mocks.actions.deleteWorkspaceSkill).toHaveBeenCalledOnce();
+  });
+
+  it('selects the native archive owner and keeps receipt reads independent of runtime activation', async () => {
+    mocks.context.current.capabilities.features = ['skill_archive_install'];
+    await renderHook();
+    const upload = {
+      name: 'example',
+      data: new Blob(['zip']),
+      signal: new AbortController().signal,
+    };
+    await act(async () => {
+      await result?.installArchive(upload, 'workspace');
+      await result?.installArchive(upload, 'global');
+      await result?.lookupInstallAttempt('workspace', 'attempt-workspace');
+      await result?.lookupInstallAttempt('global', 'attempt-global');
+    });
+    expect(
+      mocks.workspaceClient.installWorkspaceConfigSkillArchive,
+    ).toHaveBeenCalledExactlyOnceWith(upload);
+    expect(
+      mocks.client.installWorkspaceConfigSkillArchive,
+    ).toHaveBeenCalledExactlyOnceWith(upload);
+    expect(
+      mocks.workspaceClient.getWorkspaceSkillInstallAttempt,
+    ).toHaveBeenCalledExactlyOnceWith('attempt-workspace', {
+      timeoutMs: 5_000,
+    });
+    expect(
+      mocks.client.getWorkspaceSkillInstallAttempt,
+    ).toHaveBeenCalledExactlyOnceWith('attempt-global', { timeoutMs: 5_000 });
+    expect(mocks.workspaceClient.ensureRuntime).not.toHaveBeenCalled();
+    expect(mocks.actions.installWorkspaceSkill).not.toHaveBeenCalled();
+  });
+
+  it('does not start an archive request when the capability is absent', async () => {
+    await renderHook();
+    await expect(
+      result!.installArchive(
+        { name: 'example', data: new Blob(['zip']) },
+        'workspace',
+      ),
+    ).rejects.toThrow('unavailable');
+    expect(
+      mocks.workspaceClient.installWorkspaceConfigSkillArchive,
+    ).not.toHaveBeenCalled();
+    expect(
+      mocks.client.installWorkspaceConfigSkillArchive,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('propagates activation errors only to callers that request them', async () => {
+    mocks.context.current.capabilities.features = [
+      'workspace_skills_config_runtime',
+    ];
+    mocks.workspaceClient.ensureRuntime.mockRejectedValue(
+      new Error('activation unavailable'),
+    );
+    await renderHook();
+    await act(async () => {
+      await expect(result!.ensureRuntime()).resolves.toBeUndefined();
+      await expect(
+        result!.ensureRuntime({ throwOnError: true }),
+      ).rejects.toThrow('activation unavailable');
+    });
+    expect(result!.error).toBeUndefined();
+    mocks.workspaceClient.ensureRuntime.mockResolvedValue({
+      runtimeLive: true,
+      capabilities: {
+        skills: {
+          state: 'error',
+          error: { message: 'Skill catalog unavailable' },
+        },
+      },
+    });
+    await act(async () => {
+      await expect(
+        result!.ensureRuntime({ throwOnError: true }),
+      ).rejects.toThrow('Skill catalog unavailable');
+    });
   });
 
   it('does not route a legacy secondary workspace to primary', async () => {

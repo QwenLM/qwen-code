@@ -30,6 +30,15 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class HarnessSdkValuesTest {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void boundaryForwardsModelConfigurationCapability(boolean supported) {
+        var delegate = mock(HarnessConnector.class);
+        when(delegate.supportsModelConfiguration()).thenReturn(supported);
+        assertThat(new SdkHarnessBoundary(delegate).supportsModelConfiguration()).isEqualTo(supported);
+        verify(delegate).supportsModelConfiguration();
+    }
+
     @Test
     void httpStatusBodyFieldsAndTransportCauseSurviveTheBoundary() throws Exception {
         var cause = new IOException("disconnected");

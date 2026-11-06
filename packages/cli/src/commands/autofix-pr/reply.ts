@@ -47,6 +47,7 @@ import {
   type PendingPost,
 } from './state.js';
 import { assertNoFixInFlight, fixSnapshotPath } from './fix.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 /** GitHub refuses a comment body longer than this. */
 const MAX_BODY_CHARS = 65_536;
@@ -332,8 +333,37 @@ export interface ReplyArgs {
   task?: string;
 }
 
+/** The plan at `path`: one that cannot be read, is no JSON, or is not
+ * shaped as a plan is the plan's to fix (`plan_invalid`). */
+function readPlan(path: string): Required<ReplyPlan> {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (err) {
+    // Not there, or not a file: the write of the plan failed.
+    throw new AutofixPrRefusal(
+      'plan_invalid',
+      `the reply plan cannot be read: ${(err as Error).message}`,
+    );
+  }
+  try {
+    return parsePlan(JSON.parse(text));
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      throw new AutofixPrRefusal(
+        'plan_invalid',
+        `the reply plan is not JSON: ${err.message}`,
+      );
+    }
+    if (err instanceof TypeError) {
+      throw new AutofixPrRefusal('plan_invalid', err.message);
+    }
+    throw err;
+  }
+}
+
 export function runReply(args: ReplyArgs): ReplyOutcome {
-  const plan = parsePlan(JSON.parse(readFileSync(args.planPath, 'utf8')));
+  const plan = readPlan(args.planPath);
   const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   return withWatchLock(paths, args.pr, () => replyLocked(args, plan, paths));
 }
@@ -349,7 +379,8 @@ function replyLocked(
   // The option the watch was started with holds for its rounds, whatever
   // a round's turn remembers of it; a `--once` round has options of its own.
   if (args.post && args.task !== undefined && state.watch?.reply === false) {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'plan_invalid',
       `PR #${args.pr}'s watch was started with --no-reply: run reply with --no-post.`,
     );
   }
@@ -360,7 +391,8 @@ function replyLocked(
   // rather than fail the replies to the rest.
   const { pr } = fetchPrData(state, roundReplyCheck(state, false));
   if (pr.state !== 'OPEN') {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'pr_closed',
       `PR #${args.pr} is ${pr.state.toLowerCase()}; nothing is posted on it.`,
     );
   }
@@ -453,14 +485,16 @@ function replyLocked(
     }
     const thread = offer.threads.get(reply.replyTo);
     if (!thread) {
-      throw new Error(
+      throw new AutofixPrRefusal(
+        'plan_invalid',
         `thread ${reply.replyTo} has no new comment from a trusted author on PR #${args.pr}; ` +
           `autofix replies only to the threads snapshot reports.`,
       );
     }
     const foreign = open.filter((id) => !thread.has(id));
     if (foreign.length > 0) {
-      throw new Error(
+      throw new AutofixPrRefusal(
+        'plan_invalid',
         `replies to thread ${reply.replyTo} name comments outside it or not actionable: ${foreign.join(', ')}`,
       );
     }
@@ -469,7 +503,8 @@ function replyLocked(
   const otherHandled = [...(plan.summary?.handled ?? []), ...plan.handled];
   for (const id of otherHandled) {
     if (done.has(id) || offer.comments.has(id)) continue;
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'plan_invalid',
       offer.untrusted.has(id)
         ? `${id} is from an author autofix does not act on; it is listed, never handled.`
         : `${id} is not a new comment from a trusted author on PR #${args.pr}.`,
@@ -493,7 +528,8 @@ function replyLocked(
     // Not a key at all — a gate key, a check name — would otherwise pass for
     // one of another head and be dropped while the round counts it handled.
     if (keyHead(key) === null) {
-      throw new Error(
+      throw new AutofixPrRefusal(
+        'plan_invalid',
         `${key} is not the \`key\` of a ci_failed event (<check>@<head>@<attempt>).`,
       );
     }
@@ -504,7 +540,8 @@ function replyLocked(
     if (knownChecks.has(key)) continue;
     if (!offer.checks.has(key)) {
       if (!roundChecks.has(key)) {
-        throw new Error(
+        throw new AutofixPrRefusal(
+          'plan_invalid',
           `${key} is not a failure snapshot reports on the PR head; pass the \`key\` of a ci_failed event.`,
         );
       }

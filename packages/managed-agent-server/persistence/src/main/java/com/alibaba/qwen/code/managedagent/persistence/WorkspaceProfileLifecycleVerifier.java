@@ -160,11 +160,11 @@ public class WorkspaceProfileLifecycleVerifier {
                     verifyNotStartedPublication(operation, execution);
                 } else {
                     var rows = jdbc.queryForList("SELECT producer_phase, admission_resource_id, receipt_sequence, receipt_revision,"
-                            + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined FROM ma_output_capture"
+                            + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined FROM ma_output_capture"
                             + " WHERE tenant_id = ? AND session_id = ? AND publication_id = ? FOR UPDATE",
                             operation.tenantId(), operation.sessionId(), execution.getReference().get("publicationId"));
                     if (rows.size() != 1 || !"REFERENCED".equals(rows.getFirst().get("producer_phase"))
-                            || ((Number) rows.getFirst().get("quarantined")).intValue() != 0
+                            || ((Number) rows.getFirst().get("is_quarantined")).intValue() != 0
                             || !source.outcomeRef().path("resourceId").asText().equals(rows.getFirst().get("admission_resource_id"))
                             || source.receiptSequence() != ((Number) rows.getFirst().get("receipt_sequence")).longValue()
                             || source.journalRevision() != ((Number) rows.getFirst().get("receipt_revision")).longValue()) {
@@ -313,12 +313,12 @@ public class WorkspaceProfileLifecycleVerifier {
 
     private void verifyNotStartedPublication(OperationRecord operation, ToolExecutionRecord execution) {
         var rows = jdbc.queryForList("SELECT state, producer_phase, terminal_resource_id, binding_json, binding_digest,"
-                + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                 + " FROM ma_output_capture WHERE tenant_id = ? AND session_id = ? AND publication_id = ? FOR UPDATE",
                 operation.tenantId(), operation.sessionId(), execution.getReference().get("publicationId"));
         if (rows.size() != 1 || !"NOT_STARTED".equals(rows.getFirst().get("state"))
                 || !"OPEN".equals(rows.getFirst().get("producer_phase"))
-                || ((Number) rows.getFirst().get("quarantined")).intValue() != 0
+                || ((Number) rows.getFirst().get("is_quarantined")).intValue() != 0
                 || rows.getFirst().get("terminal_resource_id") != null) {
             unsettled();
         }

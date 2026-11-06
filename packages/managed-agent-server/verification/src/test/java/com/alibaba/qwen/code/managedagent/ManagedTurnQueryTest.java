@@ -140,9 +140,9 @@ class ManagedTurnQueryTest {
         assertThat(latest).containsKey(sessionId);
         var freshSession = new FreshSessionBeforeExecute(
                 jdbc.getDataSource(), "environment.turn_id) IN (");
-        var recompiling = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
+        var recompiling = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
                 new ManagedSchemaJdbcTemplate(freshSession),
-                objectMapper, Clock.systemUTC(), ignored -> {}, registry, new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                objectMapper, Clock.systemUTC(), ignored -> {}, registry, new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
         assertThat(recompiling.findLatestEnvironmentEvents(tenant, latest)
                 .get(sessionId))
