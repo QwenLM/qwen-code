@@ -847,14 +847,20 @@ describe('prompt reasoning snapshots', () => {
   );
 });
 
-it('validates subscription declarations using the Chat wire without assuming capabilities', () => {
+it('defaults subscription routes to medium and honors explicit Chat declarations', () => {
   const subscriptionRoute = {
-    model: 'qwen3.8-max',
+    model: 'future-served-model',
     authType: AuthType.QWEN_SUBSCRIPTION,
     baseUrl: 'https://api.qwen.ai/v1',
   };
   expect(
     resolveReasoningCapabilities(subscriptionRoute, undefined),
+  ).toMatchObject({ defaultEffort: 'medium', disableField: 'enable_thinking' });
+  expect(
+    resolveReasoningCapabilities(
+      { ...subscriptionRoute, authType: AuthType.USE_OPENAI },
+      undefined,
+    ),
   ).toBeUndefined();
   expect(
     resolveReasoningCapabilities(subscriptionRoute, declaration),
