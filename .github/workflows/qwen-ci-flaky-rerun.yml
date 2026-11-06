@@ -27,12 +27,15 @@ jobs:
     # hosted pool: one round waited 2h09m for a runner, and 17 of 20 recent
     # ticks were cancelled with zero jobs — they never received one at all.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # Budget: resolve step 12 + classifier step 5, leaving 3 for scan (~2
-    # observed) and job setup. Warm rounds are far shorter. The resolver can
-    # attempt TWO sequential 10-minute pulls — the requested image, then a
-    # fallback to the latest GHCR semver — so its step is capped below the job
-    # exactly like the classifier: a cold host costs one round, not the job.
-    timeout-minutes: 20
+    # Budget: the capped steps sum to guard 2 + resolve 12 + classifier 5 = 19,
+    # and scan (~2 observed), checkout, setup-node and the capture still have to
+    # fit. An earlier 20-minute cap silently omitted the guard's own 2 minutes
+    # and could therefore be exceeded by the very steps it installed. Warm
+    # rounds are far shorter. The resolver can attempt TWO sequential 10-minute
+    # pulls — the requested image, then a fallback to the latest GHCR semver —
+    # so its step is capped below the job exactly like the classifier: a cold
+    # host costs one round, not the job.
+    timeout-minutes: 25
     permissions:
       actions: 'read'
       contents: 'read'
@@ -81,40 +84,66 @@ jobs:
                 exit 1
                 ;;
             esac
-            # The classifier runs inside the docker sandbox. Without a daemon
-            # that otherwise surfaces only after the classifier's 5-minute
-            # budget is already spent. Fail in seconds instead — and bound the
-            # probe itself: a wedged daemon that accepts the connection and
+            # The classifier's sandbox command is resolved by the CLI itself,
+            # which returns the bare name `docker` and spawns it through PATH;
+            # SANDBOX_COMMAND reaches only the image resolver. So probing the
+            # absolute path alone would greenlight a host whose PATH docker is
+            # a planted binary, and the classifier would then run on the host
+            # instead of in a container. Refuse the round unless the name the
+            # CLI will resolve IS the pinned binary.
+            resolved_docker="$(command -v docker || true)"
+            if [ "${resolved_docker}" != "${SANDBOX_COMMAND}" ]; then
+              echo "::error::PATH docker (${resolved_docker:-none}) is not ${SANDBOX_COMMAND}; refusing to run here."
+              exit 1
+            fi
+            # Bound the probe: a wedged daemon that accepts the connection and
             # never answers would otherwise hang here, before the scan, where
-            # neither the resolve nor the classifier step cap applies and even
-            # an empty-candidate round would block the serialized patrol for
-            # the whole job budget.
-            if ! timeout 10 "${SANDBOX_COMMAND}" info > /dev/null 2>&1; then
-              echo "::error::docker daemon did not answer within 10s on this runner; the sandboxed classifier cannot start."
+            # neither the resolve nor the classifier step cap applies. Keep the
+            # probe's own diagnostic — a missing binary (127), a non-executable
+            # one (126) and a socket-permission failure are not hangs, and
+            # reporting all of them as a timeout points every round at a
+            # healthy daemon.
+            probe_rc=0
+            probe_output="$(timeout 10 "${SANDBOX_COMMAND}" info 2>&1)" || probe_rc=$?
+            if [ "${probe_rc}" -ne 0 ]; then
+              printf '%s\n' "${probe_output}" | tail -n 20
+              if [ "${probe_rc}" -eq 124 ]; then
+                echo "::error::docker daemon did not answer within 10s on runner '${RUNNER_NAME}' using '${SANDBOX_COMMAND}'."
+              else
+                echo "::error::docker preflight failed on runner '${RUNNER_NAME}' using '${SANDBOX_COMMAND}' (exit ${probe_rc})."
+              fi
               exit 1
             fi
           fi
 
-      - name: 'Resolve patrol identity'
-        id: 'identity'
-        env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-        run: |-
-          bot_login="$(gh api user --jq .login)"
-          test -n "${bot_login}"
-          echo "bot_login=${bot_login}" >> "${GITHUB_OUTPUT}"
-
       # See the same step in act: a previous round's sandboxed agent can write
       # .git, and a planted filter executes during this checkout's clean/reset
       # while HEAD still resolves to the trusted SHA. Rebuild the metadata.
+      # Removing the repository's own .git is not enough: git also reads
+      # ~/.gitconfig, $XDG_CONFIG_HOME/git/config and /etc/gitconfig, and a
+      # core.hooksPath planted there redirects hook lookup for every git
+      # command on the host. actions/checkout copies $HOME/.gitconfig into its
+      # temp home and then runs `git checkout --force`, so a planted
+      # post-checkout hook fires *during* the checkout this step exists to make
+      # trustworthy, and can rewrite the driver before act runs it with the
+      # PAT. Neutralise both scopes, as triage, autofix and serve-ab already do.
       - name: 'Recreate runner Git metadata'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           rm -rf -- "$GITHUB_WORKSPACE/.git"
+          : > "${RUNNER_TEMP}/patrol-empty-gitconfig"
+          echo "GIT_CONFIG_GLOBAL=${RUNNER_TEMP}/patrol-empty-gitconfig" >> "${GITHUB_ENV}"
+          echo "GIT_CONFIG_SYSTEM=${RUNNER_TEMP}/patrol-empty-gitconfig" >> "${GITHUB_ENV}"
 
       - name: 'Checkout trusted event commit'
         id: 'checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
+        # Step env as well as the $GITHUB_ENV export above: step env outranks
+        # that appendable file, and this is the step whose own git invocation
+        # the planted global config would otherwise reach.
+        env:
+          GIT_CONFIG_GLOBAL: '${{ runner.temp }}/patrol-empty-gitconfig'
+          GIT_CONFIG_SYSTEM: '${{ runner.temp }}/patrol-empty-gitconfig'
         with:
           ref: '${{ github.sha }}'
           persist-credentials: false
@@ -124,16 +153,44 @@ jobs:
         with:
           node-version: '22'
 
+      # Capture PATH once, here, and hand it to every later step through
+      # expression context. This pool runs untrusted fork CI at the same uid
+      # and this workflow itself writes a PATH directory (`npm install -g`), so
+      # a co-located job can leave a planted `gh`, `node` or `docker` behind;
+      # the next round would then execute it with the bot PAT already in its
+      # environment. After setup-node on purpose: capturing earlier would pin
+      # the ambient node and silently drop the version this job asked for.
+      # Builtins only, so the capture resolves no command word itself.
+      - name: 'Capture trusted PATH'
+        id: 'stage'
+        run: |-
+          echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
+
+      # After the capture, not before it: this is the first step holding
+      # CI_BOT_PAT. It needs no checkout, so moving it here costs nothing.
+      - name: 'Resolve patrol identity'
+        id: 'identity'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
+        run: |-
+          export PATH="${TRUSTED_PATH:?}"
+          bot_login="$(gh api user --jq .login)"
+          test -n "${bot_login}"
+          echo "bot_login=${bot_login}" >> "${GITHUB_OUTPUT}"
+
       - name: 'Scan stale PR failures'
         id: 'scan'
         env:
           GH_TOKEN: '${{ github.token }}'
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           # Step env, not a job-level value: this name is the target of the
           # rm -rf below, and on the shared pool $GITHUB_ENV is writable by
           # anything running at the runner's uid. Must match the classifier's
           # QWEN_HOME; a test binds the two so they cannot drift apart.
           QWEN_HOME: '${{ runner.temp }}/qwen-patrol-home'
         run: |-
+          export PATH="${TRUSTED_PATH:?}"
           mkdir -p "${WORKDIR}"
           # The ECS workspace persists across jobs. A decisions file left by an
           # earlier round would pass Validate and be acted on even when this
@@ -155,8 +212,11 @@ jobs:
       - name: 'Ensure Qwen Code'
         id: 'ensure_qwen'
         if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        env:
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
           set -euo pipefail
+          export PATH="${TRUSTED_PATH:?}"
           if command -v qwen >/dev/null 2>&1; then
             echo "qwen already installed:"
           else
@@ -174,18 +234,19 @@ jobs:
         # model. 12 covers one full pull plus the digest inspect.
         timeout-minutes: 12
         env:
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           # Absolute path so a planted '${RUNNER_TEMP}/qwen-bin' or $GITHUB_PATH
           # entry cannot shadow the binary the resolver spawns.
           SANDBOX_COMMAND: '/usr/bin/docker'
         run: |-
+          export PATH="${TRUSTED_PATH:?}"
           # Pull the sandbox image HERE, outside the classifier's 5-minute
-          # budget, and report how long it takes. Observed on the hosted pool:
-          # the one round that received a runner spent 304s in the classifier,
-          # hit the step timeout and produced no decisions, with a docker
-          # process still alive at job cleanup. Whether those 304s went to a
-          # cold image pull or to inference is NOT established — this timing is
-          # what settles it. Reported on failure too, because a slow pull is
-          # exactly the case worth measuring.
+          # budget, and report how long it takes. Measured on the pool: the
+          # first dispatch spent 601s in this step and never reached the model,
+          # against a 300s classifier budget — so under the previous shape no
+          # round could have produced a decision however fast the model was.
+          # Reported on failure too, because a slow pull is exactly the case
+          # worth measuring.
           start="${SECONDS}"
           status=0
           node .github/scripts/resolve-sandbox-image.mjs \
@@ -209,6 +270,11 @@ jobs:
         env:
           GH_TOKEN: ''
           GITHUB_TOKEN: ''
+          # The CLI resolves its sandbox command as the bare name `docker`
+          # through PATH, so the guard's absolute-path probe only vouches for
+          # this step if the step searches the same PATH the guard checked.
+          # Expression context, not $GITHUB_PATH, which is appendable.
+          PATH: '${{ steps.stage.outputs.trusted_path }}'
           # Bind the resolver's digest-pinned step output, not the $GITHUB_ENV
           # value it also writes: step env outranks that appendable file, which
           # anything running at the runner's uid on the shared pool can edit.
@@ -255,7 +321,10 @@ jobs:
       - name: 'Validate patrol decisions'
         id: 'decisions'
         if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        env:
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
+          export PATH="${TRUSTED_PATH:?}"
           # No decisions is a legitimate outcome now that the classifier can
           # time out without taking the job with it. A timeout can also kill
           # the process mid-write, leaving a non-empty but unparseable file,
@@ -327,14 +396,23 @@ jobs:
       # this checkout's own clean/reset, with HEAD still resolving to the
       # trusted SHA — so a pinned ref and persist-credentials: false do not
       # help. Discard the metadata and let checkout rebuild it, as triage does.
+      # The global and system scopes are neutralised too: a core.hooksPath
+      # planted in ~/.gitconfig survives deleting the repository's own .git and
+      # fires during checkout, which is the one thing this step must guarantee.
       - name: 'Recreate runner Git metadata'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           rm -rf -- "$GITHUB_WORKSPACE/.git"
+          : > "${RUNNER_TEMP}/patrol-empty-gitconfig"
+          echo "GIT_CONFIG_GLOBAL=${RUNNER_TEMP}/patrol-empty-gitconfig" >> "${GITHUB_ENV}"
+          echo "GIT_CONFIG_SYSTEM=${RUNNER_TEMP}/patrol-empty-gitconfig" >> "${GITHUB_ENV}"
 
       - name: 'Checkout trusted event commit'
         id: 'checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
+        env:
+          GIT_CONFIG_GLOBAL: '${{ runner.temp }}/patrol-empty-gitconfig'
+          GIT_CONFIG_SYSTEM: '${{ runner.temp }}/patrol-empty-gitconfig'
         with:
           ref: '${{ github.sha }}'
           persist-credentials: false
@@ -343,6 +421,14 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
         with:
           node-version: '22'
+
+      # Same capture as classify, after setup-node so the pinned PATH still
+      # contains the node version this job asked for. Both steps below hold the
+      # write-capable PAT and resolve `node` by name.
+      - name: 'Capture trusted PATH'
+        id: 'stage'
+        run: |-
+          echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Download patrol decisions'
         if: "${{ needs.classify.outputs.target_found == 'true' }}"
@@ -355,7 +441,9 @@ jobs:
         if: "${{ needs.classify.outputs.target_found == 'true' }}"
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
+          export PATH="${TRUSTED_PATH:?}"
           node .github/scripts/ci-flaky-rerun.mjs act \
             --repo "${{ github.repository }}" \
             --workdir "${WORKDIR}" \
@@ -373,7 +461,9 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
+          export PATH="${TRUSTED_PATH:?}"
           node .github/scripts/ci-flaky-rerun.mjs reset \
             --repo "${{ github.repository }}" \
             --trusted-marker-login "${{ needs.classify.outputs.bot_login }}"

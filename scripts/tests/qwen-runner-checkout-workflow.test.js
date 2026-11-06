@@ -56,12 +56,25 @@ it.each(jobs)(
       const preserved = join(external, 'keep');
       mkdirSync(cached);
       writeFileSync(preserved, 'keep external repository');
+      // A real runner always provides these. Steps that neutralise the global
+      // and system Git config write an empty file under RUNNER_TEMP and export
+      // the scopes through GITHUB_ENV, so the fixture has to offer both or it
+      // would exercise those steps against paths that do not exist.
+      const runnerTemp = join(root, 'runner-temp');
+      mkdirSync(runnerTemp);
+      const githubEnv = join(root, 'gh-env');
+      writeFileSync(githubEnv, '');
       const git = (...args) =>
         execFileSync('git', args, { cwd: workspace, stdio: 'pipe' });
       const recover = () =>
         execFileSync('bash', ['-e', '-c', steps[index].run], {
           cwd: workspace,
-          env: { ...process.env, GITHUB_WORKSPACE: workspace },
+          env: {
+            ...process.env,
+            GITHUB_WORKSPACE: workspace,
+            RUNNER_TEMP: runnerTemp,
+            GITHUB_ENV: githubEnv,
+          },
         });
 
       git('init', '--quiet');
