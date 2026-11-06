@@ -72,7 +72,9 @@ describe(`$.prompt.submit in the ${renderer} terminal`, () => {
   });
 
   async function start(hooks: string) {
-    scratch = mkdtempSync(join(tmpdir(), 'qwen-mods-prompt-submit-ink-'));
+    scratch = mkdtempSync(
+      join(tmpdir(), `qwen-mods-prompt-submit-${renderer}-`),
+    );
     const workspace = join(scratch, 'workspace');
     const qwenHome = join(scratch, 'home');
     const plugin = join(scratch, 'followup-mod');

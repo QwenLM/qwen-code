@@ -1826,15 +1826,56 @@ describe('livePromptEvents', () => {
       });
       expect(second[3]).toEqual({ type: SendMessageType.ToolResult });
       // The sidecar sees the Mod's text, not the frame, and who sent it.
-      expect(dualOutput.emitUserMessage).toHaveBeenCalledTimes(1);
-      expect(dualOutput.emitUserMessage).toHaveBeenCalledWith([
+      expect(dualOutput['emitUserMessage']).toHaveBeenCalledTimes(1);
+      expect(dualOutput['emitUserMessage']).toHaveBeenCalledWith([
         { text: 'Summarize @src/a.ts' },
       ]);
-      expect(dualOutput.emitSystemMessage).toHaveBeenCalledWith('mod_prompt', {
-        mod: 'followup-mod',
-      });
+      expect(dualOutput['emitSystemMessage']).toHaveBeenCalledWith(
+        'mod_prompt',
+        {
+          mod: 'followup-mod',
+        },
+      );
     },
   );
+
+  it("tells the sidecar a retried Mod's prompt is the Mod's, not the frame", async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 'mod-tool',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const calls = new Map<string, ReturnType<typeof vi.fn>>();
+    const dualOutput = new Proxy(
+      {},
+      {
+        get: (_target, key: string) => {
+          if (key === 'isConnected') return true;
+          if (!calls.has(key)) calls.set(key, vi.fn());
+          return calls.get(key);
+        },
+      },
+    ) as Record<string, ReturnType<typeof vi.fn>>;
+    const modPrompt = { plugin: 'followup-mod', text: 'Summarize it' };
+    await drain(
+      livePromptEvents(config, 'unused', undefined, {
+        submittedPrompt: modPrompt.text,
+        modPrompt,
+        dualOutput: dualOutput as unknown as DualOutputBridge,
+        retry: {
+          content: 'framed: Summarize it',
+          inlineModelOverride: false,
+        },
+      }),
+    );
+    expect(dualOutput['emitUserMessage']).toHaveBeenCalledExactlyOnceWith([
+      { text: 'Summarize it' },
+    ]);
+    expect(dualOutput['emitSystemMessage']).toHaveBeenCalledWith('mod_prompt', {
+      mod: 'followup-mod',
+    });
+  });
 
   it('forwards a human declaration only on the initial send, independently from submittedPrompt', async () => {
     const sendMessageStream = oneToolBatchStream({

@@ -1243,6 +1243,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     ],
   );
 
+  // The person's own command or `!` command lets the Mods' prompts start
+  // turns again once it runs; a prompt does so when its turn starts (ink's
+  // submitQuery), so input that is refused or only queued resets nothing.
+  const notePersonPrompt = useCallback(
+    () => getInteractiveModSession(config)?.notePersonPrompt(),
+    [config],
+  );
+
   const submitInput = useCallback(
     async (
       text: string,
@@ -1326,10 +1334,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         return false;
       const settlement = hasImages
         ? { kind: 'settled' as const, outcome: false as const }
-        : await gateway.dispatch(submission, {
-            displayText: options?.displayText,
-            pasteExpansions: options?.pasteExpansions,
-          });
+        : await gateway.dispatch(
+            submission,
+            {
+              displayText: options?.displayText,
+              pasteExpansions: options?.pasteExpansions,
+            },
+            notePersonPrompt,
+          );
       if (settlement.kind === 'rejected') {
         notify(settlement.reason);
         return false;
@@ -1359,6 +1371,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           }
         }
         if (shellModeActive && query) {
+          notePersonPrompt();
           const started = runShellCommand(query);
           if (!started)
             notify('The shell command owner is not wired in this shell.');
@@ -1392,6 +1405,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       commandList,
       addInfoItem,
       props.onTranscriptEvent,
+      notePersonPrompt,
     ],
   );
 
@@ -1407,15 +1421,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       imagePaths?: readonly string[],
       options?: OpenTuiSubmitOptions,
     ): Promise<boolean> => {
-      // The person's own input, a command too, lets the Mods' prompts start
-      // turns again.
-      getInteractiveModSession(config)?.notePersonPrompt();
       submittingRef.current += 1;
       try {
         return await submitInput(text, imagePaths, options);
       } finally {
         submittingRef.current -= 1;
-        setModPromptRevision((revision) => revision + 1);
+        // Only a Mod's prompt waiting on this submission needs the re-run.
+        if (getInteractiveModSession(config)?.hasSubmittedPrompts)
+          setModPromptRevision((revision) => revision + 1);
       }
     },
     [config, submitInput],
@@ -1476,6 +1489,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             return;
           }
           if (entry.shell) {
+            notePersonPrompt();
             await runShellCommand(entry.text);
             continue;
           }
@@ -1510,10 +1524,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             }
             return;
           }
-          const settlement = await gateway.dispatch(entry.text, {
-            displayText: entry.options?.displayText,
-            pasteExpansions: entry.options?.pasteExpansions,
-          });
+          const settlement = await gateway.dispatch(
+            entry.text,
+            {
+              displayText: entry.options?.displayText,
+              pasteExpansions: entry.options?.pasteExpansions,
+            },
+            notePersonPrompt,
+          );
           if (settlement.kind === 'rejected') {
             notify(settlement.reason);
             continue;
@@ -1573,6 +1591,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     runShellCommand,
     config,
     props.composerHandle,
+    notePersonPrompt,
   ]);
 
   // A Mod's own prompts (`$.prompt.submit`) run each as a turn of its own

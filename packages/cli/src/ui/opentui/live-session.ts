@@ -839,8 +839,9 @@ export async function* livePromptEvents(
     }
   }
   if (!current() || abort.aborted) return;
-  if (options?.modPrompt && !options.retry) {
-    // As in a headless run: the Mod's text, then which Mod submitted it.
+  if (options?.modPrompt) {
+    // As in a headless run: the Mod's text, then which Mod submitted it; a
+    // retry of it (Ctrl+Y) reads the same, not as the frame the person typed.
     dualOutput?.emitUserMessage([{ text: options.modPrompt.text }]);
     dualOutput?.emitSystemMessage('mod_prompt', {
       mod: options.modPrompt.plugin,

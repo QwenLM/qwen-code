@@ -334,6 +334,10 @@ export function useOpenTuiLiveTurn(
     promptId: string;
     options?: OpenTuiSubmitOptions;
   } | null>(null);
+  // A Mod's prompt went back after its turn ended before admission; it waits
+  // for the next turn to end rather than retry at once and fail the same way
+  // in a loop, as ink's does.
+  const modPromptHeldRef = useRef(false);
   const activeTurnRef = useRef<{
     seq: number;
     prompt?: OpenTuiInputSubmission;
@@ -548,6 +552,15 @@ export function useOpenTuiLiveTurn(
       abortRef.current = abort;
       // The Mods hear the turn from its admission to its end below.
       const mods = getInteractiveModSession(config);
+      const modPrompt = retry ? undefined : turnOptions?.modPrompt;
+      if (!turnOptions?.modPrompt) {
+        modPromptHeldRef.current = false;
+        // The person's own turn, a command's prompt too, lets the Mods'
+        // prompts start turns again. As in ink's submitQuery, a queued prompt
+        // counts when it runs, after any stop the turn before it made.
+        if (!retry && !turnOptions?.toolCall) mods?.notePersonPrompt();
+      }
+      let admitted = false;
       let modTurn: ModTurn | undefined;
       let modEnded = false;
       // Declining every tool ends the turn as a cancel, as it does in ink.
@@ -735,6 +748,15 @@ export function useOpenTuiLiveTurn(
           isCurrentTurn: () => seq === turnSeqRef.current,
           ...(mods && {
             onPromptAdmitted: () => {
+              admitted = true;
+              // A notice naming the Mod, not a row the person typed: it is not
+              // recalled, rewound to or logged as the person's input. It shows
+              // once the prompt is admitted, so one that goes back has none.
+              if (modPrompt && seq === turnSeqRef.current)
+                apply({
+                  type: 'info',
+                  text: modPromptRow(modPrompt.plugin, modPrompt.text),
+                });
               // A retry, like ink's, has no typed prompt.
               modTurn = mods.startTurn(
                 retry
@@ -864,6 +886,14 @@ export function useOpenTuiLiveTurn(
               ? 'error'
               : undefined,
         );
+        // A Mod's prompt that never reached the model goes back to the queue
+        // and no longer counts toward the limit, as in ink; one the person
+        // stopped is dropped there.
+        const returned = !!modPrompt && !admitted;
+        if (returned && mods) {
+          mods.returnSubmittedPrompt(modPrompt);
+          modPromptHeldRef.current = true;
+        }
         // A stale turn must not clear a successor's controller.
         if (abortRef.current === abort) abortRef.current = null;
         if (seq === turnSeqRef.current) {
@@ -872,7 +902,7 @@ export function useOpenTuiLiveTurn(
             apply({ type: 'segment-end' });
           }
           skipRetryDelayRef.current = undefined;
-          if (failed && prepared && !abort.signal.aborted) {
+          if (failed && prepared && !abort.signal.aborted && !returned) {
             failedRequestRef.current = {
               request: prepared,
               promptId,
@@ -1134,20 +1164,18 @@ export function useOpenTuiLiveTurn(
   );
 
   const runModPrompt = useCallback((): boolean => {
-    if (!mountedRef.current || streamingRef.current) return false;
+    if (!mountedRef.current || streamingRef.current || modPromptHeldRef.current)
+      return false;
     const prompt = getInteractiveModSession(config)?.takeSubmittedPrompt();
     if (!prompt) return false;
     const promptId = nextLivePromptId(config);
-    // A notice naming the Mod, not a row the person typed: it is not
-    // recalled, rewound to or logged as the person's input.
-    apply({ type: 'info', text: modPromptRow(prompt.plugin, prompt.text) });
     void runTurn(frameModPrompt(prompt), promptId, {
       submittedPrompt: prompt.text,
       ...(prompt.context?.length ? { promptContext: prompt.context } : {}),
       modPrompt: prompt,
     });
     return true;
-  }, [config, apply, runTurn]);
+  }, [config, runTurn]);
 
   const interrupt = useCallback(
     (onSettled?: OpenTuiCancelSettled) => {

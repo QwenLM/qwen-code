@@ -4130,6 +4130,10 @@ describe('OpenTuiApp shell wiring', () => {
       expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
       await queue();
       expect(onRunModPrompt).not.toHaveBeenCalled();
+      // Input refused while it runs is no prompt of the person's.
+      await submit('/other');
+      await submit('look', ['/tmp/a.png']);
+      expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
 
       await act(async () => {
         mocks.state.releaseHandle?.();
@@ -4137,6 +4141,18 @@ describe('OpenTuiApp shell wiring', () => {
       });
       expect(mocks.state.handledTexts).toEqual(['/slow']);
       expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves a plain prompt's count to its turn", async () => {
+      const { mods } = installMods(0);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const onSubmitPrompt = vi.fn(() => true);
+      renderApp({ onSubmitPrompt });
+      await settle();
+      await submit('hello');
+      expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+      // The live turn counts it when it starts, as ink's submitQuery does.
+      expect(mods.notePersonPrompt).not.toHaveBeenCalled();
     });
 
     it('waits for a command whose defer verdict is still out when the turn ends', async () => {
