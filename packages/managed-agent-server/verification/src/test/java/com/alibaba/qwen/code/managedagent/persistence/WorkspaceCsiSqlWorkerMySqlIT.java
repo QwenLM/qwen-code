@@ -173,16 +173,16 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         var binding = bindings.claimOperation(initial.getBindingId(), "owned-test", Duration.ofMinutes(5));
         var reserved = storage.reserve(registration, bindings, binding, UUID.randomUUID().toString());
         bindings.releaseOperation(binding.getBindingId(), "owned-test", binding.getOperationGeneration());
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
-        journal.setCsiBindings(bindings);
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("construction-fixture/1");
         // Wired as in production, so the receipt commits below reach the capture guard.
         var toolResults = new ManagedToolResultStore(jdbc, manager,
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON,
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON,
                         java.time.Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties,
-                        new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules())));
-        journal.setToolResults(toolResults);
+                        new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc,
+                new ManagedExtensionRecordStore(jdbc), null, null, null, null, toolResults, null,
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), bindings);
         var endpoint = new AtomicReference<URI>();
         var actualClient = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
         var mappedClient = mock(HttpClient.class);
@@ -285,7 +285,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                                         + " WHERE EXISTS (SELECT 1 FROM ma_session_journal_tx t WHERE t.operation = 'recordToolResult'"
                                         + " AND t.command_id = e.execution_call_id) ORDER BY e.execution_call_id LIMIT 1", String.class);
                                 for (String mutation : List.of("execution_state = 'UNKNOWN', result_json = NULL, execution_status = NULL, settled_at = NULL",
-                                        "cancel_requested = TRUE", "native_authorization_json = NULL",
+                                        "is_cancel_requested = TRUE", "native_authorization_json = NULL",
                                         "execution_status = 'error', result_json = '{\"executionStatus\":\"error\",\"responseParts\":[],\"error\":{\"message\":\"changed\"}}'")) {
                                     transaction.executeWithoutResult(status -> {
                                         jdbc.update("UPDATE ma_tool_execution SET " + mutation + " WHERE execution_call_id = ?", execution);
@@ -434,9 +434,9 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE native_authorization_json IS NOT NULL"
                         + " AND execution_state = 'SETTLED'", Integer.class)).isEqualTo(4);
                 // The receipts of those executions were committed through the private CSI
-                // lane, which records none for projection. The journal still holds the
+                // lane, which records none for projection. The journal commit component still holds the
                 // result store, so the zero below is the capture guard's, not a missing store's.
-                assertThat(journal).extracting("toolResults").isSameAs(toolResults);
+                assertThat(journal).extracting("commits.toolResults").isSameAs(toolResults);
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation"
                         + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", Integer.class)).isZero();
                 assertThat(jdbc.queryForObject("SELECT writer_generation FROM ma_session_head", Long.class))
@@ -450,7 +450,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                     assertThat(result.path("retirement").path("stage").asText()).isEqualTo("DRAINED");
                     assertThat(result.path("retirement").path("progressVersion").asInt()).isEqualTo(4);
                     assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head", String.class)).isEqualTo("SEALED");
-                    assertThat(jdbc.queryForObject("SELECT wake_scan_pending FROM ma_session_head", Boolean.class)).isFalse();
+                    assertThat(jdbc.queryForObject("SELECT is_wake_scan_pending FROM ma_session_head", Boolean.class)).isFalse();
                     assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding", String.class)).isEqualTo("DRAINING");
                     assertThat(jdbc.queryForObject("SELECT csi_phase FROM ma_storage_owner", String.class)).isEqualTo("DRAINING");
                     assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session", String.class)).isEqualTo("RELEASED");

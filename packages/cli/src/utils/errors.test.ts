@@ -10,6 +10,7 @@ import {
   OutputFormat,
   FatalInputError,
   ToolErrorType,
+  parseAndFormatApiError,
 } from '@qwen-code/qwen-code-core';
 import {
   AlreadyReportedError,
@@ -191,6 +192,19 @@ describe('errors', () => {
 
         expect(mockWriteStderrLine).toHaveBeenCalledWith(
           'API Error: Test error',
+        );
+      });
+
+      it('passes the host translator to API error formatting', async () => {
+        const error = new Error('quota');
+        const translate = vi.fn((key: string) => key);
+        await expect(
+          handleError(error, mockConfig, undefined, translate),
+        ).rejects.toThrow(error);
+        expect(parseAndFormatApiError).toHaveBeenCalledWith(
+          error,
+          mockConfig.getContentGeneratorConfig()?.authType,
+          translate,
         );
       });
 

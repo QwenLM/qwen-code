@@ -693,6 +693,74 @@ class ManagedExtensionRecordStoreTest {
                 .required("state").textValue()).isEqualTo("consumed");
     }
 
+    // FG10b: the relay can classify its ledger row after acceptance but
+    // before the parent's wake Turn reads the result, leaving the mirror
+    // `pending`. The consuming revision must correct that row in the same
+    // transaction, and never touch another run's row.
+    @Test
+    void correctsAClassifiedChildResultMirrorWhenConsumptionCommits()
+            throws Exception {
+        CommitResource inputResource = hookResource("input-m",
+                "managed-input", "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-m",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-m",
+                "managed-runtime-receipt",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource);
+        commitDomain(journal, "accept-1", "child_acceptance",
+                acceptance(resultResource, receiptResource, "accepted"),
+                List.of(resultResource, receiptResource));
+        ObjectNode accepted = childAgent(sessionId, "sent", "settled",
+                "settled", "binding-1", inputResource);
+        accepted.withObject("/run").put("dispatchId", "dispatch-1");
+        accepted.put("childSessionId", "session-child");
+        accepted.put("stopReason", "completed");
+        accepted.set("resultRef", hookRef(resultResource));
+        accepted.set("terminalReceiptRef", hookRef(receiptResource));
+        accepted.withObject("/run").withObject("/delivery").put("state",
+                "accepted");
+        commitDomain(journal, "agent-5", "child_run", accepted, List.of());
+        String scope = com.alibaba.qwen.code.managedagent.repository
+                .ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        for (String run : List.of("run-x", "run-other")) {
+            jdbc.update("INSERT INTO ma_delivery (delivery_key,"
+                            + " delivery_kind, tenant_id, source_scope_key,"
+                            + " source_session_id, target_session_id,"
+                            + " delivery_id, creation_key, payload_json,"
+                            + " transport_state, reception_state,"
+                            + " consumption_state, gmt_create, gmt_modified)"
+                            + " VALUES (?, 'CHILD_RESULT', ?, ?, 'session-child',"
+                            + " ?, ?, 'creation', '{}', 'delivered', 'accepted',"
+                            + " 'pending', 1, 1)",
+                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
+                            .key("delivery", "CHILD_RESULT", scope, run),
+                    TENANT, scope, sessionId, run);
+        }
+        ObjectNode consumed = accepted.deepCopy();
+        consumed.withObject("/run").withObject("/delivery").put("state",
+                "consumed");
+        commitDomain(journal, "agent-6", "child_run", consumed, List.of());
+        assertThat(mirror(sessionId, "run-x"))
+                .isEqualTo("delivered/accepted/consumed");
+        assertThat(mirror(sessionId, "run-other"))
+                .isEqualTo("delivered/accepted/pending");
+    }
+
+    private String mirror(String sessionId, String run) {
+        return jdbc.queryForObject("SELECT CONCAT(transport_state, '/',"
+                        + " reception_state, '/', consumption_state) FROM"
+                        + " ma_delivery WHERE tenant_id = ? AND delivery_kind ="
+                        + " 'CHILD_RESULT' AND source_scope_key = ? AND"
+                        + " delivery_id = ?", String.class, TENANT,
+                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore
+                        .sessionScopeKey(TENANT, sessionId), run);
+    }
+
     /** Commits a child agent through its settled result. */
     // H4f: a child task's cancel is advertised from its projection, its
     // committed stop request is what the cancel delivery reads back, and

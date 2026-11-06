@@ -257,6 +257,13 @@ import {
   type HostedApprovalSettings,
   type HostedApprovalWaiters,
 } from './hosted-tool-approval.js';
+import {
+  HOSTED_USER_QUESTION_TOOL,
+  HOSTED_QUESTION_POLICY,
+  HostedQuestionInputError,
+  hostedQuestions,
+  readHostedQuestionDecision,
+} from './hosted-user-question.js';
 
 export {
   HOSTED_WORKSPACE_FILE_PROFILE,
@@ -1643,6 +1650,26 @@ export const HOSTED_AGENT_WAIT_ABANDONED_TEXT =
   'The turn was cancelled before the child agent finished; the child keeps running and its committed result is retained.';
 
 /**
+ * The tool names whose never-started proof is the child-run ledger
+ * (admitLaunch commits the record before dispatch): one membership fact
+ * for every arm that either reads that ledger or must decline without
+ * it. A future child-run-backed tool joins HERE, never as another
+ * inline two-name literal.
+ */
+export const CHILD_LEDGER_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'agent',
+  'workflow',
+]);
+
+/**
+ * The answer a settlement writes for a child-ledger call it cannot
+ * prove anything about: the ledger is unavailable in this generation,
+ * so the fold names the unknown instead of claiming the call never ran.
+ */
+export const HOSTED_CHILD_LEDGER_UNKNOWN_TEXT =
+  'The child run for this call kept its own ledger, which this recovery does not hold; its outcome is unknown and its record is retained.';
+
+/**
  * The never-admitted answer for a sibling call the dead batch never
  * reached: the live admission's own wording, also what the cancel
  * route's settlement writes for the parked round's remaining agent
@@ -1802,6 +1829,7 @@ interface HostedPreparedRequest {
   command: boolean;
   skill: boolean;
   planExit?: boolean;
+  question?: boolean;
   todo?: boolean;
 }
 
@@ -1948,6 +1976,7 @@ export class HostedWorkspaceToolTurn {
       profile?: string;
       context?: HostedWorkspaceContextSlot;
       foregroundOnly?: boolean;
+      childDepth?: number;
       childRuns?: HostedChildRunSession;
       monitors?: HostedMonitorSession;
       backgroundLane?: HostedShellTurnOptions;
@@ -2010,7 +2039,7 @@ export class HostedWorkspaceToolTurn {
         ? launchEnabled
         : () => launchEnabled !== false;
     this.childSnapshot = extras?.childAgents?.snapshot;
-    this.childDepth = extras?.childAgents?.depth ?? 0;
+    this.childDepth = extras?.childDepth ?? extras?.childAgents?.depth ?? 0;
     this.childWorkspaces = extras?.childAgents?.childWorkspaces === true;
     this.childSnapshots =
       this.childWorkspaces && extras?.childAgents?.childSnapshots === true;
@@ -2073,6 +2102,24 @@ export class HostedWorkspaceToolTurn {
    */
   private declaresTodoTool(): boolean {
     return this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3;
+  }
+
+  private questionsAdmitted(): boolean {
+    return (
+      this.approval !== undefined &&
+      !this.hooks &&
+      !this.mcp &&
+      !this.foregroundOnly &&
+      !this.residentWorkspace &&
+      this.childDepth === 0 &&
+      !this.memberPlanMode &&
+      [
+        HOSTED_WORKSPACE_FILE_PROFILE,
+        HOSTED_WORKSPACE_FILE_PROFILE_V2,
+        HOSTED_WORKSPACE_FILE_PROFILE_V3,
+        HOSTED_WORKSPACE_SHELL_PROFILE,
+      ].includes(this.profile ?? HOSTED_WORKSPACE_FILE_PROFILE)
+    );
   }
 
   /**
@@ -2307,6 +2354,8 @@ export class HostedWorkspaceToolTurn {
           : tool,
       );
     }
+    if (this.questionsAdmitted())
+      this.advertised.push(HOSTED_USER_QUESTION_TOOL);
     if (this.publicPlanMode) this.advertised.push(HOSTED_PUBLIC_PLAN_TOOL);
     if (this.publicChildren && this.extensionAgents.length)
       this.advertised = this.advertised.map((tool) =>
@@ -3601,6 +3650,7 @@ export class HostedWorkspaceToolTurn {
           command: false,
           skill: item.call.name === 'skill' && this.skills !== undefined,
           planExit: this.publicPlanMode && item.call.name === 'exit_plan_mode',
+          question: item.call.name === 'ask_user_question',
         });
       }
       this.logicalRound = plan.round;
@@ -3628,6 +3678,8 @@ export class HostedWorkspaceToolTurn {
       this.publicPlanMode &&
       batch?.requests.length === 1 &&
       batch.requests[0].planExit === true;
+    const singleQuestion =
+      batch?.requests.length === 1 && batch.requests[0].question === true;
     if (
       !batch ||
       batch.uncaptured ||
@@ -3636,12 +3688,14 @@ export class HostedWorkspaceToolTurn {
       (!commandStep &&
         isHostedWorkspaceShellProfile(this.profile) &&
         !singlePlanExit &&
+        !singleQuestion &&
         !this.publicChildren) ||
       (!commandStep && (this.hooks || this.mcp)) ||
       batch.requests.some(
         (request) =>
           !(
             singlePlanExit ||
+            singleQuestion ||
             (commandStep && request.call.name === 'skill') ||
             (this.publicChildren &&
               ['agent', 'run_shell_command'].includes(request.call.name)) ||
@@ -3885,6 +3939,17 @@ export class HostedWorkspaceToolTurn {
         ) {
           validationError = HOSTED_PUBLIC_PLAN_REFUSAL;
           input = { ...call.args };
+        } else if (call.name === 'ask_user_question') {
+          input = { ...call.args };
+          try {
+            hostedQuestions(input);
+            if (source.length !== 1 || !this.questionsAdmitted())
+              validationError =
+                'ask_user_question must be the only call in a supported root Session batch.';
+          } catch (cause) {
+            if (!(cause instanceof HostedQuestionInputError)) throw cause;
+            validationError = cause.message;
+          }
         } else if (planExit) {
           input = { ...call.args };
           if (!this.planning)
@@ -4223,9 +4288,7 @@ export class HostedWorkspaceToolTurn {
           } else if (
             !sharedExtensionWorkspace &&
             !agentBackground &&
-            calls.some(
-              (other) => other.name !== 'agent' && other.name !== 'workflow',
-            )
+            calls.some((other) => !CHILD_LEDGER_TOOL_NAMES.has(other.name))
           ) {
             // The same one-batch candidacy: a sibling outside a child
             // launch holds the mount for exactly the wait the foreground
@@ -4289,9 +4352,7 @@ export class HostedWorkspaceToolTurn {
             validationError = `Hosted workflow run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
           } else if (
             !agentBackground &&
-            calls.some(
-              (other) => other.name !== 'agent' && other.name !== 'workflow',
-            )
+            calls.some((other) => !CHILD_LEDGER_TOOL_NAMES.has(other.name))
           ) {
             validationError =
               'Hosted workflow run_in_background=false cannot share a batch with a tool other than agent or workflow; the sibling would hold the Workspace mount the child needs.';
@@ -4591,6 +4652,7 @@ export class HostedWorkspaceToolTurn {
           command,
           skill,
           planExit,
+          question: call.name === 'ask_user_question',
           todo: call.name === 'todo_write',
         };
       });
@@ -4955,6 +5017,7 @@ export class HostedWorkspaceToolTurn {
           request.team ||
           request.command ||
           request.planExit ||
+          request.question ||
           request.skill ||
           request.todo ||
           request.workflow
@@ -5409,6 +5472,53 @@ export class HostedWorkspaceToolTurn {
               commandRuns,
             )),
           );
+          continue;
+        }
+        if (request.question) {
+          const actionId = this.nativeBatch?.actionIds.get(index);
+          const action = actionId && this.session.authority.action(actionId);
+          if (!action)
+            throw new HostedToolRecoveryRequiredError(
+              'Question Action is missing.',
+            );
+          const options = await readHostedActionOptions(this.session, action);
+          if (options.v !== 4)
+            throw new HostedToolRecoveryRequiredError(
+              'Question Action has incompatible options.',
+            );
+          const answers = await readHostedQuestionDecision(
+            this.session,
+            action,
+            options,
+          );
+          const answerText = answers
+            .map((answer, ordinal) => {
+              const question = options.questions[ordinal];
+              const selected = question.options.filter((option) =>
+                answer.optionIds?.includes(option.id),
+              );
+              return [
+                question.prompt,
+                ...selected.map(
+                  (option) => `Selected ${option.id}: ${option.label}`,
+                ),
+                ...(answer.text !== undefined
+                  ? [`Custom answer: ${answer.text}`]
+                  : []),
+              ].join('\n');
+            })
+            .join('\n\n');
+          const converted = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [{ text: `User provided the following answers:\n\n${answerText}` }],
+          );
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new HostedToolRecoveryRequiredError(
+              'Question result exceeds the Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
+          responses.push(...converted);
           continue;
         }
         if (request.planExit) {
@@ -8452,6 +8562,7 @@ export class HostedWorkspaceToolTurn {
         continue;
       }
       const humanOnly =
+        request.question === true ||
         asks.has(index) ||
         decision === 'ask' ||
         (this.publicPlanMode &&
@@ -8861,31 +8972,49 @@ export class HostedWorkspaceToolTurn {
         ? undefined
         : await this.captureNativeBatch('approval', requestId, ordinal);
     if (ordinal >= 0 && !continuationRef) this.nativeBatch!.uncaptured = true;
-    const options: HostedActionOptions = {
-      ...(continuationRef
-        ? {
-            v: 3 as const,
-            continuationRef,
-            ...(HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
-              ? { inputRef }
-              : {}),
-          }
-        : HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
-          ? { v: 2 as const, inputRef }
-          : { v: 1 as const }),
+    const question = call.name === 'ask_user_question';
+    if (question && !continuationRef)
+      throw new HostedToolRecoveryRequiredError(
+        'Question continuation is unavailable.',
+      );
+    const identity = {
       requestId,
       turnId: this.promptId,
       functionCallId: call.callId,
       toolName: call.name,
-      policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
       inputRevision: 1,
       createdAt,
       expiresAt: createdAt + approval.settings.timeoutMs,
-      options: HOSTED_APPROVAL_OPTIONS,
-      ...(requiresHumanDecision
-        ? { requiresHumanDecision: true as const }
-        : {}),
     };
+    const options: HostedActionOptions = question
+      ? {
+          ...identity,
+          v: 4,
+          policyRevision: HOSTED_QUESTION_POLICY,
+          requiresHumanDecision: true,
+          inputRef,
+          continuationRef: continuationRef!,
+          questions: hostedQuestions(call.args),
+        }
+      : {
+          ...(continuationRef
+            ? {
+                v: 3 as const,
+                continuationRef,
+                ...(HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
+                  ? { inputRef }
+                  : {}),
+              }
+            : HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
+              ? { v: 2 as const, inputRef }
+              : { v: 1 as const }),
+          ...identity,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+          options: HOSTED_APPROVAL_OPTIONS,
+          ...(requiresHumanDecision
+            ? { requiresHumanDecision: true as const }
+            : {}),
+        };
     const optionsRef = await this.session.resources.publish(
       'managed-action-options',
       Buffer.from(JSON.stringify(options)),
@@ -8894,7 +9023,7 @@ export class HostedWorkspaceToolTurn {
     await this.harness.commitDurableWait(
       {
         requestId,
-        kind: 'permission',
+        kind: question ? 'question' : 'permission',
         source: 'tool_call',
         optionsRef,
         inputRevision: '1',
@@ -8949,6 +9078,10 @@ export class HostedWorkspaceToolTurn {
       );
     await this.harness.resolveDurableWait();
     const action = authority.action(requestId)!;
+    if (action.state === 'decided' && options.v === 4) {
+      await readHostedQuestionDecision(this.session, action, options);
+      return undefined;
+    }
     if (action.state === 'decided')
       return hostedActionAllowed(action, options.policyRevision)
         ? undefined

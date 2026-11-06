@@ -6,15 +6,23 @@ import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionSkills;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.session.ActionResponseCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedActionService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -39,9 +47,11 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.lang.Nullable;
 import org.springframework.test.context.bean.override.convention.TestBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
@@ -116,10 +126,16 @@ class ManagedActionsTest {
         @Bean @Primary
         ManagedAgentStore actionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, ObjectMapper mapper,
                 ManagedWorkspaceRegistry registry, @Qualifier("managedAgentClock") Clock clock,
-                com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher publisher) {
+                com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher publisher,
+                WorktreeFiles worktreeFiles, ManagedSessionSkills skills, ExtensionPackages extensions,
+                @Nullable WorkspaceLifecycleStore lifecycle, @Nullable ManagedAgentDefinitionStore definitions,
+                @Nullable SessionWorktreeStore worktrees, @Nullable JournalEventTransport transport,
+                @Lazy @Nullable ManagedExtensionRecordStore records) {
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
-            return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, clock, publisher, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            return new ManagedAgentStore(jdbc, mapper, clock, publisher, registry,
+                    properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), worktreeFiles,
+                    skills, extensions, lifecycle, definitions, worktrees, transport, records);
         }
     }
 
@@ -138,6 +154,89 @@ class ManagedActionsTest {
                     }
                     return RETURNS_DEFAULTS.answer(call);
                 });
+    }
+
+    @Test
+    void structuredQuestionsSurviveRefreshAndReplayAcrossPublicAndWebShell() throws Exception {
+        String tenant = tenant();
+        String session = session(tenant);
+        JsonNode input = json.readTree("""
+                {"questions":[{"question":"Which targets?","header":"Targets","multiSelect":true,
+                "options":[{"label":"Same","description":"First"},{"label":"Same","description":"Second"}]}]}
+                """);
+        ActionJournal journal = new ActionJournal(journals, tenant, session, System.currentTimeMillis(), 9007199254740991L)
+                .withQuestions(input);
+        journal.change("requested", null);
+        for (JsonNode view : inputViews(tenant, session, journal.id)) {
+            boolean web = view.has("actionId");
+            assertThat(view.path("kind").asText()).isEqualTo("question");
+            assertThat(view.path(web ? "toolName" : "tool_name").asText()).isEqualTo("ask_user_question");
+            assertThat(view.path(web ? "functionCallId" : "function_call_id").asText()).isEqualTo("call-actions");
+            assertThat(view.path("questions").get(0).path(web ? "allowText" : "allow_text").asBoolean()).isTrue();
+            assertThat(view.at("/questions/0/options/1/id").asText()).isEqualTo("q1o2");
+        }
+        String body = """
+                {"kind":"question","input_revision":1,"policy_revision":"hosted-user-question/1",
+                 "answers":[{"question_id":"q1","option_ids":["q1o2","q1o1"],"text":"Extra 中😀"}]}
+                """;
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "other")
+                        .header("Idempotency-Key", "question-answer").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isForbidden());
+        mvc.perform(auth(get(path(session, journal.id)), tenant(), "owner")).andExpect(status().isNotFound());
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                        .header("Idempotency-Key", "invalid-question").contentType(MediaType.APPLICATION_JSON)
+                        .content(body.replace("q1o2", "unknown")))
+                .andExpect(status().isBadRequest());
+        assertThat(actions.find(tenant, session, journal.id).orElseThrow().state()).isEqualTo("requested");
+        AtomicInteger delivered = new AtomicInteger();
+        responses.put(journal.id, call -> {
+            delivered.incrementAndGet();
+            JsonNode response = call.getArgument(3);
+            assertThat(response.at("/answers/0/optionIds/0").asText()).isEqualTo("q1o1");
+            journal.change("decided", response);
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        });
+        JsonNode admitted = readAccepted(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                .header("Idempotency-Key", "question-answer").contentType(MediaType.APPLICATION_JSON).content(body));
+        String operation = admitted.path("id").asText();
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(sessions.findOperation(tenant, session, operation)
+                .orElseThrow().state()).isEqualTo("COMPLETED"));
+        JsonNode replay = readAccepted(auth(post("/api/agent/web-shell/v1/actions/respond"), tenant, "owner")
+                .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(Map.of(
+                        "sessionId", session, "actionId", journal.id, "idempotencyKey", "question-answer",
+                        "response", Map.of("kind", "question", "inputRevision", 1, "policyRevision", "hosted-user-question/1",
+                                "answers", List.of(Map.of("questionId", "q1", "optionIds", List.of("q1o1", "q1o2"), "text", "Extra 中😀")))))));
+        assertThat(replay.path("operationId").asText()).isEqualTo(operation);
+        assertThat(replay.path("replayed").asBoolean()).isTrue();
+        assertThat(delivered.get()).isEqualTo(1);
+        assertThat(actions.find(tenant, session, journal.id).orElseThrow().state()).isEqualTo("decided");
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                        .header("Idempotency-Key", "question-answer").contentType(MediaType.APPLICATION_JSON)
+                        .content(body.replace("Extra 中😀", "Different")))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("idempotency_conflict"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"cancelled", "expired"})
+    void terminalQuestionsCannotInventAnAnswer(String state) throws Exception {
+        String tenant = tenant();
+        String session = session(tenant);
+        JsonNode input = json.readTree("""
+                {"questions":[{"question":"Which target?","header":"Target",
+                "options":[{"label":"First","description":"First"},{"label":"Second","description":"Second"}]}]}
+                """);
+        ActionJournal journal = new ActionJournal(journals, tenant, session, System.currentTimeMillis(), 9007199254740991L)
+                .withQuestions(input);
+        journal.change("requested", null);
+        journal.change(state, null);
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                        .header("Idempotency-Key", "terminal-question").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"kind":"question","input_revision":1,"policy_revision":"hosted-user-question/1",
+                                 "answers":[{"question_id":"q1","text":"Custom"}]}
+                                """))
+                .andExpect(status().isConflict());
+        assertThat(actions.find(tenant, session, journal.id).orElseThrow().state()).isEqualTo(state);
     }
 
     @Test

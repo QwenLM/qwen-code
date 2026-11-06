@@ -2,18 +2,15 @@
 // qwen-autofix.yml scan lane, the trusted-PR lanes of #13245, and the
 // control-plane jobs that run no PR code.
 //
-// classify_pr carries the routing logic TWICE — the `runs-on` expression
-// (which selects the classify job's own runner) and the `pick_runner` shell
-// step (which publishes `ubuntu_runner` for downstream Linux jobs). If
-// they drift, classify and the Test job land on different pools. These tests
-// evaluate BOTH against the same event matrix — including the negative
-// associations that must stay hosted — and assert they agree.
-//
-// pick_runner also publishes `lint_runner`, the one deliberate divergence:
-// Lint & Static routes EVERY pull request to the fleet, untrusted forks
-// included (maintainer decision 2026-10-31, shared-pool code-execution risk
-// accepted). The matrix below pins that divergence AND that ubuntu_runner
-// keeps the association gate for every other lane.
+// classify_pr's own runner is unconditional ECS (kill-switch excepted):
+// the gate executes only trusted base-SHA code with a read-only token, and
+// keeping it on hosted for forks queued the whole fork CI chain behind a
+// scarce pool (2026-10-31 decision, same accepted risk class as lint).
+// The association routing for DOWNSTREAM lanes lives in the `pick_runner`
+// shell step, which publishes `ubuntu_runner` (association-gated) and
+// `lint_runner` (every pull request reaches the fleet). The matrix below
+// pins the gate's unconditional routing AND that ubuntu_runner keeps the
+// association gate for the test/integration lanes.
 //
 // test_windows carries a deliberately different policy. A pull_request run
 // executes the workflow YAML from the PR's own merge commit, so any trust
@@ -52,15 +49,10 @@ const pickRunner = ciDoc.jobs.classify_pr.steps.find(
   (s) => s.id === 'pick_runner',
 );
 
-// GitHub expression semantics for the classify runs-on, restricted to the
-// routing-relevant inputs: contains(list, '') is false, a missing
+// GitHub expression semantics for the runs-on expressions, restricted to
+// the routing-relevant inputs: contains(list, '') is false, a missing
 // pull_request (merge_group / dispatch) yields '' for both head.repo and
 // author_association.
-function simulateRunsOn({ ecsDisabled, sameRepo, assoc, mergeGroup }) {
-  const trusted = TRUSTED.includes(assoc);
-  const ecs = !ecsDisabled && (sameRepo || trusted || mergeGroup);
-  return ecs ? ECS : HOSTED;
-}
 
 // Evaluates a real `runs-on` expression text with the routing inputs
 // substituted, leaving only the &&/||/parenthesis skeleton — which matches
@@ -186,25 +178,31 @@ const ASSOCIATIONS = [
 ];
 
 describe('ci.yml classify_pr runner routing', () => {
-  it('the expression and the shell step agree on every association', () => {
+  it('the gate routes every association to ECS; the kill-switch wins', () => {
+    // classify executes trusted base-SHA code only, so its own runner needs
+    // no association gate — a hosted gate queued the entire fork CI chain.
+    // The downstream ubuntu_runner keeps the gate (next test).
     for (const sameRepo of [true, false]) {
       for (const assoc of ASSOCIATIONS) {
-        const expected = simulateRunsOn({
-          ecsDisabled: false,
-          sameRepo,
-          assoc,
-          mergeGroup: false,
-        });
-        const actual = runPickRunner({
-          ecsDisabled: false,
-          sameRepo,
-          assoc,
-          eventName: 'pull_request',
-        });
-        assert.equal(
-          actual,
-          expected,
-          `drift for sameRepo=${sameRepo} assoc='${assoc}'`,
+        assert.deepEqual(
+          evalRunsOn(classifyRunsOn, {
+            ecsDisabled: false,
+            eventName: 'pull_request',
+            sameRepo,
+            assoc,
+          }),
+          JSON.parse(ECS),
+          `gate sameRepo=${sameRepo} assoc='${assoc}' must reach ECS`,
+        );
+        assert.deepEqual(
+          evalRunsOn(classifyRunsOn, {
+            ecsDisabled: true,
+            eventName: 'pull_request',
+            sameRepo,
+            assoc,
+          }),
+          JSON.parse(HOSTED),
+          `kill-switch must revert the gate (assoc='${assoc}')`,
         );
       }
     }
@@ -286,18 +284,17 @@ describe('ci.yml classify_pr runner routing', () => {
     }
   });
 
-  it('the runs-on expression keeps the trusted clause and kill-switch', () => {
-    // Structural pins for the expression half of the drift guard — the
-    // simulation above re-implements it, so pin the real text too.
-    assert.match(
-      classifyRunsOn,
-      /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
-    );
+  it('the gate expression is unconditional except the kill-switch', () => {
+    // Structural pins: no association/head-repo clause may creep back into
+    // the gate (it would re-queue fork CI on hosted), and the kill-switch
+    // must stay the single escape hatch.
+    assert.doesNotMatch(classifyRunsOn, /author_association/);
+    assert.doesNotMatch(classifyRunsOn, /head\.repo\.full_name/);
     assert.match(
       classifyRunsOn,
       /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
     );
-    assert.match(classifyRunsOn, /github\.event_name == 'merge_group'/);
+    assert.match(classifyRunsOn, /ecs-qwen/);
   });
 });
 
@@ -459,16 +456,116 @@ describe('ci.yml lint HOME isolation', () => {
     /outputs\.lint_runner/.test(String(job['runs-on'] ?? '')),
   );
 
-  it('scopes the ungated routing to the single recorded lane', () => {
-    // The decision record scopes the boundary change to Lint & Static alone;
-    // a superset must force a deliberate record update, not pass silently.
+  // The one run-unique path per lane. create, the gate's QWEN_HOME and the
+  // cleanup must all name it: a `home=` that drifts at one site leaves the
+  // others pointing at a directory this run never cleared.
+  const HOME_TEMPLATE = {
+    lint_and_static: 'qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}',
+    integration_no_ak: 'qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}',
+  };
+
+  // The `$GITHUB_ENV` writers, by value. It is last-write-wins, so an added
+  // HOME/USERPROFILE writer (or a dropped `HOME=%s`) must break equality;
+  // COREPACK_HOME stays inside the run-unique home (corepack does not
+  // re-verify entries on cache hit — a shared home is a poisoning channel)
+  // and XDG_CACHE_HOME rides the SHA-256-verified linter-archive cache.
+  const ENV_WRITES = [
+    'printf \'HOME=%s\\nUSERPROFILE=%s\\n\' "$home" "$home" >> "${GITHUB_ENV}"',
+    'printf \'XDG_CACHE_HOME=%s\\n\' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" >> "${GITHUB_ENV}"',
+    'printf \'COREPACK_HOME=%s\\n\' "${home}/.cache/node/corepack" >> "${GITHUB_ENV}"',
+  ];
+
+  it('scopes the ungated routing to the recorded lanes', () => {
+    // The decision record scopes the boundary change to Lint & Static and
+    // (2026-11-02, same trust class — PR code on the pool, zero secrets by
+    // construction) the no-AK integration lane; a superset must force a
+    // deliberate record update, not pass silently.
     assert.deepEqual(
       ungated.map(([id]) => id),
-      ['lint_and_static'],
+      ['lint_and_static', 'integration_no_ak'],
+    );
+  });
+
+  it('integration_no_ak isolates from its first step, zero-secrets at the gate', () => {
+    // no_ak's fork code starts at the checkout action and the install
+    // (lifecycle scripts AND scripts/prepare.js — build+bundle), not at the
+    // gate step, so the whole job needs lint's first-step isolation:
+    // GITHUB_ENV-published run-unique HOME, COREPACK_HOME inside it (corepack
+    // does not re-verify entries on cache hit — a shared home is a
+    // cross-job poisoning channel), XDG_CACHE_HOME on the shared verified
+    // tool cache. The gate keeps the model-key scrub.
+    // The routing decision's premise is that this job carries no secrets
+    // because its only grant is the read-only checkout. Nothing else pins it:
+    // adding any other scope would leave every assertion below green while
+    // the accepted-risk argument went stale.
+    assert.deepEqual(
+      ciDoc.jobs.integration_no_ak.permissions,
+      { contents: 'read' },
+      'no_ak must keep only the read-only checkout grant',
+    );
+
+    const steps = ciDoc.jobs.integration_no_ak.steps ?? [];
+    assert.equal(
+      steps[0]?.name,
+      'Create isolated HOME',
+      'no_ak must isolate HOME from its first step',
+    );
+    // The create/cleanup step text is pinned by VALUE in the two shared tests
+    // below, which iterate every ungated lane; looped substring checks used to
+    // survive a `-v2` path drift, a dropped `HOME=%s` and an added HOME writer.
+    // Job env must stay empty of HOME (the runner context is illegal there).
+    assert.equal(ciDoc.jobs.integration_no_ak.env?.HOME, undefined);
+
+    const gate = steps.find(
+      (s) => s.name === 'Run required no-AK integration gate',
+    );
+    assert.ok(gate, 'integration gate step missing');
+    // By value, not by prefix: a drifted create path or a `-v2` suffix would
+    // satisfy `startsWith` while QWEN_HOME pointed at a directory this run
+    // never cleared.
+    assert.equal(
+      gate.env?.QWEN_HOME,
+      '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen',
+      'QWEN_HOME must be the run-unique home the create step built',
+    );
+    // Zero-secrets contract, enforced by VALUE not by name: every env key
+    // outside QWEN_HOME must be the empty string, and the step must
+    // reference no secrets.* anywhere. A name-based regex inherits the
+    // implementation's own premise about which names are credentials, so a
+    // secret under any other name (CI_BOT_PAT, *_DSN, *_BEARER) shipped
+    // green — falsifying the contract that justifies routing untrusted-fork
+    // PR code onto the shared pool.
+    const PATH_KEYS = new Set(['QWEN_HOME']);
+    for (const [key, value] of Object.entries(gate.env ?? {})) {
+      if (!PATH_KEYS.has(key)) {
+        assert.equal(
+          value,
+          '',
+          `${key} must be empty in the no-AK PR-code step`,
+        );
+      }
+    }
+    assert.ok(
+      !JSON.stringify(gate).includes('secrets.'),
+      'the no-AK PR-code step must not reference any secrets.* context',
+    );
+    // The value whitelist above only iterates PRESENT keys, so a deleted
+    // scrub key escapes it (verified by mutation: dropping
+    // ANTHROPIC_AUTH_TOKEN left both suites green). Pin a floor on the
+    // known-dangerous set — the SDK back-fills this one from env.
+    assert.equal(
+      gate.env?.ANTHROPIC_AUTH_TOKEN,
+      '',
+      'ANTHROPIC_AUTH_TOKEN must be present and empty (SDK auth-resolver ' +
+        'back-fill; deleting the scrub key escapes the value whitelist)',
     );
   });
 
   it('publishes a run-unique HOME from the first step, not job env', () => {
+    // Both ungated lanes now share lint's shape: fork code runs from early
+    // steps, so the first step publishes HOME/USERPROFILE via GITHUB_ENV for
+    // every later step. no_ak's specifics (gate key scrub, reclamation) are
+    // covered by its own test above.
     for (const [id, job] of ungated) {
       // jobs.<job_id>.env cannot read the runner context — GitHub rejects the
       // whole workflow file (actionlint 1.7.12 witnesses it).
@@ -481,53 +578,83 @@ describe('ci.yml lint HOME isolation', () => {
       const steps = job.steps ?? [];
       assert.equal(steps[0]?.name, 'Create isolated HOME', id);
       const run = String(steps[0]?.run ?? '');
+      const lines = run.split('\n').map((line) => line.trim());
+      // The declared `home=` by value: a `-v2` suffix here leaves the gate's
+      // QWEN_HOME and the cleanup aimed at a directory this run never built.
       assert.ok(
-        run.includes('GITHUB_RUN_ID') && run.includes('GITHUB_RUN_ATTEMPT'),
-        `${id} HOME path must be run-unique`,
+        lines.includes(`home="\${RUNNER_TEMP}/${HOME_TEMPLATE[id]}"`),
+        `${id} must build its run-unique HOME from the lane template`,
       );
       assert.ok(
         run.includes('rm -rf') && run.indexOf('rm -rf') < run.indexOf('mkdir'),
         `${id} must clear the path before creating it`,
       );
-      assert.ok(
-        run.includes('HOME=') &&
-          run.includes('USERPROFILE=') &&
-          run.includes('GITHUB_ENV'),
-        `${id} must publish HOME/USERPROFILE via GITHUB_ENV`,
+      assert.deepEqual(
+        lines.filter((line) => line.includes('${GITHUB_ENV}')),
+        ENV_WRITES,
+        `${id} must publish exactly HOME/USERPROFILE, XDG_CACHE_HOME and COREPACK_HOME via GITHUB_ENV`,
       );
-      // Linter archives are SHA-256-verified on every cache hit (lint.js), so
-      // the shared tool cache is safe for them. Corepack does NOT re-verify
-      // extracted entries on hit (reproduced on 0.34.6 and 0.36.0), so
-      // COREPACK_HOME must stay inside the run-unique HOME — a shared one is
-      // a cross-job poisoning channel. Deleting either line reds this.
-      assert.ok(
-        run.includes('XDG_CACHE_HOME=') && run.includes('RUNNER_TOOL_CACHE'),
-        `${id} must share the verified linter-archive cache`,
-      );
-      assert.ok(
-        run.includes('COREPACK_HOME=') &&
-          run.includes('"${home}/.cache/node/corepack"'),
-        `${id} COREPACK_HOME must stay inside the run-unique HOME`,
-      );
+      // GITHUB_ENV is last-write-wins, so the guard cannot stop at step 0: a
+      // later step that republishes an isolated key silently reverts the home
+      // for the steps that run PR code while step 0 still matches. The npm
+      // cache step is a legitimate later writer, so only the isolated keys
+      // are banned — not every later `$GITHUB_ENV` append.
+      // `[^\w]`, not `\s`: the realistic form is `printf 'HOME=%s\n'` inside
+      // quotes, which a whitespace-only prefix let through.
+      const ISOLATED_KEY =
+        /(^|[^\w])(HOME|USERPROFILE|COREPACK_HOME|XDG_CACHE_HOME)=/;
+      for (const [index, step] of steps.entries()) {
+        if (index === 0) continue;
+        for (const line of String(step.run ?? '')
+          .split('\n')
+          .map((l) => l.trim())) {
+          assert.ok(
+            !(line.includes('${GITHUB_ENV}') && ISOLATED_KEY.test(line)),
+            `${id} step ${index} (${step.name}) must not republish an isolated HOME key via GITHUB_ENV`,
+          );
+        }
+        for (const key of Object.keys(step.env ?? {})) {
+          assert.ok(
+            !/^(HOME|USERPROFILE|COREPACK_HOME|XDG_CACHE_HOME)$/.test(key),
+            `${id} step ${index} (${step.name}) must not override ${key} for a single step`,
+          );
+        }
+      }
     }
   });
 
   it('reclaims the isolated HOME before the failure collector', () => {
+    // Both ungated lanes reclaim: no_ak's cleanup is its last step (it has
+    // no collector); lint's sits before the failure collector, which must
+    // stay last.
     for (const [id, job] of ungated) {
       const steps = job.steps ?? [];
       const names = steps.map((s) => s.name);
       const clean = steps.find((s) => s.name === 'Clean isolated HOME');
       assert.ok(clean, `${id} cleanup step missing`);
       assert.equal(clean.if, '${{ always() }}', id);
-      assert.ok(
-        names.indexOf('Clean isolated HOME') <
-          names.indexOf('Upload disk-pressure samples'),
-        `${id} collector must stay last`,
+      const collectorIndex = names.indexOf('Upload disk-pressure samples');
+      if (collectorIndex !== -1) {
+        assert.ok(
+          names.indexOf('Clean isolated HOME') < collectorIndex,
+          `${id} collector must stay last`,
+        );
+      } else {
+        // No collector (no_ak): the cleanup itself is the last step.
+        assert.equal(
+          names[names.length - 1],
+          'Clean isolated HOME',
+          `${id} cleanup must be the final step`,
+        );
+      }
+      // The realized removal by value, never $HOME: any `qwen-*` path passes a
+      // substring check, so a retargeted `rm -rf` (or an `echo` stand-in)
+      // would leave the run-unique home to accumulate on this persistent pool.
+      assert.equal(
+        String(clean.run),
+        `rm -rf -- "\${RUNNER_TEMP}/${HOME_TEMPLATE[id]}"`,
+        `${id} must reclaim the exact run-unique HOME the create step built`,
       );
-      // The constructed path, never $HOME: a failed init must not aim the
-      // removal at the account's real home.
-      assert.ok(String(clean.run).includes('qwen-lint-home-'), id);
-      assert.ok(!String(clean.run).includes('"$HOME"'), id);
     }
   });
 });
@@ -1203,6 +1330,21 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       String(s.uses || '').startsWith('actions/setup-node'),
     );
     assert.equal(setupNode.if, "${{ runner.environment == 'github-hosted' }}");
+    const setupJava = build.steps.find((s) =>
+      String(s.uses || '').startsWith('actions/setup-java'),
+    );
+    const cache = setupJava.with.cache;
+    for (const [environment, expected] of [
+      ['github-hosted', 'maven'],
+      ['self-hosted', ''],
+    ]) {
+      const actual = cache.startsWith('${{')
+        ? new Function('runner', `return (${cache.slice(3, -2)});`)({
+            environment,
+          })
+        : cache;
+      assert.equal(actual, expected, environment);
+    }
   });
 
   it('tui-parity keeps setup-node and the pnpm cache off the pool', () => {

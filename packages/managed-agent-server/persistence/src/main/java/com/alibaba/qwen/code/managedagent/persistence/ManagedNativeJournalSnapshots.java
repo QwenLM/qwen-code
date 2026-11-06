@@ -45,6 +45,8 @@ public class ManagedNativeJournalSnapshots {
     static final String PAYLOAD_FORMAT = "committed-prefix-v1";
     static final int MAX_PAGE_BYTES = 16 * 1024 * 1024;
     private static final String OWNER = "NATIVE_SNAPSHOT";
+    /** Claim attempts for one publication: the initial try plus deadlock retries. */
+    private static final int CLAIM_ATTEMPTS = 3;
     private final JdbcTemplate jdbc;
     private final ManagedSessionStore sessions;
     private final ObjectMapper json;
@@ -89,7 +91,19 @@ public class ManagedNativeJournalSnapshots {
         Basis basis = isolated.execute(status -> new Basis(sessions.lockSnapshotWriter(tenant, session, token, request),
                 retention.read(tenant, session)));
         try {
-            return isolated.execute(status -> build(tenant, session, token, request, basis));
+            // Two publishers of the same snapshot claim the manifest row with
+            // INSERT ... ON DUPLICATE KEY, which InnoDB can resolve by rolling
+            // one side back as a deadlock victim. The retry re-reads the claim,
+            // sees the winner's row and answers the replay descriptor.
+            for (int attempt = 1; ; attempt++) {
+                try {
+                    return isolated.execute(status -> build(tenant, session, token, request, basis));
+                } catch (RuntimeException error) {
+                    if (attempt >= CLAIM_ATTEMPTS || !JournalFencing.deadlockVictim(error)) {
+                        throw error;
+                    }
+                }
+            }
         } finally {
             isolated.executeWithoutResult(status -> basis.lease().close());
         }
