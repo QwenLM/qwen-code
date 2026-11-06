@@ -3085,4 +3085,6 @@ export default {
   'x clear history': 'x clear history',
   'Tip: Use /btw to ask a quick side question without interrupting the current work':
     'Tip: Use /btw to ask a quick side question without interrupting the current work',
+  '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
+    '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)',
 };

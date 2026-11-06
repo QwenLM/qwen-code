@@ -38,8 +38,8 @@ export interface BtwRetryState {
 
 export type BtwOutcome =
   | { readonly kind: 'answered'; readonly response: string }
-  /** Text produced locally, e.g. when the model tried to call a tool. */
-  | { readonly kind: 'synthetic'; readonly response: string }
+  /** The model tried to call a tool instead of answering. */
+  | { readonly kind: 'tool-call'; readonly toolName: string }
   | { readonly kind: 'empty' }
   /** The session has no conversation context to fork yet. */
   | { readonly kind: 'unavailable' }
@@ -103,6 +103,7 @@ export const runBtwQuery: BtwRunner = async (params) => {
   const cacheSafeParams = buildBtwCacheSafeParams(
     params.config,
     params.history,
+    { fullHistory: true },
   );
   if (!cacheSafeParams) return null;
   const result = await runForkedAgent({
@@ -319,10 +320,7 @@ function outcomeFromResult(result: BtwRunResult | null): BtwOutcome {
   const response = result.text?.trim() ?? '';
   if (response) return { kind: 'answered', response };
   if (result.toolCallName) {
-    return {
-      kind: 'synthetic',
-      response: `(The model tried to call ${result.toolCallName} instead of answering directly. Try rephrasing or ask in the main conversation.)`,
-    };
+    return { kind: 'tool-call', toolName: result.toolCallName };
   }
   return { kind: 'empty' };
 }

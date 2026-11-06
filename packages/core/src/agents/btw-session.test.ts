@@ -10,9 +10,16 @@ import {
   BTW_HISTORY_LIMIT,
   BtwSession,
   getBtwSession,
+  runBtwQuery,
   type BtwRunParams,
   type BtwRunResult,
 } from './btw-session.js';
+import { runForkedAgent, type CachePathParams } from './forkedAgent.js';
+
+vi.mock('./forkedAgent.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./forkedAgent.js')>()),
+  runForkedAgent: vi.fn(),
+}));
 
 const config = { getSessionId: () => 'session-a' } as unknown as Config;
 
@@ -99,7 +106,7 @@ describe('BtwSession', () => {
     expect(exchanges[0].question).toBe('q2');
   });
 
-  it('does not record synthetic, empty, failed, unavailable or cancelled outcomes', async () => {
+  it('does not record tool-call, empty, failed, unavailable or cancelled outcomes', async () => {
     const results: Array<() => Promise<BtwRunResult | null>> = [
       async () => ({ text: null, toolCallName: 'shell' }),
       async () => ({ text: '  ' }),
@@ -112,8 +119,8 @@ describe('BtwSession', () => {
     const session = new BtwSession(config, runner);
 
     expect(await session.ask('tool?').done).toMatchObject({
-      kind: 'synthetic',
-      response: expect.stringContaining('tried to call shell'),
+      kind: 'tool-call',
+      toolName: 'shell',
     });
     expect(await session.ask('empty?').done).toEqual({ kind: 'empty' });
     expect(await session.ask('fail?').done).toMatchObject({
@@ -266,5 +273,58 @@ describe('getBtwSession', () => {
 
     expect(second).not.toBe(first);
     expect(dispose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('runBtwQuery', () => {
+  it('forks the full history with tools declared but function calls disabled', async () => {
+    const getHistory = vi.fn(() => [
+      { role: 'user', parts: [{ text: 'main' }] },
+    ]);
+    const getHistoryTail = vi.fn(() => []);
+    const owner = {
+      getModel: () => 'qwen',
+      getLlmClient: () => ({
+        getChat: () => ({
+          getGenerationConfig: () => ({}),
+          getHistory,
+          getHistoryTail,
+        }),
+      }),
+    } as unknown as Config;
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      text: 'answer',
+      model: 'qwen',
+      usage: { inputTokens: 1, outputTokens: 2 },
+    } as unknown as Awaited<ReturnType<typeof runForkedAgent>>);
+
+    const result = await runBtwQuery({
+      config: owner,
+      question: 'why?',
+      history: [{ question: 'first?', response: 'one' }],
+      signal: new AbortController().signal,
+      onText: async () => {},
+      onRetry: async () => {},
+    });
+
+    expect(getHistory).toHaveBeenCalledWith(true);
+    expect(getHistoryTail).not.toHaveBeenCalled();
+    const params = vi.mocked(runForkedAgent).mock
+      .calls[0][0] as unknown as CachePathParams;
+    expect(params).toMatchObject({
+      fullHistory: true,
+      preserveTools: true,
+      disableFunctionCalls: true,
+    });
+    expect(params.cacheSafeParams.history).toEqual([
+      { role: 'user', parts: [{ text: 'main' }] },
+      { role: 'user', parts: [{ text: 'first?' }] },
+      { role: 'model', parts: [{ text: 'one' }] },
+    ]);
+    expect(result).toEqual({
+      text: 'answer',
+      toolCallName: undefined,
+      usage: { model: 'qwen', inputTokens: 1, outputTokens: 2 },
+    });
   });
 });

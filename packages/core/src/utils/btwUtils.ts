@@ -36,20 +36,24 @@ ${question}`;
 }
 
 /**
- * Snapshot of the main conversation for a side question: the full curated
- * history, so the fork's request prefix matches the main agent's, followed by
- * earlier side-question exchanges.
+ * Snapshot of the main conversation for a side question, followed by earlier
+ * side-question exchanges. `fullHistory` takes the whole curated history so
+ * the fork's request prefix matches the main agent's; otherwise only the
+ * 40-entry tail a default forked chat keeps is cloned.
  */
 export function buildBtwCacheSafeParams(
   config: Config,
   exchanges: ReadonlyArray<{ question: string; response: string }> = [],
+  options: { fullHistory?: boolean } = {},
 ): CacheSafeParams | null {
   const llmClient = config.getLlmClient();
   try {
     const chat = llmClient.getChat();
     const generationConfig = chat.getGenerationConfig();
     if (!generationConfig) return null;
-    const history: Content[] = chat.getHistory(true);
+    const history: Content[] = options.fullHistory
+      ? chat.getHistory(true)
+      : chat.getHistoryTail(40, true);
     for (const exchange of exchanges) {
       history.push(
         { role: 'user', parts: [{ text: exchange.question }] },

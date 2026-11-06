@@ -16,7 +16,7 @@ import {
   getBtwSession,
   type BtwOutcome,
 } from '@qwen-code/qwen-code-core/agents/btw-session.js';
-import { showBtwRequest } from '../utils/btw-view.js';
+import { formatBtwToolCallNotice, showBtwRequest } from '../utils/btw-view.js';
 import { recordBtwUse } from '../../services/tips/index.js';
 
 function formatBtwError(error: string): string {
@@ -26,11 +26,16 @@ function formatBtwError(error: string): string {
 function outcomeToMessage(outcome: BtwOutcome): SlashCommandActionReturn {
   switch (outcome.kind) {
     case 'answered':
-    case 'synthetic':
       return {
         type: 'message',
         messageType: 'info',
         content: outcome.response,
+      };
+    case 'tool-call':
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: formatBtwToolCallNotice(outcome.toolName),
       };
     case 'empty':
       return {

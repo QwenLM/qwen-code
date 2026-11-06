@@ -2653,4 +2653,6 @@ export default {
   'x clear history': 'x 清除歷史',
   'Tip: Use /btw to ask a quick side question without interrupting the current work':
     '提示：用 /btw 順帶問一個旁路問題，不打斷目前的工作',
+  '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
+    '（模型嘗試呼叫 {{tool}}，而沒有直接回答。請換個問法，或在主對話中提問。）',
 };

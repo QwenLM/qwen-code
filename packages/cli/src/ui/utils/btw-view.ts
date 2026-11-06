@@ -23,6 +23,13 @@ import { MessageType, type BtwProps } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { copyToClipboard } from './commandUtils.js';
 
+export function formatBtwToolCallNotice(toolName: string): string {
+  return t(
+    '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)',
+    { tool: toolName },
+  );
+}
+
 type BtwViewUi = Pick<
   CommandContext['ui'],
   'setBtwItem' | 'btwAbortControllerRef'
@@ -235,8 +242,13 @@ function projectRequest(
   }
   switch (outcome.kind) {
     case 'answered':
-    case 'synthetic':
       return { ...base, answer: outcome.response, isPending: false };
+    case 'tool-call':
+      return {
+        ...base,
+        answer: formatBtwToolCallNotice(outcome.toolName),
+        isPending: false,
+      };
     case 'empty':
       return { ...base, answer: t('No response received.'), isPending: false };
     case 'unavailable':

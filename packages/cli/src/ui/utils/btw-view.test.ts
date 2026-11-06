@@ -21,6 +21,11 @@ import {
   showBtwRequest,
 } from './btw-view.js';
 import type { Key } from '../contexts/KeypressContext.js';
+import { copyToClipboard } from './commandUtils.js';
+
+vi.mock('./commandUtils.js', () => ({
+  copyToClipboard: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock('../../i18n/index.js', () => ({
   t: (key: string, params?: Record<string, string>) =>
@@ -61,6 +66,18 @@ function makeSession() {
       }),
   );
   return { session, pending };
+}
+
+function key(overrides: Partial<Key>): Key {
+  return {
+    name: '',
+    ctrl: false,
+    meta: false,
+    shift: false,
+    paste: false,
+    sequence: '',
+    ...overrides,
+  };
 }
 
 describe('btw view', () => {
@@ -227,15 +244,6 @@ describe('btw view', () => {
   });
 
   it('consumes only the keys that apply to the shown item', async () => {
-    const key = (overrides: Partial<Key>): Key => ({
-      name: '',
-      ctrl: false,
-      meta: false,
-      shift: false,
-      paste: false,
-      sequence: '',
-      ...overrides,
-    });
     const { session, pending } = makeSession();
     const view = makeUi();
     const { id, done } = session.ask('why?');
@@ -260,5 +268,45 @@ describe('btw view', () => {
     );
     expect(view.items.at(-1)).toBeNull();
     expect(handleBtwViewKey(key({ name: 'c', sequence: 'c' }))).toBe(false);
+  });
+
+  it('routes the arrow, c and x keys to browse, copy and clear', async () => {
+    const { session, pending } = makeSession();
+    const view = makeUi();
+    for (const question of ['one?', 'two?']) {
+      const request = session.ask(question);
+      pending.at(-1)!.resolve({ text: `answer ${question}` });
+      await request.done;
+    }
+    showBtwRequest(view.ui, session, session.getSnapshot().exchanges[1].id);
+
+    expect(handleBtwViewKey(key({ name: 'left' }))).toBe(true);
+    expect(view.current()).toMatchObject({ question: 'one?' });
+    expect(handleBtwViewKey(key({ name: 'right' }))).toBe(true);
+    expect(view.current()).toMatchObject({ question: 'two?' });
+
+    expect(handleBtwViewKey(key({ name: 'c', sequence: 'c' }))).toBe(true);
+    expect(copyToClipboard).toHaveBeenCalledWith('answer two?');
+
+    expect(handleBtwViewKey(key({ name: 'x', sequence: 'x' }))).toBe(true);
+    expect(session.getSnapshot().exchanges.map((e) => e.question)).toEqual([
+      'two?',
+    ]);
+  });
+
+  it('shows a localized notice when the model only tried to call a tool', async () => {
+    const { session, pending } = makeSession();
+    const view = makeUi();
+    const { id, done } = session.ask('why?');
+    showBtwRequest(view.ui, session, id);
+
+    pending[0].resolve({ text: null, toolCallName: 'shell' });
+    await done;
+
+    expect(view.current()).toMatchObject({
+      answer:
+        '(The model tried to call shell instead of answering directly. Try rephrasing or ask in the main conversation.)',
+      isPending: false,
+    });
   });
 });

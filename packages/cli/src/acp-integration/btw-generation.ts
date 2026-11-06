@@ -6,6 +6,7 @@
 
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { getBtwSession } from '@qwen-code/qwen-code-core/agents/btw-session.js';
+import { formatBtwToolCallNotice } from '../ui/utils/btw-view.js';
 import type { GenerationEvent, GenerationResult } from './generation.js';
 
 export const BTW_STREAM_TIMEOUT_MS = 305_000;
@@ -33,8 +34,12 @@ export async function executeBtwGeneration(
   const result = await done;
   signal.throwIfAborted();
   if (result.kind === 'failed') throw result.cause;
-  if (result.kind === 'synthetic' && seq === 0) {
-    await emit({ type: 'delta', seq: seq++, text: result.response });
+  if (result.kind === 'tool-call' && seq === 0) {
+    await emit({
+      type: 'delta',
+      seq: seq++,
+      text: formatBtwToolCallNotice(result.toolName),
+    });
   }
   return {
     model: result.usage?.model ?? model,
