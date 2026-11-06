@@ -7,6 +7,7 @@
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import type { DaemonContinueSessionResult } from '../../src/daemon/index.js';
 import * as Public from '../../src/index.js';
+import * as DaemonPublic from '../../src/daemon/index.js';
 
 import {
   DAEMON_KNOWN_EVENT_TYPE_VALUES,
@@ -199,6 +200,25 @@ import type {
   DaemonUnrecognizedDiagnostic as DaemonEntryUnrecognizedDiagnostic,
   DaemonUnrecognizedDiagnosticReason as DaemonEntryUnrecognizedDiagnosticReason,
 } from '../../src/daemon/index.js';
+
+it('exports native Skill archive contracts without widening legacy runtime sources', () => {
+  expect(Public.DaemonSkillInstallError).toBe(
+    DaemonPublic.DaemonSkillInstallError,
+  );
+  expectTypeOf<Public.DaemonSkillArchiveInstallRequest>().toEqualTypeOf<DaemonPublic.DaemonSkillArchiveInstallRequest>();
+  expectTypeOf<Public.DaemonSkillArchiveInstallResult>().toEqualTypeOf<DaemonPublic.DaemonSkillArchiveInstallResult>();
+  expectTypeOf<Public.DaemonSkillInstallAttempt>().toEqualTypeOf<DaemonPublic.DaemonSkillInstallAttempt>();
+  expectTypeOf<Public.DaemonSkillInstallOptions>().toEqualTypeOf<DaemonPublic.DaemonSkillInstallOptions>();
+  expectTypeOf<
+    Extract<Public.DaemonSkillInstallSource, { type: 'zip-file' }>
+  >().toBeNever();
+  expectTypeOf<
+    Extract<
+      Public.DaemonSkillConfigInstallRequest['source'],
+      { type: 'zip-file' }
+    >
+  >().toEqualTypeOf<{ type: 'zip-file'; path: string; sha256?: string }>();
+});
 
 describe('resource-link public surface', () => {
   it('keeps the ACP discriminator and nullable metadata in the daemon API', () => {
