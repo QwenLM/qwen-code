@@ -661,7 +661,7 @@ describe('recoverHostedRuntimeTurn', () => {
     await harness.commitDurableWait(
       {
         requestId: ACTION_ID,
-        kind: 'execute',
+        kind: 'permission',
         source: 'tool_call',
         optionsRef: await session.resources.publish(
           'managed-action-options',
