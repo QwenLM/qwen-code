@@ -32,9 +32,11 @@ describe('withoutDeletedRule', () => {
   it('keeps non-string entries instead of calling a method on them', () => {
     // Settings loading does not validate element types, and `parseRules` drops
     // falsy entries, so a `null` can sit in the stored list while the session
-    // runs normally.
+    // runs normally. The `null` goes before the match: behind it, a lookup
+    // that stops at the first match never reaches it, and dropping the type
+    // guard keeps the test green.
     expect(
-      withoutDeletedRule([' Bash(git *) ', null] as unknown[], 'Bash(git *)'),
+      withoutDeletedRule([null, ' Bash(git *) '] as unknown[], 'Bash(git *)'),
     ).toEqual([null]);
   });
 });
