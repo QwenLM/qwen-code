@@ -368,6 +368,11 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsPersonalMemory() {
+        return feature("session-memory/1");
+    }
+
+    @Override
     public boolean supportsUserMessageQueue() { return feature("user-message-queue/1"); }
 
     @Override

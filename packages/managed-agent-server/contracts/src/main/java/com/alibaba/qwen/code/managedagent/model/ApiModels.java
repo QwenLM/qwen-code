@@ -74,7 +74,13 @@ public final class ApiModels {
             JsonNode workspace,
             @Size(max = 256) List<@NotNull Map<String, Object>> skills,
             @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree,
-            @JsonProperty("model_config") JsonNode modelConfig) {
+            @JsonProperty("model_config") JsonNode modelConfig,
+            @JsonProperty("memory_store_id") @Size(min = 1, max = 128) String memoryStoreId) {
+        public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
+                Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills,
+                List<Pin> extensionPins, JsonNode worktree, JsonNode modelConfig) {
+            this(agentId, agentRevision, input, metadata, stream, workspace, skills, extensionPins, worktree, modelConfig, null);
+        }
         public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
                 Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills,
                 List<Pin> extensionPins, JsonNode worktree) {
@@ -228,7 +234,19 @@ public final class ApiModels {
             @JsonProperty("compaction_revision") Long compactionRevision,
             @JsonProperty("context_compression_operation_id") String contextCompressionOperationId,
             SessionRecovery recovery,
-            PublicSessionWorktree worktree) {
+            PublicSessionWorktree worktree,
+            @JsonProperty("memory_store_id") String memoryStoreId,
+            @JsonProperty("owner_only") Boolean ownerOnly) {
+        public PublicSession(String id, String object, String agentId, String agentRevision,
+                String agentDefinitionDigest, String status, long createdAt, long updatedAt,
+                Map<String, Object> metadata, PublicTurn activeTurn, long lastEventId,
+                long replayFloorSequence, long snapshotThroughSequence, SessionCapabilities capabilities,
+                PublicWorkspace workspace, Long compactionRevision, String contextCompressionOperationId,
+                SessionRecovery recovery, PublicSessionWorktree worktree) {
+            this(id, object, agentId, agentRevision, agentDefinitionDigest, status, createdAt, updatedAt,
+                    metadata, activeTurn, lastEventId, replayFloorSequence, snapshotThroughSequence,
+                    capabilities, workspace, compactionRevision, contextCompressionOperationId, recovery, worktree, null, null);
+        }
         public PublicSession(String id, String object, String agentId, String agentRevision,
                 String agentDefinitionDigest, String status, long createdAt, long updatedAt,
                 Map<String, Object> metadata, PublicTurn activeTurn, long lastEventId,
@@ -269,7 +287,7 @@ public final class ApiModels {
                     agentDefinitionDigest, status, createdAt, updatedAt,
                     metadata, activeTurn, lastEventId, replayFloorSequence,
                     snapshotThroughSequence, capabilities, workspace,
-                    compactionRevision, contextCompressionOperationId, value, worktree);
+                    compactionRevision, contextCompressionOperationId, value, worktree, memoryStoreId, ownerOnly);
         }
 
         public PublicSession withWorktree(com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Descriptor value) {
@@ -280,7 +298,7 @@ public final class ApiModels {
                     compactionRevision, contextCompressionOperationId, recovery,
                     value == null ? null : new PublicSessionWorktree(value.id(), value.sessionId(), value.workspaceId(),
                             value.state(), value.branch(), value.baseCommit(), value.cwdRelative(), value.operationId(),
-                            value.revision(), value.errorCode()));
+                            value.revision(), value.errorCode()), memoryStoreId, ownerOnly);
         }
     }
 
@@ -460,7 +478,15 @@ public final class ApiModels {
             Map<String, Object> metadata,
             JsonNode workspace, String approvalMode, Boolean planMode, String modelId,
             @Size(max = 256) List<@NotNull Map<String, Object>> skills,
-            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree, JsonNode modelConfig) {
+            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree, JsonNode modelConfig,
+            @Size(min = 1, max = 128) String memoryStoreId) {
+        public WebShellCreateRequest(String requestId, String idempotencyKey, String agentId, String title,
+                List<InputBlock> input, Map<String, Object> metadata, JsonNode workspace, String approvalMode,
+                Boolean planMode, String modelId, List<Map<String, Object>> skills, List<Pin> extensionPins,
+                JsonNode worktree, JsonNode modelConfig) {
+            this(requestId, idempotencyKey, agentId, title, input, metadata, workspace, approvalMode,
+                    planMode, modelId, skills, extensionPins, worktree, modelConfig, null);
+        }
         public WebShellCreateRequest(String requestId, String idempotencyKey, String agentId, String title,
                 List<InputBlock> input, Map<String, Object> metadata, JsonNode workspace, String approvalMode,
                 Boolean planMode, String modelId, List<Map<String, Object>> skills, List<Pin> extensionPins, JsonNode worktree) {

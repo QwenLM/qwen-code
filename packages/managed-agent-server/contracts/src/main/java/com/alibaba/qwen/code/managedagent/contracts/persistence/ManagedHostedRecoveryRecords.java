@@ -314,26 +314,39 @@ public final class ManagedHostedRecoveryRecords {
             }
             ManagedExtensionRecords.oneOf(body.get("stage"), List.of("approval", "final"), "stage");
             JsonNode runtime = body.get("runtime");
-            Set<String> runtimeFields = new HashSet<>(Set.of("runtimeSessionId", "bindingId", "generation", "workspaceGeneration"));
-            if (runtime != null && runtime.has("provisionerKind")) {
-                runtimeFields.add("provisionerKind");
-                ManagedExtensionRecords.oneOf(runtime.get("provisionerKind"), List.of("local-process"), "native Runtime provider");
-                require(!body.has("commandStep") && body.path("calls").isArray() && body.path("calls").size() == 1
-                        && "ask_user_question".equals(body.path("calls").get(0).path("call").path("name").asText()),
-                        "Native Runtime provider pin requires a single question.");
-            }
-            ManagedExtensionRecords.closed(runtime, runtimeFields, "native Runtime");
-            if (body.has("commandStep")) {
-                ManagedExtensionRecords.id(runtime.get("runtimeSessionId"), "command Runtime owner");
+            boolean memoryOnly = runtime != null && runtime.isNull();
+            if (memoryOnly) {
+                require(!body.has("commandStep") && !body.has("publicChildModel"), "Memory continuation cannot name Runtime work.");
             } else {
-                require(runtimeSessionId(body.get("promptId").asText()).equals(runtime.path("runtimeSessionId").asText()), "Native Runtime owner conflicts.");
+                Set<String> runtimeFields = new HashSet<>(Set.of("runtimeSessionId", "bindingId", "generation", "workspaceGeneration"));
+                if (runtime != null && runtime.has("provisionerKind")) {
+                    runtimeFields.add("provisionerKind");
+                    ManagedExtensionRecords.oneOf(runtime.get("provisionerKind"), List.of("local-process"), "native Runtime provider");
+                    require(!body.has("commandStep") && body.path("calls").isArray() && body.path("calls").size() == 1
+                            && "ask_user_question".equals(body.path("calls").get(0).path("call").path("name").asText()),
+                            "Native Runtime provider pin requires a single question.");
+                }
+                ManagedExtensionRecords.closed(runtime, runtimeFields, "native Runtime");
+                if (body.has("commandStep")) {
+                    ManagedExtensionRecords.id(runtime.get("runtimeSessionId"), "command Runtime owner");
+                } else {
+                    require(runtimeSessionId(body.get("promptId").asText()).equals(runtime.path("runtimeSessionId").asText()), "Native Runtime owner conflicts.");
+                }
+                ManagedExtensionRecords.id(runtime.get("bindingId"), "bindingId");
+                generation(runtime.get("generation"));
+                generation(runtime.get("workspaceGeneration"));
             }
-            ManagedExtensionRecords.id(runtime.get("bindingId"), "bindingId");
-            generation(runtime.get("generation"));
-            generation(runtime.get("workspaceGeneration"));
             require(body.path("calls").isArray() && !body.path("calls").isEmpty(), "Native batch is empty.");
             ManagedExtensionRecords.count(body.get("approvalOrdinal"), 0, body.path("calls").size() - 1, "approvalOrdinal");
             for (JsonNode call : body.get("calls")) {
+                if (memoryOnly) {
+                    require(Set.of("context_search", "context_remember", "context_get", "context_forget")
+                            .contains(call.path("call").path("name").asText()), "Memory continuation contains another tool.");
+                    String correlation = runtimeSessionId(body.get("promptId").asText());
+                    require(correlation.equals(call.path("prepareReference").path("sessionId").asText())
+                            && (correlation + ":" + call.path("runtimeCallId").asText()).equals(call.path("prepareKey").asText()),
+                            "Memory continuation correlation conflicts.");
+                }
                 require(!body.has("commandStep") || "skill".equals(call.path("call").path("name").asText()), "Command continuation must resume its Skill call.");
                 Set<String> callFields = new HashSet<>(Set.of("call", "runtimeCallId", "inputRef", "definitionRef",
                         "requestDigest", "argsDigest", "prepareKey", "prepareReference", "partIndex", "refusal", "actionId"));

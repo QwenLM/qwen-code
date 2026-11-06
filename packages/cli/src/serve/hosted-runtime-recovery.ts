@@ -37,6 +37,10 @@ import { enforceFunctionResponseBudget } from '@qwen-code/qwen-code-core/tools/t
 import { hostedToolOutputBudget } from './hosted-harness-model.js';
 import { RESIDENT_WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
+  HOSTED_MEMORY_READS,
+  isHostedMemoryTool,
+} from './hosted-memory-session.js';
+import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
@@ -818,7 +822,14 @@ async function answerAbandonedTurnCalls(input: {
             callId: functionCallId,
           });
     let parts: Part[];
-    if (uncommitted === 'hosted' && call.name === 'skill' && input.skills) {
+    if (isHostedMemoryTool(call.name)) {
+      if (uncommitted === 'none') continue;
+      parts = unconfirmedMemoryResponse(call.name, functionCallId);
+    } else if (
+      uncommitted === 'hosted' &&
+      call.name === 'skill' &&
+      input.skills
+    ) {
       parts = skillResponses.get(functionCallId)!;
     } else if (planDecision !== undefined) {
       parts = convertToFunctionResponse(call.name, functionCallId, [
@@ -1047,6 +1058,22 @@ function sentMessageText(
 
 /** The interruption every settle or resume route below names. */
 const INTERRUPTED_HARNESS = 'the Harness that asked was interrupted';
+
+function unconfirmedMemoryResponse(name: string, callId: string): Part[] {
+  const parts = convertToFunctionErrorResponse(
+    name,
+    callId,
+    [],
+    'The personal memory result was not durably recorded before interruption. Its outcome is unknown; do not automatically retry this operation.',
+  );
+  const response = parts[0]!.functionResponse!;
+  response.response = {
+    ...response.response,
+    status: HOSTED_MEMORY_READS.has(name) ? 'unavailable' : 'unknown',
+    executionStatus: 'unknown',
+  };
+  return parts;
+}
 
 async function hostedSkillBatchResponses(
   session: ManagedSession,
@@ -1492,6 +1519,13 @@ export async function fillParkedRoundAgentGaps(input: {
     // The journaled set gates only the fold, never the replay-safe marks —
     // both sibling arms in this diff document and follow the same rule.
     const foldOwed = !journaled.has(callId);
+    if (isHostedMemoryTool(name)) {
+      if (foldOwed) {
+        await writeFold(unconfirmedMemoryResponse(name, callId));
+        filled += 1;
+      }
+      continue;
+    }
     if (name === 'skill' && input.skills) {
       if (foldOwed) {
         await writeFold(skillResponses.get(callId)!);
@@ -1869,7 +1903,9 @@ export async function fillParkedRoundCommandGaps(input: {
           )
         : undefined;
     let parts: Part[] | undefined;
-    if (sent !== undefined) {
+    if (isHostedMemoryTool(name)) {
+      parts = unconfirmedMemoryResponse(name, callId);
+    } else if (sent !== undefined) {
       parts = convertToFunctionResponse(name, callId, [{ text: sent }]);
     } else {
       parts = convertToFunctionErrorResponse(

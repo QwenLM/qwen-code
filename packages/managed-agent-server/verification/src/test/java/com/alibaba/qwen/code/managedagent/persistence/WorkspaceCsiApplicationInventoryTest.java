@@ -788,7 +788,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.TABLES.size());
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(810);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(826);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -800,6 +800,105 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(snapshot.table("ma_tenant_guard").rows()).hasSize(2);
         assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_head")
                 && blocker.code().equals("missing_or_extra_original"));
+    }
+
+    @Test
+    void personalMemoryOnlyBlocksSessionsBoundToTheStore() throws Exception {
+        byte[] owner = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor");
+        jdbc.update("INSERT INTO ma_memory_store (store_key,owner_key,tenant_id,memory_store_id,owner_actor_key,namespace,gmt_create)"
+                        + " VALUES (?,?,?,?,?,?,1)", "a".repeat(64), "b".repeat(64), "tenant", "memory", owner, "namespace");
+        jdbc.update("INSERT INTO ma_memory_entry (entry_key,tenant_id,memory_store_id,memory_id,is_deleted,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,?,?,0,1,1)", "c".repeat(64), "tenant", "memory", "entry");
+        var unbound = inspect();
+        assertThat(unbound.table("ma_memory_store").rows()).isEmpty();
+        assertThat(unbound.table("ma_memory_entry").rows()).isEmpty();
+        assertThat(unbound.blockers()).noneMatch(blocker -> blocker.table().startsWith("ma_memory")
+                || blocker.table().equals("ma_session"));
+
+        jdbc.update("UPDATE ma_session SET memory_store_id=?,owner_actor_key=?,owner_only=1 WHERE tenant_id=? AND session_id=?",
+                "memory", owner, "tenant", session);
+        var bound = inspect();
+        assertThat(bound.table("ma_memory_store").rows()).hasSize(1);
+        assertThat(bound.table("ma_memory_entry").rows()).hasSize(1);
+        assertThat(bound.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session")
+                && blocker.code().equals("invalid_original_association"));
+        assertThat(bound.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
+                || blocker.code().equals("query_unavailable"));
+    }
+
+    @Test
+    void otherSessionMemoryReceiptsDoNotBlockCsiRetirement() throws Exception {
+        for (String ownerTenant : List.of("tenant", "foreign")) {
+            String ownerSession = "memory-session-" + ownerTenant;
+            createOtherMemorySession(ownerTenant, ownerSession);
+            if ("foreign".equals(ownerTenant)) {
+                jdbc.update("UPDATE ma_session SET workspace_id=NULL,workspace_generation=NULL,workspace_storage_id=NULL,"
+                                + "cwd_relative=NULL,context_config_ref=NULL,context_revision=NULL,workspace_config_ref=NULL,workspace_policy_ref=NULL"
+                                + " WHERE tenant_id=? AND session_id=?", ownerTenant, ownerSession);
+            }
+            for (String state : List.of("DISPATCHED", "COMPLETED")) {
+                String receipt = insertMemoryReceipt(ownerTenant, ownerSession, state);
+                if ("COMPLETED".equals(state)) {
+                    jdbc.update("UPDATE ma_request_receipt SET result_json=? WHERE receipt_key=?", "{\"status\":\"unavailable\"}", receipt);
+                }
+            }
+        }
+        var found = inspect();
+        assertThat(found.blockers()).noneMatch(blocker -> blocker.table().equals("ma_request_receipt")
+                || blocker.table().equals("ma_memory_store"));
+        assertThat(found.table("ma_request_receipt").rows()).filteredOn(row -> "MEMORY".equals(row.text("namespace")))
+                .hasSize(4).allMatch(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.OTHER);
+        assertThat(found.table("ma_memory_store").rows()).hasSize(2)
+                .allMatch(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.OTHER);
+    }
+
+    @Test
+    void malformedAndUnownedMemoryReceiptsStillBlockCsiRetirement() throws Exception {
+        createOtherMemorySession("tenant", "memory-session");
+        String receipt = insertMemoryReceipt("tenant", "memory-session", "DISPATCHED");
+        var original = jdbc.queryForMap("SELECT * FROM ma_request_receipt WHERE receipt_key=?", receipt);
+        for (var mutation : Map.of("scope_id", "wrong", "scope_kind", "TENANT", "scope_key", "a".repeat(64),
+                "idempotency_digest", "b".repeat(64), "request_digest", "invalid", "session_id", session,
+                "operation", "unknown", "state", "COMPLETED", "result_json", "{}", "actor_id", "unexpected").entrySet()) {
+            jdbc.update("UPDATE ma_request_receipt SET " + mutation.getKey() + "=? WHERE receipt_key=?", mutation.getValue(), receipt);
+            assertWorkspaceReceiptBlocked(receipt);
+            jdbc.update("UPDATE ma_request_receipt SET " + mutation.getKey() + "=? WHERE receipt_key=?", original.get(mutation.getKey()), receipt);
+        }
+        jdbc.update("UPDATE ma_session SET memory_store_id=? WHERE tenant_id=? AND session_id=?", "missing", "tenant", "memory-session");
+        assertWorkspaceReceiptBlocked(receipt);
+        jdbc.update("UPDATE ma_session SET memory_store_id=? WHERE tenant_id=? AND session_id=?", "memory-session", "tenant", "memory-session");
+        jdbc.update("UPDATE ma_memory_store SET owner_actor_key=? WHERE tenant_id=? AND memory_store_id=?",
+                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "other"), "tenant", "memory-session");
+        assertWorkspaceReceiptBlocked(receipt);
+        jdbc.update("UPDATE ma_memory_store SET owner_actor_key=? WHERE tenant_id=? AND memory_store_id=?",
+                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"), "tenant", "memory-session");
+        assertThat(inspect().blockers()).noneMatch(blocker -> blocker.table().equals("ma_request_receipt"));
+        assertWorkspaceReceiptBlocked(insertMemoryReceipt("tenant", session, "DISPATCHED"));
+        assertWorkspaceReceiptBlocked(insertMemoryReceipt("foreign", "missing-session", "DISPATCHED"));
+    }
+
+    private void createOtherMemorySession(String ownerTenant, String ownerSession) {
+        byte[] owner = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(ownerTenant, "actor");
+        jdbc.update("INSERT INTO ma_memory_store (store_key,owner_key,tenant_id,memory_store_id,owner_actor_key,namespace,gmt_create)"
+                        + " VALUES (?,?,?,?,?,?,1)", com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(ownerTenant, ownerSession),
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(ownerTenant, "actor"), ownerTenant, ownerSession, owner, ownerSession);
+        jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,agent_revision,workspace_id,workspace_generation,"
+                        + "workspace_storage_id,cwd_relative,context_config_ref,context_revision,workspace_config_ref,workspace_policy_ref,"
+                        + "owner_actor_key,memory_store_id,owner_only,gmt_create,gmt_modified)"
+                        + " SELECT ?,?,agent_id,agent_revision,workspace_id,workspace_generation,workspace_storage_id,cwd_relative,"
+                        + "context_config_ref,context_revision,workspace_config_ref,workspace_policy_ref,?,?,1,1,1"
+                        + " FROM ma_session WHERE tenant_id=? AND session_id=?",
+                ownerTenant, ownerSession, owner, ownerSession, "tenant", session);
+    }
+
+    private String insertMemoryReceipt(String ownerTenant, String ownerSession, String state) {
+        var namespace = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace.MEMORY;
+        var scope = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope.SESSION;
+        String idempotency = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("input", state);
+        ManagedReceipts.insert(jdbc, namespace, ownerTenant, scope, ownerSession, idempotency,
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("request"), "remember", null,
+                ownerSession, null, state, null, null, 1);
+        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.receiptKey(namespace, ownerTenant, scope, ownerSession, idempotency);
     }
 
     @Test

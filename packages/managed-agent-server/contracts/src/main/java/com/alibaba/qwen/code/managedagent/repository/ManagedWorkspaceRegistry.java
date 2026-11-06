@@ -9,6 +9,15 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 public interface ManagedWorkspaceRegistry {
+    public static void requireSessionVisibility(
+            com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord session,
+            String actorId, ManagedWorkspaceRegistry workspaces) {
+        if (session.ownerOnly() && !workspaces.isSessionOwner(session.tenantId(), actorId, session.sessionId())) {
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(
+                    404, "session_not_found", "The Session was not found.");
+        }
+    }
+
     public boolean createdSession(String tenantId, String actorId, String sessionId);
 
     public boolean isSessionOwner(String tenantId, String actorId, String sessionId);

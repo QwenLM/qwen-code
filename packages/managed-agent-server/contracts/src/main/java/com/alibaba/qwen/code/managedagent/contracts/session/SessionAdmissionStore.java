@@ -44,6 +44,18 @@ public interface SessionAdmissionStore {
                 requestDigest, agentId, requestedRevision, title, input, payloadDigest);
     }
 
+    public default Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            com.alibaba.qwen.code.managedagent.model.SessionModelConfig modelConfig, String memoryStoreId) {
+        if (memoryStoreId != null) {
+            throw new UnsupportedOperationException("Session memory is unavailable");
+        }
+        return insertSessionCommand(tenantId, actorId, operation, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig);
+    }
+
     /**
      * H4b: creates a child Session under its parent's exact binding,
      * stamping the lineage in the same transaction. The idempotency key

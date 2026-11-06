@@ -107,6 +107,12 @@ final class WorkspaceCsiApplicationInventory {
             declaration("ma_extension_settings", "settings_key",
                     "settings_key:CHAR,scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,extension_id:VARBINARY,"
                     + "settings_revision:BIGINT,encryption_key_id:VARBINARY,encrypted_values:LONGTEXT,configured_keys_json:LONGTEXT,gmt_create:BIGINT"),
+            declaration("ma_memory_entry", "entry_key",
+                    "entry_key:CHAR,tenant_id:VARBINARY,memory_store_id:VARBINARY,memory_id:VARBINARY,"
+                    + "is_deleted:TINYINT,gmt_create:BIGINT,gmt_modified:BIGINT"),
+            declaration("ma_memory_store", "store_key",
+                    "store_key:CHAR,owner_key:CHAR,tenant_id:VARBINARY,memory_store_id:VARBINARY,"
+                    + "owner_actor_key:VARBINARY,namespace:VARCHAR,gmt_create:BIGINT"),
             declaration("ma_message", "tenant_id,session_id,item_id",
                     "tenant_id:VARBINARY,session_id:VARBINARY,item_id:VARBINARY,turn_id:VARBINARY,item_type:VARCHAR,"
                     + "item_role:VARCHAR,item_status:VARCHAR,attributes_json:LONGTEXT,first_sequence:BIGINT,"
@@ -224,7 +230,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "cwd_relative:VARCHAR,context_config_ref:VARBINARY,context_revision:BIGINT,"
                     + "workspace_config_ref:VARBINARY,workspace_policy_ref:VARBINARY,agent_revision:VARCHAR,"
                     + "approval_mode:VARCHAR,tool_profile:VARCHAR,"
-                    + "creator_actor_key:VARBINARY,owner_actor_key:VARBINARY,parent_session_id:VARBINARY,"
+                    + "creator_actor_key:VARBINARY,owner_actor_key:VARBINARY,memory_store_id:VARBINARY,owner_only:TINYINT,parent_session_id:VARBINARY,"
                     + "root_session_id:VARBINARY,parent_child_run_id:VARBINARY,child_depth:INT,"
                     + "agent_definition_digest:CHAR,session_kind:VARCHAR,tenant_key:CHAR,session_key:CHAR,"
                     + "session_scope_key:CHAR,title_revision:BIGINT,retirement_operation_id:VARBINARY,"
@@ -322,110 +328,7 @@ final class WorkspaceCsiApplicationInventory {
             declaration("ma_workspace_access", "tenant_id,workspace_id,actor_id",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,actor_id:VARBINARY,role:VARCHAR"));
 
-    private static final Set<String> IDENTITY_FIELDS = Set.of(
-            "account_id",
-            "action_id",
-            "activation_id",
-            "active_binding_id",
-            "active_operation_id",
-            "admission_resource_id",
-            "agent_id",
-            "artifact_id",
-            "binding_id",
-            "capability_digest",
-            "capture_id",
-            "capture_object_key",
-            "channel_id",
-            "chat_id",
-            "child_run_id",
-            "child_workspace_id",
-            "claim_owner",
-            "command_id",
-            "config_ref",
-            "content_part_id",
-            "context_config_ref",
-            "creation_key",
-            "credential_key_id",
-            "csi_provision_request_id",
-            "decision_receipt_id",
-            "default_tenant",
-            "delivery_id",
-            "dispatch_owner",
-            "encryption_key_id",
-            "event_id",
-            "execution_call_id",
-            "fence_operation_id",
-            "finish_operation_id",
-            "finish_predecessor_id",
-            "harness_boot_id",
-            "harness_event_epoch",
-            "harness_session_id",
-            "idempotency_key",
-            "isolation_key",
-            "item_id",
-            "kind",
-            "latest_checkpoint_resource_id",
-            "lease_id",
-            "lease_owner",
-            "loss_evidence_id",
-            "model_id",
-            "object_key",
-            "object_version_id",
-            "occurrence_key",
-            "operation_id",
-            "operation_owner",
-            "output_stream_id",
-            "parent_child_run_id",
-            "parent_session_id",
-            "parent_workspace_id",
-            "policy_ref",
-            "policy_version",
-            "prompt_id",
-            "provider_id",
-            "provision_request_id",
-            "public_session_id",
-            "publication_command_id",
-            "publication_id",
-            "publish_command_id",
-            "receipt_id",
-            "reconcile_operation_id",
-            "record_id",
-            "record_resource_id",
-            "resource_id",
-            "result_id",
-            "retirement_operation_id",
-            "root_session_id",
-            "route_id",
-            "run_id",
-            "runtime_credential_key_id",
-            "runtime_instance_id",
-            "runtime_lease_id",
-            "runtime_session_id",
-            "schedule_id",
-            "scope_id",
-            "segment_id",
-            "sender_id",
-            "session_id",
-            "slot_key",
-            "source_key",
-            "source_session_id",
-            "storage_id",
-            "stream_id",
-            "target_id",
-            "target_session_id",
-            "task_id",
-            "tenant_id",
-            "terminal_resource_id",
-            "thread_id",
-            "tool_call_id",
-            "transaction_id",
-            "turn_id",
-            "workspace_config_ref",
-            "workspace_generation",
-            "workspace_id",
-            "workspace_policy_ref",
-            "workspace_storage_id",
-            "writer_id");
+    private static final Set<String> IDENTITY_FIELDS = WorkspaceCsiApplicationIdentities.FIELDS;
 
     enum Membership { ORIGINAL, CONTEXT, OTHER }
 
@@ -2197,6 +2100,7 @@ final class WorkspaceCsiApplicationInventory {
                         query(table, "tenant_id=T&session_id=sessions");
                 case "ma_event_stream" -> query(table, "tenant_id=T&session_id=sessions", "artifact_refs_resource_key=resourceKeys");
                 case "ma_message" -> query(table, "tenant_id=T&session_id=sessions", "body_resource_key=resourceKeys");
+                case "ma_memory_store", "ma_memory_entry" -> query(table, "tenant_id=T&memory_store_id=memoryStores");
                 case "ma_agent_definition" -> query(table, "tenant_id=T&agent_id=agent&revision=agentRevision");
                 case "ma_workspace_access", "ma_channel_instance", "ma_extension_operation", "ma_extension_package",
                         "ma_extension_settings" -> query(table, "tenant_id=T&workspace_id=W");
@@ -2379,6 +2283,9 @@ final class WorkspaceCsiApplicationInventory {
             if (namespace == com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace.WORKSPACE_CREATE) {
                 return otherWorkspaceCreationReceipt(row);
             }
+            if (namespace == com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace.MEMORY) {
+                return otherMemoryReceipt(row);
+            }
             if (!row.cell("operation").isNull() || !row.cell("session_status_before").isNull()) {
                 return false;
             }
@@ -2405,6 +2312,57 @@ final class WorkspaceCsiApplicationInventory {
             }
             return lookup("ma_turn", "tenant_id = ? AND session_id = ? AND turn_id = ?",
                     ownerTenant, row.text("session_id"), row.text("turn_id")) != null;
+        }
+
+        private boolean otherMemoryReceipt(Row row) throws SQLException {
+            String ownerTenant = row.text("tenant_id");
+            String ownerSession = row.text("session_id");
+            if (!"SESSION".equals(row.text("scope_kind")) || ownerSession == null
+                    || !ownerSession.equals(row.text("scope_id"))
+                    || tenant.equals(ownerTenant) && has("sessions", ownerSession)
+                    || !row.text("idempotency_key").matches("[a-f0-9]{64}")
+                    || !row.text("request_digest").matches("[a-f0-9]{64}")
+                    || !Set.of("recall", "search", "remember", "get", "forget").contains(row.text("operation"))) {
+                return false;
+            }
+            for (String field : List.of("actor_id", "is_workspace_bound", "turn_id", "agent_id", "agent_revision",
+                    "schedule_id", "channel_id", "account_generation", "semantic_revision", "action_id", "action_version",
+                    "decision_scope_key", "mutation_attempt_sequence", "session_status_before", "result_operation_key")) {
+                if (!row.cell(field).isNull()) {
+                    return false;
+                }
+            }
+            JsonNode result = row.cell("result_json").isNull() ? null : parse(row.text("result_json"));
+            if (!("DISPATCHED".equals(row.text("state")) && row.cell("result_json").isNull()
+                    || "COMPLETED".equals(row.text("state")) && result != null && result.isObject()
+                    && Set.of("ok", "found", "stored", "deleted", "unknown", "unavailable", "not_deleted")
+                            .contains(result.path("status").asText()))) {
+                return false;
+            }
+            Row parent = lookup("ma_session", "tenant_id = ? AND session_id = ?", ownerTenant, ownerSession);
+            if (parent == null || !Boolean.TRUE.equals(parent.bool("owner_only"))
+                    || parent.binary("owner_actor_key") == null || parent.binary("owner_actor_key").length == 0
+                    || parent.text("memory_store_id") == null || parent.text("agent_id") == null
+                    || parent.text("agent_revision") == null || savedOriginalReference("ma_session", parent, liveReferences())) {
+                return false;
+            }
+            if (parent.text("workspace_id") != null) {
+                if (!otherSession(ownerTenant, null, ownerSession)) {
+                    return false;
+                }
+            } else {
+                for (String field : List.of("workspace_generation", "workspace_storage_id", "cwd_relative",
+                        "context_config_ref", "context_revision", "workspace_config_ref", "workspace_policy_ref", "runtime_request_key")) {
+                    if (!parent.cell(field).isNull()) {
+                        return false;
+                    }
+                }
+            }
+            Row store = lookup("ma_memory_store", "tenant_id = ? AND memory_store_id = ?",
+                    ownerTenant, parent.text("memory_store_id"));
+            return store != null && com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
+                    ownerTenant, parent.text("memory_store_id")).equals(store.text("store_key"))
+                    && Arrays.equals(parent.binary("owner_actor_key"), store.binary("owner_actor_key"));
         }
 
         private boolean otherWorkspaceCreationReceipt(Row row) throws SQLException {
@@ -2538,6 +2496,8 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_storage" -> intent.reservation().registrationKey().equals(row.text("alias_key"));
                 case "ma_storage_owner" -> intent.physicalKey().equals(row.text("storage_key"));
                 case "ma_read_lease" -> has("RT", row.text("tenant_key")) && has("RS", row.text("session_key"));
+                case "ma_memory_store", "ma_memory_entry" -> tenant.equals(row.text("tenant_id"))
+                        && has("memoryStores", row.text("memory_store_id"));
                 default -> false;
             };
         }
@@ -2695,6 +2655,7 @@ final class WorkspaceCsiApplicationInventory {
             }
             if (table.equals("ma_session")) {
                 id("agent", row.text("agent_id"));
+                id("memoryStores", row.text("memory_store_id"));
                 String revision = row.text("agent_revision");
                 if (revision != null && revision.matches("[1-9][0-9]{0,18}")
                         && new BigInteger(revision).compareTo(BigInteger.valueOf(Long.MAX_VALUE)) <= 0) {
@@ -2852,6 +2813,7 @@ final class WorkspaceCsiApplicationInventory {
                             && row.cell("model_id").isNull() && Objects.equals(0L, row.number("model_revision"))
                             && row.cell("model_config_digest").isNull() && row.cell("model_config_key_id").isNull()
                             && row.cell("model_config_ciphertext").isNull()
+                            && row.cell("memory_store_id").isNull() && Boolean.FALSE.equals(row.bool("owner_only"))
                             && row.cell("selected_approval_mode").isNull() && Objects.equals(0L, row.number("approval_revision"))
                             && Boolean.FALSE.equals(row.bool("is_plan_enabled")) && row.cell("permission_rules_json").isNull()
                             && Objects.equals(0L, row.number("public_child_agents_version"))

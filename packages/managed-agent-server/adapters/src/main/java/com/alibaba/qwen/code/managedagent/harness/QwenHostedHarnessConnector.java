@@ -368,6 +368,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     .withHarnessPlacement(placementDescriptor(session))
                     .withAgentDefinition(agentDefinition(session, false))
                     .withModelConfigDigest(modelConfigDigest(session))
+                    .withMemoryStoreId(session.memoryStoreId())
                     .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withInitialSelection(initialSelection(session))
                     .withMcpServers(mcpServers(session))
@@ -867,6 +868,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsPersonalMemory() {
+        try {
+            return sessionStore.isEnabled() && client().capabilities().getFeatures().contains("session-memory/1");
+        } catch (RuntimeException error) {
+            return false;
+        }
+    }
+
+    @Override
     public boolean supportsModelConfiguration() {
         try {
             return sessionStore.isEnabled() && client().capabilities().getFeatures().contains("session-model-config/1");
@@ -1301,6 +1311,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         .withHarnessPlacement(placementDescriptor(session))
                         .withAgentDefinition(agentDefinition(session, false))
                         .withModelConfigDigest(modelConfigDigest(session))
+                        .withMemoryStoreId(session.memoryStoreId())
                         .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withInitialSelection(initialSelection(session))
                         .withMcpServers(mcpServers(session))
@@ -1568,6 +1579,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     CreateHarnessSession.builder()
                             .harnessSessionId(session.sessionId())
                             .modelConfigDigest(modelConfigDigest(session))
+                            .memoryStoreId(session.memoryStoreId())
                             .harnessPlacement(placementDescriptor(session))
                             .approvalMode(
                                     session.workspace() == null
@@ -1663,6 +1675,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 .withHarnessPlacement(placementDescriptor(session))
                 .withAgentDefinition(agentDefinition(session, false))
                 .withModelConfigDigest(modelConfigDigest(session))
+                .withMemoryStoreId(session.memoryStoreId())
                 .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withInitialSelection(initialSelection(session))
                 .withMcpServers(mcpServers(session))
@@ -1826,6 +1839,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     .withHarnessPlacement(placementDescriptor(session))
                     .withAgentDefinition(agentDefinition(session, false))
                     .withModelConfigDigest(modelConfigDigest(session))
+                    .withMemoryStoreId(session.memoryStoreId())
                     .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withInitialSelection(initialSelection(session))
                     .withPublicChildAgentsVersion(session.publicChildAgentsVersion())

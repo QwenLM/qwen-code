@@ -46,6 +46,14 @@ import {
   HOSTED_GLOB_TOO_COMPLEX,
 } from './hosted-glob-pattern.js';
 import {
+  HOSTED_MEMORY_READS,
+  HOSTED_MEMORY_TOOLS,
+  hostedMemoryDeclarations,
+  hostedMemoryInputError,
+  isHostedMemoryTool,
+  type HostedMemorySession,
+} from './hosted-memory-session.js';
+import {
   HostedTodoInputError,
   hostedTodoInstructions,
   writeHostedTodos,
@@ -791,6 +799,7 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'edit',
   'run_shell_command',
   'todo_write',
+  ...HOSTED_MEMORY_TOOLS,
   'agent',
   'send_message',
   'team_create',
@@ -1828,6 +1837,7 @@ interface HostedPreparedRequest {
   planExit?: boolean;
   question?: boolean;
   todo?: boolean;
+  memory?: boolean;
 }
 
 export class HostedWorkspaceToolTurn {
@@ -1859,7 +1869,33 @@ export class HostedWorkspaceToolTurn {
     uncaptured?: boolean;
   };
   hookStopReason?: string;
-  private readonly broker: HostedWorkspaceBroker;
+  private readonly runtimeBroker?: HostedWorkspaceBroker;
+  private readonly configuredOptions?: HostedWorkspaceBrokerOptions;
+  private readonly memory?: HostedMemorySession;
+  private readonly memoryOnly: boolean;
+
+  private get broker(): HostedWorkspaceBroker {
+    if (!this.runtimeBroker)
+      throw new HostedToolRecoveryRequiredError(
+        'This memory-only Turn has no Runtime.',
+      );
+    return this.runtimeBroker;
+  }
+
+  private get options(): HostedWorkspaceBrokerOptions {
+    if (!this.configuredOptions)
+      throw new HostedToolRecoveryRequiredError(
+        'This memory-only Turn has no Broker configuration.',
+      );
+    return this.configuredOptions;
+  }
+
+  private get runtimeSessionId(): string {
+    return (
+      this.runtimeBroker?.runtimeSessionId ??
+      hostedRuntimeSessionId(this.promptId)
+    );
+  }
   private readonly warmed: Promise<void>;
   private acquired = false;
   private cleanupOwed = false;
@@ -1943,7 +1979,7 @@ export class HostedWorkspaceToolTurn {
   private readonly memberPlanMode: boolean;
 
   constructor(
-    private readonly options: HostedWorkspaceBrokerOptions,
+    options: HostedWorkspaceBrokerOptions | undefined,
     private readonly session: ManagedSession,
     private readonly harness: ManagedHarnessHandle,
     private readonly promptId: string,
@@ -1971,6 +2007,8 @@ export class HostedWorkspaceToolTurn {
     // (R1-2/R1-3 were exactly that), while a missing object field is named
     // at every call site.
     extras?: {
+      memory?: HostedMemorySession;
+      memoryOnly?: boolean;
       mcp?: HostedMcpSession;
       hooks?: HostedHookSession;
       profile?: string;
@@ -2019,6 +2057,11 @@ export class HostedWorkspaceToolTurn {
       recoveryBroker?: HostedWorkspaceBroker;
     },
   ) {
+    this.configuredOptions = options;
+    this.memory = extras?.memory;
+    this.memoryOnly = extras?.memoryOnly === true;
+    if (this.memoryOnly && !this.memory)
+      throw new Error('A memory-only Turn requires a saved memory binding.');
     this.extensionConfig = extras?.extensionConfig;
     this.foregroundOnly = extras?.foregroundOnly === true;
     this.mcp = this.foregroundOnly ? undefined : extras?.mcp;
@@ -2074,29 +2117,32 @@ export class HostedWorkspaceToolTurn {
       publicationOrShell && 'resources' in publicationOrShell
         ? publicationOrShell
         : shell;
-    this.broker =
-      extras?.recoveryBroker ??
-      this.mcp?.broker ??
-      this.hooks?.broker ??
-      new HostedWorkspaceBroker(
-        options,
-        session.authority.sessionHeader.sessionKey,
-        hostedRuntimeSessionId(promptId),
-      );
+    this.runtimeBroker = this.memoryOnly
+      ? undefined
+      : (extras?.recoveryBroker ??
+        this.mcp?.broker ??
+        this.hooks?.broker ??
+        new HostedWorkspaceBroker(
+          this.options,
+          session.authority.sessionHeader.sessionKey,
+          hostedRuntimeSessionId(promptId),
+        ));
     if (
       extras?.recoveryBroker &&
-      (this.mcp ||
+      (this.memoryOnly ||
+        this.mcp ||
         this.hooks ||
         this.broker.harnessSessionId !==
           session.authority.sessionHeader.sessionKey.sessionId ||
         this.broker.runtimeSessionId !== hostedRuntimeSessionId(promptId))
     )
       throw new Error('Invalid question recovery Broker.');
-    this.warmed = extras?.recoveryBroker
-      ? Promise.resolve()
-      : this.mcp
-        ? this.mcp.ensureReady()
-        : this.broker.warm();
+    this.warmed =
+      this.memoryOnly || extras?.recoveryBroker
+        ? Promise.resolve()
+        : this.mcp
+          ? this.mcp.ensureReady()
+          : this.broker.warm();
     // Warmup runs alongside inference; a text-only answer need not wait for it.
     void this.warmed.catch(() => undefined);
   }
@@ -2208,6 +2254,18 @@ export class HostedWorkspaceToolTurn {
 
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
+    await this.memory?.ready();
+    if (this.memoryOnly) {
+      this.planning =
+        this.publicPlanMode &&
+        (await hostedPublicPlanActive(this.session, this.promptId));
+      this.advertised = hostedMemoryDeclarations();
+      return this.planning
+        ? this.advertised.filter((tool) =>
+            HOSTED_MEMORY_READS.has(tool.name ?? ''),
+          )
+        : this.advertised;
+    }
     if (this.childDepth === 1) {
       this.questionChild = await this.questionWaitAdmitted();
       if (this.questionChild) await waitForTurn(this.warmed, signal);
@@ -2241,11 +2299,14 @@ export class HostedWorkspaceToolTurn {
         HOSTED_WORKSPACE_FILE_TOOLS,
         !this.fileBackupsEnabled,
       );
+      if (this.memory) this.advertised.push(...hostedMemoryDeclarations());
       if (this.publicPlanMode) this.advertised.push(HOSTED_PUBLIC_PLAN_TOOL);
       return this.planning
         ? this.advertised.filter(
             (tool) =>
-              tool.name === 'read_file' || tool.name === 'exit_plan_mode',
+              tool.name === 'read_file' ||
+              tool.name === 'exit_plan_mode' ||
+              HOSTED_MEMORY_READS.has(tool.name ?? ''),
           )
         : this.advertised;
     }
@@ -2297,6 +2358,7 @@ export class HostedWorkspaceToolTurn {
             this.extensionConfig,
           );
         }),
+      ...(this.memory ? hostedMemoryDeclarations() : []),
       ...(this.mcp?.tools() ?? []),
       ...(skill ? [skill] : []),
       // H4b: the Agent tool joins the declaration set only on a
@@ -2419,7 +2481,9 @@ export class HostedWorkspaceToolTurn {
       ? this.advertised.filter(
           (tool) =>
             tool.name === 'exit_plan_mode' ||
-            HOSTED_PUBLIC_PLAN_READS.has(tool.name ?? ''),
+            HOSTED_PUBLIC_PLAN_READS.has(tool.name ?? '') ||
+            (this.memory !== undefined &&
+              HOSTED_MEMORY_READS.has(tool.name ?? '')),
         )
       : this.advertised;
   }
@@ -2601,7 +2665,7 @@ export class HostedWorkspaceToolTurn {
 
   async resumeCommittedResults(signal?: AbortSignal): Promise<void> {
     if (this.acquired) return;
-    if (this.skills && !this.hooks && !this.mcp) {
+    if ((this.skills || this.memory) && !this.hooks && !this.mcp) {
       const history = (await this.session.sink.project()).filter(
         (entry) => entry.daemonPromptId === this.promptId,
       );
@@ -2617,7 +2681,12 @@ export class HostedWorkspaceToolTurn {
       );
       if (
         calls.length &&
-        calls.every((call) => call.name === 'skill' && answered.has(call.id!))
+        calls.every(
+          (call) =>
+            (call.name === 'skill' ||
+              (this.memory && isHostedMemoryTool(call.name ?? ''))) &&
+            answered.has(call.id!),
+        )
       )
         return;
     }
@@ -3213,6 +3282,7 @@ export class HostedWorkspaceToolTurn {
         // its error, so its committed answer is its own dispatch evidence.
         (((call.name === 'skill' && this.skills !== undefined) ||
           (call.name === 'todo_write' && this.declaresTodoTool()) ||
+          (this.memory !== undefined && isHostedMemoryTool(call.name)) ||
           HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
           (call.name === 'exit_plan_mode' &&
             this.commands?.command(
@@ -3591,24 +3661,32 @@ export class HostedWorkspaceToolTurn {
       (plan.commandStep &&
         plan.commandStep.configRevision !== this.extensionConfig?.revision) ||
       this.promptId !== plan.promptId ||
-      this.broker.runtimeSessionId !== plan.runtime.runtimeSessionId
+      (plan.runtime === null
+        ? !this.memory ||
+          plan.calls.some((item) => !isHostedMemoryTool(item.call.name))
+        : this.runtimeSessionId !== plan.runtime.runtimeSessionId)
     )
       throw new HostedToolRecoveryRequiredError(
         'Unsupported saved batch owner.',
       );
     this.uncertain = true;
     try {
-      if (plan.runtime.provisionerKind) await this.warmed;
-      else await waitForTurn(this.warmed, signal);
-      this.broker.runtime = {
-        bindingId: plan.runtime.bindingId,
-        generation: plan.runtime.generation,
-        workspaceGeneration: plan.runtime.workspaceGeneration,
-      };
-      const needsRuntime = plan.calls.some(
-        (item) => item.call.name !== 'agent',
-      );
-      if (needsRuntime) {
+      const needsRuntime =
+        plan.runtime !== null &&
+        plan.calls.some(
+          (item) =>
+            item.call.name !== 'agent' && !isHostedMemoryTool(item.call.name),
+        );
+      if (plan.runtime) {
+        if (plan.runtime.provisionerKind) await this.warmed;
+        else await waitForTurn(this.warmed, signal);
+        this.broker.runtime = {
+          bindingId: plan.runtime.bindingId,
+          generation: plan.runtime.generation,
+          workspaceGeneration: plan.runtime.workspaceGeneration,
+        };
+      }
+      if (needsRuntime && plan.runtime) {
         if (!this.hooks && !this.mcp) {
           await oweHostedTurnCleanup(this.session, this.promptId, this.broker);
           this.cleanupOwed = true;
@@ -3654,7 +3732,11 @@ export class HostedWorkspaceToolTurn {
         if (this.context?.read() === undefined)
           await this.fetchWorkspaceContext(signal);
       }
-      const declarations = await this.declarations(signal);
+      const declarations =
+        plan.runtime === null
+          ? hostedMemoryDeclarations()
+          : await this.declarations(signal);
+      if (plan.runtime === null) this.advertised = declarations;
       const requests: HostedPreparedRequest[] = [];
       for (const [ordinal, item] of plan.calls.entries()) {
         const definition = JSON.parse(
@@ -3712,6 +3794,8 @@ export class HostedWorkspaceToolTurn {
           skill: item.call.name === 'skill' && this.skills !== undefined,
           planExit: this.publicPlanMode && item.call.name === 'exit_plan_mode',
           question: item.call.name === 'ask_user_question',
+          memory:
+            this.memory !== undefined && isHostedMemoryTool(item.call.name),
         });
       }
       this.logicalRound = plan.round;
@@ -3748,7 +3832,12 @@ export class HostedWorkspaceToolTurn {
     commandStep?: HostedApprovalContinuation['commandStep'],
   ): Promise<ManagedSessionDurableRef | undefined> {
     const batch = this.nativeBatch;
-    const runtime = this.broker.runtime;
+    const memoryBatch =
+      this.memory !== undefined &&
+      batch !== undefined &&
+      batch.requests.length > 0 &&
+      batch.requests.every((request) => request.memory);
+    const runtime = memoryBatch ? null : this.runtimeBroker?.runtime;
     const singlePlanExit =
       this.publicPlanMode &&
       batch?.requests.length === 1 &&
@@ -3759,11 +3848,12 @@ export class HostedWorkspaceToolTurn {
       !batch ||
       batch.uncaptured ||
       batch.requests.some((request) => request.todo) ||
-      !runtime ||
+      (!runtime && !memoryBatch) ||
       (!commandStep &&
         isHostedWorkspaceShellProfile(this.profile) &&
         !singlePlanExit &&
         !singleQuestion &&
+        !memoryBatch &&
         !this.publicChildren) ||
       (!commandStep && (this.hooks || this.mcp)) ||
       batch.requests.some(
@@ -3771,6 +3861,7 @@ export class HostedWorkspaceToolTurn {
           !(
             singlePlanExit ||
             singleQuestion ||
+            request.memory ||
             (commandStep && request.call.name === 'skill') ||
             (this.publicChildren &&
               ['agent', 'run_shell_command'].includes(request.call.name)) ||
@@ -3831,9 +3922,9 @@ export class HostedWorkspaceToolTurn {
         requestDigest: request.digest,
         // Present: a batch with an undigested call is never captured.
         argsDigest: request.argsDigest as string,
-        prepareKey: `${this.broker.runtimeSessionId}:${request.runtimeCallId}`,
+        prepareKey: `${this.runtimeSessionId}:${request.runtimeCallId}`,
         prepareReference: {
-          sessionId: this.broker.runtimeSessionId,
+          sessionId: this.runtimeSessionId,
           promptId: this.promptId,
           callId: request.runtimeCallId,
           argsDigest: request.digest,
@@ -3850,7 +3941,7 @@ export class HostedWorkspaceToolTurn {
     }
     const plan: HostedApprovalContinuation = {
       v: 1,
-      ...(this.publicChildren && this.childModelRoute
+      ...(!memoryBatch && this.publicChildren && this.childModelRoute
         ? { publicChildModel: this.childModelRoute }
         : {}),
       sessionKey: header.sessionKey,
@@ -3858,15 +3949,17 @@ export class HostedWorkspaceToolTurn {
       definitionRef: header.definitionRef,
       rootSnapshotRef: header.rootSnapshotRef,
       sourceActivation: this.session.activation,
-      runtime: {
-        runtimeSessionId: this.broker.runtimeSessionId,
-        bindingId: runtime.bindingId,
-        generation: runtime.generation,
-        workspaceGeneration: runtime.workspaceGeneration,
-        ...(singleQuestion && batch.releaseQuestionMount
-          ? { provisionerKind: 'local-process' as const }
-          : {}),
-      },
+      runtime: memoryBatch
+        ? null
+        : {
+            runtimeSessionId: this.runtimeSessionId,
+            bindingId: runtime!.bindingId,
+            generation: runtime!.generation,
+            workspaceGeneration: runtime!.workspaceGeneration,
+            ...(singleQuestion && batch.releaseQuestionMount
+              ? { provisionerKind: 'local-process' as const }
+              : {}),
+          },
       batchId: batch.messageId,
       assistantRef: assistant.payload[
         'contentRef'
@@ -4018,7 +4111,8 @@ export class HostedWorkspaceToolTurn {
         if (
           this.planning &&
           !planExit &&
-          !HOSTED_PUBLIC_PLAN_READS.has(call.name)
+          !HOSTED_PUBLIC_PLAN_READS.has(call.name) &&
+          !(this.memory && HOSTED_MEMORY_READS.has(call.name))
         ) {
           validationError = HOSTED_PUBLIC_PLAN_REFUSAL;
           input = { ...call.args };
@@ -4219,6 +4313,9 @@ export class HostedWorkspaceToolTurn {
               }
             }
           }
+        } else if (this.memory && isHostedMemoryTool(call.name)) {
+          input = { ...call.args };
+          validationError = hostedMemoryInputError(call.name, input);
         } else if (call.name === 'todo_write') {
           const check = checkHostedTodoWriteInput(call.args);
           input = check.input;
@@ -4737,6 +4834,7 @@ export class HostedWorkspaceToolTurn {
           planExit,
           question: call.name === 'ask_user_question',
           todo: call.name === 'todo_write',
+          memory: this.memory !== undefined && isHostedMemoryTool(call.name),
         };
       });
     };
@@ -4759,13 +4857,16 @@ export class HostedWorkspaceToolTurn {
         (call) =>
           !HOSTED_WORKSPACE_FILE_TOOLS.some(
             (tool) => tool.name === call.name,
-          ) && !(this.publicPlanMode && call.name === 'exit_plan_mode'),
+          ) &&
+          !(this.memory && isHostedMemoryTool(call.name)) &&
+          !(this.publicPlanMode && call.name === 'exit_plan_mode'),
       )
     ) {
       return this.refuseBatch(
         calls,
         calls.map((call) =>
           HOSTED_WORKSPACE_FILE_TOOLS.some((tool) => tool.name === call.name) ||
+          (this.memory && isHostedMemoryTool(call.name)) ||
           (this.publicPlanMode && call.name === 'exit_plan_mode')
             ? undefined
             : 'Resident Workspace supports only read_file, write_file and edit.',
@@ -4824,7 +4925,9 @@ export class HostedWorkspaceToolTurn {
     if (
       this.hooks ||
       this.mcp ||
-      requests.some((request) => !request.skill && !request.todo)
+      requests.some(
+        (request) => !request.skill && !request.todo && !request.memory,
+      )
     )
       await waitForTurn(this.warmed, signal);
     // H4b: an agent-only batch runs entirely inside its own Sessions and
@@ -4846,7 +4949,8 @@ export class HostedWorkspaceToolTurn {
           !request.team &&
           request.command !== true &&
           !request.skill &&
-          !request.todo,
+          !request.todo &&
+          !request.memory,
       )
     ) {
       // Acquisition may have taken effect even when its reply is lost.
@@ -5110,6 +5214,7 @@ export class HostedWorkspaceToolTurn {
           request.question ||
           request.skill ||
           request.todo ||
+          request.memory ||
           request.workflow
         )
           continue;
@@ -5532,8 +5637,35 @@ export class HostedWorkspaceToolTurn {
       const skillBatch = skillResponses.length
         ? enforceFunctionResponseBudget(skillResponses, this.toolOutputBudget)
         : undefined;
+      const journaledMemoryRecords =
+        restored && requests.some((request) => request.memory)
+          ? await this.session.sink.project()
+          : [];
+      const journaledMemory = journaledMemoryRecords
+        .slice(
+          journaledMemoryRecords.findIndex(
+            (entry) => entry.uuid === messageId,
+          ) + 1,
+        )
+        .filter(
+          (entry) =>
+            entry.daemonPromptId === this.promptId &&
+            entry.type === 'tool_result',
+        )
+        .flatMap((entry) => entry.message?.parts ?? []);
       executing = true;
       for (const [index, request] of requests.entries()) {
+        if (request.memory) {
+          const committed = journaledMemory.find(
+            (part) =>
+              part.functionResponse?.id === request.call.callId &&
+              part.functionResponse.name === request.call.name,
+          );
+          if (committed) {
+            responses.push(committed);
+            continue;
+          }
+        }
         const refused = refusal(index);
         if (refused) {
           const response = skillBatch?.[index].responseParts ?? refused;
@@ -5631,6 +5763,45 @@ export class HostedWorkspaceToolTurn {
             );
           await this.commit('tool_result', converted, model);
           this.planning = false;
+          responses.push(...converted);
+          continue;
+        }
+        if (request.memory) {
+          if (
+            this.publicPlanMode &&
+            !HOSTED_MEMORY_READS.has(request.call.name) &&
+            (await hostedPublicPlanActive(this.session, this.promptId))
+          )
+            throw new HostedToolRecoveryRequiredError(
+              HOSTED_PUBLIC_PLAN_REFUSAL,
+            );
+          const result = await this.memory!.execute(
+            request.call.name,
+            await this.memoryInputId(messageId),
+            request.call.callId,
+            request.input,
+            signal,
+          );
+          const confirmed = ['ok', 'stored', 'found', 'deleted'].includes(
+            String(result['status']),
+          );
+          const converted = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [{ text: JSON.stringify(result) }],
+          );
+          const response = converted[0]?.functionResponse;
+          if (!response) throw new Error('Hosted memory result is missing.');
+          response.response = {
+            ...response.response,
+            ...result,
+            executionStatus: confirmed ? 'success' : 'error',
+          };
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted memory result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
           responses.push(...converted);
           continue;
         }
@@ -6235,6 +6406,24 @@ export class HostedWorkspaceToolTurn {
     return responses;
   }
 
+  private async memoryInputId(messageId: string): Promise<string> {
+    const history = await this.session.sink.project();
+    const batch = history.findIndex((entry) => entry.uuid === messageId);
+    if (batch < 0)
+      throw new HostedToolRecoveryRequiredError(
+        'Memory tool batch is missing.',
+      );
+    const user = history
+      .slice(0, batch)
+      .findLast(
+        (entry) =>
+          entry.type === 'user' && entry.daemonPromptId === this.promptId,
+      );
+    return user?.subtype === 'mid_turn_user_message'
+      ? user.uuid
+      : this.promptId;
+  }
+
   private encodeToolInput(payload: {
     toolName: string;
     input: unknown;
@@ -6244,7 +6433,7 @@ export class HostedWorkspaceToolTurn {
       JSON.stringify({
         harnessSessionId:
           this.session.authority.sessionHeader.sessionKey.sessionId,
-        runtimeSessionId: this.broker.runtimeSessionId,
+        runtimeSessionId: this.runtimeSessionId,
         payloadJson,
       }),
     );
@@ -8662,6 +8851,7 @@ export class HostedWorkspaceToolTurn {
         if (
           decision === 'allow' ||
           (request.call.name === 'skill' && this.skills !== undefined) ||
+          (request.memory && HOSTED_MEMORY_READS.has(request.call.name)) ||
           this.hookAllowed.has(request.call.callId) ||
           !hostedApprovalAsks(settings, request.call.name, globProfile)
         )
@@ -9415,10 +9605,10 @@ export class HostedWorkspaceToolTurn {
         () => this.hooks?.mountWorkUnproven() ?? false,
       );
     if (this.hooks) return this.hooks.mountHandback();
-    const owner = this.mountOwner ?? this.broker;
-    const claim = owner.mountClaim();
+    const owner = this.mountOwner ?? this.runtimeBroker;
+    const claim = owner?.mountClaim();
     // A turn that never sent an acquire holds nothing to hand back.
-    if (claim === undefined) return undefined;
+    if (!owner || claim === undefined) return undefined;
     return async () => {
       await owner.releaseMount(claim);
       this.acquired = false;

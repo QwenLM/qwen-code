@@ -259,8 +259,10 @@ public class WorkspaceFileStore {
 
     private ContextBinding sessionBinding(String tenant, String actor, String sessionId, boolean lock) {
         var bindings = jdbc.query("SELECT * FROM ma_session WHERE tenant_id = ? AND session_id = ?"
-                        + " AND status <> 'DELETED'" + (lock ? " FOR UPDATE" : ""),
-                (result, row) -> ManagedAgentStore.readBinding(result), tenant, sessionId);
+                        + " AND status <> 'DELETED' AND (owner_only = 0 OR COALESCE(owner_actor_key, creator_actor_key) = ?)"
+                        + (lock ? " FOR UPDATE" : ""),
+                (result, row) -> ManagedAgentStore.readBinding(result), tenant, sessionId,
+                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor));
         if (bindings.size() != 1 || bindings.getFirst() == null
                 || !registry.accessOf(tenant, actor, bindings.getFirst().getWorkspaceId()).canCreate()) {
             throw sessionNotFound();
