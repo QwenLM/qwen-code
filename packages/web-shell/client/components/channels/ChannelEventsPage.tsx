@@ -53,15 +53,25 @@ const EVENT_TYPES = ['inbound', 'outbound', 'task', 'poll'] as const;
 type EventTypeFilter = (typeof EVENT_TYPES)[number] | 'all';
 const ALL_CHANNELS = '__all__';
 
-const KNOWN_OUTCOMES = new Set([
+/**
+ * Outcomes the page knows how to label. Anything else renders as its raw
+ * token, so a new adapter outcome degrades to an unreadable-but-safe row
+ * rather than a missing translation key. Exported for the catalog
+ * completeness test: every entry here needs an EN and a ZH label.
+ */
+export const KNOWN_OUTCOMES = new Set([
   'accepted',
   'skipped',
   'posted',
   'suppressed',
   'posting',
   'failed',
+  'failed_ambiguous',
   'ok',
+  'degraded',
   'running',
+  'delivered',
+  'retired',
   'reply_pending',
   'cancelled',
 ]);
@@ -141,10 +151,15 @@ export function ChannelEventsPage({
     [language],
   );
 
-  const outcomeLabel = (outcome: string) =>
-    KNOWN_OUTCOMES.has(outcome)
-      ? t(`channelEvents.outcome.${outcome}`)
-      : outcome;
+  // The watch-guard recovery edge keeps `degraded` on the wire (the outcome
+  // vocabulary is unchanged); labeling it "Degraded" would read as an ongoing
+  // failure, so the reason names the label instead.
+  const outcomeLabel = (outcome: string, reason?: string) =>
+    reason === 'watch_reconcile_recovered'
+      ? t('channelEvents.outcome.recovered')
+      : KNOWN_OUTCOMES.has(outcome)
+        ? t(`channelEvents.outcome.${outcome}`)
+        : outcome;
 
   return (
     <div className={styles.page}>
@@ -348,7 +363,7 @@ export function ChannelEventsPage({
                           className={styles.outcome}
                           data-outcome={event.outcome}
                         >
-                          {outcomeLabel(event.outcome)}
+                          {outcomeLabel(event.outcome, event.reason)}
                         </span>
                         <span className={styles.target}>
                           {safeTargetUrl ? (
@@ -379,12 +394,38 @@ export function ChannelEventsPage({
                               {event.reason ?? event.triggerKind}
                             </code>
                           ) : null}
+                          {event.sessionId ? (
+                            <code
+                              className={styles.markerCode}
+                              title={event.sessionId}
+                            >
+                              {t('channelEvents.session', {
+                                id: event.sessionId.slice(0, 8),
+                              })}
+                            </code>
+                          ) : null}
                           {event.type === 'poll' &&
                           typeof event.detail?.['notifications'] ===
                             'number' ? (
                             <span className={styles.duration}>
                               {t('channelEvents.notifications', {
                                 count: event.detail['notifications'] as number,
+                              })}
+                            </span>
+                          ) : null}
+                          {event.type === 'poll' &&
+                          typeof event.detail?.['streak'] === 'number' ? (
+                            <span className={styles.duration}>
+                              {t('channelEvents.streak', {
+                                count: event.detail['streak'] as number,
+                              })}
+                            </span>
+                          ) : null}
+                          {event.type === 'poll' &&
+                          typeof event.detail?.['sessions'] === 'number' ? (
+                            <span className={styles.duration}>
+                              {t('channelEvents.sessions', {
+                                count: event.detail['sessions'] as number,
                               })}
                             </span>
                           ) : null}
