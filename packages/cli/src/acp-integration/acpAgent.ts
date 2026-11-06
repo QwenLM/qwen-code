@@ -252,6 +252,7 @@ import { readBackgroundShellOutputTail } from '@qwen-code/qwen-code-core/service
 import { sampleProcessTreeRssBytes } from '@qwen-code/qwen-code-core/utils/process-resources.js';
 import { expandHomeDir } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { getBtwSession } from '@qwen-code/qwen-code-core/agents/btw-session.js';
+import { formatBtwToolCallNotice } from '../ui/utils/btw-view.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -13697,9 +13698,11 @@ class QwenAgent implements Agent {
         return {
           sessionId,
           answer:
-            result.kind === 'answered' || result.kind === 'synthetic'
+            result.kind === 'answered'
               ? result.response
-              : null,
+              : result.kind === 'tool-call'
+                ? formatBtwToolCallNotice(result.toolName)
+                : null,
         };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionForkAgent: {
