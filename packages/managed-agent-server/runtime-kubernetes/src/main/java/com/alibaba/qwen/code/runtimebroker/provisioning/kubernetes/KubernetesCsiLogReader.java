@@ -3,12 +3,10 @@ package com.alibaba.qwen.code.runtimebroker.provisioning.kubernetes;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.spi.KubernetesRuntimeClient;
+import org.apache.commons.codec.digest.DigestUtils;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -42,12 +40,7 @@ public final class KubernetesCsiLogReader {
         private Snapshot(Source source, String content) {
             this.source = source;
             this.content = content;
-            try {
-                this.sha256 = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                        .digest(content.getBytes(StandardCharsets.UTF_8)));
-            } catch (NoSuchAlgorithmException impossible) {
-                throw new IllegalStateException(impossible);
-            }
+            this.sha256 = DigestUtils.sha256Hex(content.getBytes(StandardCharsets.UTF_8));
         }
 
         public Source source() {
