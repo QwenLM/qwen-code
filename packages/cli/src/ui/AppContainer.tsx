@@ -221,6 +221,24 @@ import { sendNotification } from '../services/notificationService.js';
 import { type UpdateObject } from './utils/updateCheck.js';
 import { setUpdateHandler } from './handleAutoUpdate.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
+import { spawnSync } from 'node:child_process';
+import type { AgentViewIdleGateState } from './commands/types.js';
+import { detachCurrentSessionToAgentView } from '../agent-view/managed-detach.js';
+import { buildCurrentQwenCliArgv } from '../agent-view/current-cli-argv.js';
+import { isAgentViewEnabled } from '../agent-view/feature.js';
+import {
+  readAgentViewWorkerSidebandEnv,
+  readAgentViewWorkerControlEvents,
+  reportAgentViewWorkerState,
+  sendAgentViewWorkerEvent,
+} from '../agent-view/worker-sideband.js';
+import {
+  applyAgentViewWorkerControlEventForUi,
+  getAgentViewAnswerableToolCalls,
+  getAgentViewWorkerStateForUi,
+  getLastAgentViewModelOutputLine,
+  retainAnsweredAgentViewSoftQuestion,
+} from './agent-view/worker-ui-bridge.js';
 import { exitCleanly } from '../utils/processUtils.js';
 import {
   useMessageQueue,
@@ -856,6 +874,41 @@ const SHELL_WIDTH_FRACTION = 0.89;
  * for the shell. This provides vertical padding and space for other UI elements.
  */
 const SHELL_HEIGHT_PADDING = 10;
+
+type SpawnSyncFn = typeof spawnSync;
+
+// Synchronous on purpose: the roster relaunch is a terminal handoff, so the
+// current process must hand stdio to the child before returning.
+export function runAgentViewRosterCommand(
+  cwd: string,
+  spawn: SpawnSyncFn = spawnSync,
+): number {
+  let argv: string[];
+  try {
+    argv = buildCurrentQwenCliArgv(['agents', '--cwd', cwd]);
+  } catch {
+    return 1;
+  }
+  const [command, ...commandArgs] = argv;
+  if (!command) {
+    return 1;
+  }
+  const result = spawn(command, commandArgs, {
+    stdio: 'inherit',
+    env: {
+      ...process.env,
+      QWEN_CODE_NO_RELAUNCH: '1',
+    },
+  });
+  if (result.error || result.signal) {
+    if (result.error) {
+      // eslint-disable-next-line no-console
+      console.error(result.error);
+    }
+    return 1;
+  }
+  return result.status ?? 1;
+}
 
 export const AppContainer = (props: AppContainerProps) => {
   const {
@@ -1529,6 +1582,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // Note: isIdleRef.current is assigned after streamingState becomes available
   // (see the assignment below useLlmStream).
   const isIdleRef = useRef(true);
+  const agentViewIdleGateStateRef = useRef<AgentViewIdleGateState>({});
   // Live content-area height, kept in a ref so useLlmStream (called above the
   // point where availableTerminalHeight is computed) can read the current value
   // when bounding the pending item's rendered height. terminalWidthRef pairs
@@ -2239,6 +2293,23 @@ export const AppContainer = (props: AppContainerProps) => {
     return unsub;
   }, [config]);
 
+  const detachAgentViewSession = useCallback(async () => {
+    if (readAgentViewWorkerSidebandEnv() !== undefined) {
+      await sendAgentViewWorkerEvent({ type: 'detach' });
+      return;
+    }
+    await config.getChatRecordingService?.()?.flush?.();
+    await detachCurrentSessionToAgentView(config, {
+      terminal: {
+        columns: terminalWidth,
+        rows: terminalHeight,
+      },
+    });
+    config.getLlmClient()?.requestShutdown();
+    await runExitCleanup();
+    process.exit(runAgentViewRosterCommand(config.getProjectRoot()));
+  }, [config, terminalHeight, terminalWidth]);
+
   const slashCommandActions = useMemo(
     () => ({
       openAuthDialog,
@@ -2288,9 +2359,11 @@ export const AppContainer = (props: AppContainerProps) => {
       handleBranch,
       openDeleteDialog,
       openHelpDialog,
+      detachAgentViewSession,
       clearPendingState: () => clearPendingStateRef.current(),
     }),
     [
+      detachAgentViewSession,
       openAuthDialog,
       openThemeDialog,
       openEditorDialog,
@@ -2356,6 +2429,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.updateItem,
     setSessionName,
     extensionRefreshState,
+    agentViewIdleGateStateRef,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
@@ -3217,6 +3291,51 @@ export const AppContainer = (props: AppContainerProps) => {
   // always reads current values without needing re-registration.
   const pendingToolCallsRef = useRef(pendingToolCalls);
   pendingToolCallsRef.current = pendingToolCalls;
+  const streamingStateRef = useRef(streamingState);
+  streamingStateRef.current = streamingState;
+  const isProcessingRef = useRef(isProcessing);
+  isProcessingRef.current = isProcessing;
+
+  const [isAgentViewWorker] = useState(
+    () => readAgentViewWorkerSidebandEnv() !== undefined,
+  );
+  const agentViewLastResult = isAgentViewWorker
+    ? getLastAgentViewModelOutputLine([
+        ...historyManager.history,
+        ...pendingLlmHistoryItems,
+      ])
+    : undefined;
+  const agentViewLastResultRef = useRef(agentViewLastResult);
+  agentViewLastResultRef.current = agentViewLastResult;
+  const answeredAgentViewSoftQuestionRef = useRef<string | undefined>(
+    undefined,
+  );
+
+  useEffect(() => {
+    if (readAgentViewWorkerSidebandEnv() === undefined) return;
+    answeredAgentViewSoftQuestionRef.current =
+      retainAnsweredAgentViewSoftQuestion(
+        answeredAgentViewSoftQuestionRef.current,
+        agentViewLastResult,
+      );
+    const report = getAgentViewWorkerStateForUi({
+      initError,
+      streamingState,
+      pendingToolCalls,
+      lastResult: agentViewLastResult,
+      answeredSoftQuestion: answeredAgentViewSoftQuestionRef.current,
+    });
+    void reportAgentViewWorkerState({
+      ...report,
+      ...(report.summary || !sessionName ? {} : { summary: sessionName }),
+    });
+  }, [
+    agentViewLastResult,
+    initError,
+    pendingToolCalls,
+    sessionName,
+    streamingState,
+  ]);
   const dualOutputRef = useRef(dualOutput);
   dualOutputRef.current = dualOutput;
 
@@ -3699,6 +3818,89 @@ export const AppContainer = (props: AppContainerProps) => {
       pendingPastes,
     ],
   );
+
+  const pendingAgentViewControlPromptsRef = useRef<string[]>([]);
+  const handleFinalSubmitRef = useRef(handleFinalSubmit);
+  handleFinalSubmitRef.current = handleFinalSubmit;
+  useEffect(() => {
+    if (readAgentViewWorkerSidebandEnv() === undefined) return undefined;
+
+    let disposed = false;
+    let timer: NodeJS.Timeout | undefined;
+    const flushPrompt = () => {
+      if (
+        streamingStateRef.current !== StreamingState.Idle ||
+        isProcessingRef.current
+      ) {
+        return;
+      }
+      const nextPrompt = pendingAgentViewControlPromptsRef.current.shift();
+      if (nextPrompt) {
+        const lastResult = agentViewLastResultRef.current;
+        answeredAgentViewSoftQuestionRef.current = lastResult;
+        void reportAgentViewWorkerState({
+          sessionState: 'idle',
+          ...(lastResult ? { lastResult } : {}),
+        });
+        handleFinalSubmitRef.current(nextPrompt);
+      }
+    };
+    const poll = async () => {
+      let stopped = false;
+      try {
+        const events = await readAgentViewWorkerControlEvents();
+        if (!disposed && events.some((event) => event.type === 'redraw')) {
+          refreshStatic();
+        }
+        for (const event of events) {
+          await applyAgentViewWorkerControlEventForUi(
+            event,
+            pendingToolCallsRef.current,
+            (text) => {
+              pendingAgentViewControlPromptsRef.current.push(text);
+            },
+            () => {
+              if (streamingStateRef.current === StreamingState.Responding) {
+                cancelOngoingRequestRef.current();
+              }
+              pendingAgentViewControlPromptsRef.current = [];
+              const shutdown = async () => {
+                config.getLlmClient()?.requestShutdown();
+                await runExitCleanup();
+                process.exit(0);
+              };
+              void reportAgentViewWorkerState({
+                sessionState: 'stopped',
+                lastResult: 'Stopped by user',
+              }).then(shutdown, shutdown);
+            },
+          );
+          if (event.type === 'stop') {
+            stopped = true;
+            break;
+          }
+        }
+      } catch {
+        // Supervisor sideband is best-effort; normal TUI rendering continues.
+      } finally {
+        if (!disposed) {
+          if (!stopped) {
+            flushPrompt();
+          }
+          timer = setTimeout(poll, 250);
+        }
+      }
+    };
+
+    flushPrompt();
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [config, refreshStatic]);
 
   const handleArenaModelsSelected = useCallback(
     (models: string[]) => {
@@ -4428,6 +4630,30 @@ export const AppContainer = (props: AppContainerProps) => {
     showWorktreeExitDialog ||
     !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
   dialogsVisibleRef.current = dialogsVisible;
+
+  if (isAgentViewEnabled(settings.merged)) {
+    const answerableAgentViewToolCalls =
+      getAgentViewAnswerableToolCalls(pendingToolCalls);
+    agentViewIdleGateStateRef.current = {
+      hasPendingUserQuestion: answerableAgentViewToolCalls.some(
+        (toolCall) => toolCall.confirmationDetails.type === 'ask_user_question',
+      ),
+      hasPendingToolConfirmation: answerableAgentViewToolCalls.some(
+        (toolCall) => toolCall.confirmationDetails.type !== 'ask_user_question',
+      ),
+      hasPendingCommandConfirmation:
+        !!shellConfirmationRequest ||
+        !!confirmationRequest ||
+        !!loopDetectionConfirmationRequest,
+      hasForegroundShell: Boolean(
+        activePtyId || embeddedShellFocused || agentViewState.agentShellFocused,
+      ),
+      hasBackgroundFocusDialog: bgTasksDialogOpen,
+      hasQueuedPrompt:
+        goalQueueRef.current?.hasQueuedUserMessages?.() === true ||
+        (goalQueueRef.current?.getPendingSubmissionCount?.() ?? 0) > 0,
+    };
+  }
 
   const shouldShowStickyTodos =
     stickyTodos !== null &&

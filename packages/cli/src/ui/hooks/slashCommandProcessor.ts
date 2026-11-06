@@ -46,6 +46,7 @@ import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
   CommandKind,
+  type AgentViewIdleGateState,
   type CommandContext,
   type SlashCommand,
 } from '../commands/types.js';
@@ -203,6 +204,7 @@ export interface SlashCommandProcessorActions {
   openEffortDialog: () => void;
   openOutputStyleDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
+  detachAgentViewSession?: () => Promise<void>;
   handleResume: (sessionId: string) => Promise<void>;
   handleBranch: (name?: string) => Promise<void>;
   openDeleteDialog: () => void;
@@ -246,6 +248,7 @@ export const useSlashCommandProcessor = (
   updateItem: UseHistoryManagerReturn['updateItem'],
   setSessionName?: (name: string | null) => void,
   extensionRefreshState?: ExtensionRefreshState,
+  agentViewIdleGateStateRef?: MutableRefObject<AgentViewIdleGateState>,
 ) => {
   const fallbackExtensionRefreshStateRef = useRef<ExtensionRefreshState | null>(
     null,
@@ -562,6 +565,7 @@ export const useSlashCommandProcessor = (
         cancelBtw,
         btwAbortControllerRef,
         isIdleRef,
+        agentViewIdleGateStateRef,
         toggleVimEnabled,
         setMemoryFileCount,
         reloadCommands,
@@ -601,6 +605,7 @@ export const useSlashCommandProcessor = (
       setSessionName,
       extensionsUpdateState,
       isIdleRef,
+      agentViewIdleGateStateRef,
       activeExtensionRefreshState,
       peerMessaging,
     ],
@@ -1562,6 +1567,14 @@ export const useSlashCommandProcessor = (
                     isCurrentSubmission,
                   );
                 }
+                case 'agent_view_detach':
+                  if (!actions.detachAgentViewSession) {
+                    throw new Error(
+                      'Agent View detach action is not available.',
+                    );
+                  }
+                  await actions.detachAgentViewSession();
+                  return { type: 'handled' };
                 case 'stream_messages': {
                   // stream_messages is only used in ACP/Zed integration mode
                   // and should not be returned in interactive UI mode
