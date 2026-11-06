@@ -82,7 +82,7 @@ import {
   inputHighlight,
   inputHighlightTheme,
 } from '../extensions/inputHighlight';
-import { isEditableTarget } from '../utils/dom';
+import { getShadowAwareActiveElement, isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
 import {
   createInputAnnotationsFromComposerTags,
@@ -4599,10 +4599,14 @@ export function useComposerCore(
       // body focus too — otherwise clicking the pane silences "type anywhere".
       const target = event.target as Node;
       const isWithinContainer = containerRef.current?.contains(target);
+      // The focused element must be read from the container's own root: in a
+      // shadow-root mount `document.activeElement` and `event.target` both
+      // retarget to the host, which would make a parked focus region look
+      // unfocused and silence "type anywhere".
+      const activeRegion = getShadowAwareActiveElement(containerRef.current);
       const isBodyFocused =
         document.activeElement === document.body ||
-        document.activeElement?.hasAttribute('data-web-shell-focus-region') ===
-          true;
+        activeRegion?.hasAttribute('data-web-shell-focus-region') === true;
       if (!isWithinContainer && !isBodyFocused) return;
       const view = viewRef.current;
       const followup = followupStateRef.current;

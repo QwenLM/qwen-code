@@ -1878,6 +1878,34 @@ describe('useComposerCore paste', () => {
     }
   });
 
+  it('captures type-anywhere keystrokes when a shadow mount parks focus on a focus region', async () => {
+    await mount();
+    // A shadow-root mount retargets document.activeElement and event.target to
+    // the host, so the parked wrapper has to be read from the container root.
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    document.body.appendChild(host);
+    shadow.appendChild(container!);
+    const region = document.createElement('div');
+    region.tabIndex = -1;
+    region.setAttribute('data-web-shell-focus-region', '');
+    container!.appendChild(region);
+    try {
+      act(() => region.focus());
+      expect(document.activeElement).toBe(host);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      act(() => region.dispatchEvent(event));
+      expect(latest!.getText()).toBe('a');
+    } finally {
+      host.remove();
+    }
+  });
+
   it('leaves keystrokes alone when focus parks on an unmarked focusable element', async () => {
     await mount();
     const outside = document.createElement('div');
