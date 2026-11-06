@@ -369,6 +369,7 @@ import {
   registerWorkspaceQualifiedSkillsRoutes,
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
+import { SkillInstallAttemptStore } from './skill-install-attempts.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
 import {
   AGENT_HOST_RATE_LIMIT,
@@ -698,6 +699,14 @@ export interface ServeAppDeps {
   ) => Promise<void>;
   persistDisabledSkills?: DaemonWorkspaceServiceDeps['persistDisabledSkills'];
   persistDisabledSkillsBatch?: DaemonWorkspaceServiceDeps['persistDisabledSkillsBatch'];
+  persistUserSkillsActivation?: (
+    workspace: string,
+    skillNames: readonly string[],
+    activation: import('../config/skill-settings.js').UserSkillActivation,
+    assertGenerationOpen?: () => void,
+  ) => Promise<
+    import('./workspace-service/types.js').PersistUserSkillsActivationResult
+  >;
   contextFilename?: string;
   persistSetting?: (
     workspace: string,
@@ -1185,6 +1194,8 @@ export function createServeApp(
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
+      userSkillActivationAvailable:
+        deps.persistUserSkillsActivation !== undefined,
       sessionArtifactsPersistenceAvailable:
         deps.sessionArtifactsPersistenceAvailable !== false,
       sessionGenerationAvailable: () => {
@@ -1410,6 +1421,7 @@ export function createServeApp(
         : {}),
       maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
+      eventRingMaxBytes: opts.eventRingMaxBytes,
       compactedReplayMaxBytes: opts.compactedReplayMaxBytes,
       maxJournalEvents: opts.maxJournalEvents,
       maxJournalBytes: opts.maxJournalBytes,
@@ -3778,7 +3790,10 @@ export function createServeApp(
     safeBody,
     sendBridgeError,
   });
+  const archiveInstalls = new SkillInstallAttemptStore();
   registerWorkspaceSkillsRoutes(app, {
+    archiveInstalls,
+    getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
     workspaceRuntime: primaryRuntime,
     workspaceRegistry,
     mutate,
@@ -3786,7 +3801,18 @@ export function createServeApp(
     sendBridgeError,
     getSkillsConfigStatus,
     invalidateSkillsConfigStatus,
-    installSkillConfig: (workspaceCwd, request) =>
+    ...(deps.persistUserSkillsActivation
+      ? {
+          persistUserSkillsActivation: (skillNames, activation) =>
+            deps.persistUserSkillsActivation!(
+              primaryBoundWorkspace,
+              skillNames,
+              activation,
+              capturePrimaryGenerationAssertion(),
+            ),
+        }
+      : {}),
+    installSkillConfig: (workspaceCwd, request, options) =>
       installWorkspaceSkill(
         workspaceCwd,
         request,
@@ -3795,6 +3821,7 @@ export function createServeApp(
           daemonEnvAtBoot['GH_TOKEN'] ??
           daemonEnvAtBoot['GITHUB_TOKEN'],
         capturePrimaryGenerationAssertion(),
+        options,
       ),
     deleteSkillConfig: (workspaceCwd, scope, skillName, installedPath) =>
       deleteWorkspaceSkill(
@@ -3808,6 +3835,8 @@ export function createServeApp(
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceQualifiedSkillsRoutes(app, {
+    archiveInstalls,
+    getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
     getSkillsSnapshot: (workspaceCwd) =>
       trustedSkillsConfigStatus.snapshot(workspaceCwd),
     workspaceRegistry,

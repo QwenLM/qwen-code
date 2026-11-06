@@ -8046,6 +8046,7 @@ export class Config {
       `${this.sessionId}.runtime.json`,
       `${this.sessionId}.worktree.json`,
       `${this.sessionId}.pr.json`,
+      `${this.sessionId}.title.json`,
     ].map((fileName) => ({
       from: path.join(oldChatsDir, fileName),
       to: path.join(newChatsDir, fileName),
