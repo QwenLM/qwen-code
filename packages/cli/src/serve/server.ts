@@ -369,6 +369,7 @@ import {
   registerWorkspaceQualifiedSkillsRoutes,
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
+import { SkillInstallAttemptStore } from './skill-install-attempts.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
 import {
   AGENT_HOST_RATE_LIMIT,
@@ -3778,7 +3779,10 @@ export function createServeApp(
     safeBody,
     sendBridgeError,
   });
+  const archiveInstalls = new SkillInstallAttemptStore();
   registerWorkspaceSkillsRoutes(app, {
+    archiveInstalls,
+    getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
     workspaceRuntime: primaryRuntime,
     workspaceRegistry,
     mutate,
@@ -3786,7 +3790,7 @@ export function createServeApp(
     sendBridgeError,
     getSkillsConfigStatus,
     invalidateSkillsConfigStatus,
-    installSkillConfig: (workspaceCwd, request) =>
+    installSkillConfig: (workspaceCwd, request, options) =>
       installWorkspaceSkill(
         workspaceCwd,
         request,
@@ -3795,6 +3799,7 @@ export function createServeApp(
           daemonEnvAtBoot['GH_TOKEN'] ??
           daemonEnvAtBoot['GITHUB_TOKEN'],
         capturePrimaryGenerationAssertion(),
+        options,
       ),
     deleteSkillConfig: (workspaceCwd, scope, skillName, installedPath) =>
       deleteWorkspaceSkill(
@@ -3808,6 +3813,8 @@ export function createServeApp(
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceQualifiedSkillsRoutes(app, {
+    archiveInstalls,
+    getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
     getSkillsSnapshot: (workspaceCwd) =>
       trustedSkillsConfigStatus.snapshot(workspaceCwd),
     workspaceRegistry,
