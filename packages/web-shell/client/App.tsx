@@ -369,7 +369,10 @@ import {
 } from './settings';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { WorkspaceDirectoriesSection } from './components/workspaces/WorkspaceDirectoriesSection';
-import { isAskUserPermission } from './utils/askUserPermission';
+import {
+  formatAskUserQuestions,
+  isAskUserPermission,
+} from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
 import { AskUserQuestion } from './components/messages/AskUserQuestion';
 import { HelpDialog } from './components/dialogs/HelpDialog';
@@ -19821,6 +19824,15 @@ export function App({
     [sessionActions],
   );
 
+  // The composer is hidden while a question is pending, so the panel itself
+  // offers the /btw-side escape hatch: a side task that explains the question
+  // without answering it or touching the main session.
+  const handleAskUserDetails = useCallback(() => {
+    if (!pendingAskUserApproval) return;
+    const questions = formatAskUserQuestions(pendingAskUserApproval.rawInput);
+    createSideTask(t('askUser.detailsPrompt', { questions }));
+  }, [pendingAskUserApproval, createSideTask, t]);
+
   // Runs once the daemon has settled the cancelled turn, so the transcript
   // holds everything the turn produced.
   const takeBackCancelledPrompt = useCallback(
@@ -24617,6 +24629,11 @@ export function App({
                             variant="floating"
                             keyboardActive={askUserOverlayVisible}
                             customInputLabel={askUserFreeTextLabel}
+                            onAskDetails={
+                              sideTasksAvailable
+                                ? handleAskUserDetails
+                                : undefined
+                            }
                           />
                         </div>
                       )}

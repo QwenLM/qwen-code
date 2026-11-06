@@ -25,3 +25,44 @@ export function isAskUserPermission(
   if (!request.toolName) return true;
   return isAskUserQuestionToolName(request.toolName);
 }
+
+/**
+ * Language-neutral snapshot of a pending AskUserQuestion payload — numbered
+ * questions with their option labels and descriptions — for embedding in the
+ * side-task details prompt. Malformed entries are skipped rather than throwing:
+ * the payload crosses the daemon wire and is not schema-validated here.
+ */
+export function formatAskUserQuestions(
+  rawInput: Record<string, unknown> | undefined,
+): string {
+  const questions = Array.isArray(rawInput?.questions)
+    ? rawInput.questions
+    : [];
+  const parts: string[] = [];
+  for (const entry of questions) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const { question, options } = entry as {
+      question?: unknown;
+      options?: unknown;
+    };
+    if (typeof question !== 'string' || !question.trim()) continue;
+    const lines = [`[${parts.length + 1}] ${question.trim()}`];
+    if (Array.isArray(options)) {
+      for (const option of options) {
+        if (typeof option !== 'object' || option === null) continue;
+        const { label, description } = option as {
+          label?: unknown;
+          description?: unknown;
+        };
+        if (typeof label !== 'string' || !label.trim()) continue;
+        lines.push(
+          typeof description === 'string' && description.trim()
+            ? `- ${label.trim()}: ${description.trim()}`
+            : `- ${label.trim()}`,
+        );
+      }
+    }
+    parts.push(lines.join('\n'));
+  }
+  return parts.join('\n\n');
+}

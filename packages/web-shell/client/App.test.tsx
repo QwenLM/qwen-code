@@ -1009,6 +1009,7 @@ const {
       latestAskUserQuestionOnError: null as
         | ((error: unknown, fallback: string) => void)
         | null,
+      latestAskUserQuestionOnAskDetails: null as (() => void) | null,
       latestBackgroundTasksRefreshTrigger: null as number | null,
       backgroundTasks: [] as DaemonSessionTaskStatus[],
       latestMonitorDetailsOnOpen: null as
@@ -2952,11 +2953,13 @@ vi.doMock('./components/messages/AskUserQuestion', async () => {
     AskUserQuestion: (props: {
       keyboardActive?: boolean;
       onError: (error: unknown, fallback: string) => void;
+      onAskDetails?: () => void;
     }) => {
       testState.latestAskUserQuestionKeyboardActive =
         props.keyboardActive ?? null;
       testState.askUserKeyboardActiveHistory.push(props.keyboardActive ?? null);
       testState.latestAskUserQuestionOnError = props.onError;
+      testState.latestAskUserQuestionOnAskDetails = props.onAskDetails ?? null;
       return React.createElement('div', { 'data-web-shell-ask-panel': '' });
     },
   };
@@ -12548,6 +12551,7 @@ beforeEach(() => {
   testState.latestTodoPanelOnOpen = null;
   testState.latestTasksStatusProps = null;
   testState.latestAskUserQuestionOnError = null;
+  testState.latestAskUserQuestionOnAskDetails = null;
   testState.latestBackgroundTasksRefreshTrigger = null;
   testState.backgroundTasks = [];
   testState.latestMonitorDetailsOnOpen = null;
@@ -34693,6 +34697,67 @@ describe('App session callbacks', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(container.querySelector('button[title="Side task"]')).toBeNull();
+  });
+
+  it('opens a prefilled details side task from a pending ask-user question', async () => {
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValueOnce({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(testState.latestAskUserQuestionOnAskDetails).not.toBeNull();
+
+    act(() => testState.latestAskUserQuestionOnAskDetails!());
+    await flush();
+
+    expect(
+      mockWorkspace.client.createSideTaskSession,
+    ).toHaveBeenCalledExactlyOnceWith(
+      'session-1',
+      { name: 'Side task' },
+      'client-1',
+    );
+    // The pending question stays pending: no answer, no main-session prompt.
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    const tab = testState.latestArtifactPanelProps?.tabs[0];
+    expect(tab).toEqual(
+      expect.objectContaining({
+        kind: 'side_task',
+        parentSessionId: 'session-1',
+        sessionId: 'details-side-task',
+      }),
+    );
+    const initialPrompt = tab?.kind === 'side_task' ? tab.initialPrompt : '';
+    expect(initialPrompt).toContain('Pick one');
+    expect(initialPrompt).toContain('ASD-STE100');
+    expect(initialPrompt).toContain('.qwen/tmp/');
+  });
+
+  it('does not offer the details action without the side-task capability', async () => {
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(testState.latestAskUserQuestionOnAskDetails).toBeNull();
   });
 
   it('passes a directive to /fork as a regular background-agent directive', async () => {

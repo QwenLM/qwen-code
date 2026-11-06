@@ -1366,6 +1366,15 @@ const EN: Messages = {
   'askUser.submitFailed': 'Failed to submit answer',
   'askUser.submitOptionUnavailable': 'Submit option is unavailable',
   'askUser.ignore': 'Ignore',
+  'askUser.askDetails': 'Ask for details',
+  'askUser.askDetailsHint':
+    'Open a side task that explains this question before you answer',
+  'askUser.detailsPrompt': (v) =>
+    `The main session is waiting for me to answer the questions below. I want to understand the details before answering. Read the relevant code and context first. Base every claim on what you verify, and mark anything unverified.
+
+${v?.questions ?? ''}
+
+Write the explanation as a self-contained single-file HTML (inline CSS, no external resources) in English. Borrow the ASD-STE100 controlled-language sentence rules: one idea per sentence, active voice, short sentences (about 20 words max), one term per concept, conditions before actions, lists for three or more items, no metaphors or exclamations. Keep code, commands, paths, and config keys verbatim. Cover the background of each question, every option's meaning, differences, impact and risks, and a recommendation with reasons. Do not answer the questions for me and do not change the main session. Save the file under .qwen/tmp/ (for example .qwen/tmp/ask-details.html), then reply with its path and a one-sentence summary.`,
   'askUser.multiHint': 'multiple choice',
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} questions`,
   'askUser.selectAnswer': 'Select an answer',
@@ -6333,6 +6342,14 @@ const ZH: Messages = {
   'askUser.submitFailed': '提交回答失败',
   'askUser.submitOptionUnavailable': '提交选项不可用',
   'askUser.ignore': '忽略',
+  'askUser.askDetails': '问细节',
+  'askUser.askDetailsHint': '打开侧边任务，在作答前解释这个问题',
+  'askUser.detailsPrompt': (v) =>
+    `主会话正在等我回答下面的问题。我想先了解细节，再作答。请先阅读相关代码与上下文。结论以你核实到的事实为准，未核实的内容要标注。
+
+${v?.questions ?? ''}
+
+请把解释写成自包含单文件 HTML（内联 CSS，不引用外部资源），用中文写作。借鉴 ASD-STE100 受控句式：一句一个意思、主动语态、每句不超过 20 字（代码与标识符按 1 词计）、同一概念只用一个词、条件写在动作之前、三项以上用列表、不用比喻和感叹号。代码、命令、路径、配置键名原样保留。内容覆盖：每个问题的背景；每个选项的含义、差异、影响与风险；给出建议并说明理由。不要替我作答，也不要改动主会话。文件保存到 .qwen/tmp/ 下（例如 .qwen/tmp/ask-details.html），完成后回复文件路径和一句话摘要。`,
   'askUser.multiHint': '可多选',
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} 个问题`,
   'askUser.selectAnswer': '选择一个答案',

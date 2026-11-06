@@ -410,7 +410,8 @@
   height: 14px;
 }
 
-.ignoreButton {
+.ignoreButton,
+.detailsButton {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -426,11 +427,13 @@
   line-height: 22px;
 }
 
-.ignoreButton:hover {
+.ignoreButton:hover,
+.detailsButton:hover {
   color: var(--foreground);
 }
 
-.ignoreButton:disabled {
+.ignoreButton:disabled,
+.detailsButton:disabled {
   cursor: not-allowed;
   opacity: 0.6;
 }
