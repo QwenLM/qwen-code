@@ -249,12 +249,12 @@ vi.mock('./config/sandboxConfig.js', () => ({
 }));
 
 vi.mock('./core/initializer.js', () => ({
-  initializeApp: vi.fn().mockResolvedValue({
+  initializeApp: vi.fn(async () => ({
     authError: null,
     themeError: null,
     shouldOpenAuthDialog: false,
     memoryFileCount: 0,
-  }),
+  })),
 }));
 
 vi.mock('./startup/startup-prefetch.js', () => ({

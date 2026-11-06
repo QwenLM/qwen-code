@@ -18,7 +18,14 @@ const step = (job, name) =>
 describe('audio prebuild reuse wiring', () => {
   it('builds every target required by payload validation', () => {
     const build = audioYaml.jobs.build;
-    const targets = build.strategy.matrix.include.flatMap(({ os, arch }) => {
+    const matrix = build.strategy.matrix.include;
+    expect(matrix.find(({ os }) => os.startsWith('macos'))).toEqual({
+      os: 'macos-15',
+      runner: 'macos-15',
+      arch: 'arm64',
+      artifact_suffix: 'arm64+x64',
+    });
+    const targets = matrix.flatMap(({ os, arch }) => {
       if (os.startsWith('macos')) return [`darwin-${arch}`, 'darwin-x64'];
       return [`${os.startsWith('windows') ? 'win32' : 'linux'}-${arch}`];
     });

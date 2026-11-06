@@ -82,7 +82,12 @@ import type {
   BridgeTelemetry,
 } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
-import { EventBus, type BridgeEvent } from './eventBus.js';
+import {
+  EventBus,
+  DEFAULT_RING_MAX_BYTES,
+  MAX_RING_MAX_BYTES,
+  type BridgeEvent,
+} from './eventBus.js';
 import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
   JOURNAL_GROWTH_HARD_CAP_BYTES,
@@ -4452,6 +4457,94 @@ describe('createAcpSessionBridge', () => {
       /Invalid eventRingSize/,
     );
   });
+
+  it('resolves default and custom eventRingMaxBytes at bridge construction', () => {
+    expect(
+      makeBridge().getDaemonStatusSnapshot().limits.eventRingMaxBytes,
+    ).toBe(DEFAULT_RING_MAX_BYTES);
+    for (const value of [1, 1024 * 1024, MAX_RING_MAX_BYTES]) {
+      expect(
+        makeBridge({ eventRingMaxBytes: value }).getDaemonStatusSnapshot()
+          .limits.eventRingMaxBytes,
+      ).toBe(value);
+    }
+  });
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER + 1,
+    MAX_RING_MAX_BYTES + 1,
+  ])('rejects invalid eventRingMaxBytes=%s at construction', (value) => {
+    expect(() => makeBridge({ eventRingMaxBytes: value })).toThrow(
+      /eventRingMaxBytes/,
+    );
+  });
+
+  it.each(['fresh', 'load', 'resume'] as const)(
+    'wires eventRingMaxBytes and retention diagnostics for %s sessions',
+    async (kind) => {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        eventRingMaxBytes: 1024,
+      });
+      const retention = vi.spyOn(EventBus.prototype, 'retentionSnapshot');
+      try {
+        const session =
+          kind === 'fresh'
+            ? await bridge.spawnOrAttach({ workspaceCwd: WS_A })
+            : await bridge[kind === 'load' ? 'loadSession' : 'resumeSession']({
+                sessionId: SESS_A,
+                workspaceCwd: WS_A,
+              });
+        await handle.agentConnection.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [{ name: 'help', description: 'Show help' }],
+            _meta: {
+              availableSkillDetails: { help: { body: 'Skill details' } },
+            },
+          },
+        });
+        for (let i = 0; i < 8; i++) {
+          await handle.agentConnection.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'x'.repeat(300) },
+            },
+          });
+        }
+        const diagnostic = bridge.getDaemonStatusSnapshot().sessions[0]!;
+        const snapshot = retention.mock.results.at(-1)!.value as ReturnType<
+          EventBus['retentionSnapshot']
+        >;
+        expect(diagnostic).toMatchObject({
+          eventRingCount: snapshot.ringCount,
+          eventRingBytes: snapshot.ringBytes,
+          eventRingEarliestEventId: snapshot.earliestEventId,
+          eventRingEvictedEvents: snapshot.evictedEvents,
+          eventRingEvictedBytes: snapshot.evictedBytes,
+          availableCommandsSnapshotBytes:
+            snapshot.availableCommandsSnapshotBytes,
+        });
+        expect(diagnostic.eventRingCount).toBeGreaterThan(0);
+        expect(diagnostic.eventRingBytes).toBeLessThanOrEqual(1024);
+        expect(diagnostic.eventRingEvictedEvents).toBeGreaterThan(0);
+        expect(diagnostic.eventRingEvictedBytes).toBeGreaterThan(0);
+        expect(diagnostic.availableCommandsSnapshotBytes).toBeGreaterThan(0);
+      } finally {
+        retention.mockRestore();
+        await bridge.shutdown();
+      }
+    },
+  );
 
   it('accepts and rejects BridgeOptions.compactedReplayMaxBytes at construction time', () => {
     expect(() => makeBridge({ compactedReplayMaxBytes: 1 })).not.toThrow();
