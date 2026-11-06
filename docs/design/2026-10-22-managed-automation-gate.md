@@ -742,7 +742,6 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
   Session are admitted and fired concurrently, and that one fire can outlive
   its lease. Traced through the scanner's and the funnel's code, these mean
   for gates:
-
   - Probes on different Sessions can run in parallel, up to the node's scanner
     threads; one Session's probes run one at a time in its funnel queue, and
     that Session's other automation operations (define, retire, cancel, the
