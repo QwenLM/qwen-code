@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
@@ -1164,17 +1165,7 @@ public final class JdbcRuntimeBindingRepository
     }
 
     public static String storageAliasKey(String tenantId, String storageId) {
-        try {
-            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
-            for (String field : List.of("qwen-csi-alias/1", tenantId, storageId)) {
-                byte[] bytes = field.getBytes(StandardCharsets.UTF_8);
-                digest.update(java.nio.ByteBuffer.allocate(Integer.BYTES).putInt(bytes.length).array());
-                digest.update(bytes);
-            }
-            return java.util.HexFormat.of().formatHex(digest.digest());
-        } catch (java.security.NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException("SHA-256 unavailable", impossible);
-        }
+        return WorkspaceCsiRegistration.aliasKey(tenantId, storageId);
     }
 
     private static String storageFence(Connection connection, String tenantId, String storageId) throws SQLException {
