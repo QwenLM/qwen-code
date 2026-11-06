@@ -1814,8 +1814,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           at: new Date().toISOString(),
           type: 'github_publication',
           // Ambiguous by construction: a definite no-write never reaches
-          // here. Keep the key consumed (at-most-once).
+          // here. Keep the key consumed (at-most-once). The pendingId lets
+          // this row still stop a resend when the record cannot be removed
+          // from the pending file below and survives to the next start.
           outcome: 'failed_ambiguous',
+          pendingId: record.id,
           failurePhase: 'delivery',
           failureError: sanitizeLogText(
             err instanceof Error ? err.message : String(err),
@@ -1846,7 +1849,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           } catch {
             return false;
           }
-          return record.outcome === 'posted' && record.pendingId === pendingId;
+          return (
+            (record.outcome === 'posted' ||
+              // An ambiguous answer may have landed the public reply, so it
+              // counts as consumed for this same pendingId: re-sending it
+              // would be a second reply to the same thread.
+              record.outcome === 'failed_ambiguous') &&
+            record.pendingId === pendingId
+          );
         });
     } catch {
       return false;

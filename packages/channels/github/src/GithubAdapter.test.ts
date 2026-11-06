@@ -5302,11 +5302,55 @@ describe('GithubChannel', () => {
       expect(audit).toEqual([
         expect.objectContaining({
           outcome: 'failed_ambiguous',
+          pendingId: 'first',
           failureError: 'ambiguous',
         }),
         expect.objectContaining({
           outcome: 'posted',
           commentId: 2004,
+        }),
+      ]);
+    });
+
+    it('does not resend a pending final after an ambiguous answer survives a failed rewrite', async () => {
+      const record = pendingRecord({ id: 'ambiguous' });
+      writePending([record]);
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      // The rewrite fails, but the file keeps the record for the next start.
+      mockOctokit.rest.issues.createComment.mockImplementationOnce(async () => {
+        writeFileSync(pendingPath(), '{');
+        throw new Error('ambiguous');
+      });
+
+      try {
+        await retryPendingForTest();
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining('failed to update pending GitHub deliveries'),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      // Next start: the record is still on disk, so the audit has to be
+      // what stops the second public reply.
+      writePending([record]);
+      await retryPendingForTest();
+
+      // The second start sends nothing, and the record it skipped is
+      // dropped once the rewrite succeeds.
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(() => readFileSync(pendingPath(), 'utf-8')).toThrow();
+      const audit = readFileSync(auditPath(), 'utf-8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(audit).toEqual([
+        expect.objectContaining({
+          outcome: 'failed_ambiguous',
+          pendingId: 'ambiguous',
         }),
       ]);
     });
