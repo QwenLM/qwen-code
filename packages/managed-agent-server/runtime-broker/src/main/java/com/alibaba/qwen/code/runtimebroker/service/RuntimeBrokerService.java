@@ -143,6 +143,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     private final RuntimeExecutionRecovery executionRecovery;
     private final RuntimeExecutionCancellation executionCancellation;
     private final RuntimeHoldInventory holdInventory;
+    private final RuntimeDrainRelease drainRelease;
 
     /**
      * H4b: the live physical Runtime binding of a Harness Session — how
@@ -343,6 +344,8 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                 sessionRepository, transport, executionReconciler, closed);
         this.executionCancellation = new RuntimeExecutionCancellation(bindingRegistry, executionState, executionRepository,
                 transport, executionDispatcher, scheduler, this.operationLeaseDuration, closed);
+        this.drainRelease = new RuntimeDrainRelease(this, sessionRepository, executionRepository, transport,
+                provisioner, executionDispatcher, bindingRepository);
     }
 
     public boolean supportsDrainedStop() {
@@ -667,7 +670,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                     throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
                 }
                 var receipt = draining.getDrainReceipt();
-                stopped = (receipt == null ? stopAcknowledgedRuntime(draining, renewal, authority) : CompletableFuture.completedFuture(receipt))
+                stopped = (receipt == null ? drainRelease.stopAcknowledgedRuntime(draining, renewal, authority) : CompletableFuture.completedFuture(receipt))
                         .thenAccept(proof -> {
                             if (authority != null) {
                                 bindingRepository.requireHarnessCleanup(draining.getRequest().getScope(), draining.getRequest().getIsolationKey(), authority);
@@ -679,17 +682,17 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                 // The sessions release — and their sweep of provably ended
                 // background exits — run BEFORE the unsettled gate: a row the
                 // sweep can prove never blocks the close on a stale active.
-                releaseDrainedSessions(draining, renewal, authority)).thenCompose(ignored -> {
+                drainRelease.releaseDrainedSessions(draining, renewal, authority)).thenCompose(ignored -> {
                     if (sessionRepository.countActiveByBinding(draining.getBindingId(), draining.getGeneration()) != 0
                             || executionRepository.hasActiveByBinding(draining.getBindingId(), draining.getGeneration())) {
                         throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
                     }
                     var current = renewal.requireDrainClaim();
                     var receipt = current.getDrainReceipt();
-                    return receipt == null ? stopAcknowledgedRuntime(current, renewal, authority)
+                    return receipt == null ? drainRelease.stopAcknowledgedRuntime(current, renewal, authority)
                             : CompletableFuture.completedFuture(receipt);
                 }).thenAccept(receipt -> renewal.persistDrainReceipt(receipt, authority))
-                        .thenCompose(ignored -> releaseRetiredHolders(draining, renewal, authority)).thenRun(() -> {
+                        .thenCompose(ignored -> drainRelease.releaseRetiredHolders(draining, renewal, authority)).thenRun(() -> {
                             if (authority != null) {
                                 bindingRepository.requireHarnessCleanup(draining.getRequest().getScope(), draining.getRequest().getIsolationKey(), authority);
                             }
@@ -715,26 +718,6 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                 }).exceptionally(error -> {
                     throw mapStepTimeout(error);
                 });
-    }
-
-    /**
-     * Releases the drained Sessions, and escalates a worker that refuses to
-     * release to the durable stop this drain arm already owns. Only the close
-     * cascade reaches this path: a routine release never stops a worker.
-     */
-    private CompletionStage<Void> releaseDrainedSessions(RuntimeBindingRecord binding,
-            BindingRenewal renewal, RuntimeLifecycleAuthority authority) {
-        return drainSessions(binding, renewal, authority, null).exceptionallyCompose(error -> {
-            if (!workerRefusedRelease(error) || !provisioner.supportsDrainedStop(binding)) {
-                return CompletableFuture.<Void>failedFuture(error);
-            }
-            return safeStage(() -> {
-                var current = renewal.requireDrainClaim();
-                return current.getDrainReceipt() == null ? stopAcknowledgedRuntime(current, renewal, authority)
-                        : CompletableFuture.completedFuture(current.getDrainReceipt());
-            }).thenAccept(receipt -> renewal.persistDrainReceipt(receipt, authority))
-                    .thenCompose(ignored -> drainSessions(binding, renewal, authority, null));
-        });
     }
 
     /**
@@ -766,166 +749,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         return cause instanceof java.io.IOException || cause instanceof TimeoutException;
     }
 
-    private static boolean workerRefusedRelease(Throwable error) {
-        Throwable cause = unwrap(error);
-        return cause instanceof RuntimeBrokerException failure
-                && ("managed_runtime_owner_hold_pending".equals(failure.getCode())
-                        || "managed_runtime_release_timeout".equals(failure.getCode()));
-    }
-
-    /**
-     * Clears durable Workspace ownership for Sessions this drain has retired.
-     * Their worker is stopped and their rows are released, so no writer can
-     * still hold the storage. Runs before the binding is marked RELEASED, so a
-     * crash retries it; the exact-match clear cannot touch a newer holder.
-     */
-    private CompletionStage<Void> releaseRetiredHolders(RuntimeBindingRecord binding, BindingRenewal renewal,
-            RuntimeLifecycleAuthority authority) {
-        var current = renewal.requireDrainClaim();
-        // Physical retirement is authorized only by the committed native receipt.
-        if (!binding.getRequest().isManagedContext() || binding.getLease() == null
-                || current.getDrainReceipt() == null) {
-            return CompletableFuture.completedFuture(null);
-        }
-        return releaseRetiredHolders(current, renewal, authority, null);
-    }
-
-    private CompletionStage<Void> releaseRetiredHolders(RuntimeBindingRecord binding, BindingRenewal renewal,
-            RuntimeLifecycleAuthority authority, String cursor) {
-        var batch = sessionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
-        CompletionStage<Void> work = CompletableFuture.completedFuture(null);
-        for (var record : batch) {
-            if (record.isActive()) {
-                continue;
-            }
-            work = work.thenCompose(ignored -> safeStage(() -> {
-                var current = renewal.requireDrainClaim();
-                if (current.getDrainReceipt() == null || !current.getDrainReceipt().matches(current)) {
-                    throw conflict("workspace_close_identity_unverified", "Original stop receipt differs");
-                }
-                var session = record.getSession();
-                if (authority != null) {
-                    session = new RuntimeSession(session.getHarnessSessionId(), session.getRuntimeSessionId(),
-                            session.getTurnKind(), session.getScope().withLifecycleAuthority(authority));
-                }
-                return transport.releaseRetired(current.getLease(), session);
-            }))
-                    .thenAccept(retired -> {
-                        if (!Boolean.TRUE.equals(retired)) {
-                            throw unavailable("runtime_session_release_failed",
-                                    "Retired Session still owns Workspace storage");
-                        }
-                    });
-        }
-        return work.thenCompose(ignored -> batch.size() < 100
-                ? CompletableFuture.completedFuture(null)
-                : releaseRetiredHolders(binding, renewal, authority, batch.getLast().getRuntimeSessionId()));
-    }
-
-    private CompletionStage<Void> drainSessions(RuntimeBindingRecord binding, BindingRenewal renewal,
-            RuntimeLifecycleAuthority authority, String cursor) {
-        var batch = sessionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
-        CompletionStage<Void> work = CompletableFuture.completedFuture(null);
-        for (var record : batch) {
-            if (!record.isActive()) {
-                continue;
-            }
-            work = work.thenCompose(ignored -> {
-                if (authority != null) {
-                    if (!renewal.releaseStoppedSession(record, authority)) {
-                        return failed(conflict("workspace_close_identity_unverified", "Original stop receipt is missing"));
-                    }
-                    return CompletableFuture.completedFuture(null);
-                }
-                return releaseSavedSession(binding, record, renewal);
-            });
-        }
-        return work.thenCompose(ignored -> batch.size() < 100 ? CompletableFuture.completedFuture(null)
-                : drainSessions(binding, renewal, authority, batch.getLast().getRuntimeSessionId()));
-    }
-
-    private CompletionStage<Void> acknowledgeDrainedTools(RuntimeBindingRecord binding, String cursor) {
-        return acknowledgeDrainedTools(binding, cursor, null, null);
-    }
-
-    private CompletionStage<Void> acknowledgeDrainedTools(RuntimeBindingRecord binding, String cursor,
-            BindingRenewal renewal, RuntimeLifecycleAuthority authority) {
-        if ((!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
-                && !com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest()))
-                || binding.getLease() == null) {
-            return CompletableFuture.completedFuture(null);
-        }
-        if (binding.getLease() == null) {
-            return com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())
-                    ? failed(conflict("workspace_close_identity_unverified", "Original worker lease is missing"))
-                    : CompletableFuture.completedFuture(null);
-        }
-        var batch = executionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
-        CompletionStage<Void> work = CompletableFuture.completedFuture(null);
-        for (var execution : batch) {
-            work = work.thenCompose(ignored -> executionDispatcher.acknowledgePersistedTools(
-                    renewal == null ? binding : drainClaimForIo(renewal, authority), execution));
-        }
-        return work.thenCompose(ignored -> batch.size() < 100 ? CompletableFuture.completedFuture(null)
-                : acknowledgeDrainedTools(binding, batch.getLast().getExecutionCallId(), renewal, authority));
-    }
-
-    private RuntimeBindingRecord drainClaimForIo(BindingRenewal renewal, RuntimeLifecycleAuthority authority) {
-        var current = renewal.requireDrainClaim(authority != null);
-        if (authority != null) {
-            bindingRepository.requireHarnessCleanup(current.getRequest().getScope(), current.getRequest().getIsolationKey(), authority);
-            current = current.withLifecycleAuthority(authority);
-        }
-        return current;
-    }
-
-    private CompletionStage<RuntimeDrainReceipt> stopAcknowledgedRuntime(RuntimeBindingRecord binding,
-            BindingRenewal renewal, RuntimeLifecycleAuthority authority) {
-        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
-            return stopAcknowledgedRuntime(binding);
-        }
-        var current = drainClaimForIo(renewal, authority);
-        if (executionRepository.hasActiveByBinding(current.getBindingId(), current.getGeneration())) {
-            return failed(conflict("workspace_close_execution_unsettled", "Original resources are unsettled"));
-        }
-        return acknowledgeDrainedTools(current, null, renewal, authority)
-                .thenCompose(ignored -> provisioner.stopDrained(drainClaimForIo(renewal, authority)));
-    }
-
-    private CompletionStage<RuntimeDrainReceipt> stopAcknowledgedRuntime(RuntimeBindingRecord binding) {
-        if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(binding.getRequest().getProvisionerKind())
-                && (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())
-                        || executionRepository.hasActiveByBinding(binding.getBindingId(), binding.getGeneration()))) {
-            return failed(conflict("workspace_close_identity_unverified", "External file drain is not verified"));
-        }
-        if (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind()) || binding.getLease() == null) {
-            return acknowledgeDrainedTools(binding, null).thenCompose(ignored -> provisioner.stopDrained(binding));
-        }
-        return safeStage(() -> provisioner.reconcile(binding.getRequest(), binding.getProvisionSeed(),
-                binding.getResourceHandle(), binding.getLease())).handle((observation, error) -> {
-                    if (error != null) {
-                        Throwable cause = unwrap(error);
-                        if (cause instanceof RuntimeBrokerException failure && failure.getCode().contains("conflict")) {
-                            return RuntimeBrokerSupport.<RuntimeDrainReceipt>failed(failure);
-                        }
-                        return safeStage(() -> provisioner.stopDrained(binding));
-                    }
-                    if (observation == null || observation.getOutcome() != RuntimeObservation.Outcome.READY) {
-                        return safeStage(() -> provisioner.stopDrained(binding));
-                    }
-                    RuntimeLease lease = binding.getLease();
-                    if (!binding.getResourceHandle().equals(observation.getHandle())
-                            || !lease.getRuntimeInstanceId().equals(observation.getRuntimeInstanceId())
-                            || !lease.getLeaseId().equals(observation.getLeaseId()) || lease.getEpoch() != observation.getEpoch()
-                            || !lease.getEndpoint().equals(observation.getEndpoint())) {
-                        return RuntimeBrokerSupport.<RuntimeDrainReceipt>failed(conflict("workspace_close_identity_unverified",
-                                "Original SSH worker identity changed"));
-                    }
-                    return acknowledgeDrainedTools(binding, null).thenCompose(ignored -> provisioner.stopDrained(binding));
-                }).thenCompose(stage -> stage);
-    }
-
-    private CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
+    CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
             BindingRenewal renewal) {
         return releaseSavedSession(binding, record, renewal, true);
     }
@@ -969,7 +793,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                             }
                             // Absence cannot confirm a Session release. Persist the
                             // original worker's stop receipt before releasing its rows.
-                            return stopAcknowledgedRuntime(renewal.requireDrainClaim(), renewal, null).thenAccept(receipt -> {
+                            return drainRelease.stopAcknowledgedRuntime(renewal.requireDrainClaim(), renewal, null).thenAccept(receipt -> {
                                 renewal.persistDrainReceipt(receipt);
                                 renewal.releaseStoppedSession(record);
                             });
@@ -4151,7 +3975,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         return Math.max(1, operationDeadlineMillis() / 2);
     }
 
-    private final class BindingRenewal implements AutoCloseable {
+    final class BindingRenewal implements AutoCloseable {
         // A monitor here would pin a virtual-thread carrier whenever a
         // guarded repository call blocks on the database (JDK 21);
         // the lock parks without pinning instead.
@@ -4255,11 +4079,11 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
             }
         }
 
-        private RuntimeBindingRecord requireDrainClaim() {
+        RuntimeBindingRecord requireDrainClaim() {
             return requireDrainClaim(false);
         }
 
-        private RuntimeBindingRecord requireDrainClaim(boolean stoppedRecovery) {
+        RuntimeBindingRecord requireDrainClaim(boolean stoppedRecovery) {
             var binding = current.get();
             if (closed.get() || stopped.get() || !valid.get()
                     || !brokerOwnerId.equals(binding.getOperationOwner())
