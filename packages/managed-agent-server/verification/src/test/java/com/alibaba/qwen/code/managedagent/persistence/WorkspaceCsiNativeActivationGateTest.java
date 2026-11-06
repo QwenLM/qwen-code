@@ -22,6 +22,7 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiFilesRetirementGua
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -111,8 +112,9 @@ class WorkspaceCsiNativeActivationGateTest {
             var legacy = CsiFilesRetirementProfile.request(new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
                     "tenant", "workspace", 3, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
                     "/workspace", sessionId, CsiFilesRetirementProfile.PROFILE);
-            jdbc.update("UPDATE ma_session SET tool_profile=?, runtime_request_key=? WHERE tenant_id='tenant' AND session_id=?",
-                    CsiFilesRetirementProfile.PROFILE, legacy.requestKey(), sessionId);
+            jdbc.update("UPDATE ma_session SET tool_profile=?, runtime_request_key=? WHERE tenant_id=? AND session_id=?",
+                    CsiFilesRetirementProfile.PROFILE, legacy.requestKey(),
+                    ManagedSchemaKeys.identity("tenant"), ManagedSchemaKeys.identity(sessionId));
             request = transaction.execute(status -> managed.requireCsiRequest(registration, sessionId));
         }
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));

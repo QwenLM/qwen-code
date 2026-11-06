@@ -85,6 +85,8 @@ Java 与 TypeScript 均使用饱和整数加法核对终态计数之和，包括
 
 诊断 usage 资源保持在现有 UTF-8 64 KiB inline 上限内。分配如下：统计 40 KiB、context 8 KiB、envelope 加 budget state 12 KiB、预留 4 KiB。发布前按字节落实限制，覆盖 Unicode。Overflow/截断必须显式表达。不保存原始 prompt/error 或旧 `models` 字典。Budget 的原始输出总量作为独立标量 `rawOutputTokensTotal` 保留；规范化诊断 output 不能静默替代其语义。
 
+内部 `rawOutputTokensTotal` 与 `budget.outputTokensAtTurnStart` 标量在暖恢复和冷恢复中保留有限、非负且不超过 `Number.MAX_SAFE_INTEGER` 的原始账本值，包括旧 provider 返回的小数。保持原值，不进行舍入；比较持久累计值时使用数值比较，不截为整数。公开统计投影省略这两个预算标量。规范化指标计数及快照 revision 仍为安全整数；诊断计数支持完整的安全整数上限，独立于 extension-record 的序号上限。
+
 填入实际 attempt 身份和 provider usage 后，再次落实 context 大小限制。仅用于诊断的 prepared-request observer 使用已有零 snapshot budget，同步测量临时借用的输入，不复制请求。模型窗口仅在正的安全整数时才视为已知；观察时间缺失时，UI 保持未知。
 
 使用 main/hook usage v2 资源。自动压缩随 main terminal output 或 `turn.settled` 的 usage 引用提交。新的 maintenance v2 record 携带 `modelStatsRef`；candidate 在 `PostCompact` 之前发布，让后续 Hook 从正确 baseline 继续。已有活动 v1 maintenance 链允许以部分覆盖兼容收尾。保持 `context.compacted.tokenCountsRef` 不变。不新增 native domain、Stage H 家族或请求 journal。

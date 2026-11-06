@@ -476,7 +476,8 @@ export class UiTelemetryService extends EventEmitter {
   }
 
   restoreSessionOutputTokensBaseline(sessionId: string, total: number): void {
-    if (!Number.isSafeInteger(total) || total < 0) return;
+    if (!Number.isFinite(total) || total < 0 || total > Number.MAX_SAFE_INTEGER)
+      return;
     const current = this.getTotalOutputTokens(sessionId);
     if (total > current)
       this.#sessionOutputBaselines.set(

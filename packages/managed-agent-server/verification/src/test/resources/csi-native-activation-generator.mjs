@@ -50,6 +50,7 @@ const now = () => {
 };
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const grant = () => ({
+  supportedStorageVersion: 3,
   writerGeneration,
   leaseUntil,
   journalRevision: transactions.length,

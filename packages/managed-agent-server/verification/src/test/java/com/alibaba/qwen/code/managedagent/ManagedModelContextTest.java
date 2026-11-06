@@ -158,6 +158,24 @@ class ManagedModelContextTest {
     }
 
     @Test
+    void decreasingFractionalRawOutputRollsBackTheOriginalTransaction() throws Exception {
+        var journal = open(TENANT, "raw-output-regression", true);
+        ObjectNode first = diagnosticBody("snapshot-zero", 1);
+        first.withObject("/statistics").put("rawOutputTokensTotal", 38.75);
+        commit(journal, diagnosticRequest(journal, "first", first, ManagedModelDiagnostics.STATS_KIND, "completed"));
+        long revision = records.findModelDiagnostics(TENANT, "raw-output-regression").readRevision();
+        ObjectNode next = first.deepCopy();
+        next.withObject("/statistics").put("snapshotRevision", 2).put("rawOutputTokensTotal", 38.25);
+        assertThatThrownBy(() -> commit(journal, diagnosticRequest(journal, "regressing", next,
+                ManagedModelDiagnostics.STATS_KIND, "completed"))).isInstanceOf(ManagedAgentException.class)
+                .hasMessageContaining("cannot decrease");
+        var saved = records.findModelDiagnostics(TENANT, "raw-output-regression");
+        assertThat(saved.readRevision()).isEqualTo(revision);
+        assertThat(saved.statistics().path("snapshotRevision").longValue()).isEqualTo(1);
+        assertThat(saved.statistics().path("rawOutputTokensTotal").decimalValue()).isEqualByComparingTo("38.75");
+    }
+
+    @Test
     void staleContextRemainsReadableAfterCompactionAndTheBadgeReturnsAfterTheNextModel() throws Exception {
         var journal = open(TENANT, "stale-diagnostic", true);
         commit(journal, diagnosticRequest(journal, "main", diagnosticBody("main-zero", 1), ManagedModelDiagnostics.MAIN_KIND, "output_committed"));

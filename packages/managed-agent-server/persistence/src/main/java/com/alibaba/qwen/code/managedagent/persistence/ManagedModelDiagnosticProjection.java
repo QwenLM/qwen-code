@@ -224,7 +224,7 @@ final class ManagedModelDiagnosticProjection {
 
     private static void requireMonotonicStatistics(JsonNode before, JsonNode after) {
         if (before.isNumber()) {
-            require(after.longValue() >= before.longValue(), "Cumulative model statistics cannot decrease.");
+            require(after.decimalValue().compareTo(before.decimalValue()) >= 0, "Cumulative model statistics cannot decrease.");
             return;
         }
         before.fields().forEachRemaining(field -> requireMonotonicStatistics(field.getValue(), after.get(field.getKey())));

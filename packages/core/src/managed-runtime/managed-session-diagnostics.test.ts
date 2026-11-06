@@ -144,6 +144,40 @@ function fixture(revisions: number[], maintenance = false) {
 }
 
 describe('Managed diagnostic restore', () => {
+  it('retains fractional legacy raw output when enabling diagnostics', async () => {
+    const state = fixture([1]);
+    const ref = { ...state.refs[0], kind: 'managed-hosted-model-usage' };
+    state.bytes.set(
+      ref.resourceId,
+      Buffer.from(
+        JSON.stringify({
+          version: 1,
+          models: {
+            main: { tokens: { candidates: 27 } },
+            hook: { tokens: { candidates: 11.25 } },
+          },
+        }),
+      ),
+    );
+    state.events.splice(0, state.events.length, {
+      kind: 'model.attempt',
+      payload: {
+        attemptId: 'legacy-attempt',
+        state: 'output_committed',
+        usageRef: ref,
+      },
+    });
+    await state.diagnostics.restore();
+    expect(uiTelemetryService.getTotalOutputTokens(state.sessionId)).toBe(
+      38.25,
+    );
+    await state.diagnostics.publishTurnFallback('next-turn');
+    const saved = JSON.parse(state.publish.mock.calls[0][1].toString());
+    expect(saved.statistics.rawOutputTokensTotal).toBe(38.25);
+    expect(saved.statistics.coverage.gaps).toEqual(['legacy_history']);
+    expect(saved.statistics.totals.requests.total).toBe(0);
+  });
+
   it.each(['matching', 'different-turn', 'foreign-session'] as const)(
     'keeps a cold-restored fallback budget only for its %s owner',
     async (owner) => {

@@ -315,6 +315,83 @@ describe('Managed Hook model activation', () => {
     expect(continued.statistics.rawOutputTokensTotal).toBe(12);
   });
 
+  it.each([false, true])(
+    'preserves fractional raw budgets across five turns and a reload (cold=%s)',
+    async (cold) => {
+      const initial = await fixture();
+      const { options } = initial;
+      let session = initial.session;
+      let controller = initial.controller;
+      await enableManagedSessionDiagnostics(session);
+      await createManagedHarnessHandle(session).ensureRunnable();
+      let total = 0;
+      for (const [index, output] of [8, 9, 10, 11.25, 12].entries()) {
+        if (index === 4) {
+          await session.close();
+          sessions.splice(sessions.indexOf(session), 1);
+          if (cold) uiTelemetryService.resetSession(options.sessionId);
+          session = await openManagedSession(options);
+          sessions.push(session);
+          await enableManagedSessionDiagnostics(session);
+          await enableManagedSessionDiagnostics(session);
+          controller = new ManagedHookActivationController(session);
+          expect(
+            uiTelemetryService.getTotalOutputTokens(options.sessionId),
+          ).toBe(38.25);
+        }
+        const turnId = `fractional-${index + 1}`;
+        await controller.runTurn(turnId, async (scope) => {
+          const budget = new TurnBudget();
+          await scope.bindBudget(budget, 'continue +5k');
+          expect(
+            budget.current(options.sessionId)?.outputTokensAtTurnStart,
+          ).toBe(total);
+          const complete = await scope.beginMainAttempt('main');
+          const usage = {
+            promptTokenCount: index === 3 ? 15.5 : 12 + index,
+            candidatesTokenCount: output,
+            totalTokenCount: index === 3 ? 26.75 : 20 + index * 2,
+            cachedContentTokenCount: index === 3 ? 1.25 : 0,
+            thoughtsTokenCount: index === 3 ? 3.5 : 3,
+          };
+          const observation = startModelInvocationObservation({
+            sessionId: options.sessionId,
+            executionId: randomUUID(),
+            model: 'main',
+            startedAt: Date.now(),
+            retryAttempt: 1,
+          })!;
+          observation.update(usage);
+          observation.finish('success');
+          uiTelemetryService.addEvent(
+            {
+              ...new ApiResponseEvent('r', 'main', 1, turnId, undefined, usage),
+              'event.name': EVENT_API_RESPONSE,
+            } as UiEvent,
+            options.sessionId,
+          );
+          await complete(true, []);
+        });
+        const terminal = session.authority.lastEventOfKind('model.attempt')!;
+        const saved = JSON.parse(
+          (
+            await session.resources.read(terminal.payload['usageRef'] as never)
+          ).toString(),
+        );
+        expect(saved.budget.outputTokensAtTurnStart).toBe(total);
+        total += output;
+        expect(saved.statistics.rawOutputTokensTotal).toBe(total);
+        expect(saved.statistics.totals.requests.success).toBe(index + 1);
+        expect(saved.statistics.totals.usageKnown.candidates).toBe(
+          index + 1 - (index >= 3 ? 1 : 0),
+        );
+        if (index >= 3)
+          expect(saved.statistics.coverage.gaps).toContain('missing_usage');
+      }
+      expect(total).toBe(50.25);
+    },
+  );
+
   it('preserves an unclosed attempt gap after later successful invocations', async () => {
     const { session, controller, options } = await fixture();
     await enableManagedSessionDiagnostics(session);

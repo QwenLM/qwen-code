@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.contracts.persistence;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.List;
@@ -9,7 +10,6 @@ import java.util.Set;
 import java.util.UUID;
 
 import static com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.closed;
-import static com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.count;
 import static com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.id;
 import static com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.oneOf;
 
@@ -64,7 +64,7 @@ public final class ManagedModelDiagnostics {
             id(budget.get("sessionId"), "budget.sessionId");
             id(budget.get("promptId"), "budget.promptId");
             nullableCount(budget.get("budget"), "budget.budget");
-            counter(budget.get("outputTokensAtTurnStart"), "budget.outputTokensAtTurnStart");
+            rawOutput(budget.get("outputTokensAtTurnStart"), "budget.outputTokensAtTurnStart");
         }
         requireStatistics(body.get("statistics"));
         JsonNode context = body.get("context");
@@ -83,7 +83,7 @@ public final class ManagedModelDiagnostics {
         count(statistics.get("version"), 1, 1, "statistics.version");
         count(statistics.get("snapshotRevision"), 1, MAX_SAFE, "snapshotRevision");
         counter(statistics.get("observedAt"), "observedAt");
-        counter(statistics.get("rawOutputTokensTotal"), "rawOutputTokensTotal");
+        rawOutput(statistics.get("rawOutputTokensTotal"), "rawOutputTokensTotal");
         bool(statistics.get("modelBreakdownOmitted"), "modelBreakdownOmitted");
         bool(statistics.get("samplesTruncated"), "samplesTruncated");
         closed(statistics.get("coverage"), Set.of("gaps"), "coverage");
@@ -208,6 +208,23 @@ public final class ManagedModelDiagnostics {
 
     private static void counter(JsonNode node, String field) {
         count(node, 0, MAX_SAFE, field);
+    }
+
+    private static void rawOutput(JsonNode node, String field) {
+        require(node != null && node.isNumber() && Double.isFinite(node.doubleValue())
+                && node.decimalValue().signum() >= 0
+                && node.decimalValue().compareTo(BigDecimal.valueOf(MAX_SAFE)) <= 0,
+                field + " must be a finite number from 0 to " + MAX_SAFE);
+    }
+
+    // Diagnostic counters include MAX_SAFE, unlike the extension-record count contract.
+    private static void count(JsonNode node, long min, long max, String field) {
+        BigDecimal value = node != null && node.isNumber() && Double.isFinite(node.doubleValue())
+                ? node.decimalValue() : null;
+        require(value != null && value.stripTrailingZeros().scale() <= 0
+                && value.compareTo(BigDecimal.valueOf(min)) >= 0
+                && value.compareTo(BigDecimal.valueOf(max)) <= 0,
+                field + " must be an integer from " + min + " to " + max);
     }
 
     private static void nullableCount(JsonNode node, String field) {

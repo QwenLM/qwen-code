@@ -1106,6 +1106,225 @@
         },
         "context": null
       }
+    },
+    {
+      "name": "snapshot-fractional-raw-budget",
+      "kind": "managed-session-model-stats",
+      "body": {
+        "version": 1,
+        "budget": {
+          "sessionId": "session-1",
+          "promptId": "turn-1",
+          "budget": 5000,
+          "outputTokensAtTurnStart": 27.125
+        },
+        "statistics": {
+          "version": 1,
+          "snapshotRevision": 1,
+          "observedAt": 0,
+          "rawOutputTokensTotal": 38.25,
+          "coverage": {
+            "gaps": ["legacy_history"]
+          },
+          "totals": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "sources": {
+            "main": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "hook": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "compression": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            }
+          },
+          "models": [],
+          "overflow": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "recent": [],
+          "modelBreakdownOmitted": false,
+          "samplesTruncated": false
+        },
+        "context": null
+      }
     }
   ],
   "invalid": [

@@ -52,6 +52,46 @@ describe('bounded Managed model statistics', () => {
     expect(() => parseManagedStatisticsEnvelope(kind, body)).toThrow();
   });
 
+  it.each([-1, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid raw budget values %s',
+    (value) => {
+      const statistics = createManagedModelStatistics();
+      statistics.snapshotRevision = 1;
+      const budget = {
+        sessionId: 'session-1',
+        promptId: 'turn-1',
+        budget: 5000,
+        outputTokensAtTurnStart: 0,
+      };
+      const body = { version: 1, statistics, budget, context: null };
+      statistics.rawOutputTokensTotal = value;
+      expect(() =>
+        parseManagedStatisticsEnvelope('managed-session-model-stats', body),
+      ).toThrow('rawOutputTokensTotal');
+      statistics.rawOutputTokensTotal = 0;
+      budget.outputTokensAtTurnStart = value;
+      expect(() =>
+        parseManagedStatisticsEnvelope('managed-session-model-stats', body),
+      ).toThrow('outputTokensAtTurnStart');
+    },
+  );
+
+  it('keeps normalized counters and revisions integral with fractional raw usage', () => {
+    const statistics = createManagedModelStatistics();
+    statistics.snapshotRevision = 1;
+    statistics.rawOutputTokensTotal = 38.25;
+    const body = { version: 1, statistics, budget: null, context: null };
+    statistics.totals.tokens.candidates = 11.25;
+    expect(() =>
+      parseManagedStatisticsEnvelope('managed-session-model-stats', body),
+    ).toThrow('tokens.candidates');
+    statistics.totals.tokens.candidates = 0;
+    statistics.snapshotRevision = 1.5;
+    expect(() =>
+      parseManagedStatisticsEnvelope('managed-session-model-stats', body),
+    ).toThrow('snapshotRevision');
+  });
+
   it('counts invocations independently of business parsing, and preserves unknown token fields', () => {
     const statistics = createManagedModelStatistics();
     recordManagedModelObservation(

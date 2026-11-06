@@ -214,8 +214,9 @@ export class ManagedSessionDiagnostics {
       const total = Object.values(saved.models ?? {}).reduce((sum, model) => {
         const count = model.tokens?.candidates;
         return typeof count === 'number' &&
-          Number.isSafeInteger(count) &&
-          count >= 0
+          Number.isFinite(count) &&
+          count >= 0 &&
+          count <= Number.MAX_SAFE_INTEGER
           ? Math.min(Number.MAX_SAFE_INTEGER, sum + count)
           : sum;
       }, 0);

@@ -125,3 +125,13 @@ WebShell trace 请求现拒绝未知字段，limit/cursor 限制与 OpenAPI 一�
 静态集成复核保留上游共享 JDBC helper、摘要实现和锁范围，以及两个 CSI profile、诊断预算和恢复修正。不重新启动 Java 验证；共享账本保持 599.08/600 秒。此前成功检查仅在测试输入不变时继续作为证据；更新后的 TypeScript 基础及受影响消费者在发布刷新分支前进行定向验证。
 
 刷新后的代码通过完整根目录 TypeScript build、根目录 typecheck（含 integration 消费者）、bundle、Core restore/Hook/sink 66 项及本地 journal snapshot 30 项、CLI 诊断消费者 210 项及所选基础工具/恢复分支 21 项（明确未选 1,336 项），以及 host-asset 交接元测试 3 项（明确未选 78 项）。首次 Core 选择器误将 journal 文件放在另一目录下，因此仅运行 66 项；修正选择器后单独运行全部 30 项 journal 用例。诊断浏览器 fixture 不挂载变更后的 Sidebar，page/Dialog/Tabs 源码不变，因此此前受控布局 2/2 证据仍有效，未重复执行。WebShell 与 capability-parity 证据同样仅在消费者未变时复用。所有新增 Java 和真实 Hosted/fault 检查仍等待发布 head 的 CI。
+
+## 12. Java CI 边界与 producer 修正
+
+在 `30a7e354f7` 上，fast H2 suite 实际执行 6,387 项，报告两个失败、一个 setup 错误和 17 个跳过。路由 capture、受保护 SQL ownership 门禁、model context suite、真实 Hosted files 用例及 CSI binding guard 定向用例分别通过，但整体 suite 仍失败。失败暴露：诊断安全整数上限被无关的 extension-record count helper 静默截低、legacy 测试使用文本 SQL 字面量比较二进制 tenant 列，以及 native producer collector 的 grant 未声明支持的 storage version。修正保留 extension-record 序号契约，显式绑定二进制 tenant/Session 身份，并声明 collector 支持 storage 3，同时保留初始持久 floor 1。
+
+随后，仅用 Node 复现完整 legacy producer 时发现第四个失败：小数 usage 样本之后，原始输出账本被新增诊断的整数约束拒绝。原始预算值现按有限、非负的原始数值保留小数，在发布及暖/冷恢复时保持一致；规范化 token 计数仍为整数。Java 累计比较保留小数顺序。变更仅涉及内部 carrier，公开投影继续省略原始预算标量。原有五回合样本及真实 Java profile 拒绝断言保持。
+
+修正通过 142 项受影响 Core 测试和定向 ESLint，随后完整根目录 TypeScript build、typecheck、bundle 均通过，退出状态已记录。五回合暖/冷恢复单元回归保留下一 Turn 的 38.25 baseline 和最终 50.25 原始总量。独立使用 Node 22 执行未改动的五回合 producer 成功，记录五次真实 loopback 模型请求；由于其中包含预期的工具拒绝，其保留的原始 baseline 为 28.25，最终原始总量为 40.25。规范化统计保留五次请求、四次成功、一次中断及 usage 缺失覆盖。此前通过的两回合 `/2` producer 与关闭诊断的 `/1` 控制用例证据仍适用，未重复执行。
+
+共享本地 Java 账本仍为 599.08/600 秒。不重新启动 Maven、Java 或 MySQL 验证。Java 计数、精度及二进制 key 回归等待新 head CI；Node producer 检查仅证明夹具生成，不证明 Java admission 或退休行为。

@@ -183,6 +183,16 @@ function count(value: unknown, label: string): asserts value is number {
     fail(label);
 }
 
+function rawTokens(value: unknown, label: string): asserts value is number {
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > Number.MAX_SAFE_INTEGER
+  )
+    fail(label);
+}
+
 function counts(value: unknown, keys: readonly string[], label: string) {
   const record = closed(value, keys, label);
   for (const key of keys) count(record[key], label + '.' + key);
@@ -296,7 +306,7 @@ export function parseManagedModelStatistics(
   count(s['snapshotRevision'], 'snapshotRevision');
   if (s['snapshotRevision'] < 1) fail('snapshotRevision');
   count(s['observedAt'], 'observedAt');
-  count(s['rawOutputTokensTotal'], 'rawOutputTokensTotal');
+  rawTokens(s['rawOutputTokensTotal'], 'rawOutputTokensTotal');
   const gaps = closed(s['coverage'], ['gaps'], 'coverage')['gaps'];
   if (
     !Array.isArray(gaps) ||
@@ -510,7 +520,7 @@ export function parseManagedStatisticsEnvelope(
     text(b['sessionId'], 'budget sessionId', 512);
     text(b['promptId'], 'budget promptId', 512);
     if (b['budget'] !== null) count(b['budget'], 'budget');
-    count(b['outputTokensAtTurnStart'], 'outputTokensAtTurnStart');
+    rawTokens(b['outputTokensAtTurnStart'], 'outputTokensAtTurnStart');
   }
   parseManagedModelStatistics(e['statistics']);
   if (e['context'] !== null) {
