@@ -225,7 +225,7 @@ public class WorkspaceExecutionStore
     }
 
     public boolean isExternal(ContextBinding binding) {
-        return JdbcRuntimeBindingRepository.externalStorage(jdbc, binding);
+        return JdbcExternalWorkspaceOwnership.externalStorage(jdbc, binding);
     }
 
     public void authorizeExternal(SessionRecord session,
@@ -332,7 +332,7 @@ public class WorkspaceExecutionStore
             if (context != null && !context.equals(saved)) {
                 throw unavailable();
             }
-            JdbcRuntimeBindingRepository.requireExternalHarnessAdmission(connection, binding.getRequest(), scope, !acquiring);
+            JdbcExternalWorkspaceOwnership.requireExternalHarnessAdmission(connection, binding.getRequest(), scope, !acquiring);
             if (claimDriftRetryable) {
                 JdbcExternalWorkspaceOwnership.requireUnchangedClaimOrRetry(connection, original, binding);
             }

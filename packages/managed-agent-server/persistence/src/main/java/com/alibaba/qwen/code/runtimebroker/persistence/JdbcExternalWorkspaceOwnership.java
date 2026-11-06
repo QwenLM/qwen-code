@@ -4,6 +4,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAdmission;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
+import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -339,6 +341,46 @@ public final class JdbcExternalWorkspaceOwnership {
             }
         }
         requireStopped(connection, current, claim, session);
+    }
+
+    /** Stopped-release prelude: owner lock, saved-context proof, harness admission, in that order. */
+    public static Owner lockStoppedRelease(Connection connection, RuntimeBindingRecord claim) throws SQLException {
+        Owner owner = lockOwner(connection, claim);
+        savedContext(connection, claim, false);
+        requireExternalHarnessAdmission(connection, claim.getRequest(), claim.getRequest().getScope(), true);
+        return owner;
+    }
+
+    /** Stopped-release member dispatch: the EXTERNAL receipt-backed release or the local member clear. */
+    public static void releaseStoppedMember(Connection connection, boolean external, Owner externalOwner,
+            RuntimeBindingRecord binding, RuntimeBindingRecord claim, RuntimeSessionRecord expected, String physical) throws SQLException {
+        if (external) {
+            releaseStopped(connection, externalOwner, binding, claim, expected);
+        } else if (physical != null) {
+            JdbcRuntimeBindingRepository.clearStoppedMember(connection, physical, expected);
+        }
+    }
+
+    public static void requireExternalHarnessAdmission(Connection connection, RuntimeProvisionRequest request,
+            RuntimeScope scope, boolean cleanup) throws SQLException {
+        if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)
+                || !request.getScope().equals(scope)) {
+            throw JdbcRuntimeBindingRepository.unverifiedWorkspaceHolder();
+        }
+        JdbcRuntimeBindingRepository.requireHarnessAdmission(connection, scope, request.getIsolationKey(),
+                scope.getLifecycleAuthority(), cleanup
+                        ? JdbcRuntimeBindingRepository.fence(false, JdbcRuntimeBindingRepository.HarnessFence.CLEANUP, JdbcRuntimeBindingRepository.HarnessFence.RETIREMENT)
+                        : JdbcRuntimeBindingRepository.fence(false));
+    }
+
+    /**
+     * The single read of "is this storage registered as EXTERNAL?"; admission and
+     * authorization must not drift apart on this answer.
+     */
+    public static boolean externalStorage(org.springframework.jdbc.core.JdbcTemplate jdbc,
+            com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding binding) {
+        return binding != null && jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE alias_key = ?",
+                String.class, JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId())).contains("EXTERNAL");
     }
 
     private static void requireStopped(Connection connection, RuntimeBindingRecord current,

@@ -55,7 +55,7 @@ public class ManagedWorkspaceRegistry
     }
 
     public boolean isExternal(ContextBinding binding) {
-        return com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.externalStorage(jdbc, binding);
+        return com.alibaba.qwen.code.runtimebroker.persistence.JdbcExternalWorkspaceOwnership.externalStorage(jdbc, binding);
     }
 
     public boolean externalFilesAllowed(ContextBinding binding) {
