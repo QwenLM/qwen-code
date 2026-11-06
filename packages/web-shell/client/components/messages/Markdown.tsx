@@ -925,7 +925,8 @@ function MarkdownLink({
         }
         onClick={(event) => {
           const root = event.currentTarget.getRootNode() as
-            Document | ShadowRoot;
+            | Document
+            | ShadowRoot;
           const target = root.getElementById(href.slice(1));
           if (!target) return;
           event.preventDefault();

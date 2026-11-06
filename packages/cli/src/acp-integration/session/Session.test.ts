@@ -3066,9 +3066,11 @@ describe('Session', () => {
 
   it('serializes concurrent workflow approvals for single-flight ACP clients', async () => {
     let resolveFirst:
-      ((response: RequestPermissionResponse) => void) | undefined;
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
     let resolveSecond:
-      ((response: RequestPermissionResponse) => void) | undefined;
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
     vi.mocked(mockClient.requestPermission)
       .mockImplementationOnce(
         () =>
@@ -3133,9 +3135,11 @@ describe('Session', () => {
 
   it('does not serialize permissions across sessions sharing one ACP connection', async () => {
     let settleFirst:
-      ((response: RequestPermissionResponse) => void) | undefined;
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
     let settleSecond:
-      ((response: RequestPermissionResponse) => void) | undefined;
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
     vi.mocked(mockClient.requestPermission)
       .mockImplementationOnce(
         () =>
@@ -3234,7 +3238,8 @@ describe('Session', () => {
 
   it('advances the permission queue when a request is aborted without waiting for the orphaned RPC', async () => {
     let settleFirstTransport:
-      ((response: RequestPermissionResponse) => void) | undefined;
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
     vi.mocked(mockClient.requestPermission)
       .mockImplementationOnce(
         () =>
@@ -3281,7 +3286,8 @@ describe('Session', () => {
 
   it('drops a queued permission request that was abandoned before the head settled', async () => {
     let settleFirst:
-      ((response: RequestPermissionResponse) => void) | undefined;
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
     vi.mocked(mockClient.requestPermission)
       .mockImplementationOnce(
         () =>
@@ -4375,7 +4381,8 @@ describe('Session', () => {
   it('attributes a delayed title notification to the persisted record session', () => {
     const callback = mockChatRecordingService.setTitleRecordedCallback.mock
       .calls[0]?.[0] as
-      ((title: string, source: string, sessionId: string) => void) | undefined;
+      | ((title: string, source: string, sessionId: string) => void)
+      | undefined;
 
     callback?.('Durable title', 'auto', 'persisted-session-id');
 
@@ -7152,8 +7159,9 @@ describe('Session', () => {
       }
       mockToolRegistry.getTool.mockReturnValue(agentTool);
       if (agentToolName === core.ToolNames.TOOL_CALL) {
-        const { ToolCallTool } =
-          await import('@qwen-code/qwen-code-core/tools/tool-call.js');
+        const { ToolCallTool } = await import(
+          '@qwen-code/qwen-code-core/tools/tool-call.js'
+        );
         const bridge = new ToolCallTool();
         const findTool = (name: string) =>
           name === core.ToolNames.TOOL_CALL
@@ -7224,7 +7232,8 @@ describe('Session', () => {
         } = await import('@qwen-code/qwen-code-core/tools/tool-call.js');
         const error = (
           produced.parts[0]?.functionResponse?.response as
-            { error?: string } | undefined
+            | { error?: string }
+            | undefined
         )?.error;
         expect(error).toEqual(expect.any(String));
         expect(produced.repeatedToolFailureBatch?.observations).toEqual([
@@ -8081,7 +8090,8 @@ describe('Session', () => {
     };
     const isWorkflowRunLiveInSiblingSession = (runId: string): boolean => {
       const entry = siblingRegistry.get(runId) as
-        { status: core.WorkflowStatus } | undefined;
+        | { status: core.WorkflowStatus }
+        | undefined;
       if (entry && !core.isTerminalWorkflowStatus(entry.status)) return true;
       return siblingRegistry.getHandle(runId) !== undefined;
     };
@@ -13153,9 +13163,11 @@ describe('Session', () => {
           if (key !== 'model.reasoningEffort') return;
           const target = scope === SettingScope.Workspace ? workspace : user;
           target.settings.model.reasoningEffort = value as
-            typeof selection | undefined;
+            | typeof selection
+            | undefined;
           target.originalSettings.model.reasoningEffort = value as
-            typeof selection | undefined;
+            | typeof selection
+            | undefined;
           mockSettings.recomputeMerged();
         },
       );
@@ -19512,7 +19524,8 @@ describe('Session', () => {
         (params) =>
           (
             params.update._meta?.['backgroundTask'] as
-              { turnId?: string } | undefined
+              | { turnId?: string }
+              | undefined
           )?.turnId,
       );
       expect(responseTurnIds[0]).toMatch(
@@ -19690,7 +19703,8 @@ describe('Session', () => {
       const terminalUpdateIndex = interceptUpdate.mock.calls.findIndex(
         ([update]) => {
           const backgroundTask = update._meta?.['backgroundTask'] as
-            { turnComplete?: boolean } | undefined;
+            | { turnComplete?: boolean }
+            | undefined;
           return (
             update._meta?.['source'] === 'background_notification_response' &&
             backgroundTask?.turnComplete === true
@@ -19784,7 +19798,8 @@ describe('Session', () => {
             update as { content?: { type?: string; text?: string } }
           ).content;
           const backgroundTask = update._meta?.['backgroundTask'] as
-            { turnComplete?: boolean } | undefined;
+            | { turnComplete?: boolean }
+            | undefined;
           return (
             content?.type === 'text' &&
             content.text === '' &&
@@ -19911,7 +19926,8 @@ describe('Session', () => {
       const markerIndex = sessionUpdate.mock.calls.findIndex(([params]) => {
         const update = (params as SessionNotification).update;
         const backgroundTask = update._meta?.['backgroundTask'] as
-          { turnComplete?: boolean; partial?: boolean } | undefined;
+          | { turnComplete?: boolean; partial?: boolean }
+          | undefined;
         return (
           update._meta?.['source'] === 'background_notification_response' &&
           backgroundTask?.turnComplete === true &&
@@ -20047,7 +20063,8 @@ describe('Session', () => {
       const markerIndex = sessionUpdate.mock.calls.findIndex(([params]) => {
         const update = (params as SessionNotification).update;
         const backgroundTask = update._meta?.['backgroundTask'] as
-          { turnComplete?: boolean; partial?: boolean } | undefined;
+          | { turnComplete?: boolean; partial?: boolean }
+          | undefined;
         return (
           update._meta?.['source'] === 'background_notification_response' &&
           backgroundTask?.turnComplete === true &&
@@ -20976,7 +20993,8 @@ describe('Session', () => {
           update as { content?: { type?: string; text?: string } }
         ).content;
         const backgroundTask = update._meta?.['backgroundTask'] as
-          { partial?: boolean; turnComplete?: boolean } | undefined;
+          | { partial?: boolean; turnComplete?: boolean }
+          | undefined;
         return (
           content?.type === 'text' &&
           content.text === '' &&
@@ -24131,8 +24149,9 @@ describe('Session', () => {
           mockConfig.getApprovalMode = vi
             .fn()
             .mockReturnValue(ApprovalMode.YOLO);
-          const { ToolCallTool } =
-            await import('@qwen-code/qwen-code-core/tools/tool-call.js');
+          const { ToolCallTool } = await import(
+            '@qwen-code/qwen-code-core/tools/tool-call.js'
+          );
           const bridge = new ToolCallTool();
           const targets = names.map((name) => ({
             name,
@@ -24193,8 +24212,9 @@ describe('Session', () => {
       it.each(['success', 'build error', 'execute error'] as const)(
         'routes tool_call through a hidden deferred tool in ACP: %s',
         async (outcome) => {
-          const { DEFERRED_TOOL_CALL_REFUSAL_PREFIX } =
-            await import('@qwen-code/qwen-code-core/tools/tool-call.js');
+          const { DEFERRED_TOOL_CALL_REFUSAL_PREFIX } = await import(
+            '@qwen-code/qwen-code-core/tools/tool-call.js'
+          );
           mockConfig.getApprovalMode = vi
             .fn()
             .mockReturnValue(ApprovalMode.YOLO);
@@ -34804,7 +34824,8 @@ describe('Session', () => {
         mockConfig.getWorkingDir = vi.fn(() => currentRoot);
 
         let fire:
-          ((job: { prompt: string; cronExpr?: string }) => void) | undefined;
+          | ((job: { prompt: string; cronExpr?: string }) => void)
+          | undefined;
         const scheduler = {
           size: 1,
           hasPendingWork: true,
@@ -37729,7 +37750,8 @@ describe('Session', () => {
           subscribe: vi.fn().mockReturnValue(() => {}),
         };
         let capturedHooks:
-          { startNewSession?: (sessionId: string) => void } | undefined;
+          | { startNewSession?: (sessionId: string) => void }
+          | undefined;
         vi.mocked(
           nonInteractiveCliCommands.handleSlashCommand,
         ).mockImplementationOnce(
@@ -47735,8 +47757,9 @@ describe('Session', () => {
 
     describe('tool call concurrency', () => {
       it('keeps bridged Goal calls sequential', async () => {
-        const { ToolCallTool } =
-          await import('@qwen-code/qwen-code-core/tools/tool-call.js');
+        const { ToolCallTool } = await import(
+          '@qwen-code/qwen-code-core/tools/tool-call.js'
+        );
         const bridge = new ToolCallTool();
         const order: string[] = [];
         const goal = {
@@ -47817,8 +47840,9 @@ describe('Session', () => {
         // stale recorded fingerprint (the tool changed since tool_search
         // returned it) must refuse the call rather than run arguments
         // written against a schema the model no longer has.
-        const { ToolCallTool } =
-          await import('@qwen-code/qwen-code-core/tools/tool-call.js');
+        const { ToolCallTool } = await import(
+          '@qwen-code/qwen-code-core/tools/tool-call.js'
+        );
         const bridge = new ToolCallTool();
         const execute = vi.fn().mockResolvedValue({
           llmContent: 'agent done',
@@ -47901,8 +47925,9 @@ describe('Session', () => {
         // Driver: the first resolution's ensureTool aborts the turn, so a
         // batch of two bridged delegations resolves exactly one with the
         // gate and both without it.
-        const { ToolCallTool } =
-          await import('@qwen-code/qwen-code-core/tools/tool-call.js');
+        const { ToolCallTool } = await import(
+          '@qwen-code/qwen-code-core/tools/tool-call.js'
+        );
         const bridge = new ToolCallTool();
         const execute = vi.fn().mockResolvedValue({
           llmContent: 'agent done',
@@ -48159,8 +48184,9 @@ describe('Session', () => {
               name === callName ? agentTool : undefined,
             );
             if (callName === core.ToolNames.TOOL_CALL) {
-              const { ToolCallTool } =
-                await import('@qwen-code/qwen-code-core/tools/tool-call.js');
+              const { ToolCallTool } = await import(
+                '@qwen-code/qwen-code-core/tools/tool-call.js'
+              );
               const bridge = new ToolCallTool();
               const findTool = (name: string) =>
                 name === core.ToolNames.TOOL_CALL
@@ -48277,8 +48303,9 @@ describe('Session', () => {
         // the envelope; every production session has a non-null PM. The
         // deny arm is pinned elsewhere — this pins the allow arm: resolution
         // must still happen and the bridged delegations must fan out.
-        const { ToolCallTool } =
-          await import('@qwen-code/qwen-code-core/tools/tool-call.js');
+        const { ToolCallTool } = await import(
+          '@qwen-code/qwen-code-core/tools/tool-call.js'
+        );
         const bridge = new ToolCallTool();
         const isToolEnabled = vi.fn().mockResolvedValue(true);
         mockConfig.getPermissionManager = vi.fn().mockReturnValue({

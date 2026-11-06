@@ -5152,16 +5152,16 @@ export class Session implements SessionContext {
     // only executing turns so it can reopen and let those queues progress.
     return Boolean(
       this.mcpAppCalls.size > 0 ||
-      this.pendingPrompt ||
-      this.historyMutationActive ||
-      this.pendingPromptCompletion ||
-      this.goalProcessing ||
-      this.cronProcessing ||
-      this.cronAbortController ||
-      this.cronCompletion ||
-      this.notificationProcessing ||
-      this.notificationAbortController ||
-      this.notificationCompletion,
+        this.pendingPrompt ||
+        this.historyMutationActive ||
+        this.pendingPromptCompletion ||
+        this.goalProcessing ||
+        this.cronProcessing ||
+        this.cronAbortController ||
+        this.cronCompletion ||
+        this.notificationProcessing ||
+        this.notificationAbortController ||
+        this.notificationCompletion,
     );
   }
 
@@ -5714,7 +5714,8 @@ export class Session implements SessionContext {
       const { rewindId } = content as Content & { rewindId?: unknown };
       if (rewindId === undefined) return;
       const copy = restored[index] as
-        (Content & { rewindId?: unknown }) | undefined;
+        | (Content & { rewindId?: unknown })
+        | undefined;
       if (!copy) return;
       delete copy.rewindId;
       markApiHistoryPrompt(copy, getApiHistoryPromptId(content) ?? rewindId);
@@ -6740,13 +6741,13 @@ export class Session implements SessionContext {
         historyMutation: this.historyMutationActive,
         notification: Boolean(
           this.notificationProcessing ||
-          this.notificationAbortController ||
-          this.notificationCompletion,
+            this.notificationAbortController ||
+            this.notificationCompletion,
         ),
         cron: Boolean(
           this.cronProcessing ||
-          this.cronAbortController ||
-          this.cronCompletion,
+            this.cronAbortController ||
+            this.cronCompletion,
         ),
         goal: this.goalProcessing,
       });
@@ -8214,7 +8215,8 @@ export class Session implements SessionContext {
                   ? null
                   : this.#createMessageDisplayDispatcher(pendingSend.signal);
                 let channelDeliveryResponseBlock:
-                  ChannelDeliveryResponseBlock | undefined;
+                  | ChannelDeliveryResponseBlock
+                  | undefined;
                 let channelDeliveryCheckpoint = 0;
                 // The send result assigns this before any read; null-stream
                 // paths return before the record site, so a pre-send route
@@ -9947,7 +9949,8 @@ export class Session implements SessionContext {
         pendingSend.signal,
       );
       let channelDeliveryResponseBlock:
-        ChannelDeliveryResponseBlock | undefined;
+        | ChannelDeliveryResponseBlock
+        | undefined;
       let channelDeliveryCheckpoint = 0;
       let providerSendChat: LlmChat | undefined;
       let userContentPushCountBeforeSend = 0;
@@ -13125,7 +13128,8 @@ export class Session implements SessionContext {
                   if (!responseStream) return;
                   const requestRouteKey = sendResult.requestRouteKey;
                   const channelDeliveryResponseBlock:
-                    ChannelDeliveryResponseBlock | undefined =
+                    | ChannelDeliveryResponseBlock
+                    | undefined =
                     beginChannelDeliveryResponseBlock(responseCapture);
                   const channelDeliveryCheckpoint =
                     channelDeliveryResponseBlock?.parts.length ?? 0;
@@ -13954,7 +13958,7 @@ export class Session implements SessionContext {
       getInvocationContext()?.promptId ??
       promptId;
     const parts: Part[] = [];
-    for (let index = 0; index < this.notificationQueue.length;) {
+    for (let index = 0; index < this.notificationQueue.length; ) {
       const item = this.notificationQueue[index];
       if (item.sourceTurnId !== turnId) {
         index++;
@@ -16867,7 +16871,8 @@ export class Session implements SessionContext {
     let removeAgentToolAbortPropagation: (() => void) | undefined;
     let todoPlanApprovalGeneration: number | undefined;
     let todoPlanApprovalRevision:
-      { planId: string; sourceCallId: string } | undefined;
+      | { planId: string; sourceCallId: string }
+      | undefined;
     let subAgentCleanupFunctions: Array<() => void> = [];
 
     const cleanupSubAgentTracking = () => {
@@ -19149,7 +19154,8 @@ export class Session implements SessionContext {
                       .map((part) => part.functionResponse)
                       .find((part) => part?.id === nestedCallId);
                     const response = functionResponse?.response as
-                      Record<string, unknown> | undefined;
+                      | Record<string, unknown>
+                      | undefined;
                     const nestedError = response?.['error'];
                     onResult?.({
                       callId: nestedCallId,
@@ -19418,8 +19424,9 @@ export class Session implements SessionContext {
             // iconvHelper's top-level iconv-lite import, its ~550 KB of
             // encoding tables — into the ACP agent's static closure
             // (scripts/check-serve-fast-path-bundle.js enforces that).
-            const { collectModelPolicyCall } =
-              await import('@qwen-code/qwen-code-core/omniPolicyCollection');
+            const { collectModelPolicyCall } = await import(
+              '@qwen-code/qwen-code-core/omniPolicyCollection'
+            );
             await collectModelPolicyCall({
               config: this.config,
               batch: {
@@ -19563,8 +19570,9 @@ export class Session implements SessionContext {
           if (this.config.isOmniEnabled?.()) {
             // Dynamic import: keeps omni out of the ACP static closure
             // (serve fast-path bundle-closure CI check).
-            const { processToolResultOmniMedia } =
-              await import('@qwen-code/qwen-code-core/omni');
+            const { processToolResultOmniMedia } = await import(
+              '@qwen-code/qwen-code-core/omni'
+            );
             responseParts = await processToolResultOmniMedia(
               responseParts,
               this.config,
