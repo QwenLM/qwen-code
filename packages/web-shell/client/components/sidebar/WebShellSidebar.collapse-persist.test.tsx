@@ -251,6 +251,133 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       );
     },
   );
+  it('moves the session search beside the activity toggle in the top row', async () => {
+    renderSidebar();
+    await flushSidebar();
+
+    const topRow = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.topRow}`,
+    );
+    expect(topRow).not.toBeNull();
+    const search = topRow!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    const activity = topRow!.querySelector<HTMLButtonElement>(
+      'button[aria-label="View activity"]',
+    );
+    expect(search).not.toBeNull();
+    expect(activity).not.toBeNull();
+    expect(search!.parentElement).toBe(activity!.parentElement);
+
+    const projectsHeader = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.projectsHeader}`,
+    );
+    expect(projectsHeader).not.toBeNull();
+    expect(
+      projectsHeader!.querySelector('button[aria-label="Search sessions"]'),
+    ).toBeNull();
+
+    click(search!);
+    await flushSidebar();
+    expect(
+      topRow!.querySelector('input[aria-label="Search sessions"]'),
+    ).not.toBeNull();
+  });
+  it('hides the session search while the activity view is open', async () => {
+    renderSidebar();
+    await flushSidebar();
+
+    const activity = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="View activity"]',
+    );
+    expect(activity).not.toBeNull();
+    act(() => click(activity!));
+    await flushSidebar();
+
+    expect(
+      container.querySelector('button[aria-label="Search sessions"]'),
+    ).toBeNull();
+    const close = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close activity view"]',
+    );
+    expect(close).not.toBeNull();
+    act(() => click(close!));
+    await flushSidebar();
+    expect(
+      container.querySelector('button[aria-label="Search sessions"]'),
+    ).not.toBeNull();
+  });
+  it('drops the search field below the icon row in the mobile drawer', async () => {
+    renderSidebar(false, { mobileOpen: true });
+    await flushSidebar();
+
+    const topRow = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.topRow}`,
+    );
+    const search = topRow!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(search).not.toBeNull();
+    act(() => click(search!));
+    await flushSidebar();
+
+    expect(
+      topRow!.querySelector('input[aria-label="Search sessions"]'),
+    ).toBeNull();
+    const row = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.topRowSearchRow}`,
+    );
+    expect(row).not.toBeNull();
+    expect(
+      row!.querySelector('input[aria-label="Search sessions"]'),
+    ).not.toBeNull();
+  });
+  it('drops the search field below the icon row in a narrow column', async () => {
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '276');
+    renderSidebar(false, { layout: 'rail' });
+    await flushSidebar();
+
+    const topRow = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.topRow}`,
+    );
+    const search = topRow!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(search).not.toBeNull();
+    act(() => click(search!));
+    await flushSidebar();
+
+    expect(
+      topRow!.querySelector('input[aria-label="Search sessions"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector(`.${sidebarStyles.topRowSearchRow}`),
+    ).not.toBeNull();
+  });
+  it('keeps the session search in the Channels section header', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_source_metadata', 'session_organization'],
+    };
+    workspace.capabilities = connection.capabilities;
+    renderSidebar(false, { layout: 'rail', activePage: 'channels' });
+    await flushSidebar();
+
+    const header = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.sectionHeader}`,
+    );
+    expect(header).not.toBeNull();
+    expect(header!.textContent).toContain('Channels');
+    const search = header!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(search).not.toBeNull();
+    act(() => click(search!));
+    await flushSidebar();
+    expect(
+      header!.querySelector('input[aria-label="Search sessions"]'),
+    ).not.toBeNull();
+  });
   it('uses drawer constraints and closes mobile without persisting desktop collapse', async () => {
     const onCollapsedChange = vi.fn();
     const onMobileClose = vi.fn();
