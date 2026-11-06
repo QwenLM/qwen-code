@@ -596,22 +596,37 @@ const pathProperty = {
   description:
     'Path relative to the saved Session working directory in its remote Workspace. Never use the Harness host path.',
 };
-export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
-  {
-    name: 'read_file',
-    description:
-      'Read a file in the remote Workspace. Read before editing an existing file.',
-    parametersJsonSchema: {
-      type: 'object',
-      properties: {
-        file_path: pathProperty,
-        offset: { type: 'integer', minimum: 0 },
-        limit: { type: 'integer', minimum: 1 },
+const HOSTED_READ_FILE_TOOL = {
+  name: 'read_file',
+  description:
+    'Read a file in the remote Workspace. Read before editing an existing file.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      file_path: pathProperty,
+      offset: { type: 'integer', minimum: 0 },
+      limit: { type: 'integer', minimum: 1 },
+    },
+    required: ['file_path'],
+    additionalProperties: false,
+  },
+};
+const HOSTED_PAGED_READ_FILE_TOOL: FunctionDeclaration = {
+  ...HOSTED_READ_FILE_TOOL,
+  parametersJsonSchema: {
+    ...HOSTED_READ_FILE_TOOL.parametersJsonSchema,
+    properties: {
+      ...HOSTED_READ_FILE_TOOL.parametersJsonSchema.properties,
+      pages: {
+        type: ['string', 'null'],
+        description:
+          "Optional PDF page range to extract as text, such as '3' or '1-5'. Pages start at 1; at most 20 pages per request. Open-ended ranges are unsupported. Omit or set to null for other files.",
       },
-      required: ['file_path'],
-      additionalProperties: false,
     },
   },
+};
+export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
+  HOSTED_READ_FILE_TOOL,
   {
     name: 'write_file',
     description:
@@ -715,7 +730,7 @@ const HOSTED_GLOB_TOOL: FunctionDeclaration = {
     additionalProperties: false,
   },
 };
-// #15076: `todo_write`, declared only on `files/3`. The Harness persists
+// `todo_write` is declared on `files/3` and `shell/1`. The Harness persists
 // the Session list without writing a Workspace file. `web_fetch` is not part
 // of this declaration: `main` adds it to the same files lane under its own argument
 // and destination checks, so this array appends only the todo tool.
@@ -764,16 +779,10 @@ export const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
 };
 // #13753 I3: the read profile of a snapshot child, which reads a frozen copy
 // of its parent's Workspace. Nothing here writes, and the turn refuses any
-// call it does not declare. A missing read_file stops the module loading:
-// spreading a failed lookup would silently declare a tool with no name.
-const HOSTED_READ_FILE_TOOL = HOSTED_WORKSPACE_FILE_TOOLS.find(
-  (tool) => tool.name === 'read_file',
-);
-if (HOSTED_READ_FILE_TOOL === undefined)
-  throw new Error('Hosted Workspace file tools no longer declare read_file.');
+// call it does not declare.
 export const HOSTED_WORKSPACE_READ_TOOLS: FunctionDeclaration[] = [
   {
-    ...HOSTED_READ_FILE_TOOL,
+    ...HOSTED_PAGED_READ_FILE_TOOL,
     description:
       "Read a file in this read-only snapshot of the parent's Workspace, taken when this child started. Files cannot be changed and commands cannot run here.",
   },
@@ -2095,13 +2104,11 @@ export class HostedWorkspaceToolTurn {
     return !this.mcp || this.profile === 'hosted-workspace-shell/1';
   }
 
-  /**
-   * #15076: whether this Session's profile declares `todo_write`. Only the
-   * `/3` profiles do; every earlier profile keeps its exact vocabulary, so
-   * the turn refuses the name there.
-   */
   private declaresTodoTool(): boolean {
-    return this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3;
+    return (
+      this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE
+    );
   }
 
   private questionsAdmitted(): boolean {
@@ -2230,8 +2237,6 @@ export class HostedWorkspaceToolTurn {
     // board commands — resolved once, both declarations follow it.
     const memberCommands = await this.memberCommandsDeclared();
     const skill = this.skills?.declaration();
-    // #15076: only a `/3` profile declares `todo_write`, so every earlier
-    // profile keeps the exact array it has always declared.
     const todoTool = this.declaresTodoTool();
     this.advertised = [
       ...[
@@ -2243,7 +2248,10 @@ export class HostedWorkspaceToolTurn {
       ]
         .filter((tool) => tool.name !== 'monitor' || this.monitorsAdmitted())
         .map((declaration) => {
-          let tool = declaration;
+          let tool =
+            declaration.name === 'read_file'
+              ? HOSTED_PAGED_READ_FILE_TOOL
+              : declaration;
           if (
             tool.name === 'run_shell_command' &&
             !this.backgroundShellAdmitted()
@@ -5782,7 +5790,9 @@ export class HostedWorkspaceToolTurn {
                   error:
                     `Tool execution settled as ${result.executionStatus}, but its output exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte durable Session limit and was omitted.` +
                     (request.call.name === 'read_file'
-                      ? ' Request a smaller offset/limit range.'
+                      ? this.residentWorkspace
+                        ? ' Request a smaller offset/limit range.'
+                        : ' Request a smaller offset/limit range for text, or a smaller pages range for PDFs.'
                       : ''),
                   executionStatus: result.executionStatus,
                   outputOmitted: true,

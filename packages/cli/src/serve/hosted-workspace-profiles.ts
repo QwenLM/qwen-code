@@ -62,6 +62,7 @@ export function hostedShellLaneAttachesChildAgents(
 /** The file-search and Shell profiles; read-only children use their own list. */
 export function isHostedWorkspaceSearchProfile(profile: unknown): boolean {
   return (
+    profile === HOSTED_WORKSPACE_FILE_PROFILE ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V3
