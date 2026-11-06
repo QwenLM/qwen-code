@@ -57,24 +57,32 @@ for (const { language, theme } of [
     await daemon.sendEvent(
       replayCompleteEvent({ sessionId: scenario.sessionId }),
     );
-    const control = page.locator('[data-web-shell-workflow-mode-control]');
-    const toggle = page.getByRole('switch', {
-      name: language === 'en' ? 'Workflow mode' : 'Workflow 模式',
-      exact: true,
-    });
-    await expect(toggle).toBeChecked();
+    const trigger = page.getByTestId('composer-add-menu-trigger');
+    const toggle = page.getByTestId('composer-add-menu-workflow');
+    await expect(toggle).toHaveCount(0);
+    await trigger.tap();
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
     await expect(toggle).toBeEnabled();
-    await control.getByRole('button').tap();
-    const details = page.getByRole('dialog', {
-      name: language === 'en' ? 'Workflow mode' : 'Workflow 模式',
-      exact: true,
-    });
+    await expect(toggle).toContainText(
+      language === 'en'
+        ? 'Workflow mode is on, but currently unavailable.'
+        : 'Workflow 模式已开启，但当前不可用。',
+    );
+    const details = page.getByRole('dialog');
     await expect(details).toBeVisible();
     await details.evaluate(async (element) => {
       await Promise.all(
         element.getAnimations().map((animation) => animation.finished),
       );
     });
+    await toggle.scrollIntoViewIfNeeded();
+    const rowBounds = await toggle.boundingBox();
+    const planBounds = await page
+      .getByTestId('composer-add-menu-plan')
+      .boundingBox();
+    expect(rowBounds).not.toBeNull();
+    expect(planBounds).not.toBeNull();
+    expect(rowBounds!.height).toBeLessThanOrEqual(planBounds!.height + 1);
     const detailsBounds = await details.boundingBox();
     expect(detailsBounds).not.toBeNull();
     expect(detailsBounds!.x).toBeGreaterThanOrEqual(0);
@@ -90,23 +98,25 @@ for (const { language, theme } of [
       path: testInfo.outputPath(`workflow-${language}-${theme}-details.png`),
       animations: 'disabled',
     });
-    await page.keyboard.press('Escape');
     await toggle.tap();
-    await expect(toggle).not.toBeChecked();
+    await expect(details).toBeHidden();
+    await trigger.tap();
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
     await expect(toggle).toBeDisabled();
     expect(
       daemon.configOptionRequests().map((request) => request.body),
     ).toEqual([{ configId: 'workflow_mode', value: 'off' }]);
     expect(daemon.promptRequests()).toHaveLength(0);
-    const bounds = await control.boundingBox();
+    const bounds = await toggle.boundingBox();
     expect(bounds).not.toBeNull();
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
-    await expect(
-      page.locator('[data-web-shell-composer-submit]'),
-    ).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath(`workflow-${language}-${theme}-off.png`),
     });
+    await page.keyboard.press('Escape');
+    await expect(
+      page.locator('[data-web-shell-composer-submit]'),
+    ).toBeVisible();
   });
 }

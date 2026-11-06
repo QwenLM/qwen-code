@@ -30,6 +30,27 @@ function deps(overrides: Partial<JoinDeps> = {}) {
   return { value, out, err };
 }
 
+it('waits long enough for a join whose save waits on its lock', async () => {
+  // Two program probes, enrollment, up to three heartbeats (10 s each) and a
+  // save that can wait about 13.5 s: past that the join is reported failed
+  // with the token already spent.
+  const timeout = vi.spyOn(AbortSignal, 'timeout');
+  try {
+    const { value } = deps();
+
+    await runAgentsJoin(
+      { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+      value,
+    );
+
+    expect(timeout).toHaveBeenCalledWith(90_000);
+    const [, init] = vi.mocked(value.fetch).mock.calls[0]!;
+    expect(init?.signal).toBe(timeout.mock.results[0]?.value);
+  } finally {
+    timeout.mockRestore();
+  }
+});
+
 it('asks the local daemon to connect with the link and token', async () => {
   const { value, out } = deps({
     env: {
@@ -58,12 +79,77 @@ it('asks the local daemon to connect with the link and token', async () => {
     allowHttp: false,
   });
   expect(out.join('\n')).toContain('qwen, claude');
+  // No `saved` field, as from an older daemon: it always claimed the save.
+  expect(out.join('\n')).toContain('The daemon reconnects after restarts.');
+});
+
+it('warns, and still succeeds, when the daemon could not save the connection', async () => {
+  const { value, out, err } = deps({
+    fetch: vi.fn(async () =>
+      Response.json({
+        connected: true,
+        saved: false,
+        saveError: 'Lock file is already being held',
+        providers: ['qwen'],
+      }),
+    ) as unknown as typeof fetch,
+  });
+
+  const code = await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  // The token is spent; a failure exit would invite a rerun with it.
+  expect(code).toBe(0);
+  expect(out.join('\n')).toContain('Joined https://hub.example:4170');
+  expect(out.join('\n')).not.toContain('reconnects after restarts');
+  expect(err).toEqual([
+    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: Lock file is already being held',
+  ]);
+});
+
+it('says "no detail" when the daemon gives no reason for the failed save', async () => {
+  const { value, err } = deps({
+    fetch: vi.fn(async () =>
+      Response.json({ connected: true, saved: false, saveError: '' }),
+    ) as unknown as typeof fetch,
+  });
+
+  await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  expect(err).toEqual([
+    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: no detail',
+  ]);
+});
+
+it('reports a JSON null answer as a failed join rather than crashing', async () => {
+  const { value, err } = deps({
+    fetch: vi.fn(
+      async () => new Response('null', { status: 502 }),
+    ) as unknown as typeof fetch,
+  });
+
+  const code = await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  expect(code).toBe(1);
+  expect(err.join('\n')).toContain('Join failed (502)');
 });
 
 it('points at `qwen serve --join` when no daemon is running', async () => {
   const { value, err } = deps({
     fetch: vi.fn(async () => {
-      throw new TypeError('fetch failed');
+      throw new TypeError('fetch failed', {
+        cause: Object.assign(new Error('connect ECONNREFUSED'), {
+          code: 'ECONNREFUSED',
+        }),
+      });
     }) as unknown as typeof fetch,
   });
 
@@ -76,6 +162,125 @@ it('points at `qwen serve --join` when no daemon is running', async () => {
   expect(err.join('\n')).toContain(
     'qwen serve --join http://10.0.0.2:4170/join/ws_1 --agent-host-allow-http',
   );
+});
+
+it.each([
+  [
+    'does not answer in time',
+    () => {
+      throw new DOMException(
+        'The operation was aborted due to timeout',
+        'TimeoutError',
+      );
+    },
+  ],
+  [
+    'drops the connection after the request',
+    () => {
+      throw new TypeError('fetch failed', {
+        cause: Object.assign(new Error('socket hang up'), {
+          code: 'ECONNRESET',
+        }),
+      });
+    },
+  ],
+  [
+    'closes the connection after the request',
+    () => {
+      throw new TypeError('fetch failed', {
+        cause: Object.assign(new Error('other side closed'), {
+          code: 'UND_ERR_SOCKET',
+        }),
+      });
+    },
+  ],
+  [
+    'stops reading the request',
+    () => {
+      throw new TypeError('fetch failed', {
+        cause: Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }),
+      });
+    },
+  ],
+  [
+    'does not finish sending the answer',
+    () =>
+      ({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new DOMException('timed out', 'TimeoutError');
+        },
+      }) as unknown as Response,
+  ],
+  [
+    'answers 200 with a body that is not JSON',
+    () =>
+      ({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new SyntaxError('Unexpected end of JSON input');
+        },
+      }) as unknown as Response,
+  ],
+  ['answers 200 with JSON null', () => new Response('null', { status: 200 })],
+  [
+    'answers 200 without saying it connected',
+    () => Response.json({ providers: ['qwen'] }),
+  ],
+] as const)(
+  'says the join may still complete when the daemon %s',
+  async (_label, answer) => {
+    // Not "no daemon": it took the request, and may have spent the token.
+    const { value, err } = deps({
+      fetch: vi.fn(async () => answer()) as unknown as typeof fetch,
+    });
+
+    const code = await runAgentsJoin(
+      { link: 'http://10.0.0.2:4170/join/ws_1', 'allow-http': true },
+      value,
+    );
+
+    expect(code).toBe(1);
+    expect(err.join('\n')).toContain('the join may still complete');
+    expect(err.join('\n')).not.toContain('No running qwen serve daemon');
+    expect(err.join('\n')).not.toContain('Join failed');
+    expect(err.join('\n')).not.toContain('qwen serve --join');
+  },
+);
+
+it.each([
+  [
+    'an answer that is not JSON',
+    () => new SyntaxError('Unexpected end of JSON input'),
+    'answered without confirming the join',
+  ],
+  [
+    'an answer cut off by a timeout',
+    () => new DOMException('timed out', 'TimeoutError'),
+    'did not finish answering',
+  ],
+] as const)('tells %s apart', async (_label, failure, phrase) => {
+  const { value, err } = deps({
+    fetch: vi.fn(
+      async () =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw failure();
+          },
+        }) as unknown as Response,
+    ) as unknown as typeof fetch,
+  });
+
+  await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  expect(err.join('\n')).toContain(phrase);
 });
 
 it('prompts for the token when the environment has none, and refuses without one', async () => {

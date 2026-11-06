@@ -1200,6 +1200,24 @@ export interface components {
             prompts: "complete" | "partial" | "failed" | "stale";
         };
         InputBlock: components["schemas"]["InputTextBlock"] | components["schemas"]["InputFileBlock"] | components["schemas"]["InputImageBlock"];
+        /** @description Immutable Session connection. Requires session-model-config/1, encrypted storage and an endpoint in the control-plane allowlist. UTF-8 limits: model 512 bytes, base_url 2048 bytes, api_key 4096 bytes, complete canonical JSON 8192 bytes. Secrets are never returned in public Session responses. Child Sessions inherit the configuration. Cannot be combined with modelId. */
+        SessionModelConfig: {
+            /** @enum {string} */
+            protocol: "openai" | "openai-responses" | "anthropic" | "gemini";
+            model: string;
+            /** @description Exact allowlisted HTTP(S) base URL without userinfo, query or fragment. */
+            base_url: string;
+            api_key: string;
+            generation_config?: {
+                temperature?: number;
+                top_p?: number;
+                top_k?: number;
+                max_tokens?: number;
+                presence_penalty?: number;
+                frequency_penalty?: number;
+                seed?: number;
+            };
+        };
         PublicArtifact: {
             /** @constant */
             object: "agent.artifact";
@@ -1261,6 +1279,7 @@ export interface components {
             agentId: string;
             /** @description Optional host-catalog model for a bound built-in qwen-code Session. Requires modelSelectionSupported. Persisted atomically before the first Turn and included in creation idempotency; omission preserves the default model and old digest. */
             modelId?: string;
+            modelConfig?: components["schemas"]["SessionModelConfig"];
             /** @description The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title. */
             title?: string | null;
             /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit for text-only inputs and a 32 MiB prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 8 MiB and requires input-attachments/1. */
