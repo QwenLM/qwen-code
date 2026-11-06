@@ -475,6 +475,16 @@ describe('ci.yml lint HOME isolation', () => {
     // does not re-verify entries on cache hit — a shared home is a
     // cross-job poisoning channel), XDG_CACHE_HOME on the shared verified
     // tool cache. The gate keeps the model-key scrub.
+    // The routing decision's premise is that this job carries no secrets
+    // because its only grant is the read-only checkout. Nothing else pins it:
+    // adding any other scope would leave every assertion below green while
+    // the accepted-risk argument went stale.
+    assert.deepEqual(
+      ciDoc.jobs.integration_no_ak.permissions,
+      { contents: 'read' },
+      'no_ak must keep only the read-only checkout grant',
+    );
+
     const steps = ciDoc.jobs.integration_no_ak.steps ?? [];
     assert.equal(
       steps[0]?.name,
@@ -491,11 +501,18 @@ describe('ci.yml lint HOME isolation', () => {
         create.indexOf('rm -rf') < create.indexOf('mkdir'),
       'must clear the HOME before creating it',
     );
+    // Pin the publication by its template, not by a `HOME=` substring:
+    // COREPACK_HOME= and XDG_CACHE_HOME= both satisfy a substring check, so
+    // deleting the real HOME/USERPROFILE line kept this test green.
+    const homePublish = create
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith('printf '));
     assert.ok(
-      create.includes('HOME=') &&
-        create.includes('USERPROFILE=') &&
-        create.includes('GITHUB_ENV'),
-      'must publish HOME/USERPROFILE via GITHUB_ENV',
+      homePublish.includes(
+        'printf \'HOME=%s\\nUSERPROFILE=%s\\n\' "$home" "$home" >> "${GITHUB_ENV}"',
+      ),
+      'must publish HOME/USERPROFILE from the resolved $home via GITHUB_ENV',
     );
     assert.ok(
       create.includes('COREPACK_HOME=') &&
@@ -558,10 +575,14 @@ describe('ci.yml lint HOME isolation', () => {
     const clean = steps.find((s) => s.name === 'Clean isolated HOME');
     assert.ok(clean, 'no_ak cleanup step missing');
     assert.equal(clean.if, '${{ always() }}');
+    // Pin the template the create step builds, not just the `qwen-no-ak-home-`
+    // prefix: a cleanup that dropped `-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}`
+    // would still satisfy a prefix check while removing a path nothing used.
     assert.ok(
-      String(clean.run).includes('qwen-no-ak-home-') &&
-        !String(clean.run).includes('"$HOME"'),
-      'cleanup must use the constructed path, never $HOME',
+      String(clean.run).includes(
+        '${RUNNER_TEMP}/qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}',
+      ) && !String(clean.run).includes('"$HOME"'),
+      'cleanup must remove the exact run-unique path the create step builds',
     );
     assert.ok(
       steps[steps.length - 1]?.name !== 'Run required no-AK integration gate',
