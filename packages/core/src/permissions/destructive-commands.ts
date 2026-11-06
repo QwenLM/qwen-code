@@ -19,8 +19,11 @@
  */
 
 import type { Content, Part } from '@google/genai';
-import { execSync } from 'node:child_process';
-import { commandContainsGitAmend } from './shell-semantics.js';
+import { execFileSync, execSync } from 'node:child_process';
+import {
+  commandContainsGitAmend,
+  stripShellQuotes,
+} from './shell-semantics.js';
 
 /**
  * Destructive git commands that discard local work.
@@ -68,19 +71,6 @@ const DISCARD_KEYWORDS: readonly RegExp[] = Object.freeze([
  */
 export function userMentionsDiscard(userPrompt: string): boolean {
   return DISCARD_KEYWORDS.some((kw) => kw.test(userPrompt));
-}
-
-/**
- * Strip one layer of shell quoting from a command string so destructive
- * patterns inside `bash -c "git reset --hard"` or `sh -c 'git clean -fd'`
- * are still detected.
- */
-function stripShellQuotes(command: string): string {
-  return command.replace(
-    /(?:^|\s)(?:bash|sh|zsh|fish|dash|ksh)\s+-[a-zA-Z]*c\s+(?:"([^"]*)"|'([^']*)')/g,
-    (_match, dq: string | undefined, sq: string | undefined) =>
-      ' ' + (dq ?? sq ?? ''),
-  );
 }
 
 /**
@@ -146,18 +136,107 @@ export function registerSessionCommit(sha: string): void {
 }
 
 /**
- * Check whether a `git commit --amend` targets a commit made this session.
- * Reads the current HEAD commit SHA and checks against registered session commits.
+ * Which repository a recognised amend actually targets (#16075 R9, B2).
+ * `null` means the command relocates the repository in a way this guard
+ * cannot statically resolve — the session exemption must then fail closed.
  */
-export function isAmendOfSessionCommit(cwd: string): boolean {
+interface AmendTarget {
+  /** Directory to run `git rev-parse HEAD` in. */
+  cwd: string;
+  /** Explicit git directory, when the command names one. */
+  gitDir?: string;
+}
+
+/**
+ * A static literal absolute path: no quotes, spaces, variables, tildes, or
+ * shell metacharacters. Anything else cannot be resolved without running
+ * shell expansion, which this guard must not do.
+ */
+const STATIC_ABSOLUTE_PATH = /^\/[A-Za-z0-9._/-]+$/;
+
+/**
+ * Resolve the repository an amend targets from the raw command's
+ * repo-relocation flags (`-C`, `--git-dir`, `--work-tree`, `GIT_DIR=`,
+ * `GIT_WORK_TREE=`). Commands without those flags keep the historical
+ * cwd-only answer, byte for byte.
+ *
+ * Deliberately narrow: exactly one relocation flag, with a static literal
+ * absolute path. Stacked or mixed flags (`-C a -C b`, `--git-dir` plus
+ * `--work-tree`), relative paths, and quoted-but-not-literal values all
+ * refuse the exemption rather than guess which HEAD gets amended.
+ */
+function resolveAmendTarget(cwd: string, command: string): AmendTarget | null {
+  const words = command.split(/\s+/);
+  const relocations: Array<{ flag: string; value: string | undefined }> = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    const next = words[i + 1];
+    if (w === '-C') relocations.push({ flag: '-C', value: next });
+    else if (w.startsWith('-C') && w.length > 2)
+      relocations.push({ flag: '-C', value: w.slice(2) });
+    else if (w === '--git-dir')
+      relocations.push({ flag: '--git-dir', value: next });
+    else if (w.startsWith('--git-dir='))
+      relocations.push({ flag: '--git-dir', value: w.slice(10) });
+    else if (w === '--work-tree')
+      relocations.push({ flag: '--work-tree', value: next });
+    else if (w.startsWith('--work-tree='))
+      relocations.push({ flag: '--work-tree', value: w.slice(12) });
+    else if (w.startsWith('GIT_DIR='))
+      relocations.push({ flag: '--git-dir', value: w.slice(8) });
+    else if (w.startsWith('GIT_WORK_TREE='))
+      relocations.push({ flag: '--work-tree', value: w.slice(14) });
+  }
+  if (relocations.length === 0) return { cwd };
+  if (relocations.length > 1) return null;
+  const { flag, value } = relocations[0]!;
+  if (value === undefined) return null;
+  // One layer of single quotes around an otherwise literal path is still a
+  // static literal; any other quoting is not.
+  const unquoted =
+    value.length >= 2 && value.startsWith("'") && value.endsWith("'")
+      ? value.slice(1, -1)
+      : value;
+  if (!STATIC_ABSOLUTE_PATH.test(unquoted)) return null;
+  if (flag === '-C') return { cwd: unquoted };
+  if (flag === '--git-dir') return { cwd, gitDir: unquoted };
+  // --work-tree moves the checkout, not HEAD: the amended repository is
+  // still the one discovered from cwd.
+  return { cwd };
+}
+
+/**
+ * Check whether a `git commit --amend` targets a commit made this session.
+ * Reads the current HEAD commit SHA of the repository the command actually
+ * targets and checks against registered session commits. Without a command,
+ * or with no repo-relocation flags, that is `cwd`'s HEAD exactly as before;
+ * a relocation this guard cannot resolve statically refuses the exemption
+ * (#16075 R9, B2).
+ */
+export function isAmendOfSessionCommit(cwd: string, command?: string): boolean {
   if (sessionCommitShas.size === 0) return false;
+  const target =
+    command === undefined ? { cwd } : resolveAmendTarget(cwd, command);
+  if (target === null) return false;
   try {
-    const headSha = execSync('git rev-parse HEAD', {
-      cwd,
-      encoding: 'utf-8',
-      timeout: 5000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
+    const headSha =
+      target.gitDir !== undefined
+        ? execFileSync(
+            'git',
+            ['--git-dir', target.gitDir, 'rev-parse', 'HEAD'],
+            {
+              cwd: target.cwd,
+              encoding: 'utf-8',
+              timeout: 5000,
+              stdio: ['ignore', 'pipe', 'ignore'],
+            },
+          ).trim()
+        : execSync('git rev-parse HEAD', {
+            cwd: target.cwd,
+            encoding: 'utf-8',
+            timeout: 5000,
+            stdio: ['ignore', 'pipe', 'ignore'],
+          }).trim();
     return sessionCommitShas.has(headSha);
   } catch {
     return false;
@@ -210,7 +289,10 @@ export function isDestructiveCommand(
     }
   }
 
-  if (commandContainsGitAmend(command) && !isAmendOfSessionCommit(cwd)) {
+  if (
+    commandContainsGitAmend(command) &&
+    !isAmendOfSessionCommit(cwd, command)
+  ) {
     return {
       blocked: true,
       reason:

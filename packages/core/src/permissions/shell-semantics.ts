@@ -2665,9 +2665,15 @@ function shellDashCPayload(tokens: string[], index: number): string | null {
  *
  * `commandContainsGitAmend` is the deterministic AUTO-mode gate, so a construct
  * it cannot positively classify has to answer "amend" rather than "not an
- * amend". The list is grouped by construct rather than by spelling: a `-c`
- * payload and an `env -S` value are extracted and analysed, while a shell fed
- * by an executor or by data the model never reads fails closed.
+ * amend". Since #16075 R9 (B1) that contract is enforced structurally at the
+ * top level: this token scan may only ADD denials, and the fail-closed
+ * backstop in `commandContainsGitAmend` re-tests the base substring pattern
+ * over the raw command plus its wrapper-stripped form, denying every literal
+ * occurrence the scan did not confirm unless `amendOccurrencesProvablyInert`
+ * proves each one inert data. The list is grouped by construct rather than by
+ * spelling: a `-c` payload and an `env -S` value are extracted and analysed,
+ * while a shell fed by an executor or by data the model never reads fails
+ * closed.
  */
 function nestedAmendPayloads(tokens: string[]): {
   payloads: string[];
@@ -3222,13 +3228,233 @@ function pipedProgramText(producer: string, consumer: string): string | null {
 }
 
 /**
+ * Strip one layer of shell quoting from a command string so destructive
+ * patterns inside `bash -c "git reset --hard"` or `sh -c 'git clean -fd'`
+ * are still detected. Shared with `destructive-commands.ts`, which feeds the
+ * same expansion to its other destructive patterns (#16075 R9 B1: the amend
+ * backstop must see exactly the input the base substring guard saw).
+ */
+export function stripShellQuotes(command: string): string {
+  return command.replace(
+    /(?:^|\s)(?:bash|sh|zsh|fish|dash|ksh)\s+-[a-zA-Z]*c\s+(?:"([^"]*)"|'([^']*)')/g,
+    (_match, dq: string | undefined, sq: string | undefined) =>
+      ' ' + (dq ?? sq ?? ''),
+  );
+}
+
+/**
+ * The base substring guard's pattern, restored as a fail-closed backstop
+ * (#16075 R9, B1). The recognizer below may only ADD denials to this set.
+ */
+const GIT_AMEND_BACKSTOP_PATTERN = /\bgit\s+commit\s+--amend\b/;
+
+/**
+ * Programs whose quoted arguments and quoted-delimiter heredoc bodies are
+ * provably inert data: they print, search, or copy text and never execute it.
+ * Deliberately tiny — a member must have no flag that turns an argument into
+ * a program. Excludes every shell and executor (`env`, `node`, `xargs`,
+ * `find`, `eval`, `trap`, …): for those, quoted text can still become code.
+ */
+const INERT_TEXT_PROGRAMS: ReadonlySet<string> = new Set([
+  'echo',
+  'printf',
+  'grep',
+  'cat',
+  'head',
+  'tail',
+  'wc',
+  'ls',
+]);
+
+/**
+ * Prove that EVERY literal `git commit --amend` occurrence in the raw command
+ * is inert data, so the backstop may let it through (#16075 R9, B1).
+ *
+ * Narrow and fail-closed by construction. An occurrence is inert only when it
+ * sits inside:
+ *   - a single-quoted word of a simple command whose program basename is in
+ *     `INERT_TEXT_PROGRAMS`, or
+ *   - an unquoted `#` comment (comment text never executes), or
+ *   - the body of a SINGLE-QUOTED-delimiter heredoc (`<<'EOF'`) owned by a
+ *     program in `INERT_TEXT_PROGRAMS` — bash performs no expansion on such a
+ *     body, and a non-shell owner only copies it.
+ *
+ * Outside single-quoted spans and comments the command must be one simple
+ * line: no metacharacters (`; & | $ ` < > ( ) { }`), no newline, no redirect
+ * other than the heredoc opener itself, no assignment, no double quotes, no
+ * backslash escapes. Double-quoted occurrences, shell-fed or unquoted-
+ * delimiter heredocs, pipelines, and anything else this scanner cannot
+ * positively classify answer false (deny). A backstop match with zero raw
+ * occurrences (the phrase only exists in the wrapper-stripped expansion) is
+ * unclassifiable, not vacuously inert.
+ */
+function amendOccurrencesProvablyInert(command: string): boolean {
+  const occurrences: Array<{ start: number; end: number }> = [];
+  const phrase = /\bgit\s+commit\s+--amend\b/g;
+  for (let m = phrase.exec(command); m !== null; m = phrase.exec(command)) {
+    occurrences.push({ start: m.index, end: m.index + m[0].length });
+  }
+  if (occurrences.length === 0) return false;
+
+  // Per-character context: 0 code, 1 single-quoted, 2 comment, 3 heredoc body.
+  const kind = new Uint8Array(command.length);
+  const heredocDelimiters: string[] = [];
+  // Words of code (quote spans included) for the program / assignment checks.
+  const codeWords: string[] = [];
+  let word = '';
+  let inSingle = false;
+  let inComment = false;
+  let i = 0;
+  const flushWord = () => {
+    if (word.length > 0) {
+      codeWords.push(word);
+      word = '';
+    }
+  };
+  while (i < command.length) {
+    const ch = command[i]!;
+    if (inComment) {
+      if (ch === '\n') return false; // a second segment is not a simple command
+      kind[i] = 2;
+      i++;
+      continue;
+    }
+    if (inSingle) {
+      kind[i] = 1;
+      word += ch;
+      if (ch === "'") inSingle = false;
+      i++;
+      continue;
+    }
+    // Code context.
+    if (ch === "'") {
+      inSingle = true;
+      kind[i] = 1;
+      word += ch;
+      i++;
+      continue;
+    }
+    if (ch === '"') return false; // double quotes are not proven inert this round
+    if (ch === '\\') return false; // escapes outside single quotes: unmodelled
+    if (ch === '#') {
+      const prev = i === 0 ? ' ' : command[i - 1]!;
+      if (/\s/.test(prev)) {
+        flushWord();
+        inComment = true;
+        kind[i] = 2;
+        i++;
+        continue;
+      }
+      // A `#` glued to a word is not a comment start.
+      kind[i] = 0;
+      word += ch;
+      i++;
+      continue;
+    }
+    if (ch === '<') {
+      // The only redirection this prover accepts: a single-quoted-delimiter
+      // heredoc opener. Everything else (`<`, `<<EOF`, `<<<`, `<<-`) denies.
+      if (!command.startsWith("<<'", i)) return false;
+      const close = command.indexOf("'", i + 3);
+      if (close === -1 || close === i + 3) return false;
+      heredocDelimiters.push(command.slice(i + 3, close));
+      flushWord();
+      i = close + 1;
+      continue;
+    }
+    if (ch === '\n') {
+      // The opener line's newline starts the heredoc bodies; any other
+      // newline means a second segment, which this prover does not classify.
+      if (heredocDelimiters.length === 0) return false;
+      flushWord();
+      break;
+    }
+    if (/[;&|$`>(){}]/.test(ch)) return false;
+    if (/\s/.test(ch)) {
+      flushWord();
+      kind[i] = 0;
+      i++;
+      continue;
+    }
+    kind[i] = 0;
+    word += ch;
+    i++;
+  }
+  if (inSingle) return false; // unterminated quote
+  flushWord();
+
+  // Heredoc bodies follow the code line, one per opener, in order.
+  if (heredocDelimiters.length > 0) {
+    for (const delimiter of heredocDelimiters) {
+      // i is at the newline that ends the opener line.
+      if (command[i] !== '\n') return false;
+      i++;
+      let closed = false;
+      while (i < command.length) {
+        const lineEnd = command.indexOf('\n', i);
+        const end = lineEnd === -1 ? command.length : lineEnd;
+        const line = command.slice(i, end);
+        for (let k = i; k < end; k++) kind[k] = 3;
+        i = end;
+        if (line === delimiter) {
+          closed = true;
+          if (lineEnd !== -1) i++; // consume the closing line's newline
+          break;
+        }
+        if (lineEnd === -1) break;
+        i++; // consume the body line's newline
+      }
+      if (!closed) return false; // unterminated heredoc
+    }
+    // Nothing executable may follow the last heredoc.
+    if (!/^[ \t]*\n?$/.test(command.slice(i))) return false;
+  }
+
+  // The program word must be a plain allowlisted basename; a quoted or
+  // decorated program word is not positively classifiable.
+  const program = codeWords[0];
+  const programIsInert =
+    program !== undefined &&
+    /^[A-Za-z0-9._/-]+$/.test(program) &&
+    INERT_TEXT_PROGRAMS.has(program.split('/').pop()!);
+  // No assignment prefixes or assignment words anywhere in the code.
+  if (codeWords.some((w) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(w))) return false;
+
+  for (const { start, end } of occurrences) {
+    let sawQuotedOrHeredoc = false;
+    for (let k = start; k < end; k++) {
+      const context = kind[k];
+      if (context === 0 || context === undefined) return false;
+      if (context === 1 || context === 3) sawQuotedOrHeredoc = true;
+    }
+    // Comment-only occurrences are inert regardless of the program; quoted
+    // words and heredoc bodies are data only when the owner cannot run them.
+    if (sawQuotedOrHeredoc && !programIsInert) return false;
+  }
+  return true;
+}
+
+/**
  * Check whether a shell command actually invokes `git commit --amend`.
  *
- * Unlike the old raw-substring guard, this ignores quoted text, heredoc
- * bodies, commit-message arguments, and commands whose program is not git.
+ * Two layers, deny-only in combination (#16075 R9, B1):
+ *   1. the parsed recognizer, which ignores quoted text, heredoc bodies,
+ *      commit-message arguments, and commands whose program is not git, and
+ *      unwraps the execution constructs it models;
+ *   2. a fail-closed backstop — the base substring pattern over the raw
+ *      command plus its wrapper-stripped form. A literal phrase the
+ *      recognizer did not confirm is denied unless
+ *      `amendOccurrencesProvablyInert` proves every occurrence inert data.
+ * The recognizer can therefore only ever ADD denials, never remove one the
+ * base guard made.
  */
 export function commandContainsGitAmend(command: string): boolean {
-  return commandContainsGitAmendAtDepth(command, 0);
+  if (commandContainsGitAmendAtDepth(command, 0)) return true;
+  const expanded = command + ' ' + stripShellQuotes(command);
+  return (
+    GIT_AMEND_BACKSTOP_PATTERN.test(expanded) &&
+    !amendOccurrencesProvablyInert(command)
+  );
 }
 
 function walkCompoundCommand(

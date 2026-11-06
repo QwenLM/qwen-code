@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  commandContainsGitAmend,
   extractShellOperations,
   extractShellOperationsAcrossCommand,
 } from './shell-semantics.js';
@@ -838,5 +839,48 @@ describe('line continuations before a `$` construct', () => {
     const literal = ops("mv /tmp/a $'/tmp/protected/x'");
     expect(literal).not.toEqual([]);
     expect(ops("mv /tmp/a $\\\n'/tmp/protected/x'")).toEqual(literal);
+  });
+});
+
+describe('commandContainsGitAmend fail-closed backstop (#16075 R9 B1)', () => {
+  // The recognizer may only ADD denials to the base substring guard. These
+  // pin the backstop at the unit level; the end-to-end denial table lives in
+  // destructive-commands.test.ts.
+  it.each([
+    // Recognizer-missed spellings from doudouOUC's B1 probe: the literal
+    // phrase is present, no inert proof applies, so the backstop denies.
+    "X='git commit --amend --no-edit'; $X",
+    "trap 'git commit --amend --no-edit' EXIT",
+    "echo 'git commit --amend --no-edit' | cat | bash",
+    "env -u FOO -S 'git commit --amend --no-edit'",
+    // The phrase exists only in the wrapper-stripped expansion: zero raw
+    // occurrences are unclassifiable, not vacuously inert.
+    "bash -c '--amend' git commit",
+  ])('denies an unproven literal phrase: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+
+  it.each([
+    "echo 'git commit --amend'",
+    "grep 'git commit --amend' file.txt",
+    'git status # git commit --amend',
+    "cat <<'EOF'\ngit commit --amend\nEOF",
+    // No phrase at all: the backstop must not fire on unrelated commands.
+    'git status',
+    'git commit -m "fix"',
+    "echo 'set $IFS'",
+  ])('allows provably inert or phrase-free commands: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(false);
+  });
+
+  it('keeps recognizer denials that the raw phrase test cannot see', () => {
+    // Quote-split spellings the base regex never matched stay denied by the
+    // recognizer layer alone.
+    expect(
+      commandContainsGitAmend('git${IFS}commit${IFS}--amend --no-edit'),
+    ).toBe(true);
+    expect(
+      commandContainsGitAmend("bash -c $'git commit --amend\\x3btrue'"),
+    ).toBe(true);
   });
 });

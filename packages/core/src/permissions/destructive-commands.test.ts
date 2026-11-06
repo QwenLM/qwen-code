@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   isDestructiveCommand,
   userMentionsDiscard,
@@ -359,17 +363,12 @@ describe('isDestructiveCommand — git commit --amend', () => {
   });
 
   it.each([
-    `node -e 'console.log("a report about git commit --amend behaviour")'`,
-    'echo "git commit --amend"',
     `printf '%s\\n' 'git commit --amend'`,
-    'grep -n "git commit --amend" CHANGELOG.md',
     'git commit -m --amend',
     // ANSI-C quoting keeps `--amend` inside `-m`'s value; `\'` is an escape,
     // not the end of the word, so this stays inert (#16075 review, R3-2).
     "git commit -m $'fix: remember --amend'",
     "git commit -m $'fix: don\\'t forget --amend'",
-    'git log --grep="git commit --amend"',
-    `cat > notes.txt <<'EOF'\ngit commit --amend\nEOF`,
     // After `--` the token is a pathspec, not a flag, so this is not an amend.
     'git commit -- foo --amend',
     // A pipe, a process substitution or a here-string in inert text is not a
@@ -393,19 +392,216 @@ describe('isDestructiveCommand — git commit --amend', () => {
     "grep -rn '${IFS}' packages/core/src",
     'find . -name bash',
     'ls | xargs sh',
-    // Position, not presence: a program word in argument position runs nothing
-    // (#16075 review, R5-4).
-    "echo bash <<< 'git commit --amend --no-edit'",
-    "grep -rn sh <<< 'git commit --amend'",
+    // Position, not presence: a program word in argument position runs
+    // nothing (#16075 review, R5-4). The here-string variants of these two
+    // moved to the backstop-flipped table below: `<<<` is a metacharacter
+    // the inert prover does not classify (#16075 R9, B1).
     "echo bash -c 'git commit --amend'",
     "git commit -m 'fix: tidy' # --amend is blocked in AUTO mode",
-    "bash --version; cat > notes.md <<'EOF'\ngit commit --amend --no-edit\nEOF",
   ])('allows inert text that mentions amend: %s', (command) => {
     expectAllowed([command], 'write a report');
   });
 
   it('allows git commit (without --amend)', () => {
     expectAllowed(['git commit -m "fix"'], 'commit changes');
+  });
+
+  // ── #16075 R9 structural repair ─────────────────────────────────────────
+
+  // B1 (doudouOUC): every spelling below was ALLOWED at head 733b9096 with
+  // an empty session registry while the base substring guard denied it, and
+  // each one really amends HEAD when executed. The fail-closed backstop must
+  // deny all of them again — the recognizer may only add denials.
+  it.each([
+    "X='git commit --amend --no-edit'; $X",
+    "sh -c ''--'' 'git commit --amend --no-edit'",
+    "trap 'git commit --amend --no-edit' EXIT",
+    "git rebase --exec 'git commit --amend --no-edit' HEAD~1",
+    "echo 'git commit --amend --no-edit' | cat | bash",
+    "env -u FOO -S 'git commit --amend --no-edit'",
+    "bash -c -e 'git commit --amend --no-edit'",
+    "xargs -n 1 bash -c 'git commit --amend --no-edit'",
+    "find . -maxdepth 0 -exec timeout 5 sh -c 'git commit --amend --no-edit' \\;",
+    "bash <<< 'echo FIRST' <<< 'git commit --amend --no-edit'",
+    'bash -c "echo hi # it\'s\ngit commit --amend --no-edit"',
+  ])('B1 backstop blocks a recognizer-missed amend: %s', (command) => {
+    expectBlocked(command, 'amend the commit', 'amend');
+  });
+
+  // The narrow inert prover keeps genuinely inert data allowed: single-quoted
+  // words of print/search/copy programs, comments, and a single-quoted-
+  // delimiter heredoc fed to a non-shell program (bash performs no expansion
+  // on such a body, and cat only copies it).
+  it.each([
+    "echo 'git commit --amend'",
+    "grep 'git commit --amend' file.txt",
+    "printf '%s' 'git commit --amend'",
+    'git status # git commit --amend is blocked in AUTO mode',
+    '# git commit --amend',
+    "cat <<'EOF'\ngit commit --amend\nEOF",
+  ])('B1 inert prover allows provably inert data: %s', (command) => {
+    expectAllowed([command], 'write a report');
+  });
+
+  // The heredoc arm is inert ONLY for a quoted delimiter owned by a
+  // non-shell allowlisted program: a shell owner executes the body, a pipe
+  // hands it to a shell, and an unquoted delimiter lets bash expand the body.
+  it.each([
+    "bash <<'EOF'\ngit commit --amend\nEOF",
+    "cat <<'EOF'\ngit commit --amend\nEOF | bash",
+    'cat <<EOF\ngit commit --amend\nEOF',
+    "cat <<'EOF'\ngit commit --amend\nEOF\nls",
+  ])('B1 heredoc arm stays fail-closed outside its proof: %s', (command) => {
+    expectBlocked(command, 'write a report', 'amend');
+  });
+
+  // These were ALLOWED before R9. The settled backstop design only proves
+  // single-quoted words of a tiny inert-program allowlist, comments, and
+  // quoted-delimiter heredocs without redirects; each case below sits outside
+  // that proof (double quotes, a non-allowlisted program, a redirect, a
+  // here-string, or a compound command), so the fail-closed backstop denies
+  // it. They are false positives the design accepts this round — recorded
+  // here, not silently dropped (#16075 R9, B1; qqqys backstop option (a)).
+  it.each([
+    // node is not an inert program: a `-e` payload can execute anything.
+    `node -e 'console.log("a report about git commit --amend behaviour")'`,
+    // Double-quoted occurrences are not proven inert this round.
+    'echo "git commit --amend"',
+    'grep -n "git commit --amend" CHANGELOG.md',
+    'git log --grep="git commit --amend"',
+    // A redirect is a metacharacter outside the quoted words (R1 scenario).
+    `cat > notes.txt <<'EOF'\ngit commit --amend\nEOF`,
+    // `<<<` is a metacharacter the inert prover does not classify.
+    "echo bash <<< 'git commit --amend --no-edit'",
+    "grep -rn sh <<< 'git commit --amend'",
+    // A compound command is not a simple allowlisted command.
+    "bash --version; cat > notes.md <<'EOF'\ngit commit --amend --no-edit\nEOF",
+  ])('B1 backstop flips a formerly-allowed unprovable case: %s', (command) => {
+    expectBlocked(command, 'write a report', 'amend');
+  });
+
+  // Known limitations that stay blocked this round — pinned so a future
+  // narrowing of the backstop cannot silently re-open them, and not chased
+  // further in R9 (#16075 R9 task scope; doudouOUC R1).
+  it.each([
+    // R1: unquoted inert text with a redirect — the every-offset sweep still
+    // sees program-position amend words; fixing it needs the comment/newline
+    // refactor the review describes.
+    'echo git commit --amend >> CHANGELOG.md',
+    // Double-quoted interpreter payloads are outside the inert proof.
+    `node -e "console.log('git commit --amend')"`,
+  ])('known limitation stays blocked: %s', (command) => {
+    expectBlocked(command, 'write a report', 'amend');
+  });
+});
+
+// ── B2: the session exemption follows the repository the command targets ──
+
+describe('session-commit exemption scoping (#16075 R9 B2)', () => {
+  let repoA: { dir: string; head: string };
+  let repoB: { dir: string; head: string };
+
+  function makeRepo(label: string): { dir: string; head: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'amend-scope-'));
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'test',
+      GIT_AUTHOR_EMAIL: 'test@example.com',
+      GIT_COMMITTER_NAME: 'test',
+      GIT_COMMITTER_EMAIL: 'test@example.com',
+    };
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: dir, encoding: 'utf-8', env });
+    git('init', '-q');
+    // Distinct content per repo: identical trees committed in the same second
+    // with the same identity would produce identical HEAD SHAs and make the
+    // two-repo contrast vacuous.
+    writeFileSync(join(dir, 'f.txt'), `${label}\n`);
+    git('add', 'f.txt');
+    git('-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'init');
+    return { dir, head: git('rev-parse', 'HEAD').trim() };
+  }
+
+  beforeEach(() => {
+    repoA = makeRepo('repo-a');
+    repoB = makeRepo('repo-b');
+    registerSessionCommit(repoA.head);
+  });
+
+  afterEach(() => {
+    rmSync(repoA.dir, { recursive: true, force: true });
+    rmSync(repoB.dir, { recursive: true, force: true });
+  });
+
+  it('blocks an amend relocated to a repo whose HEAD is not registered', () => {
+    // cwd=A (registered), but -C targets B: the exemption must not apply.
+    const result = isDestructiveCommand(
+      `git -C ${repoB.dir} commit --amend --no-edit`,
+      'amend the commit',
+      repoA.dir,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.blocked).toBe(true);
+  });
+
+  it('allows an amend relocated to the repo whose HEAD is registered', () => {
+    // cwd=B (unregistered), but -C targets A: the exemption follows the
+    // target, not the cwd.
+    expect(
+      isDestructiveCommand(
+        `git -C ${repoA.dir} commit --amend --no-edit`,
+        'amend the commit',
+        repoB.dir,
+      ),
+    ).toBeNull();
+  });
+
+  it('keeps the no-flag exemption exactly as before', () => {
+    expect(
+      isDestructiveCommand(
+        'git commit --amend --no-edit',
+        'amend the commit',
+        repoA.dir,
+      ),
+    ).toBeNull();
+    expect(
+      isDestructiveCommand(
+        'git commit --amend --no-edit',
+        'amend the commit',
+        repoB.dir,
+      ),
+    ).not.toBeNull();
+  });
+
+  it('scopes GIT_DIR= to the named git directory', () => {
+    expect(
+      isDestructiveCommand(
+        `GIT_DIR=${repoB.dir}/.git git commit --amend --no-edit`,
+        'amend the commit',
+        repoA.dir,
+      ),
+    ).not.toBeNull();
+    expect(
+      isDestructiveCommand(
+        `GIT_DIR=${repoA.dir}/.git git commit --amend --no-edit`,
+        'amend the commit',
+        repoB.dir,
+      ),
+    ).toBeNull();
+  });
+
+  it.each([
+    // Non-static targets refuse the exemption entirely (fail closed), even
+    // when cwd's own HEAD is registered.
+    'git -C "$OTHER" commit --amend --no-edit',
+    'git -C relative/path commit --amend --no-edit',
+    'git -C ~/repo commit --amend --no-edit',
+    // Stacked relocations cannot be resolved statically.
+    'git -C /tmp -C /var commit --amend --no-edit',
+  ])('refuses the exemption for an unresolvable relocation: %s', (command) => {
+    const result = isDestructiveCommand(command, 'amend the commit', repoA.dir);
+    expect(result).not.toBeNull();
+    expect(result!.blocked).toBe(true);
   });
 });
 
