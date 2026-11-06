@@ -1120,9 +1120,61 @@ describe('BaseLlmClient', () => {
       });
     });
 
-    it('falls back to the main generator when the target model is not in the registry', async () => {
-      getResolvedModel.mockReturnValue(undefined);
+    it('does not report a provider declaration the registry replaced', async () => {
+      // The entry asks for audio, but the registry canonicalises a name-fixed
+      // family away from it, so the agent runs without audio. Reporting the
+      // declaration would aim a refusal at a key that already asks for the
+      // refused modality (QwenLM/qwen-code#16185).
+      getResolvedModel.mockReturnValue({
+        ...anthropicKey(),
+        id: fastModel,
+        generationConfig: { modalities: { image: true, video: true } },
+      });
+      crossProviderConfig.getModelProvidersConfig.mockReturnValue({
+        'openai-compatible': [
+          {
+            id: fastModel,
+            baseUrl: undefined,
+            generationConfig: { modalities: { audio: true } },
+          },
+        ],
+      } as never);
 
+      const resolved = await resolve(fastModel);
+
+      expect(resolved.configSources?.['modalities']).toEqual({
+        kind: 'computed',
+        detail: "auto-detected from 'fast-model'",
+      });
+    });
+
+    it('reports the provider declaration when the registry kept it', async () => {
+      getResolvedModel.mockReturnValue({
+        ...anthropicKey(),
+        id: fastModel,
+        generationConfig: { modalities: { audio: true } },
+      });
+      crossProviderConfig.getModelProvidersConfig.mockReturnValue({
+        'openai-compatible': [
+          {
+            id: fastModel,
+            baseUrl: undefined,
+            generationConfig: { modalities: { audio: true } },
+          },
+        ],
+      } as never);
+
+      const resolved = await resolve(fastModel);
+
+      expect(resolved.configSources?.['modalities']).toEqual({
+        kind: 'modelProviders',
+        authType: AuthType.USE_ANTHROPIC,
+        modelId: fastModel,
+        detail: 'generationConfig.modalities',
+      });
+    });
+
+    it('falls back to the main generator when the target model is not in the registry', async () => {
       const resolved = await resolve('unknown-model');
 
       expect(resolved.contentGenerator).toBe(mockContentGenerator);

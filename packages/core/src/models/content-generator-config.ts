@@ -33,6 +33,7 @@ import type { ModelConfig, ResolvedModelConfig } from './types.js';
 import type {
   ContentGeneratorConfigSource,
   ContentGeneratorConfigSources,
+  InputModalities,
 } from '../core/contentGenerator.js';
 import {
   clampReasoningEffort,
@@ -247,7 +248,18 @@ export function resolveAgentModalitiesSource(
       resolvedModel,
       safeCall(() => base.getModelsConfig?.()?.getProviderProtocolConfig?.()),
     );
-    if (declared?.generationConfig?.modalities !== undefined) {
+    if (
+      declared?.generationConfig?.modalities !== undefined &&
+      // The registry canonicalises `modalities` away for a family whose
+      // capabilities are fixed by the name, so the entry's value is not what
+      // the agent runs with. Labelling that as provider-declared would aim a
+      // refusal at a key that already asks for the refused modality — the same
+      // false declaration ModelsConfig guards against on the primary path.
+      sameModalities(
+        declared.generationConfig.modalities,
+        resolvedModel.generationConfig.modalities,
+      )
+    ) {
       return {
         kind: 'modelProviders',
         authType: resolvedModel.authType,
@@ -267,6 +279,15 @@ export function resolveAgentModalitiesSource(
 }
 
 const COMPUTED: ContentGeneratorConfigSource = { kind: 'computed' };
+
+/** Field-by-field equality, with absent and `false` treated alike. */
+function sameModalities(
+  declared: InputModalities | undefined,
+  used: InputModalities | undefined,
+): boolean {
+  const keys: Array<keyof InputModalities> = ['image', 'pdf', 'audio', 'video'];
+  return keys.every((key) => Boolean(declared?.[key]) === Boolean(used?.[key]));
+}
 
 /** The raw provider entry the agent's route was built from, if any. */
 function findProviderEntry(
