@@ -601,7 +601,7 @@
   font-size: 14px;
   font-weight: 400;
   line-height: 22px;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .slashDetailText {
