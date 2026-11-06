@@ -151,7 +151,8 @@ const timeoutMinutesOn = (job, runner) => {
   // The same `|| '["ubuntu-latest"]'` default the runs-on expression carries:
   // a missing output (classify_pr skipped) is the hosted routing. The caller
   // passes the value of the output the job itself reads — ubuntu_runner for
-  // the association-gated lanes, lint_runner for lint_and_static.
+  // the association-gated lanes, lint_runner for lint_and_static and
+  // integration_no_ak.
   const effective = runner || HOSTED_RUNNER;
   const output = runnerOutputOf(job);
   let expr = String(ci.jobs[job]['timeout-minutes'])
@@ -752,10 +753,11 @@ describe('post-merge push lane', () => {
   it('routes lint_and_static through the classify_pr lint output', () => {
     // runs-on is where the contributor code this describe's other pins talk
     // about actually executes. classify_pr's pick_runner publishes TWO
-    // routings: ubuntu_runner keeps the fork-trust boundary for test and the
-    // integration lanes, while lint_runner routes every pull request —
+    // routings: ubuntu_runner keeps the fork-trust boundary for test and
+    // integration_cli, while lint_runner routes every pull request —
     // untrusted forks included — to the fleet (maintainer decision
-    // 2026-10-31, shared-pool code-execution risk accepted). A literal pool
+    // 2026-10-31, shared-pool code-execution risk accepted, extended to
+    // integration_no_ak 2026-11-02). A literal pool
     // label array here would bypass the classifier indirection whole (and
     // desync from timeout-minutes, which reads the same output), and reading
     // ubuntu_runner would silently restore the hosted fork lane. Whole-

@@ -16642,6 +16642,7 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'web_fetch',
       'glob',
+      'ask_user_question',
     ]);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
@@ -16692,6 +16693,7 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'web_fetch',
       'glob',
+      'ask_user_question',
     ]);
     expect(state.model).toHaveBeenCalledTimes(2);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
@@ -16787,6 +16789,7 @@ describe('Hosted Harness no-tool session', () => {
       'send_message',
       // #13803: and, behind its own kind gate, its Workflow tool.
       'workflow',
+      'ask_user_question',
     ]);
     expect(acquire).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
@@ -16853,6 +16856,7 @@ describe('Hosted Harness no-tool session', () => {
       'send_message',
       // #13803: and, behind its own kind gate, its Workflow tool.
       'workflow',
+      'ask_user_question',
     ]);
     expect(state.model).toHaveBeenCalledTimes(2);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
@@ -30093,6 +30097,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         'edit',
         'web_fetch',
         ...(toolProfile.endsWith('/2') ? ['glob'] : []),
+        'ask_user_question',
       ]);
       // The takeover-built attachment starts with an undefined slot: the
       // recovered turn must have populated it before driving the model, or
