@@ -16,6 +16,7 @@ import type { DaemonTrustPolicySnapshot } from '../../config/daemon-trust-policy
 import { SkillInstallAttemptStore } from '../skill-install-attempts.js';
 import {
   createWorkspaceRegistry,
+  WorkspaceGenerationClosedError,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import {
@@ -24,8 +25,10 @@ import {
   type WorkspaceSkillInstallOptions,
   type WorkspaceSkillInstallRequest,
 } from '../workspace-skill-management.js';
+import { getWorkspaceRuntimeCoordinator } from '../workspace-runtime-coordinator.js';
 import {
   WorkspaceSkillNotFoundError,
+  type PersistUserSkillsActivationResult,
   type WorkspaceSkillBatchToggleResult,
   type WorkspaceSkillToggleResult,
 } from '../workspace-service/types.js';
@@ -33,6 +36,7 @@ import {
   registerWorkspaceQualifiedSkillsRoutes,
   registerWorkspaceSkillsRoutes,
 } from './workspace-skills.js';
+import type { UserSkillActivation } from '../../config/skill-settings.js';
 
 function createHarness(
   trusted = true,
@@ -137,6 +141,7 @@ function createHarness(
     }),
   );
   const bridge = {
+    publishWorkspaceEvent: vi.fn(),
     knownClientIds: () => new Set(['client-1']),
     getSessionSummary: vi.fn((sessionId: string) => {
       if (sessionId === 'session-1') return { sessionId };
@@ -174,6 +179,25 @@ function createHarness(
     },
   } as unknown as WorkspaceRuntime;
   const workspaceRegistry = createWorkspaceRegistry([runtime]);
+  const persistUserSkillsActivation = vi.fn(
+    async (
+      names: readonly string[],
+      activation: UserSkillActivation,
+    ): Promise<PersistUserSkillsActivationResult> => ({
+      outcomes: names.map((skillName) => ({ skillName, changed: true })),
+      settingsChanges: [
+        {
+          key:
+            activation.state === 'enabled'
+              ? 'skills.enabled'
+              : activation.mode === 'default'
+                ? 'skills.defaultDisabled'
+                : 'skills.disabled',
+          value: [...names],
+        },
+      ],
+    }),
+  );
   const app = express();
   app.use(express.json({ limit: '10mb' }));
   const routeDeps = {
@@ -197,6 +221,7 @@ function createHarness(
     deleteSkillConfig: (workspaceCwd, scope, skillName, installedPath) =>
       deleteWorkspaceSkill(workspaceCwd, scope, skillName, installedPath),
     parseAndValidateClientId: () => 'client-1',
+    persistUserSkillsActivation,
   });
   registerWorkspaceQualifiedSkillsRoutes(app, {
     ...routeDeps,
@@ -205,6 +230,8 @@ function createHarness(
   return {
     app,
     archiveInstalls: routeDeps.archiveInstalls,
+    bridge,
+    persistUserSkillsActivation,
     runtime,
     refreshWorkspaceSkills,
     workspaceRegistry,
@@ -223,6 +250,169 @@ function createHarness(
 }
 
 describe('workspace Skill management routes', () => {
+  it.each([
+    { state: 'enabled' },
+    { state: 'disabled', mode: 'hard' },
+    { state: 'disabled', mode: 'default' },
+  ])(
+    'saves User activation without workspace trust and broadcasts ordinary events: %j',
+    async (activation) => {
+      const h = createHarness(false);
+      const result = await request(h.app)
+        .put('/skills/activation')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({
+          skillNames: [' rust:pdf ', 'RUST:PDF', 'future'],
+          ...activation,
+        })
+        .expect(200);
+      expect(result.body).toEqual({
+        scope: 'user',
+        ...activation,
+        propagation: 'deferred',
+        results: [
+          { skillName: 'rust:pdf', changed: true },
+          { skillName: 'future', changed: true },
+        ],
+      });
+      expect(h.persistUserSkillsActivation).toHaveBeenCalledWith(
+        ['rust:pdf', 'future'],
+        activation,
+      );
+      expect(h.bridge.publishWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'settings_changed',
+        data: {
+          scope: 'user',
+          key:
+            activation.state === 'enabled'
+              ? 'skills.enabled'
+              : activation.mode === 'default'
+                ? 'skills.defaultDisabled'
+                : 'skills.disabled',
+          value: ['rust:pdf', 'future'],
+        },
+        originatorClientId: 'client-1',
+      });
+      expect(h.invalidateSkillsConfigStatus).toHaveBeenCalledWith('/workspace');
+      expect(h.getSkillsConfigStatus).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([true, false])(
+    'schedules a User settings reload with runtimeLive=%s',
+    async (runtimeLive) => {
+      const h = createHarness(true, runtimeLive);
+      const reconcile = vi.spyOn(
+        getWorkspaceRuntimeCoordinator(h.runtime),
+        'reconcileSkillsConfiguration',
+      );
+
+      const result = await request(h.app)
+        .put('/skills/activation')
+        .send({ skillNames: ['pdf'], state: 'enabled' })
+        .expect(200);
+
+      expect(result.body.propagation).toBe(runtimeLive ? 'queued' : 'deferred');
+      expect(reconcile).toHaveBeenCalledWith({ userSettings: true });
+    },
+  );
+
+  it('normalizes the default disable mode and skips all propagation after an unchanged save', async () => {
+    const h = createHarness();
+    h.persistUserSkillsActivation.mockResolvedValue({
+      outcomes: [{ skillName: 'pdf', changed: false }],
+      settingsChanges: [],
+    });
+    const result = await request(h.app)
+      .put('/skills/activation')
+      .send({ skillNames: ['pdf'], state: 'disabled' })
+      .expect(200);
+    expect(result.body).toMatchObject({
+      state: 'disabled',
+      mode: 'hard',
+      propagation: 'not_required',
+    });
+    expect(h.persistUserSkillsActivation).toHaveBeenCalledWith(['pdf'], {
+      state: 'disabled',
+      mode: 'hard',
+    });
+    expect(h.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+    expect(h.invalidateSkillsConfigStatus).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {},
+    { skillNames: [] },
+    { skillNames: ['valid', ''] },
+    { skillNames: ['valid', 1] },
+    { skillNames: Array(101).fill('same') },
+    { skillNames: ['x'.repeat(257)] },
+    { state: 'other' },
+    { mode: 'default' },
+    { state: 'disabled', mode: null },
+    { state: 'disabled', mode: 'other' },
+  ])('rejects invalid batches before mutation: %j', async (invalid) => {
+    const h = createHarness();
+    const body = Object.keys(invalid).length
+      ? { skillNames: ['valid'], state: 'enabled', ...invalid }
+      : {};
+    await request(h.app).put('/skills/activation').send(body).expect(400);
+    expect(h.persistUserSkillsActivation).not.toHaveBeenCalled();
+    expect(h.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+  });
+
+  it('accepts and broadcasts to draining clients until removal', async () => {
+    const h = createHarness(false);
+    const secondaryBridge = {
+      ...h.bridge,
+      knownClientIds: () => new Set(['draining-client']),
+      publishWorkspaceEvent: vi.fn(),
+    };
+    const secondary = {
+      ...h.runtime,
+      workspaceId: 'secondary',
+      workspaceCwd: '/secondary',
+      primary: false,
+      bridge: secondaryBridge,
+    } as unknown as WorkspaceRuntime;
+    h.workspaceRegistry.add(secondary);
+    h.workspaceRegistry.beginDrain(secondary);
+    expect(h.workspaceRegistry.list()).not.toContain(secondary);
+    await request(h.app)
+      .put('/skills/activation')
+      .set('X-Qwen-Client-Id', 'draining-client')
+      .send({ skillNames: ['future'], state: 'enabled' })
+      .expect(200);
+    expect(secondaryBridge.publishWorkspaceEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'settings_changed',
+        data: expect.objectContaining({ scope: 'user' }),
+        originatorClientId: 'draining-client',
+      }),
+    );
+    expect(h.invalidateSkillsConfigStatus).toHaveBeenCalledWith('/secondary');
+    h.workspaceRegistry.completeDrain(secondary);
+    await request(h.app)
+      .put('/skills/activation')
+      .set('X-Qwen-Client-Id', 'draining-client')
+      .send({ skillNames: ['future'], state: 'disabled' })
+      .expect(400);
+    expect(h.persistUserSkillsActivation).toHaveBeenCalledOnce();
+  });
+
+  it('returns a retryable 503 for a closed primary generation without events', async () => {
+    const h = createHarness();
+    h.persistUserSkillsActivation.mockRejectedValue(
+      new WorkspaceGenerationClosedError(),
+    );
+    const response = await request(h.app)
+      .put('/skills/activation')
+      .send({ skillNames: ['pdf'], state: 'enabled' })
+      .expect(503);
+    expect(response.headers['retry-after']).toBe('1');
+    expect(h.bridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+  });
+
   it('exports only the explicitly selected trusted source and rejects missing or untrusted sources', async () => {
     const h = createHarness();
     const response = await request(h.app)

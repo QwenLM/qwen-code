@@ -40,7 +40,7 @@ Matched origins receive the standard CORS response headers on every request:
 ```
 Access-Control-Allow-Origin: <echoed origin>
 Vary: Origin
-Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
 Access-Control-Allow-Headers: Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID, X-Qwen-Event-Epoch
 Access-Control-Max-Age: 86400
 Access-Control-Expose-Headers: Retry-After, X-Qwen-Event-Epoch, X-Qwen-SSE-Stream-Id
@@ -714,6 +714,7 @@ nothing.
 | `realtime_voice`                         | the macOS WebShell daemon has Live Voice enabled and the native Host opted in with `QWEN_SERVE_LIVE_NATIVE_HOST=1` (off by default; see below). `/live/status` reports readiness, but the capability is withdrawn until the feature is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `realtime_voice_web`                     | Live Voice is enabled and the Web Shell page may itself be the audio endpoint over WS `/live/web`, on any platform, and the default endpoint (the native Host is macOS-only and opt-in). The route authenticates like `/voice/stream` (bearer subprotocol), requires a trusted primary workspace, and speaks the Live Host protocol with a reduced hello: microphone permission plus the audio input/output self-checks. A single Host lease remains: a native Host supersedes a browser (`4010`), a browser never displaces a native Host (`4009`), and a second tab takes over only with `?takeover=1`. `/live/status` reports `host.kind: "browser"`; screen capture needs a shared screen (below), and a shortcut change is stored for the next native Host rather than registered.                                                                                                                                                                                                                                                                        |
 | `web_terminal`                           | ACP HTTP is enabled, so the authenticated Web Terminal endpoint is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `user_skill_activation`                  | User settings persistence is available. `PUT /skills/activation` saves exact-name User preferences and queues asynchronous propagation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 <!-- conditional-serve-features:end -->
 
@@ -4528,6 +4529,39 @@ Response (200):
 ```
 
 Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, or `invalid_enabled_flag`. Authentication, workspace trust, client identity, unexpected persistence failures, and runtime-generation failures fail the whole request through the standard route gates. `errors` remains in the response for wire compatibility and is empty for structurally valid names. Batch-level `activation`, `sessionsRefreshed`, and `sessionsFailed` describe child liveness and the single live-session refresh shared by all changed results. A batch in which no target changed can still answer `applied` when a child is live or `deferred` when none exists, matching the single-Skill no-op response, so derive what actually changed from each result's `changed` flag. When at least one target changes, the daemon emits the same `settings_changed` mutation metadata as the single-Skill route; every `skills.disabled` / `skills.enabled` event from that request shares one `mutation.id`.
+
+#### `PUT /skills/activation`
+
+Capability: `user_skill_activation` (advertised when User settings persistence is available). This process-global mutation saves User Skill preferences without requiring a trusted workspace or scanning installed Skills. It uses the usual authenticated mutation gates; an optional `X-Qwen-Client-Id` must belong to a still-managed runtime, including one being drained.
+
+```json
+{
+  "skillNames": ["rust:pdf", "go:review"],
+  "state": "enabled"
+}
+```
+
+Supply 1–100 names (at most 256 characters each). Names are trimmed and deduplicated case-insensitively. `state` is `enabled` or `disabled`. Only `disabled` accepts `mode`: `hard` (default) or `default`. Names need not be installed yet. Invalid batches are rejected before any write.
+
+Qwen reads the latest User settings under its settings write lock, adds each explicit name to `skills.enabled`, `skills.disabled`, or `skills.defaultDisabled`, and removes that same name from the other two lists in one save. Other names, spellings, scopes, and settings are preserved. In particular, enabling `rust:pdf` does not remove a `pdf` restriction. Explicit bare names retain the existing matching rules. System restrictions still apply.
+
+```json
+{
+  "scope": "user",
+  "state": "enabled",
+  "results": [
+    { "skillName": "rust:pdf", "changed": true },
+    { "skillName": "go:review", "changed": true }
+  ],
+  "propagation": "queued"
+}
+```
+
+Disabled responses also include the normalized `mode`. `propagation` describes scheduling, not measured availability: `queued` means at least one live runtime queued a refresh; `deferred` means saved settings await runtime lifecycle work; `not_required` means this request changed nothing. A no-op neither writes nor emits events and does not certify completion of earlier refreshes. Read the existing workspace configuration and runtime Skill status endpoints for effective state.
+
+Successful changes invalidate configuration caches and broadcast ordinary `settings_changed` events with `scope: "user"`. Refreshes re-read User and Workspace settings atomically; failed configuration or session refreshes retain pending work for lifecycle recovery and bounded retries. Existing workspace-only refresh behavior is unchanged.
+
+Malformed input returns HTTP 400 (`invalid_skill_names`, `invalid_skill_name`, `invalid_skill_activation_state`, or `invalid_skill_activation_mode`). A primary runtime generation closed before commit returns HTTP 503 with `Retry-After: 1`, as on settings routes. The SDK exposes `setUserSkillsActivation(skillNames, activation, { clientId? })` and sends one PUT without a preliminary configuration read.
 
 #### `POST /workspace/init`
 

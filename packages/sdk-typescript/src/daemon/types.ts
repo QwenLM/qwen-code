@@ -4080,6 +4080,19 @@ export type DaemonSkillToggleActivation =
   | 'reconciling'
   | 'partial';
 
+export type DaemonUserSkillActivation =
+  | { state: 'enabled' }
+  | { state: 'disabled'; mode?: 'hard' | 'default' };
+
+export interface DaemonUserSkillsActivationResult {
+  scope: 'user';
+  state: 'enabled' | 'disabled';
+  mode?: 'hard' | 'default';
+  /** Queue disposition for this write, not effective Skill availability. */
+  propagation: 'queued' | 'deferred' | 'not_required';
+  results: Array<{ skillName: string; changed: boolean }>;
+}
+
 export interface DaemonSkillToggleMutationSkill {
   name: string;
   enabled: boolean;
