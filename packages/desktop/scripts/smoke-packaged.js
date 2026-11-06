@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isTeardownTargetAlive } from './process-liveness.js';
 import { resolveLogRoot, sliceNewLog } from './resolve-log-root.js';
 
 const packageDir = path.resolve(
@@ -229,9 +230,11 @@ async function teardown(child, removeWorkspace) {
   // recorded before the tree they live in is deleted.
   const daemons = readDaemonPids();
   for (const pid of daemons) terminate(pid);
-  let stragglers = await waitForExit(daemons, 5_000);
-  for (const pid of stragglers) terminate(pid, 'SIGKILL');
-  stragglers = await waitForExit(stragglers, 2_000);
+  await waitForExit(daemons, 5_000);
+  // A leader that already exited is not "alive", yet its group can still hold
+  // the children writing under the workspace: escalate on every group.
+  for (const pid of daemons) terminate(pid, 'SIGKILL');
+  const stragglers = await waitForExit(daemons, 2_000);
   if (stragglers.length > 0) {
     // A runtime we could not stop is a leak, not a filesystem race: fail the
     // check instead of hiding it behind the delete retries below.
@@ -282,8 +285,9 @@ function readDaemonPids() {
       continue;
     }
     for (const record of contents.matchAll(/\[DAEMON\][^\n]*\bpid=(\d+)/g)) {
-      const pid = Number(record[1]);
-      if (isAlive(pid)) pids.add(pid);
+      // The record is the only handle on the leader's group, which outlives
+      // the leader itself; `waitForExit` decides what actually stopped.
+      pids.add(Number(record[1]));
     }
   }
   if (pids.size === 0 && fs.existsSync(daemonDir)) {
@@ -295,20 +299,10 @@ function readDaemonPids() {
   return [...pids];
 }
 
-function isAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // EPERM means the process exists but belongs to another user.
-    return error.code === 'EPERM';
-  }
-}
-
 async function waitForExit(pids, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const alive = pids.filter(isAlive);
+    const alive = pids.filter(isTeardownTargetAlive);
     if (alive.length === 0 || Date.now() >= deadline) return alive;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }

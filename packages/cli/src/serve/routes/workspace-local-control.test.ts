@@ -363,6 +363,76 @@ describe('Local Control routes', () => {
     expect(response.body.urlRedacted).toBe(true);
   });
 
+  it('redacts the pairing secret from a remote-access bearer', async () => {
+    // The secondary listeners serve this same app and each verifies only its
+    // own token, so "some credential was verified" would hand the Local
+    // Control pairing secret to a remote-access client; nothing revokes
+    // `#pairing` when remote access is turned off.
+    const url = 'http://192.168.1.10:4170/#token=abc123';
+    const app = express();
+    app.use(asAuthenticated);
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        status: vi.fn(() => ({ active: true, url })),
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({}),
+      trustedLoopbackMode: true,
+    });
+    const server = createServer(app);
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    tagListener(server, { kind: 'remote-access' });
+
+    try {
+      const response = await request(server).get('/workspace/local-control');
+
+      expect(response.status).toBe(200);
+      expect(response.body.active).toBe(true);
+      expect(response.body.url).toBeUndefined();
+      expect(response.body.qrText).toBeUndefined();
+      expect(response.body.urlRedacted).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('returns the pairing secret to the listener that owns it', async () => {
+    const url = 'http://192.168.1.10:4170/#token=abc123';
+    const app = express();
+    app.use(asAuthenticated);
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        status: vi.fn(() => ({ active: true, url })),
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({}),
+    });
+    const server = createServer(app);
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const port = (server.address() as AddressInfo).port;
+    tagListener(server, {
+      kind: 'local-control',
+      authority: `127.0.0.1:${port}`,
+      origin: `http://127.0.0.1:${port}`,
+    });
+
+    try {
+      const response = await request(server)
+        .get('/workspace/local-control')
+        .set('Host', `127.0.0.1:${port}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.url).toBe(url);
+      expect(response.body.urlRedacted).toBeUndefined();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it('returns the pairing secret to a trusted-loopback primary caller', async () => {
     const url = 'http://192.168.1.10:4170/#token=abc123';
     const app = express();

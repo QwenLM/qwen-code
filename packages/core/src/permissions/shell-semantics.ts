@@ -1407,8 +1407,8 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       '--max-count',
       '--after-context',
       '--before-context',
-      '-n',
-      '--line-number',
+      // -n/--line-number only print line numbers. They take no argument;
+      // treating them as value flags consumes the pattern and drops the file.
       '--label',
       '-D',
       '--devices',
@@ -2439,22 +2439,6 @@ const PREFIX_COMMANDS = new Set([
  * @param simpleCommand - A single shell command without compound operators.
  * @param cwd           - Working directory for resolving relative paths.
  */
-/**
- * File operations a `cd` segment's redirections perform.
- *
- * `cd` moves no data, but its redirections are still opened: `cd x > /tmp/log`
- * truncates the log. The cd classifier cuts redirect operators to count
- * operands, so the ops are pulled out here. Process substitutions become
- * `/dev/fd/N` words (bash's own expansion) and are dropped: the analyzer has
- * no name for the process on the other end.
- */
-function cdRedirectOps(segment: string, cwd: string): ShellOperation[] {
-  return extractShellOperations(
-    cutShellCommentsAndProcessSubstitutions(segment),
-    cwd,
-  ).filter((op) => !op.filePath?.startsWith('/dev/fd/'));
-}
-
 export function extractShellOperations(
   simpleCommand: string,
   cwd: string,
@@ -2480,16 +2464,10 @@ export function extractShellOperations(
   const cmdName = tokens[0];
   if (!cmdName) {
     // Only assignments and/or redirections were present.
-    return [
-      ...redirectReads.map((p) => ({
-        virtualTool: 'read_file' as const,
-        filePath: p,
-      })),
-      ...redirectWrites.map((p) => ({
-        virtualTool: 'write_file' as const,
-        filePath: p,
-      })),
-    ];
+    return toRedirectOperations({
+      readFiles: redirectReads,
+      writeFiles: redirectWrites,
+    });
   }
 
   const ops: ShellOperation[] = [];
@@ -2547,14 +2525,10 @@ export function extractShellOperations(
 
   // Append redirect-derived operations
   ops.push(
-    ...redirectReads.map((p) => ({
-      virtualTool: 'read_file' as const,
-      filePath: p,
-    })),
-    ...redirectWrites.map((p) => ({
-      virtualTool: 'write_file' as const,
-      filePath: p,
-    })),
+    ...toRedirectOperations({
+      readFiles: redirectReads,
+      writeFiles: redirectWrites,
+    }),
   );
 
   return ops;
@@ -2586,8 +2560,13 @@ const MAX_SHELL_UNWRAP_DEPTH = 4;
  */
 type CdResolution =
   | { kind: 'not-cd' }
-  | { kind: 'dynamic' }
-  | { kind: 'static'; cwd: string; cwdUnknown: boolean };
+  | { kind: 'dynamic'; redirects: RedirectResult }
+  | {
+      kind: 'static';
+      cwd: string;
+      cwdUnknown: boolean;
+      redirects: RedirectResult;
+    };
 
 function isDynamicShellPath(word: string, artifactSegment: boolean): boolean {
   if (word.includes('$') || word.includes('`')) return true;
@@ -2671,18 +2650,39 @@ function resolveCdTargetCwd(
     if (words[0]?.text === '--') words.shift();
   }
 
-  if (words[0]?.text === 'popd') return { kind: 'dynamic' };
-  if (words[0]?.text !== 'cd' && words[0]?.text !== 'pushd') {
+  if (
+    words[0]?.text !== 'popd' &&
+    words[0]?.text !== 'cd' &&
+    words[0]?.text !== 'pushd'
+  ) {
     return { kind: 'not-cd' };
   }
+
+  const extractedRedirects = extractRedirects(
+    tokens.map((token) => token.text),
+    tokens,
+    cwd,
+  );
+  const redirects = {
+    readFiles: extractedRedirects.readFiles.filter(
+      (filePath) => !filePath.startsWith('/dev/fd/'),
+    ),
+    writeFiles: extractedRedirects.writeFiles.filter(
+      (filePath) => !filePath.startsWith('/dev/fd/'),
+    ),
+  };
+
+  if (words[0]?.text === 'popd') {
+    return { kind: 'dynamic', redirects };
+  }
   if (invalidRedirect || cdEnvironmentUnknown || cdFunctionUnknown) {
-    return { kind: 'dynamic' };
+    return { kind: 'dynamic', redirects };
   }
 
   if (words[0]!.text === 'pushd') {
-    if (words.length === 1) return { kind: 'dynamic' };
-    if (/^[+-]\d+$/.test(words[1]!.text)) return { kind: 'dynamic' };
-    if (words[1]!.text === '-n') return { kind: 'dynamic' };
+    if (words.length === 1) return { kind: 'dynamic', redirects };
+    if (/^[+-]\d+$/.test(words[1]!.text)) return { kind: 'dynamic', redirects };
+    if (words[1]!.text === '-n') return { kind: 'dynamic', redirects };
   }
 
   // Skip the POSIX `cd` flags bash accepts (-L, -P, -e) without consuming the
@@ -2706,14 +2706,14 @@ function resolveCdTargetCwd(
   if (words[targetIndex]?.text === '--') {
     targetIndex++;
   }
-  if (sawInvalidOption) return { kind: 'dynamic' };
+  if (sawInvalidOption) return { kind: 'dynamic', redirects };
 
   // bash rejects a `cd` carrying more than one operand (`too many
   // arguments`), so the cwd never moves; trusting words[targetIndex] there
   // would attribute later writes to a directory the shell never entered
   // (#12280 R7-2). Sits after redirect stripping so `cd x > /dev/null`
   // still counts as one operand.
-  if (words.length > targetIndex + 1) return { kind: 'dynamic' };
+  if (words.length > targetIndex + 1) return { kind: 'dynamic', redirects };
 
   const target = words[targetIndex];
   if (target === undefined) {
@@ -2721,8 +2721,8 @@ function resolveCdTargetCwd(
     // every word: a `cd` spelled by a quoting artifact of the split is not a
     // command bash runs, so there is no directory to certify (#12280 R2-1).
     const home = process.env['HOME'];
-    if (!home || artifactSegment) return { kind: 'dynamic' };
-    return { kind: 'static', cwd: home, cwdUnknown: false };
+    if (!home || artifactSegment) return { kind: 'dynamic', redirects };
+    return { kind: 'static', cwd: home, cwdUnknown: false, redirects };
   }
   if (
     target.text === '-' ||
@@ -2756,18 +2756,35 @@ function resolveCdTargetCwd(
     // (`Not a directory`): the shell stays where it was (#12280 R1-6).
     target.text.startsWith('/dev/fd/')
   ) {
-    return { kind: 'dynamic' };
+    return { kind: 'dynamic', redirects };
   }
 
   if (process.env['CDPATH'] && !isShellAbsolutePath(target.text)) {
-    return { kind: 'dynamic' };
+    return { kind: 'dynamic', redirects };
   }
 
   return {
     kind: 'static',
     cwd: resolvePath(target.text, cwd),
     cwdUnknown: cwdUnknown && !isShellAbsolutePath(target.text),
+    redirects,
   };
+}
+
+function toRedirectOperations({
+  readFiles,
+  writeFiles,
+}: RedirectResult): ShellOperation[] {
+  return [
+    ...readFiles.map((filePath) => ({
+      virtualTool: 'read_file' as const,
+      filePath,
+    })),
+    ...writeFiles.map((filePath) => ({
+      virtualTool: 'write_file' as const,
+      filePath,
+    })),
+  ];
 }
 
 /**
@@ -2783,7 +2800,8 @@ function resolveCdTargetCwd(
  *   - `splitCompoundCommandSegments` produces the segment boundaries (the
  *     per-reading splits below take over for backslash-bearing commands).
  *   - Literal `cd <dir>` segments shift the effective cwd for subsequent
- *     segments and themselves emit no ops.
+ *     segments; redirects on a `cd` segment are reported from the cwd where
+ *     that segment starts.
  *   - Dynamic `cd` targets (variables, substitutions, `cd -`) keep the last
  *     known cwd for best-effort path extraction and mark subsequent relative
  *     file operations with `cwdUnknown`.
@@ -3169,31 +3187,20 @@ function walkCompoundCommand(
       artifactSegment[index] ?? false,
       cdFunctionUnknown,
     );
-    if (cdTarget.kind === 'static') {
-      // A `cd` still performs its redirections: `cd x > /tmp/log` truncates the
-      // log even though the command itself only moves the cwd, so the segment's
-      // redirect targets are collected here or the write would go unjudged
-      // (#12280 review). Redirections are opened before the command runs, so
-      // they resolve against the cwd the segment starts in. Process
-      // substitutions are erased first — bash expands them to an fd path, not a
-      // file this analyzer can name.
-      const cdOps = cdRedirectOps(sub, effectiveCwd);
+    if (cdTarget.kind !== 'not-cd') {
+      const redirectOps = toRedirectOperations(cdTarget.redirects);
       ops.push(
-        ...(cwdUnknown ? markCwdUnknownOps(cdOps, sub, effectiveCwd) : cdOps),
+        ...(cwdUnknown
+          ? markCwdUnknownOps(redirectOps, sub, effectiveCwd)
+          : redirectOps),
       );
       if (!backgrounded) {
-        effectiveCwd = cdTarget.cwd;
-        cwdUnknown = cdTarget.cwdUnknown;
-      }
-      continue;
-    }
-    if (cdTarget.kind === 'dynamic') {
-      const cdOps = cdRedirectOps(sub, effectiveCwd);
-      ops.push(
-        ...(cwdUnknown ? markCwdUnknownOps(cdOps, sub, effectiveCwd) : cdOps),
-      );
-      if (!backgrounded) {
-        cwdUnknown = true;
+        if (cdTarget.kind === 'static') {
+          effectiveCwd = cdTarget.cwd;
+          cwdUnknown = cdTarget.cwdUnknown;
+        } else {
+          cwdUnknown = true;
+        }
       }
       continue;
     }

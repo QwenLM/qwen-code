@@ -109,6 +109,7 @@ it('runs a relocated bundled worker with TypeScript and relative imports', async
     tools: false,
     commands: [{ name: 'hello', description: 'Bundled', plugin: 'fixture' }],
     turnStart: false,
+    promptSubmit: [],
     turnComplete: [],
     render: [],
   });
