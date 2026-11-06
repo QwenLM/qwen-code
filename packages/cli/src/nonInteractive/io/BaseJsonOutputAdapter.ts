@@ -125,6 +125,10 @@ export interface JsonOutputAdapterInterface extends MessageEmitter {
     preserveText: boolean,
     discardedToolCalls: ToolCallRequestInfo[],
   ): void;
+  /** Reads the turn-scoped text tally, for callers that emit outside a turn. */
+  getTurnProducedText?(): boolean;
+  /** Restores the turn-scoped text tally after a synthesized message. */
+  setTurnProducedText?(produced: boolean): void;
   processEvent(event: ServerLlmStreamEvent): void;
   finalizeAssistantMessage(): CLIAssistantMessage;
   emitResult(options: ResultOptions): CLIResultMessage;
@@ -136,7 +140,7 @@ export interface JsonOutputAdapterInterface extends MessageEmitter {
   ): void;
   finalizeSubagentAssistantMessage?(
     parentToolUseId: string,
-  ): CLIAssistantMessage;
+  ): CLIAssistantMessage | null;
   emitSubagentErrorResult?(
     errorMessage: string,
     numTurns: number,
@@ -783,6 +787,16 @@ export abstract class BaseJsonOutputAdapter {
    */
   protected latchPreSendRefusal(message: string): void {
     this.preSendRefusal ??= { message, producedText: this.turnProducedText };
+  }
+
+  /** Reads the turn-scoped text tally, for callers that emit outside a turn. */
+  getTurnProducedText(): boolean {
+    return this.turnProducedText;
+  }
+
+  /** Restores the turn-scoped text tally after a synthesized message. */
+  setTurnProducedText(produced: boolean): void {
+    this.turnProducedText = produced;
   }
 
   // ========== Subagent APIs ==========

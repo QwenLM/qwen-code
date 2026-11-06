@@ -388,10 +388,14 @@ function emitNonInteractiveAssistantText(
   message: string,
 ): void {
   adapter.startAssistantMessage();
+  const producedTextBefore = adapter.getTurnProducedText?.() ?? false;
   adapter.processEvent({
     type: LlmEventType.Content,
     value: message,
   } as unknown as Parameters<JsonOutputAdapterInterface['processEvent']>[0]);
+  // A command's reply is not a prompt's answer: the Mod turn submitted next
+  // must not let a refused first send inherit it as this turn's text.
+  adapter.setTurnProducedText?.(producedTextBefore);
   adapter.finalizeAssistantMessage();
 }
 

@@ -1140,6 +1140,44 @@ describe('StreamJsonOutputAdapter', () => {
       expect(parsed).not.toHaveProperty('result');
     });
 
+    it('should not treat a synthesized reply as the turn text', () => {
+      // `emitNonInteractiveAssistantText` renders a slash command's reply as a
+      // Content event. That reply is not a prompt's answer, so a refusal on the
+      // next send must keep the error envelope instead of inheriting it.
+      // End the shared setup's turn first so the tally starts clear.
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+      adapter.startAssistantMessage();
+      const tallyBefore = adapter.getTurnProducedText();
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'Review queued.',
+      });
+      adapter.setTurnProducedText(tallyBefore);
+      adapter.finalizeAssistantMessage();
+
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+
+      const parsed = JSON.parse(stdoutWriteSpy.mock.calls[0][0] as string);
+      expect(parsed.is_error).toBe(true);
+      expect(parsed).not.toHaveProperty('result');
+    });
+
     it('should stop reporting the refusal once the next turn answers', () => {
       // Previous prompt's turn, ended by its own result — see the token-limit
       // case above.
