@@ -203,3 +203,265 @@ describe('OpentuiRewindSelector restore-option burst', () => {
     expect(onRewind.mock.calls[0]![1]).toBe('both');
   });
 });
+
+describe('OpentuiRewindSelector region budget', () => {
+  it('keeps the selected turn visible through a short region and resize before restoring it', () => {
+    const turns = Array.from({ length: 12 }, (_, index) => ({
+      id: `turn-${index + 1}`,
+      text: `Prompt ${index + 1}`,
+      sentToModel: true,
+    }));
+    const onRewind = vi.fn();
+    const props = {
+      turns,
+      fileCheckpointingEnabled: false,
+      onRewind,
+      onCancel: vi.fn(),
+    };
+    const view = render(
+      <OpentuiRewindSelector {...props} availableTerminalHeight={30} />,
+    );
+    expect(screen.getAllByText(/^Prompt \d+$/)).toHaveLength(7);
+    view.rerender(
+      <OpentuiRewindSelector {...props} availableTerminalHeight={7} />,
+    );
+    expect(screen.getAllByText(/^Prompt \d+$/)).toHaveLength(5);
+    expect(screen.queryByText('Prompt 1')).toBeNull();
+    expect(screen.getByText('Prompt 12').parentElement?.textContent).toContain(
+      '› #12 ',
+    );
+    view.rerender(
+      <OpentuiRewindSelector {...props} availableTerminalHeight={3} />,
+    );
+    burst([{ name: 'up' }, ENTER]);
+    expect(onRewind).not.toHaveBeenCalled();
+    expect(screen.queryByText('Rewind Conversation:')).toBeNull();
+    expect(screen.getByText('Prompt 11').parentElement?.textContent).toContain(
+      '› #11 ',
+    );
+    burst([ENTER]);
+    expect(screen.getByText('Rewind Conversation:')).toBeTruthy();
+    expect(screen.getByText('Prompt 11')).toBeTruthy();
+    burst([ENTER]);
+    expect(onRewind).toHaveBeenCalledExactlyOnceWith(turns[10], 'conversation');
+  });
+
+  it('does not commit a restore option that a key burst moves outside the painted window', async () => {
+    const onRewind = vi.fn();
+    render(
+      <OpentuiRewindSelector
+        turns={TURNS}
+        fileCheckpointingEnabled
+        onRewind={onRewind}
+        onCancel={vi.fn()}
+        availableTerminalHeight={3}
+        getDiffStats={vi.fn().mockResolvedValue({
+          filesChanged: ['a.ts'],
+          insertions: 3,
+          deletions: 1,
+        })}
+      />,
+    );
+    burst([ENTER]);
+    await flush();
+    expect(highlighted()).toMatch(/^› Restore code and conversation/);
+    expect(screen.queryByText('Restore conversation only')).toBeNull();
+    burst([DOWN, ENTER]);
+    expect(onRewind).not.toHaveBeenCalled();
+    expect(highlighted()).toBe('› Restore conversation only');
+    burst([ENTER]);
+    expect(onRewind).toHaveBeenCalledExactlyOnceWith(TURNS[1], 'conversation');
+  });
+
+  it('blocks invisible pick and confirm actions until the region can paint their target', () => {
+    const onRewind = vi.fn();
+    const props = {
+      turns: TURNS,
+      fileCheckpointingEnabled: false,
+      onRewind,
+      onCancel: vi.fn(),
+    };
+    const view = render(
+      <OpentuiRewindSelector {...props} availableTerminalHeight={0} />,
+    );
+    burst([ENTER]);
+    expect(screen.queryByText('Rewind Conversation:')).toBeNull();
+    expect(onRewind).not.toHaveBeenCalled();
+    view.rerender(
+      <OpentuiRewindSelector {...props} availableTerminalHeight={3} />,
+    );
+    burst([ENTER]);
+    expect(screen.getByText('Rewind Conversation:')).toBeTruthy();
+    expect(screen.getByText('Second prompt')).toBeTruthy();
+    view.rerender(
+      <OpentuiRewindSelector {...props} availableTerminalHeight={0} />,
+    );
+    burst([ENTER]);
+    expect(onRewind).not.toHaveBeenCalled();
+    view.rerender(
+      <OpentuiRewindSelector {...props} availableTerminalHeight={3} />,
+    );
+    burst([ENTER]);
+    expect(onRewind).toHaveBeenCalledExactlyOnceWith(TURNS[1], 'conversation');
+  });
+
+  it('keeps a pending restore bounded through resize without admitting another action', async () => {
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const onRewind = vi.fn(() => pending);
+    const onCancel = vi.fn();
+    const getDiffStats = vi.fn().mockResolvedValue({
+      filesChanged: ['a.ts'],
+      insertions: 3,
+      deletions: 1,
+    });
+    const props = {
+      turns: TURNS,
+      fileCheckpointingEnabled: true,
+      onRewind,
+      onCancel,
+      getDiffStats,
+    };
+    const view = render(
+      <OpentuiRewindSelector {...props} availableTerminalHeight={3} />,
+    );
+    burst([ENTER]);
+    await flush();
+    burst([ENTER]);
+    expect(screen.getByText('Restoring...')).toBeTruthy();
+    view.rerender(
+      <OpentuiRewindSelector {...props} availableTerminalHeight={1} />,
+    );
+    expect(screen.getByText('Restoring...')).toBeTruthy();
+    burst([DOWN, ENTER, { name: 'escape' }]);
+    expect(onRewind).toHaveBeenCalledExactlyOnceWith(TURNS[1], 'both');
+    expect(onCancel).not.toHaveBeenCalled();
+    await act(async () => {
+      finish();
+      await pending;
+    });
+  });
+
+  it.each([false, true])(
+    'keeps phase-owned paint and keys when checkpointing changes from %s',
+    async (enabled) => {
+      const onRewind = vi.fn();
+      const props = {
+        turns: TURNS,
+        onRewind,
+        onCancel: vi.fn(),
+        availableTerminalHeight: 3,
+      };
+      const view = render(
+        <OpentuiRewindSelector {...props} fileCheckpointingEnabled={enabled} />,
+      );
+      burst([ENTER]);
+      await flush();
+      view.rerender(
+        <OpentuiRewindSelector
+          {...props}
+          fileCheckpointingEnabled={!enabled}
+        />,
+      );
+      if (enabled) {
+        expect(highlighted()).toBe('› Restore conversation only');
+        burst([{ sequence: 'y' }]);
+        expect(onRewind).not.toHaveBeenCalled();
+        burst([ENTER]);
+      } else {
+        expect(screen.getByText('Rewind Conversation:')).toBeTruthy();
+        expect(screen.getByText('Second prompt')).toBeTruthy();
+        burst([{ sequence: 'y' }]);
+      }
+      expect(onRewind).toHaveBeenCalledExactlyOnceWith(
+        TURNS[1],
+        'conversation',
+      );
+    },
+  );
+
+  it('does not confirm when a narrow compact row cannot show the action and target', () => {
+    mocks.state.width = 80;
+    const onRewind = vi.fn();
+    const props = {
+      turns: TURNS,
+      fileCheckpointingEnabled: false,
+      availableTerminalHeight: 3,
+      onRewind,
+      onCancel: vi.fn(),
+    };
+    const view = render(<OpentuiRewindSelector {...props} />);
+    burst([ENTER]);
+    expect(screen.getByText('Rewind Conversation:')).toBeTruthy();
+    expect(screen.getByText('Second prompt')).toBeTruthy();
+    mocks.state.width = 12;
+    view.rerender(<OpentuiRewindSelector {...props} />);
+    expect(screen.queryByText('Second prompt')).toBeNull();
+    burst([ENTER, { sequence: 'y' }]);
+    expect(onRewind).not.toHaveBeenCalled();
+  });
+
+  it('keeps the same pick and restore option uncommitted while resize removes their labels', async () => {
+    mocks.state.width = 80;
+    const onRewind = vi.fn();
+    const getDiffStats = vi.fn().mockResolvedValue(undefined);
+    const props = {
+      turns: TURNS,
+      fileCheckpointingEnabled: true,
+      onRewind,
+      getDiffStats,
+      onCancel: vi.fn(),
+      availableTerminalHeight: 3,
+    };
+    const view = render(<OpentuiRewindSelector {...props} />);
+    expect(screen.getByText('Second prompt')).toBeTruthy();
+    mocks.state.width = 10;
+    view.rerender(<OpentuiRewindSelector {...props} />);
+    burst([ENTER]);
+    expect(getDiffStats).not.toHaveBeenCalled();
+    expect(onRewind).not.toHaveBeenCalled();
+    mocks.state.width = 80;
+    view.rerender(<OpentuiRewindSelector {...props} />);
+    expect(screen.getByText('Second prompt')).toBeTruthy();
+    burst([ENTER]);
+    await flush();
+    expect(highlighted()).toBe('› Restore conversation only');
+    for (const width of [10, 11]) {
+      mocks.state.width = width;
+      view.rerender(<OpentuiRewindSelector {...props} />);
+      burst([ENTER]);
+      expect(onRewind).not.toHaveBeenCalled();
+    }
+    mocks.state.width = 80;
+    view.rerender(<OpentuiRewindSelector {...props} />);
+    expect(highlighted()).toBe('› Restore conversation only');
+    burst([ENTER]);
+    expect(onRewind).toHaveBeenCalledExactlyOnceWith(TURNS[1], 'conversation');
+  });
+
+  it.each(['...', '…'])(
+    'allows a real %s prompt through pick and confirmation at normal width',
+    (text) => {
+      mocks.state.width = 80;
+      const turn = { id: 'literal-ellipsis', text, sentToModel: true };
+      const onRewind = vi.fn();
+      render(
+        <OpentuiRewindSelector
+          turns={[turn]}
+          fileCheckpointingEnabled={false}
+          availableTerminalHeight={30}
+          onRewind={onRewind}
+          onCancel={vi.fn()}
+        />,
+      );
+      expect(screen.getByText(text)).toBeTruthy();
+      burst([ENTER]);
+      expect(screen.getByText('Rewind to:')).toBeTruthy();
+      expect(screen.getByText(text)).toBeTruthy();
+      burst([ENTER]);
+      expect(onRewind).toHaveBeenCalledExactlyOnceWith(turn, 'conversation');
+    },
+  );
+});

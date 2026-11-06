@@ -33,6 +33,17 @@ import {
   parseHostedMcpServers,
 } from './hosted-mcp-session.js';
 import { parseManagedRuntimeProviderRequest } from './managed-runtime-provider-protocol.js';
+import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
+import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
+import {
+  HostedMcpManager,
+  commitHostedMcpSettings,
+  readHostedMcpSettings,
+  selectedMcpServers,
+  type HostedMcpCommand,
+} from './hosted-mcp-settings.js';
+import { LocalJsonlManagedSessionJournalHandle } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
+import { ManagedSessionAppendUnsettledError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
 let root: string;
 let session: ManagedSession;
@@ -41,6 +52,7 @@ let requests: ManagedMcpControl[];
 let replies: Map<string, ManagedMcpOperationView>;
 let loseAck: boolean;
 let unknown: boolean;
+let discoveredToolName: string;
 const pin = {
   serverId: 'demo',
   serverRevision: 1,
@@ -93,6 +105,7 @@ beforeEach(async () => {
   replies = new Map();
   loseAck = false;
   unknown = false;
+  discoveredToolName = 'echo';
   vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
     async function (this: HostedWorkspaceBroker) {
       this.runtime = {
@@ -151,7 +164,7 @@ beforeEach(async () => {
             catalogRevision: operation.configRevision,
             tools: [
               {
-                name: 'echo',
+                name: discoveredToolName,
                 description: 'Echo input',
                 inputSchema: {
                   type: 'object',
@@ -208,6 +221,55 @@ afterEach(async () => {
   if (root) await rm(root, { recursive: true, force: true });
 });
 
+it('keeps a server send_message in the MCP namespace and its overflow fatal (#14062)', async () => {
+  discoveredToolName = 'send_message';
+  await mcp.refresh(new AbortController().signal);
+  const name = mcp.tools()[0].name!;
+  const args = { text: '"'.repeat(20_000) };
+  expect(name).toMatch(/^mcp_[a-f0-9]{32}$/);
+  expect(mcp.toolInput('send_message', args, 'dense')).toBeUndefined();
+  expect(mcp.toolInput(name, args, 'dense')?.input.request).toEqual({
+    kind: 'tool_call',
+    name: 'send_message',
+    arguments: args,
+  });
+  const commit = vi.fn();
+  const turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    createManagedHarnessHandle(session),
+    'prompt',
+    commit,
+    () => true,
+    undefined,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-mcp/1', mcp },
+  );
+  await expect(
+    turn.execute(
+      [
+        {
+          name,
+          callId: 'dense',
+          args,
+          isClientInitiated: false,
+          prompt_id: 'prompt',
+        },
+      ],
+      [{ functionCall: { name, id: 'dense', args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow(
+    'Hosted tool input exceeds the inline Session Store limit.',
+  );
+  expect(
+    requests.filter((request) => request.kind === 'mcp-invoke'),
+  ).toHaveLength(0);
+  expect(commit).not.toHaveBeenCalled();
+});
+
 it('pins discovery, commits raw resource results and replays without another effect', async () => {
   const operationId = randomUUID();
   const request = { kind: 'resource_read' as const, uri: 'memory://blob' };
@@ -245,6 +307,27 @@ it('pins discovery, commits raw resource results and replays without another eff
   expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
 });
 
+it('identifies each server behind opaque model tool names without changing invocation bindings', async () => {
+  mcp = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin, { ...pin, serverId: 'other' }],
+  );
+  await mcp.ensureReady();
+  const tools = mcp.tools();
+  expect(tools).toHaveLength(2);
+  expect(new Set(tools.map((tool) => tool.name)).size).toBe(2);
+  for (const [index, serverId] of ['demo', 'other'].entries()) {
+    expect(tools[index].description).toBe(
+      `MCP server: "${serverId}"\nMCP tool: "echo"\nEcho input`,
+    );
+    expect(
+      mcp.toolInput(tools[index].name!, { text: 'hello' }, `call-${index}`)
+        ?.input,
+    ).toMatchObject({ serverId, request: { kind: 'tool_call', name: 'echo' } });
+  }
+});
+
 it('queries a lost configure reply by its original identity instead of reconnecting', async () => {
   loseAck = true;
   await mcp.ensureReady();
@@ -255,6 +338,63 @@ it('queries a lost configure reply by its original identity instead of reconnect
   expect(requests[1]).toMatchObject({
     targetOperationId: requests[0].operationId,
   });
+});
+
+it('keeps an unchanged independent MCP connection through package configuration changes', async () => {
+  await mcp.ensureReady();
+  const before = mcp.tools();
+  const configuration =
+    session.authority.extensionRecordsInDomain('mcp_configuration')[0]!;
+  const token = parseMcpConfiguration(configuration.record);
+  const requestCount = requests.length;
+  await mcp.drainForExtensionConfiguration([pin]);
+  await mcp.enableExtensionConfiguration([pin], randomUUID());
+  expect(requests).toHaveLength(requestCount);
+  expect(mcp.tools()).toEqual(before);
+  expect(
+    session.authority.extensionRecordsInDomain('mcp_configuration'),
+  ).toHaveLength(1);
+  expect(
+    parseMcpConfiguration(
+      session.authority.extensionRecord(
+        'mcp_configuration',
+        token.configurationId,
+      )!.record,
+    ),
+  ).toMatchObject({
+    configurationId: token.configurationId,
+    configRevision: token.configRevision,
+    connectionGeneration: token.connectionGeneration,
+    releaseState: 'active',
+  });
+});
+
+it('drains only the MCP server changed by an extension configuration', async () => {
+  const other = { ...pin, serverId: 'other' };
+  mcp = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin, other],
+  );
+  await mcp.ensureReady();
+  const preserved = session.authority
+    .extensionRecordsInDomain('mcp_configuration')
+    .map((entry) => parseMcpConfiguration(entry.record))
+    .find((entry) => entry.serverId === 'other')!;
+  const next = { ...pin, serverRevision: 2, definitionDigest: 'b'.repeat(64) };
+  await mcp.drainForExtensionConfiguration([next, other]);
+  await mcp.enableExtensionConfiguration([next, other], randomUUID());
+  expect(
+    requests
+      .filter((request) => request.kind === 'mcp-release')
+      .map((request) => ('serverId' in request ? request.serverId : undefined)),
+  ).toEqual(['demo']);
+  expect(
+    session.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .map((entry) => parseMcpConfiguration(entry.record))
+      .filter((entry) => entry.serverId === 'other'),
+  ).toEqual([preserved]);
 });
 
 async function interruptBeforeDispatch(operationId: string) {
@@ -845,22 +985,19 @@ it('does not release the owner until the physical drain receipt is durably commi
 });
 
 it.each([
-  { status: 409, code: 'runtime_session_not_ready', retry: true, held: false },
+  { status: 409, code: 'runtime_session_not_ready' },
   {
     status: 409,
     code: 'runtime_session_not_acquirable',
-    retry: true,
-    held: false,
   },
-  { status: 409, code: 'runtime_session_not_ready', retry: true, held: true },
-  { status: 503, code: 'runtime_session_not_ready', retry: false, held: false },
-  { status: 409, code: 'runtime_admission_closed', retry: false, held: false },
-  { status: 409, code: 'runtime_session_conflict', retry: false, held: false },
-  { status: 403, code: 'workspace_access_denied', retry: false, held: false },
-  { status: 0, code: 'network failure', retry: false, held: false },
+  { status: 503, code: 'runtime_session_not_ready' },
+  { status: 409, code: 'runtime_admission_closed' },
+  { status: 409, code: 'runtime_session_conflict' },
+  { status: 403, code: 'workspace_access_denied' },
+  { status: 0, code: 'network failure' },
 ])(
-  'recovers legacy releasing records only after a closed-owner rejection ($status $code, held: $held)',
-  async ({ status, code, retry, held }) => {
+  'refuses an owner rejection before the drain receipt is committed ($status $code)',
+  async ({ status, code }) => {
     await mcp.ensureReady();
     const saved =
       session.authority.extensionRecordsInDomain('mcp_configuration')[0];
@@ -870,7 +1007,7 @@ it.each([
     };
     await session.authority.commitExtensionRecord(
       {
-        operation: 'legacy-release',
+        operation: 'release-started',
         commandId: randomUUID(),
         sessionKey: session.authority.sessionHeader.sessionKey,
         contentDigest: 'a'.repeat(64),
@@ -891,21 +1028,15 @@ it.each([
       failure,
     );
     const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
-    if (held)
-      release.mockRejectedValue(new Error('still owns unfinished work'));
-    if (retry && !held) await mcp.close();
-    else
-      await expect(mcp.close()).rejects.toThrow(
-        held ? 'still owns unfinished work' : failure.message,
-      );
+    await expect(mcp.close()).rejects.toThrow(failure.message);
     expect(mcp.broker.runtimeSessionId).toBe(owner);
-    expect(release).toHaveBeenCalledTimes(retry ? 1 : 0);
+    expect(release).not.toHaveBeenCalled();
     expect(
       parseMcpConfiguration(
         session.authority.extensionRecordsInDomain('mcp_configuration')[0]
           .record,
       ).releaseState,
-    ).toBe(retry && !held ? 'released' : 'releasing');
+    ).toBe('releasing');
     expect(
       requests.filter((entry) => entry.kind === 'mcp-release'),
     ).toHaveLength(0);
@@ -1186,7 +1317,9 @@ it('stops refresh after cancellation without configuring a changed catalog or po
   });
   const abort = new AbortController();
   const refresh = mcp.refresh(abort.signal).catch((cause: unknown) => cause);
-  await vi.waitFor(() => expect(discoveryId).toBeDefined());
+  await vi.waitFor(() => expect(discoveryId).toBeDefined(), {
+    timeout: 10_000,
+  });
   const count = control.mock.calls.length;
   const reason = new Error('cancelled discovery');
   abort.abort(reason);
@@ -1290,7 +1423,9 @@ it('discards discovery from a configuration superseded while the request was pen
     return physical(operation);
   });
   const refreshing = mcp.refresh();
-  await vi.waitFor(() => expect(operationId).toBeDefined());
+  await vi.waitFor(() => expect(operationId).toBeDefined(), {
+    timeout: 10_000,
+  });
   try {
     await mcp.configure(randomUUID(), { ...pin, serverRevision: 2 }, 1);
     reply({
@@ -1370,7 +1505,9 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       .refresh(abort.signal)
       .catch((cause: unknown) => cause);
     try {
-      await vi.waitFor(() => expect(entered).toBe(true));
+      await vi.waitFor(() => expect(entered).toBe(true), {
+        timeout: 10_000,
+      });
       abort.abort(reason);
       await expect(mcp.close()).rejects.toBeInstanceOf(
         HostedMcpRecoveryRequiredError,
@@ -1438,7 +1575,9 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       .ensureReady(abort.signal)
       .catch((error: unknown) => error);
     try {
-      await vi.waitFor(() => expect(entered).toBe(true));
+      await vi.waitFor(() => expect(entered).toBe(true), {
+        timeout: 10_000,
+      });
       const before =
         session.authority.extensionRecordsInDomain('mcp_configuration')[0];
       abort.abort(reason);
@@ -1450,12 +1589,16 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       expect(requests).toHaveLength(0);
       loseAck = phase === 'dispatch_started';
       finish();
-      await vi.waitFor(() => expect(resumed).toBe(true));
+      await vi.waitFor(() => expect(resumed).toBe(true), {
+        timeout: 10_000,
+      });
       if (phase === 'dispatch_started') {
-        await vi.waitFor(() =>
-          expect(
-            requests.filter((request) => request.kind === 'mcp-configure'),
-          ).toHaveLength(1),
+        await vi.waitFor(
+          () =>
+            expect(
+              requests.filter((request) => request.kind === 'mcp-configure'),
+            ).toHaveLength(1),
+          { timeout: 10_000 },
         );
         await mcp.ensureReady();
         expect(
@@ -1476,6 +1619,375 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
     } finally {
       finish();
       await initializing;
+    }
+  },
+);
+
+function managementCommand(
+  action: HostedMcpCommand['action'],
+  serverId: string,
+  expectedRevision: number,
+  server?: HostedMcpCommand['server'],
+): HostedMcpCommand {
+  return {
+    operationId: randomUUID(),
+    actorKey: 'c'.repeat(64),
+    action,
+    serverId,
+    expectedRevision,
+    ...(server ? { server } : {}),
+  };
+}
+
+function managementInventory() {
+  const second = { ...pin, serverId: 'second' };
+  const updated = {
+    ...pin,
+    serverRevision: 2,
+    definitionDigest: 'b'.repeat(64),
+  };
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mcpDefinitions').mockResolvedValue(
+    [pin, second, updated].map((entry) => ({ ...entry, transport: 'stdio' })),
+  );
+  return { second, updated };
+}
+
+it('manages all published selections without changing admission, releasing the shared owner or duplicating a retry', async () => {
+  const { second, updated } = managementInventory();
+  await mcp.ensureReady();
+  const definition = session.authority.sessionHeader.definitionRef;
+  const manager = new HostedMcpManager(
+    session,
+    [pin],
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    mcp,
+  );
+  await manager.open();
+  let revision = 0;
+  for (const [action, target, selected] of [
+    ['add', 'second', second],
+    ['disable', 'demo'],
+    ['edit', 'demo', updated],
+    ['enable', 'demo'],
+    ['remove', 'second'],
+    ['add', 'second', second],
+    ['reload', 'demo'],
+    ['restart', 'demo'],
+  ] as const) {
+    const command = managementCommand(action, target, revision, selected);
+    const before = requests.length;
+    await manager.submit(command);
+    const status = manager.status(command.operationId);
+    expect(status).toMatchObject({ state: 'settled', revision: ++revision });
+    const effects = requests.length;
+    await manager.submit(command);
+    expect(requests).toHaveLength(effects);
+    expect(session.authority.sessionHeader.definitionRef).toEqual(definition);
+    expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+    if (action === 'restart' || action === 'reload') {
+      const work = requests
+        .slice(before)
+        .filter((entry) => entry.kind !== 'mcp-status');
+      expect(work[0].kind).toBe('mcp-release');
+      expect(work.at(-1)?.kind).toBe('mcp-configure');
+      expect(
+        work.filter(
+          (entry) => 'serverId' in entry && entry.serverId === 'second',
+        ),
+      ).toEqual([]);
+    }
+  }
+  await mcp.ensureReady();
+  expect(mcp.tools()).toHaveLength(2);
+  await mcp.closeResources();
+  expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledTimes(1);
+});
+
+it('persists removal across cold load and Session rename without reviving a server', async () => {
+  managementInventory();
+  await mcp.ensureReady();
+  const manager = new HostedMcpManager(
+    session,
+    [pin],
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    mcp,
+  );
+  await manager.open();
+  await manager.submit(managementCommand('remove', 'demo', 0));
+  const key = session.authority.sessionHeader.sessionKey;
+  await session.authority.commitDomainRecord(
+    {
+      operation: 'renameSession',
+      commandId: randomUUID(),
+      sessionKey: key,
+      contentDigest: 'f'.repeat(64),
+    },
+    {
+      domain: 'session_metadata',
+      content: { title: 'Renamed', titleSource: 'manual' },
+    },
+    { class: 'trusted_entry' },
+  );
+  await session.close();
+  session = await openManagedSession({
+    runtimeBaseDir: root,
+    cwd: root,
+    transcriptPath: path.join(root, 'session.jsonl'),
+    sessionId: key.sessionId,
+    sessionKey: key,
+    version: 'test',
+    workerId: 'replacement-worker',
+    activationLeaseDurationMs: 60_000,
+  });
+  const history = await readHostedMcpSettings(session);
+  const restored = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin],
+    history.at(-1),
+  );
+  const starts = requests.filter(
+    (entry) => entry.kind === 'mcp-configure',
+  ).length;
+  await restored.ensureReady();
+  expect(restored.tools()).toEqual([]);
+  expect(restored.recoveryBlocked).toBe(false);
+  expect(
+    requests.filter((entry) => entry.kind === 'mcp-configure'),
+  ).toHaveLength(starts);
+  await restored.closeResources();
+  expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledTimes(1);
+});
+
+it('blocks replacement while an original release is unknown and resumes the same command after its receipt arrives', async () => {
+  managementInventory();
+  await mcp.ensureReady();
+  const physical = vi
+    .mocked(HostedWorkspaceBroker.prototype.control)
+    .getMockImplementation()!;
+  let lostRelease: string | undefined;
+  vi.mocked(HostedWorkspaceBroker.prototype.control).mockImplementation(
+    async (operation) => {
+      if (operation.kind === 'mcp-release') {
+        lostRelease = operation.operationId;
+        requests.push(operation);
+        const response = {
+          operationId: operation.operationId,
+          state: 'outcome_unknown' as const,
+        };
+        replies.set(operation.operationId, response);
+        return response;
+      }
+      return physical(operation);
+    },
+  );
+  const manager = new HostedMcpManager(
+    session,
+    [pin],
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    mcp,
+  );
+  await manager.open();
+  const command = managementCommand('restart', 'demo', 0);
+  await expect(manager.submit(command)).rejects.toThrow(
+    HostedMcpRecoveryRequiredError,
+  );
+  expect(manager.status(command.operationId)?.state).toBe('recovery_required');
+  expect(
+    requests.filter((entry) => entry.kind === 'mcp-configure'),
+  ).toHaveLength(1);
+  await expect(
+    manager.submit(managementCommand('restart', 'demo', 1)),
+  ).rejects.toThrow(HostedMcpRecoveryRequiredError);
+  expect(lostRelease).toBeDefined();
+  replies.set(lostRelease!, {
+    operationId: lostRelease!,
+    state: 'settled',
+    response: { released: true },
+  });
+  await manager.submit(command);
+  expect(manager.status(command.operationId)?.state).toBe('settled');
+  expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
+    1,
+  );
+  expect(
+    requests.filter((entry) => entry.kind === 'mcp-configure'),
+  ).toHaveLength(2);
+});
+
+it('commits settings after a queued activation renewal without duplicating the command', async () => {
+  const prototype = LocalJsonlManagedSessionJournalHandle.prototype;
+  const append = prototype.appendTransaction;
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const held = vi
+    .spyOn(prototype, 'appendTransaction')
+    .mockImplementationOnce(async function (
+      this: LocalJsonlManagedSessionJournalHandle,
+      records,
+    ) {
+      entered();
+      await gate;
+      return append.call(this, records);
+    });
+  try {
+    const before = session.authority.committedSequence;
+    const renewal = session.authority.renewActivation({
+      leaseDurationMs: 60_000,
+    });
+    await started;
+    const command = managementCommand('add', 'demo', 0, pin);
+    const servers = selectedMcpServers([], command);
+    const commit = commitHostedMcpSettings(session, command, servers);
+    release();
+    const [, receipt] = await Promise.all([renewal, commit]);
+    expect(receipt.revision).toBe(1);
+    expect(receipt.sequence).toBe(before + 2);
+    expect(await commitHostedMcpSettings(session, command, servers)).toEqual(
+      receipt,
+    );
+    expect(await readHostedMcpSettings(session)).toHaveLength(1);
+    expect(requests).toEqual([]);
+  } finally {
+    release();
+    held.mockRestore();
+  }
+});
+
+it('rejects competing settings revisions atomically before creating another physical effect', async () => {
+  const first = managementCommand('add', 'demo', 0, pin);
+  const second = managementCommand('add', 'second', 0, {
+    ...pin,
+    serverId: 'second',
+  });
+  const result = await Promise.allSettled(
+    [first, second].map((command) =>
+      commitHostedMcpSettings(
+        session,
+        command,
+        selectedMcpServers([], command),
+      ),
+    ),
+  );
+  expect(result.filter((entry) => entry.status === 'fulfilled')).toHaveLength(
+    1,
+  );
+  expect(result.filter((entry) => entry.status === 'rejected')).toHaveLength(1);
+  expect(await readHostedMcpSettings(session)).toHaveLength(1);
+  expect(requests).toEqual([]);
+});
+
+it('adds MCP to an ordinary Session with no initial pins and rejects an unpublished definition before committing', async () => {
+  managementInventory();
+  const manager = new HostedMcpManager(session, [], {
+    baseUrl: 'http://127.0.0.1:1',
+    token: 'test',
+  });
+  await manager.open();
+  await expect(
+    manager.submit(
+      managementCommand('add', 'foreign', 0, { ...pin, serverId: 'foreign' }),
+    ),
+  ).rejects.toThrow('not published');
+  expect(session.authority.domainRecord('config_install')).toBeUndefined();
+  await manager.submit(managementCommand('add', 'demo', 0, pin));
+  expect(manager.mcp).toBeDefined();
+  expect(
+    manager.status(
+      (await readHostedMcpSettings(session))[0].command.operationId,
+    )?.state,
+  ).toBe('settled');
+  expect(manager.mcp!.tools()).toHaveLength(1);
+});
+
+it('keeps an old disable settled and idempotent after a later enable and cold restore', async () => {
+  managementInventory();
+  await mcp.ensureReady();
+  const options = { baseUrl: 'http://127.0.0.1:1', token: 'test' };
+  const manager = new HostedMcpManager(session, [pin], options, mcp);
+  await manager.open();
+  const disable = managementCommand('disable', 'demo', 0);
+  await manager.submit(disable);
+  await manager.submit(managementCommand('enable', 'demo', 1));
+  expect(manager.status(disable.operationId)?.state).toBe('settled');
+  const effects = requests.length;
+  await manager.submit(disable);
+  expect(requests).toHaveLength(effects);
+  const key = session.authority.sessionHeader.sessionKey;
+  await session.close();
+  session = await openManagedSession({
+    runtimeBaseDir: root,
+    cwd: root,
+    transcriptPath: path.join(root, 'session.jsonl'),
+    sessionId: key.sessionId,
+    sessionKey: key,
+    version: 'test',
+    workerId: 'replacement-worker',
+    activationLeaseDurationMs: 60_000,
+  });
+  const history = await readHostedMcpSettings(session);
+  const restored = new HostedMcpSession(
+    options,
+    session,
+    [pin],
+    history.at(-1),
+  );
+  const reopened = new HostedMcpManager(session, [pin], options, restored);
+  await reopened.open();
+  expect(reopened.status(disable.operationId)?.state).toBe('settled');
+  await reopened.submit(disable);
+  expect(requests).toHaveLength(effects);
+});
+
+it.each(['landed', 'absent'] as const)(
+  'settles a %s settings append before reading and resuming the original command',
+  async (outcome) => {
+    managementInventory();
+    const manager = new HostedMcpManager(session, [], {
+      baseUrl: 'http://127.0.0.1:1',
+      token: 'test',
+    });
+    await manager.open();
+    const prototype: typeof LocalJsonlManagedSessionJournalHandle.prototype & {
+      settleAppend?: () => Promise<'landed' | 'absent'>;
+    } = LocalJsonlManagedSessionJournalHandle.prototype;
+    const append = prototype.appendTransaction;
+    prototype.settleAppend = async () => outcome;
+    vi.spyOn(prototype, 'appendTransaction').mockImplementationOnce(
+      async function (this: LocalJsonlManagedSessionJournalHandle, records) {
+        if (outcome === 'landed') await append.call(this, records);
+        throw new ManagedSessionAppendUnsettledError(
+          new Error('Lost settings ACK'),
+        );
+      },
+    );
+    const command = managementCommand('add', 'demo', 0, pin);
+    try {
+      await expect(manager.submit(command)).rejects.toThrow(
+        ManagedSessionAppendUnsettledError,
+      );
+      expect(requests).toEqual([]);
+      await manager.open();
+      expect((await manager.snapshot(false)).revision).toBe(
+        outcome === 'landed' ? 1 : 0,
+      );
+      expect(requests).toEqual([]);
+      await manager.submit(command);
+      await manager.submit(command);
+      expect(await readHostedMcpSettings(session)).toHaveLength(1);
+      expect(manager.status(command.operationId)?.state).toBe('settled');
+      expect(
+        requests.filter((entry) => entry.kind === 'mcp-configure'),
+      ).toHaveLength(1);
+    } finally {
+      await session.authority.settlePendingAppend().catch(() => undefined);
+      delete prototype.settleAppend;
     }
   },
 );

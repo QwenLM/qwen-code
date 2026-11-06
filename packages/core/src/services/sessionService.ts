@@ -24,7 +24,10 @@ import readline from 'node:readline';
 import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
-import { prepareTranscriptRecords } from '../utils/transcript-records.js';
+import {
+  isTranscriptConversationRecord,
+  prepareTranscriptRecords,
+} from '../utils/transcript-records.js';
 import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
 import type {
   ChatRecord,
@@ -62,6 +65,7 @@ import {
 } from '../utils/sessionStorageUtils.js';
 import {
   isSessionArtifactRecord,
+  SESSION_ARTIFACT_PERSISTENCE_VERSION,
   getWebPreviewSnapshotId,
   type PersistedSessionArtifact,
   rebuildSessionArtifactSnapshot,
@@ -71,6 +75,15 @@ import {
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 import { moveSessionPrSidecar } from './session-pr-service.js';
+import {
+  moveSessionTitleSidecar,
+  readSessionTitleSidecar,
+  removeSessionTitleSidecar,
+  sessionTitleSidecarPath,
+  truncateTitleForList,
+  writeSessionTitleSidecar,
+  type SessionTitleSidecar,
+} from './session-title-sidecar.js';
 import {
   deleteArtifactSnapshot,
   retainArtifactSnapshot,
@@ -259,6 +272,20 @@ export class SessionTranscriptDurabilityError extends Error {
     super('Session transcript deletion durability could not be confirmed.', {
       cause: options.cause,
     });
+  }
+}
+
+export class SessionArtifactLibraryError extends Error {
+  override readonly name = 'SessionArtifactLibraryError';
+
+  constructor(
+    readonly sessionId: string,
+    readonly code:
+      | 'session_transcript_corrupt'
+      | 'artifact_mutation_requires_managed_authority',
+    message: string,
+  ) {
+    super(message);
   }
 }
 
@@ -983,6 +1010,51 @@ export class SessionService {
     state: SessionArchiveState,
   ): string {
     return path.join(this.getChatsDirForState(state), `${sessionId}.pr.json`);
+  }
+
+  private getSessionTitleSidecarPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return sessionTitleSidecarPath(this.getChatsDirForState(state), sessionId);
+  }
+
+  /**
+   * Reads the list-label sidecar written when the session first got a name.
+   * A missing or unreadable sidecar is normal — most legacy sessions never
+   * had one.
+   */
+  private readSessionTitleSidecarForSession(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): SessionTitleSidecar | undefined {
+    return readSessionTitleSidecar(
+      this.getSessionTitleSidecarPathForState(sessionId, state),
+    );
+  }
+
+  /**
+   * The custom title for one transcript, with the sidecar as a fallback. A
+   * `prompt`-sourced sidecar is deliberately excluded: it labels the list row,
+   * it is not a title the user gave the session. Reads stay transcript-first,
+   * so a rebuilt transcript that regained a `custom_title` outranks the file.
+   */
+  private readSessionTitleInfoWithSidecar(
+    sessionId: string,
+    filePath: string,
+    state: SessionArchiveState,
+    tailBuffer?: Buffer,
+  ): { title?: string; source?: TitleSource } {
+    const fromTranscript = this.readSessionTitleInfoFromFile(
+      filePath,
+      tailBuffer,
+    );
+    if (fromTranscript.title) return fromTranscript;
+    const sidecar = this.readSessionTitleSidecarForSession(sessionId, state);
+    if (sidecar && sidecar.source !== 'prompt') {
+      return { title: sidecar.displayName, source: sidecar.source };
+    }
+    return fromTranscript;
   }
 
   private async sessionBelongsToCurrentProject(
@@ -1756,6 +1828,14 @@ export class SessionService {
     }
   }
 
+  private removeSessionTitleSidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      removeSessionTitleSidecar(
+        this.getSessionTitleSidecarPathForState(sessionId, state),
+      );
+    }
+  }
+
   private removePromptLedgers(sessionId: string): void {
     for (const state of ['active', 'archived'] as const) {
       const ledger = this.getPromptLedgerPathForState(sessionId, state);
@@ -1878,6 +1958,28 @@ export class SessionService {
     fs.unlinkSync(sourcePath);
   }
 
+  /**
+   * A conflict resolution keeps one transcript and drops the other. The kept
+   * transcript's label wins: move the dropped side's sidecar in only when the
+   * kept side has none, and discard it otherwise.
+   */
+  private reconcileTitleSidecarOnConflict(
+    sessionId: string,
+    keptState: SessionArchiveState,
+    droppedState: SessionArchiveState,
+  ): void {
+    const kept = this.getSessionTitleSidecarPathForState(sessionId, keptState);
+    const dropped = this.getSessionTitleSidecarPathForState(
+      sessionId,
+      droppedState,
+    );
+    if (fs.existsSync(kept)) {
+      removeSessionTitleSidecar(dropped);
+    } else {
+      moveSessionTitleSidecar(dropped, kept);
+    }
+  }
+
   private async moveArchiveSidecars(
     sessionId: string,
     action: 'archive' | 'unarchive',
@@ -1940,6 +2042,18 @@ export class SessionService {
       assertCleanupOwned?.();
       this.warn(
         `${action}Sessions: failed to move prompt ledger for ${sessionId} from ${sourceLedger} to ${destinationLedger}: ${error}`,
+      );
+    }
+    try {
+      assertCleanupOwned?.();
+      moveSessionTitleSidecar(
+        this.getSessionTitleSidecarPathForState(sessionId, sourceState),
+        this.getSessionTitleSidecarPathForState(sessionId, destinationState),
+      );
+    } catch (error) {
+      assertCleanupOwned?.();
+      this.warn(
+        `${action}Sessions: failed to move title sidecar for ${sessionId}: ${error}`,
       );
     }
   }
@@ -2226,11 +2340,11 @@ export class SessionService {
     }
     const chatsDir = this.getChatsDir();
     const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
-    return this.readSessionTitleInfoFromFile(filePath);
+    return this.readSessionTitleInfoWithSidecar(sessionId, filePath, 'active');
   }
 
   /**
-   * Reads the UUID of the last record in a session JSONL file.
+   * Reads the UUID of the last conversation record in a session JSONL file.
    * Uses a tail-read strategy for efficiency.
    *
    * Each physical line is routed through `jsonl.parseLineTolerant` so a
@@ -2243,61 +2357,66 @@ export class SessionService {
     try {
       const stats = fs.statSync(filePath);
       const fileSize = stats.size;
-      const readStart = Math.max(0, fileSize - TAIL_READ_SIZE);
-      const readLength = Math.min(fileSize, TAIL_READ_SIZE);
+      for (let window = TAIL_READ_SIZE; ; window *= 2) {
+        const readStart = Math.max(0, fileSize - window);
+        const readLength = Math.min(fileSize, window);
 
-      const fd = fs.openSync(filePath, 'r');
-      let buffer: Buffer;
-      let firstSegmentIsPartial = false;
-      try {
-        buffer = Buffer.alloc(readLength);
-        fs.readSync(fd, buffer, 0, readLength, readStart);
+        const fd = fs.openSync(filePath, 'r');
+        let buffer: Buffer;
+        let firstSegmentIsPartial = false;
+        try {
+          buffer = Buffer.alloc(readLength);
+          fs.readSync(fd, buffer, 0, readLength, readStart);
 
-        // The first split segment is partial only when the tail window
-        // truly starts in the middle of a JSONL record. If the byte right
-        // before `readStart` is `\n`, the window started on a record
-        // boundary and the first segment is a complete line — the
-        // 64-KiB-aligned case where `prev\n<exactly-64KiB-record>\n`
-        // would otherwise drop the only readable record. Peek that byte
-        // before deciding to shift.
-        if (readStart > 0) {
-          const peek = Buffer.alloc(1);
-          fs.readSync(fd, peek, 0, 1, readStart - 1);
-          firstSegmentIsPartial = peek[0] !== 0x0a; // 0x0a = '\n'
+          // The first split segment is partial only when the tail window
+          // truly starts in the middle of a JSONL record. If the byte right
+          // before `readStart` is `\n`, the window started on a record
+          // boundary and the first segment is a complete line — the
+          // 64-KiB-aligned case where `prev\n<exactly-64KiB-record>\n`
+          // would otherwise drop the only readable record. Peek that byte
+          // before deciding to shift.
+          if (readStart > 0) {
+            const peek = Buffer.alloc(1);
+            fs.readSync(fd, peek, 0, 1, readStart - 1);
+            firstSegmentIsPartial = peek[0] !== 0x0a; // 0x0a = '\n'
+          }
+        } finally {
+          fs.closeSync(fd);
         }
-      } finally {
-        fs.closeSync(fd);
-      }
 
-      const tail = buffer.toString('utf-8');
-      const lines = tail.split('\n');
+        const tail = buffer.toString('utf-8');
+        const lines = tail.split('\n');
 
-      // Discard the first segment ONLY when it's a true partial fragment.
-      // Running tolerant recovery on a partial would surface a balanced
-      // inner `{ "uuid": ... }` object from inside the record's payload as
-      // if it were a top-level uuid — `renameSession` would then anchor
-      // `custom_title.parentUuid` at payload data and break the parent
-      // chain. Complete physical lines (including a boundary-aligned
-      // first segment) are safe to recover.
-      if (firstSegmentIsPartial) {
-        lines.shift();
-      }
+        // Discard the first segment ONLY when it's a true partial fragment.
+        // Running tolerant recovery on a partial would surface a balanced
+        // inner `{ "uuid": ... }` object from inside the record's payload as
+        // if it were a top-level uuid — `renameSession` would then anchor
+        // `custom_title.parentUuid` at payload data and break the parent
+        // chain. Complete physical lines (including a boundary-aligned
+        // first segment) are safe to recover.
+        if (firstSegmentIsPartial) {
+          lines.shift();
+        }
 
-      // Walk physical lines bottom-up; on each line walk recovered records
-      // bottom-up too, so a `}{`-glued tail returns the *latest* record.
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const trimmed = lines[i].trim();
-        if (!trimmed) continue;
-        const records = jsonl.parseLineTolerant<ChatRecord>(trimmed, filePath);
-        for (let j = records.length - 1; j >= 0; j--) {
-          const record = records[j];
-          if (record.uuid) {
-            return record.uuid;
+        // Walk physical lines bottom-up; on each line walk recovered records
+        // bottom-up too, so a `}{`-glued tail returns the *latest* record.
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const trimmed = lines[i].trim();
+          if (!trimmed) continue;
+          const records = jsonl.parseLineTolerant<ChatRecord>(
+            trimmed,
+            filePath,
+          );
+          for (let j = records.length - 1; j >= 0; j--) {
+            const record = records[j];
+            if (record.uuid && isTranscriptConversationRecord(record)) {
+              return record.uuid;
+            }
           }
         }
-      }
 
-      return null;
+        if (readStart === 0) return null;
+      }
     } catch {
       return null;
     }
@@ -2361,14 +2480,7 @@ export class SessionService {
   }
 
   private truncatePromptForDisplay(text: string): string {
-    const codePoints: string[] = [];
-    for (const codePoint of text) {
-      if (codePoints.length === 200) {
-        return `${codePoints.join('')}...`;
-      }
-      codePoints.push(codePoint);
-    }
-    return text;
+    return truncateTitleForList(text);
   }
 
   /**
@@ -2747,9 +2859,30 @@ export class SessionService {
         knownManaged,
       );
       signal?.throwIfAborted();
+      // A transcript can lose its head (rebuilt after a crash, restored into
+      // a fresh file, or truncated externally). The sidecar keeps the label
+      // the session had before that, so the sidebar never falls back to a
+      // bare session id.
+      const sidecar =
+        prompt && titleInfo.title
+          ? undefined
+          : this.readSessionTitleSidecarForSession(
+              firstRecord.sessionId,
+              isArchived ? 'archived' : 'active',
+            );
+      const fallbackPrompt =
+        prompt || (sidecar?.source === 'prompt' ? sidecar.displayName : '');
+      const fallbackTitle =
+        titleInfo.title ||
+        (sidecar && sidecar.source !== 'prompt'
+          ? sidecar.displayName
+          : undefined);
+      const fallbackTitleSource =
+        titleInfo.source ??
+        (sidecar && sidecar.source !== 'prompt' ? sidecar.source : undefined);
       const goalObjective = this.resolveGoalObjective(
-        prompt,
-        titleInfo.title,
+        fallbackPrompt,
+        fallbackTitle,
         filePath,
         records,
         readResult.complete,
@@ -2760,14 +2893,14 @@ export class SessionService {
         cwd: firstRecord.cwd,
         startTime: firstRecord.timestamp,
         mtime: file.mtime,
-        prompt,
+        prompt: fallbackPrompt,
         gitBranch: firstRecord.gitBranch,
         filePath,
         // messageCount intentionally omitted — see SessionListItem
         // and `countSessionMessages` for the rationale.
-        customTitle: titleInfo.title,
+        customTitle: fallbackTitle,
         goalObjective,
-        titleSource: titleInfo.source,
+        titleSource: fallbackTitleSource,
         ...(source.parentSessionId
           ? { parentSessionId: source.parentSessionId }
           : {}),
@@ -2833,23 +2966,36 @@ export class SessionService {
       knownManaged,
     );
     const prompt = this.extractFirstPromptFromRecords(records);
+    const sidecar =
+      prompt && titleInfo.title
+        ? undefined
+        : this.readSessionTitleSidecarForSession(sessionId, archiveState);
+    const fallbackPrompt =
+      prompt || (sidecar?.source === 'prompt' ? sidecar.displayName : '');
+    const fallbackTitle =
+      titleInfo.title ||
+      (sidecar && sidecar.source !== 'prompt'
+        ? sidecar.displayName
+        : undefined);
     return {
       sessionId: firstRecord.sessionId,
       cwd: firstRecord.cwd,
       startTime: firstRecord.timestamp,
       mtime: stats.mtimeMs,
-      prompt,
+      prompt: fallbackPrompt,
       gitBranch: firstRecord.gitBranch,
       filePath,
-      customTitle: titleInfo.title,
+      customTitle: fallbackTitle,
       goalObjective: this.resolveGoalObjective(
-        prompt,
-        titleInfo.title,
+        fallbackPrompt,
+        fallbackTitle,
         filePath,
         records,
         readResult.complete,
       ),
-      titleSource: titleInfo.source,
+      titleSource:
+        titleInfo.source ??
+        (sidecar && sidecar.source !== 'prompt' ? sidecar.source : undefined),
       ...(source.parentSessionId
         ? { parentSessionId: source.parentSessionId }
         : {}),
@@ -3059,6 +3205,236 @@ export class SessionService {
     sessionId: string,
   ): Promise<ResumedSessionData | undefined> {
     return this.loadSessionFromState(sessionId, 'active');
+  }
+
+  private async readArtifactLibraryState(sessionId: string) {
+    const physical = await this.resolveMaintainableSessionSnapshot(sessionId);
+    if (!physical.location) return undefined;
+    if (physical.location === 'conflict' || physical.identities.length !== 1) {
+      throw new SessionTranscriptChangedError();
+    }
+    const identity = physical.identities[0];
+    const maxBytes = 64 * 1024 * 1024;
+    if (identity.size > maxBytes) {
+      throw new SessionTranscriptTooLargeError(
+        sessionId,
+        identity.size,
+        maxBytes,
+      );
+    }
+    if (identity.size === 0) return undefined;
+    const handle = await fs.promises.open(
+      identity.filePath,
+      fs.constants.O_RDONLY |
+        (process.platform === 'win32' ? 0 : (fs.constants.O_NOFOLLOW ?? 0)),
+    );
+    const records: ChatRecord[] = [];
+    let complete = true;
+    try {
+      const stats = await handle.stat();
+      if (
+        stats.dev !== identity.dev ||
+        stats.ino !== identity.ino ||
+        stats.size !== identity.size
+      ) {
+        throw new SessionTranscriptChangedError();
+      }
+      const input = handle.createReadStream({
+        start: 0,
+        end: identity.size - 1,
+        autoClose: false,
+      });
+      try {
+        const lines = readline.createInterface({ input, crlfDelay: Infinity });
+        try {
+          for await (const line of lines) {
+            if (!line.trim()) continue;
+            const parsed = jsonl.parseLineTolerantWithIntegrity<ChatRecord>(
+              line,
+              identity.filePath,
+            );
+            complete &&= parsed.complete;
+            records.push(...parsed.records);
+          }
+        } finally {
+          lines.close();
+        }
+      } finally {
+        input.destroy();
+      }
+    } finally {
+      await handle.close();
+    }
+    if (
+      !complete ||
+      !records.length ||
+      records.some((record) => record.sessionId !== sessionId)
+    ) {
+      throw new SessionArtifactLibraryError(
+        sessionId,
+        'session_transcript_corrupt',
+        'The session transcript contains incomplete or foreign records.',
+      );
+    }
+    this.assertMaintainableSessionUnchanged(sessionId, physical);
+    const { messages, gaps } = this.reconstructHistory(records, {
+      detectGaps: true,
+    });
+    // Artifacts can be registered before the first prompt; these valid
+    // sessions have only side records and no conversation chain.
+    const sideRecordsOnly = records.every(
+      (record) =>
+        isSessionArtifactRecord(record) ||
+        (record.type === 'system' &&
+          (record.subtype === 'custom_title' ||
+            record.subtype === 'session_sources_snapshot')),
+    );
+    if (gaps.length || (!messages.length && !sideRecordsOnly)) {
+      throw new SessionArtifactLibraryError(
+        sessionId,
+        'session_transcript_corrupt',
+        'The session transcript has an incomplete conversation chain.',
+      );
+    }
+    const snapshot = rebuildSessionArtifactSnapshot(
+      sideRecordsOnly
+        ? records
+        : includeActiveSideArtifactRecords(records, messages),
+      sessionId,
+    );
+    return {
+      physical,
+      identity,
+      records,
+      snapshot,
+      // Parenting to side records would hide this removal on conversation replay.
+      artifactParentUuid: messages.at(-1)?.uuid ?? null,
+    };
+  }
+
+  async readSessionArtifactSnapshot(sessionId: string) {
+    const state = await this.readArtifactLibraryState(sessionId);
+    if (!state) return undefined;
+    return (
+      state.snapshot ??
+      ({
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId,
+        sequence: 0,
+        artifacts: [],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      } satisfies RebuiltSessionArtifactSnapshot)
+    );
+  }
+
+  async removeSessionArtifactForLibrary(
+    sessionId: string,
+    artifactId: string,
+    guards: {
+      assertStorageUnchanged: () => Promise<void>;
+      assertCanMutate: () => void;
+    },
+  ): Promise<boolean | undefined> {
+    const removed = await this.removeSessionArtifactsForLibrary(
+      sessionId,
+      [artifactId],
+      guards,
+    );
+    return removed === undefined ? undefined : removed.length > 0;
+  }
+
+  async removeSessionArtifactsForLibrary(
+    sessionId: string,
+    artifactIds: readonly string[],
+    guards: {
+      assertStorageUnchanged: () => Promise<void>;
+      assertCanMutate: () => void;
+    },
+  ): Promise<string[] | undefined> {
+    const requestedIds = new Set(artifactIds);
+    if (requestedIds.size > 800) {
+      throw new RangeError('Artifact removal supports at most 800 unique ids.');
+    }
+    const state = await this.readArtifactLibraryState(sessionId);
+    if (!state) return undefined;
+    if (isManagedExecutionTranscriptSync(state.identity.filePath)) {
+      throw new SessionArtifactLibraryError(
+        sessionId,
+        'artifact_mutation_requires_managed_authority',
+        'Artifact mutation must use its managed session authority.',
+      );
+    }
+    if (
+      state.snapshot?.warnings.some(
+        (warning) =>
+          !warning.startsWith('skipped malformed artifact ') &&
+          !warning.startsWith('skipped oversized metadata for artifact ') &&
+          warning !== 'skipped artifact without id/title',
+      )
+    ) {
+      throw new SessionArtifactLibraryError(
+        sessionId,
+        'session_transcript_corrupt',
+        'The artifact journal cannot establish an authoritative mutation sequence.',
+      );
+    }
+    const artifacts = (state.snapshot?.artifacts ?? []).filter((item) =>
+      requestedIds.has(item.id),
+    );
+    if (artifacts.length === 0) return [];
+    const recordedAt = new Date().toISOString();
+    const first = state.records[0];
+    const record: ChatRecord = {
+      uuid: randomUUID(),
+      parentUuid: state.artifactParentUuid,
+      sessionId,
+      timestamp: recordedAt,
+      type: 'system',
+      subtype: 'session_artifact_event',
+      cwd: first.cwd,
+      version: first.version,
+      systemPayload: {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId,
+        sequence: (state.snapshot?.sequence ?? 0) + 1,
+        recordedAt,
+        changes: artifacts.map((artifact) => ({
+          action: 'removed',
+          artifactId: artifact.id,
+          artifact,
+          reason: 'explicit',
+        })),
+      },
+    };
+    await guards.assertStorageUnchanged();
+    guards.assertCanMutate();
+    this.assertMaintainableSessionUnchanged(sessionId, state.physical);
+    jsonl.writeLineSync(state.identity.filePath, record);
+    const retainedSnapshots = new Set(
+      (state.snapshot?.artifacts ?? [])
+        .filter((artifact) => !requestedIds.has(artifact.id))
+        .map(getWebPreviewSnapshotId),
+    );
+    const releasedSnapshots = new Set<string>();
+    for (const artifact of artifacts) {
+      const snapshotId = getWebPreviewSnapshotId(artifact);
+      if (
+        !snapshotId ||
+        retainedSnapshots.has(snapshotId) ||
+        releasedSnapshots.has(snapshotId)
+      ) {
+        continue;
+      }
+      releasedSnapshots.add(snapshotId);
+      await deleteArtifactSnapshot(
+        artifact,
+        this.storage.getRuntimeBaseDir(),
+        sessionId,
+      );
+    }
+    return artifacts.map((artifact) => artifact.id);
   }
 
   async readSessionSources(
@@ -3547,6 +3923,8 @@ export class SessionService {
     assertCleanupOwned?.();
     this.removePrSidecars(sessionId);
     assertCleanupOwned?.();
+    this.removeSessionTitleSidecars(sessionId);
+    assertCleanupOwned?.();
     this.removePromptLedgers(sessionId);
     assertCleanupOwned?.();
     this.removeFileHistoryBackups(sessionId);
@@ -3631,6 +4009,19 @@ export class SessionService {
           this.removeFileIfExists(
             this.getPromptLedgerPathForState(sessionId, 'active'),
           );
+          try {
+            options.assertCleanupOwned?.();
+            this.reconcileTitleSidecarOnConflict(
+              sessionId,
+              'archived',
+              'active',
+            );
+          } catch (titleSidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `archiveSessions: failed to reconcile title sidecar for ${sessionId}: ${titleSidecarError}`,
+            );
+          }
           archived.push(sessionId);
           resolvedConflicts.push(sessionId);
           continue;
@@ -3689,9 +4080,18 @@ export class SessionService {
     sessionId: string,
     archivedFilePath: string,
   ): Promise<void> {
-    const currentTitle = await this.readSessionDisplayNameFromFile(
-      archivedFilePath,
-    ).catch(() => undefined);
+    // The archived row can be named only by its sidecar after a transcript
+    // rebuild; the collision check must see that name too, or unarchiving
+    // leaves two rows reading the same.
+    const currentTitle =
+      this.readSessionTitleInfoWithSidecar(
+        sessionId,
+        archivedFilePath,
+        'archived',
+      ).title ??
+      (await this.readSessionDisplayNameFromFile(archivedFilePath).catch(
+        () => undefined,
+      ));
     if (!currentTitle) return;
     const normalizedTitle = currentTitle.toLowerCase().trim();
     const activeTitles = new Set(
@@ -3769,6 +4169,19 @@ export class SessionService {
           this.removeFileIfExists(
             this.getPromptLedgerPathForState(sessionId, 'archived'),
           );
+          try {
+            options.assertCleanupOwned?.();
+            this.reconcileTitleSidecarOnConflict(
+              sessionId,
+              'active',
+              'archived',
+            );
+          } catch (titleSidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `unarchiveSessions: failed to reconcile title sidecar for ${sessionId}: ${titleSidecarError}`,
+            );
+          }
           unarchived.push(sessionId);
           resolvedConflicts.push(sessionId);
           continue;
@@ -3985,6 +4398,13 @@ export class SessionService {
         this.assertMaintainableSessionUnchanged(sessionId, physicalSnapshot);
       }
       jsonl.writeLineSync(filePath, titleRecord);
+      // This fallback path has no live recording service to mirror the write
+      // into the list-label sidecar, so persist it here as well.
+      writeSessionTitleSidecar(
+        sessionTitleSidecarPath(path.dirname(filePath), sessionId),
+        title,
+        titleSource,
+      );
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -4357,6 +4777,38 @@ export class SessionService {
         await fs.promises.rename(stagedTranscriptPath, targetPath);
       }
       committed = true;
+      if (options.title !== undefined) {
+        if (
+          !writeSessionTitleSidecar(
+            sessionTitleSidecarPath(chatsDir, newSessionId),
+            options.title,
+            'manual',
+          )
+        ) {
+          this.warn(
+            `branch committed session=${newSessionId} but its title sidecar could not be written`,
+          );
+        }
+      } else {
+        // A fork copies only the source's surviving records. When the source
+        // lost its head, its label lives in the sidecar alone; carrying it
+        // keeps the branch named like the session it came from.
+        const sourceTitle = readSessionTitleSidecar(
+          sessionTitleSidecarPath(chatsDir, sourceSessionId),
+        );
+        if (
+          sourceTitle &&
+          !writeSessionTitleSidecar(
+            sessionTitleSidecarPath(chatsDir, newSessionId),
+            sourceTitle.displayName,
+            sourceTitle.source,
+          )
+        ) {
+          this.warn(
+            `branch committed session=${newSessionId} but its title sidecar could not be copied from ${sourceSessionId}`,
+          );
+        }
+      }
       try {
         await fsyncDirectoryBestEffort(chatsDir);
       } catch (error) {
@@ -4420,41 +4872,72 @@ export class SessionService {
     }
     const chatsDir = this.getChatsDir();
     const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
-    return this.readSessionTitleFromFile(filePath);
+    const fromTranscript = this.readSessionTitleFromFile(filePath);
+    if (fromTranscript) return fromTranscript;
+    const sidecar = this.readSessionTitleSidecarForSession(sessionId, 'active');
+    return sidecar && sidecar.source !== 'prompt'
+      ? sidecar.displayName
+      : undefined;
   }
 
-  private async readSessionDisplayNameFromFile(
+  private async readSessionDisplayNameOutcome(
     filePath: string,
     titleInfo = this.readSessionTitleInfoFromFile(filePath),
-  ): Promise<string | undefined> {
+  ): Promise<
+    | { status: 'name'; name: string }
+    | { status: 'no-name' }
+    | { status: 'not-member' }
+  > {
     const records = await jsonl.readLines<ChatRecord>(
       filePath,
       titleInfo.title ? 1 : MAX_PROMPT_SCAN_LINES,
     );
-    if (records.length === 0) return undefined;
+    if (records.length === 0) return { status: 'no-name' };
     if (
       !(await this.sessionBelongsToCurrentProject(
         records[0].sessionId,
         records[0].cwd,
       ))
     ) {
-      return undefined;
+      return { status: 'not-member' };
     }
-    return (
+    const name =
       titleInfo.title ||
       this.extractFirstPromptFromRecords(records) ||
-      undefined
+      undefined;
+    return name ? { status: 'name', name } : { status: 'no-name' };
+  }
+
+  private async readSessionDisplayNameFromFile(
+    filePath: string,
+    titleInfo = this.readSessionTitleInfoFromFile(filePath),
+  ): Promise<string | undefined> {
+    const outcome = await this.readSessionDisplayNameOutcome(
+      filePath,
+      titleInfo,
     );
+    return outcome.status === 'name' ? outcome.name : undefined;
   }
 
   async getSessionDisplayName(sessionId: string): Promise<string | undefined> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) return undefined;
     const filePath = path.join(this.getChatsDir(), `${sessionId}.jsonl`);
+    let outcome:
+      | { status: 'name'; name: string }
+      | { status: 'no-name' }
+      | { status: 'not-member' }
+      | { status: 'error' };
     try {
-      return await this.readSessionDisplayNameFromFile(filePath);
+      outcome = await this.readSessionDisplayNameOutcome(filePath);
     } catch {
-      return undefined;
+      // A read error is exactly what the sidecar covers; a membership refusal
+      // is not, and it must not be turned into another project's text.
+      outcome = { status: 'error' };
     }
+    if (outcome.status === 'not-member') return undefined;
+    if (outcome.status === 'name') return outcome.name;
+    return this.readSessionTitleSidecarForSession(sessionId, 'active')
+      ?.displayName;
   }
 
   /**
@@ -4514,8 +4997,15 @@ export class SessionService {
 
       // Cheap check first: tail-read the title and skip non-matches before
       // doing the full hydration work (first-record read, project filter,
-      // prompt extraction).
-      const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
+      // prompt extraction). A name that only the sidecar carries still matches
+      // here, so the picker's `--resume "<name>"` can find what the list row
+      // displays.
+      const titleInfo = this.readSessionTitleInfoWithSidecar(
+        file.name.slice(0, -'.jsonl'.length),
+        filePath,
+        'active',
+        tailBuffer,
+      );
       if (titleInfo.title?.toLowerCase().trim() !== normalizedTitle) continue;
 
       const records = await jsonl.readLines<ChatRecord>(
@@ -4605,7 +5095,11 @@ export class SessionService {
       filesProcessed++;
 
       const filePath = path.join(chatsDir, name);
-      const titleInfo = this.readSessionTitleInfoFromFile(filePath);
+      const titleInfo = this.readSessionTitleInfoWithSidecar(
+        name.slice(0, -'.jsonl'.length),
+        filePath,
+        archiveState,
+      );
       if (
         titleInfo.title &&
         !titleInfo.title.toLowerCase().trim().startsWith(normalizedPrefix)
@@ -4614,10 +5108,16 @@ export class SessionService {
       }
 
       try {
-        const displayName = await this.readSessionDisplayNameFromFile(
+        const outcome = await this.readSessionDisplayNameOutcome(
           filePath,
           titleInfo,
         );
+        // A sidecar-only name still has to belong to this project; the
+        // transcript's own refusal is the membership signal.
+        if (outcome.status === 'not-member') continue;
+        const displayName =
+          titleInfo.title ??
+          (outcome.status === 'name' ? outcome.name : undefined);
         if (!displayName) continue;
         if (!displayName.toLowerCase().trim().startsWith(normalizedPrefix)) {
           continue;
@@ -4887,7 +5387,10 @@ function collectReferencedFileHistoryBackupNames(
       ) {
         continue;
       }
-      for (const backup of Object.values(snapshot.trackedFileBackups)) {
+      for (const backup of [
+        ...Object.values(snapshot.trackedFileBackups),
+        ...Object.values(snapshot.diffAfterBackups ?? {}),
+      ]) {
         if (
           backup &&
           backup.failed !== true &&

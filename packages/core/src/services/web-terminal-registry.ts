@@ -8,6 +8,8 @@ import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import type { Terminal } from '@xterm/headless';
 import { loadPty, type PtyLoadResult } from '../utils/getPty.js';
+import { collectPtyProcessTree } from '../utils/pty-process-tree.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { loadXtermHeadless } from '../utils/load-xterm-headless.js';
 import {
@@ -42,6 +44,14 @@ export interface WebTerminalSnapshot {
   exitCode?: number;
   workspaceCwd: string;
   handlesPrimaryDa?: boolean;
+  /**
+   * Set when the PTY backend terminated the session itself — a resource
+   * budget was exhausted (bounded write queue). The failure is
+   * the terminal state; `exitCode` is deliberately absent because no native
+   * exit status belongs to it.
+   */
+  failed?: boolean;
+  failureMessage?: string;
 }
 
 export interface CreateWebTerminalOptions {
@@ -73,11 +83,15 @@ interface PtySession {
   unacknowledgedInputBytes: number;
   exited: boolean;
   exitCode?: number;
+  /** Set once the PTY backend terminated this session on a resource limit. */
+  failure?: { message: string };
   outputListeners: Set<(data: string) => void>;
   exitListeners: Set<(e: { exitCode: number; signal?: number }) => void>;
+  failureListeners: Set<(message: string) => void>;
   reclaimTimer?: ReturnType<typeof setTimeout>;
   dataDisposable?: { dispose(): void };
   exitDisposable?: { dispose(): void };
+  errorDisposable?: { dispose(): void };
   queryTerminal?: Terminal;
   queryReplyDisposable?: { dispose(): void };
   /**
@@ -94,6 +108,75 @@ interface SpawnedWebTerminalPty extends WebTerminalPty {
   onExit(
     callback: (e: { exitCode: number; signal?: number }) => void,
   ): { dispose(): void } | undefined;
+  /**
+   * EventEmitter surface; used for structured PTY resource failures. The
+   * return value is backend-specific — node-pty's Terminal proxies the
+   * listener to its master socket and returns undefined, an EventEmitter
+   * returns the emitter itself — so it is NOT a Disposable contract; see
+   * subscribeToPtyError.
+   */
+  on?(event: 'error', listener: (err: Error) => void): unknown;
+  off?(event: 'error', listener: (err: Error) => void): unknown;
+  removeListener?(event: 'error', listener: (err: Error) => void): unknown;
+}
+
+const debugLogger = createDebugLogger('WEB_TERMINAL_REGISTRY');
+
+const getPtyLimitMessage = (err: unknown): string | undefined => {
+  const code = (err as { code?: unknown }).code;
+  if (code !== 'QWEN_PTY_WRITE_LIMIT') return undefined;
+  return err instanceof Error ? err.message : String(err);
+};
+
+const getPtyAdmissionMessage = (err: unknown): string | undefined => {
+  const failure = err as {
+    code?: unknown;
+    limitKind?: unknown;
+    limit?: unknown;
+  } | null;
+  if (failure?.code !== 'QWEN_PTY_ACTIVE_LIMIT') return undefined;
+  const details = [
+    failure.code,
+    typeof failure.limitKind === 'string' ? failure.limitKind : undefined,
+    typeof failure.limit === 'number' ? `limit ${failure.limit}` : undefined,
+  ]
+    .filter((detail) => detail !== undefined)
+    .join(', ');
+  return `PTY capacity limit reached (${details}): ${getErrorMessage(err)}`;
+};
+
+/**
+ * Subscribe to a PTY's `error` event and return a real Disposable. The two
+ * backends disagree on what `on` hands back (see SpawnedWebTerminalPty.on), so
+ * the return value must never be stored as the Disposable — an EventEmitter
+ * returns the emitter itself, and calling `.dispose()` on it during release
+ * crashes the host with a TypeError. A backend that does return a Disposable
+ * is honored as-is; otherwise detachment goes through `off`/`removeListener`,
+ * and a backend with neither leaves the subscription undisposed (the
+ * pre-existing Node behavior).
+ */
+function subscribeToPtyError(
+  pty: SpawnedWebTerminalPty,
+  listener: (err: Error) => void,
+): { dispose(): void } | undefined {
+  if (typeof pty.on !== 'function') return undefined;
+  const returned: unknown = pty.on('error', listener);
+  if (
+    returned !== null &&
+    typeof returned === 'object' &&
+    typeof (returned as { dispose?: unknown }).dispose === 'function'
+  ) {
+    return returned as { dispose(): void };
+  }
+  if (typeof pty.off === 'function') {
+    const off = pty.off.bind(pty);
+    return { dispose: () => off('error', listener) };
+  }
+  if (typeof pty.removeListener === 'function') {
+    const removeListener = pty.removeListener.bind(pty);
+    return { dispose: () => removeListener('error', listener) };
+  }
+  return undefined;
 }
 
 function killPtyTree(pty: WebTerminalPty): void {
@@ -108,50 +191,7 @@ function killPtyTree(pty: WebTerminalPty): void {
     }
   } else {
     if (pty.pid > 1) {
-      const scopeColumn =
-        process.platform === 'linux'
-          ? 'sid='
-          : process.platform === 'darwin'
-            ? 'tdev='
-            : undefined;
-      const processes = spawnSync(
-        'ps',
-        ['-A', '-o', scopeColumn ? `pid=,ppid=,${scopeColumn}` : 'pid=,ppid='],
-        {
-          encoding: 'utf8',
-          maxBuffer: 8 * 1024 * 1024,
-          timeout: 2_000,
-        },
-      );
-      const rows = (processes.stdout?.split('\n') ?? []).flatMap((line) => {
-        const [pidText, parentPidText, scope] = line.trim().split(/\s+/);
-        const pid = Number(pidText);
-        const parentPid = Number(parentPidText);
-        return Number.isInteger(pid) && Number.isInteger(parentPid)
-          ? [{ pid, parentPid, scope }]
-          : [];
-      });
-      const rootScope = rows.find(({ pid }) => pid === pty.pid)?.scope;
-      const targets = new Set([pty.pid]);
-      let found = true;
-      while (found) {
-        found = false;
-        for (const { pid, parentPid, scope } of rows) {
-          if (
-            pid > 1 &&
-            !targets.has(pid) &&
-            (targets.has(parentPid) ||
-              (rootScope !== undefined &&
-                rootScope !== '0' &&
-                rootScope !== '??' &&
-                scope === rootScope))
-          ) {
-            targets.add(pid);
-            found = true;
-          }
-        }
-      }
-      for (const pid of [...targets].reverse()) {
+      for (const pid of collectPtyProcessTree(pty.pid).pids.reverse()) {
         try {
           process.kill(pid, 'SIGKILL');
         } catch {
@@ -211,7 +251,7 @@ export class WebTerminalRegistry {
       };
     }
     const liveSessions = [...this.sessions.values()].filter(
-      (session) => !session.exited,
+      (session) => !session.exited && !session.failure,
     ).length;
     if (liveSessions + this.creating.size >= MAX_CONCURRENT_WEB_TERMINALS) {
       return { error: 'Web terminal limit reached', retryable: true };
@@ -288,6 +328,30 @@ export class WebTerminalRegistry {
     const sessionRef: { current?: PtySession } = {};
     const earlyOutput: string[] = [];
     let earlyExit: { exitCode: number; signal?: number } | undefined;
+    let earlyFailure: string | undefined;
+    const handleFailure = (message: string) => {
+      const session = sessionRef.current;
+      if (!session) {
+        earlyFailure = message;
+        return;
+      }
+      if (session.failure) return;
+      session.failure = { message };
+      // Failure remains exclusive even if a real exit was observed first.
+      session.exited = false;
+      delete session.exitCode;
+      // Logical failure stops further I/O. Release the session's resources
+      // without signalling a pid whose native exit may already be recorded.
+      setImmediate(() => this.releasePtyResources(session));
+      for (const listener of [...session.failureListeners]) {
+        try {
+          listener(message);
+        } catch {
+          // One disconnected client must not suppress other clients' failure
+          // notifications or the already scheduled resource release.
+        }
+      }
+    };
     const handleData = (data: string) => {
       const session = sessionRef.current;
       if (!session) {
@@ -334,6 +398,10 @@ export class WebTerminalRegistry {
         earlyExit = e;
         return;
       }
+      // `failed` is the exclusive terminal state: a native exit that races
+      // a resource failure (the backend's parked-exit path) must not also
+      // latch `exited`, or a snapshot would report both.
+      if (session.failure) return;
       session.exited = true;
       session.exitCode = e.exitCode;
       for (const listener of [...session.exitListeners]) listener(e);
@@ -360,6 +428,7 @@ export class WebTerminalRegistry {
     };
     let dataDisposable: { dispose(): void } | undefined;
     let exitDisposable: { dispose(): void } | undefined;
+    let errorDisposable: { dispose(): void } | undefined;
     const spawnPty = (useBundled: boolean) =>
       ptyImpl.module.spawn(file, args, {
         name: 'xterm-256color',
@@ -390,11 +459,31 @@ export class WebTerminalRegistry {
         // behavior beats a terminal that cannot start at all. A failed spawn
         // produced no child process, so the retry cannot double-spawn (the
         // `ptySpawned` argument from #11497).
-        if (!useBundledConpty) throw firstError;
+        if (
+          !useBundledConpty ||
+          getPtyAdmissionMessage(firstError) !== undefined
+        )
+          throw firstError;
         spawned = spawnPty(false) as SpawnedWebTerminalPty;
       }
       dataDisposable = spawned.onData(handleData);
       exitDisposable = spawned.onExit(handleExit);
+      errorDisposable = subscribeToPtyError(spawned, (err: Error) => {
+        const message = getPtyLimitMessage(err);
+        if (message !== undefined) {
+          handleFailure(message);
+          return;
+        }
+        const code = (err as { code?: unknown }).code;
+        // EIO/EAGAIN on a dead child is the expected teardown race node-pty
+        // deliberately swallows; the session converges through the exit path.
+        if (code === 'EIO' || code === 'EAGAIN') return;
+        // Anything else must not escape this emit either: a throw here leaves
+        // the backend's fs callback as an uncaught exception and kills the
+        // whole serve daemon. Route it to the diagnostic sink — the same
+        // fallback the backend itself uses when nobody listens.
+        debugLogger.warn(`web terminal pty error: ${getErrorMessage(err)}`);
+      });
       proc = {
         pid: spawned.pid,
         write: (data) => spawned.write(data),
@@ -448,10 +537,15 @@ export class WebTerminalRegistry {
           }
         });
       }
-    } catch {
+    } catch (error) {
       queryReplyDisposable?.dispose();
       queryTerminal?.dispose();
       this.finishCreating(terminalId);
+      const admissionMessage = getPtyAdmissionMessage(error);
+      if (admissionMessage !== undefined) {
+        debugLogger.warn(admissionMessage);
+        return { error: admissionMessage };
+      }
       return { error: 'Failed to spawn shell' };
     }
 
@@ -464,8 +558,10 @@ export class WebTerminalRegistry {
       exited: false,
       outputListeners: new Set(),
       exitListeners: new Set(),
+      failureListeners: new Set(),
       dataDisposable,
       exitDisposable,
+      errorDisposable,
       queryTerminal,
       queryReplyDisposable,
       ptyResourcesReleased: false,
@@ -475,6 +571,7 @@ export class WebTerminalRegistry {
     this.finishCreating(terminalId);
     for (const data of earlyOutput) handleData(data);
     if (earlyExit) handleExit(earlyExit);
+    if (earlyFailure !== undefined) handleFailure(earlyFailure);
     this.scheduleReclaim(terminalId, session);
 
     return { terminalId };
@@ -506,6 +603,20 @@ export class WebTerminalRegistry {
     return () => session.exitListeners.delete(listener);
   }
 
+  /** Observe a backend-side resource failure (bounded hold / write queue). */
+  addFailureListener(
+    terminalId: string,
+    listener: (message: string) => void,
+  ): (() => void) | undefined {
+    const session = this.sessions.get(terminalId);
+    if (!session) return undefined;
+    session.failureListeners.add(listener);
+    return () => {
+      if (this.sessions.get(terminalId) === session)
+        session.failureListeners.delete(listener);
+    };
+  }
+
   /** Read buffered output and exit state when a browser tab reconnects. */
   readSnapshot(terminalId: string): WebTerminalSnapshot | undefined {
     const session = this.sessions.get(terminalId);
@@ -516,18 +627,20 @@ export class WebTerminalRegistry {
       workspaceCwd: session.workspaceCwd,
       ...(session.queryTerminal ? { handlesPrimaryDa: true } : {}),
       ...(session.exitCode !== undefined ? { exitCode: session.exitCode } : {}),
+      ...(session.failure
+        ? { failed: true, failureMessage: session.failure.message }
+        : {}),
     };
   }
 
   write(terminalId: string, data: string): WebTerminalWriteResult {
     const session = this.sessions.get(terminalId);
-    if (!session || session.exited) return 'unavailable';
+    if (!session || session.exited || session.failure) return 'unavailable';
     const bytes = Buffer.byteLength(data);
     const isRecoveryControl =
       data.length === 1 && '\x03\x04\x1a\x1c'.includes(data);
     if (
       !isRecoveryControl &&
-      session.unacknowledgedInputBytes !== 0 &&
       session.unacknowledgedInputBytes + bytes > MAX_UNACKNOWLEDGED_INPUT_BYTES
     ) {
       return 'backpressure';
@@ -543,7 +656,7 @@ export class WebTerminalRegistry {
 
   resize(terminalId: string, cols: number, rows: number): boolean {
     const session = this.sessions.get(terminalId);
-    if (!session || session.exited) return false;
+    if (!session || session.exited || session.failure) return false;
     try {
       session.pty.resize(cols, rows);
       return true;
@@ -576,14 +689,15 @@ export class WebTerminalRegistry {
     }
     this.clearReclaim(session);
     this.sessions.delete(terminalId);
-    if (!session.exited) {
+    if (!session.exited && !session.failure) {
       for (const listener of session.exitListeners) {
         listener({ exitCode: 143, signal: 15 });
       }
     }
     session.outputListeners.clear();
     session.exitListeners.clear();
-    if (!session.exited) {
+    session.failureListeners.clear();
+    if (!session.exited && !session.failure) {
       // killPtyTree has to run before releasePtyResources: its pty.kill()
       // defers the whole teardown while `_isReady` is false, so a terminal
       // released before its shell's first output byte (tab closed during slow
@@ -592,6 +706,11 @@ export class WebTerminalRegistry {
       // it really ran; releaseHost then disposes the worker a deferred kill
       // would strand, and skips the native close so the queued kill() stays the
       // single closer — never a second close.
+      //
+      // A failed session skips this on purpose: the backend already
+      // terminated the whole tree before reporting the failure, so
+      // re-signaling the pid would reach a possibly recycled one — the same
+      // reason the exited path never signals.
       killPtyTree(session.pty);
     }
     this.releasePtyResources(session);
@@ -643,6 +762,7 @@ export class WebTerminalRegistry {
     session.ptyResourcesReleased = true;
     session.dataDisposable?.dispose();
     session.exitDisposable?.dispose();
+    session.errorDisposable?.dispose();
     session.queryReplyDisposable?.dispose();
     session.queryTerminal?.dispose();
     session.pty.releaseHost?.();

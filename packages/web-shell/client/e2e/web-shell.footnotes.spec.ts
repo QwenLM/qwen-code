@@ -573,7 +573,7 @@ test('source locator demo delegates the card link to its host panel', async ({
   const footerTrigger = page.locator(footerSelectorForDemo);
   await expect(footerTrigger).toHaveText('4 个来源');
   const assistantFooter = footerTrigger.locator('..');
-  await expect(assistantFooter).toHaveCSS('opacity', '0');
+  await expect(assistantFooter).toHaveCSS('opacity', '1');
   await expect(page.locator('[data-footnotes]')).toHaveCount(0);
   const footerMetrics = await footerTrigger.evaluate((element) => {
     const footer = element.parentElement!;
@@ -581,7 +581,7 @@ test('source locator demo delegates the card link to its host panel', async ({
       '[aria-hidden="true"]',
     )!;
     const copyIcon = footer.querySelector<SVGElement>(
-      'button[aria-label="复制"] svg',
+      'button[aria-label="复制内容"] svg',
     )!;
     const time = footer.querySelector<HTMLElement>(
       ':scope > span[aria-hidden="true"]',
@@ -609,7 +609,7 @@ test('source locator demo delegates the card link to its host panel', async ({
   expect(footerMetrics.textCenterDelta).toBeLessThan(0.1);
   const painted = await assistantFooter.evaluate(async (footer) => {
     const copy = footer.querySelector<SVGElement>(
-      'button[aria-label="复制"] svg',
+      'button[aria-label="复制内容"] svg',
     )!;
     const citation = footer.querySelector<HTMLElement>(
       '[data-web-shell-turn-sources-trigger] > span',

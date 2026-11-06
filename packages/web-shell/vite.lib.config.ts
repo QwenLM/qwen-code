@@ -128,11 +128,13 @@ function injectCssModules(): Plugin {
         // keep `data-qwen-web-shell="component"` so shadow-root style adoption
         // (client/shadowDom.ts) still finds them; that reader concatenates
         // every match rather than taking the first.
-        const entry = item.facadeModuleId?.endsWith('/client/transcript.ts')
-          ? 'transcript'
-          : item.facadeModuleId?.endsWith('/client/index.tsx')
-            ? 'index'
-            : undefined;
+        const entry = item.facadeModuleId?.endsWith('/client/managed-host.tsx')
+          ? 'managed-host'
+          : item.facadeModuleId?.endsWith('/client/transcript.ts')
+            ? 'transcript'
+            : item.facadeModuleId?.endsWith('/client/index.tsx')
+              ? 'index'
+              : undefined;
         if (!entry) {
           continue;
         }
@@ -164,6 +166,10 @@ function injectCssModules(): Plugin {
 const TRANSCRIPT_STUBS = new Map(
   [
     [
+      './client/components/message-deletion-messages.ts',
+      './client/components/message-deletion-messages.transcript-stub.ts',
+    ],
+    [
       './client/trajectory/execution-messages.ts',
       './client/trajectory/execution-messages.transcript-stub.ts',
     ],
@@ -175,6 +181,10 @@ const TRANSCRIPT_STUBS = new Map(
     [
       './client/components/artifacts/files-messages.ts',
       './client/components/artifacts/files-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/artifacts/token-usage-messages.ts',
+      './client/components/artifacts/token-usage-messages.transcript-stub.ts',
     ],
     [
       './client/voice/messages.ts',
@@ -201,8 +211,16 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/messages/SelectionCopyMenu.transcript-stub.tsx',
     ],
     [
+      './client/utils/selectionClipboard.ts',
+      './client/utils/selectionClipboard.transcript-stub.ts',
+    ],
+    [
       './client/components/messages/workflow-agent-details.ts',
       './client/components/messages/workflow-agent-details.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-lifecycle-messages.ts',
+      './client/components/managed/managed-lifecycle-messages.transcript-stub.ts',
     ],
     [
       './client/components/managed/managed-task-messages.ts',
@@ -211,6 +229,10 @@ const TRANSCRIPT_STUBS = new Map(
     [
       './client/components/managed/managed-workspace-messages.ts',
       './client/components/managed/managed-workspace-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-mcp-messages.ts',
+      './client/components/managed/managed-mcp-messages.transcript-stub.ts',
     ],
   ].map(([module, stub]) => [
     normalizePath(resolve(__dirname, module)),
@@ -260,6 +282,7 @@ export default defineConfig(({ mode }) => ({
   },
   build: {
     emptyOutDir: false,
+    outDir: mode === 'managed-host' ? 'dist/managed-host' : 'dist',
     // Same floor as the app build: the lib bundle minifies the same xterm
     // (it is not external), and Vite 5's default target lowers its logical
     // assignments into code that throws on the first mode query. Also covers
@@ -267,18 +290,21 @@ export default defineConfig(({ mode }) => ({
     target: WEB_SHELL_BUILD_TARGET,
     lib: {
       entry:
-        mode === 'transcript'
-          ? { transcript: 'client/transcript.ts' }
-          : {
-              index: 'client/index.tsx',
-              'daemon-react-sdk': 'client/daemon-react-sdk.ts',
-              'code-highlighter': 'client/code-highlighter.ts',
-            },
+        mode === 'managed-host'
+          ? { index: 'client/managed-host.tsx' }
+          : mode === 'transcript'
+            ? { transcript: 'client/transcript.ts' }
+            : {
+                index: 'client/index.tsx',
+                'daemon-react-sdk': 'client/daemon-react-sdk.ts',
+                'code-highlighter': 'client/code-highlighter.ts',
+              },
       formats: ['es'],
       fileName: (_format, entryName) => `${entryName}.js`,
     },
     rollupOptions: {
       external: (id, importer) => {
+        if (mode === 'managed-host') return false;
         // Pierre requires Shiki 3/4; keep its copy inside the lazy preview bundle.
         if (id === 'shiki') return !importer?.includes('/@pierre/');
         return [
@@ -287,6 +313,7 @@ export default defineConfig(({ mode }) => ({
           'react/jsx-dev-runtime',
           'react-dom',
           'react-dom/client',
+          'react-dom/server',
           'radix-ui',
           'lucide-react',
           'class-variance-authority',
@@ -321,6 +348,9 @@ export default defineConfig(({ mode }) => ({
     },
   },
   define: {
+    ...(mode === 'managed-host'
+      ? { 'process.env.NODE_ENV': JSON.stringify('production') }
+      : {}),
     __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),
   },
 }));

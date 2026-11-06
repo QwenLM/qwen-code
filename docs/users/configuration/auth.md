@@ -1,17 +1,38 @@
 # Authentication
 
-Qwen Code's first-run `/auth` menu has four top-level options. Pick the one that matches how you want to run the CLI:
+Qwen Code’s first-run `/auth` menu has five top-level options. Pick the one that matches how you want to run the CLI:
 
-- **QwenCloud**: official recommended setup. Opens a sub-menu with **Token Plan** (subscription with a monthly Credit quota · dedicated endpoint, Personal and Team editions) or **Standard API Key** (pay-as-you-go). You then pick the platform explicitly — **China — 千问AI平台** or **International — QwenCloud** — so the UI language never decides your endpoint. Both access methods also enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup.
-- **Alibaba ModelStudio**: opens a sub-menu with **Coding Plan** (for individual developers · weekly quota included), **Token Plan** (for teams and companies · usage-based billing with a dedicated endpoint), or **Standard API Key** (connect with an existing ModelStudio API key). Token Plan and Standard API Key also enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup. Saved ModelStudio credentials, endpoints and models keep working unchanged.
+- [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code): sign in with your Qwen account through **Qwen OAuth** to access **Qwen Code and Agent** with your **Plus or Pro subscription** from [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code). If you don’t have a subscription yet, visit [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) to subscribe to Plus or Pro, then return to Qwen Code and select [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code).
+- **QwenCloud**: official recommended setup. Opens a sub-menu with **Token Plan** (subscription with a monthly Credit quota · dedicated endpoint, Personal and Team editions) or **Standard API Key** (pay-as-you-go). You then pick the platform explicitly — **China — 千问AI平台** or **International — QwenCloud** — so the UI language never decides your endpoint. Both access methods also enable the built-in [`web_search` tool](https://qwenlm.github.io/qwen-code-docs/en/developers/tools/web-search/) with no extra setup.
+- **Alibaba ModelStudio**: opens a sub-menu with **Coding Plan** (for individual developers · weekly quota included), **Token Plan** (for teams and companies · usage-based billing with a dedicated endpoint), or **Standard API Key** (connect with an existing ModelStudio API key). Token Plan and Standard API Key also enable the built-in [`web_search` tool](https://qwenlm.github.io/qwen-code-docs/en/developers/tools/web-search/) with no extra setup. Saved ModelStudio credentials, endpoints and models keep working unchanged.
 - **Third-party Providers**: choose a built-in provider and connect with an API key (DeepSeek, Grok, MiniMax, Z.AI, Kimi, Idealab, ModelScope, OpenRouter, Requesty).
 - **Custom Provider**: manually connect a local server, proxy, or unsupported provider — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
 
-> [!note]
->
-> **Qwen OAuth** is no longer a selectable dialog entry — its free tier was discontinued on 2026-04-15. It remains documented below as a hard-coded, discontinued provider only.
+## **Option 1: Qwen OAuth —** [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code)
 
-## ☁️ Option 1: QwenCloud
+Qwen OAuth lets you sign in with your Qwen account and use your **Plus or Pro subscription** from [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) to access **Qwen Code and Agent**. In the first-run menu or `/auth` dialog, choose [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code) to get started.
+
+- **How it works**: select [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code) and follow the browser sign-in flow to authorize Qwen Code with your Qwen account.
+- **Requirements**: a Qwen account with an active **Plus or Pro subscription** from [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) and internet access.
+- **Benefits**: access **Qwen Code and Agent** through your Qwen subscription without manually configuring an API key.
+- **Cost & quota**: usage is subject to your subscription plan. Visit [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) for Plus and Pro plan details.
+
+### **Interactive setup**
+
+1. If you don’t have a subscription yet, visit [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) and subscribe to **Plus or Pro**. If you already have an active subscription, continue with the next step.
+2. Start Qwen Code in your terminal:
+
+   ```bash
+   qwen
+   ```
+
+3. In the first-run menu, choose [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code). If Qwen Code is already running, enter `/auth` to open the authentication menu and select the same option.
+4. Complete the browser sign-in and authorization flow using the **same Qwen account you used to subscribe at** [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code).
+5. Return to Qwen Code to start working with your subscription.
+
+For non-interactive environments where you cannot complete the browser sign-in flow, such as CI or unattended containers, use an API-key-based authentication method instead.
+
+## ☁️ Option 2: QwenCloud
 
 The official platform entry. Choose it when your API key comes from 千问AI平台 (China) or QwenCloud (International).
 
@@ -30,6 +51,8 @@ The official platform entry. Choose it when your API key comes from 千问AI平�
 ### Interactive setup
 
 Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **QwenCloud**, and choose **Token Plan** or **Standard API Key** from the sub-menu. Choose the platform (**China — 千问AI平台** or **International — QwenCloud**), then enter your API key.
+
+Qwen Code checks the endpoint's model list at startup with your stored key; see [Built-in provider updates](#built-in-provider-updates).
 
 ### Headless or scripted setup
 
@@ -90,30 +113,6 @@ As with the other provider-specific keys, `QWENCLOUD_API_KEY` and `QWENCLOUD_TOK
 >
 > QwenCloud and Alibaba ModelStudio are separate entries with separate env keys and endpoints. Choosing QwenCloud does not rewrite or delete saved ModelStudio credentials, endpoints, or model selections.
 
-## Option 2: Qwen OAuth (Discontinued)
-
-> [!warning]
->
-> The Qwen OAuth free tier was discontinued on 2026-04-15. Existing cached tokens may continue working briefly, but new requests will be rejected. Please switch to Alibaba Cloud Coding Plan, [OpenRouter](https://openrouter.ai), [Fireworks AI](https://app.fireworks.ai), or another provider. Run `qwen` and use `/auth` to configure.
-
-- **How it works**: on first start, Qwen Code opens a browser login page. After you finish, credentials are cached locally so you usually won't need to log in again.
-- **Requirements**: a `qwen.ai` account + internet access (at least for the first login).
-- **Benefits**: no API key management, automatic credential refresh.
-- **Cost & quota**: the free tier has been discontinued as of 2026-04-15.
-
-Start the CLI and follow the browser flow:
-
-```bash
-qwen
-```
-
-Qwen OAuth is no longer offered as a selectable entry in the `/auth` dialog; run `/auth` and choose one of the current options (QwenCloud, Alibaba ModelStudio, Third-party Providers, or Custom Provider) instead.
-
-> [!note]
->
-> In non-interactive or headless environments (e.g., CI, SSH, containers), you typically **cannot** complete the OAuth browser login flow.
-> In these cases, please use the Alibaba Cloud Coding Plan or API Key authentication method.
-
 ## 💳 Option 3: Alibaba Cloud Coding Plan
 
 Use this if you want predictable costs with diverse model options and higher usage quotas.
@@ -133,6 +132,8 @@ Alibaba Cloud Coding Plan is available in two regions:
 ### Interactive setup
 
 Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **Alibaba ModelStudio**, and choose **Coding Plan** from the sub-menu. Choose your region, then enter your `sk-sp-xxxxxxxxx` key.
+
+Qwen Code checks the endpoint's model list at startup with your stored key; see [Built-in provider updates](#built-in-provider-updates).
 
 After authentication, use the `/model` command to switch between all Alibaba Cloud Coding Plan supported models (including qwen3.5-plus, qwen3.6-plus, qwen3.7-plus, qwen3-coder-plus, qwen3-coder-next, qwen3-max-2026-01-23, glm-5, glm-4.7, kimi-k2.5, and MiniMax-M2.5).
 
@@ -201,9 +202,11 @@ Token Plan is available in two regions, each with its own dedicated endpoint:
 
 ### Interactive setup
 
-Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **Alibaba ModelStudio**, and choose **Token Plan** from the sub-menu. Choose your region (**China (Beijing)** or **Singapore (International)**), then enter your API key. The wizard then shows its final step (Step 3/3 · Model IDs), where you pick the model IDs to configure: the models served by your endpoint are offered there and are applied only when you explicitly select them. ModelStudio Token Plan API keys have no prefix requirement, unlike Coding Plan keys, which start with `sk-sp-`, and unlike the separate QwenCloud Token Plan keys in Option 1, which also start with `sk-sp-`.
+Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **Alibaba ModelStudio**, and choose **Token Plan** from the sub-menu. Choose your region (**China (Beijing)** or **Singapore (International)**), then enter your API key. The wizard then shows its final step (Step 3/3 · Model IDs), where you pick the model IDs to configure: the models served by your endpoint are offered there and are applied only when you explicitly select them. ModelStudio Token Plan API keys have no prefix requirement, unlike Coding Plan keys, which start with `sk-sp-`, and unlike the separate QwenCloud Token Plan keys in Option 2, which also start with `sk-sp-`.
 
 After authentication, use the `/model` command to browse and switch between the models configured for your Token Plan. The model lineup evolves over time, so it is intentionally not listed here; model discovery from the endpoint happens during the `/auth` setup step above (the endpoint's own list is offered there and must be selected explicitly), and `/model` then shows the models configured for your plan.
+
+Qwen Code also checks the endpoint's model list at startup with your stored API key, as described in [Built-in provider updates](#built-in-provider-updates).
 
 ### Headless or scripted setup
 
@@ -462,6 +465,18 @@ qwen --model "qwen3-coder-plus"
 
 qwen --model "qwen3.5-plus"
 ```
+
+## Built-in provider updates
+
+Installed providers with a built-in model list can offer a **Built-in Provider Update** when a newer preset ships.
+
+QwenCloud (Token Plan and Standard API Key) and Alibaba ModelStudio (Coding Plan, Token Plan and Standard API Key) also check `/models` at startup. This check uses the provider-specific API-key variable saved by `/auth` (for example, `BAILIAN_TOKEN_PLAN_API_KEY`), including values from `settings.env`. A key supplied only through a CLI flag, `OPENAI_API_KEY`, or generic authentication settings does not enable this check; generic keys are not forwarded to other providers' endpoints.
+
+Successful discovery limits the update to built-in models your key is served, while preserving user-added models. It can also offer an update when the served set changes without a preset release, such as after switching plans. Discovery alone keeps the selected model; once you switch away, a later startup check can offer its removal. If filtering leaves no built-in model to install, the existing provider configuration is kept without prompting. When only the served set changes, the update adds just newly served models, so a model you left out during `/auth` is not added back. If nothing would change, the check is recorded without a prompt.
+
+If discovery is unavailable, fails, or matches no built-in model, a preset update uses the full built-in list; an already-current install is left unchanged. Providers without discovery continue to use the built-in list.
+
+**Later** waits 24 hours before asking again about the same version or served set; a different change can still prompt. Updating, skipping, or silently recording a newer decision clears the earlier postponement. **Skip** keeps your configuration, including retained models: a skipped preset version is not offered again until a newer one ships, and a skipped served set is not offered again until it changes.
 
 ## Removed `qwen auth` CLI command
 

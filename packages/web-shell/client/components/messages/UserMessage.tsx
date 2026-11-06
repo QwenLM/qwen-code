@@ -173,10 +173,29 @@ function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
         {t('scheduledTasks.runContext.taskId')}: <code>{run.id}</code>
       </div>
       <div className={styles.scheduledTaskPrompt}>
-        <LinkifiedText text={run.prompt} />
+        {renderUserMessageText(run.prompt)}
       </div>
     </div>
   );
+}
+
+function renderUserMessageText(text: string, isContinuation?: boolean) {
+  // Preserve captured line breaks separately from the slash tokens.
+  return text.split(/(^|\r\n?|\n)(\/[^ \r\n]*)/g).map((part, index) => {
+    const content = part.includes('://') ? (
+      <LinkifiedText key={index} text={part} />
+    ) : (
+      part
+    );
+    return index % 3 === 2 &&
+      (!isContinuation || index > 2 || text[0] !== '/') ? (
+      <span key={index} data-web-shell-user-slash-command>
+        {content}
+      </span>
+    ) : (
+      content
+    );
+  });
 }
 
 function DefaultUserMessageContent({
@@ -206,7 +225,7 @@ function DefaultUserMessageContent({
     <>
       {segments.map((segment, index) =>
         segment.type === 'text' ? (
-          <LinkifiedText key={index} text={segment.text} />
+          renderUserMessageText(segment.text, index > 0)
         ) : (
           <ReadonlyComposerTag
             composerTagIcons={composerTagIcons}
@@ -337,10 +356,22 @@ export const UserMessage = memo(function UserMessage({
       parseUserMessageContent,
       '[WebShell] failed to parse user message content',
     );
-    if (!parts) return <LinkifiedText text={content} />;
-    return parts.map((part, index) => {
+    if (!parts) return renderUserMessageText(content);
+    const mergedParts: Array<(typeof parts)[number]> = [];
+    for (const part of parts) {
+      const previous = mergedParts.at(-1);
+      if (part.type === 'text' && previous?.type === 'text') {
+        mergedParts[mergedParts.length - 1] = {
+          type: 'text',
+          text: previous.text + part.text,
+        };
+      } else {
+        mergedParts.push(part);
+      }
+    }
+    return mergedParts.map((part, index) => {
       if (part.type === 'text') {
-        return <LinkifiedText key={index} text={part.text} />;
+        return renderUserMessageText(part.text, index > 0);
       }
       return (
         <ReadonlyComposerTag

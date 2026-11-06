@@ -37,7 +37,7 @@ concurrency:
 jobs:
   # First job: Determine version and run tests once
   prepare:
-    runs-on: 'ubuntu-latest'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # The release-event (sync-with-CLI) path can be paused by setting the
     # repository variable RELEASE_VSCODE_SYNC_PUBLISH=false; manual
     # workflow_dispatch releases keep working either way.
@@ -63,6 +63,8 @@ jobs:
       is_dry_run: '${{ steps.vars.outputs.is_dry_run }}'
 
     steps:
+      - uses: '$/.github/actions/prepare-release-runner'
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -88,6 +90,7 @@ jobs:
           echo "is_dry_run=${is_dry_run}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Setup Node.js'
+        if: "${{ runner.environment != 'self-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
@@ -229,11 +232,19 @@ jobs:
             target: ''
             universal: true
 
-    runs-on: '${{ matrix.os }}'
+    # Only the universal leg can leave the hosted pool: it packages with
+    # --omit=optional, so it carries no native node-pty and does not depend on
+    # the build host's architecture. The linux-x64 leg resolves native
+    # dependencies for the host it builds on and stays hosted until that
+    # selection is explicitly cross-target. The release-only runners are ARM64,
+    # so the label carries no architecture component.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'' && matrix.universal) && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || matrix.os }}'
     permissions:
       contents: 'read'
 
     steps:
+      - uses: '$/.github/actions/prepare-release-runner'
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -241,6 +252,7 @@ jobs:
           fetch-depth: 0
 
       - name: 'Setup Node.js'
+        if: "${{ runner.environment != 'self-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
@@ -311,7 +323,7 @@ jobs:
     needs:
       - 'prepare'
       - 'build'
-    runs-on: 'ubuntu-latest'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     environment:
       name: 'production-release'
       url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/vscode-companion-${{ needs.prepare.outputs.release_tag }}'
@@ -320,6 +332,8 @@ jobs:
       issues: 'write'
 
     steps:
+      - uses: '$/.github/actions/prepare-release-runner'
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:

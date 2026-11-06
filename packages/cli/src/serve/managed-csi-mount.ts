@@ -117,6 +117,17 @@ export class ManagedCsiMount extends ManagedContextMount {
     return this.withVerifiedRoot(async (_handle, receipt) => receipt);
   }
 
+  async retirementInspection() {
+    const root = await this.#directory;
+    if (!root) throw new Error(UNAVAILABLE);
+    return {
+      admissionClosed: this.#closed,
+      pendingOperations: this.#observations.size,
+      closeFailed: this.#closeFailure !== undefined,
+      root: root.retirementInspection(),
+    };
+  }
+
   async withVerifiedRoot<T>(
     operation: (
       handle: FileHandle,
@@ -316,6 +327,11 @@ async function verifyChildren(
 ): Promise<void> {
   for (const child of children) {
     if (
+      !sameDirectory(
+        child.stats,
+        await child.handle.stat({ bigint: true }),
+        device,
+      ) ||
       !sameDirectory(
         child.stats,
         await fs.lstat(child.address, { bigint: true }),

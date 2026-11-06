@@ -9,6 +9,7 @@ import {
   MOD_MAX_BYTES,
   type ModOptions,
   type ModToolDialect,
+  type ModUnsupportedEvents,
 } from './types.js';
 
 const option = z.union([
@@ -74,20 +75,44 @@ function* pluginConfigurations(
   }
 }
 
+function resolveModChoice<T extends string>(
+  scopes: readonly unknown[],
+  name: string,
+  marketplace: string | undefined,
+  key: string,
+  choices: readonly [T, ...T[]],
+): T {
+  let choice = choices[0];
+  for (const config of pluginConfigurations(scopes, name, marketplace)) {
+    const value = config[key];
+    if (value === undefined) continue;
+    if (!choices.includes(value as T))
+      throw new Error(`Invalid Mod ${key}: expected ${choices.join(' or ')}.`);
+    choice = value as T;
+  }
+  return choice;
+}
+
 export function resolveModToolDialect(
   scopes: readonly unknown[],
   name: string,
   marketplace?: string,
 ): ModToolDialect {
-  let dialect: ModToolDialect = 'native';
-  for (const config of pluginConfigurations(scopes, name, marketplace)) {
-    const value = config['toolDialect'];
-    if (value === undefined) continue;
-    if (value !== 'native' && value !== 'claude')
-      throw new Error('Invalid Mod toolDialect: expected native or claude.');
-    dialect = value;
-  }
-  return dialect;
+  return resolveModChoice(scopes, name, marketplace, 'toolDialect', [
+    'native',
+    'claude',
+  ]);
+}
+
+export function resolveModUnsupportedEvents(
+  scopes: readonly unknown[],
+  name: string,
+  marketplace?: string,
+): ModUnsupportedEvents {
+  return resolveModChoice(scopes, name, marketplace, 'unsupportedEvents', [
+    'skip',
+    'reject',
+  ]);
 }
 
 export function resolveModOptions(

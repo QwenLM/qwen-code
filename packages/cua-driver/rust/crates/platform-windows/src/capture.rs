@@ -152,10 +152,28 @@ unsafe fn screenshot_via_screen_region(hwnd: HWND) -> Result<(Vec<u8>, i32, i32)
         bail!("screen-region fallback: window has zero/negative bounds: {w}x{h}");
     }
 
-    let screen_dc = GetDC(HWND(std::ptr::null_mut())); // NULL HWND → desktop DC
+    let screen_dc = GetDC(HWND(std::ptr::null_mut()));
+    if screen_dc.is_invalid() {
+        bail!("screen-region fallback: GetDC(NULL) returned an invalid desktop DC");
+    }
     let mem_dc = CreateCompatibleDC(screen_dc);
+    if mem_dc.is_invalid() {
+        ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
+        bail!("screen-region fallback: CreateCompatibleDC returned an invalid memory DC");
+    }
     let bitmap = CreateCompatibleBitmap(screen_dc, w, h);
+    if bitmap.is_invalid() {
+        let _ = DeleteDC(mem_dc);
+        ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
+        bail!("screen-region fallback: CreateCompatibleBitmap returned an invalid bitmap");
+    }
     let old_bitmap = SelectObject(mem_dc, bitmap);
+    if old_bitmap.is_invalid() {
+        let _ = DeleteObject(bitmap);
+        let _ = DeleteDC(mem_dc);
+        ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
+        bail!("screen-region fallback: SelectObject failed to select the capture bitmap");
+    }
 
     // Copy from physical screen coords into our memory DC at (0, 0).
     let blt_ok = BitBlt(
@@ -571,6 +589,19 @@ unsafe fn screenshot_window_bytes_with_occlusion_unsafe(hwnd: u64) -> Result<(Ve
 
 /// Capture the primary display (full screen), returning raw PNG bytes.
 pub fn screenshot_display_bytes() -> Result<Vec<u8>> {
+    screenshot_display_bytes_with(|memory, screen, width, height| unsafe {
+        BitBlt(memory, 0, 0, width, height, screen, 0, 0, SRCCOPY)
+    })
+}
+
+fn screenshot_display_bytes_with(
+    copy: impl FnOnce(
+        windows::Win32::Graphics::Gdi::HDC,
+        windows::Win32::Graphics::Gdi::HDC,
+        i32,
+        i32,
+    ) -> windows::core::Result<()>,
+) -> Result<Vec<u8>> {
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
         // Under Per-Monitor V2 DPI awareness, GetSystemMetrics returns
@@ -583,10 +614,28 @@ pub fn screenshot_display_bytes() -> Result<Vec<u8>> {
             bail!("Could not get screen metrics");
         }
         let screen_dc = GetDC(HWND::default());
+        if screen_dc.is_invalid() {
+            bail!("GetDC(NULL) returned an invalid desktop DC");
+        }
         let mem_dc = CreateCompatibleDC(screen_dc);
+        if mem_dc.is_invalid() {
+            ReleaseDC(HWND::default(), screen_dc);
+            bail!("CreateCompatibleDC returned an invalid memory DC");
+        }
         let bitmap = CreateCompatibleBitmap(screen_dc, w, h);
+        if bitmap.is_invalid() {
+            let _ = DeleteDC(mem_dc);
+            ReleaseDC(HWND::default(), screen_dc);
+            bail!("CreateCompatibleBitmap returned an invalid bitmap");
+        }
         let old_bitmap = SelectObject(mem_dc, bitmap);
-        BitBlt(mem_dc, 0, 0, w, h, screen_dc, 0, 0, SRCCOPY)?;
+        if old_bitmap.is_invalid() {
+            let _ = DeleteObject(bitmap);
+            let _ = DeleteDC(mem_dc);
+            ReleaseDC(HWND::default(), screen_dc);
+            bail!("SelectObject failed to select the capture bitmap");
+        }
+        let blt_result = copy(mem_dc, screen_dc, w, h);
         let mut bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -614,6 +663,9 @@ pub fn screenshot_display_bytes() -> Result<Vec<u8>> {
         let _ = DeleteObject(bitmap);
         let _ = DeleteDC(mem_dc);
         ReleaseDC(HWND::default(), screen_dc);
+        if let Err(error) = blt_result {
+            bail!("desktop capture: BitBlt failed: {error}");
+        }
         if ok == 0 {
             bail!("GetDIBits returned 0");
         }
@@ -658,4 +710,55 @@ pub fn crosshair_png_bytes(png_bytes: &[u8], cx: f64, cy: f64) -> Result<Vec<u8>
 /// the `_pub` export; the public alias is what callers use today.
 pub fn png_dimensions_pub(data: &[u8]) -> Result<(u32, u32)> {
     cua_driver_core::image_utils::png_dimensions(data)
+}
+
+#[cfg(test)]
+mod capture_resource_tests {
+    use super::*;
+
+    #[test]
+    fn failed_desktop_copy_releases_gdi_resources() {
+        const CHILD: &str = "QWEN_CUA_CAPTURE_RESOURCE_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "capture::capture_resource_tests::failed_desktop_copy_releases_gdi_resources",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, GetGuiResources, GR_GDIOBJECTS,
+        };
+        let fail_copy = || {
+            let called = std::cell::Cell::new(false);
+            let error = screenshot_display_bytes_with(|_, _, _, _| {
+                called.set(true);
+                Err(windows::core::Error::from_hresult(
+                    windows::Win32::Foundation::E_FAIL,
+                ))
+            })
+            .unwrap_err();
+            assert!(called.get(), "GDI allocation did not reach copy: {error}");
+            assert!(error.to_string().contains("BitBlt failed"));
+        };
+        fail_copy();
+        let before = unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
+        for _ in 0..3 {
+            fail_copy();
+        }
+        let after = unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
+        assert_eq!(after, before, "failed capture leaked GDI handles");
+    }
 }

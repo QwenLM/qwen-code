@@ -38,7 +38,7 @@ PR 不付代价。技能的环境约定写明通道提供什么。
 
 在技能里列为 _Not covered_，仍由 `sdk-java.yml` 负责：
 
-- MariaDB / MySQL 的 failsafe 集成测试和 hosted harness。它们需要数据库和
+- MySQL 8.4 的 failsafe 集成测试和 hosted harness。它们需要数据库和
   打包好的 `dist/cli.js`。
 - Java 11 和 Java 17 矩阵。
 - 用抖动门重跑 Java 测试。

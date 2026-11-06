@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { GenerateContentResponse } from '@google/genai';
+import { setToolCallPreparations } from '../tool-call-preparation.js';
 import { hasUserVisibleContent } from './streamContentDetection.js';
 
 function chunkWithParts(parts: unknown[]): GenerateContentResponse {
@@ -33,6 +34,12 @@ describe('hasUserVisibleContent', () => {
         chunkWithParts([{ functionCall: { name: 'read', args: {} } }]),
       ),
     ).toBe(true);
+  });
+
+  it('returns true for a tool-call preparation without parts', () => {
+    const r = new GenerateContentResponse();
+    setToolCallPreparations(r, [{ callId: 'call_1', toolName: 'read_file' }]);
+    expect(hasUserVisibleContent(r)).toBe(true);
   });
 
   it('returns true for inlineData part', () => {

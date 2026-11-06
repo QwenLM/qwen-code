@@ -25,6 +25,7 @@ import {
   parseExecutionSandboxSettings,
   readBareModeOperatorSettings,
   readOperatorSandboxSettings,
+  selectOperatorCatalogRefresh,
   selectOperatorExecutionSandbox,
   stripUtf8Bom,
 } from './execution-sandbox-settings.js';
@@ -37,6 +38,7 @@ import {
   type SettingDefinition,
   getSettingsSchema,
 } from './settingsSchema.js';
+import { applyVerifyPrCoordinateEnv } from './verify-pr-coordinates.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
   setNestedPropertySafe,
@@ -209,6 +211,30 @@ export enum SettingScope {
   Workspace = 'Workspace',
   System = 'System',
   SystemDefaults = 'SystemDefaults',
+}
+
+function mergeTrustCheckSettings(
+  systemDefaults: Settings,
+  user: Settings,
+  system: Settings,
+): Settings {
+  return customDeepMerge(
+    getMergeStrategyForPath,
+    {},
+    systemDefaults,
+    user,
+    system,
+  ) as Settings;
+}
+
+export function getOperatorTrustSettings(
+  settings: Pick<LoadedSettings, 'forScope'>,
+): Settings {
+  return mergeTrustCheckSettings(
+    settings.forScope(SettingScope.SystemDefaults).settings,
+    settings.forScope(SettingScope.User).settings,
+    settings.forScope(SettingScope.System).settings,
+  );
 }
 
 export interface CheckpointingSettings {
@@ -727,6 +753,22 @@ function mergeSettings(
   } else if (merged.tools && typeof merged.tools === 'object') {
     delete merged.tools.executionSandbox;
   }
+  const operatorCatalogRefresh = selectOperatorCatalogRefresh(
+    systemDefaults,
+    user,
+    system,
+  );
+  // Same shape as the executionSandbox restore: a project that replaces the
+  // whole `model` section cannot reset the operator's refresh opt-out.
+  if (operatorCatalogRefresh !== undefined) {
+    const model = merged.model;
+    merged.model = {
+      ...(model && typeof model === 'object' && !Array.isArray(model)
+        ? model
+        : {}),
+      catalogRefresh: operatorCatalogRefresh,
+    } as Settings['model'];
+  }
   return merged;
 }
 
@@ -1003,6 +1045,7 @@ export function createMinimalSettings(): LoadedSettings {
         }
       : {}),
     ...(operator.privacy ? { privacy: operator.privacy } : {}),
+    ...(operator.model ? { model: operator.model } : {}),
   };
   const emptySettingsFile: SettingsFile = {
     path: '',
@@ -1557,20 +1600,15 @@ function readSettingsLayers(
   // answer the final merged settings (and `loadCliConfig`'s `trustedFolder`)
   // use; the workspace scope stays out, since a workspace file that only a
   // trusted workspace may contribute cannot decide its own trust.
-  const initialTrustCheckSettings = customDeepMerge(
-    getMergeStrategyForPath,
-    {},
+  const initialTrustCheckSettings = mergeTrustCheckSettings(
     systemDefaultSettings,
     userSettings,
     systemSettings,
   );
   const isTrusted =
     opts.workspaceTrusted ??
-    isWorkspaceTrusted(
-      initialTrustCheckSettings as Settings,
-      undefined,
-      realWorkspaceDir,
-    ).isTrusted ??
+    isWorkspaceTrusted(initialTrustCheckSettings, undefined, realWorkspaceDir)
+      .isTrusted ??
     false;
 
   // Create a temporary merged settings object to pass to loadEnvironment.
@@ -1586,6 +1624,9 @@ function readSettingsLayers(
   // the settings to avoid a cycle
   if (!opts.skipLoadEnvironment) {
     loadEnvironment(tempMergedSettings, workspaceDir);
+    // `verifyPr` is a workspace-restricted root, so the merged value already
+    // excludes a cloned repository's choice of publishing target.
+    applyVerifyPrCoordinateEnv(tempMergedSettings.verifyPr);
   }
 
   // Create LoadedSettings first

@@ -17,6 +17,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
 import {
   LocalFilesBridge,
   openBrowserSocket,
@@ -155,6 +156,10 @@ function phaseFromBridge(
 
 export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   const { sessionId } = options;
+  const availability = useDaemonAvailabilityController();
+  const availabilityRef = useRef(availability);
+  const bridgeAvailabilityRef = useRef(availability);
+  availabilityRef.current = availability;
   const win = options.win ?? defaultWindow();
   const store = useMemo(
     () =>
@@ -385,6 +390,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     () =>
       bridgeRef.current !== undefined &&
       LIVE_BRIDGE_PHASES.has(bridgeRef.current.getState().phase) &&
+      bridgeAvailabilityRef.current === availabilityRef.current &&
       bridgeSessionRef.current === optionsRef.current.sessionId &&
       bridgeSelectorKeyRef.current ===
         selectorKeyOf(optionsRef.current.workspaceSelector),
@@ -420,6 +426,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         opts?.force !== true &&
         bound !== undefined &&
         LIVE_BRIDGE_PHASES.has(bound.getState().phase) &&
+        bridgeAvailabilityRef.current === availabilityRef.current &&
         bridgeSessionRef.current === optionsRef.current.sessionId &&
         bridgeSelectorKeyRef.current ===
           selectorKeyOf(optionsRef.current.workspaceSelector) &&
@@ -472,6 +479,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       const current = optionsRef.current;
       ownedRunRef.current = false;
       const bridge = new LocalFilesBridge({
+        availability: availabilityRef.current,
         baseUrl: current.baseUrl,
         sessionId: targetSession,
         server: new LocalFilesMcpServer(new LocalDirectory(handle)),
@@ -501,6 +509,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         },
       });
       bridgeRef.current = bridge;
+      bridgeAvailabilityRef.current = availabilityRef.current;
       bridgeSessionRef.current = targetSession;
       bridgeSelectorKeyRef.current = selectorKeyOf(current.workspaceSelector);
       bridgeHandleNameRef.current = handle.name;
@@ -778,6 +787,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     };
   }, [
     sessionId,
+    availability,
     selectorKey,
     sameEntryOrFalse,
     startBridge,

@@ -22,6 +22,33 @@ const ref = {
   digest: 'a'.repeat(64),
 };
 
+it('reads large model snapshots without widening other recovery descriptors', () => {
+  const bytes = Buffer.from(
+    JSON.stringify({
+      v: 1,
+      sessionKey: key,
+      promptId: 'prompt',
+      prepared: 'x'.repeat(128 * 1024),
+    }),
+  );
+  expect(
+    parseHostedRecoveryResource(bytes, key, 'hosted-model-request')['prepared'],
+  ).toHaveLength(128 * 1024);
+  expect(() =>
+    parseHostedRecoveryResource(bytes, key, 'hosted-approval-continuation'),
+  ).toThrow();
+  expect(() =>
+    parseHostedRecoveryResource(bytes, key, 'hosted-turn-cleanup'),
+  ).toThrow();
+  expect(() =>
+    parseHostedRecoveryResource(
+      Buffer.alloc(32 * 1024 * 1024 + 1),
+      key,
+      'hosted-model-request',
+    ),
+  ).toThrow('exceeds');
+});
+
 it('follows only protocol reference slots, preserving arbitrary model and tool data', () => {
   const businessData = {
     resourceId: 'business',

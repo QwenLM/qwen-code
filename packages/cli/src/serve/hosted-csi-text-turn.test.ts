@@ -18,6 +18,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import { runHostedCsiTextTurn } from './hosted-csi-text-turn.js';
+import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 
 vi.mock('./hosted-harness-model.js', () => ({
   runHostedHarnessTextTurn: vi.fn(),
@@ -173,6 +174,110 @@ describe('private CSI native text turn', () => {
     );
     expect(second.systemPayload).toMatchObject({ state: 'completed' });
     expect(managed.authority.currentActivation?.epoch).toBe(1);
+  });
+
+  it('keeps one final assistant with its attempt receipt and streamed identity for file turns', async () => {
+    const parts = [
+      { text: 'reason', thought: true },
+      { text: 'answer'.repeat(20_000) },
+    ];
+    vi.mocked(runHostedHarnessTextTurn).mockImplementation(async (input) => {
+      expect(input.toolTurn).toBeDefined();
+      const finish = await input.modelScope!.beginMainAttempt('owned-model');
+      await input.textDeltas!.delta('answer');
+      await input.completeFinalOutput!(finish, [], parts, 'owned-model');
+      return { text: 'answer', parts, model: 'owned-model' };
+    });
+    await submit(managed, PROMPT_A, 'first');
+    await runHostedCsiTextTurn(
+      {
+        managed,
+        cwd: root,
+        files: {
+          broker: { baseUrl: 'http://127.0.0.1:8080', token: 'fixture' },
+          runtime: { bindingId: SESSION_ID, generation: '1' },
+        },
+      },
+      PROMPT_A,
+      'first',
+      new AbortController(),
+    );
+    const assistants = (await managed.sink.project()).filter(
+      (entry) => entry.type === 'assistant',
+    );
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0].message?.parts).toEqual(parts);
+    const events = managed.authority.eventsInSequenceRange(
+      1,
+      managed.authority.committedSequence,
+    );
+    expect(
+      events.find((event) => event.kind === 'message.delta')?.payload[
+        'messageId'
+      ],
+    ).toBe(assistants[0].uuid);
+    const output = events.find(
+      (event) =>
+        event.kind === 'model.attempt' &&
+        event.payload['state'] === 'output_committed',
+    )!;
+    const message = events.find(
+      (event) => event.sequence === output.sequence + 1,
+    )!;
+    expect(message.kind).toBe('message.committed');
+    expect(message.payload).toMatchObject({
+      messageId: assistants[0].uuid,
+      modelAttemptId: output.payload['attemptId'],
+    });
+  });
+
+  it('retains chunked text replies when file tools are available', async () => {
+    const text = '完整回复'.repeat(20_000);
+    vi.mocked(runHostedHarnessTextTurn).mockImplementation(async (input) => {
+      expect(input.toolTurn).toBeDefined();
+      const finish = await input.modelScope!.beginMainAttempt('owned-model');
+      await finish(true, []);
+      return { text, model: 'owned-model' };
+    });
+    await submit(managed, PROMPT_A, 'first');
+    const result = await runHostedCsiTextTurn(
+      {
+        managed,
+        cwd: root,
+        files: {
+          broker: { baseUrl: 'http://127.0.0.1:8080', token: 'fixture' },
+          runtime: { bindingId: SESSION_ID, generation: '1' },
+        },
+      },
+      PROMPT_A,
+      'first',
+      new AbortController(),
+    );
+    expect(result.systemPayload).toMatchObject({ state: 'completed' });
+    const assistant = (await managed.sink.project()).find(
+      (entry) => entry.type === 'assistant',
+    );
+    expect(assistant?.message?.parts).toEqual([{ text }]);
+  });
+
+  it('propagates uncertain file outcomes without settling the turn', async () => {
+    vi.mocked(runHostedHarnessTextTurn).mockRejectedValueOnce(
+      new HostedToolRecoveryRequiredError('owned result uncertain'),
+    );
+    await submit(managed, PROMPT_A, 'first');
+    await expect(
+      runHostedCsiTextTurn(
+        { managed, cwd: root },
+        PROMPT_A,
+        'first',
+        new AbortController(),
+      ),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(
+      managed.authority
+        .eventsInSequenceRange(1, managed.authority.committedSequence)
+        .some((event) => event.kind === 'turn.settled'),
+    ).toBe(false);
   });
 
   it('propagates native persistence errors from the model scope without settling', async () => {
