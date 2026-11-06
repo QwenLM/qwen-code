@@ -664,7 +664,7 @@ describe('getVersion', () => {
       );
     });
 
-    it('should reject a stable release derived below the published latest version', () => {
+    it('should bump the stable base past the published latest when the preview lags it', () => {
       const mockWithOlderPreviewVersions = (command) => {
         if (
           command.includes('npm view') &&
@@ -686,9 +686,10 @@ describe('getVersion', () => {
       };
       vi.mocked(execSync).mockImplementation(mockWithOlderPreviewVersions);
 
-      expect(() => getVersion({ type: 'stable' })).toThrow(
-        'Derived stable version 0.7.0 is lower than published latest 0.9.0',
-      );
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.9.1');
+      expect(result.npmTag).toBe('latest');
+      expect(result.previousReleaseTag).toBe('v0.6.1');
     });
   });
 

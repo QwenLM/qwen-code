@@ -338,14 +338,20 @@ function getStableVersion(args) {
     releaseVersion = tagResult.latestVersion.replace(/-preview.*/, '');
     validateVersion(releaseVersion, 'X.Y.Z', 'derived from preview dist-tag');
     const latestStable = getVersionFromNPM('latest');
+    // A stable patch released after the last successful preview leaves that
+    // preview behind `latest`, so promoting its base would repeat a shipped
+    // version. Target the next patch after the published latest instead, the
+    // same way getPreviewVersion bumps past it.
     if (
       latestStable &&
       semver.valid(latestStable) &&
-      semver.gt(latestStable, releaseVersion)
+      semver.gte(latestStable, releaseVersion)
     ) {
-      throw new Error(
-        `Derived stable version ${releaseVersion} is lower than published latest ${latestStable}. Refusing retrograde baseline.`,
+      const bumped = semver.inc(latestStable, 'patch');
+      console.error(
+        `Preview baseline ${releaseVersion} is at or below published latest ${latestStable}; bumping the stable base to ${bumped}.`,
       );
+      releaseVersion = bumped;
     }
   } else {
     const packageJson = readJson('package.json');
