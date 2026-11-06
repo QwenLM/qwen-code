@@ -1349,7 +1349,6 @@ export abstract class BaseJsonOutputAdapter {
         resultOptions = {
           ...options,
           isError: true,
-          subtype: 'error_during_execution',
           errorMessage: options.errorMessage ?? refusal.message,
         };
       }
