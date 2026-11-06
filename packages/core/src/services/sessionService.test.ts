@@ -262,9 +262,20 @@ describe('SessionService', () => {
   let renameSyncSpy: MockInstance<typeof fs.renameSync>;
   let rmSyncSpy: MockInstance<typeof fs.rmSync>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.mocked(getProjectHash).mockReturnValue('test-project-hash');
     vi.mocked(path.join).mockImplementation((...args) => args.join('/'));
+    // Storage.getProjectDir bounds the identifier it gets from sanitizeCwd;
+    // the file-level automock would otherwise hand it undefined.
+    const actualPaths =
+      await vi.importActual<typeof import('../utils/paths.js')>(
+        '../utils/paths.js',
+      );
+    (
+      (await import('../utils/paths.js')) as unknown as {
+        sanitizeCwd: (cwd: string) => string;
+      }
+    ).sanitizeCwd = actualPaths.sanitizeCwd;
     vi.mocked(path.dirname).mockImplementation((p) => {
       const parts = p.split('/');
       parts.pop();

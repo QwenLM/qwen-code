@@ -8,8 +8,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Storage } from './storage.js';
+import { Storage, PROJECT_DIR_NAME_MAX } from './storage.js';
 import { FatalConfigError } from '../utils/errors.js';
+import { getProjectHash, sanitizeCwd } from '../utils/paths.js';
 
 const mockRealpathSync = vi.hoisted(() => vi.fn());
 const mockReaddirSync = vi.hoisted(() => vi.fn());
@@ -391,6 +392,46 @@ describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
   it('getProjectDir uses custom runtime base dir', () => {
     const storage = new Storage('/tmp/project');
     expect(storage.getProjectDir()).toContain(path.join(customDir, 'projects'));
+  });
+
+  it('getProjectDir keeps the readable identifier for a short project path', () => {
+    const projectRoot = path.resolve('workspace', 'short-project');
+    const storage = new Storage(projectRoot);
+    expect(path.basename(storage.getProjectDir())).toBe(
+      sanitizeCwd(projectRoot),
+    );
+  });
+
+  it('getProjectDir bounds a project identifier to one filesystem component', () => {
+    const longRoot = path.join(
+      path.resolve('workspace'),
+      ...'abcde'.split('').map((letter) => letter.repeat(50)),
+    );
+    // The bug this pins: the flattened identifier exceeded NAME_MAX, so every
+    // mkdir/scandir under it failed with ENAMETOOLONG.
+    expect(sanitizeCwd(longRoot).length).toBeGreaterThan(PROJECT_DIR_NAME_MAX);
+
+    const storage = new Storage(longRoot);
+    const projectId = path.basename(storage.getProjectDir());
+    expect(Buffer.byteLength(projectId, 'utf8')).toBeLessThanOrEqual(
+      PROJECT_DIR_NAME_MAX,
+    );
+    expect(projectId).toContain(getProjectHash(longRoot).slice(0, 16));
+    expect(projectId.startsWith(sanitizeCwd(longRoot).slice(0, 64))).toBe(true);
+  });
+
+  it('getProjectDir gives distinct long project paths distinct directories', () => {
+    const base = path.resolve('workspace');
+    const first = new Storage(path.join(base, 'a'.repeat(200), 'one'));
+    const second = new Storage(path.join(base, 'a'.repeat(200), 'two'));
+    expect(first.getProjectDir()).not.toBe(second.getProjectDir());
+  });
+
+  it('getProjectDir is stable for the same long project path', () => {
+    const longRoot = path.join(path.resolve('workspace'), 'x'.repeat(300));
+    expect(new Storage(longRoot).getProjectDir()).toBe(
+      new Storage(longRoot).getProjectDir(),
+    );
   });
 
   it('getGeneratedWorkflowsDir sits under the project workflow runs dir', () => {
