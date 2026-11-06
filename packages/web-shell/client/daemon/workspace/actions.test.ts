@@ -55,14 +55,17 @@ describe('workspace actions', () => {
       runtimeSync: { status: 'applied' },
     });
     const workspaceByCwd = vi.fn().mockReturnValue({ activateSubscription });
-    let cwd: string | undefined = '/secondary';
+    let cwd: string | undefined = '/primary';
     const actions = createDaemonWorkspaceActions({
       getClient: () => ({ workspaceByCwd }) as unknown as DaemonClient,
       getWorkspaceCwd: () => cwd,
       baseUrl: 'http://localhost:3001',
     });
     const options = { signal: new AbortController().signal };
-    await actions.activateSubscription(options);
+    await actions.activateSubscription({
+      ...options,
+      workspaceCwd: '/secondary',
+    });
     expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
     expect(activateSubscription).toHaveBeenCalledWith(options);
     cwd = undefined;
