@@ -100,6 +100,33 @@ export function managedPermissionRulesEqual(
 }
 
 export type ManagedSessionSkill = components['schemas']['SessionCreationSkill'];
+export type ManagedDiagnosticContextUsage =
+  components['schemas']['ManagedDiagnosticContextUsage'];
+export type ManagedDiagnosticStats =
+  components['schemas']['ManagedDiagnosticStats'];
+export type ManagedDiagnosticResources =
+  components['schemas']['ManagedDiagnosticResources'];
+export type ManagedDiagnosticAgentTrace =
+  components['schemas']['ManagedDiagnosticAgentTrace'];
+
+export interface ManagedDiagnosticsProvider {
+  getContextUsage(
+    sessionId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedDiagnosticContextUsage>;
+  getStatistics(
+    sessionId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedDiagnosticStats>;
+  getResources(
+    sessionId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedDiagnosticResources>;
+  listAgentTrace(
+    sessionId: string,
+    options: ManagedAgentRequestOptions & { cursor?: string; limit?: number },
+  ): Promise<ManagedDiagnosticAgentTrace>;
+}
 export type ManagedSessionRecovery = components['schemas']['SessionRecovery'];
 export type ManagedTurnCancelOperation =
   components['schemas']['WebShellCommandOperation'];
@@ -217,6 +244,7 @@ export interface ManagedAgentSessionSummary {
     actions?: boolean;
     childAgents?: boolean;
     tasks?: boolean;
+    diagnostics?: boolean;
     artifacts?: boolean;
     /** The caller may submit later Turns to this Workspace-bound Session. */
     workspaceTurns?: boolean;
@@ -365,6 +393,7 @@ export interface ManagedAgentQuestionResponse {
 export type ManagedAgentActionResponse = string | ManagedAgentQuestionResponse;
 
 export interface ManagedAgentProvider {
+  readonly diagnostics?: ManagedDiagnosticsProvider;
   readonly userMessages?: {
     query(
       sessionId: string,

@@ -228,7 +228,7 @@ try {
       JSON.stringify({
         engine: 'managed',
         sessionId: key.sessionId,
-        toolProfile: 'csi-files-retirement/1',
+        toolProfile: boot.identity.profile,
       }),
     ),
   );
@@ -274,7 +274,7 @@ try {
   async function history(commandId, preparation, value) {
     const digestContent = {
       schemaVersion: 2,
-      profile: 'csi-files-retirement/1',
+      profile: boot.identity.profile,
       runtimeSessionId: key.sessionId,
       ...value,
       preparation,

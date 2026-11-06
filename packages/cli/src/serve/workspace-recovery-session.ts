@@ -343,7 +343,7 @@ export async function verifyRecoverySession(
         typeof retiredHead.workspaceId === 'string' &&
         retiredHead.workspaceId.length > 0 &&
         retiredHead.state === 'DELETED' &&
-        [1, 2].includes(retiredHead.storageVersion) &&
+        [1, 2, 3].includes(retiredHead.storageVersion) &&
         retiredHead.writerId === null &&
         retiredHead.writerLeaseUntil === null &&
         retiredHead.latestCheckpointResourceId === null &&
@@ -396,7 +396,7 @@ export async function verifyRecoverySession(
     !head ||
       (head.sessionId === source.sessionId &&
         head.tenantId === source.binding.tenantId &&
-        [1, 2].includes(head.storageVersion) &&
+        [1, 2, 3].includes(head.storageVersion) &&
         head.journalRevision >= 1 &&
         head.compactedThroughRevision === 0 &&
         head.recoveryStatus === 'READY'),

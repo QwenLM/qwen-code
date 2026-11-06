@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { preflightManagedExtensionPackage } from './managed-extension-preflight.js';
 import { managedExtensionEnvironment } from './managed-extension-environment.js';
-import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
+import { isCsiFilesCapability } from './managed-csi-file-profile.js';
 import {
   compileManagedExtensionPackage,
   type ManagedPackageContributions,
@@ -327,7 +327,7 @@ export function registerManagedContextRoutes(
   sshForegroundOnly = false,
 ): ManagedToolExecutor {
   const boot = parseManagedContextBoot(bootDocument);
-  if (boot.capabilityDigest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST)
+  if (isCsiFilesCapability(boot.capabilityDigest))
     throw new Error('Private CSI file profile requires its dedicated worker.');
   const installations = new ManagedContextInstallations(boot);
   let extensionRuntime: ManagedExtensionRuntime | undefined;

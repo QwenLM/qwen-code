@@ -1089,6 +1089,7 @@ describe('Hosted Harness model boundary', () => {
         modelScope: {
           bindBudget: vi.fn(),
           evaluate: vi.fn(),
+          diagnosticsEnabled: false,
           beginMainAttempt: vi
             .fn()
             .mockResolvedValueOnce(first)
@@ -1924,6 +1925,7 @@ describe('Hosted Harness model boundary', () => {
       modelScope: {
         bindBudget,
         evaluate: vi.fn(),
+        diagnosticsEnabled: false,
         beginMainAttempt: vi.fn().mockResolvedValue(complete),
       },
     });
@@ -2010,6 +2012,7 @@ describe('Hosted Harness model boundary', () => {
       modelScope: {
         bindBudget: vi.fn(),
         evaluate: vi.fn(),
+        diagnosticsEnabled: false,
         beginMainAttempt: vi.fn().mockResolvedValue(complete),
       },
     });
@@ -2056,6 +2059,7 @@ describe('Hosted Harness model boundary', () => {
         modelScope: {
           bindBudget: vi.fn(),
           evaluate: vi.fn(),
+          diagnosticsEnabled: false,
           beginMainAttempt,
         },
       });
@@ -2095,6 +2099,7 @@ describe('Hosted Harness model boundary', () => {
       modelScope: {
         bindBudget: vi.fn(),
         evaluate: vi.fn(),
+        diagnosticsEnabled: false,
         beginMainAttempt,
       },
     });
@@ -2124,6 +2129,7 @@ describe('Hosted Harness model boundary', () => {
         modelScope: {
           bindBudget: vi.fn(),
           evaluate: vi.fn(),
+          diagnosticsEnabled: false,
           beginMainAttempt: vi.fn().mockResolvedValue(complete),
         },
       });
@@ -2302,6 +2308,7 @@ describe('Hosted Harness model boundary', () => {
       modelScope: {
         evaluate: vi.fn(),
         bindBudget: vi.fn(),
+        diagnosticsEnabled: false,
         beginMainAttempt: vi.fn(),
       },
       toolTurn,
@@ -2373,6 +2380,7 @@ describe('Hosted Harness model boundary', () => {
       const modelScope = {
         evaluate: vi.fn(),
         bindBudget: vi.fn(),
+        diagnosticsEnabled: false,
         beginMainAttempt: vi
           .fn()
           .mockResolvedValueOnce(complete('turn:model-1'))

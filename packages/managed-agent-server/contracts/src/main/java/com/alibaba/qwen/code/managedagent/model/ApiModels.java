@@ -189,6 +189,11 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents) {
+        @JsonProperty("diagnostics")
+        public boolean diagnostics() {
+            return tasks;
+        }
+
         public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
                 boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
                 boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,

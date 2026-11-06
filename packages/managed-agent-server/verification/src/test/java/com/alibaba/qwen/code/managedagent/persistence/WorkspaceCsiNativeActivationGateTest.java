@@ -908,7 +908,8 @@ class WorkspaceCsiNativeActivationGateTest {
         Path root = VerificationFixtures.repositoryRoot().toRealPath();
         Path input = directory.resolve("input.json");
         var value = JSON.createObjectNode().put("cwd", request.getScope().getCanonicalCwd())
-                .put("capabilityDigest", CsiFilesRetirementProfile.CAPABILITY_DIGEST);
+                .put("capabilityDigest", request.getScope().getCapabilityDigest())
+                .put("toolProfile", CsiFilesRetirementProfile.profile(request.getScope()));
         if (conversation) {
             value.put("conversation", true);
         }

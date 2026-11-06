@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { MessageList } from '../MessageList';
 import { Button } from '../ui/button';
@@ -17,6 +17,9 @@ import {
 import type { ManagedAgentProvider } from './managed-agent-provider';
 import { createManagedMessageProjector } from './managed-session-messages';
 import { useManagedSession } from './use-managed-session';
+import { isManagedSessionRunning } from './managed-agent-provider';
+import { ManagedDiagnosticsPanel } from './ManagedDiagnosticsPanel';
+import { useManagedDiagnosticsText } from './managed-diagnostics-messages';
 
 export function ManagedChildSessionView({
   provider,
@@ -32,7 +35,14 @@ export function ManagedChildSessionView({
   restoreFocus(): void;
 }) {
   const { t } = useI18n();
+  const diagnosticsText = useManagedDiagnosticsText();
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  useEffect(() => setDiagnosticsOpen(false), [provider, clientId, sessionId]);
+  const diagnosticsTrigger = useRef<HTMLButtonElement>(null);
   const detail = useManagedSession(provider, clientId, sessionId);
+  useEffect(() => {
+    if (detail.signals?.session) setDiagnosticsOpen(false);
+  }, [detail.signals?.session]);
   const projector = useMemo(() => createManagedMessageProjector(), []);
   const messages = useMemo(
     () => projector(detail.events, t('managed.truncated')),
@@ -84,6 +94,18 @@ export function ManagedChildSessionView({
               {t('managed.tasks.approvalMode')}: {detail.summary.approvalMode}
             </Badge>
           )}
+          {provider.diagnostics &&
+            !detail.signals?.session &&
+            detail.summary?.capabilities.diagnostics && (
+              <Button
+                ref={diagnosticsTrigger}
+                variant="outline"
+                size="sm"
+                onClick={() => setDiagnosticsOpen(true)}
+              >
+                {diagnosticsText('title')}
+              </Button>
+            )}
         </div>
         {(detail.error || detail.stoppedReason) && (
           <p role="alert">{detail.error ?? detail.stoppedReason}</p>
@@ -103,6 +125,20 @@ export function ManagedChildSessionView({
             />
           </ToolDetailsContext.Provider>
         </div>
+        {diagnosticsOpen &&
+          provider.diagnostics &&
+          !detail.signals?.session &&
+          detail.summary?.capabilities.diagnostics && (
+            <ManagedDiagnosticsPanel
+              provider={provider.diagnostics}
+              clientId={clientId}
+              sessionId={sessionId}
+              running={isManagedSessionRunning(detail.summary.phase)}
+              revision={`${detail.summary.compactionRevision}:${detail.summary.modelSelection?.revision}:${detail.summary.phase}`}
+              onClose={() => setDiagnosticsOpen(false)}
+              restoreFocus={() => diagnosticsTrigger.current?.focus()}
+            />
+          )}
       </DialogContent>
     </Dialog>
   );

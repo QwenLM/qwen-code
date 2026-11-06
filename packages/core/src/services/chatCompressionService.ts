@@ -22,6 +22,7 @@ import { runSideQuery } from '../utils/sideQuery.js';
 import { buildModelIdContext, resolveModelId } from '../utils/modelId.js';
 import { supportsOpenAIPrefixCaching } from '../core/openaiContentGenerator/prefix-caching.js';
 import { logChatCompression } from '../telemetry/loggers.js';
+import { withModelObservationSource } from '../telemetry/model-observation.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -504,6 +505,15 @@ function hasStateSnapshot(summary: string): boolean {
 
 export class ChatCompressionService {
   async compress(
+    chat: LlmChat,
+    opts: CompressOptions,
+  ): Promise<{ newHistory: Content[] | null; info: ChatCompressionInfo }> {
+    return withModelObservationSource('compression', () =>
+      this.compressOwned(chat, opts),
+    );
+  }
+
+  private async compressOwned(
     chat: LlmChat,
     opts: CompressOptions,
   ): Promise<{ newHistory: Content[] | null; info: ChatCompressionInfo }> {

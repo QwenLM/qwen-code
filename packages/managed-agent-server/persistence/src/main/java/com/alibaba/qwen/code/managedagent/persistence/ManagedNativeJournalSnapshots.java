@@ -456,6 +456,11 @@ public class ManagedNativeJournalSnapshots {
                     && resource.schemaVersion() == next.path("schemaVersion").asInt(-1)
                     && resource.byteLength() == next.path("byteLength").asLong(-1)
                     && resource.digest().equals(next.path("digest").asText()), "managed_session_snapshot_corrupt");
+            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(resource.kind())) {
+                require(resource.schemaVersion() == 1, "managed_session_snapshot_corrupt");
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.requireBody(
+                        resource.kind(), decode(resource.bytes(), JsonNode.class));
+            }
             if (seen.add(id) && structured(resource.kind())) {
                 JsonNode body = decode(resource.bytes(), JsonNode.class);
                 if (ManagedHostedRecoveryRecords.KINDS.contains(resource.kind()) || "managed-action-options".equals(resource.kind())) {

@@ -32,7 +32,12 @@ import { listenerIdentityOf } from './local-control/listener-identity.js';
 import type { HostedHarnessContract } from './hosted-harness-contract.js';
 import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
-import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
+import {
+  CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
+  CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
+  type CsiFilesProfile,
+} from './managed-csi-file-profile.js';
+import { enableManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
 import {
   runHostedCsiTextTurn,
   type HostedCsiTextSession,
@@ -57,6 +62,7 @@ class Refusal extends Error {
 }
 
 interface Admission {
+  profile: CsiFilesProfile;
   bindingId: string;
   generation: string;
   workspaceGeneration: string;
@@ -198,7 +204,10 @@ async function acquire(
     body['runtimeSessionId'] !== key.sessionId ||
     scope['tenantId'] !== key.tenantId ||
     scope['workspaceId'] !== key.workspaceId ||
-    scope['capabilityDigest'] !== CSI_FILES_RETIREMENT_CAPABILITY_DIGEST ||
+    ![
+      CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
+      CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
+    ].includes(String(scope['capabilityDigest'])) ||
     scope['isolationClass'] !== 'session' ||
     typeof cwd !== 'string' ||
     cwd.length > 4096 ||
@@ -214,6 +223,10 @@ async function acquire(
   )
     throw new Refusal('csi_runtime_identity_conflict');
   return {
+    profile:
+      scope['capabilityDigest'] === CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST
+        ? 'csi-files-retirement/2'
+        : 'csi-files-retirement/1',
     cwd,
     bindingId: runtime['bindingId'],
     generation: '1',
@@ -261,7 +274,7 @@ async function initialize(
             JSON.stringify({
               engine: 'managed',
               sessionId: owner.key.sessionId,
-              toolProfile: 'csi-files-retirement/1',
+              toolProfile: owner.admission.profile,
             }),
           ),
         );
@@ -316,6 +329,18 @@ async function initialize(
       prepareOwnershipRelease: deny,
       close: deny,
     };
+    const definition = JSON.parse(
+      (
+        await managed.resources.read(authority.sessionHeader.definitionRef)
+      ).toString('utf8'),
+    ) as { toolProfile?: unknown };
+    if (definition.toolProfile !== owner.admission.profile)
+      throw new Refusal('csi_runtime_identity_conflict');
+    if (owner.admission.profile === 'csi-files-retirement/2') {
+      if (!stores.supportsModelDiagnostics())
+        throw new Refusal('csi_diagnostics_storage_unavailable');
+      await enableManagedSessionDiagnostics(managed);
+    }
     owner.timer = setInterval(() => {
       if (
         owner.stopped ||

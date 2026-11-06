@@ -273,7 +273,7 @@ try {
         JSON.stringify({
           engine: 'managed',
           sessionId: input.sessionKey.sessionId,
-          toolProfile: 'csi-files-retirement/1',
+          toolProfile: input.toolProfile,
         }),
       ),
     );

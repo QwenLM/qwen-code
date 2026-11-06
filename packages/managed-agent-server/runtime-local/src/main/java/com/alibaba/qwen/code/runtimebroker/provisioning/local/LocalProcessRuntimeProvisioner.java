@@ -246,7 +246,7 @@ public final class LocalProcessRuntimeProvisioner
     public CompletionStage<RuntimeResourceHandle> ensureResource(
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle knownHandle) {
-        if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest())) {
+        if (CsiFilesRetirementProfile.isProfile(request.getScope())) {
             return CompletableFuture.failedFuture(privateProfileRefusal());
         }
         if (store != null) {
@@ -359,7 +359,7 @@ public final class LocalProcessRuntimeProvisioner
     @Override
     public CompletionStage<Void> release(RuntimeProvisionRequest request,
             RuntimeLease lease) {
-        if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest())) {
+        if (CsiFilesRetirementProfile.isProfile(request.getScope())) {
             return CompletableFuture.failedFuture(privateProfileRefusal());
         }
         if (store == null) {
@@ -1098,7 +1098,7 @@ public final class LocalProcessRuntimeProvisioner
     }
 
     private static void requireLegacyProfile(RuntimeScope scope) {
-        if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
+        if (CsiFilesRetirementProfile.isProfile(scope)) {
             throw privateProfileRefusal();
         }
     }

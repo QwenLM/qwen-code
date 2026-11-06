@@ -25,6 +25,11 @@ import { uiTelemetryService, type UiEvent } from '../telemetry/uiTelemetry.js';
 import { ApiResponseEvent } from '../telemetry/types.js';
 import { EVENT_API_RESPONSE } from '../telemetry/constants.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
+import { enableManagedSessionDiagnostics } from './managed-session-diagnostics.js';
+import {
+  startModelInvocationObservation,
+  withModelObservationSource,
+} from '../telemetry/model-observation.js';
 
 const operation = {
   operationId: 'operation-1',
@@ -86,6 +91,181 @@ async function fixture() {
 }
 
 describe('Managed Hook model activation', () => {
+  it('omits the prepared context from an abandoned main terminal', async () => {
+    const { session, controller } = await fixture();
+    await enableManagedSessionDiagnostics(session);
+    await createManagedHarnessHandle(session).ensureRunnable();
+    await controller.runTurn('turn-failed', async (scope) => {
+      const complete = await scope.beginMainAttempt('main', undefined, {
+        version: 1,
+        turnId: 'turn-failed',
+        model: 'main',
+        providerPin: 'a'.repeat(64),
+        observedAt: 1,
+        inputTokens: null,
+        cachedTokens: null,
+        contextWindowSize: 100_000,
+        breakdown: {
+          systemPrompt: 10,
+          builtinTools: 0,
+          mcpTools: 0,
+          instructionFiles: 0,
+          memoryFiles: 0,
+          skills: 0,
+          startupContext: 0,
+          messages: 2,
+        },
+        thresholds: null,
+        details: [],
+        attributionComplete: true,
+        detailsTruncated: false,
+      });
+      await complete(false, []);
+    });
+    const event = session.authority.lastEventOfKind('model.attempt')!;
+    expect(event.payload['state']).toBe('abandoned');
+    const body = JSON.parse(
+      (
+        await session.resources.read(event.payload['usageRef'] as never)
+      ).toString(),
+    );
+    expect(body.version).toBe(2);
+    expect(body.context).toBeNull();
+  });
+
+  it('persists nested Hook and compression calls once and restores bounded budget counters', async () => {
+    const { session, controller, options } = await fixture();
+    await enableManagedSessionDiagnostics(session);
+    await createManagedHarnessHandle(session).ensureRunnable();
+    const invoke = (model: string) => {
+      const observation = startModelInvocationObservation({
+        sessionId: options.sessionId,
+        executionId: randomUUID(),
+        model,
+        startedAt: Date.now(),
+        retryAttempt: 1,
+      });
+      observation!.update({
+        promptTokenCount: 10,
+        candidatesTokenCount: 3,
+        totalTokenCount: 13,
+        cachedContentTokenCount: 0,
+        thoughtsTokenCount: 0,
+      });
+      observation!.finish('success');
+      uiTelemetryService.addEvent(
+        {
+          ...new ApiResponseEvent('r', model, 1, 'turn-1', undefined, {
+            candidatesTokenCount: 3,
+          }),
+          'event.name': EVENT_API_RESPONSE,
+        } as UiEvent,
+        options.sessionId,
+      );
+    };
+    await controller.runTurn('turn-1', async (scope) => {
+      await scope.bindBudget(new TurnBudget(), 'hello +5k');
+      const complete = await scope.beginMainAttempt('main');
+      withModelObservationSource('compression', () => invoke('compression'));
+      invoke('main');
+      await scope.evaluate(
+        { ...evaluation, originTurnId: 'turn-1' },
+        async () => {
+          invoke('hook');
+          return {
+            ...result,
+            success: false,
+            outcome: 'non_blocking_error' as const,
+          };
+        },
+      );
+      await complete(true, []);
+      await complete(true, []);
+    });
+    const attempts = session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter(
+        (event) => event.kind === 'model.attempt' && event.payload['usageRef'],
+      );
+    expect(attempts).toHaveLength(2);
+    const saved = JSON.parse(
+      (
+        await session.resources.read(
+          attempts.at(-1)!.payload['usageRef'] as never,
+        )
+      ).toString(),
+    );
+    expect(saved.version).toBe(2);
+    expect(saved.statistics.snapshotRevision).toBe(2);
+    expect(saved.statistics.totals.requests.success).toBe(3);
+    expect(saved.statistics.sources.hook.requests.success).toBe(1);
+    expect(saved.statistics.sources.compression.requests.success).toBe(1);
+    expect(saved.statistics.rawOutputTokensTotal).toBe(9);
+    expect(saved.budget).not.toHaveProperty('directiveText');
+    await session.close();
+    sessions.splice(sessions.indexOf(session), 1);
+    uiTelemetryService.resetSession(options.sessionId);
+    const restored = await openManagedSession(options);
+    sessions.push(restored);
+    await enableManagedSessionDiagnostics(restored);
+    await enableManagedSessionDiagnostics(restored);
+    expect(uiTelemetryService.getTotalOutputTokens(options.sessionId)).toBe(9);
+    await new ManagedHookActivationController(restored).runTurn(
+      'turn-2',
+      async (scope) => {
+        await scope.bindBudget(new TurnBudget(), 'next');
+        const complete = await scope.beginMainAttempt('main');
+        invoke('main');
+        await complete(true, []);
+      },
+    );
+    const latest = restored.authority.lastEventOfKind('model.attempt')!;
+    const continued = JSON.parse(
+      (
+        await restored.resources.read(latest.payload['usageRef'] as never)
+      ).toString(),
+    );
+    expect(continued.statistics.totals.requests.total).toBe(4);
+    expect(continued.statistics.rawOutputTokensTotal).toBe(12);
+  });
+
+  it('preserves an unclosed attempt gap after later successful invocations', async () => {
+    const { session, controller, options } = await fixture();
+    await enableManagedSessionDiagnostics(session);
+    await createManagedHarnessHandle(session).ensureRunnable();
+    await controller.runTurn('crashed', async (scope) => {
+      await scope.beginMainAttempt('main');
+    });
+    await session.close();
+    sessions.splice(sessions.indexOf(session), 1);
+    const restored = await openManagedSession(options);
+    sessions.push(restored);
+    await enableManagedSessionDiagnostics(restored);
+    await new ManagedHookActivationController(restored).runTurn(
+      'next',
+      async (scope) => {
+        const complete = await scope.beginMainAttempt('main');
+        const observation = startModelInvocationObservation({
+          sessionId: options.sessionId,
+          executionId: randomUUID(),
+          model: 'main',
+          startedAt: Date.now(),
+          retryAttempt: 1,
+        });
+        observation!.finish('success');
+        await complete(true, []);
+      },
+    );
+    const latest = restored.authority.lastEventOfKind('model.attempt')!;
+    const saved = JSON.parse(
+      (
+        await restored.resources.read(latest.payload['usageRef'] as never)
+      ).toString(),
+    );
+    expect(saved.statistics.coverage.gaps).toContain('unclosed_model_attempt');
+    expect(saved.statistics.totals.requests.success).toBe(1);
+  });
+
   it('commits complete final Parts with its output marker after renewal and refuses changed replay', async () => {
     const { session, controller, options } = await fixture();
     await createManagedHarnessHandle(session).ensureRunnable();

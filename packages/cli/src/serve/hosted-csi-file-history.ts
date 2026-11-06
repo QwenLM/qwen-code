@@ -177,7 +177,13 @@ export async function commitHostedCsiHistory(
   const original = readCsiFileHistoryObservation(observation, owner);
   const content = {
     schemaVersion: 2,
-    profile: 'csi-files-retirement/1',
+    profile: (
+      JSON.parse(
+        (
+          await session.resources.read(authority.sessionHeader.definitionRef)
+        ).toString('utf8'),
+      ) as { toolProfile: string }
+    ).toolProfile,
     runtimeSessionId: owner,
     ...original,
     preparation,
