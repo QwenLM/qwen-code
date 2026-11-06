@@ -55,7 +55,7 @@ export const CHANNEL_EVENTS_MESSAGES_EN: Record<string, ChannelEventsMessage> =
     // refreshes the bindings again inside the same poll, so one poll can
     // advance it more than once.
     'channelEvents.streak': (v) =>
-      `${v?.count ?? 0} binding scan${v?.count === 1 ? '' : 's'}`,
+      `${v?.count ?? 0} consecutive binding scan${v?.count === 1 ? '' : 's'}`,
     'channelEvents.sessions': (v) =>
       `${v?.count ?? 0} session${v?.count === 1 ? '' : 's'} listed`,
     'channelEvents.openTarget': (v) => `Open ${v?.target ?? ''} on GitHub`,

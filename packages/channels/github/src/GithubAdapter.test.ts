@@ -18313,10 +18313,12 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         };
         await watch.refreshBoundSessions();
         mockPull({ mergeable: false, mergeable_state: 'dirty' });
-        // The dead-letter append succeeds but the sidecar save fails. The
-        // shift is only durable once that save lands, so the journal must not
-        // claim the retire: a restart would load the event as still pending
-        // and deliver it, leaving a skip row for a delivered transition.
+        // The dead-letter append succeeds but the end-of-pass sidecar save
+        // fails. There is no mid-pass save: the baseline and the full queue
+        // commit in one write, so a failure leaves disk untouched and the
+        // journal must not claim the retire. The in-memory slice stands (the
+        // dead-letter record is the retire's commit point); the drain guard
+        // completes it next poll instead of delivering a dead-lettered head.
         const originalRename = nodeFs.renameSync;
         const spy = vi.spyOn(nodeFs, 'renameSync').mockImplementation(((
           from: unknown,
@@ -18365,8 +18367,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
             (event) => event['reason'] === 'watch_pending_overflow',
           ),
         ).toHaveLength(0);
-        // Rolled back in memory as well, so the next detection retries the
-        // overflow instead of agreeing with a disk that still holds the event.
+        // The slice stands in memory (the head is committed to retire by its
+        // dead-letter record); disk is untouched because the only save threw.
+        // The drain guard, not a rollback, keeps the dead-lettered head from
+        // being delivered once a later save lands.
         const state = channel as unknown as {
           prWatchState: {
             entries: Record<string, { pending?: unknown[] }>;
@@ -18374,10 +18378,360 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         };
         expect(
           state.prWatchState.entries['owner/repo#42']!['pending'],
-        ).toHaveLength(65);
+        ).toHaveLength(64);
         expect(
           readWatchState().entries['owner/repo#42']!['pending'],
         ).toHaveLength(64);
+      });
+
+      it('commits the advanced baseline and the full event queue in one save (R4-1)', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const pending = Array.from({ length: 64 }, (_, i) =>
+          makePendingWatch({
+            key: `watch:merge_conflict:42:seed-${i}:1751446800000`,
+            text: `seed event ${i}`,
+          }),
+        );
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            mergeableState: 'clean',
+            prState: 'open',
+            fired: [],
+            pending,
+          },
+        });
+        const watch = channel as unknown as {
+          runPrStateWatch: () => Promise<void>;
+          refreshBoundSessions: () => Promise<void>;
+        };
+        await watch.refreshBoundSessions();
+        // One pull yields TWO transitions — a new head (head_change) and a
+        // failing CI aggregate (ci_failure). At the cap each push overflows
+        // and slices a seed head, so a mid-pass save would be tempting.
+        mockPull({ head: { sha: 'sha-2' } });
+        mockChecks([{ status: 'completed', conclusion: 'failure' }]);
+        const writes: string[] = [];
+        const originalRename = nodeFs.renameSync;
+        const spy = vi.spyOn(nodeFs, 'renameSync').mockImplementation(((
+          from: unknown,
+          to: unknown,
+        ) => {
+          if (String(to) === watchStatePath()) {
+            writes.push(readFileSync(String(from), 'utf-8'));
+          }
+          return (originalRename as (a: unknown, b: unknown) => void)(from, to);
+        }) as unknown as typeof nodeFs.renameSync);
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          await watch.runPrStateWatch();
+        } finally {
+          spy.mockRestore();
+          stderr.mockRestore();
+        }
+        // The FIRST sidecar write must already carry the advanced baseline AND
+        // both derived events. A mid-pass save would commit the baseline with
+        // only the first event queued; a crash before the second is pushed
+        // would then never re-derive it, because the baseline already equals
+        // the observed state. Baseline and queue commit together or not at all.
+        expect(writes.length).toBeGreaterThan(0);
+        const first = JSON.parse(writes[0]!) as {
+          entries: Record<
+            string,
+            { headSha?: string; pending?: Array<{ key: string }> }
+          >;
+        };
+        const entry = first.entries['owner/repo#42']!;
+        expect(entry.headSha).toBe('sha-2');
+        const keys = (entry.pending ?? []).map((p) => p.key);
+        expect(keys.some((k) => k.startsWith('watch:head_change'))).toBe(true);
+        expect(keys.some((k) => k.startsWith('watch:ci_failure'))).toBe(true);
+      });
+
+      it('does not re-file the overflow dead-letter across a restart (R4-16)', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const pending = Array.from({ length: 64 }, (_, i) =>
+          makePendingWatch({
+            key: `watch:merge_conflict:42:seed-${i}:1751446800000`,
+            text: `seed event ${i}`,
+          }),
+        );
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            mergeableState: 'clean',
+            prState: 'open',
+            fired: [],
+            pending,
+          },
+        });
+        writeFileSync(inboundTaskPath(), '{corrupt', 'utf-8');
+        const originalRename = nodeFs.renameSync;
+        const spy = vi.spyOn(nodeFs, 'renameSync').mockImplementation(((
+          from: unknown,
+          to: unknown,
+        ) => {
+          if (String(to) === watchStatePath()) {
+            throw Object.assign(new Error('ENOSPC: no space left'), {
+              code: 'ENOSPC',
+            });
+          }
+          return (originalRename as (a: unknown, b: unknown) => void)(from, to);
+        }) as unknown as typeof nodeFs.renameSync);
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          const watch = channel as unknown as {
+            runPrStateWatch: () => Promise<void>;
+            refreshBoundSessions: () => Promise<void>;
+          };
+          await watch.refreshBoundSessions();
+          mockPull({ mergeable: false, mergeable_state: 'dirty' });
+          await expect(watch.runPrStateWatch()).rejects.toThrow('ENOSPC');
+          // A FRESH channel instance over the same state dir: the in-process
+          // dedupe cache is empty, the sidecar still unwritable. The dead-letter
+          // file itself must carry the dedupe, or the restart files a second
+          // "retired undelivered" record for the same transition.
+          await initChannel(watchConfig, { boundSessions });
+          const watch2 = channel as unknown as {
+            runPrStateWatch: () => Promise<void>;
+            refreshBoundSessions: () => Promise<void>;
+          };
+          await watch2.refreshBoundSessions();
+          mockPull({ mergeable: false, mergeable_state: 'dirty' });
+          await expect(watch2.runPrStateWatch()).rejects.toThrow('ENOSPC');
+        } finally {
+          spy.mockRestore();
+          stderr.mockRestore();
+        }
+        const lines = readFileSync(boundDeadLetterPath(), 'utf-8')
+          .split('\n')
+          .filter((line) => line.length > 0);
+        expect(lines).toHaveLength(1);
+      });
+
+      it('completes the retire instead of delivering a dead-lettered head (R1-15)', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const pending = Array.from({ length: 64 }, (_, i) =>
+          makePendingWatch({
+            key: `watch:merge_conflict:42:seed-${i}:1751446800000`,
+            text: `seed event ${i}`,
+          }),
+        );
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            mergeableState: 'clean',
+            prState: 'open',
+            fired: [],
+            pending,
+          },
+        });
+        writeFileSync(inboundTaskPath(), '{corrupt', 'utf-8');
+        const originalRename = nodeFs.renameSync;
+        let failSaves = true;
+        const spy = vi.spyOn(nodeFs, 'renameSync').mockImplementation(((
+          from: unknown,
+          to: unknown,
+        ) => {
+          if (failSaves && String(to) === watchStatePath()) {
+            throw Object.assign(new Error('ENOSPC: no space left'), {
+              code: 'ENOSPC',
+            });
+          }
+          return (originalRename as (a: unknown, b: unknown) => void)(from, to);
+        }) as unknown as typeof nodeFs.renameSync);
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          const watch = channel as unknown as {
+            runPrStateWatch: () => Promise<void>;
+            refreshBoundSessions: () => Promise<void>;
+          };
+          await watch.refreshBoundSessions();
+          mockPull({ mergeable: false, mergeable_state: 'dirty' });
+          await expect(watch.runPrStateWatch()).rejects.toThrow('ENOSPC');
+          // The save recovers and the task store is readable again. Reload from
+          // disk so the dead-lettered head is back at the queue's front, then
+          // let the drain run: it must complete that head's retire, never
+          // deliver an event the dead-letter file already calls retired.
+          failSaves = false;
+          writeFileSync(inboundTaskPath(), '[]', 'utf-8');
+          (
+            channel as unknown as { prWatchStateLoaded: boolean }
+          ).prWatchStateLoaded = false;
+          mockPull({ mergeable: true, mergeable_state: 'clean' });
+          mockNotificationsOnce([]);
+          await pollOnce();
+        } finally {
+          spy.mockRestore();
+          stderr.mockRestore();
+        }
+        // The other seeds may deliver; the dead-lettered head must not.
+        expect(
+          boundSessions.deliverPrompt.mock.calls.every(
+            (call) => !String(call[1]).includes('seed event 0'),
+          ),
+        ).toBe(true);
+        const skips = readChannelEvents().filter(
+          (event) => event['reason'] === 'watch_pending_overflow',
+        );
+        expect(
+          skips.some(
+            (event) =>
+              event['messageId'] ===
+              'watch:merge_conflict:42:seed-0:1751446800000',
+          ),
+        ).toBe(true);
+      });
+
+      it('names the lost session workspace on the dead-letter row (R4-12)', async () => {
+        await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            state: 'running',
+            attempts: 0,
+            deferCount: 239,
+            issueNumber: 42,
+            delivery: { kind: 'bound-session', sessionId: 'bound-session' },
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: '1001',
+            },
+            dedupe: {},
+          }),
+        ]);
+        boundSessions.deliverPrompt.mockRejectedValue(
+          new BoundSessionGoneError('bound-session'),
+        );
+        // The bound session lives in ANOTHER workspace; the row must carry it
+        // so Open-session reaches it instead of 404ing in the Channel's own.
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'bound-session',
+              workspaceCwd: '/other/ws',
+            }),
+          ],
+          partial: true,
+        });
+        mockOctokit.paginate.mockResolvedValue([]);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        const rows = readChannelEvents().filter(
+          (event) => event['type'] === 'task' && event['outcome'] === 'retired',
+        );
+        expect(rows.at(-1)).toMatchObject({
+          reason: 'dead_letter',
+          sessionId: 'bound-session',
+          sessionWorkspaceCwd: '/other/ws',
+        });
+      });
+
+      it('names the frozen target workspace on the overflow skip row (R4-14)', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'bound-session',
+              workspaceCwd: '/other/ws',
+            }),
+          ],
+          partial: false,
+        });
+        const pending = Array.from({ length: 64 }, (_, i) =>
+          makePendingWatch({
+            key: `watch:merge_conflict:42:seed-${i}:1751446800000`,
+            text: `seed event ${i}`,
+          }),
+        );
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            mergeableState: 'clean',
+            prState: 'open',
+            fired: [],
+            pending,
+          },
+        });
+        writeFileSync(inboundTaskPath(), '{corrupt', 'utf-8');
+        const watch = channel as unknown as {
+          runPrStateWatch: () => Promise<void>;
+          refreshBoundSessions: () => Promise<void>;
+        };
+        await watch.refreshBoundSessions();
+        mockPull({ mergeable: false, mergeable_state: 'dirty' });
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          await watch.runPrStateWatch();
+        } finally {
+          stderr.mockRestore();
+        }
+        const skips = readChannelEvents().filter(
+          (event) => event['reason'] === 'watch_pending_overflow',
+        );
+        expect(skips[0]).toMatchObject({
+          sessionId: 'bound-session',
+          sessionWorkspaceCwd: '/other/ws',
+        });
+      });
+
+      it('names the frozen target workspace on the no-candidate skip row (R4-13)', async () => {
+        const key = 'watch:ci_failure:sha-1';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            mergeableState: 'clean',
+            prState: 'open',
+            fired: [],
+            pending: [makePendingWatch({ key })],
+          },
+        });
+        await initChannel(watchConfig, { boundSessions });
+        // The frozen target still follows ANOTHER PR, so it is listed (its
+        // workspace is known) but is no candidate for PR 42: the watch event
+        // retires with no candidate, and the row must still link its workspace.
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'bound-session',
+              workspaceCwd: '/other/ws',
+              prs: [
+                {
+                  number: 99,
+                  url: 'https://github.com/owner/repo/pull/99',
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          mockNotificationsOnce([]);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        const skips = readChannelEvents().filter(
+          (event) => event['reason'] === 'watch_no_candidate',
+        );
+        expect(skips[0]).toMatchObject({
+          sessionId: 'bound-session',
+          sessionWorkspaceCwd: '/other/ws',
+        });
       });
 
       it('keeps the event queued when the pre-claim retire save throws', async () => {

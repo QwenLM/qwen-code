@@ -74,23 +74,23 @@ state files, so a Channel name cannot escape the directory.
 
 Record:
 
-| Field         | Meaning                                                                                                                                                                                      |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `at`          | ISO timestamp                                                                                                                                                                                |
-| `channel`     | Channel instance name, kept in full (see limits below)                                                                                                                                       |
-| `type`        | `inbound` / `outbound` / `task` / `poll`                                                                                                                                                     |
-| `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `failed_ambiguous` / `ok` / `degraded` / a task state (§5)                                                                                    |
-| `reason`      | machine reason code for a skip or an inbound failure (`sender_denied`, `reason_filter`, `github_api_error`, ...)                                                                             |
-| `triggerKind` | Channel-specific trigger (`mention`, `assign`, ...)                                                                                                                                          |
-| `repository`  | conversation container (for GitHub, `owner/repo`)                                                                                                                                            |
-| `thread`      | thread identity (`issue:12`, `pr:34`)                                                                                                                                                        |
-| `number`      | issue or PR number                                                                                                                                                                           |
-| `actor`       | sender login                                                                                                                                                                                 |
-| `sessionId`   | session the event was routed to; on the rows written while a delivery is cleared (`running` / `failed` / `reply_pending` / `retired`) and on a pre-claim `skipped` row, the one it lost (§5) |
-| `messageId`   | source message identity                                                                                                                                                                      |
-| `durationMs`  | poll duration                                                                                                                                                                                |
-| `error`       | sanitized single-line error, capped at 200 characters                                                                                                                                        |
-| `detail`      | flat primitive map, at most 12 keys                                                                                                                                                          |
+| Field         | Meaning                                                                                                                                                                                                                                                                                   |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `at`          | ISO timestamp                                                                                                                                                                                                                                                                             |
+| `channel`     | Channel instance name, kept in full (see limits below)                                                                                                                                                                                                                                    |
+| `type`        | `inbound` / `outbound` / `task` / `poll`                                                                                                                                                                                                                                                  |
+| `outcome`     | `accepted` / `skipped` / `posted` / `suppressed` / `posting` / `failed` / `failed_ambiguous` / `ok` / `degraded` / a task state (§5)                                                                                                                                                      |
+| `reason`      | machine reason code on a skip, an inbound failure, a task retire/failure, or a degraded poll (`sender_denied`, `reason_filter`, `github_api_error`, `dead_letter`, `bindings_partial`, ...)                                                                                               |
+| `triggerKind` | Channel-specific trigger (`mention`, `assign`, ...)                                                                                                                                                                                                                                       |
+| `repository`  | conversation container (for GitHub, `owner/repo`)                                                                                                                                                                                                                                         |
+| `thread`      | thread identity (`issue:12`, `pr:34`)                                                                                                                                                                                                                                                     |
+| `number`      | issue or PR number                                                                                                                                                                                                                                                                        |
+| `actor`       | sender login                                                                                                                                                                                                                                                                              |
+| `sessionId`   | session the event was routed to; on the rows written while a delivery is cleared (`cancelled` / `running` / `failed` / `reply_pending` / `retired`) and on a pre-claim `skipped` row, the one it lost (§5). A `running` row with a live delivery carries its live target, not a lost one. |
+| `messageId`   | source message identity                                                                                                                                                                                                                                                                   |
+| `durationMs`  | poll duration                                                                                                                                                                                                                                                                             |
+| `error`       | sanitized single-line error, capped at 200 characters                                                                                                                                                                                                                                     |
+| `detail`      | flat primitive map, at most 12 keys                                                                                                                                                                                                                                                       |
 
 Limits: free-text fields and `detail` values are capped at 200 characters. The
 Channel identity is the exception: the management API accepts names up to 255
@@ -210,8 +210,8 @@ must not be the answer when the journal could not be read.
   polls) and, on the `bindings_partial` rows only, `detail.sessions`; the
   `bindings_cold_empty` and `bindings_unreachable` rows carry `streak` alone, so
   the presence of `sessions` is not a "this scan was partial" predicate. The
-  watch-guard rows carry only their reason, plus `error` when the watch state
-  could not be read. The workspace selector lists the registered, non-live
+  watch-guard rows carry only their reason, plus `error` on a blocking row when
+  the watch state could not be read or reconciliation failed. The workspace selector lists the registered, non-live
   workspaces exactly as the management page does, because the provider's cwd is
   the daemon-wide primary workspace and a Channel started in a secondary
   workspace would otherwise be unreachable. Changing the workspace resets the
@@ -258,7 +258,10 @@ journal's terminal word from it. No routing, fallback, budget or cursor
 decision changed: the deferred verdict is the old `false`, and every other
 verdict is the old `true`. The public verdict emits nothing because the public
 path journals its own acceptance and publication. A retire carries the session
-it lost, because those exits clear the delivery before returning.
+it lost: most retire exits clear the delivery before returning, so the verdict
+names the target explicitly. The preflight-rejected exit is the exception — it
+consumes the task with its delivery still set, so its terminal row reads the
+live target rather than a lost one.
 
 `transitionInboundTask` takes an optional journal override so the bound
 acceptance mark can be persisted as `running` (there is no `delivered` task
@@ -295,17 +298,19 @@ terminal words, not persisted task states. `retired` carries a reason:
 `preflight_rejected`, `watch_no_target`, `watch_no_candidate`,
 `watch_session_gone`, `dead_letter`, and the role-aware exits
 `bound_no_candidate` (a comment whose role lost its match on a complete
-snapshot — the non-watch sibling of `watch_no_candidate`),
+snapshot — the non-watch sibling of `watch_no_candidate`) and
 `siblings_still_follow` (the gone fallback retires because other roles still
 follow the PR or the delivery ring already holds the event, so a public reply
-would duplicate a sibling's private delivery) and `already_delivered_other_role`
-(the defensive targetless duplicate suppression; the claim path normally
-retires such an event through the dead-letter surface first). A failed
-dead-letter append journals
-`task` / `failed` with reason `dead_letter_write_failed`, because the task is
-kept and stays recoverable — it is not a retire. Every terminal row is written
-after the durable step it describes, so a throwing removal or save cannot leave
-a retire claim behind for an event the next poll re-runs.
+would duplicate a sibling's private delivery). A failed dead-letter append
+journals `task` / `failed` with reason `dead_letter_write_failed`. For six of
+the seven `retireBoundTask` call sites the task is kept and stays recoverable,
+so the next poll retries the append — it is not a retire. The exception is the
+role-aware public-suppression retire: it calls `markPrivatelyRetired` first,
+which persists the terminal `cancelled` state, so a failed append there leaves
+a non-recoverable record and the `failed` row is the event's last word. Every
+terminal row is written after the durable step it describes, so a throwing
+removal or save cannot leave a retire claim behind for an event the next poll
+re-runs.
 
 Three retires happen before any task is claimed, so they have no task row to
 close and journal `inbound` / `skipped` instead: `watch_no_candidate` when a
@@ -314,11 +319,30 @@ per-PR pending queue passes its cap and the oldest event is retired undelivered,
 and `no_role_matched` when followers exist but no role's template chain matched
 the event on a complete fresh snapshot — an operator subscription decision, not
 an absence, so the public path must not answer it either.
-The pre-claim retire rolls its slice back if the watch-state save throws: the
-slice mutates the loaded state before the save, and a failed save does not clear
-the loaded flag, so without the rollback the next poll would skip the entry and
-the end-of-pass save would persist the truncation — losing the event with no
-trace at all.
+
+The overflow retire's commit point is its dead-letter record, not a sidecar
+save. The append happens first (a failed append dumps the body to stderr and
+keeps the event queued); the head is then sliced **in memory only**, and the
+baseline and the full queue commit together in the single end-of-pass save. A
+mid-pass save would persist the advanced baseline before the pass's later
+events are queued, so a crash would never re-derive them. The skip row is
+journalled only after that save lands. If the save throws — or the process dies
+before it — the head stays queued on disk while its dead-letter record stands;
+the drain recognizes a dead-lettered head (from the never-rotated file, so this
+survives a restart) and **completes its retire instead of delivering it**, so no
+event is ever both delivered and filed as retired undelivered. The
+`watch_no_candidate` drain retire, which writes no dead-letter record, rolls its
+slice back if its save throws: the slice mutates the loaded state before the
+save, and a failed save does not clear the loaded flag, so without the rollback
+the next poll would skip the entry and the end-of-pass save would persist the
+truncation — losing the event with no trace at all.
+
+These are the pre-claim retires this PR journals. The role-aware drain has a
+fourth, pre-existing targetless retire (a trusted complete snapshot whose enum
+matches no role) that writes only a stderr line, journals no row, and slices
+then saves without a rollback; it predates this PR and is out of its scope, so
+the journaling and rollback invariants above are claims about the three retires
+this PR adds, not about every pre-claim exit in the adapter.
 
 **No new event type, no wire change.** `outcome` is a free string in the
 journal, the SDK and the route, so the four types, both routes and the response
@@ -371,13 +395,22 @@ present throughout the degraded window and unchanged at its end. Only the
 watch-guard reasons have a recovery row. `bindings_unreachable` recovers
 implicitly, because a successful scan stops producing it and the next streak
 starts over. **`bindings_cold_empty` does not**: an empty partial is a
-_successful_ scan, and `coldEmptyPartialStreak` resets only on a complete or
-non-empty snapshot, so a daemon whose workspaces keep answering empty partials
-keeps producing the row from the success path. Past the bounded escape the row
-goes silent because the throttle maxed out — the gate guards on
+_successful_ scan, and the streak is keyed on the routing map and the trust
+flag, not on the snapshot alone — the gate is
+`snapshot.partial && map.size === 0 && !boundSnapshotTrusted`, and the streak
+resets only when a scan yields a non-empty routing map or a complete snapshot
+establishes trust. A workspace whose bindings are all channel-owned leaves the
+map empty on a non-empty partial, so the streak keeps advancing and the cap can
+fire `bindings_cold_empty` for a scan that _did_ list sessions; once any complete
+snapshot has been seen, an empty partial clears it. Past the bounded escape the
+row goes silent because the throttle maxed out — the gate guards on
 `streak < MAX_COLD_EMPTY_PARTIAL_POLLS` and both escapes test `=== MAX` — not
-because the state recovered: the comment lane is open while the snapshot is
-still an empty partial. **`bindings_partial` is not a
+because the state recovered. On the success-path producer the comment lane is
+open while the snapshot is still an empty partial; the refresh-failure producer
+shares the counter but, while no snapshot has ever succeeded, the cold-start
+gate keeps the lane **closed** and every notification — issue events included —
+stays stalled, so the silence there is not containment.
+**`bindings_partial` is not a
 degradation with a recovery edge**: a successful multi-page scan is its
 _producer_, and `partialSnapshotStreak` resets only on a complete snapshot, which
 a permanently multi-page daemon never returns. It is a standing health hint, so
@@ -396,24 +429,36 @@ considered and rejected: `setPollEventDetail` is called by the comment lane, and
 both cold-start gates return _before_ it — the detail would be missing in
 exactly the case it exists to report.
 
-Five recurring stderr sites in the binding-scan and watch lane are deliberately
-not journaled: the watch pass failure, the "keeping previous map" refresh
-failure, the retention-cap drop that discards the oldest unlisted sessions when
-a partial snapshot exceeds `MAX_PARTIAL_RETAINED`, the watch entry-cap eviction
-of idle entries, and the watch cap that leaves the oldest bound PRs beyond
-`MAX_WATCHED_PRS` unwatched. All five run on every poll while their condition
-holds, with no throttle and no existing flag to edge-trigger on, so covering
-them would mean new adapter state for diagnostics alone.
+Six recurring stderr sites in the binding-scan and watch lane are deliberately
+not journaled: the credential/rate-limit watch-pass abort, the watch pass
+failure, the "keeping previous map" refresh failure, the retention-cap drop that
+discards the oldest unlisted sessions when a partial snapshot exceeds
+`MAX_PARTIAL_RETAINED`, the watch entry-cap eviction of idle entries, and the
+watch cap that leaves the oldest bound PRs beyond `MAX_WATCHED_PRS` unwatched.
+The abort is the heaviest silent failure of the six: a credential or rate-limit
+answer makes `watchOnePr` break out of the pass and return normally, so the
+outer pass-failure catch never fires, the poll completes, the base writes
+`poll` / `ok`, and every later poll repeats the abort with no journal row while
+no transition is detected for any bound PR. Most of these sites run on every
+poll while their condition holds, with no throttle and no flag to edge-trigger
+on, so covering them would mean new adapter state for diagnostics alone. The
+exception is the "keeping previous map" refresh failure: it is written inside
+the catch that sets `boundRefreshFailed`, and the flag clears on every successful
+snapshot, so its false→true edge already marks the onset of the run and could be
+journaled without new state. It is left on stderr here for scope, not because
+the edge is unavailable.
 
-They are not equally heavy. The watch cap is the worst: an excluded PR is never
-watched, so its transitions produce no rows at all and the operator reads
-silence rather than a late answer. The retention-cap drop is next — the dropped
-sessions' events defer and dead-letter at the horizon, so terminal rows appear
-hours later with no row saying sessions were pruned. The entry-cap eviction is
-the lightest by construction: it evicts only idle entries that have no pending
-event, no surviving binding claim and no in-flight watch task, so no deliverable
-event is lost. The two capacity sites are the first candidates if that state is
-ever added.
+They are not equally heavy. The credential/rate-limit abort and the watch cap
+are the worst: the abort stalls detection for every bound PR while the timeline
+reads `ok`, and an excluded PR is never watched, so its transitions produce no
+rows at all and the operator reads silence rather than a late answer. The
+retention-cap drop is next — the dropped sessions' events defer and dead-letter
+at the horizon, so terminal rows appear hours later with no row saying sessions
+were pruned. The entry-cap eviction is the lightest by construction: it evicts
+only idle entries that have no pending event, no surviving binding claim and no
+in-flight watch task, so no deliverable event is lost. The abort, the stale-map
+refresh failure and the two capacity sites are the first candidates if that
+state is ever added.
 
 This is a census of the lane's recurring health and capacity sites, not of every
 stderr line in the adapter. Two further classes stay on stderr as well and are
@@ -543,8 +588,12 @@ classes, the daemon route, the SDK types and the wire shape are unchanged.
   private retire, the gone-horizon attribution in the same run, the per-cause
   watch-guard edge and its subscriptions-off recovery site, the scan-scoped
   streak under gone retries, the role-aware retire reasons, and the recovered
-  label. Every one of
-  these guards was mutation-verified: 47 mutations, 47 killed. Two of them
+  label. The fourth round added guards for the overflow's single-save baseline
+  atomicity (the first sidecar write already carries both derived events), the
+  dead-letter file as the restart-durable dedupe, the drain completing a
+  dead-lettered head's retire instead of delivering it, and the lost session's
+  workspace on the terminal and pre-claim rows. Every one of
+  these guards was mutation-verified: 51 mutations, 51 killed. Two of them
   exist only to prove the privacy assertion is load-bearing — one smuggles the
   body into another field of a retire row, the other appends it after the write
   error so the error assertion still passes. Three more initially survived and

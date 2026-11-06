@@ -1321,8 +1321,9 @@ advance more than once per poll) and, on the `bindings_partial` rows only,
 listed plus the sessions retention keeps routing under a partial answer,
 bounded by the retention cap,
 while the watch-guard rows (`watch_reconcile_blocked`,
-`watch_pending_unreconciled`, `watch_reconcile_recovered`) carry only `reason`
-and, for a read failure, `error`. A GitHub poll that filters more than 20 notifications journals
+`watch_pending_unreconciled`, `watch_reconcile_recovered`) carry `reason`; a
+blocking row also carries `error` when the watch state could not be read or
+reconciliation failed (the recovered row carries no error). A GitHub poll that filters more than 20 notifications journals
 the first 20 individually and one further `reason_filter` row whose
 `detail.filtered` counts the rest, so a pinned poll cursor cannot flood the
 journal with repeats of the same batch. While the cursor is held, a comment the

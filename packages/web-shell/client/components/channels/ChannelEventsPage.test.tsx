@@ -916,7 +916,7 @@ describe('ChannelEventsPage', () => {
 
     const rows = container.querySelectorAll('li');
     expect(rows[0]?.textContent).toContain('bindings_partial');
-    expect(rows[0]?.textContent).toContain('10 binding scans');
+    expect(rows[0]?.textContent).toContain('10 consecutive binding scans');
     expect(rows[0]?.textContent).toContain('1 session listed');
   });
 
@@ -947,6 +947,7 @@ describe('ChannelEventsPage', () => {
       'channelEvents.notifications',
       'channelEvents.moreFiltered',
       'channelEvents.duration',
+      'channelEvents.openTarget',
     ];
     // Collected rather than asserted per key so the failure names the offenders.
     const notFunctions = interpolating.filter(
@@ -995,5 +996,79 @@ describe('ChannelEventsPage', () => {
     // not catch a plain-string label until a row happens to carry the var.
     expect(rows[0]?.textContent).not.toContain('连续  次');
     expect(rows[0]?.textContent).not.toContain('列出  个');
+  });
+
+  it('renders the Chinese degraded, retired and recovered outcome labels', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'poll',
+          outcome: 'degraded',
+          reason: 'bindings_partial',
+          detail: { streak: 10, sessions: 1 },
+        },
+        {
+          at: '2026-11-02T02:01:00.000Z',
+          channel: 'bot',
+          type: 'task',
+          outcome: 'retired',
+          reason: 'dead_letter',
+        },
+        {
+          at: '2026-11-02T02:02:00.000Z',
+          channel: 'bot',
+          type: 'poll',
+          outcome: 'degraded',
+          reason: 'watch_reconcile_recovered',
+        },
+      ],
+    };
+
+    await renderPage('zh-CN');
+
+    const rows = container.querySelectorAll('li');
+    expect(rows).toHaveLength(3);
+    // Newest first: recovered, retired, degraded. A translator round that set
+    // any of these back to the English word would otherwise ship green — the
+    // parity test only checks key presence, not the rendered value.
+    expect(rows[0]?.textContent).toContain('已恢复');
+    expect(rows[0]?.textContent).not.toContain('Recovered');
+    expect(rows[1]?.textContent).toContain('已终止');
+    expect(rows[1]?.textContent).not.toContain('Retired');
+    expect(rows[2]?.textContent).toContain('降级');
+    expect(rows[2]?.textContent).not.toContain('Degraded');
+  });
+
+  it('renders the Chinese open-target label with its repository and number', async () => {
+    channelsState.current = {
+      'gh-bot': { config: { type: 'github' } },
+    };
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'gh-bot',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+        },
+      ],
+    };
+
+    await renderPage('zh-CN');
+
+    // The shape guard catches a plain-string openTarget, but only a render
+    // assertion catches a function that dropped its interpolation: every ZH
+    // row would otherwise read "在 GitHub 上打开" with no target.
+    const link = container.querySelector('li a[target="_blank"]');
+    expect(link?.getAttribute('aria-label')).toBe(
+      '在 GitHub 上打开 owner/repo#42',
+    );
   });
 });

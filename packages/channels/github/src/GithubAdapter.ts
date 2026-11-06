@@ -1313,15 +1313,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private prWatchState: PrWatchStateFile = { version: 1, entries: {} };
   private prWatchStateLoaded = false;
   /**
-   * Overflow heads whose dead-letter record is already durable while the
-   * sidecar save kept failing (entry key -> pending head key). The next
-   * detection skips the append instead of filing the same retired transition
-   * twice; a successful overflow save clears the entry. A head that leaves
-   * the queue through another path can leave a stale entry: it only
-   * suppresses a duplicate record for the identical transition key, never a
-   * delivery.
+   * Message keys that already have a durable dead-letter record, lazily
+   * loaded from the never-rotated dead-letter file on first use and kept
+   * current as this process appends. The file is the overflow retire's commit
+   * point: a head with a record is never re-appended — even across a restart,
+   * which empties this cache and reloads it from disk — and never delivered;
+   * the drain completes its retire instead. Watch keys are unique per
+   * episode, so a record can only match the same transition.
    */
-  private overflowDeadLetteredHeads = new Map<string, string>();
+  private deadLetteredKeys: Set<string> | undefined;
   private inboundRecoveryPending = true;
   private recoverableInboundTasks = 0;
   /**
@@ -3241,9 +3241,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         `[Channel:${this.name}] event ${envelope.messageId} matched no role's boundSessionActions; retiring without public fallback\n`,
       );
       // Retired before any task was claimed, so there is no task row to
-      // close: the skip is the event's only journal trace. After the dedupe
-      // is durable — a throwing save must not leave a skip claim behind for
-      // an event the next poll re-reads.
+      // close: the skip is the event's only journal trace. The dedupe cursor
+      // is still in memory here — the base saves it after pollOnce returns —
+      // so this row is at-least-once: if that cursor write fails or the daemon
+      // dies first, the notification re-lists and the same event may produce a
+      // second identical skip row.
       this.recordChannelEvent({
         type: 'inbound',
         outcome: 'skipped',
@@ -4078,6 +4080,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const identity = this.boundJournalIdentity(task.delivery);
     const sessionId =
       identity.sessionId ?? previousSessionId ?? task.lostSessionId;
+    const sessionWorkspaceCwd =
+      identity.sessionWorkspaceCwd ??
+      (sessionId ? this.sessionWorkspaceFor(sessionId) : undefined);
     this.recordChannelEvent({
       type: 'task',
       outcome: journal?.outcome ?? state,
@@ -4093,9 +4098,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       number: task.issueNumber,
       messageId: task.source.messageId,
       ...(sessionId ? { sessionId } : {}),
-      ...(identity.sessionWorkspaceCwd
-        ? { sessionWorkspaceCwd: identity.sessionWorkspaceCwd }
-        : {}),
+      ...(sessionWorkspaceCwd ? { sessionWorkspaceCwd } : {}),
       ...(updates.attempts !== undefined
         ? { detail: { attempts: updates.attempts } }
         : {}),
@@ -4123,6 +4126,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       (task.delivery?.kind === 'bound-session'
         ? task.delivery.sessionId
         : task.lostSessionId);
+    const workspaceCwd = target ? this.sessionWorkspaceFor(target) : undefined;
     this.recordChannelEvent({
       type: 'task',
       outcome,
@@ -4138,6 +4142,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       number: task.issueNumber,
       messageId: task.source.messageId,
       ...(target ? { sessionId: target } : {}),
+      ...(workspaceCwd ? { sessionWorkspaceCwd: workspaceCwd } : {}),
       ...(error ? { error } : {}),
     });
   }
@@ -4161,6 +4166,78 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       sessionId: delivery.sessionId,
       ...(workspaceCwd ? { sessionWorkspaceCwd: workspaceCwd } : {}),
     };
+  }
+
+  /**
+   * The workspace a bound session lives in, from the latest binding list, so
+   * a journal row's Open-session button reaches a session in ANOTHER
+   * workspace instead of falling back to the Channel's own (the daemon would
+   * answer 404). Undefined when the session is not currently listed.
+   */
+  private sessionWorkspaceFor(sessionId: string): string | undefined {
+    return this.lastBindings.find((binding) => binding.sessionId === sessionId)
+      ?.workspaceCwd;
+  }
+
+  /**
+   * Whether a message key already has a durable dead-letter record. Loads the
+   * never-rotated file's keys once, then serves from the cache this process
+   * keeps current on append. A read failure yields an empty cache: nothing is
+   * known to be dead-lettered, so the caller appends (a possible duplicate is
+   * benign) rather than silently skipping the exhaustion surface.
+   */
+  private isDeadLettered(messageKey: string): boolean {
+    if (this.deadLetteredKeys === undefined) {
+      const keys = new Set<string>();
+      try {
+        const raw = readFileSync(
+          this.channelFilePath('github-bound-deadletter.jsonl'),
+          'utf-8',
+        );
+        for (const line of raw.split('\n')) {
+          if (!line) continue;
+          try {
+            const rec = JSON.parse(line) as { source?: { messageId?: string } };
+            if (typeof rec.source?.messageId === 'string') {
+              keys.add(rec.source.messageId);
+            }
+          } catch {
+            // A malformed line names no key; skip it.
+          }
+        }
+      } catch {
+        // No file yet, or unreadable: nothing known to be dead-lettered.
+      }
+      this.deadLetteredKeys = keys;
+    }
+    return this.deadLetteredKeys.has(messageKey);
+  }
+
+  /**
+   * The overflow retire's journal trace, written only after the retire is
+   * durable. Identifiers only — the dead-letter record's `text` (the body)
+   * must never be copied here. Carries the frozen target and its workspace so
+   * the row links to the session the event lost, even in another workspace.
+   */
+  private recordWatchOverflowSkip(pending: PendingWatchEvent): void {
+    const sessionId =
+      pending.delivery?.kind === 'bound-session'
+        ? pending.delivery.sessionId
+        : undefined;
+    const workspaceCwd = sessionId
+      ? this.sessionWorkspaceFor(sessionId)
+      : undefined;
+    this.recordChannelEvent({
+      type: 'inbound',
+      outcome: 'skipped',
+      reason: 'watch_pending_overflow',
+      repository: pending.envelope.chatId,
+      thread: pending.envelope.threadId,
+      number: pending.issueNumber,
+      messageId: pending.key,
+      ...(sessionId ? { sessionId } : {}),
+      ...(workspaceCwd ? { sessionWorkspaceCwd: workspaceCwd } : {}),
+    });
   }
 
   private removeInboundTask(taskId: string): void {
@@ -5348,8 +5425,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         return { kind: 'retired', reason: 'watch_no_target' };
       }
       if (this.boundRoleAware && this.boundEventAlreadyDelivered(envelope)) {
-        // A sibling role already accepted this event privately; a targetless
-        // retry must not answer it publicly (durable delivery ring).
+        // Defensive: a sibling role already accepted this event privately, so
+        // a targetless retry must not answer it publicly (durable delivery
+        // ring). Unreachable in practice — boundRoleAware requires
+        // boundSessionActions, which the constructor clears in standalone
+        // mode, and a bound delivery implies a live boundSessions handle — so
+        // this reason is NOT part of the published vocabulary. Kept as a guard
+        // against a future call path that clears the delivery mid-run.
         process.stderr.write(
           `[Channel:${this.name}] event ${envelope.messageId} already delivered privately to another role; retiring without public fallback\n`,
         );
@@ -6092,6 +6174,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // independent subscriptions. Comment events still dedupe across
     // instances via their stable GitHub ids.
     const detectedAt = Date.now();
+    // Overflow retires sliced during this pass; their skip rows are journalled
+    // only after the end-of-pass save commits the baseline and queue together.
+    const overflowRetires: PendingWatchEvent[] = [];
     for (const event of events) {
       // ci_failure dedupes per head SHA: once per head even when the
       // aggregate flaps back to success and fails again. The other three
@@ -6155,30 +6240,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       });
       if (next.pending.length > MAX_PENDING_WATCH_PER_ENTRY) {
         const oldest = next.pending[0]!;
-        const record = {
-          retiredAt: new Date().toISOString(),
-          issueNumber: oldest.issueNumber,
-          source: {
-            chatId,
-            threadId: `pr:${number}`,
-            messageId: oldest.key,
-          },
-          delivery: oldest.delivery,
-          reason: `watch pending queue overflow (cap ${MAX_PENDING_WATCH_PER_ENTRY}); oldest event retired undelivered`,
-          text: oldest.envelope.text,
-        };
-        // `slice`, not `shift`: the rollback below restores this reference, so
-        // the queued array must not be mutated in place before the save lands.
-        const pendingBefore = next.pending;
-        // The append and the save fail differently. A failed append leaves
-        // the body nowhere else to go, so the payload is dumped to stderr and
-        // the next detection retries the whole retire. A failed save leaves
-        // the record ALREADY durable: re-appending it on the next detection
-        // would file the same retired transition twice, so the head is
-        // remembered and the append skipped until a save lands.
-        let deadLetterDurable =
-          this.overflowDeadLetteredHeads.get(key) === oldest.key;
-        if (!deadLetterDurable) {
+        if (!this.isDeadLettered(oldest.key)) {
+          const record = {
+            retiredAt: new Date().toISOString(),
+            issueNumber: oldest.issueNumber,
+            source: {
+              chatId,
+              threadId: `pr:${number}`,
+              messageId: oldest.key,
+            },
+            delivery: oldest.delivery,
+            reason: `watch pending queue overflow (cap ${MAX_PENDING_WATCH_PER_ENTRY}); oldest event retired undelivered`,
+            text: oldest.envelope.text,
+          };
           try {
             const path = this.channelFilePath('github-bound-deadletter.jsonl');
             mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -6186,65 +6260,33 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
               encoding: 'utf-8',
               mode: 0o600,
             });
-            deadLetterDurable = true;
+            this.deadLetteredKeys!.add(oldest.key);
           } catch (err) {
-            // Same fail-safe as retireBoundTask: if the exhaustion surface
-            // cannot be written, keep the event queued (over cap) and retry
-            // the overflow on the next detection instead of dropping it.
-            // Sanitized without truncation, like the retireBoundTask dump.
+            // The exhaustion surface cannot be written: keep the event queued
+            // (over cap) and retry the overflow on the next detection instead
+            // of dropping it. The body has nowhere else to go, so dump it to
+            // stderr — sanitized without truncation, like retireBoundTask.
             const payload = JSON.stringify(record);
             process.stderr.write(
               `[Channel:${this.name}] failed to write watch pending overflow dead-letter (${oldest.key}): ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}; payload: ${sanitizeLogText(payload, payload.length)}\n`,
             );
           }
         }
-        if (deadLetterDurable) {
+        if (this.isDeadLettered(oldest.key)) {
+          // The dead-letter record is the retire's commit point. Slice in
+          // memory ONLY: the end-of-pass save below commits the advanced
+          // baseline and the full queue in one write. A mid-pass save here
+          // would persist the baseline before this pass's later events are
+          // queued, so a crash would never re-derive them. The skip row is
+          // journalled after that save, never before; if the save throws, the
+          // drain completes the retire next poll (the head is dead-lettered,
+          // so it is never delivered).
           next.pending = next.pending.slice(1);
           this.prWatchState.entries[key] = next;
-          // The shift is only durable once the sidecar is saved, and the
-          // end-of-pass save below can still throw. Persist it here, before
-          // the journal claims the retire: otherwise a failed save leaves the
-          // event queued while the timeline says it was skipped, and a restart
-          // drains it — a skip row for a transition that is delivered later.
-          let saved = false;
-          try {
-            this.savePrWatchState();
-            saved = true;
-          } catch (err) {
-            // Only the shift failed; the record is already in the dead-letter
-            // file. Roll the shift back so memory and disk agree about what is
-            // still queued, remember the head so the next detection does not
-            // append a second copy, and name the file that actually failed —
-            // no payload dump, the body is already durable.
-            next.pending = pendingBefore;
-            this.prWatchState.entries[key] = next;
-            this.overflowDeadLetteredHeads.set(key, oldest.key);
-            process.stderr.write(
-              `[Channel:${this.name}] failed to save watch state after overflow dead-letter (${oldest.key}): ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}; the record is already in the dead-letter file and the event stays queued\n`,
-            );
-          }
-          if (saved) {
-            this.overflowDeadLetteredHeads.delete(key);
-            process.stderr.write(
-              `[Channel:${this.name}] watch pending overflow for ${key}: retired ${oldest.key} to dead-letter (cap ${MAX_PENDING_WATCH_PER_ENTRY})\n`,
-            );
-            // The overflow retire is a silent consumption otherwise: the event
-            // was never claimed, so there is no task row to close, and the
-            // dead-letter file plus stderr are its only trace. Identifiers only
-            // — `record.text` above carries the body and must not be copied.
-            this.recordChannelEvent({
-              type: 'inbound',
-              outcome: 'skipped',
-              reason: 'watch_pending_overflow',
-              repository: chatId,
-              thread: `pr:${number}`,
-              number,
-              messageId: oldest.key,
-              ...(oldest.delivery?.kind === 'bound-session'
-                ? { sessionId: oldest.delivery.sessionId }
-                : {}),
-            });
-          }
+          overflowRetires.push(oldest);
+          process.stderr.write(
+            `[Channel:${this.name}] watch pending overflow for ${key}: retired ${oldest.key} to dead-letter (cap ${MAX_PENDING_WATCH_PER_ENTRY})\n`,
+          );
         }
       }
       if (event.type === 'ci_failure' && headSha !== undefined) {
@@ -6257,6 +6299,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // either finds the pending event (drained next poll) or the claimed
     // task (recovery), never a consumed transition with nothing to retry.
     this.savePrWatchState();
+    // The overflow retires are durable only now. Journal their skip rows after
+    // the save: a throwing save leaves no claim for an event still queued on
+    // disk, and the drain completes the retire next poll instead.
+    for (const retired of overflowRetires) {
+      this.recordWatchOverflowSkip(retired);
+    }
     await this.drainPendingWatch(key, next);
   }
 
@@ -6295,6 +6343,24 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (unsettledPredecessor) return;
     while (entry.pending && entry.pending.length > 0) {
       const pending = entry.pending[0]!;
+      if (this.isDeadLettered(pending.key)) {
+        // This head already carries a durable "retired undelivered" record
+        // (an overflow whose end-of-pass save failed, or a crash before it).
+        // Complete the retire instead of delivering: a delivered event must
+        // never also stand in the dead-letter file as retired undelivered.
+        const pendingBefore = entry.pending;
+        entry.pending = entry.pending.slice(1);
+        this.prWatchState.entries[key] = entry;
+        try {
+          this.savePrWatchState();
+        } catch (err) {
+          entry.pending = pendingBefore;
+          this.prWatchState.entries[key] = entry;
+          throw err;
+        }
+        this.recordWatchOverflowSkip(pending);
+        continue;
+      }
       // Re-validate the frozen recipient against the latest COMPLETE
       // snapshot: a live rebind must not misdeliver to the old session. On
       // a partial/failed scan the persisted target stands (fail-closed).
@@ -6337,6 +6403,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           // durable save — the rollback above keeps the event queued when the
           // save throws, and the journal must not claim a retire that did not
           // happen.
+          const lostTarget =
+            pending.delivery?.kind === 'bound-session'
+              ? pending.delivery.sessionId
+              : undefined;
+          const lostWorkspace = lostTarget
+            ? this.sessionWorkspaceFor(lostTarget)
+            : undefined;
           this.recordChannelEvent({
             type: 'inbound',
             outcome: 'skipped',
@@ -6349,9 +6422,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             // record (only the overflow retire does), so the skip row is the
             // event's only trace — without the target it cannot say whether
             // the retired event ever belonged to a session.
-            ...(pending.delivery?.kind === 'bound-session'
-              ? { sessionId: pending.delivery.sessionId }
-              : {}),
+            ...(lostTarget ? { sessionId: lostTarget } : {}),
+            ...(lostWorkspace ? { sessionWorkspaceCwd: lostWorkspace } : {}),
           });
           continue;
         }
@@ -6431,6 +6503,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   ): Promise<void> {
     while (entry.pending && entry.pending.length > 0) {
       const pending = entry.pending[0]!;
+      if (this.isDeadLettered(pending.key)) {
+        // A dead-lettered head is committed to retire; complete it rather than
+        // deliver, so no event is both delivered and filed as retired
+        // undelivered. Mirrors the legacy drain's guard.
+        const pendingBefore = entry.pending;
+        entry.pending = entry.pending.slice(1);
+        this.prWatchState.entries[key] = entry;
+        try {
+          this.savePrWatchState();
+        } catch (err) {
+          entry.pending = pendingBefore;
+          this.prWatchState.entries[key] = entry;
+          throw err;
+        }
+        this.recordWatchOverflowSkip(pending);
+        continue;
+      }
       const { targets } = this.resolveBoundTargets(
         pending.envelope.chatId,
         pending.issueNumber,
