@@ -151,7 +151,8 @@ const timeoutMinutesOn = (job, runner) => {
   // The same `|| '["ubuntu-latest"]'` default the runs-on expression carries:
   // a missing output (classify_pr skipped) is the hosted routing. The caller
   // passes the value of the output the job itself reads — ubuntu_runner for
-  // the association-gated lanes, lint_runner for lint_and_static.
+  // the association-gated lanes, lint_runner for lint_and_static and
+  // integration_no_ak.
   const effective = runner || HOSTED_RUNNER;
   const output = runnerOutputOf(job);
   let expr = String(ci.jobs[job]['timeout-minutes'])
@@ -497,7 +498,26 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
   expect(ci.jobs.web_shell_e2e_smoke.strategy['fail-fast']).toBe(false);
   const result = ci.jobs.web_shell_e2e_smoke_result;
   expect(result.name).toBe('web-shell E2E Smoke (ubuntu-latest, Node 22.x)');
-  expect(result.needs).toEqual(['classify_pr', 'web_shell_e2e_smoke']);
+  expect(result.needs).toEqual([
+    'classify_pr',
+    'test_build',
+    'web_shell_e2e_smoke',
+  ]);
+  // The smoke tests test_build's tree instead of building its own, and a
+  // draft skips it along with the no-AK integration gate.
+  expect(ci.jobs.web_shell_e2e_smoke.needs).toEqual([
+    'classify_pr',
+    'test_build',
+  ]);
+  expect(condOf('web_shell_e2e_smoke')).toContain(
+    "needs.test_build.result == 'success'",
+  );
+  expect(condOf('web_shell_e2e_smoke')).toContain(
+    '!github.event.pull_request.draft',
+  );
+  const smokeSteps = ci.jobs.web_shell_e2e_smoke.steps.map((x) => x.name);
+  expect(smokeSteps).not.toContain('Build');
+  expect(smokeSteps).toContain('Unpack the built tree');
   expect(result['runs-on']).toBe(ci.jobs.web_shell_e2e_smoke['runs-on']);
   expect(condOf('web_shell_e2e_smoke_result')).toBe(
     condOf('web_shell_e2e_smoke'),
@@ -553,6 +573,9 @@ const gateRunsOn = (cond, event) => {
     // re-derive this helper's verdict before adding such a gate.
     [/needs\.classify_pr\.outputs\.skip_ci/g, '"false"'],
     [/needs\.classify_pr\.outputs\.ci_profile/g, '"full"'],
+    // A normal run: the build passed and the pull request is not a draft.
+    [/needs\.test_build\.result/g, '"success"'],
+    [/github\.event\.pull_request\.draft/g, 'false'],
     [
       /github\.event\.pull_request\.head\.repo\.full_name/g,
       event === 'pull_request' ? '"QwenLM/qwen-code"' : '""',
@@ -752,10 +775,11 @@ describe('post-merge push lane', () => {
   it('routes lint_and_static through the classify_pr lint output', () => {
     // runs-on is where the contributor code this describe's other pins talk
     // about actually executes. classify_pr's pick_runner publishes TWO
-    // routings: ubuntu_runner keeps the fork-trust boundary for test and the
-    // integration lanes, while lint_runner routes every pull request —
+    // routings: ubuntu_runner keeps the fork-trust boundary for test and
+    // integration_cli, while lint_runner routes every pull request —
     // untrusted forks included — to the fleet (maintainer decision
-    // 2026-10-31, shared-pool code-execution risk accepted). A literal pool
+    // 2026-10-31, shared-pool code-execution risk accepted, extended to
+    // integration_no_ak 2026-11-02). A literal pool
     // label array here would bypass the classifier indirection whole (and
     // desync from timeout-minutes, which reads the same output), and reading
     // ubuntu_runner would silently restore the hosted fork lane. Whole-
@@ -973,7 +997,36 @@ describe('post-merge push lane', () => {
     // intersection, and a floor below the real count lets any one shared step
     // be deleted out of either job without turning this red.
     expect(shared.length).toBeGreaterThanOrEqual(13);
+    // One deliberate divergence: lint maps java_only to its full payload
+    // and adds the scripts/tests lane, where every other job skips. The
+    // step must equal test's in everything else.
+    const profileStep = 'Use trusted CI profile';
+    const stepOf = (job, name) =>
+      (ci.jobs[job].steps ?? []).find((x) => x.name === name);
+    const lintProfile = stepOf('lint_and_static', profileStep);
+    const testProfile = stepOf('test', profileStep);
+    const { run: lintRun, ...lintRest } = lintProfile;
+    const { run: testRun, ...testRest } = testProfile;
+    expect(lintRest).toEqual(testRest);
+    expect(lintRun).toContain(
+      'java_only)\n    profile=full\n    scripts_unit=true',
+    );
+    expect(testRun).toContain('docs_only|github_ci_only|java_only|full) ;;');
+    // Strip lint's java_only additions; what is left is test's step.
+    const lintBase = lintRun
+      .replace('scripts_unit=false\n', '')
+      .replace(/\n {2}# A change confined[\s\S]*?java_only\)\n[\s\S]*?;;/, '')
+      .replace(
+        'docs_only|github_ci_only|full',
+        'docs_only|github_ci_only|java_only|full',
+      )
+      .replace(
+        'echo "scripts_unit=${scripts_unit}" >> "${GITHUB_OUTPUT}"\n',
+        '',
+      );
+    expect(lintBase).toBe(testRun);
     for (const n of shared) {
+      if (n === profileStep) continue;
       expect(l.get(n), `step "${n}" drifted between the two jobs`).toBe(
         t.get(n),
       );
@@ -1327,17 +1380,58 @@ describe('post-merge push lane', () => {
       'Run yamllint',
       'Run Prettier',
       'Run sensitive keyword linter',
-      'Check serve fast-path bundle closure',
-      'Check core subpath exports resolve',
       'Run i18n check',
-      'Generate settings schema',
-      'Check settings schema is up-to-date',
       'Generate Web Shell and VS Code companion notices',
       'Check Web Shell and VS Code companion notices are up-to-date',
       'Run .github/scripts helper tests',
     ];
     const steps = ci.jobs.lint_and_static.steps ?? [];
     const stepByName = new Map(steps.map((x) => [x.name, x]));
+    // The two checks that read the built tree moved to test_build, which
+    // builds it anyway; Lint & Static used to build and bundle the CLI a
+    // second time for them. They stay full-gated and required through
+    // `Test (ubuntu-latest, Node 22.x)`.
+    const buildSteps = new Map(
+      (ci.jobs.test_build.steps ?? []).map((x) => [x.name, x]),
+    );
+    for (const [name, command] of [
+      [
+        'Check serve fast-path bundle closure',
+        'node scripts/check-serve-fast-path-bundle.js',
+      ],
+      [
+        'Check core subpath exports resolve',
+        'npm run check:core-subpath-exports',
+      ],
+      // The generator imports core's dist.
+      ['Generate settings schema', 'npm run generate:settings-schema'],
+      [
+        'Check settings schema is up-to-date',
+        'git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json',
+      ],
+    ]) {
+      expect(stepByName.has(name), name).toBe(false);
+      expect(buildSteps.get(name)?.run, name).toContain(command);
+      expect(buildSteps.get(name)?.if, name).toContain("ci_profile == 'full'");
+    }
+    expect(buildSteps.get('Build').env?.DEV).toBe('true');
+    const buildOrder = [...buildSteps.keys()];
+    expect(buildOrder.indexOf('Check serve fast-path bundle closure')).toBe(
+      buildOrder.indexOf('Build') + 1,
+    );
+    // A java_only change runs scripts/tests here instead of in the shards.
+    const javaSuites = stepByName.get(
+      'Run scripts/tests for a Java-only change',
+    );
+    expect(javaSuites.if).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.scripts_unit == 'true' }}",
+    );
+    expect(javaSuites.run).toContain(
+      "git grep -l -E 'managed-agent-server/|sdk-java/' -- 'scripts/tests/*.test.*'",
+    );
+    expect(javaSuites.run).toContain(
+      'npm run test:scripts:unit -- "${suites[@]}"',
+    );
     const testNames = new Set((ci.jobs.test.steps ?? []).map((x) => x.name));
     const prelude = new Set((ci.jobs.test.steps ?? []).map((x) => x.name));
     // Order and completeness in one shot: the full-gated steps that are not
@@ -1396,14 +1490,7 @@ describe('post-merge push lane', () => {
       'Run Prettier': 'node scripts/lint.js --prettier',
       'Run sensitive keyword linter':
         'node scripts/lint.js --sensitive-keywords',
-      'Check serve fast-path bundle closure':
-        'npm run check:serve-fast-path-bundle',
-      'Check core subpath exports resolve':
-        'npm run check:core-subpath-exports',
       'Run i18n check': 'npm run check-i18n',
-      'Generate settings schema': 'npm run generate:settings-schema',
-      'Check settings schema is up-to-date':
-        'git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json',
       'Generate Web Shell and VS Code companion notices':
         'npm run generate:notices --workspace=@qwen-code/web-shell',
       'Check Web Shell and VS Code companion notices are up-to-date':
@@ -1417,7 +1504,7 @@ describe('post-merge push lane', () => {
     ).toEqual([...FULL_PAYLOAD].sort());
     // Whole literal, not the `ci_profile == 'full'` substring filtered above:
     // an appended `&&` clause still matches that substring while dropping the
-    // step from the unattended post-merge lane. All 19 gates are identical.
+    // step from the unattended post-merge lane. All 15 gates are identical.
     const FULL_GATE =
       "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}";
     for (const n of FULL_PAYLOAD) {
@@ -1442,7 +1529,7 @@ describe('post-merge push lane', () => {
       ).not.toMatch(/\|\|\s*(true|:)/);
     }
     expect(
-      String(stepByName.get('Check settings schema is up-to-date').run),
+      String(buildSteps.get('Check settings schema is up-to-date').run),
       'settings-schema gate lost its exit 1',
     ).toContain('exit 1');
     // The two deliberately-different gates, pinned as they are.
