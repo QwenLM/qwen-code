@@ -112,6 +112,12 @@ vi.mock('@qwen-code/channel-base', () => ({
     protected getResponseMessageId(_sessionId: string): string | undefined {
       return undefined;
     }
+    protected isProactivePromptTurn(_sessionId: string): boolean {
+      return false;
+    }
+    protected disableLoopJobsForChat(_chatId: string): Promise<number> {
+      return Promise.resolve(0);
+    }
     protected getResponseSenderId(_sessionId: string): string | undefined {
       return undefined;
     }
