@@ -571,13 +571,16 @@ function trimBashEdgeSeparators(command: string): string {
 
 /**
  * The word a token denotes once the shell removes its quoting, so an option
- * terminator written `'--'`, `"--"`, `\--` or `$'--'` is the same word as `--`
- * (#16075 review, R6-1).
+ * terminator written `'--'`, `"--"`, `\--`, `$'--'` or `$"--"` is the same
+ * word as `--` (#16075 review, R6-1 / R8-11).
  */
 function shellWordAfterQuoteRemoval(token: string): string {
   const { value, quote } = stripSymmetricQuotes(token);
   if (quote !== '') return value;
   if (value.startsWith("$'") && value.endsWith("'")) {
+    return value.slice(2, -1);
+  }
+  if (value.startsWith('$"') && value.endsWith('"')) {
     return value.slice(2, -1);
   }
   return value.replace(/\\(.)/g, '$1');

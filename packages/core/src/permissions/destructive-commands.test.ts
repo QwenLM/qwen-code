@@ -495,6 +495,78 @@ describe('isDestructiveCommand — git commit --amend', () => {
   });
 });
 
+// ── R10: recognizer seams measured against real bash/git at ab5f81bd ──────
+
+describe('isDestructiveCommand — R10 recognizer seams', () => {
+  it.each([
+    // `$"…"` is locale-translation quoting: the shell removes the introducer
+    // and quotes, so these run a real amend (#16075 review, R8-11).
+    'git $"commit" --amend',
+    'git commit $"--amend"',
+    'bash -c $"git commit --amend --no-edit"',
+    `sh -c $"--" 'git commit --amend --no-edit'`,
+    // git accepts every unambiguous prefix of --amend (#16075 review, R8-8).
+    'git commit --am --no-edit',
+    'git commit --ame --no-edit',
+    'git commit --amen --no-edit',
+    // Short clusters are read letter by letter: an attached value does not
+    // consume the next word (#16075 review, R1-6).
+    'git commit -mtopic --amend',
+    'git commit -mC --amend',
+    'git commit -amC --amend --no-edit',
+    "git commit -m'doc' --amend",
+    // GIT_CONFIG_PARAMETERS defines aliases too (#16075 review, R8-12).
+    `GIT_CONFIG_PARAMETERS="'alias.x=commit --amend'" git x --no-edit`,
+    // Expansions in the subcommand/flag positions word-split into an amend
+    // the tokenizer keeps glued (#16075 review, R8-10).
+    'git commit${IFS}--amend --no-edit',
+    'git commit $IFS--amend',
+    'git commit ${x:---amend}',
+    'git $(echo commit) --amend',
+    'git {commit,--amend}',
+    // Positional/special parameters expand to nothing when unset, gluing
+    // `commit$1` into the plain subcommand (measured bash argv:
+    // [git] [commit] [--amend]).
+    'git commit$1 --amend',
+    'git commit$@ --amend',
+    'git commit$* --amend',
+    // A global flag's VALUE decides what the flag does: `-c $X` can expand
+    // to an alias definition that turns `y` into `commit --amend`.
+    'git -c $X y --no-edit',
+    // A trailing `\c` stays literal; it must not swallow the closing quote
+    // and the rest of the line (#16075 review, R8-2 / R10-1). `\cZ` still
+    // decodes as a control escape.
+    "git commit -m $'fix \\c' --amend",
+    "git commit -m $'fix \\cZ' --amend",
+    // Global-flag seams: attr-source takes a value, redirections interleave
+    // with the flags, and config sections are case-insensitive (#16075
+    // review, R1-1 residual).
+    'git --attr-source HEAD commit --amend',
+    'git >/dev/null commit --amend',
+    'git 2>&1 commit --amend',
+    "git -c ALIAS.x='commit --amend' x",
+  ])('blocks a real amend through a measured seam: %s', (command) => {
+    expectBlocked(command, 'amend the commit', 'amend');
+  });
+
+  it.each([
+    // The expansion arm reads invocation positions, not argument data:
+    // another subcommand's variables and brace lists cannot amend.
+    'git push origin $BRANCH',
+    'git checkout feature/{a,b}',
+    'git stash apply stash@{0}',
+    // `-m --amend` is still a message; optional-value short flags never
+    // consume the next word.
+    'git commit -m --amend',
+    'git commit -u --amendx',
+    // A special parameter inside a consumed message value is data, not an
+    // invocation position.
+    "git commit -m 'price $5' --no-edit",
+  ])('keeps non-amend invocations allowed: %s', (command) => {
+    expectAllowed([command], 'do git work');
+  });
+});
+
 // ── B2: the session exemption follows the repository the command targets ──
 
 describe('session-commit exemption scoping (#16075 R9 B2)', () => {
@@ -602,6 +674,194 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
     const result = isDestructiveCommand(command, 'amend the commit', repoA.dir);
     expect(result).not.toBeNull();
     expect(result!.blocked).toBe(true);
+  });
+
+  // ── R7-2 fix-induced: relocations are segment-scoped and quote-aware ────
+
+  it('does not read a -C inside the commit message as a relocation', () => {
+    // cwd=B (unregistered); the message only SPELLS `-C <A>`. The old
+    // whitespace split exempted this amend of B's unregistered HEAD.
+    const result = isDestructiveCommand(
+      `git commit --amend -m 'note -C ${repoA.dir} done'`,
+      'amend the commit',
+      repoB.dir,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.blocked).toBe(true);
+  });
+
+  it('does not borrow a relocation from an adjacent segment', () => {
+    // The `-C <A>` belongs to `git status`; the amend runs in cwd=B.
+    const result = isDestructiveCommand(
+      `git -C ${repoA.dir} status && git commit --amend --no-edit`,
+      'amend the commit',
+      repoB.dir,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.blocked).toBe(true);
+  });
+
+  it('treats a post-subcommand -C as reuse-message, not a relocation', () => {
+    // `git commit -C HEAD` reuses HEAD's message; the amend targets cwd=A,
+    // whose HEAD is registered, so the exemption must survive.
+    expect(
+      isDestructiveCommand(
+        'git commit --amend -C HEAD --no-edit',
+        'amend the commit',
+        repoA.dir,
+      ),
+    ).toBeNull();
+  });
+
+  it('does not read a relocation spelled in a heredoc body', () => {
+    // The body is the commit message (-F -), not command words.
+    expect(
+      isDestructiveCommand(
+        `git commit --amend -F - <<'EOF'\n-C ${repoB.dir}\nEOF`,
+        'amend the commit',
+        repoA.dir,
+      ),
+    ).toBeNull();
+  });
+
+  it.each(['cd', 'pushd'])(
+    'follows %s into the repository the amend runs under',
+    (cdCommand) => {
+      // cwd=A (registered), but the amend runs in B after the cd.
+      const result = isDestructiveCommand(
+        `${cdCommand} ${repoB.dir} && git commit --amend --no-edit`,
+        'amend the commit',
+        repoA.dir,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.blocked).toBe(true);
+    },
+  );
+
+  it('tracks a cd back to the registered repository', () => {
+    expect(
+      isDestructiveCommand(
+        `cd ${repoB.dir} && cd ${repoA.dir} && git commit --amend --no-edit`,
+        'amend the commit',
+        repoA.dir,
+      ),
+    ).toBeNull();
+  });
+
+  it.each([
+    // A subshell cd does not move this shell's cwd, and the amend inside it
+    // runs under a cwd this walk cannot attribute: fail closed.
+    `( cd ${'%REPO_B%'} && git commit --amend --no-edit )`,
+    // A dynamic cd target cannot be resolved statically.
+    'cd "$TARGET" && git commit --amend --no-edit',
+    // popd returns to an unknown directory.
+    'popd && git commit --amend --no-edit',
+  ])('fails closed when the amend cwd is untrackable: %s', (template) => {
+    const command = template.replace('%REPO_B%', repoB.dir);
+    const result = isDestructiveCommand(command, 'amend the commit', repoA.dir);
+    expect(result).not.toBeNull();
+    expect(result!.blocked).toBe(true);
+  });
+
+  it.each(['sudo', 'env', 'env -i', 'sudo -u root'])(
+    'reads a GIT_DIR handed through %s as a relocation',
+    (prefix) => {
+      // cwd=A (registered); the prefix command hands GIT_DIR=B through to
+      // git, so the amend targets B, whose HEAD is not registered. The
+      // prefix walker must not eat the assignment without recording it.
+      const result = isDestructiveCommand(
+        `${prefix} GIT_DIR=${repoB.dir}/.git git commit --amend --no-edit`,
+        'amend the commit',
+        repoA.dir,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.blocked).toBe(true);
+    },
+  );
+
+  it('exempts a GIT_DIR handed through a prefix to the registered repo', () => {
+    // cwd=B (unregistered); env hands GIT_DIR=A through and A's HEAD is
+    // registered: the exemption follows the resolved target, not the cwd.
+    expect(
+      isDestructiveCommand(
+        `env GIT_DIR=${repoA.dir}/.git git commit --amend --no-edit`,
+        'amend the commit',
+        repoB.dir,
+      ),
+    ).toBeNull();
+  });
+
+  it('refuses the exemption for a relocation encoded in a wrapper payload', () => {
+    // The amend lives in bash's -c payload; \x20 hides the `-C <B>` from a
+    // raw-text scan, but the inner git still amends B, not cwd A.
+    const result = isDestructiveCommand(
+      `bash -c $'git\\x20-C\\x20${repoB.dir}\\x20commit\\x20--amend\\x20--no-edit'`,
+      'amend the commit',
+      repoA.dir,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.blocked).toBe(true);
+  });
+
+  it('keeps the cwd-only exemption for a payload without relocations', () => {
+    expect(
+      isDestructiveCommand(
+        "bash -c 'git commit --amend --no-edit'",
+        'amend the commit',
+        repoA.dir,
+      ),
+    ).toBeNull();
+  });
+
+  it.each(['if', 'while'])(
+    'tracks a cd wrapped in %s control flow',
+    (keyword) => {
+      // The condition's cd runs in this shell, so the amend runs in B even
+      // though the cwd started in registered A.
+      const command =
+        keyword === 'if'
+          ? `if cd ${repoB.dir}; then git commit --amend --no-edit; fi`
+          : `while cd ${repoB.dir}; do git commit --amend --no-edit; break; done`;
+      const result = isDestructiveCommand(
+        command,
+        'amend the commit',
+        repoA.dir,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.blocked).toBe(true);
+    },
+  );
+
+  it('exempts an amend after a control-flow cd to the registered repo', () => {
+    expect(
+      isDestructiveCommand(
+        `if cd ${repoA.dir}; then git commit --amend --no-edit; fi`,
+        'amend the commit',
+        repoB.dir,
+      ),
+    ).toBeNull();
+  });
+
+  it('refuses the exemption for an unclassifiable direct git invocation', () => {
+    // `-c $X` may define an alias that amends any repository; this is not a
+    // nested payload, so the cwd-only answer must not exempt it.
+    const result = isDestructiveCommand(
+      'git -c $X y --no-edit',
+      'amend the commit',
+      repoA.dir,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.blocked).toBe(true);
+  });
+
+  it('keeps the exemption for a literal -c config on a direct amend', () => {
+    expect(
+      isDestructiveCommand(
+        'git -c user.name=x commit --amend --no-edit',
+        'amend the commit',
+        repoA.dir,
+      ),
+    ).toBeNull();
   });
 });
 

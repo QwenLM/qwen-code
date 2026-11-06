@@ -170,10 +170,18 @@ function tokenize(
     // `$'…'`: skip only the `$`; the quote that follows opens the ANSI-C
     // word, so the payload stays one token instead of splitting on spaces.
     // A `\`+newline between the two is removed first (#16075 review, R7-1).
+    // `$"…"` is bash's locale-translation quoting: the shell removes the
+    // introducer and quotes just like a double-quoted word, so `git $"commit"`
+    // runs the `commit` subcommand (#16075 review, R8-11).
     if (ch === '$' && !inSingle && !inDouble) {
       const next = nextSignificantIndex(command, i + 1);
       if (command[next] === "'") {
         inAnsiC = true;
+        i = next;
+        continue;
+      }
+      if (command[next] === '"') {
+        inDouble = true;
         i = next;
         continue;
       }
@@ -2381,21 +2389,51 @@ function stripHeredocBodies(command: string): string {
   return kept.join('\n');
 }
 
-function getHeredocDelimiters(line: string): string[] {
-  const delimiters: string[] = [];
+interface HeredocOpener {
+  /** The delimiter word of a `<<` heredoc; empty for a `<<<` here-string. */
+  word: string;
+  /** True for a `<<<` here-string (its word is data, not a delimiter). */
+  hereString: boolean;
+  /** Offset of the `<` that opens the operator. */
+  index: number;
+}
+
+/**
+ * Unquoted heredoc (`<<`) and here-string (`<<<`) operators on one line, in
+ * order, with their offsets. Quote- and ANSI-C-aware: `echo "a << b"` and
+ * `$'it\'s << EOF'` carry no operator, so a decoy cannot claim ownership of
+ * a real opener's body (#16075 review, R9-1).
+ */
+function scanHeredocOpeners(line: string): HeredocOpener[] {
+  const openers: HeredocOpener[] = [];
   let inSingle = false;
   let inDouble = false;
+  let inAnsiC = false;
   let escaped = false;
 
   for (let i = 0; i < line.length; i++) {
     const ch = line[i]!;
 
+    if (inAnsiC) {
+      // `\'` does not close an ANSI-C word.
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === "'") inAnsiC = false;
+      continue;
+    }
     if (escaped) {
       escaped = false;
       continue;
     }
     if (ch === '\\' && !inSingle) {
       escaped = true;
+      continue;
+    }
+    if (ch === '$' && !inSingle && !inDouble && line[i + 1] === "'") {
+      inAnsiC = true;
+      i++;
       continue;
     }
     if (ch === "'" && !inDouble) {
@@ -2410,6 +2448,7 @@ function getHeredocDelimiters(line: string): string[] {
       continue;
     }
     if (line[i + 2] === '<') {
+      openers.push({ word: '', hereString: true, index: i });
       i += 2;
       continue;
     }
@@ -2434,11 +2473,21 @@ function getHeredocDelimiters(line: string): string[] {
     }
 
     if (wordEnd > wordStart) {
-      delimiters.push(line.slice(wordStart, wordEnd));
+      openers.push({
+        word: line.slice(wordStart, wordEnd),
+        hereString: false,
+        index: i,
+      });
     }
     i = wordEnd;
   }
-  return delimiters;
+  return openers;
+}
+
+function getHeredocDelimiters(line: string): string[] {
+  return scanHeredocOpeners(line)
+    .filter((opener) => !opener.hereString)
+    .map((opener) => opener.word);
 }
 
 const AMEND_PREFIX_COMMANDS = new Set([...PREFIX_COMMANDS, 'command', 'exec']);
@@ -2473,21 +2522,75 @@ const AMEND_LEADING_NOISE = new Set(
   ),
 );
 
-const AMEND_GIT_GLOBAL_FLAGS_WITH_VALUE =
-  /^(?:-[cC]|--(?:config-env|exec-path|git-dir|list-cmds|namespace|super-prefix|work-tree))$/;
+/**
+ * Leading control-flow keywords wrapping a cd that still runs in THIS shell
+ * (`if cd x; then …`, `while cd x; do …`). Stripping them lets the exemption
+ * walk track the cd; the rest of the segment keeps its raw quoting. Longest
+ * first so `done` is not read as `do` + noise.
+ */
+const AMEND_LEADING_FLOW_NOISE = new RegExp(
+  '^(?:(?:' +
+    [...AMEND_LEADING_NOISE].sort((a, b) => b.length - a.length).join('|') +
+    ')[ \\t]+)+',
+);
 
-const AMEND_COMMIT_FLAGS_WITH_VALUE =
-  /^(?:-[A-Za-z]*[cCFm]|--(?:author|cleanup|date|file|fixup|message|pathspec-from-file|reedit-message|reuse-message|squash|template|trailer))$/;
+const AMEND_GIT_GLOBAL_FLAGS_WITH_VALUE =
+  /^(?:-[cC]|--(?:attr-source|config-env|exec-path|git-dir|list-cmds|namespace|super-prefix|work-tree))$/;
+
+/** Long `git commit` options that consume the following word as their value. */
+const AMEND_COMMIT_LONG_FLAGS_WITH_VALUE =
+  /^--(?:author|cleanup|date|file|fixup|message|pathspec-from-file|reedit-message|reuse-message|squash|template|trailer)$/;
+
+/**
+ * Does this `git commit` short-option cluster consume the NEXT word as a
+ * value? git's parse-options reads a cluster letter by letter: the first
+ * value-taking letter (`c`, `C`, `F`, `m`, `t`) takes the rest of the token
+ * as its attached value when non-empty (`-mtopic`, `-mC`), and only an empty
+ * rest consumes the next word (`-m --amend` is a message, not an amend).
+ * `S`/`u` take an OPTIONAL attached value and never consume the next word.
+ * Reading the whole cluster as one value flag swallowed the following
+ * `--amend` (#16075 review, R1-6).
+ */
+function amendCommitShortClusterConsumesNext(token: string): boolean {
+  if (!token.startsWith('-') || token.startsWith('--') || token.length < 2) {
+    return false;
+  }
+  for (let p = 1; p < token.length; p++) {
+    const letter = token[p]!;
+    if (letter === 'S' || letter === 'u') {
+      if (p + 1 < token.length) return false; // attached optional value
+      continue;
+    }
+    if ('cCFmt'.includes(letter)) {
+      return p + 1 === token.length; // empty rest: value is the next word
+    }
+  }
+  return false;
+}
 
 const AMEND_UNWRAP_DEPTH_LIMIT = 8;
 
-/** An `alias.*` git expands itself, so the subcommand word is not what runs. */
-const AMEND_GIT_ALIAS_CONFIG = /^alias\.[^=]+=/;
+/** An `alias.*` git expands itself, so the subcommand word is not what runs.
+ * Config section names are case-insensitive (`ALIAS.x` is `alias.x`). */
+const AMEND_GIT_ALIAS_CONFIG = /^alias\.[^=]+=/i;
 
 const AMEND_FIND_EXEC_MARKERS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
 
 /** A redirection operator as its own word; its target is the next word. */
 const AMEND_REDIRECT_WORD = /^\d*(?:>>?|<<?|<<<|>&|<&|&>|&>>)$/;
+
+/** A redirection operator prefix, including glued targets (`>/dev/null`). */
+const AMEND_REDIRECT_TOKEN = /^\d*(?:>>?|<<?|<<<|>&|<&|&>|&>>)/;
+
+/**
+ * Shell expansion syntax that can word-split into argv entries: variables,
+ * `${…}` forms, command substitutions, brace lists, and the positional /
+ * special parameters (`$1`, `$@`, `$*`, …) which expand to nothing when unset,
+ * gluing the surrounding letters into the plain word (`git commit$1 --amend`
+ * runs `git commit --amend`). A bare `$` at the end of a word is literal —
+ * it stays in the word, so git never sees the subcommand — and does not match.
+ */
+const AMEND_EXPANSION_WORD = /\$[A-Za-z0-9_{(@*#?$!-]|`|\{[^{}]*,/;
 
 /**
  * Offsets whose token can be the program of a wrapper that carries its command
@@ -2587,6 +2690,15 @@ function isGitAmendInvocationAt(tokens: string[], start: number): boolean {
       index++;
       break;
     }
+    // Redirections interleave with the global flags: `git >/dev/null commit
+    // --amend` and `git 2>&1 commit --amend` run the same invocation
+    // (#16075 review, R1-1). A standalone operator word takes the next token
+    // as its target.
+    if (AMEND_REDIRECT_TOKEN.test(token)) {
+      index +=
+        AMEND_REDIRECT_WORD.test(token) && index + 1 < tokens.length ? 2 : 1;
+      continue;
+    }
     if (!token.startsWith('-')) break;
     // git expands an `alias.*` it is handed here, so the subcommand word that
     // follows is not the program that runs (#16075 review, R4-1).
@@ -2612,12 +2724,15 @@ function isGitAmendInvocationAt(tokens: string[], start: number): boolean {
     // A word boundary ends the flag, so `--amend` stays an amend when bash
     // glues a redirect (`--amend>log`), a parameter expansion (`--amend$(…)`)
     // or a brace range (`--amend{,}`) onto it. `--amendx` / `--amend-foo` are
-    // rejected by git itself and stay unrecognised.
-    if (/^--amend(?![A-Za-z-])/.test(token)) return true;
+    // rejected by git itself and stay unrecognised. git also accepts every
+    // unambiguous prefix of `--amend`, and no other commit option starts
+    // with `--am` (#16075 review, R8-8).
+    if (/^--am(?:e(?:n(?:d)?)?)?(?![A-Za-z-])/.test(token)) return true;
 
-    const consumesNext =
-      AMEND_COMMIT_FLAGS_WITH_VALUE.test(token) && index + 1 < tokens.length;
-    if (consumesNext) index++;
+    const consumesNext = token.startsWith('--')
+      ? AMEND_COMMIT_LONG_FLAGS_WITH_VALUE.test(token)
+      : amendCommitShortClusterConsumesNext(token);
+    if (consumesNext && index + 1 < tokens.length) index++;
   }
   return false;
 }
@@ -2682,10 +2797,16 @@ function nestedAmendPayloads(tokens: string[]): {
   const payloads: string[] = [];
   let unclassifiable = false;
 
-  // git expands an `alias.*` handed to it through `GIT_CONFIG_*`; the value is
-  // arbitrary text, so a defined alias is unclassifiable (#16075 review, R4-1).
+  // git expands an `alias.*` handed to it through `GIT_CONFIG_KEY_n` or a
+  // `GIT_CONFIG_PARAMETERS` entry; the value is arbitrary text, so a defined
+  // alias is unclassifiable (#16075 review, R4-1 / R8-12). Config sections
+  // are case-insensitive, and the PARAMETERS value keeps its inner quotes.
   for (const token of tokens) {
-    if (/^GIT_CONFIG_KEY_\d+=alias\./.test(token)) unclassifiable = true;
+    if (
+      /^(?:GIT_CONFIG_KEY_\d+|GIT_CONFIG_PARAMETERS)=.*alias\./i.test(token)
+    ) {
+      unclassifiable = true;
+    }
   }
 
   // Only the program word and the wrapper positions that carry a command in
@@ -2748,13 +2869,71 @@ function nestedAmendPayloads(tokens: string[]): {
     else payloads.push(payload);
   }
 
-  // `${IFS}` splits a word into argv entries the tokenizer keeps glued
-  // together, so `git${IFS}commit${IFS}--amend` only executes an amend when the
-  // expansion lands in the program word. Inside quoted arguments the same text
-  // is literal (`grep '${IFS}'`), so only the program position fails closed.
-  const [programWord] = skipAmendPrefixes(tokens);
-  if (programWord !== undefined && /\$\{?IFS\b/.test(programWord)) {
+  // Unquoted expansions word-split into argv entries the tokenizer keeps
+  // glued, so an expansion in a position that decides the invocation — the
+  // program word, a git global flag, the subcommand, or a `git commit`
+  // flag/argument — can assemble an amend this scan cannot see
+  // (`git commit${IFS}--amend`, `git $(echo commit) --amend`). Quoted
+  // arguments are data (`grep '${IFS}'`, `-m "… ${IFS} …"`), and another
+  // subcommand's arguments cannot amend (`git push origin $BRANCH`), so only
+  // the positions the invocation check reads fail closed (#16075 review,
+  // R8-10).
+  const afterPrefix = skipAmendPrefixes(tokens);
+  const [programWord] = afterPrefix;
+  if (programWord !== undefined && AMEND_EXPANSION_WORD.test(programWord)) {
     unclassifiable = true;
+  } else if (
+    programWord !== undefined &&
+    amendExecutableBasename(programWord) === 'git'
+  ) {
+    let cursor = 1;
+    while (cursor < afterPrefix.length) {
+      const token = afterPrefix[cursor]!;
+      if (token === '--') {
+        cursor++;
+        break;
+      }
+      if (AMEND_REDIRECT_TOKEN.test(token)) {
+        cursor +=
+          AMEND_REDIRECT_WORD.test(token) && cursor + 1 < afterPrefix.length
+            ? 2
+            : 1;
+        continue;
+      }
+      if (!token.startsWith('-')) break;
+      if (AMEND_EXPANSION_WORD.test(token)) {
+        unclassifiable = true;
+        break;
+      }
+      const takesValue =
+        AMEND_GIT_GLOBAL_FLAGS_WITH_VALUE.test(token) &&
+        cursor + 1 < afterPrefix.length;
+      // The value decides what the flag does: `-c $X` can expand to an
+      // `alias.*` definition, so an expansion there hides the invocation
+      // just like one in the flag itself.
+      if (takesValue && AMEND_EXPANSION_WORD.test(afterPrefix[cursor + 1]!)) {
+        unclassifiable = true;
+        break;
+      }
+      cursor += takesValue ? 2 : 1;
+    }
+    const subcommand = afterPrefix[cursor];
+    if (subcommand !== undefined && AMEND_EXPANSION_WORD.test(subcommand)) {
+      unclassifiable = true;
+    } else if (subcommand === 'commit') {
+      for (cursor++; cursor < afterPrefix.length; cursor++) {
+        const token = afterPrefix[cursor]!;
+        if (token === '--') break;
+        if (AMEND_EXPANSION_WORD.test(token)) {
+          unclassifiable = true;
+          break;
+        }
+        const consumesNext = token.startsWith('--')
+          ? AMEND_COMMIT_LONG_FLAGS_WITH_VALUE.test(token)
+          : amendCommitShortClusterConsumesNext(token);
+        if (consumesNext && cursor + 1 < afterPrefix.length) cursor++;
+      }
+    }
   }
 
   return { payloads, unclassifiable };
@@ -2814,7 +2993,12 @@ function decodeAnsiCEscape(
       };
     }
   }
-  if (next === 'c' && index + 2 < body.length) {
+  // `\c` needs an operand letter. At the end of the word bash keeps `\c`
+  // literal; when the tokenizer passes the raw command, the next character
+  // is then the CLOSING quote, and consuming it as the operand left the
+  // ANSI-C state open and swallowed the rest of the command line
+  // (#16075 review, R8-2 / R10-1).
+  if (next === 'c' && index + 2 < body.length && body[index + 2] !== "'") {
     return {
       text: String.fromCharCode(
         body[index + 2]!.toUpperCase().charCodeAt(0) & 0x1f,
@@ -2848,12 +3032,19 @@ function decodeAnsiCWord(body: string): string {
 }
 
 /**
- * Decode a payload that is exactly one ANSI-C word (`$'…'`), which is how a
- * wrapper hands its program over (`bash -c $'…'`, `eval $'…'`).
+ * Decode a payload that is exactly one quoted word a wrapper hands its
+ * program over as: ANSI-C (`bash -c $'…'`, `eval $'…'`) or locale-translation
+ * (`bash -c $"…"`) quoting. The locale form keeps its body verbatim — bash
+ * translates it but performs the same expansions as a double-quoted word,
+ * which the recursive pass models (#16075 review, R8-11).
  */
 function decodeBareAnsiCWord(text: string): string {
-  const ansiC = /^\$'([\s\S]*)'$/.exec(text.trim());
-  return ansiC ? decodeAnsiCWord(ansiC[1]!) : text;
+  const trimmed = text.trim();
+  const ansiC = /^\$'([\s\S]*)'$/.exec(trimmed);
+  if (ansiC) return decodeAnsiCWord(ansiC[1]!);
+  const locale = /^\$"([\s\S]*)"$/.exec(trimmed);
+  if (locale) return locale[1]!;
+  return text;
 }
 
 /**
@@ -2991,9 +3182,15 @@ function tokensContainGitAmend(segment: string, depth: number): boolean {
  * Returns null when the segment has no here-string.
  */
 function hereStringProgram(segment: string): string | null {
-  const operator = segment.indexOf('<<<');
-  if (operator === -1) return null;
-  const [word] = tokenize(segment.slice(operator + 3));
+  // bash feeds the LAST here-string on the line to the program; earlier ones
+  // are opened but never read. Quote-aware, so `echo "a <<< b"` is not an
+  // operator (#16075 review, R9-1).
+  const openers = scanHeredocOpeners(segment).filter(
+    (opener) => opener.hereString,
+  );
+  const last = openers[openers.length - 1];
+  if (!last) return null;
+  const [word] = tokenize(segment.slice(last.index + 3));
   return word ?? null;
 }
 
@@ -3119,14 +3316,14 @@ const SHELLS_READING_STDIN = new Set([
 function extractShellFedHeredocBodies(command: string): string[] {
   const lines = command.split('\n');
   const bodies: string[] = [];
-  let active: { delimiter: string; shellFed: boolean } | null = null;
+  let pending: Array<{ delimiter: string; shellFed: boolean }> = [];
   let collected: string[] = [];
 
   for (const line of lines) {
-    if (active) {
-      if (line.trim() === active.delimiter) {
-        if (active.shellFed) bodies.push(collected.join('\n'));
-        active = null;
+    if (pending.length > 0) {
+      if (line.trim() === pending[0]!.delimiter) {
+        if (pending[0]!.shellFed) bodies.push(collected.join('\n'));
+        pending.shift();
         collected = [];
         continue;
       }
@@ -3137,10 +3334,13 @@ function extractShellFedHeredocBodies(command: string): string[] {
     const delimiters = getHeredocDelimiters(line);
     if (delimiters.length === 0) continue;
 
-    // Attributed to the segment that owns the redirection, plus a pipe consumer
-    // after it — not to any shell anywhere on the line. `bash --version; cat >
-    // notes.md <<'EOF'` writes the body to a file, so the `bash` before the `;`
-    // must not turn it into a program.
+    // Attribute each operator to the compound segment that carries it,
+    // quote-aware — not to any shell anywhere on the line, and not to a
+    // decoy `<<` inside quotes. `bash --version; cat > notes.md <<'EOF'`
+    // writes the body to a file, while `echo "a << b" && bash <<'EOF'` feeds
+    // it to bash. Every body on the opener line is read, in opener order:
+    // bash feeds the last heredoc to the program, and analysing the earlier
+    // ones too can only add denials (#16075 review, R9-1).
     const segments = splitCompoundCommandSegments(line);
     const readsStdin = (seg: string): boolean => {
       const [program] = skipAmendPrefixes(tokenize(seg));
@@ -3149,21 +3349,52 @@ function extractShellFedHeredocBodies(command: string): string[] {
         SHELLS_READING_STDIN.has(amendExecutableBasename(program))
       );
     };
-    const ownerIndex = Math.max(
-      segments.findIndex(({ command: seg }) => /<<-?\s*['"]?/.test(seg)),
-      0,
-    );
-    const owner = segments[ownerIndex]!;
-    const shellFed =
-      readsStdin(owner.command) ||
-      ((owner.terminator === '|' || owner.terminator === '|&') &&
-        segments[ownerIndex + 1] !== undefined &&
-        readsStdin(segments[ownerIndex + 1]!.command));
-    active = {
-      delimiter: delimiters[0]!,
-      shellFed,
+    const shellFedForSegment = (index: number): boolean => {
+      const owner = segments[index]!;
+      return (
+        readsStdin(owner.command) ||
+        ((owner.terminator === '|' || owner.terminator === '|&') &&
+          segments[index + 1] !== undefined &&
+          readsStdin(segments[index + 1]!.command))
+      );
     };
+    const openerCounts = segments.map(
+      ({ command: seg }) =>
+        scanHeredocOpeners(seg).filter((opener) => !opener.hereString).length,
+    );
+    const totalOpeners = openerCounts.reduce((sum, count) => sum + count, 0);
+    const shellFedFlags: boolean[] = [];
+    if (totalOpeners === delimiters.length) {
+      let segmentIndex = 0;
+      let remaining = openerCounts[0] ?? 0;
+      for (let k = 0; k < delimiters.length; k++) {
+        while (remaining === 0 && segmentIndex + 1 < segments.length) {
+          segmentIndex++;
+          remaining = openerCounts[segmentIndex] ?? 0;
+        }
+        shellFedFlags.push(shellFedForSegment(segmentIndex));
+        remaining--;
+      }
+    } else {
+      // The two scans disagree on a pathological line: fail closed — any
+      // stdin-reading shell on the line makes every body code.
+      const anyShellFed = segments.some((_, index) =>
+        shellFedForSegment(index),
+      );
+      for (let k = 0; k < delimiters.length; k++) {
+        shellFedFlags.push(anyShellFed);
+      }
+    }
+    pending = delimiters.map((delimiter, k) => ({
+      delimiter,
+      shellFed: shellFedFlags[k]!,
+    }));
     collected = [];
+  }
+
+  // An unterminated heredoc still feeds the partial body bash read.
+  if (pending.length > 0 && pending[0]!.shellFed && collected.length > 0) {
+    bodies.push(collected.join('\n'));
   }
 
   return bodies;
@@ -3410,13 +3641,16 @@ function amendOccurrencesProvablyInert(command: string): boolean {
     if (!/^[ \t]*\n?$/.test(command.slice(i))) return false;
   }
 
-  // The program word must be a plain allowlisted basename; a quoted or
-  // decorated program word is not positively classifiable.
+  // The program word must be a plain allowlisted BARE name; a quoted or
+  // decorated program word is not positively classifiable. A path-qualified
+  // word (`./cat`, `/bin/cat`, `/tmp/grep`) may be any executable the caller
+  // placed at that path, so it never earns the certificate (#16075 review,
+  // R10-2).
   const program = codeWords[0];
   const programIsInert =
     program !== undefined &&
-    /^[A-Za-z0-9._/-]+$/.test(program) &&
-    INERT_TEXT_PROGRAMS.has(program.split('/').pop()!);
+    /^[A-Za-z0-9._-]+$/.test(program) &&
+    INERT_TEXT_PROGRAMS.has(program);
   // No assignment prefixes or assignment words anywhere in the code.
   if (codeWords.some((w) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(w))) return false;
 
@@ -3455,6 +3689,222 @@ export function commandContainsGitAmend(command: string): boolean {
     GIT_AMEND_BACKSTOP_PATTERN.test(expanded) &&
     !amendOccurrencesProvablyInert(command)
   );
+}
+
+/** One compound segment that directly invokes `git commit --amend`, with the
+ * cwd it runs under. */
+export interface AmendSegment {
+  segment: string;
+  cwd: string;
+}
+
+export type AmendSegmentAnalysis =
+  | { kind: 'segments'; segments: AmendSegment[]; effectiveCwd: string }
+  | { kind: 'untrackable' };
+
+/** Does the segment carry subshell/group parentheses outside quotes? Quoted
+ * parentheses (`-m 'fix (bug)'`) are message data, not shell syntax. */
+function hasUnquotedParens(segment: string): boolean {
+  let inSingle = false;
+  let inDouble = false;
+  let inAnsiC = false;
+  let escaped = false;
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]!;
+    if (inAnsiC) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === "'") inAnsiC = false;
+      continue;
+    }
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && !inSingle) {
+      escaped = true;
+      continue;
+    }
+    if (ch === '$' && !inSingle && !inDouble && segment[i + 1] === "'") {
+      inAnsiC = true;
+      i++;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (!inSingle && !inDouble && (ch === '(' || ch === ')')) return true;
+  }
+  return false;
+}
+
+/**
+ * Locate the compound segments that DIRECTLY invoke `git commit --amend`,
+ * with the cwd each runs under, for the session-commit exemption (#16075
+ * review, R7-2 fix-induced). Heredoc bodies are data, not segments; `cd` /
+ * `pushd` shift the effective cwd; subshell parentheses, `popd` and dynamic
+ * cd targets make the cwd untrackable, which fails closed. An empty segment
+ * list means the amend exists only inside a nested payload (a wrapper `-c`
+ * operand, a shell-fed heredoc, a substitution).
+ */
+export function amendSegmentsForExemption(
+  command: string,
+  cwd: string,
+): AmendSegmentAnalysis {
+  const segments = splitCompoundCommandSegments(stripHeredocBodies(command));
+  let effectiveCwd = cwd;
+  let cwdKnown = true;
+  // The splitter does not keep subshell boundaries, so once unquoted
+  // parentheses appear, a cd may run in a subshell (not moving this cwd)
+  // and an amend may run under a cwd this walk cannot attribute. Both fail
+  // closed rather than exempt against the wrong repository.
+  let sawSubshell = false;
+  const amendSegments: AmendSegment[] = [];
+  for (const { command: segment, terminator } of segments) {
+    if (hasUnquotedParens(segment)) sawSubshell = true;
+    const cdTarget = resolveCdTargetCwd(
+      segment.replace(AMEND_LEADING_FLOW_NOISE, ''),
+      effectiveCwd,
+      !cwdKnown,
+    );
+    if (cdTarget.kind !== 'not-cd') {
+      // A backgrounded `cd` runs in a subshell and does not move this cwd.
+      if (terminator !== '&' && !sawSubshell) {
+        if (cdTarget.kind === 'static') {
+          effectiveCwd = cdTarget.cwd;
+          cwdKnown = !cdTarget.cwdUnknown;
+        } else {
+          cwdKnown = false;
+        }
+      }
+      continue;
+    }
+    const tokens = skipAmendPrefixes(tokenize(stripUnquotedComments(segment)));
+    if (tokens.length > 0 && isGitAmendInvocationAt(tokens, 0)) {
+      if (!cwdKnown || sawSubshell) return { kind: 'untrackable' };
+      amendSegments.push({ segment, cwd: effectiveCwd });
+      continue;
+    }
+    // A direct git invocation the recognizer cannot classify (an expansion
+    // in an invocation-deciding position, a defined alias) is not a nested
+    // payload: it may assemble an amend of ANY repository, so the cwd-only
+    // answer must not exempt it.
+    if (
+      tokens.length > 0 &&
+      amendExecutableBasename(tokens[0]!) === 'git' &&
+      nestedAmendPayloads(tokens).unclassifiable
+    ) {
+      return { kind: 'untrackable' };
+    }
+  }
+  if ((!cwdKnown || sawSubshell) && amendSegments.length === 0) {
+    return { kind: 'untrackable' };
+  }
+  return { kind: 'segments', segments: amendSegments, effectiveCwd };
+}
+
+/**
+ * The repo-relocating options of the direct amend invocation in ONE compound
+ * segment: `-C` / `--git-dir` / `--work-tree` (separate, `=` and glued forms)
+ * BEFORE the subcommand, plus leading `GIT_DIR=` / `GIT_WORK_TREE=`
+ * assignments. A `-C` after `commit` is git-commit's own reuse-message
+ * option, not a relocation, and a `-C` inside a quoted message is data —
+ * both must stay invisible here (#16075 review, R7-2 fix-induced).
+ */
+export function amendSegmentRelocations(
+  segment: string,
+): Array<{ flag: string; value: string }> {
+  const relocations: Array<{ flag: string; value: string }> = [];
+  const tokens = tokenize(stripUnquotedComments(segment));
+  const takeAssignment = (token: string): void => {
+    const eq = token.indexOf('=');
+    const name = token.slice(0, eq);
+    if (name === 'GIT_DIR' || name === 'GIT_WORK_TREE') {
+      relocations.push({
+        flag: name === 'GIT_DIR' ? '--git-dir' : '--work-tree',
+        value: token.slice(eq + 1),
+      });
+    }
+  };
+  let index = 0;
+  while (index < tokens.length && isEnvAssignmentToken(tokens[index]!)) {
+    takeAssignment(tokens[index]!);
+    index++;
+  }
+  const rest = skipAmendPrefixes(tokens.slice(index));
+  // `sudo GIT_DIR=… git …` and `env GIT_DIR=… git …` hand the assignment
+  // through the prefix command: skipAmendPrefixes consumes it as noise, so
+  // scan the region it ate for relocations too. Missing one would exempt an
+  // amend of another repository against this cwd's registered HEAD.
+  const consumed = tokens.length - index - rest.length;
+  for (let k = index; k < index + consumed; k++) {
+    if (isEnvAssignmentToken(tokens[k]!)) takeAssignment(tokens[k]!);
+  }
+  if (amendExecutableBasename(rest[0] ?? '') !== 'git') return relocations;
+  let cursor = 1;
+  while (cursor < rest.length) {
+    const token = rest[cursor]!;
+    if (token === '--') break;
+    if (AMEND_REDIRECT_TOKEN.test(token)) {
+      cursor +=
+        AMEND_REDIRECT_WORD.test(token) && cursor + 1 < rest.length ? 2 : 1;
+      continue;
+    }
+    if (!token.startsWith('-')) break; // the subcommand: relocations end here
+    if (token === '-C' || token === '--git-dir' || token === '--work-tree') {
+      relocations.push({ flag: token, value: rest[cursor + 1] ?? '' });
+      cursor += 2;
+    } else if (token.startsWith('-C') && token.length > 2) {
+      relocations.push({ flag: '-C', value: token.slice(2) });
+      cursor++;
+    } else if (token.startsWith('--git-dir=')) {
+      relocations.push({
+        flag: '--git-dir',
+        value: token.slice('--git-dir='.length),
+      });
+      cursor++;
+    } else if (token.startsWith('--work-tree=')) {
+      relocations.push({
+        flag: '--work-tree',
+        value: token.slice('--work-tree='.length),
+      });
+      cursor++;
+    } else {
+      cursor +=
+        AMEND_GIT_GLOBAL_FLAGS_WITH_VALUE.test(token) &&
+        cursor + 1 < rest.length
+          ? 2
+          : 1;
+    }
+  }
+  return relocations;
+}
+
+/** A repo-relocation spelling at a word boundary. */
+const AMEND_RELOCATION_SPELLING =
+  /(?:^|[\s'"])(?:-C|--git-dir|--work-tree|GIT_DIR=|GIT_WORK_TREE=)/;
+
+/**
+ * Does the command spell a repo relocation anywhere — including inside an
+ * ANSI-C-encoded wrapper payload (`bash -c $'git\x20-C\x20/repo\x20commit…'`)
+ * whose decoded words the raw text hides? The exemption's nested-payload
+ * branch cannot attribute a relocation to the inner invocation, so any
+ * spelling refuses the exemption (fail closed).
+ */
+export function commandSpellsRepoRelocation(command: string): boolean {
+  if (AMEND_RELOCATION_SPELLING.test(command)) return true;
+  const decoded = command.replace(
+    /\$'((?:[^'\\]|\\.)*)'/g,
+    (_match, body: string) => decodeAnsiCWord(body),
+  );
+  return decoded !== command && AMEND_RELOCATION_SPELLING.test(decoded);
 }
 
 function walkCompoundCommand(

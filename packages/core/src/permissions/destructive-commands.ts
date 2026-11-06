@@ -21,7 +21,10 @@
 import type { Content, Part } from '@google/genai';
 import { execFileSync, execSync } from 'node:child_process';
 import {
+  amendSegmentRelocations,
+  amendSegmentsForExemption,
   commandContainsGitAmend,
+  commandSpellsRepoRelocation,
   stripShellQuotes,
 } from './shell-semantics.js';
 
@@ -155,54 +158,60 @@ interface AmendTarget {
 const STATIC_ABSOLUTE_PATH = /^\/[A-Za-z0-9._/-]+$/;
 
 /**
- * Resolve the repository an amend targets from the raw command's
- * repo-relocation flags (`-C`, `--git-dir`, `--work-tree`, `GIT_DIR=`,
- * `GIT_WORK_TREE=`). Commands without those flags keep the historical
- * cwd-only answer, byte for byte.
+ * Resolve the repository an amend targets. Relocations are read ONLY from
+ * the compound segment that carries the amend, quote-aware: a `-C` inside a
+ * commit message, in an adjacent segment, or in a heredoc body is not a
+ * relocation, and a `-C` after the `commit` subcommand is git-commit's own
+ * reuse-message option. `cd`/`pushd` segments shift the cwd the amend runs
+ * under; subshells and dynamic cd targets fail closed (#16075 review, R7-2
+ * fix-induced).
  *
  * Deliberately narrow: exactly one relocation flag, with a static literal
  * absolute path. Stacked or mixed flags (`-C a -C b`, `--git-dir` plus
- * `--work-tree`), relative paths, and quoted-but-not-literal values all
- * refuse the exemption rather than guess which HEAD gets amended.
+ * `--work-tree`), relative paths, and non-literal values all refuse the
+ * exemption rather than guess which HEAD gets amended. Commands without
+ * relocations keep the historical cwd-only answer.
  */
 function resolveAmendTarget(cwd: string, command: string): AmendTarget | null {
-  const words = command.split(/\s+/);
-  const relocations: Array<{ flag: string; value: string | undefined }> = [];
-  for (let i = 0; i < words.length; i++) {
-    const w = words[i]!;
-    const next = words[i + 1];
-    if (w === '-C') relocations.push({ flag: '-C', value: next });
-    else if (w.startsWith('-C') && w.length > 2)
-      relocations.push({ flag: '-C', value: w.slice(2) });
-    else if (w === '--git-dir')
-      relocations.push({ flag: '--git-dir', value: next });
-    else if (w.startsWith('--git-dir='))
-      relocations.push({ flag: '--git-dir', value: w.slice(10) });
-    else if (w === '--work-tree')
-      relocations.push({ flag: '--work-tree', value: next });
-    else if (w.startsWith('--work-tree='))
-      relocations.push({ flag: '--work-tree', value: w.slice(12) });
-    else if (w.startsWith('GIT_DIR='))
-      relocations.push({ flag: '--git-dir', value: w.slice(8) });
-    else if (w.startsWith('GIT_WORK_TREE='))
-      relocations.push({ flag: '--work-tree', value: w.slice(14) });
+  const analysis = amendSegmentsForExemption(command, cwd);
+  if (analysis.kind === 'untrackable') return null;
+
+  let target: AmendTarget;
+  if (analysis.segments.length === 0) {
+    // The amend lives in a nested payload (wrapper `-c` operand, shell-fed
+    // heredoc, substitution). Keep the cwd-only answer when nothing spells
+    // a relocation; a relocation this guard cannot attribute to the inner
+    // invocation refuses the exemption. The spelling check also decodes
+    // ANSI-C words, so `$'git\x20-C\x20/repo…'` cannot hide one.
+    if (commandSpellsRepoRelocation(command)) return null;
+    target = { cwd: analysis.effectiveCwd };
+  } else {
+    const perSegment = analysis.segments.map(({ segment, cwd: segCwd }) => ({
+      relocations: amendSegmentRelocations(segment),
+      cwd: segCwd,
+    }));
+    const relocated = perSegment.filter((s) => s.relocations.length > 0);
+    if (relocated.length === 0) {
+      // Plain amends: every one must run under the same cwd.
+      if (new Set(perSegment.map((s) => s.cwd)).size !== 1) return null;
+      target = { cwd: perSegment[0]!.cwd };
+    } else if (
+      perSegment.length === 1 &&
+      relocated[0]!.relocations.length === 1
+    ) {
+      const { flag, value } = relocated[0]!.relocations[0]!;
+      if (!STATIC_ABSOLUTE_PATH.test(value)) return null;
+      if (flag === '-C') target = { cwd: value };
+      else if (flag === '--git-dir') target = { cwd, gitDir: value };
+      // --work-tree moves the checkout, not HEAD: the amended repository is
+      // still the one discovered from cwd.
+      else target = { cwd };
+    } else {
+      // Several amending segments, or stacked relocations: ambiguous.
+      return null;
+    }
   }
-  if (relocations.length === 0) return { cwd };
-  if (relocations.length > 1) return null;
-  const { flag, value } = relocations[0]!;
-  if (value === undefined) return null;
-  // One layer of single quotes around an otherwise literal path is still a
-  // static literal; any other quoting is not.
-  const unquoted =
-    value.length >= 2 && value.startsWith("'") && value.endsWith("'")
-      ? value.slice(1, -1)
-      : value;
-  if (!STATIC_ABSOLUTE_PATH.test(unquoted)) return null;
-  if (flag === '-C') return { cwd: unquoted };
-  if (flag === '--git-dir') return { cwd, gitDir: unquoted };
-  // --work-tree moves the checkout, not HEAD: the amended repository is
-  // still the one discovered from cwd.
-  return { cwd };
+  return target;
 }
 
 /**

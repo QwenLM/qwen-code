@@ -883,4 +883,56 @@ describe('commandContainsGitAmend fail-closed backstop (#16075 R9 B1)', () => {
       commandContainsGitAmend("bash -c $'git commit --amend\\x3btrue'"),
     ).toBe(true);
   });
+
+  // R9-1: the heredoc owner is resolved quote-aware per operator, every body
+  // on the opener line is read, and the LAST here-string is the one bash
+  // feeds to the program. Each body hides the phrase behind ANSI-C quoting,
+  // so only the shell-fed heredoc/here-string arms can see it.
+  it.each([
+    "echo \"a << b\" && bash <<'EOF'\ngit commit $'--amend' --no-edit\nEOF",
+    "bash <<'A' <<'B'\necho hi\nA\ngit commit $'--amend' --no-edit\nB",
+    "bash <<< 'echo hi' <<< $'git\\x20commit\\x20--amend --no-edit'",
+  ])('reads the body the shell actually executes: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+
+  // R10-2: a path-qualified program word may be any executable the caller
+  // placed there; the inert certificate is for bare allowlisted names only.
+  // The bare-name rows in the allow table above must stay allowed.
+  it.each([
+    "./cat <<'EOF'\ngit commit --amend\nEOF",
+    "/bin/cat <<'EOF'\ngit commit --amend\nEOF",
+    "/tmp/grep 'git commit --amend' f.txt",
+    "./echo 'git commit --amend'",
+  ])(
+    'refuses the inert certificate for a path-qualified program: %s',
+    (command) => {
+      expect(commandContainsGitAmend(command)).toBe(true);
+    },
+  );
+});
+
+// R8-2 / R10-1: a trailing `\c` in an ANSI-C word stays literal. Consuming
+// the closing quote as its operand left the quote state open and swallowed
+// the rest of the line, hiding both the amend and the file operations.
+describe('ANSI-C words ending in a literal trailing \\c', () => {
+  it('keeps the redirect visible after the word', () => {
+    expect(
+      extractShellOperationsAcrossCommand("echo $'a\\c' > /etc/motd", '/repo'),
+    ).toEqual([write('/etc/motd')]);
+  });
+
+  it('keeps later operands visible after the word', () => {
+    const ops = extractShellOperationsAcrossCommand(
+      "cat $'x\\c' /etc/passwd",
+      '/tmp',
+    );
+    expect(ops.map((op) => op.filePath)).toContain('/etc/passwd');
+  });
+
+  it('still decodes \\c with a real operand letter', () => {
+    expect(commandContainsGitAmend("git commit -m $'fix \\cZ' --amend")).toBe(
+      true,
+    );
+  });
 });
