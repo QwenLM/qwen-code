@@ -505,7 +505,7 @@ for (const permission of ['default', 'denied', 'unavailable'] as const) {
     } else {
       await expect(
         help.getByRole('button', { name: 'Allow notifications', exact: true }),
-      ).toBeDisabled();
+      ).toHaveCount(0);
       await expect(help.getByRole('status')).toHaveText(
         permission === 'denied'
           ? 'Notifications are blocked. Allow them in your browser site settings.'
@@ -514,6 +514,98 @@ for (const permission of ['default', 'denied', 'unavailable'] as const) {
     }
   });
 }
+
+for (const permission of ['denied', 'unavailable'] as const) {
+  test(`explains desktop ${permission} notifications in the panel and settings @smoke`, async ({
+    page,
+  }, testInfo) => {
+    await page.addInitScript(() => {
+      Object.assign(window, {
+        __TAURI__: { core: { invoke: async () => {} } },
+      });
+    });
+    await captureNotifications(page, { enabled: false, permission });
+    const { daemon } = await openActionPanel(
+      page,
+      String(testInfo.project.use.baseURL),
+      'approval',
+    );
+    await page
+      .getByRole('button', { name: 'Task notifications', exact: true })
+      .click();
+    const help = page.locator('[data-web-shell-notification-help]');
+    await expect(help.getByRole('status')).toContainText(
+      'Run qwen serve --port 4170 --open',
+    );
+    await expect(
+      help.getByRole('button', { name: 'Allow notifications' }),
+    ).toHaveCount(0);
+    expect(
+      await page.evaluate(() => window.__taskNotificationPermissionRequests),
+    ).toBe(0);
+    await page.keyboard.press('Escape');
+    await daemon.sendEvent({
+      id: 2,
+      v: 1,
+      type: 'permission_resolved',
+      data: {
+        requestId: 'action-1',
+        outcome: { outcome: 'selected', optionId: 'cancel' },
+      },
+    });
+    await expect(page.getByRole('alertdialog')).toHaveCount(0);
+    await page.getByRole('button', { name: 'More', exact: true }).click();
+    await page
+      .getByRole('button', { name: 'Settings', exact: true })
+      .first()
+      .click();
+    await page
+      .getByRole('navigation', { name: 'Settings' })
+      .getByRole('button', { name: /^UI/ })
+      .click();
+    await expect(
+      page.getByRole('switch', { name: 'Task notifications' }),
+    ).toBeDisabled();
+    await expect(
+      page.getByText(
+        /Web notifications are unavailable in this desktop window/,
+      ),
+    ).toBeVisible();
+  });
+}
+
+test('requests desktop notification permission only after an explicit click @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.addInitScript(() => {
+    Object.assign(window, { __TAURI__: { core: { invoke: async () => {} } } });
+  });
+  await captureNotifications(page, {
+    permission: 'default',
+    savedPreference: false,
+  });
+  await openActionPanel(page, String(testInfo.project.use.baseURL), 'question');
+  await page
+    .getByRole('button', { name: 'Task notifications', exact: true })
+    .click();
+  const help = page.locator('[data-web-shell-notification-help]');
+  await expect(help.getByRole('status')).toHaveText(
+    'Notifications are not authorized yet.',
+  );
+  expect(
+    await page.evaluate(() => window.__taskNotificationPermissionRequests),
+  ).toBe(0);
+  await page.evaluate(() => {
+    window.__taskNextNotificationPermission = 'granted';
+  });
+  await help
+    .getByRole('button', { name: 'Allow notifications', exact: true })
+    .click();
+  await expect(help.getByRole('status')).toHaveText('Enabled for this site.');
+  expect(
+    await page.evaluate(() => window.__taskNotificationPermissionRequests),
+  ).toBe(1);
+});
 
 test('shows localized notification help in the question header', async ({
   page,

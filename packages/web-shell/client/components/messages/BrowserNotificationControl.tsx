@@ -9,6 +9,7 @@ import {
 import { useBrowserNotificationSettings } from '../../browser-turn-notifications';
 import { useI18n } from '../../i18n';
 import { getShadowAwareActiveElement } from '../../utils/dom';
+import { isDesktopShell } from '../../utils/externalOpen';
 import { Button } from '../ui/button';
 import {
   Popover,
@@ -28,7 +29,9 @@ export function BrowserNotificationControl() {
   pending.current = settings?.pending;
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const requestPermissionOnce = settings?.requestPermissionOnce;
-  useEffect(() => requestPermissionOnce?.(), [requestPermissionOnce]);
+  useEffect(() => {
+    if (!isDesktopShell()) requestPermissionOnce?.();
+  }, [requestPermissionOnce]);
   useEffect(() => () => clearTimeout(timer.current), []);
   if (!settings) return null;
 
@@ -37,17 +40,19 @@ export function BrowserNotificationControl() {
     settings.permission === 'default' || settings.permission === 'granted';
   const status = settings.pending
     ? 'requesting'
-    : settings.permission === 'unavailable'
-      ? 'unavailable'
-      : settings.permission === 'denied'
-        ? 'denied'
-        : enabled
-          ? 'helpEnabled'
-          : settings.error
-            ? 'error'
-            : settings.permission === 'default'
-              ? 'helpWaiting'
-              : 'disabled';
+    : !canAuthorize && isDesktopShell()
+      ? 'desktopUnavailable'
+      : settings.permission === 'unavailable'
+        ? 'unavailable'
+        : settings.permission === 'denied'
+          ? 'denied'
+          : enabled
+            ? 'helpEnabled'
+            : settings.error
+              ? 'error'
+              : settings.permission === 'default'
+                ? 'helpWaiting'
+                : 'disabled';
   const Icon = enabled
     ? BellRing
     : settings.permission === 'default'
@@ -169,11 +174,11 @@ export function BrowserNotificationControl() {
               <p>{t(`browserNotifications.${status}`)}</p>
             )}
           </div>
-          {!enabled && (
+          {!enabled && canAuthorize && (
             <Button
               type="button"
               size="sm"
-              disabled={!canAuthorize || settings.pending}
+              disabled={settings.pending}
               onClick={async (event) => {
                 const button = event.currentTarget;
                 await settings.setEnabled(true);
