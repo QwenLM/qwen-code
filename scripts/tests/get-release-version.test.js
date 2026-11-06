@@ -691,6 +691,96 @@ describe('getVersion', () => {
       expect(result.npmTag).toBe('latest');
       expect(result.previousReleaseTag).toBe('v0.6.1');
     });
+
+    it('should read the published latest through the rollback-aware lookup', () => {
+      // A rolled-back `latest` dist-tag must not become the stable base:
+      // 0.11.0 is the highest published stable even though the tag says
+      // 0.9.2, and publishing 0.9.3 would move the tag backwards.
+      const mockWithRolledBackLatest = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.9.0-preview.1';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.9.2';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.9.0-preview.1', '0.9.2', '0.11.0']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithRolledBackLatest);
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.11.1');
+      expect(result.npmTag).toBe('latest');
+    });
+
+    it('should bump the stable base when the preview base equals the published latest', () => {
+      // The common ordering: previews for X.Y.Z exist, then X.Y.Z ships
+      // stable. The equality arm keeps the derived version unpublished
+      // even when the existence probes cannot confirm it.
+      const mockWithEqualLatest = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.9.0-preview.1';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.9.0';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.9.0-preview.1', '0.9.0']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithEqualLatest);
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.9.1');
+      expect(result.npmTag).toBe('latest');
+    });
+
+    it('should describe the bumped stable base as a candidate, not the released version', () => {
+      const mockWithTaggedCandidate = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          throw new Error('npm error code E404');
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          return '0.9.0';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify([
+            '0.7.0-preview.0',
+            '0.7.0-preview.1',
+            '0.9.0',
+          ]);
+        if (
+          command.includes('npm view @qwen-code/channel-telegram@0.9.1 version')
+        )
+          return '0.9.1';
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithTaggedCandidate);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const result = getVersion({ type: 'stable' });
+
+      expect(result.releaseVersion).toBe('0.9.2');
+      expect(errorSpy.mock.calls.flat().join('\n')).toContain(
+        'bumping the stable base to at least 0.9.1.',
+      );
+      errorSpy.mockRestore();
+    });
   });
 
   it('runCli default dispatch prints the version JSON and exits 0', () => {
