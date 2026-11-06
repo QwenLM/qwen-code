@@ -1300,6 +1300,28 @@ describe('ModelsConfig', () => {
     });
   });
 
+  it('does not attribute a declared modalities the registry overrode', async () => {
+    // The registry canonicalises `modalities` for a family whose capabilities
+    // are fixed by the model name, so the entry's own value can be discarded.
+    // Claiming the entry declared the value actually in use sends a media
+    // refusal to a key that already says the operator wants that modality
+    // (QwenLM/qwen-code#16185, F1).
+    const modelsConfig = openaiConfig([
+      entry('minimax-m3-text', 'MiniMax', undefined, undefined, {
+        modalities: { audio: true },
+      }),
+    ]);
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'minimax-m3-text');
+
+    expect(modelsConfig.getGenerationConfig()['modalities']).not.toEqual({
+      audio: true,
+    });
+    expect(modelsConfig.getGenerationConfigSources()['modalities']?.kind).toBe(
+      'computed',
+    );
+  });
+
   it.each<{
     shape: string;
     providers: ModelProvidersConfig;

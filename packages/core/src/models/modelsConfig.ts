@@ -7,7 +7,10 @@
 import process from 'node:process';
 
 import { AuthType } from '../core/contentGenerator.js';
-import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
+import type {
+  ContentGeneratorConfig,
+  InputModalities,
+} from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER } from '../qwen/oauth-config.js';
@@ -1022,25 +1025,34 @@ export class ModelsConfig {
     for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this._generationConfig as any)[field] = gc[field];
-      this.generationConfigSources[field] =
-        declared?.[field] !== undefined
+      // `modalities` is the one field the registry can replace wholesale: for
+      // a family whose capabilities are fixed by the model name it canonicalises
+      // the entry's own value away (`shouldUseCanonicalModalities`). Labelling
+      // the used value as declared would then point a refusal at a key that
+      // already says the operator wants the refused modality.
+      const declaredIsUsed =
+        declared?.[field] !== undefined &&
+        (field !== 'modalities' ||
+          ModelsConfig.sameModalities(declared.modalities, gc.modalities));
+      this.generationConfigSources[field] = declaredIsUsed
+        ? {
+            kind: 'modelProviders',
+            authType: model.authType,
+            modelId: model.id,
+            detail: `generationConfig.${field}`,
+          }
+        : // The entry says nothing about this field, or the registry replaced
+          // what it said. `modalities` is the one field the registry derives
+          // from the model name; every other value here is the field's own
+          // built-in default, so labelling those as auto-detected would report
+          // an inference that never happened.
+          field === 'modalities'
           ? {
-              kind: 'modelProviders',
-              authType: model.authType,
-              modelId: model.id,
-              detail: `generationConfig.${field}`,
+              kind: 'computed',
+              detail: 'auto-detected from model',
+              ...(derivedVia ? { via: derivedVia } : {}),
             }
-          : // The entry says nothing about this field. `modalities` is the one
-            // field the registry derives from the model name; every other value
-            // here is the field's own built-in default, so labelling those as
-            // auto-detected would report an inference that never happened.
-            field === 'modalities'
-            ? {
-                kind: 'computed',
-                detail: 'auto-detected from model',
-                ...(derivedVia ? { via: derivedVia } : {}),
-              }
-            : { kind: 'default', ...(derivedVia ? { via: derivedVia } : {}) };
+          : { kind: 'default', ...(derivedVia ? { via: derivedVia } : {}) };
     }
 
     // contextWindowSize fallback: auto-detect from model when not set by provider
@@ -1094,6 +1106,26 @@ export class ModelsConfig {
         return entry;
     }
     return undefined;
+  }
+
+  /**
+   * Whether two `modalities` values describe the same capabilities. A field
+   * omitted and a field set to `false` both mean the modality is unsupported,
+   * so they are the same declaration.
+   */
+  private static sameModalities(
+    declared: InputModalities | undefined,
+    used: InputModalities | undefined,
+  ): boolean {
+    const keys: Array<keyof InputModalities> = [
+      'image',
+      'pdf',
+      'audio',
+      'video',
+    ];
+    return keys.every(
+      (key) => Boolean(declared?.[key]) === Boolean(used?.[key]),
+    );
   }
 
   /**
