@@ -469,6 +469,11 @@ describe('runNonInteractiveStreamJson', () => {
     expect(
       sdkInitializeReplyTimeoutMs(SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS * 4),
     ).toBe(SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS * 3);
+    // Between the margin and twice the margin the margin is halved rather
+    // than kept, so the fallback never has to be used for a budget that
+    // could still carry a reply.
+    expect(sdkInitializeReplyTimeoutMs(9_000)).toBe(4_500);
+    expect(sdkInitializeReplyTimeoutMs(6_000)).toBe(3_000);
     // A non-positive budget is not a deadline at all; use the default.
     expect(sdkInitializeReplyTimeoutMs(0)).toBe(
       SDK_INITIALIZE_REPLY_TIMEOUT_MS,
@@ -1544,7 +1549,8 @@ describe('runNonInteractiveStreamJson', () => {
     ]);
     const order: string[] = [];
     let failureListener:
-      ((event: { sessionId: string; error: Error }) => void) | undefined;
+      | ((event: { sessionId: string; error: Error }) => void)
+      | undefined;
     let flushCount = 0;
     config = createConfig({
       getLlmClient: vi.fn().mockReturnValue(config.getLlmClient()),

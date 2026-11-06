@@ -92,11 +92,12 @@ export const sdkInitializeReplyTimeoutMs = (
   ) {
     return SDK_INITIALIZE_REPLY_TIMEOUT_MS;
   }
-  // A budget at or below the margin cannot keep the whole margin without
-  // falling back to the 55 s default, which is later than the client's own
-  // deadline and so the exact bug this derivation exists to avoid. Keep half
-  // the budget instead: the reply is still written while the request is
-  // pending, and the error frame still has the other half to land in.
+  // A budget that cannot absorb the whole 5 s margin keeps half of it
+  // instead. Reserving the full margin is only rejected when it would leave
+  // nothing behind: `Math.min` halves the margin up to twice the margin's
+  // worth of budget, so a 9 s budget reserves 4.5 s rather than 5 s. The
+  // reply is still written while the request is pending, and the error frame
+  // still has the other half to land in.
   const margin = Math.min(
     SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS,
     declaredBudget / 2,

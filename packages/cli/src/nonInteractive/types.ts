@@ -88,7 +88,10 @@ export interface ToolResultBlock {
 }
 
 export type ContentBlock =
-  TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock;
+  | TextBlock
+  | ThinkingBlock
+  | ToolUseBlock
+  | ToolResultBlock;
 
 /**
  * Anthropic SDK Message types
@@ -521,7 +524,9 @@ export interface ControlCancelRequest {
 }
 
 export type ControlMessage =
-  CLIControlRequest | CLIControlResponse | ControlCancelRequest;
+  | CLIControlRequest
+  | CLIControlResponse
+  | ControlCancelRequest;
 
 /**
  * Union of all CLI message types
