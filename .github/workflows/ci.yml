@@ -764,7 +764,7 @@ jobs:
           DEV: 'true'
         run: 'node scripts/ci-build-cache.mjs build .qwen-build-cache'
 
-      # Both checks read the built tree. They used to run in Lint & Static,
+      # These checks read the built tree. They used to run in Lint & Static,
       # which built and bundled the CLI a second time for them (~9 minutes);
       # here they read the tree every other lane tests, in seconds. They stay
       # required: `Test (ubuntu-latest, Node 22.x)` passes only when this job
@@ -784,6 +784,23 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         timeout-minutes: 5
         run: 'npm run check:core-subpath-exports'
+
+      # The generator imports core's dist, so it lives with the build too.
+      - name: 'Generate settings schema'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run generate:settings-schema'
+
+      - name: 'Check settings schema is up-to-date'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          if [[ -n $(git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json) ]]; then
+            echo "Error: settings.schema.json is out of date."
+            echo "Please run: npm run generate:settings-schema"
+            echo "Then commit the updated schema file."
+            git diff packages/vscode-ide-companion/schemas/settings.schema.json
+            exit 1
+          fi
+          echo "Settings schema is up-to-date"
 
       - name: 'Pack the build cache'
         id: 'pack_build_cache'
@@ -2047,22 +2064,6 @@ jobs:
       - name: 'Run i18n check'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check-i18n'
-
-      - name: 'Generate settings schema'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run generate:settings-schema'
-
-      - name: 'Check settings schema is up-to-date'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: |-
-          if [[ -n $(git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json) ]]; then
-            echo "Error: settings.schema.json is out of date."
-            echo "Please run: npm run generate:settings-schema"
-            echo "Then commit the updated schema file."
-            git diff packages/vscode-ide-companion/schemas/settings.schema.json
-            exit 1
-          fi
-          echo "Settings schema is up-to-date"
 
       - name: 'Generate Web Shell and VS Code companion notices'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"

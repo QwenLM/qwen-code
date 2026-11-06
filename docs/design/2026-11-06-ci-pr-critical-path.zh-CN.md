@@ -64,7 +64,7 @@ flowchart LR
 
 - **集成测试**：`integration_no_ak` 依赖 `test_build`，用 `QWEN_SKIP_PREPARE=1` 安装依赖，然后像单测分片一样下载并解包 `unit-test-tree`。测试分 3 片跑（`--shard=N/3`），`typecheck:integration` 只在 shard 1 执行。新增的 `integration_no_ak_result` job 沿用 required 名称 `Integration Tests (no-AK, No Sandbox)`，只有构建和每个分片都通过时才通过。
 - **web-shell**：`web_shell_e2e_smoke` 去掉了 hash / restore / build / pack / save 这几步，改为依赖 `test_build` 并解包同一棵树。
-- **test_build**：构建时设 `DEV=true`，它唯一的作用是写出 `dist/esbuild.json`。构建后直接在产物上运行 `Check serve fast-path bundle closure` 和 `Check core subpath exports resolve`，两项加起来不到 2 秒。这两项检查从 `Lint & Static` 移出，通过 `Test (ubuntu-latest, Node 22.x)` 保持 required。
+- **test_build**：构建时设 `DEV=true`，它唯一的作用是写出 `dist/esbuild.json`。构建后直接在产物上运行 `Check serve fast-path bundle closure` 和 `Check core subpath exports resolve`，两项加起来不到 2 秒；settings schema 是否最新的检查也一起移过来，因为它的生成脚本要 import core 的 `dist`。这三项都从 `Lint & Static` 移出（`Lint & Static` 之所以有 `dist`，只是因为 bundle 检查顺带构建了一次），通过 `Test (ubuntu-latest, Node 22.x)` 保持 required。
 
 ### 较小的改动
 

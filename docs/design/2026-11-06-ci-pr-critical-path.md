@@ -93,8 +93,10 @@ host.
 - `test_build` builds with `DEV=true`, whose only effect is writing
   `dist/esbuild.json`, and then runs `Check serve fast-path bundle closure`
   and `Check core subpath exports resolve` against the built tree (under two
-  seconds together). They leave `Lint & Static` and stay required through
-  `Test (ubuntu-latest, Node 22.x)`.
+  seconds together), plus the settings-schema freshness check, whose
+  generator imports core's `dist`. All three leave `Lint & Static`, which
+  only had `dist` because the bundle check built it, and stay required
+  through `Test (ubuntu-latest, Node 22.x)`.
 
 ### Smaller changes
 

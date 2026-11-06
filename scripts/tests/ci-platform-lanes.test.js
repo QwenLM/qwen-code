@@ -1381,8 +1381,6 @@ describe('post-merge push lane', () => {
       'Run Prettier',
       'Run sensitive keyword linter',
       'Run i18n check',
-      'Generate settings schema',
-      'Check settings schema is up-to-date',
       'Generate Web Shell and VS Code companion notices',
       'Check Web Shell and VS Code companion notices are up-to-date',
       'Run .github/scripts helper tests',
@@ -1405,9 +1403,15 @@ describe('post-merge push lane', () => {
         'Check core subpath exports resolve',
         'npm run check:core-subpath-exports',
       ],
+      // The generator imports core's dist.
+      ['Generate settings schema', 'npm run generate:settings-schema'],
+      [
+        'Check settings schema is up-to-date',
+        'git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json',
+      ],
     ]) {
       expect(stepByName.has(name), name).toBe(false);
-      expect(buildSteps.get(name)?.run, name).toBe(command);
+      expect(buildSteps.get(name)?.run, name).toContain(command);
       expect(buildSteps.get(name)?.if, name).toContain("ci_profile == 'full'");
     }
     expect(buildSteps.get('Build').env?.DEV).toBe('true');
@@ -1487,9 +1491,6 @@ describe('post-merge push lane', () => {
       'Run sensitive keyword linter':
         'node scripts/lint.js --sensitive-keywords',
       'Run i18n check': 'npm run check-i18n',
-      'Generate settings schema': 'npm run generate:settings-schema',
-      'Check settings schema is up-to-date':
-        'git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json',
       'Generate Web Shell and VS Code companion notices':
         'npm run generate:notices --workspace=@qwen-code/web-shell',
       'Check Web Shell and VS Code companion notices are up-to-date':
@@ -1503,7 +1504,7 @@ describe('post-merge push lane', () => {
     ).toEqual([...FULL_PAYLOAD].sort());
     // Whole literal, not the `ci_profile == 'full'` substring filtered above:
     // an appended `&&` clause still matches that substring while dropping the
-    // step from the unattended post-merge lane. All 17 gates are identical.
+    // step from the unattended post-merge lane. All 15 gates are identical.
     const FULL_GATE =
       "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}";
     for (const n of FULL_PAYLOAD) {
@@ -1528,7 +1529,7 @@ describe('post-merge push lane', () => {
       ).not.toMatch(/\|\|\s*(true|:)/);
     }
     expect(
-      String(stepByName.get('Check settings schema is up-to-date').run),
+      String(buildSteps.get('Check settings schema is up-to-date').run),
       'settings-schema gate lost its exit 1',
     ).toContain('exit 1');
     // The two deliberately-different gates, pinned as they are.

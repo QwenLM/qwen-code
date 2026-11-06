@@ -105,8 +105,9 @@ is recopied for the host after every restore and unpack
 
 The unit-test shards, the three `Integration Tests (no-AK, shard N/3)` shards
 and the four web-shell smoke shards all unpack that one tree. `test_build`
-also runs the two checks that read it, the serve fast-path bundle closure and
-the core subpath exports, which `Lint & Static` used to build for.
+also runs the checks that read it, the serve fast-path bundle closure, the
+core subpath exports and the settings-schema freshness check, which
+`Lint & Static` used to build for.
 `Integration Tests (no-AK, No Sandbox)` passes only when the build and every
 integration shard pass. A draft pull request skips the integration shards and
 the browser smoke; marking it ready for review starts the run that includes
