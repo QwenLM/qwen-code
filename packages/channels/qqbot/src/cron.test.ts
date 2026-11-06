@@ -70,6 +70,9 @@ vi.mock('@qwen-code/channel-base', () => ({
     protected getResponseSourceLabel(_sessionId: string): undefined {
       return undefined;
     }
+    protected isProactivePromptTurn(_sessionId: string): boolean {
+      return false;
+    }
     protected formatMarkdownAttributedText(
       text: string,
       sourceLabel?: string,
