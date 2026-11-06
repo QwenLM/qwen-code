@@ -102,16 +102,19 @@ first committing to an answer or discarding the question.
   (localStorage), so it outlives the tab: closing the details tab and clicking
   again reopens the same child, and a child reopened from the side-task
   catalog under its own `side-task:<sessionId>` tab is focused rather than
-  duplicated. Three lifecycle edges are covered: the association is recorded
+  duplicated. Four lifecycle edges are covered: the association is recorded
   even when the draft tab closes before creation resolves (the parent identity
   is captured when creation starts, since the server does not cancel it); the
   reopened tab retains the explanation prompt, and the pane's empty-session
   guard sends it only while the child has no user prompt yet, so a prompt
-  interrupted by a close is delivered exactly once and never re-sent; and
-  archiving a child invalidates its association, because the daemon's load
-  route rejects archived sessions (409 `session_archived`) — the next click
-  provisions a fresh child instead of attaching an unloadable one. One entry
-  per parent supersedes the resolved question's association, keeping the store
+  interrupted by a close is delivered exactly once and never re-sent; a
+  catalog-reopened tab carries no prompt of its own, so clicking details again
+  supplies the pending prompt on the matched tab before focusing it, letting
+  the same guard deliver it to a still-empty child; and archiving a child
+  invalidates its association, because the daemon's load route rejects
+  archived sessions (409 `session_archived`) — the next click provisions a
+  fresh child instead of attaching an unloadable one. One entry per parent
+  supersedes the resolved question's association, keeping the store
   bounded. The tab id stays short because the pane derives its daemon clientId
   as `side-task:<parentSessionId>:<tabId>` and the daemon rejects client ids
   over 128 characters; an App-level test pins that budget with uuid-length

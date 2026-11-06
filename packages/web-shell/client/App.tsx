@@ -5745,11 +5745,23 @@ export function App({
       // tab for the same session.
       if (existingChildSessionId) {
         const openTab = artifactPanelTabsRef.current.find(
-          (item) =>
+          (item): item is Extract<ArtifactPanelTab, { kind: 'side_task' }> =>
             item.kind === 'side_task' &&
             item.sessionId === existingChildSessionId,
         );
         if (openTab) {
+          // A catalog reopen carries no prompt. If the original details tab
+          // was closed before the pane admitted it, the child is still empty;
+          // supply the pending prompt so the pane's empty-session guard can
+          // deliver it (it never re-sends once the child has a user prompt).
+          const prompt = initialPrompt?.trim();
+          if (prompt && openTab.initialPrompt !== prompt) {
+            setArtifactPanelTabs((tabs) =>
+              tabs.map((tab) =>
+                tab.id === openTab.id ? { ...tab, initialPrompt: prompt } : tab,
+              ),
+            );
+          }
           setActiveArtifactPanelTabId(openTab.id);
           setArtifactPanelOpen(true);
           return true;

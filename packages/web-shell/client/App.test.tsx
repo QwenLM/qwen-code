@@ -35096,7 +35096,7 @@ describe('App session callbacks', () => {
     expect(derivedClientId.length).toBeLessThanOrEqual(128);
   });
 
-  it('focuses a catalog-reopened details child instead of adding a tab', async () => {
+  it('focuses a catalog-reopened details child and supplies the unsent prompt', async () => {
     mockConnection.capabilities.features = ['session_side_task'];
     mockWorkspace.client.createSideTaskSession.mockResolvedValue({
       sessionId: 'details-side-task',
@@ -35150,6 +35150,16 @@ describe('App session callbacks', () => {
     expect(testState.latestArtifactPanelProps?.activeTabId).toBe(
       sideTaskTabs[0]!.id,
     );
+    // The catalog tab carries no prompt of its own. If the original tab was
+    // closed before the pane admitted the prompt, the child is still empty;
+    // the click must supply the pending explanation on the matched tab so
+    // the pane's empty-session guard can deliver it.
+    expect(sideTaskTabs[0]!.id).toBe('side-task:details-side-task');
+    expect(
+      sideTaskTabs[0]!.kind === 'side_task'
+        ? sideTaskTabs[0]!.initialPrompt
+        : undefined,
+    ).toContain('Pick one');
   });
 
   it('passes a directive to /fork as a regular background-agent directive', async () => {
