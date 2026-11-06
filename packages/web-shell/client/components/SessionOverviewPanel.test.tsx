@@ -201,6 +201,11 @@ function statusSession(
     pendingPermissionCount: 0,
     hasActivePrompt: false,
     lastEventId: 0,
+    eventRingCount: 0,
+    eventRingBytes: 0,
+    eventRingEvictedEvents: 0,
+    eventRingEvictedBytes: 0,
+    availableCommandsSnapshotBytes: 0,
     ...extra,
   };
 }
