@@ -174,6 +174,29 @@ async function countSnapshots(f: Awaited<ReturnType<typeof fixture>>) {
   ).length;
 }
 
+/**
+ * Makes every fstatSync report the timestamps of the first one, as when the
+ * file's coarse clock does not tick between them. Bigint and number stats are
+ * pinned separately.
+ */
+function pinStatTimestamps() {
+  const fstatSync = fsSync.fstatSync;
+  const firsts = new Map<boolean, fsSync.Stats>();
+  return vi.spyOn(fsSync, 'fstatSync').mockImplementation(((
+    ...args: Parameters<typeof fsSync.fstatSync>
+  ) => {
+    const value = Reflect.apply(fstatSync, fsSync, args) as fsSync.Stats;
+    const bigint = (args[1] as fsSync.StatOptions | undefined)?.bigint === true;
+    const first = firsts.get(bigint) ?? value;
+    firsts.set(bigint, first);
+    return Object.assign(
+      Object.create(Object.getPrototypeOf(value) as object) as fsSync.Stats,
+      value,
+      { ctimeMs: first.ctimeMs, mtimeMs: first.mtimeMs },
+    );
+  }) as typeof fsSync.fstatSync);
+}
+
 describe('local native journal snapshots', () => {
   it('converts only sealed resume, preserves original bytes and command replay, then never rotates', async () => {
     const f = await fixture();
@@ -312,6 +335,75 @@ describe('local native journal snapshots', () => {
       spy.mockRestore();
     }
   });
+
+  it.each([
+    ['without a byte bound', false],
+    ['with a frozen byte bound', true],
+  ] as const)(
+    'refuses a growth that rewrites the prefix within one timestamp tick, %s',
+    async (_label, bounded) => {
+      const f = await fixture();
+      await f.first.authority.close();
+      const original = await fs.readFile(f.transcriptPath);
+      const readSync = fsSync.readSync;
+      const stats = pinStatTimestamps();
+      const read = vi
+        .spyOn(fsSync, 'readSync')
+        .mockImplementationOnce((...args) => {
+          const count = Reflect.apply(readSync, fsSync, args) as number;
+          const modified = Buffer.from(original);
+          modified[0] ^= 1;
+          fsSync.writeFileSync(
+            f.transcriptPath,
+            Buffer.concat([modified, Buffer.from('a concurrent tail')]),
+          );
+          return count;
+        });
+      try {
+        expect(() =>
+          readLocalJournalBytes(
+            f.transcriptPath,
+            bounded ? original.length : undefined,
+          ),
+        ).toThrow(/file changed while reading/);
+      } finally {
+        read.mockRestore();
+        stats.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ['within one timestamp tick', true],
+    ['across timestamp ticks', false],
+  ] as const)(
+    'reads an unbounded generation as its first stat saw it while a writer appends %s',
+    async (_label, pinned) => {
+      const f = await fixture();
+      await f.first.authority.close();
+      const original = await fs.readFile(f.transcriptPath);
+      const readSync = fsSync.readSync;
+      const stats = pinned ? pinStatTimestamps() : undefined;
+      const read = vi
+        .spyOn(fsSync, 'readSync')
+        .mockImplementationOnce((...args) => {
+          const count = Reflect.apply(readSync, fsSync, args) as number;
+          fsSync.appendFileSync(f.transcriptPath, 'a concurrent tail');
+          // Make the append visible to the timestamps when they are not pinned.
+          if (!pinned) {
+            const later = new Date(Date.now() + 60_000);
+            fsSync.utimesSync(f.transcriptPath, later, later);
+          }
+          return count;
+        });
+      try {
+        expect(readLocalJournalBytes(f.transcriptPath)).toEqual(original);
+      } finally {
+        read.mockRestore();
+        stats?.mockRestore();
+      }
+    },
+  );
 
   it.each(['manifest', 'page', 'dependency'] as const)(
     'refuses a missing %s without treating the Session as empty',

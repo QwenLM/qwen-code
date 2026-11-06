@@ -321,7 +321,7 @@ When a workspace runtime has more than one execution engine, `runtimeLive` and `
 
 The optional top-level `/capabilities` field `sessionLiveStatePollIntervalMs` advertises the daemon-wide live-state polling interval in milliseconds. It is resolved once from the startup environment variable `QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS`, independently of workspace environment overlays. Integer values from `1000` to `2147483647` are accepted; missing or invalid values use `5000`. Web Shell consumes this hint for all workspace live-state polling and also falls back to `5000` for an absent or invalid field from an older or incompatible daemon. This field does not change the route's snapshot semantics, immediate local/visibility refreshes, or full-catalog polling. SDK clients remain responsible for their own timers.
 
-`slow_client_warning` covers SSE backpressure behavior: (a) the daemon emits a `slow_client_warning` synthetic event-stream frame when a subscriber's live frame backlog or live serialized-byte backlog crosses 75% full, once per overflow episode (rearmed after both measurements drain below 37.5%); (b) `GET /session/:id/events` accepts a `?maxQueued=N` query param (range `[16, 2048]`) to pre-size the per-subscriber frame backlog for cold reconnects against a large replay ring. The serialized-byte cap is daemon-owned (default **2 MiB** per subscriber), live-only, and intentionally has no query parameter. The daemon-wide ring size is controlled by `--event-ring-size` (default **8000**, per #3803 §02). Old daemons silently lack the warning/query behavior — pre-flight this tag before opting in.
+`slow_client_warning` covers SSE backpressure behavior: (a) the daemon emits a `slow_client_warning` synthetic event-stream frame when a subscriber's live frame backlog or live serialized-byte backlog crosses 75% full, once per overflow episode (rearmed after both measurements drain below 37.5%); (b) `GET /session/:id/events` accepts a `?maxQueued=N` query param (range `[16, 2048]`) to pre-size the per-subscriber frame backlog for cold reconnects against a large replay ring. The serialized-byte cap is daemon-owned (default **2 MiB** per subscriber), live-only, and intentionally has no query parameter. The per-session ring is bounded by `--event-ring-size` (default **8000**, per #3803 §02) and `--event-ring-max-bytes` (default **8 MiB**, including the latest full command snapshot), except that the newest ring event survives an oversized event or snapshot. Old daemons silently lack the warning/query behavior — pre-flight this tag before opting in.
 
 `typed_event_schema` advertises daemon event payloads that match the SDK's `KnownDaemonEvent` schema. Older daemons may still stream compatible frames, but SDK clients should pre-flight this tag before assuming typed event coverage.
 
@@ -937,6 +937,7 @@ Response shape:
     "maxPendingPromptsPerSession": 5,
     "listenerMaxConnections": 256,
     "eventRingSize": 8000,
+    "eventRingMaxBytes": 8388608,
     "compactedReplayMaxBytes": 4194304,
     "promptDeadlineMs": null,
     "writerIdleTimeoutMs": null,
@@ -993,6 +994,8 @@ Multi-workspace responses also include top-level `workspaces[]` rows with
 `{ id, cwd, displayName?, primary, trusted }`. The optional display name is
 omitted when unset and remains presentation-only; status consumers must keep
 using `id` or `cwd` to correlate runtimes.
+
+Full session status includes `eventRingCount`, `eventRingBytes`, optional `eventRingEarliestEventId`, `eventRingEvictedEvents`, `eventRingEvictedBytes`, and `availableCommandsSnapshotBytes`. Current ring bytes conservatively include the latest full command snapshot; eviction counters accumulate over the bus lifetime. These fields are additive and older daemons may omit them.
 
 `runtime.perf` is optional. When present, it reports daemon-process event loop
 lag, prompt FIFO queue wait samples, and daemon-child pipe byte counters only;
@@ -1301,13 +1304,32 @@ user or system settings. The member is omitted entirely when no channel
 resolves, and older daemons never send it; a settings read failure degrades
 to its absence rather than failing the journal read. Each event records what a Channel did — an inbound
 message it accepted or skipped (with the machine reason: `reason_filter`,
-`mention_required`, `duplicate`, a sender-gate rejection, `github_api_error`),
+`mention_required`, `duplicate`, a sender-gate rejection, `github_api_error`,
+`no_role_matched`),
 a GitHub thread whose handling failed and that it will read again (`failed`
 with `github_api_error`: a GitHub error, or a local error while the channel
 cannot read or write its own state or one of the thread's tasks is unfinished),
 a publication
 outcome, an inbound task transition, or a poll result — and never carries
-message text. A GitHub poll that filters more than 20 notifications journals
+message text. `outcome` is an open string: besides the task states it includes
+the publication outcomes `posted`, `suppressed`, `posting`, `failed` and
+`failed_ambiguous` (the write may have landed, so it is never retried publicly),
+the private-delivery terminals `delivered` and `retired` (with a reason such as
+`preflight_rejected`, `watch_no_candidate`, `bound_no_candidate` or
+`dead_letter`), and `degraded` for
+a dependency the poll survived. A `task` event about a PR-bound session carries
+that session's `sessionId`, including the rows written while the delivery is
+cleared and the retire that follows, which name the session the event lost.
+`detail` is optional on every event: a binding-scan `degraded` row carries
+`detail.streak` (a count of binding scans, which a gone-session retry can
+advance more than once per poll) and, on the `bindings_partial` rows only,
+`detail.sessions` — a session count, not a PR count: the session rows this scan
+listed plus the sessions retention keeps routing under a partial answer,
+bounded by the retention cap,
+while the watch-guard rows (`watch_reconcile_blocked`,
+`watch_pending_unreconciled`, `watch_reconcile_recovered`) carry `reason`; a
+blocking row also carries `error` when the watch state could not be read or
+reconciliation failed (the recovered row carries no error). A GitHub poll that filters more than 20 notifications journals
 the first 20 individually and one further `reason_filter` row whose
 `detail.filtered` counts the rest, so a pinned poll cursor cannot flood the
 journal with repeats of the same batch. While the cursor is held, a comment the
@@ -1899,7 +1921,7 @@ Budget enforcement is capability-driven. With `mcp_workspace_pool`, sessions ins
 - `budgets[0].status === 'error'` ⇔ `refusedCount > 0` (one or more servers refused this discovery pass).
 - `budgets[0].status === 'ok'` ⇔ below the 75% threshold AND no refusals.
 
-Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; the snapshot is cheap and the budget cell carries no extra discovery cost. SDK clients that subscribe to push events still benefit from the snapshot for state-after-extended-disconnect (the SSE replay ring depth is finite — `--event-ring-size`, default 8000 — so a client offline longer than the ring's coverage falls back to snapshot resync).
+Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; the snapshot is cheap and the budget cell carries no extra discovery cost. SDK clients that subscribe to push events still benefit from the snapshot for state-after-extended-disconnect (the SSE replay ring is bounded by `--event-ring-size`, default 8000, and `--event-ring-max-bytes`, default 8 MiB — so a client offline longer than the ring's coverage falls back to snapshot resync).
 
 ### `GET /workspace/skills`
 
@@ -3447,7 +3469,7 @@ Both routes return `409 artifact_library_unavailable` when artifact persistence 
 
 ### `GET /workspace/:id/sessions` and `GET /workspaces/:workspace/sessions`
 
-List sessions whose canonical workspace matches `:id` or `:workspace`. The path parameter first resolves as an exact workspace id and then as a URL-encoded absolute cwd. Primary workspaces include the existing persisted/live merge: the default list is active sessions from `chats/`; pass `archiveState=archived` to list archived sessions from `chats/archive/`. Trusted non-primary workspaces include active persisted sessions from their own `chats/` store and merge matching live summaries without duplicates; if no active persisted sessions exist, the route preserves the previous live-only cursor behavior. Trusted non-primary workspaces also support `archiveState=archived`, the organized `view=organized` list, and `group` filters, reading from their own `chats/`, `chats/archive/`, and session-organization stores; a combined `view=organized&archiveState=archived` query returns only archived sessions without a live merge. Registered untrusted non-primary workspaces support the same list, filter, and pagination shapes but return persisted entries only: the daemon does not query the live bridge or populate pending interactions, turn errors, or client state from the runtime. Persisted defaults such as `clientCount: 0` and `hasActivePrompt: false` remain present for wire compatibility. Missing storage returns an empty list. The plural route still returns `403 { code: "untrusted_workspace" }` for an untrusted primary; legacy primary routes keep their existing compatibility behavior. `archiveState=all` is not supported in v1. Primary and persisted-backed lists keep the existing numeric `cursor` semantics; the no-persisted trusted non-primary live fallback keeps its existing opaque live cursor.
+List sessions whose canonical workspace matches `:id` or `:workspace`. The path parameter first resolves as an exact workspace id and then as a URL-encoded absolute cwd. Primary workspaces include the existing persisted/live merge: the default list is active sessions from `chats/`; pass `archiveState=archived` to list archived sessions from `chats/archive/`. Trusted non-primary workspaces include active persisted sessions from their own `chats/` store and merge matching live summaries without duplicates; if no active persisted sessions exist, the route preserves the previous live-only cursor behavior. Trusted non-primary workspaces also support `archiveState=archived`, the organized `view=organized` list, and `group` filters, reading from their own `chats/`, `chats/archive/`, and session-organization stores; a combined `view=organized&archiveState=archived` query returns only archived sessions without a live merge. Registered untrusted non-primary workspaces support the same list, filter, and pagination shapes but return persisted entries only: the daemon does not query the live bridge or populate pending interactions, turn errors, or client state from the runtime. Persisted defaults such as `clientCount: 0` and `hasActivePrompt: false` remain present for wire compatibility. Missing storage returns an empty list. The plural route still returns `403 { code: "untrusted_workspace" }` for an untrusted primary; legacy primary routes keep their existing compatibility behavior. `archiveState=all` is not supported in v1. The legacy recent list of a primary or persisted-backed workspace — the default list and `archiveState=archived` — accepts a legacy numeric `cursor` (a bare mtime position) and answers with an opaque persisted cursor `"<mtime>|<name>"` on every page that has more results, whether or not the page ends inside a group of files sharing an mtime; a bare numeric mtime is accepted only as legacy input. Callers must round-trip the returned token verbatim rather than parse it. The `view=organized` list and the `parentSessionId` / `sourceType` filtered lists page with their own opaque activity cursors, described below, and reject a numeric `cursor` with `400 { code: "invalid_cursor" }`. The no-persisted trusted non-primary live fallback keeps its existing opaque live cursor.
 
 ```bash
 curl http://127.0.0.1:4170/workspace/$(jq -rn --arg c "$PWD" '$c|@uri')/sessions
@@ -3482,7 +3504,7 @@ Response:
       "isArchived": false
     }
   ],
-  "nextCursor": 1772251200000
+  "nextCursor": "1772251200000|<uuid>.jsonl"
 }
 ```
 
@@ -3524,7 +3546,7 @@ Read independently paginated session catalogs for several registered workspaces 
 
 `workspaces` is an ordered array of 1–20 `{ workspace, cursor? }` entries, or `"all"` to select all public registered workspaces. Selectors resolve as exact ids before canonical absolute paths. `all` excludes internal Conversations and removed entries, includes temporarily unavailable entries, and fails if more than 20 entries would be selected; callers must then split explicit selections. An empty public registry returns an empty result. Explicit internal selectors return an entry error without booting the internal runtime.
 
-Shared `options` accept `size` (integer 1–100, default 20), `archiveState`, `view`, `group`, `parentSessionId`, `sourceType`, and `sourceId` with the existing list filters and combinations. `group` and `parentSessionId` are limited to 256 characters. `includeGroups` defaults to false. Each workspace has its own cursor. Batch default pages use activity ordering and opaque cursors, including for live-only sessions; these cursors are not interchangeable with legacy numeric list cursors. Continue with that entry's returned `cwd` and `nextCursor`, preserving the filters. There is no global sort or global pagination cursor.
+Shared `options` accept `size` (integer 1–100, default 20), `archiveState`, `view`, `group`, `parentSessionId`, `sourceType`, and `sourceId` with the existing list filters and combinations. `group` and `parentSessionId` are limited to 256 characters. `includeGroups` defaults to false. Each workspace has its own cursor. Batch default pages use activity ordering and opaque cursors, including for live-only sessions; these cursors are not interchangeable with the persisted list cursors described above. Continue with that entry's returned `cwd` and `nextCursor`, preserving the filters. There is no global sort or global pagination cursor.
 
 ```json
 {
@@ -4474,7 +4496,7 @@ Response (200):
 }
 ```
 
-`activation` reflects child liveness and any required refresh independently from `changed`. It is `applied` when an ACP child is live and any required refresh succeeds, `deferred` when no child was live at the liveness check or a changed request loses its child/session during the required refresh, and `partial` when at least one other required refresh fails. A no-op can therefore be `applied` or `deferred` with `changed: false`; when `changed` is true and activation is `deferred`, the persisted declaration is used when a child starts. Busy sessions are included in a required refresh. The daemon reloads workspace settings for the ACP child and every active session, notifies SkillManager consumers, and pushes `available_commands_update`. A request already sent to the model is not rewritten; subsequent validation, command snapshots, and model contexts use the new state. If persistence fails, no refresh or event is emitted. If a session refresh fails, the committed setting is retained. When the child returns per-session results, the session counts are exact. If the refresh control itself fails before returning those results, `sessionsFailed: 1` is a conservative lower bound indicating that the refresh request failed.
+`activation` reflects child liveness and any required refresh independently from `changed`. It is `applied` when an ACP child is live and any required refresh succeeds, `deferred` when no child was live at the liveness check or a changed request loses its child/session during the required refresh, and `partial` when at least one other required refresh fails. A no-op can therefore be `applied` or `deferred` with `changed: false`; when `changed` is true and activation is `deferred`, the persisted declaration is used when a child starts. Busy sessions are included in a required refresh. The daemon reloads workspace settings for the ACP child and every active session, notifies SkillManager consumers, and pushes `available_commands_update` when the rebuilt catalog differs from the last successfully pushed snapshot. An unchanged command snapshot is suppressed; clients should use `settings_changed` to observe changed settings declarations independently of catalog delivery. A request already sent to the model is not rewritten; subsequent validation, command snapshots, and model contexts use the new state. If persistence fails, no refresh or event is emitted. If a session refresh fails, the committed setting is retained. When the child returns per-session results, the session counts are exact. If the refresh control itself fails before returning those results, `sessionsFailed: 1` is a conservative lower bound indicating that the refresh request failed.
 
 Errors:
 
@@ -4765,7 +4787,8 @@ The SSE-level `id:` / `event:` lines duplicate `envelope.id` / `envelope.type` f
 
 Reconnect semantics:
 
-- Send `Last-Event-ID: <n>` to replay events with `id > n` from the per-session ring (default depth **8000**, tunable via `qwen serve --event-ring-size <n>`).
+- Send `Last-Event-ID: <n>` to replay events with `id > n` from the per-session ring (default depth **8000**, tunable via `qwen serve --event-ring-size <n>`). Retention is also byte-capped by `--event-ring-max-bytes` (default **8 MiB**, positive safe integer up to **256 MiB**), including the latest full command snapshot. At least the newest ring event is retained even when one event or snapshot exceeds the cap.
+- Unchanged `available_commands_update` snapshots are not republished by the ACP child. Historical copies retain command metadata and skill names without full skill bodies; only the latest complete snapshot is restored at its original matching ID for ACP replay. Browser/SDK egress still omits skill bodies. These latest-state projections do not create ID gaps or replace the existing resync signals.
 - **Gap detection:** within the same epoch, if the first retained ring id is greater than `<n> + 1`, the daemon emits an id-less `state_resync_required` frame with `reason: 'ring_evicted'` before replaying the surviving suffix. The other reasons are `epoch_reset`, `seeded_replay_not_in_ring`, and `replay_budget_exceeded`; the budget signal follows the delivered replay prefix. See [resync reasons and ordering](./daemon/09-event-schema.md#resync-reasons-and-ordering) for their triggers, cursor fields, and recovery rules.
 - The SDK latches `awaitingResync`; clients should call `POST /session/:id/load` and rebuild from the current bounded replay snapshot window. That snapshot may itself start with `history_truncated` when older in-memory replay entries were dropped; this marker is informational and must not start another resync loop. Its optional pagination anchor is [frozen at replay-window eviction](./daemon/09-event-schema.md#history-truncation-anchor).
 - IDs are monotonic within a session's event-bus epoch, starting at 1. A rejected publish must not consume an id; see [event sequence invariants](./daemon/09-event-schema.md#state-and-forward-compatibility).
@@ -4912,8 +4935,8 @@ Response (`201` fresh start, `200` idempotent take-over):
   "providerId": "qwen-oauth",
   "status": "pending",
   "userCode": "USER-1",
-  "verificationUri": "https://chat.qwen.ai/api/v1/oauth2/device",
-  "verificationUriComplete": "https://chat.qwen.ai/api/v1/oauth2/device?user_code=USER-1",
+  "verificationUri": "https://chat.qwen.ai/api/v1/oauth2/device?entry=qwen_code&paywallScene=cli",
+  "verificationUriComplete": "https://chat.qwen.ai/api/v1/oauth2/device?user_code=USER-1&entry=qwen_code&paywallScene=cli",
   "expiresAt": 1700000600000,
   "intervalMs": 5000,
   "attached": false
