@@ -31,10 +31,10 @@ moment the detection below can see it (see _Which `main`_).
 Nothing in the automation closes such a PR once triage has run. The autofix agent lane
 holds no GitHub write credentials (it said so itself on #11376), the loop's
 push-and-report step has the bot PAT but no close path, and `stale.yml` only
-acts after 60 + 30 days. The Fleet Shepherd walks the bot fleet every 15
-minutes with the bot PAT and already owns the fleet's other levers (conflict
-dispatch, stale-base sync, liveness, takeover auto-release), so it is the
-natural home for one more.
+acts after 60 + 30 days (30 + 14 since 2026-11-06). The Fleet Shepherd walks the
+bot fleet every 15 minutes with the bot PAT and already owns the fleet's other
+levers (conflict dispatch, stale-base sync, liveness, takeover auto-release),
+so it is the natural home for one more.
 
 ## Detection: GitHub's own test merge
 
