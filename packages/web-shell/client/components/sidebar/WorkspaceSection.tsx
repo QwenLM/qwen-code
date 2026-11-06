@@ -1,4 +1,9 @@
 import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../../daemon/availability.js';
+import {
   Fragment,
   useCallback,
   useEffect,
@@ -86,9 +91,12 @@ export function isAbsolutePath(cwd: string): boolean {
   );
 }
 
-function getSessionLabel(session: DaemonSessionSummary): string {
+function getSessionLabel(
+  session: DaemonSessionSummary,
+  untitledLabel?: string,
+): string {
   const displayName = session.displayName?.trim();
-  return displayName || session.sessionId.slice(0, 8);
+  return displayName || untitledLabel || session.sessionId.slice(0, 8);
 }
 
 function WorkspaceFolderIcon({
@@ -145,6 +153,8 @@ interface WorkspaceSectionProps {
   trustToOpenLabel: string;
   noSessionsLabel: string;
   loadErrorLabel: string;
+  /** Shown instead of an id prefix when a session has no persisted name. */
+  untitledSessionLabel?: string;
   organizationEnabled: boolean;
   sessionCatalogRequestsEnabled?: boolean;
   sessionGroupCatalog?: DaemonSessionGroupCatalog;
@@ -271,6 +281,7 @@ export function WorkspaceSection({
   trustToOpenLabel,
   noSessionsLabel,
   loadErrorLabel,
+  untitledSessionLabel,
   organizationEnabled,
   sessionCatalogRequestsEnabled = true,
   sessionGroupCatalog,
@@ -308,6 +319,8 @@ export function WorkspaceSection({
   onOpenGitDiff,
   onOpenCommit,
 }: WorkspaceSectionProps) {
+  const available = useDaemonAvailability() === 'available';
+  const availability = useDaemonAvailabilityController();
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [channelCatalog, setChannelCatalog] = useState<{
     catalog: DaemonChannelTypeCatalog;
@@ -326,6 +339,8 @@ export function WorkspaceSection({
   const [gitStatus, setGitStatus] = useState<DaemonWorkspaceGitStatus>();
   const fulfilledPendingSessions = useRef(new Set<string>());
   const channelCatalogLoadRequestId = useRef(0);
+  const channelCatalogFailed = useRef(false);
+  const sessionPollFailed = useRef(false);
   const { t } = useI18n();
   const expanded = controlledExpanded ?? internalExpanded;
   const readOnly = !workspace.primary && !workspace.trusted;
@@ -403,6 +418,7 @@ export function WorkspaceSection({
     previousSessionsActiveRef.current = sessionsActive;
     previousReadOnlyRef.current = readOnly;
     if (
+      available &&
       sessionCatalogRequestsEnabled &&
       !sessionLiveStateEnabled &&
       sessionsActive &&
@@ -413,6 +429,7 @@ export function WorkspaceSection({
       void reloadSessions().catch(() => undefined);
     }
   }, [
+    available,
     readOnly,
     reloadSessions,
     sessionCatalogRequestsEnabled,
@@ -422,15 +439,26 @@ export function WorkspaceSection({
     sessionsStale,
   ]);
   const sessions = sessionsResult.sessions;
-  const loadError = Boolean(sessionsResult.error);
+  const loadError =
+    Boolean(sessionsResult.error) || (!available && !sessionsPage);
 
   useEffect(() => {
-    if (!sessionsResult.error) return;
+    if (!sessionsResult.error) {
+      sessionPollFailed.current = false;
+      return;
+    }
+    if (
+      !available ||
+      isDaemonUnavailableError(sessionsResult.error) ||
+      sessionPollFailed.current
+    )
+      return;
+    sessionPollFailed.current = true;
     console.warn(
       `[WorkspaceSection] session poll failed for ${workspace.cwd}:`,
       sessionsResult.error,
     );
-  }, [sessionsResult.error, workspace.cwd]);
+  }, [available, sessionsResult.error, workspace.cwd]);
 
   useEffect(() => {
     if (
@@ -442,7 +470,7 @@ export function WorkspaceSection({
       setGroups([]);
       return;
     }
-    if (!sessionCatalogRequestsEnabled) return;
+    if (!available || !sessionCatalogRequestsEnabled) return;
     if (sessionLiveStateEnabled) {
       // Live-state owns group freshness here; while its catalog is pending
       // there is no valid group data, so clear rather than render stale.
@@ -457,12 +485,19 @@ export function WorkspaceSection({
         if (!cancelled) setGroups(catalog.groups);
       })
       .catch((err: unknown) => {
+        if (
+          isDaemonUnavailableError(err) ||
+          (availability && availability.getSnapshot() !== 'available')
+        )
+          return;
         console.warn('[WorkspaceSection] group catalog load failed:', err);
       });
     return () => {
       cancelled = true;
     };
   }, [
+    availability,
+    available,
     channelGroupingEnabled,
     client,
     disabled,
@@ -476,7 +511,14 @@ export function WorkspaceSection({
   ]);
 
   const loadChannelCatalog = useCallback(async () => {
-    if (disabled || readOnly || !channelGroupingEnabled) return;
+    if (
+      !available ||
+      disabled ||
+      readOnly ||
+      !channelGroupingEnabled ||
+      (availability && availability.getSnapshot() !== 'available')
+    )
+      return;
     const requestId = ++channelCatalogLoadRequestId.current;
     try {
       const workspaceClient = client.workspaceByCwd(workspace.cwd);
@@ -485,14 +527,30 @@ export function WorkspaceSection({
         workspaceClient.workspaceChannels(),
       ]);
       if (requestId === channelCatalogLoadRequestId.current) {
+        channelCatalogFailed.current = false;
         setChannelCatalog({ catalog, snapshot });
       }
     } catch (err) {
       // Keep the last known catalog across a transient failure; the next
       // poll tick retries.
+      if (
+        isDaemonUnavailableError(err) ||
+        (availability && availability.getSnapshot() !== 'available') ||
+        channelCatalogFailed.current
+      )
+        return;
+      channelCatalogFailed.current = true;
       console.warn('[WorkspaceSection] channel catalog load failed:', err);
     }
-  }, [channelGroupingEnabled, client, disabled, readOnly, workspace.cwd]);
+  }, [
+    availability,
+    available,
+    channelGroupingEnabled,
+    client,
+    disabled,
+    readOnly,
+    workspace.cwd,
+  ]);
 
   useEffect(() => {
     if (!renderSessions || disabled || readOnly || !channelGroupingEnabled) {
@@ -500,7 +558,7 @@ export function WorkspaceSection({
       setChannelCatalog(undefined);
       return;
     }
-    if (!expanded && !searchActive) return;
+    if (!available || (!expanded && !searchActive)) return;
     void loadChannelCatalog();
     // The catalog rides its own tick so instances added or removed while a
     // section is expanded reach the grouping logic without a collapse cycle.
@@ -509,6 +567,7 @@ export function WorkspaceSection({
     }, 10_000);
     return () => clearInterval(timer);
   }, [
+    available,
     channelGroupingEnabled,
     disabled,
     expanded,
@@ -548,7 +607,14 @@ export function WorkspaceSection({
     };
   }, [client, gitPollCwd, workspace.trusted]);
   const loadGitStatus = useCallback(async () => {
-    if (!gitStatusEnabled || !workspace.trusted || !gitPollCwd) return;
+    if (
+      !available ||
+      !gitStatusEnabled ||
+      !workspace.trusted ||
+      !gitPollCwd ||
+      (availability && availability.getSnapshot() !== 'available')
+    )
+      return;
     const generation = ++gitPollGeneration.current;
     const target = { client, cwd: gitPollCwd, trusted: workspace.trusted };
     const isCurrent = () => {
@@ -571,7 +637,12 @@ export function WorkspaceSection({
       gitPollFailed.current = false;
       setGitStatus(status);
     } catch (err) {
-      if (!isCurrent()) return;
+      if (
+        !isCurrent() ||
+        isDaemonUnavailableError(err) ||
+        (availability && availability.getSnapshot() !== 'available')
+      )
+        return;
       // Keep the last known status on a transient failure so a brief network
       // or daemon blip doesn't blank the summary for a whole poll interval; log
       // only on the success→failure transition.
@@ -580,7 +651,14 @@ export function WorkspaceSection({
         gitPollFailed.current = true;
       }
     }
-  }, [client, gitPollCwd, gitStatusEnabled, workspace.trusted]);
+  }, [
+    availability,
+    available,
+    client,
+    gitPollCwd,
+    gitStatusEnabled,
+    workspace.trusted,
+  ]);
 
   // Poll only while the hover summary or a Git-dependent menu is visible.
   useEffect(() => {
@@ -588,7 +666,7 @@ export function WorkspaceSection({
       setGitStatus(undefined);
       return;
     }
-    if (!gitStatusEnabled) return;
+    if (!available || !gitStatusEnabled) return;
     void loadGitStatus();
     const onFocus = () => void loadGitStatus();
     window.addEventListener('focus', onFocus);
@@ -600,6 +678,7 @@ export function WorkspaceSection({
       window.clearInterval(timer);
     };
   }, [
+    available,
     gitPollCwd,
     gitStatusEnabled,
     loadGitStatus,
@@ -784,14 +863,19 @@ export function WorkspaceSection({
     };
   };
   const renderReadOnlySessionRow = (session: DaemonSessionSummary) => {
-    const label = getSessionLabel(session);
+    const label = getSessionLabel(session, untitledSessionLabel);
+    // The body text stays the label; the id lives in the accessible name so
+    // two untitled rows are not announced identically.
+    const accessibleLabel = session.displayName?.trim()
+      ? `${label}. ${trustToOpenLabel}`
+      : `${label} (${session.sessionId.slice(0, 8)}). ${trustToOpenLabel}`;
     const stamp = session.updatedAt || session.createdAt;
     const row = (
       <div
         key={session.sessionId}
         className={styles.sessionItemReadOnly}
         role="note"
-        aria-label={`${label}. ${trustToOpenLabel}`}
+        aria-label={accessibleLabel}
         onMouseEnter={(event) => measureSessionTitleScroll(event.currentTarget)}
       >
         <span className={styles.sessionName} data-web-shell-session-title>

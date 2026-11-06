@@ -232,6 +232,8 @@ protected override async pushProactive(
 
 Use `supportsProactiveDeliveryTarget()` when generic daemon delivery accepts a different target shape, and `supportsProactiveWebhookTarget()` when webhook delivery differs from loops and background results. Keep unsupported targets rejected rather than falling back to another conversation.
 
+An adapter that streams chunks from `onResponseChunk` must also consult `isProactivePromptTurn(sessionId)`: it is `true` for loop and webhook turns, whose result `ChannelBase` delivers once, in full, through `pushProactive` and for which it never calls `onResponseComplete`. Posting progressive output for those turns would post the same text twice, so a chunk-flushing sink must suppress them.
+
 **Media** — populate `envelope.attachments` with images/files. See [Attachments](#attachments) above.
 
 ## Reference Implementations

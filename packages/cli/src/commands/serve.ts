@@ -80,6 +80,25 @@ export function validateManagedLocalFlags(args: readonly string[]): void {
   }
 }
 
+export function validateManagedWebFlags(args: readonly string[]): void {
+  const supported = new Set([
+    '--managed-web-config',
+    '--hostname',
+    '--port',
+    '--allow-origin',
+    '--token',
+    '--require-auth',
+  ]);
+  const unsupported = args.find(
+    (arg) => arg.startsWith('--') && !supported.has(arg.split('=')[0]!),
+  );
+  if (unsupported) {
+    throw new Error(
+      `${unsupported.split('=')[0]} is not supported with --managed-web-config. Only hostname, port, allow-origin and browser authentication options are supported.`,
+    );
+  }
+}
+
 /**
  * Turn Local Control on through the daemon and print the pairing QR.
  *
@@ -223,6 +242,7 @@ interface ServeArgs {
   profile: 'default' | 'hosted-harness';
   managed: boolean;
   'managed-data-dir'?: string;
+  'managed-web-config'?: string;
   'hosted-harness-capability-digest'?: string;
   token?: string;
   'max-sessions'?: number;
@@ -234,6 +254,7 @@ interface ServeArgs {
   'max-journal-events'?: number;
   'max-journal-bytes'?: number;
   workspace?: string | string[];
+  'conversations-dir'?: string;
   'memory-project-scope'?: MemoryProjectScope;
   'require-auth': boolean;
   'enable-session-shell': boolean;
@@ -338,6 +359,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Private persistent data directory for --managed; defaults to <Qwen home>/managed-local.',
       })
+      .option('managed-web-config', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Run only the authenticated Managed Web gateway using a JSON file with apiUrl, tenantId, actorId and signingKeyFile. Requires an independent browser token of at least 32 bytes via QWEN_SERVER_TOKEN or --token.',
+      })
       .option('token', {
         type: 'string',
         description:
@@ -373,6 +400,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'POST /session requests with a mismatched cwd return 400 workspace_mismatch. ' +
           'Defaults to process.cwd() when omitted. ' +
           'Repeat to register isolated workspace runtimes; the first is primary.',
+      })
+      .option('conversations-dir', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Absolute working-directory root shared by standalone and Live Conversations. Overrides QWEN_CONVERSATIONS_DIR; defaults to ~/Documents/Qwen Code/Conversations.',
       })
       .option('memory-project-scope', {
         type: 'string',
@@ -501,6 +534,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Allow unencrypted Agent Host HTTP connections outside loopback (trusted demo networks only).',
       })
       .check((argv) => {
+        if (Array.isArray(argv['conversations-dir'])) {
+          throw new Error('pass --conversations-dir once.');
+        }
         if (argv['local-control'] === true && argv['web'] === false) {
           throw new Error('Local Control requires the Web Shell.');
         }
@@ -846,6 +882,41 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Requires --rate-limit.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
+    if (argv['managed-web-config'] !== undefined) {
+      try {
+        const serveIndex = process.argv.indexOf('serve');
+        if (serveIndex >= 0)
+          validateManagedWebFlags(process.argv.slice(serveIndex + 1));
+        if (
+          argv.managed ||
+          argv.profile !== 'default' ||
+          !argv.web ||
+          argv.workspace !== undefined ||
+          argv['conversations-dir'] !== undefined
+        ) {
+          throw new Error(
+            '--managed-web-config cannot be combined with daemon execution or Managed local mode.',
+          );
+        }
+        const { runManagedWebServe } = await import(
+          '../serve/managed-web-serve.js'
+        );
+        const handle = await runManagedWebServe({
+          configFile: argv['managed-web-config'],
+          hostname: argv.hostname,
+          port: argv.port,
+          token: argv.token,
+          allowOrigins: argv['allow-origin'],
+        });
+        writeStdoutLine(`Managed WebShell: ${handle.url}`);
+        process.exit(await handle.finished);
+      } catch (error) {
+        writeStderrLine(
+          `qwen serve: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        process.exit(1);
+      }
+    }
     if (argv.managed) {
       try {
         const serveIndex = process.argv.indexOf('serve');
@@ -856,6 +927,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           argv.profile !== 'default' ||
           !argv.web ||
           argv.workspace !== undefined ||
+          argv['conversations-dir'] !== undefined ||
           argv.token !== undefined ||
           argv['tls-cert'] ||
           argv['tls-key'] ||
@@ -1123,6 +1195,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           ? { maxJournalBytes: argv['max-journal-bytes'] }
           : {}),
         workspace: argv.workspace,
+        ...(argv['conversations-dir'] !== undefined
+          ? { conversationsDir: argv['conversations-dir'] }
+          : {}),
         ...(argv['memory-project-scope'] !== undefined
           ? { memoryProjectScope: argv['memory-project-scope'] }
           : {}),

@@ -37,6 +37,10 @@ import type {
   DaemonAuthProviderInstallRequest,
   DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
+  DaemonSubscriptionActivation,
+  DaemonSubscriptionConfig,
+  DaemonSubscriptionUserInfo,
+  DaemonSubscriptionFlow,
   DaemonBrand,
   DaemonCapabilities,
   DaemonCreateAgentRequest,
@@ -86,6 +90,8 @@ import type {
   DaemonSessionListPageOptions,
   DaemonSessionCatalogRequest,
   DaemonSessionCatalogResult,
+  DaemonSessionLiveStateBatchRequest,
+  DaemonSessionLiveStateBatchResult,
   DaemonSessionSearchOptions,
   DaemonSessionSearchResult,
   DaemonWorkspaceSessionInfo,
@@ -200,6 +206,8 @@ import type {
   DaemonChannelPairingRequestsSnapshot,
   DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
+  DaemonChannelEventsQuery,
+  DaemonChannelEventsSnapshot,
   DaemonChannelsSnapshot,
   DaemonChannelStartupRequest,
   DaemonChannelTypeCatalog,
@@ -481,6 +489,21 @@ const MCP_RESTART_DEFAULT_TIMEOUT_MS =
   MCP_RESTART_SERVER_DEADLINE_MS + MCP_RESTART_CLIENT_HEADROOM_MS;
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
 const urlEncode = encodeURIComponent;
+
+function channelEventsQuerySuffix(
+  query: DaemonChannelEventsQuery | undefined,
+): string {
+  const params = new URLSearchParams();
+  if (query?.limit !== undefined) params.set('limit', String(query.limit));
+  if (query?.types?.length) params.set('type', query.types.join(','));
+  // One parameter per name: a Channel name may contain a comma, so a joined
+  // list could not be split back into the names the caller asked for.
+  for (const channel of query?.channels ?? [])
+    params.append('channel', channel);
+  if (query?.since !== undefined) params.set('since', query.since);
+  const encoded = params.toString();
+  return encoded ? `?${encoded}` : '';
+}
 
 function transcriptPageSuffix(
   opts: DaemonSessionTranscriptPageOptions,
@@ -1281,6 +1304,45 @@ export class DaemonClient {
     return new WorkspaceDaemonClient(this, urlEncode(workspaceCwd));
   }
 
+  /**
+   * Issue a native REST request for a daemon route without ACP translation.
+   * HTTP status and response-body handling belong to the caller. The timeout
+   * covers the connection through response headers, not a streaming body;
+   * pass a signal to cancel body consumption, or `0` to disable the timer.
+   */
+  async requestRest(
+    path: string,
+    init: RequestInit = {},
+    timeoutMs?: number,
+  ): Promise<Response> {
+    if (
+      !/^\/(?![/\\\t\r\n])/.test(path) ||
+      new URL(path, 'http://daemon.invalid').origin !== 'http://daemon.invalid'
+    ) {
+      throw new Error('Daemon REST requests require an absolute route path');
+    }
+    const base = new URL(`${this.baseUrl}/`, 'http://daemon.invalid');
+    if (
+      !new URL(
+        `${this.baseUrl}${path}`,
+        'http://daemon.invalid',
+      ).pathname.startsWith(base.pathname)
+    ) {
+      throw new Error('Daemon REST requests must stay within the base path');
+    }
+    const headers = new Headers(this.headers());
+    new Headers(init.headers).forEach((value, name) =>
+      headers.set(name, value),
+    );
+    return this.fetchWithTimeout(
+      `${this.baseUrl}${path}`,
+      { ...init, headers },
+      undefined,
+      timeoutMs,
+      'rest',
+    );
+  }
+
   // -- Lifecycle / discovery ---------------------------------------------
 
   async health(): Promise<{ status: string }> {
@@ -1881,6 +1943,31 @@ export class DaemonClient {
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /workspace/hooks');
         return (await res.json()) as DaemonWorkspaceHooksStatus;
+      },
+    );
+  }
+
+  async approveWorkspaceHooks(
+    decision: 'approve' | 'reject',
+    hash?: string,
+  ): Promise<{ decision: 'approve' | 'reject'; reloaded: boolean }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/hooks/approve`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(
+          hash === undefined ? { decision } : { decision, hash },
+        ),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/hooks/approve');
+        }
+        return (await res.json()) as {
+          decision: 'approve' | 'reject';
+          reloaded: boolean;
+        };
       },
     );
   }
@@ -3594,6 +3681,28 @@ export class DaemonClient {
     opts: { clientId?: string; timeoutMs?: number } = {},
   ): Promise<DaemonWorkspaceSessionLiveState> {
     return this.workspaceByCwd(workspaceCwd).getSessionLiveState(opts);
+  }
+
+  /**
+   * Read complete memory-only snapshots for selected workspaces in one native
+   * REST request. Callers pre-flight `workspace_session_live_state_batch` once
+   * and use the single-workspace route on older daemons.
+   */
+  getSessionsLiveState(
+    request: DaemonSessionLiveStateBatchRequest,
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<DaemonSessionLiveStateBatchResult> {
+    return this.jsonRequest<DaemonSessionLiveStateBatchResult>(
+      '/sessions/live-state',
+      'POST /sessions/live-state',
+      {
+        method: 'POST',
+        body: request,
+        mode: 'rest',
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs,
+      },
+    );
   }
 
   async listSessionGroups(
@@ -6191,6 +6300,17 @@ export class DaemonClient {
     );
   }
 
+  workspaceChannelEvents(
+    query?: DaemonChannelEventsQuery,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelEventsSnapshot> {
+    return this.jsonRequest<DaemonChannelEventsSnapshot>(
+      `/workspace/channels/events${channelEventsQuerySuffix(query)}`,
+      'GET /workspace/channels/events',
+      { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
   upsertWorkspaceChannel(
     name: string,
     request: DaemonChannelUpsertRequest,
@@ -6605,6 +6725,7 @@ export class DaemonClient {
       'POST /language',
       {
         method: 'POST',
+        mode: 'rest',
         body: {
           language,
           syncOutputLanguage: opts?.syncOutputLanguage ?? false,
@@ -7088,6 +7209,99 @@ export class DaemonClient {
   }
 
   // -- Auth device-flow ---------------------------------------------------
+
+  async getSubscriptionConfig(
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<DaemonSubscriptionConfig> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription`,
+      { headers: this.headers({}), signal: opts.signal },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'GET /auth/subscription');
+        return (await res.json()) as DaemonSubscriptionConfig;
+      },
+    );
+  }
+
+  async startSubscriptionLogin(): Promise<DaemonSubscriptionFlow> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription/flows`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'POST /auth/subscription/flows');
+        return (await res.json()) as DaemonSubscriptionFlow;
+      },
+    );
+  }
+
+  async getSubscriptionLogin(
+    id: string,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<DaemonSubscriptionFlow> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription/flows/${urlEncode(id)}`,
+      { headers: this.headers({}), signal: opts.signal },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'GET /auth/subscription/flows/:id');
+        return (await res.json()) as DaemonSubscriptionFlow;
+      },
+    );
+  }
+
+  async cancelSubscriptionLogin(id: string): Promise<void> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription/flows/${urlEncode(id)}`,
+      { method: 'DELETE', headers: this.headers({}) },
+      async (res) => {
+        if (res.status !== 204 && res.status !== 404)
+          throw await this.failOnError(
+            res,
+            'DELETE /auth/subscription/flows/:id',
+          );
+      },
+    );
+  }
+
+  async getSubscriptionUserInfo(
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<DaemonSubscriptionUserInfo | null> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription/userinfo`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: '{}',
+        signal: opts.signal,
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'POST /auth/subscription/userinfo');
+        return (await res.json()) as DaemonSubscriptionUserInfo | null;
+      },
+    );
+  }
+
+  async signOutSubscription(): Promise<void> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription/revoke`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'POST /auth/subscription/revoke');
+      },
+    );
+  }
 
   /**
    * Start an OAuth device-flow login for the given provider. The daemon
@@ -7799,6 +8013,18 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  workspaceChannelEvents(
+    query?: DaemonChannelEventsQuery,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelEventsSnapshot> {
+    return this.channelRequest(
+      `/channels/events${channelEventsQuerySuffix(query)}`,
+      'GET /workspaces/:workspace/channels/events',
+      undefined,
+      opts,
+    );
+  }
+
   upsertWorkspaceChannel(
     name: string,
     request: DaemonChannelUpsertRequest,
@@ -8485,6 +8711,17 @@ export class WorkspaceDaemonClient {
     return this.get('/hooks', 'GET /workspaces/:workspace/hooks');
   }
 
+  approveWorkspaceHooks(
+    decision: 'approve' | 'reject',
+    hash?: string,
+  ): Promise<{ decision: 'approve' | 'reject'; reloaded: boolean }> {
+    return this.post(
+      '/hooks/approve',
+      'POST /workspaces/:workspace/hooks/approve',
+      hash === undefined ? { decision } : { decision, hash },
+    );
+  }
+
   workspaceEnv(): Promise<DaemonWorkspaceEnvStatus> {
     return this.get('/env', 'GET /workspaces/:workspace/env');
   }
@@ -8535,6 +8772,18 @@ export class WorkspaceDaemonClient {
       'POST /workspaces/:workspace/memory',
       { ...req, scope: 'workspace' },
       clientId,
+    );
+  }
+
+  setUiLanguage(
+    language: string,
+    clientId?: string,
+  ): Promise<SetUserLanguageResult> {
+    return this.client.workspaceJsonRequest<SetUserLanguageResult>(
+      this.workspaceSelector,
+      '/language',
+      'POST /workspaces/:workspace/language',
+      { method: 'POST', body: { language }, clientId, mode: 'rest' },
     );
   }
 
@@ -9167,6 +9416,23 @@ export class WorkspaceDaemonClient {
       {},
       opts?.clientId,
       opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  activateSubscription(
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<DaemonSubscriptionActivation> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/auth/subscription',
+      'POST /workspaces/:workspace/auth/subscription',
+      {
+        method: 'POST',
+        body: {},
+        signal: opts.signal,
+        mode: 'rest',
+        timeoutMs: 65000,
+      },
     );
   }
 

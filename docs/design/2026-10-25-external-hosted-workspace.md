@@ -25,7 +25,7 @@ Explicitly out of scope for this design (moves to later phases on request): publ
 | Provider HTTP additions   | `provision`, `observe`                | + `storage:provision`, `storage:observe`, publication/capture (§5, §7 reuse wire discipline) |
 | Workspace state machine   | —                                     | same state machine as LOCAL/SSH_LOCAL with new ownership kind `EXTERNAL`                     |
 
-The profile is selected by `QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER=external-workspace` in a deployment where Workspace files and/or shell are explicitly enabled. The phase‑1 scratch profile and its validation (`validateExternalRuntime`) remain untouched.
+The profile is selected by `QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER=external-workspace` in a deployment where Workspace files and/or shell are explicitly enabled. The phase‑1 scratch profile and its validation rules (now owned by `ExternalRuntimeProviderFactory.validate`) remain untouched.
 
 ## 3. Identity and wire contract (shared transport discipline)
 

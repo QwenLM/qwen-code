@@ -39,7 +39,7 @@ describe('no-AK integration CI wiring', () => {
         path.join(ROOT, '.github/workflows/ci.yml'),
         'utf8',
       );
-      const routingBlocks = ['test', 'test_macos', 'test_windows'].map(
+      const routingBlocks = ['test', 'test_macos_shards', 'test_windows'].map(
         (jobName) => {
           const testStep = getWorkflowStep(
             getWorkflowJob(workflow, jobName),
@@ -105,7 +105,7 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
 
-    for (const jobName of ['test', 'test_macos']) {
+    for (const jobName of ['test', 'test_macos_shards']) {
       const testStep = getWorkflowStep(
         getWorkflowJob(workflow, jobName),
         'Run tests and generate reports',
@@ -119,7 +119,7 @@ describe('no-AK integration CI wiring', () => {
         // The Linux job runs the suites through the lane script.
         jobName === 'test'
           ? '.github/scripts/ci/run-unit-test-lanes.sh'
-          : 'npm run test:ci',
+          : 'node scripts/run-macos-ci-group.js',
         'RC=$?',
         'set -e',
         'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
@@ -229,17 +229,22 @@ describe('no-AK integration CI wiring', () => {
       './cli/list_directory.test.ts',
       './cli/tool-hook-context.test.ts',
       './cli/tool-hook-updated-input.test.ts',
+      './cli/mods-prompt-submit.test.ts',
+      './cli/qwen-serve-conversations-root.test.ts',
       './cli/qwen-serve-routes.test.ts',
       './cli/qwen-serve-session-cd.test.ts',
       './cli/qwen-serve-streaming.test.ts',
       './cli/qwen-serve-standalone-concurrency.test.ts',
+      './helpers/hosted-sse-observer.test.ts',
       './interactive/workflow-completion.test.ts',
       './interactive/workflow-intent.test.ts',
       './interactive/workflow-mode.test.ts',
       './interactive/mods-tool-middleware.test.ts',
+      './interactive/mods-prompt-submit.test.ts',
       './interactive/statusline-parity.test.ts',
       './interactive/tui-editor-parity.test.ts',
       './interactive/tui-input-ownership.test.ts',
+      './interactive/ink-agent-loop-parity.test.ts',
       './sdk-typescript/abort-and-lifecycle.test.ts',
       './sdk-typescript/permission-control.test.ts',
       './sdk-typescript/sdk-mcp-server.test.ts',
@@ -353,6 +358,7 @@ describe('no-AK integration CI wiring', () => {
       'cli/telemetry.test.ts': 'Real model required',
       'cli/todo_write.test.ts': 'Real model required',
       'cli/tool-search.test.ts': 'Real model required',
+      'cli/update-target-version.test.ts': 'Runtime budget',
       'cli/utf-bom-encoding.test.ts': 'Runtime budget',
       'cli/write_file.test.ts': 'Real model required',
       'export-artifact-contract.test.ts': 'Runtime budget',
@@ -413,7 +419,7 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
-    const macosJob = getWorkflowJob(workflow, 'test_macos');
+    const macosJob = getWorkflowJob(workflow, 'test_macos_shards');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
     const gateJob = getWorkflowJob(workflow, 'integration_no_ak');
     const classifyJob = getWorkflowJob(workflow, 'classify_pr');
@@ -426,7 +432,7 @@ describe('no-AK integration CI wiring', () => {
     expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
     for (const [name, job] of Object.entries({
       test: ubuntuJob,
-      test_macos: macosJob,
+      test_macos_shards: macosJob,
       test_windows: windowsJob,
     })) {
       expect(job, `${name} must not run the no-AK script`).not.toContain(

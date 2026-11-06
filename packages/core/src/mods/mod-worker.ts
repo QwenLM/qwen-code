@@ -21,6 +21,7 @@ import {
   MOD_END_TIMEOUT_MS,
   type ModCommand,
   type ModPlugin,
+  type ModQueuedPrompt,
   type ModReply,
   type ModSessionFacts,
   type ModWorkerRequest,
@@ -37,6 +38,7 @@ import {
   assertModDepth,
   engineOrigin,
   isModMethod,
+  promptSubmitCall,
   record,
   validateInput,
   validateResult,
@@ -69,6 +71,11 @@ const turnAborts = new Map<
   number,
   { resolve: () => void; reject: (error: Error) => void }
 >();
+// $.prompt.submit calls waiting for the host to queue what they submitted.
+const promptQueues = new Map<
+  number,
+  { resolve: (refused?: string) => void; reject: (error: Error) => void }
+>();
 let serial = 0;
 let epoch = 0;
 let rootId = 0;
@@ -91,6 +98,8 @@ let builtinTool: string | undefined;
 let surface: 'terminal' | null = null;
 let sites: readonly ModRenderSite[] = [];
 let version = 'unknown';
+// Whether the host runs what `$.prompt.submit` submits.
+let submitsPrompts = false;
 // The events this host runs: those it raises only where it draws need a site.
 let supported: readonly ModEvent[] = MOD_EVENTS;
 // A render hook that keeps failing the same way is said once per load.
@@ -204,14 +213,24 @@ class Realm {
     const status = this.vm.newFunction('modStatus', (id, key, input) => {
       const call = calls.get(this.vm.getNumber(id));
       const name = this.vm.getString(key);
-      if (name === 'validate' || name === 'validateResult') {
+      if (
+        name === 'validate' ||
+        name === 'validateResult' ||
+        name === 'promptFallback'
+      ) {
         if (!call?.live || callAbandoned(call))
           throw new Error('Mod continuation is no longer active.');
         const json = this.vm.getString(input);
+        if (name !== 'validate' && Buffer.byteLength(json) > MOD_MAX_BYTES)
+          throw new Error('Mod result is too large.');
         assertModDepth(json, 'Mod value');
         const value = JSON.parse(json);
-        if (name === 'validateResult') validateResult(call.event, value);
-        else validateInput(call.event, value, call.input);
+        if (name === 'validate') validateInput(call.event, value, call.input);
+        else {
+          validateResult(call.event, value, call.input);
+          if (name === 'promptFallback')
+            call.promptFallback = Promise.resolve(value);
+        }
         return this.vm.undefined;
       }
       if (name === 'aborted')
@@ -507,6 +526,7 @@ async function dispatch(
       assertLive(call);
       recovery = {
         ...call,
+        last: call.last ? (call.promptFallback ?? call.last) : undefined,
         id: ++serial,
         budget: new ModBudget(1000),
         live: true,
@@ -529,6 +549,9 @@ async function dispatch(
         );
         if (value !== undefined) {
           validateResult(event, value, call.input);
+          await assertDropBeforeNext(event, value, recovery.last ?? call.last);
+          if (event === 'prompt.submit' && (recovery.last ?? call.last))
+            return await (recovery.last ?? call.last);
           if (event === 'tool.check')
             return await ownCheck(
               value as ModToolCheckResult,
@@ -556,7 +579,10 @@ async function dispatch(
           text: event + ' hook skipped: ' + why.slice(0, 2000),
         });
       }
-      return await (recovery.last ?? call.last ?? next(input, frames));
+      return await (recovery.last ??
+        call.last ??
+        call.promptFallback ??
+        next(input, frames));
     }
   } finally {
     call.live = false;
@@ -572,6 +598,26 @@ async function dispatch(
       calls.delete(recovery.id);
     }
   }
+}
+
+// A prompt a hook passed on has entered beneath it, so the hook cannot then
+// drop it; it fails, and its last next stands. Handing on the drop its next
+// resolved to is no drop of its own.
+async function assertDropBeforeNext(
+  event: ModEvent,
+  value: unknown,
+  last: Promise<unknown> | undefined,
+): Promise<void> {
+  if (
+    event !== 'prompt.submit' ||
+    !last ||
+    !record(value) ||
+    !('drop' in value)
+  )
+    return;
+  const below = await last.catch(() => undefined);
+  if (!record(below) || below['drop'] !== value['drop'])
+    throw new Error('a drop after its next(e) was answered');
 }
 
 // A tree that does not validate is told in Claude Code's words, unprefixed.
@@ -623,16 +669,31 @@ async function hostCall(
     }
   }
   if (!isModMethod(method)) throw new Error('Mod API not supported: ' + method);
-  validateInput(method, value, {});
   const plugin = realms[call.plugin].plugin;
+  // A submitted prompt raises prompt.submit as a typed one does, through
+  // every hook but the caller's. What arrives beneath them last is queued once
+  // they have all answered. Its hooks do not run beneath the caller's, so a
+  // call the caller does not await still queues after the caller returns.
+  const submits = method === 'prompt.submit';
+  const input = submits ? promptSubmitCall(value, plugin.name) : value;
+  if (!submits) validateInput(method, value, {});
+  // No hook hears a prompt the host would not run, or one with no words.
+  else if (!submitsPrompts)
+    return { drop: 'this host does not run prompts a Mod submits' };
+  else if (!String((input as ModInput)['text']).trim())
+    return { drop: 'the prompt is empty' };
+  else if (overPromptBudget(input as ModInput))
+    return { drop: 'the prompt is too long for a Mod payload' };
+  const detached = notice(method) || submits;
+  let arrived: ModInput | undefined;
   const invoke = async () => {
     const result = await dispatch(
       method,
-      value,
+      input as ModInput,
       { plugin: plugin.name, tier: 'user' },
       frames,
       async (e) => {
-        assertLive(notice(method) ? undefined : call);
+        assertLive(detached ? undefined : call);
         if (call.epoch !== epoch)
           throw new Error('Mod call belongs to an ended dispatch.');
         if (method === 'command.register') {
@@ -654,7 +715,9 @@ async function hostCall(
               qwen: {
                 claudeCode: CLAUDE_CODE_EVENTS_VERSION,
                 events: supported,
-                methods: [...MOD_METHODS, ...MOD_READS].sort(),
+                methods: [...MOD_METHODS, ...MOD_READS]
+                  .filter((name) => name !== 'prompt.submit' || submitsPrompts)
+                  .sort(),
               },
             },
           };
@@ -675,6 +738,14 @@ async function hostCall(
           await abortTurn(String(e['turnId']));
           return { value: undefined };
         }
+        if (submits) {
+          arrived = {
+            text: e['text'],
+            ...(e['context'] !== undefined && { context: e['context'] }),
+            origin: e['origin'],
+          };
+          return arrived;
+        }
         if (method === 'ui.invalidate') {
           send({
             type: 'invalidate',
@@ -694,15 +765,18 @@ async function hostCall(
         return { value: undefined };
       },
       0,
-      notice(method) ? undefined : call,
+      detached ? undefined : call,
     );
     if (!record(result)) throw new Error('Invalid Mod API result.');
+    if (submits) return queueArrived(result, arrived, plugin.name);
     if ('deny' in result) throw new Error(String(result['deny']));
     return result['value'];
   };
   // Void log notifications do not suspend their caller's execution, and a
-  // sleep is the caller's own time; other calls lend the caller's budget.
-  return notice(method) || method === 'clock.sleep'
+  // sleep is the caller's own time; nor does a submit, whose hooks are the
+  // other Mods' time and may still run after the caller has moved on. Other
+  // calls lend the caller's budget.
+  return detached || method === 'clock.sleep'
     ? invoke()
     : call.budget.lend(invoke);
 }
@@ -740,6 +814,44 @@ function abortTurn(turnId: string): Promise<void> {
     turnAborts.set(id, { resolve, reject });
     send({ type: 'turn-abort', id, turnId });
   }).finally(() => turnAborts.delete(id));
+}
+
+// A hook that passed the prompt on more than once queues it once, as it last
+// arrived, and the call resolves to that.
+// A prompt is held to half a Mod payload, as a typed one is, so what the call
+// resolves to, which echoes it, always fits: it is never refused once queued.
+const overPromptBudget = (prompt: ModInput) =>
+  Buffer.byteLength(JSON.stringify(prompt)) > MOD_MAX_BYTES / 2;
+
+async function queueArrived(
+  result: ModInput,
+  arrived: ModInput | undefined,
+  plugin: string,
+): Promise<ModInput> {
+  if (typeof result['drop'] === 'string') return result;
+  if (!arrived)
+    return { drop: 'a hook answered without passing the prompt on' };
+  if (!String(arrived['text']).trim())
+    return { drop: 'a hook left the prompt empty' };
+  if (overPromptBudget(arrived))
+    return { drop: 'a hook made the prompt too long for a Mod payload' };
+  const context = arrived['context'] as string[] | undefined;
+  const origin = arrived['origin'] as ModInput;
+  const refused = await queuePrompt({
+    plugin,
+    text: String(arrived['text']),
+    ...(context !== undefined && { context }),
+    ...(origin['asUser'] === true && { asUser: true }),
+  });
+  return refused === undefined ? arrived : { drop: refused };
+}
+
+function queuePrompt(prompt: ModQueuedPrompt): Promise<string | undefined> {
+  const id = ++serial;
+  return new Promise<string | undefined>((resolve, reject) => {
+    promptQueues.set(id, { resolve, reject });
+    send({ type: 'prompt-queue', id, prompt });
+  }).finally(() => promptQueues.delete(id));
 }
 
 function cancelAbandonedOperations(): void {
@@ -807,6 +919,11 @@ port.on('message', async (request: ModWorkerRequest) => {
     const pending = turnAborts.get(request.id);
     if (request.error !== undefined) pending?.reject(new Error(request.error));
     else pending?.resolve();
+    return;
+  }
+  if (request.type === 'prompt-queue-result') {
+    if (!busy || request.root !== rootId) return;
+    promptQueues.get(request.id)?.resolve(request.refused);
     return;
   }
   if (request.type === 'tool-check') {
@@ -880,8 +997,13 @@ port.on('message', async (request: ModWorkerRequest) => {
       surface = request.surface;
       version = request.version;
       sites = request.sites ?? [];
+      submitsPrompts = request.submits === true;
       supported = MOD_EVENTS.filter(
-        (event) => !MOD_HOST_EVENTS.includes(event) || sites.length > 0,
+        (event) =>
+          !MOD_HOST_EVENTS.includes(event) ||
+          (event === 'prompt.submit'
+            ? request.prompts === true
+            : sites.length > 0),
       );
       for (const plugin of request.plugins) {
         assertLive();
@@ -938,6 +1060,7 @@ port.on('message', async (request: ModWorkerRequest) => {
         commands: [...commands.values()],
         tools: hooked('tool.call').length + hooked('tool.check').length > 0,
         turnStart: hooked('turn.start').length > 0,
+        promptSubmit: hooked('prompt.submit'),
         turnComplete: hooked('turn.complete'),
         render: hooked('ui.render'),
       };
@@ -977,6 +1100,29 @@ port.on('message', async (request: ModWorkerRequest) => {
         [],
         async (e) => ({ turnId: e['turnId'] }),
       );
+    } else if (request.type === 'prompt-submit') {
+      // The prompt that enters is the one that arrives beneath the hooks.
+      let arrived: ModInput | undefined;
+      const settled = await dispatch(
+        'prompt.submit',
+        { ...request.input },
+        engineOrigin,
+        [],
+        async (e) => {
+          arrived = {
+            text: e['text'],
+            ...(e['context'] !== undefined && { context: e['context'] }),
+          };
+          return { ...arrived, origin: e['origin'] };
+        },
+      );
+      result =
+        record(settled) && typeof settled['drop'] === 'string'
+          ? { drop: settled['drop'], byHook: true }
+          : (arrived ?? {
+              drop: 'a hook answered without passing the prompt on',
+              byHook: false,
+            });
     } else if (request.type === 'render') {
       if (!sites.includes(request.input.component))
         throw new Error('This host draws no ' + request.input.component + '.');
@@ -1030,11 +1176,13 @@ port.on('message', async (request: ModWorkerRequest) => {
     for (const operation of [
       ...hostOperations.values(),
       ...turnAborts.values(),
+      ...promptQueues.values(),
     ]) {
       operation.reject(new Error('Mod root dispatch has ended.'));
     }
     hostOperations.clear();
     turnAborts.clear();
+    promptQueues.clear();
     starting = false;
     builtinTool = undefined;
     rootBudget = undefined;

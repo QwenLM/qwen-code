@@ -134,6 +134,13 @@ describe('defaultModalities', () => {
     casesFor('returns image + video for', [
       ['qwen-vl-max', ONLY_IMAGE_VIDEO],
       ['qwen3-vl-plus', has({ image: true, video: true })],
+      ['qwen2.5-vl-32b-instruct', ONLY_IMAGE_VIDEO],
+      [
+        'quantized Qwen2.5-VL builds',
+        ONLY_IMAGE_VIDEO,
+        'Qwen/Qwen2.5-VL-3B-Instruct-AWQ',
+      ],
+      ['qwen2-vl-7b-instruct', ONLY_IMAGE_VIDEO],
       ['coder-model (same as qwen3.5-plus)', IMAGE_VIDEO, 'coder-model'],
       ['qwen3.5-plus', ONLY_IMAGE_VIDEO],
       ['qwen3.7-plus', ONLY_IMAGE_VIDEO],
@@ -153,6 +160,7 @@ describe('defaultModalities', () => {
     ]);
 
     casesFor('returns image for', [
+      ['qvq-72b-preview', IMAGE],
       [
         'qwen3.8-max-preview (provider-prefixed)',
         IMAGE,
@@ -219,8 +227,16 @@ describe('defaultModalities', () => {
   describe('Kimi', () => {
     casesFor('returns image + video for', [
       ['kimi-k3', ONLY_IMAGE_VIDEO],
+      ['kimi-k3.1-pro', ONLY_IMAGE_VIDEO],
+      ['k3.1-pro', ONLY_IMAGE_VIDEO],
+      ['k3.1-pro-highspeed', ONLY_IMAGE_VIDEO],
       ['kimi-k2.5', ONLY_IMAGE_VIDEO],
     ]);
+
+    it('returns image only for the K3 256K variant', () => {
+      expect(defaultModalities('k3-256k')).toEqual({ image: true });
+      expect(defaultModalities('kimi-k3-256k')).toEqual({ image: true });
+    });
 
     it('returns text-only for kimi-k2', () => {
       TEXT_ONLY('kimi-k2');
@@ -256,6 +272,42 @@ describe('defaultModalities', () => {
       ],
       ['doubao-pro-32k', TEXT_ONLY],
       ['doubao-lite-4k', TEXT_ONLY],
+    ]);
+  });
+
+  describe('other open-weight vision models', () => {
+    casesFor('returns image for', [
+      ['llama3.2-vision (Ollama)', IMAGE, 'llama3.2-vision:11b'],
+      [
+        'Llama-3.2-11B-Vision-Instruct',
+        IMAGE,
+        'meta-llama/Llama-3.2-11B-Vision-Instruct',
+      ],
+      [
+        'Llama-4-Scout-17B-16E-Instruct',
+        IMAGE,
+        'meta-llama/Llama-4-Scout-17B-16E-Instruct',
+      ],
+      ['llama4 (Ollama)', IMAGE, 'llama4:16x17b'],
+      ['llava', IMAGE, 'llava:13b'],
+      ['pixtral-12b', IMAGE],
+      ['pixtral-large-latest', IMAGE],
+      [
+        'Mistral-Small-3.1-24B-Instruct',
+        IMAGE,
+        'mistralai/Mistral-Small-3.1-24B-Instruct-2503',
+      ],
+      ['mistral-small3.2 (Ollama)', IMAGE, 'mistral-small3.2:24b'],
+    ]);
+
+    casesFor('returns text-only for', [
+      ['llama3.2 (text model)', TEXT_ONLY, 'llama3.2:3b'],
+      ['llama3.1', TEXT_ONLY, 'llama3.1:8b'],
+      [
+        'Mistral Small 3 (text model)',
+        TEXT_ONLY,
+        'mistralai/Mistral-Small-24B-Instruct-2501',
+      ],
     ]);
   });
 
@@ -309,10 +361,41 @@ describe('isTieredEffortWireModel', () => {
     expect(isTieredEffortWireModel('Qwen3.8-Max')).toBe(true);
   });
 
+  it('matches the invite-series and qwen4 prefixes case-insensitively', () => {
+    expect(isTieredEffortWireModel('qwen-latest-series-invite-202610-m6')).toBe(
+      true,
+    );
+    expect(isTieredEffortWireModel('QWEN-LATEST-SERIES-INVITE-x')).toBe(true);
+    expect(isTieredEffortWireModel('qwen4')).toBe(true);
+    expect(isTieredEffortWireModel('qwen4-plus')).toBe(true);
+    expect(isTieredEffortWireModel('Qwen4-Max-2026-10-01')).toBe(true);
+  });
+
   it('rejects other qwen models and non-qwen ids', () => {
     expect(isTieredEffortWireModel('qwen3.7-max')).toBe(false);
+    expect(isTieredEffortWireModel('qwen3.9-max')).toBe(false);
+    expect(isTieredEffortWireModel('qwen-latest-series-other')).toBe(false);
+    expect(isTieredEffortWireModel('company-qwen4')).toBe(false);
     expect(isTieredEffortWireModel('coder-model')).toBe(false);
     expect(isTieredEffortWireModel('glm-5.2')).toBe(false);
     expect(isTieredEffortWireModel(undefined)).toBe(false);
+  });
+
+  it('keeps a configured toggle-only protocol ahead of the new prefixes', () => {
+    expect(
+      isTieredEffortWireModel('qwen-latest-series-invite-202610-m6', {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      }),
+    ).toBe(false);
+    expect(
+      isTieredEffortWireModel('qwen4-plus', {
+        thinking: true,
+        efforts: ['low', 'high'],
+        defaultEffort: 'high',
+        disableField: 'reasoning_effort',
+      }),
+    ).toBe(true);
   });
 });

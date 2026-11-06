@@ -262,24 +262,17 @@ fn sel_register(name: &CStr) -> *mut c_void {
     }
 }
 
-/// Whether `cls` actually implements `sel`, via `class_respondsToSelector`.
-///
-/// macOS 14 (Sonoma) compatibility guard: `SLSEventAuthenticationMessage`
-/// exists on macOS 14, but `messageWithEventRecord:pid:version:` was only
-/// added in macOS 15 (Sequoia). `sel_registerName` always succeeds (it just
-/// interns the string), so a `!sel.is_null()` check is not enough — we must
-/// confirm the class responds before calling `objc_msgSend`, or the runtime
-/// raises `NSInvalidArgumentException: unrecognized selector`. See #1503.
+/// Check an optional class factory before calling `objc_msgSend`.
+/// `class_respondsToSelector` checks instances, so it misses `+` factory methods.
 fn class_responds_to_selector(cls: *mut c_void, sel: *mut c_void) -> bool {
     if cls.is_null() || sel.is_null() {
         return false;
     }
-    type RespondsToFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
-    static SYM: OnceLock<Option<RespondsToFn>> = OnceLock::new();
-    let f =
-        *SYM.get_or_init(|| find_sym(b"class_respondsToSelector\0").map(|p| unsafe { as_fn(p) }));
+    type GetClassMethodFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
+    static SYM: OnceLock<Option<GetClassMethodFn>> = OnceLock::new();
+    let f = *SYM.get_or_init(|| find_sym(b"class_getClassMethod\0").map(|p| unsafe { as_fn(p) }));
     match f {
-        Some(f) => unsafe { f(cls, sel) },
+        Some(f) => !unsafe { f(cls, sel) }.is_null(),
         None => false,
     }
 }
@@ -321,13 +314,9 @@ pub(super) fn post_to_pid(pid: pid_t, event_ptr: *mut c_void, attach_auth_messag
     if attach_auth_message {
         // Build and attach SLSEventAuthenticationMessage.
         //
-        // macOS 14 (Sonoma) compatibility: the class exists on macOS 14 but
-        // `messageWithEventRecord:pid:version:` was added in macOS 15. Guard
-        // with `class_respondsToSelector` (a `!sel.is_null()` check is not
-        // enough — `sel_registerName` interns any name); when the selector is
-        // absent we skip the auth envelope and fall through to the plain
-        // `SLEventPostToPid` below. Chromium-class targets may not receive the
-        // event on macOS 14, but the daemon no longer crashes. See #1503.
+        // SkyLight factories vary across OS versions. An interned selector
+        // does not prove availability; keep missing factories on the plain
+        // PID-post path instead of raising an unrecognized-selector exception.
         let cls = objc_class(c"SLSEventAuthenticationMessage");
         let sel = sel_register(c"messageWithEventRecord:pid:version:");
         let factory = factory_msg_send_fn();
@@ -958,7 +947,33 @@ pub fn with_menu_shortcut_activation(
 
 #[cfg(test)]
 mod tests {
-    use super::{make_key_window_record, preserves_exact_existing_focus};
+    use super::{
+        class_responds_to_selector, make_key_window_record, objc_class,
+        preserves_exact_existing_focus, sel_register,
+    };
+
+    #[test]
+    fn class_factory_guard_distinguishes_class_and_instance_methods() {
+        let class = objc_class(c"NSString");
+        assert!(!class.is_null());
+        assert!(class_responds_to_selector(
+            class,
+            sel_register(c"stringWithUTF8String:")
+        ));
+        assert!(!class_responds_to_selector(
+            class,
+            sel_register(c"UTF8String")
+        ));
+        assert!(!class_responds_to_selector(
+            class,
+            sel_register(c"qwenMissingFactoryForGuardTest:")
+        ));
+        assert!(!class_responds_to_selector(
+            std::ptr::null_mut(),
+            sel_register(c"new")
+        ));
+        assert!(!class_responds_to_selector(class, std::ptr::null_mut()));
+    }
 
     #[test]
     fn make_key_records_address_only_the_exact_window() {
