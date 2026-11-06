@@ -55,19 +55,20 @@ export function BrowserNotificationControl() {
       : BellOff;
   const platform =
     typeof navigator === 'undefined' ? '' : (navigator.platform ?? '');
-  // iOS reports `iPhone`/`iPad`/`iPod`, and an iPad in desktop mode reports
-  // `MacIntel` with a touch screen; neither runs the macOS steps below. An
-  // empty or unrecognized platform keeps both guides rather than losing help.
-  const isAppleMobile =
-    /iPhone|iPad|iPod/i.test(platform) ||
-    (typeof navigator !== 'undefined' &&
-      navigator.maxTouchPoints > 1 &&
-      /Mac/i.test(platform));
-  const showMacHelp = /Mac/i.test(platform) && !isAppleMobile;
+  const touchPoints =
+    typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints;
   const showWindowsHelp = /^Win/i.test(platform);
-  // Neither guide applies on a phone or tablet, so render none. An empty or
-  // unrecognized desktop platform keeps both rather than losing the help.
-  const showBothGuides = !isAppleMobile && !showMacHelp && !showWindowsHelp;
+  // Apple mobile reports `iPhone`/`iPad`/`iPod`, and an iPad in desktop mode
+  // reports `MacIntel` with a touch screen. Android reports a `Linux` platform
+  // with touch points, so match any touch device that is not Windows rather
+  // than listing Apple's names. Neither guide applies on a phone or tablet.
+  const isMobile =
+    !showWindowsHelp && (/iPhone|iPad|iPod/i.test(platform) || touchPoints > 1);
+  const showMacHelp = /Mac/i.test(platform) && !isMobile;
+  // An empty or unrecognized desktop platform keeps both rather than losing
+  // the help.
+  const showBothGuides = !isMobile && !showMacHelp && !showWindowsHelp;
+  const showAnyGuide = showMacHelp || showWindowsHelp || showBothGuides;
   const cancelClose = () => clearTimeout(timer.current);
   const show = () => {
     cancelClose();
@@ -219,9 +220,11 @@ export function BrowserNotificationControl() {
             </p>
           )}
           <p>{t('browserNotifications.helpWhen')}</p>
-          <p className="text-muted-foreground">
-            {t('browserNotifications.helpSystem')}
-          </p>
+          {showAnyGuide && (
+            <p className="text-muted-foreground">
+              {t('browserNotifications.helpSystem')}
+            </p>
+          )}
           {(showMacHelp || showBothGuides) && (
             <details className="group shrink-0">
               <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">

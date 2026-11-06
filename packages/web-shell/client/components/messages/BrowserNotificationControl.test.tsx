@@ -256,6 +256,9 @@ it.each([
   // An iPad in desktop mode reports `MacIntel` but has a touch screen, and
   // the macOS steps do not apply to it.
   ['MacIntel', 5, []],
+  // Android reports a Linux platform with touch points; the desktop guides
+  // name settings screens a phone does not have.
+  ['Linux armv8l', 5, []],
   ['Linux x86_64', 0, ['macOS', 'Windows']],
   ['', 0, ['macOS', 'Windows']],
 ])(
@@ -264,6 +267,16 @@ it.each([
     expect(
       operatingSystemGuides(platform, touch).map((g) => g.heading),
     ).toEqual(guides);
+  },
+);
+
+it.each(['iPhone', 'Linux armv8l'])(
+  'does not point at steps it does not render on %s',
+  (platform) => {
+    operatingSystemGuides(platform, 5);
+    expect(document.querySelector(popup)!.textContent).not.toMatch(
+      /follow the steps below/i,
+    );
   },
 );
 
