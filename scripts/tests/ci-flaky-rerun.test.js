@@ -545,13 +545,34 @@ describe('ci flaky rerun patrol', () => {
     expect(kinds).toContain('comment');
   });
 
-  it('reruns before recording the hidden action marker', async () => {
+  it('reruns before posting the visible rerun notice', async () => {
     const c = client();
     await actOnDecision(c, target(), decision());
-    expect(c.calls).toEqual([
-      ['rerunFailedJobs', 123],
-      ['comment', 42, expect.stringMatching(/^<!-- .*action=rerun.* -->$/)],
+    expect(c.calls.map((call) => call[0])).toEqual([
+      'rerunFailedJobs',
+      'comment',
     ]);
+    const body = c.calls[1][2];
+    expect(body).toContain('runner timeout');
+    expect(body).toContain('re-run on the same commit');
+    expect(body).toContain('No Update Branch');
+    expect(body).toContain('<summary>中文说明</summary>');
+    expect(body).toContain('runner 超时');
+    expect(body).toMatch(/<!-- .*action=rerun.* -->$/);
+  });
+
+  it('keeps markers parseable inside the visible notices', async () => {
+    // The visible text must not break dedup or the per-head action count:
+    // both read the marker back out of the posted comment body.
+    const c = client();
+    await actOnDecision(c, target(), decision());
+    const posted = {
+      body: c.calls.find((call) => call[0] === 'comment')[2],
+      createdAt: '2026-07-12T07:25:00.000Z',
+      author: { login: 'patrol-bot' },
+    };
+    expect(alreadyHandled([posted], target(), 'patrol-bot')).toBe(true);
+    expect(currentActionCount(pr(), [posted], 'patrol-bot')).toBe(1);
   });
 
   it('posts deterministic failures in English with folded Chinese', async () => {
@@ -572,16 +593,20 @@ describe('ci flaky rerun patrol', () => {
     expect(c.calls[0][2]).toContain('action=comment');
   });
 
-  it('records no_action without a visible comment', async () => {
+  it('records no_action with a visible manual-review notice', async () => {
     const c = client();
     await actOnDecision(
       c,
       target(),
       decision({ action: 'no_action', confidence: 'low' }),
     );
-    expect(c.calls).toEqual([
-      ['comment', 42, expect.stringMatching(/^<!-- .*action=no_action.* -->$/)],
-    ]);
+    expect(c.calls).toHaveLength(1);
+    const body = c.calls[0][2];
+    expect(body).toContain('could not be confidently classified');
+    expect(body).toContain('runner timeout');
+    expect(body).toContain('<summary>中文说明</summary>');
+    expect(body).toContain('未采取自动动作');
+    expect(body).toMatch(/<!-- .*action=no_action.* -->$/);
   });
 
   it('rejects malformed, unsafe, or mismatched decisions', async () => {
@@ -604,19 +629,25 @@ describe('ci flaky rerun patrol', () => {
   });
 
   it('neutralizes mentions and markup copied into visible reasons', async () => {
-    const c = client();
-    await actOnDecision(
-      c,
-      target(),
-      decision({
-        action: 'comment',
-        reason_en: '@qwen-maintainers <script>alert(1)</script>',
-        reason_zh: '@全体成员 </details>',
-      }),
-    );
-    expect(c.calls[0][2]).toContain('@\u200bqwen-maintainers');
-    expect(c.calls[0][2]).toContain('&lt;script&gt;');
-    expect(c.calls[0][2]).toContain('@\u200b全体成员 &lt;/details&gt;');
+    // All three actions now surface the reason in a visible comment, so the
+    // escaping must hold for every action, not just `comment`.
+    for (const action of ['rerun', 'comment', 'no_action']) {
+      const c = client();
+      await actOnDecision(
+        c,
+        target(),
+        decision({
+          action,
+          confidence: action === 'no_action' ? 'low' : 'high',
+          reason_en: '@qwen-maintainers <script>alert(1)</script>',
+          reason_zh: '@全体成员 </details>',
+        }),
+      );
+      const body = c.calls.find((call) => call[0] === 'comment')[2];
+      expect(body).toContain('@\u200bqwen-maintainers');
+      expect(body).toContain('&lt;script&gt;');
+      expect(body).toContain('@\u200b全体成员 &lt;/details&gt;');
+    }
   });
 
   it('stops after three actions on the same head', async () => {
