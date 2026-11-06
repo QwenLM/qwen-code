@@ -15,8 +15,10 @@ implements transport, authentication, authorization and actual browser acceptanc
 `hostSessionOnly?: boolean` (default `false`). An injected provider is used
 without constructing the Java provider. Omitting the provider is only valid
 together with `baseUrl`: the built-in Java provider is then constructed from it,
-and supplying neither throws during render instead of resolving requests against
-`<origin>/undefined`.
+and supplying neither renders the shell's own error fallback instead of resolving
+requests against `<origin>/undefined`. The guard's message reaches `console.error`,
+not the host: the boundary that renders the fallback sits above the guard, so a
+host's own `try/catch` around the mount sees a normal return.
 
 Host-only mode opens only the explicit `sessionId`. Missing IDs render an empty
 conversation region, without listing, choosing or creating Sessions. The internal

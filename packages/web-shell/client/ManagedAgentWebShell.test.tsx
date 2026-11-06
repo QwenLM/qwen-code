@@ -97,6 +97,27 @@ describe('ManagedAgentWebShell', () => {
     expect(container.querySelector('[data-web-shell-root]')).not.toBeNull();
   });
 
+  it('clears the fallback once the config arrives (resetKeys)', async () => {
+    // The boundary clears through `resetKeys`, which is the whole recovery
+    // path for a host that mounts before its config resolves: without it the
+    // shell stays on the fallback until the host remounts the component.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await act(async () => {
+        root.render(<ManagedAgentWebShell />);
+      });
+      expect(container.textContent).toContain('Something went wrong');
+
+      await act(async () => {
+        root.render(<ManagedAgentWebShell baseUrl="https://product.example" />);
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(container.textContent).not.toContain('Something went wrong');
+    expect(container.querySelector('[data-web-shell-root]')).not.toBeNull();
+  });
+
   it('rejects a null base URL, not just an absent one', async () => {
     // A plain-JS host erases the prop type at runtime: an unresolved config
     // value arrives as `null`, which would otherwise resolve every request
