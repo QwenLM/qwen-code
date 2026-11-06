@@ -53,10 +53,10 @@ com/alibaba/qwen/code/managedagent/persistence/AgentSessionCommands.java|INSERT 
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionCommands.java|SELECT title_revision FROM ma_session WHERE tenant_id = ? AND session_id = ?
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionCommands.java|SELECT title_revision FROM ma_session WHERE tenant_id = ? AND session_id = ? AND session_kind = 'PUBLIC'
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionCommands.java|UPDATE ma_session SET gmt_modified =
+com/alibaba/qwen/code/managedagent/persistence/AgentSessionCommands.java|UPDATE ma_session SET harness_boot_id = COALESCE(harness_boot_id, ?), gmt_modified = ?, version = version + 1 WHERE tenant_id = ? AND session_id = ?
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionCommands.java|UPDATE ma_session SET status = 'CLOSED', gmt_modified = ?, version = version + 1 WHERE tenant_id = ? AND session_id = ?
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionCommands.java|UPDATE ma_session SET title = ?, harness_boot_id = COALESCE(harness_boot_id, ?), gmt_modified = ?, version = version + 1 WHERE tenant_id = ? AND session_id = ?
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionCommands.java|UPDATE ma_turn SET status = 'CANCELLING', retry_after = NULL, gmt_modified = ?, version = version + 1 WHERE tenant_id = ? AND session_id = ? AND turn_id = ? AND status IN ('ACCEPTED', 'RUNNING')
-com/alibaba/qwen/code/managedagent/persistence/AgentSessionCommands.java|UPDATE ma_session SET harness_boot_id =
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT 1 FROM ma_session_head WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION' AND (state <> 'ACTIVE' OR recovery_status <> 'READY')
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT 1 FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND (status IN ('RECOVERY_BLOCKED', 'CANCELLING') OR status IN ('ACCEPTED', 'RUNNING') AND error_code IN (?, ?, ?)) LIMIT 1
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')
