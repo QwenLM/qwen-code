@@ -544,7 +544,11 @@ final class RuntimeExecutionDispatcher {
                 || !binding.getBindingId().equals(execution.getBindingId())
                 || binding.getGeneration() != execution.getRuntimeGeneration()
                 || !binding.getRequest().getScope().equals(session.getSession().getScope())
-                || !binding.getRequest().getIsolationKey().equals(execution.getHarnessSessionId())) {
+                // Shared workspace bindings carry no session isolation key; ownership
+                // there rests on belongsTo + bindingId + generation + scope above, the
+                // same shape acquireRecovery uses (#16023 R1-25).
+                || (!HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
+                        && !binding.getRequest().getIsolationKey().equals(execution.getHarnessSessionId()))) {
             return failed(conflict("workspace_close_identity_unverified", "Persisted Tool ownership conflicts"));
         }
         if (noStart != null) {

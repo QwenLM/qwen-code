@@ -156,6 +156,47 @@ class RuntimeExecutionDispatcherTest {
         verify(fixture.renewal).cancel(false);
     }
 
+    @Test
+    void workspaceSharedAcknowledgementToleratesANullIsolationKey() {
+        // R1-25: a workspace-isolated binding carries a null isolationKey by
+        // construction. The acknowledgement identity check must skip the
+        // session-equality arm for shared bindings (ownership still rests on
+        // belongsTo + bindingId + generation + scope) instead of throwing an
+        // NPE before acknowledgeV2 ever runs.
+        var fixture = new Fixture();
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace");
+        var request = new RuntimeProvisionRequest(scope, null,
+                com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE,
+                "workspace");
+        when(fixture.binding.getRequest()).thenReturn(request);
+        when(fixture.binding.getLease()).thenReturn(fixture.lease);
+        when(fixture.binding.getBindingId()).thenReturn("binding");
+        when(fixture.binding.getGeneration()).thenReturn(7L);
+        when(fixture.session.getScope()).thenReturn(scope);
+        var record = mock(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.class);
+        when(record.getSession()).thenReturn(fixture.session);
+        when(fixture.sessions.findById(scope, "runtime")).thenReturn(record);
+        var execution = mock(ToolExecutionRecord.class);
+        var reference = Map.<String, Object>of("sessionId", "runtime", "promptId", "prompt",
+                "callId", "call", "argsDigest", "digest", "dispatchMode", "deferred");
+        when(execution.isSettled()).thenReturn(true);
+        when(execution.getResult()).thenReturn(Map.<String, Object>of("executionStatus", "success"));
+        when(execution.getReference()).thenReturn(reference);
+        when(execution.belongsTo(record)).thenReturn(true);
+        when(execution.getBindingId()).thenReturn("binding");
+        when(execution.getRuntimeGeneration()).thenReturn(7L);
+        when(execution.getRuntimeSessionId()).thenReturn("runtime");
+        when(execution.getHarnessSessionId()).thenReturn("harness");
+        when(fixture.transport.acknowledgeV2(fixture.lease, fixture.session, reference))
+                .thenReturn(CompletableFuture.completedFuture(null));
+
+        fixture.dispatcher.acknowledgePersistedTools(fixture.binding, execution)
+                .toCompletableFuture().join();
+
+        verify(fixture.transport).acknowledgeV2(fixture.lease, fixture.session, reference);
+    }
+
     private static final class Fixture {
         private static final Duration LEASE = Duration.ofSeconds(60);
         private static final Map<String, Object> REFERENCE = Map.of("sessionId", "runtime");
@@ -172,6 +213,8 @@ class RuntimeExecutionDispatcherTest {
         private final SessionContext context = mock(SessionContext.class);
         private final RuntimeSession session = mock(RuntimeSession.class);
         private final RuntimeLease lease = mock(RuntimeLease.class);
+        private final RuntimeBindingRecord binding = mock(RuntimeBindingRecord.class);
+        private final RuntimeSessionRepository sessions = mock(RuntimeSessionRepository.class);
         private final ToolExecutionRecord prepared = mock(ToolExecutionRecord.class);
         private final ToolExecutionRecord executing = mock(ToolExecutionRecord.class);
         private final CompletableFuture<Map<String, Object>> answer = new CompletableFuture<>();
@@ -180,8 +223,6 @@ class RuntimeExecutionDispatcherTest {
         private Fixture() {
             var registry = mock(RuntimeBindingRegistry.class);
             var bindings = mock(RuntimeBindingRepository.class);
-            var sessions = mock(RuntimeSessionRepository.class);
-            var binding = mock(RuntimeBindingRecord.class);
             var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
                     WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
             when(binding.getRequest()).thenReturn(new RuntimeProvisionRequest(scope, "harness", "local"));

@@ -233,6 +233,9 @@ final class WorkspaceCsiApplicationInventory {
                     + "model_id:VARBINARY,model_revision:BIGINT,selected_approval_mode:VARCHAR,approval_revision:BIGINT,"
                     + "plan_enabled:BOOLEAN,permission_rules_json:LONGTEXT,public_child_agents_version:INT,harness_instance_id:VARBINARY,harness_owner_boot_id:VARBINARY,"
                     + "harness_placement_epoch:BIGINT,harness_placement_state:VARCHAR"),
+            declaration("ma_session_principal", "tenant_id,session_id",
+                    "tenant_id:VARBINARY,session_id:VARBINARY,version:BIGINT,user_id:VARBINARY,"
+                    + "actor_present:BOOLEAN,actor_subject_id:VARBINARY,gmt_create:BIGINT"),
             declaration("ma_session_head", "tenant_key,harness_key",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,storage_version:INT,state:VARCHAR,"
                     + "writer_generation:BIGINT,writer_id:VARBINARY,writer_lease_until:BIGINT,lease_token_hash:CHAR,"
@@ -2188,7 +2191,7 @@ final class WorkspaceCsiApplicationInventory {
                         "tenant_id=T&parent_session_id=sessions", "tenant_id=T&root_session_id=sessions");
                 case "ma_session_head" -> query(table, "tenant_key=BT&harness_key=BS", "tenant_id=T&session_id=sessions");
                 case "ma_public_event", "ma_turn", "ma_session_record", "ma_user_message",
-                        "ma_user_message_command", "ma_user_message_queue" ->
+                        "ma_user_message_command", "ma_user_message_queue", "ma_session_principal" ->
                         query(table, "tenant_id=T&session_id=sessions");
                 case "ma_event_stream" -> query(table, "tenant_id=T&session_id=sessions", "artifact_refs_resource_key=resourceKeys");
                 case "ma_message" -> query(table, "tenant_id=T&session_id=sessions", "body_resource_key=resourceKeys");
@@ -2306,7 +2309,8 @@ final class WorkspaceCsiApplicationInventory {
                                                 && Objects.equals(binding.text("workspace_id"), row.text("workspace_id")));
                     }
                     case "ma_session", "ma_turn", "ma_public_event", "ma_event_stream", "ma_message",
-                            "ma_session_record", "ma_session_journal_tx", "ma_channel_binding", "ma_schedule", "ma_schedule_occurrence" ->
+                            "ma_session_record", "ma_session_journal_tx", "ma_channel_binding", "ma_schedule",
+                            "ma_schedule_occurrence", "ma_session_principal" ->
                             otherSession(row.text("tenant_id"), row.text("workspace_id"), row.text("session_id"))
                                     && (row.cell("session_scope_key") == null || Objects.equals(row.text("session_scope_key"),
                                             com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(row.text("tenant_id"), row.text("session_id"))));
@@ -2978,6 +2982,11 @@ final class WorkspaceCsiApplicationInventory {
                         && "identity".equals(row.text("record_encoding")) && row.binary("record_bytes") != null
                         && Objects.equals((long) row.binary("record_bytes").length, row.number("byte_length"))
                         && hash(row.binary("record_bytes")).equals(row.text("record_digest")));
+                // The ownership row is session-scoped without a workspace column;
+                // version 1 is the only layout this build writes (ManagedSessionPrincipal).
+                case "ma_session_principal" -> expect(table, row, rawSession(row)
+                        && Objects.equals(1L, row.number("version"))
+                        && row.binary("user_id") != null && row.bool("actor_present") != null);
                 case "ma_resource" -> expect(table, row, rawNative(row)
                         && com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), row.text("resource_id")).equals(row.text("resource_key"))
                         && row.cell("deletion_operation_key").isNull()
