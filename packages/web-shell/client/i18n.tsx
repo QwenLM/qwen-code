@@ -384,11 +384,21 @@ const EN: Messages = {
   'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
+  'managed.question.title': 'Answer the questions',
+  'managed.question.other': 'Other answer',
+  'managed.question.expired':
+    'This question has expired. Refresh to check the session.',
+  'managed.question.tooLarge':
+    'Keep each text answer within 8192 characters and all answers within 32 KiB.',
+  'managed.question.failed':
+    'The answer could not be confirmed. Retry the same answers or refresh to check their status.',
+  'managed.question.forbidden':
+    "Only the Session's owner or a Workspace operator can answer these questions.",
   'managed.approval.failed':
     'The approval answer could not be confirmed. Retry the same option or refresh to check its status.',
-  'managed.approval.loadFailed': 'Pending approvals could not be loaded.',
-  'managed.approval.refreshFailed': 'Pending approvals could not be refreshed.',
-  'managed.approval.retry': 'Retry loading approvals',
+  'managed.approval.loadFailed': 'Pending requests could not be loaded.',
+  'managed.approval.refreshFailed': 'Pending requests could not be refreshed.',
+  'managed.approval.retry': 'Retry loading requests',
   'managed.approval.forbidden':
     "Only the Session's owner or a Workspace operator can answer this approval.",
   'managed.approval.argumentsUnavailable':
@@ -5300,11 +5310,20 @@ const ZH: Messages = {
   'managed.discarded': '已丢弃本次请求。草稿已放回输入框。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
+  'managed.question.title': '请回答以下问题',
+  'managed.question.other': '其他答案',
+  'managed.question.expired': '此问题已过期，请刷新查看会话状态。',
+  'managed.question.tooLarge':
+    '每个文本答案最多 8192 个字符，全部答案最多 32 KiB。',
+  'managed.question.failed':
+    '尚未确认回答结果，请重试相同的答案或刷新查看状态。',
+  'managed.question.forbidden':
+    '只有会话所有者或工作区操作员可以回答这些问题。',
   'managed.approval.failed':
     '无法确认审批回答的结果。请重试同一选项，或刷新以查看状态。',
-  'managed.approval.loadFailed': '待审批请求加载失败。',
-  'managed.approval.refreshFailed': '待审批请求刷新失败。',
-  'managed.approval.retry': '重新读取审批',
+  'managed.approval.loadFailed': '待处理请求加载失败。',
+  'managed.approval.refreshFailed': '待处理请求刷新失败。',
+  'managed.approval.retry': '重新读取请求',
   'managed.approval.forbidden':
     '只有此会话的拥有者或所属 Workspace 的操作者可以回答这项审批。',
   'managed.approval.argumentsUnavailable': '此项审批的工具参数暂不可见。',
