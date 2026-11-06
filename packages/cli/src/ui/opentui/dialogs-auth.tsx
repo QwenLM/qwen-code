@@ -1323,7 +1323,7 @@ function SubscriptionView({
   const { cursor, cursorRef, setCursor } = useBatchSafeCursor();
   const actions = [
     ...(state.status === 'ready' &&
-    flow.connectionError &&
+    flow.connectionError !== undefined &&
     !flow.modelSelectionRequired
       ? [
           {
