@@ -25,7 +25,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Tool execution admission and dispatch on an ordinary session-class binding
  * decide the CSI pin under the Session root alone and take no tenant guard
- * there (design 2026-11-05-managed-dispatch-tenant-guards).
+ * there (designs 2026-11-05-managed-dispatch-tenant-guards and
+ * 2026-11-05-managed-admission-placement).
  */
 class ExecutionControlTenantGuardsTest {
     protected DataSource source;
@@ -60,12 +61,42 @@ class ExecutionControlTenantGuardsTest {
     }
 
     @Test
-    void sessionIsolatedAdmissionCompletesWhileThePublicationGuardIsHeld() throws Exception {
+    void sessionIsolatedAdmissionCompletesWhileBothTenantGuardsAreHeld() throws Exception {
         var fixture = sessionFixture(true);
-        // Admission still takes placement for the harness drain fence; the
-        // publication guard is no longer part of it.
-        var admitted = whileGuardsHeld(fixture.id, false, () -> fixture.prepare("call"));
+        var admitted = whileGuardsHeld(fixture.id, true, () -> fixture.prepare("call"));
         assertEquals(ToolExecutionRecord.State.PREPARED, admitted.getState());
+    }
+
+    @Test
+    void withoutASessionRootAdmissionKeepsPlacement() throws Exception {
+        var fixture = sessionFixture(false);
+        var waited = org.junit.jupiter.api.Assertions.assertThrows(Exception.class,
+                () -> whileGuardsHeld(fixture.id, true, () -> fixture.prepare("call")));
+        assertTrue(waited instanceof java.util.concurrent.TimeoutException, waited.toString());
+    }
+
+    @Test
+    void drainWaitsForTheSessionRootAnAdmissionHolds() throws Exception {
+        // A placement-free admission holds the Session root through commit, so
+        // the drain fence cannot close between its read and its insert.
+        var fixture = sessionFixture(true);
+        String harness = fixture.id + "-harness";
+        var waited = org.junit.jupiter.api.Assertions.assertThrows(Exception.class,
+                () -> whileRootHeld(fixture.id, harness, () -> {
+                    bindings.requestHarnessDrain(fixture.id, harness);
+                    return null;
+                }));
+        assertTrue(waited instanceof java.util.concurrent.TimeoutException, waited.toString());
+    }
+
+    @Test
+    void admissionAfterACommittedDrainIsRefusedWithoutPlacement() throws Exception {
+        var fixture = sessionFixture(true);
+        bindings.requestHarnessDrain(fixture.id, fixture.id + "-harness");
+        var refused = org.junit.jupiter.api.Assertions.assertThrows(java.util.concurrent.ExecutionException.class,
+                () -> whileGuardsHeld(fixture.id, true, () -> fixture.prepare("call")));
+        assertTrue(refused.getCause() instanceof RuntimeBrokerException closed
+                && "runtime_admission_closed".equals(closed.getCode()), refused.getCause().toString());
     }
 
     @Test
@@ -104,6 +135,36 @@ class ExecutionControlTenantGuardsTest {
             }
         }
         return new RuntimeRecoveryContract.Fixture(bindings, sessions, executions, tenant, "runtime-session", true);
+    }
+
+    /** Holds a Session root on another connection, as a placement-free admission does. */
+    protected <T> T whileRootHeld(String tenant, String session, Callable<T> action) throws Exception {
+        var held = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        try (var holder = Executors.newSingleThreadExecutor(); var subject = Executors.newSingleThreadExecutor()) {
+            var hold = holder.submit(() -> {
+                try (Connection connection = source.getConnection()) {
+                    connection.setAutoCommit(false);
+                    try (var lock = connection.prepareStatement(
+                            "SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
+                        lock.setBytes(1, ManagedSchemaKeys.identity(tenant));
+                        lock.setBytes(2, ManagedSchemaKeys.identity(session));
+                        lock.executeQuery().close();
+                    }
+                    held.countDown();
+                    assertTrue(release.await(60, TimeUnit.SECONDS));
+                    connection.rollback();
+                }
+                return null;
+            });
+            try {
+                assertTrue(held.await(10, TimeUnit.SECONDS));
+                return subject.submit(action).get(5, TimeUnit.SECONDS);
+            } finally {
+                release.countDown();
+                hold.get(30, TimeUnit.SECONDS);
+            }
+        }
     }
 
     /** Holds the tenant publication guard, and placement when asked, on another connection. */

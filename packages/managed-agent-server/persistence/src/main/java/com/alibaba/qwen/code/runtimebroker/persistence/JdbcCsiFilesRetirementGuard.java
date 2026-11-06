@@ -196,7 +196,7 @@ public final class JdbcCsiFilesRetirementGuard {
         return original;
     }
 
-    private static boolean sessionRootExists(Connection connection, String tenantId, String sessionId,
+    static boolean sessionRootExists(Connection connection, String tenantId, String sessionId,
             boolean locking) throws SQLException {
         try (PreparedStatement statement = statement(connection,
                 "SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ?"
