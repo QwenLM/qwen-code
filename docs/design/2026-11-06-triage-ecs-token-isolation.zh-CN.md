@@ -167,9 +167,13 @@ CI 里由新 job `publish-triage` 运行该脚本：`needs: triage`、
 仍能发布）、与兄弟 publisher 相同的 per-RUN 并发组与 10 分钟上限、
 `publish-tmux` 的 runner 路由，以及只含 publisher 脚本、`assign-issue-owner.mjs`、
 `issue-owners.json` 的 sparse checkout，钉 `github.sha`、
-`persist-credentials: false`（`publish-verify` 的模式）。它下载 drafts artifact
-（按兄弟 lane 的规矩剥离符号链接与非常规文件），持 bot PAT 运行脚本。PAT 从不
-进入 triage job 的 agent 环境；publisher 从不执行 agent 提供的代码，只处理数据。
+`persist-credentials: false`（`publish-verify` 的模式）。由于该 job 可能落在
+持久池上，checkout 之前先采取与 agent job 相同的 workspace 防护：属主恢复 +
+`Recreate runner Git metadata` 步骤，使早前 run 种下的 git 元数据无法在随后
+用 PAT 发布的 job 里执行（由 `qwen-runner-checkout-workflow.test.js` 钉住）。
+它下载 drafts artifact（按兄弟 lane 的规矩剥离符号链接与非常规文件），持 bot
+PAT 运行脚本。PAT 从不进入 triage job 的 agent 环境；publisher 从不执行 agent 提供的
+代码，只处理数据。
 
 本地则由 skill 在运行末尾用用户自己的 `gh` 认证运行同一脚本。一套协议、一份
 实现、两种凭据上下文。

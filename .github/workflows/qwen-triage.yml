@@ -1476,13 +1476,16 @@ jobs:
           fi
 
   # Publish the triage agent's drafts with the write PAT. Like publish-tmux,
-  # this job may land on the persistent pool; it is safe there because it
-  # runs only trusted base-repo code — a sparse checkout pinned to
+  # this job may land on the persistent pool, so it takes the agent jobs'
+  # workspace precautions: ownership restore plus a fresh .git before
+  # checkout, so git metadata planted by an earlier run cannot execute here.
+  # It runs only trusted base-repo code — a sparse checkout pinned to
   # github.sha, never agent-provided code — and the publisher imports only
-  # node builtins plus one relative helper, so a reused workspace offers no
-  # bare-specifier node_modules to hijack. The triage job above holds no
-  # write credential in the agent environment; this job is the sole writer
-  # to GitHub for the triage lane.
+  # node builtins plus one relative helper, leaving no bare-specifier
+  # node_modules to hijack in a reused workspace. The agent environment in
+  # the triage job holds no write credential; this job is the only path from
+  # the agent's drafts to GitHub. (The triage job's own host steps — the
+  # reaction and the lifecycle comments — also write with the PAT.)
   publish-triage:
     needs: ['triage']
     # Publish even when the agent run failed or timed out: drafts written
@@ -1502,8 +1505,8 @@ jobs:
     timeout-minutes: 10
     # Checks out only trusted base-repo scripts at the default-branch head
     # (issue_comment/pull_request_target events resolve github.sha there);
-    # no PR code, so the persistent pool is safe (publish-tmux rule).
-    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    # no agent-provided code runs here. Kill-switch:
+    # MAINTAINER_ECS_RUNNER_DISABLED.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
@@ -1518,6 +1521,16 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; artifact download may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; artifact download may fail on leftover root-owned files"
+
+      # The pool reuses workspaces: an earlier agent run owned this directory
+      # and could have planted .git hooks/config that checkout's git commands
+      # would execute — in the one job that holds the write PAT. Drop the
+      # metadata first, exactly as the triage/tmux/verify jobs do before
+      # their checkouts (pinned by qwen-runner-checkout-workflow.test.js).
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       # Sparse and pinned: the publisher, the owner-assignment helpers it
       # imports, and the owner policy — nothing else (publish-verify pattern).

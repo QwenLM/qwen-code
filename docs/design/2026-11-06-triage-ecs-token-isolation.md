@@ -203,9 +203,13 @@ a timeout or failure still publish), per-RUN concurrency group and 10-minute
 cap like the sibling publishers, `publish-tmux` runner routing, and a sparse
 checkout of only the publisher script, `assign-issue-owner.mjs`, and
 `issue-owners.json`, pinned to `github.sha` with `persist-credentials: false`
-(the `publish-verify` pattern). It downloads the drafts artifact — collected
-with the sibling lanes' symlink/non-regular-file strip — and runs the script
-with the bot PAT. The PAT never enters the triage job's agent environment,
+(the `publish-verify` pattern). Because the job may land on the persistent
+pool, it takes the agent jobs' workspace precautions before that checkout:
+ownership restore and a `Recreate runner Git metadata` step, so git metadata
+planted by an earlier run cannot execute in the job that then publishes with
+the PAT (pinned by `qwen-runner-checkout-workflow.test.js`). It downloads the
+drafts artifact — collected with the sibling lanes'
+symlink/non-regular-file strip — and runs the script with the bot PAT. The PAT never enters the triage job's agent environment,
 and the publisher never executes agent-provided code, only data.
 
 Locally, the skill runs the same script at the end of the run with the user's

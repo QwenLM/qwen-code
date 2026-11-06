@@ -15,7 +15,10 @@ import { expect, it } from 'vitest';
 
 const jobs = [
   ['desktop-release', 'prepare'],
-  ...['triage', 'tmux-testing', 'verify'].map((name) => ['qwen-triage', name]),
+  ...['triage', 'publish-triage', 'tmux-testing', 'verify'].map((name) => [
+    'qwen-triage',
+    name,
+  ]),
   ...[
     'test',
     'lint_and_static',
