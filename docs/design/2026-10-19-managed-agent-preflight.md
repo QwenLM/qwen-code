@@ -99,7 +99,17 @@ problem at the same place, unless a profile the arguments or the environment
 activate tells which one Spring read; a file this process cannot read names the
 service account when that cannot read it either, and otherwise says to run the
 check as that account. The other rows then read the arguments, the process
-environment and the packaged defaults. `Binder` produces
+environment and the packaged defaults.
+
+A file holds a secret by one rule, the configuration reference's: a key named
+as a password, token, key or secret, in any spelling Spring binds, and not an ID
+or the path to a file that holds one. The rule judges every key a file holds:
+those of each document, including one no profile activates, those on a
+commented-out line, the property a config tree value file holds, and a
+parameter of a value, such as a JDBC URL's `?password=`, or the password of a
+URL's user information. A path can be a configuration file and a config tree
+value file at once, as `config/application.yml` is under a config tree imported
+over `config/`, and is then judged both ways. `Binder` produces
 `ManagedAgentProperties`, the Harness probe uses the JDK HTTP client, and the
 database probe uses JDBC with a five-second connect and socket timeout.
 

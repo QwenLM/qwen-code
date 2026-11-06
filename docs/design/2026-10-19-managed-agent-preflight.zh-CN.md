@@ -49,7 +49,9 @@
 
 ## 实现
 
-`ManagedAgentServerApplication` 在 `SpringApplication.run` 之前拦截 `--check`，因此不会启动监听、调度器、数据源连接池或 worker。`ServerEnvironment` 按 `SpringApplication` 的方式准备 servlet 环境：参数、进程环境，然后经 `EnvironmentPostProcessorApplicationListener` 运行 classpath 上的所有 environment post-processor，并启用宽松绑定。它不创建 context；升级命令读取设置所用的 `ResolvedConfiguration` 也准备同一个环境。`config` 行先列出准备好的属性源来自的文件，再列出 Spring 在某个位置读到但其中没有任何设置的文件。准备过程抛出异常时，该行写明 Spring 拒绝的原因：被当作不存在或不可读的文件，或 YAML 错误所在的文件和行号。由于 Spring 的错误信息不包含这两者，需要在 Spring 会查找的文件中定位：列出自身错误与 Spring 一致（问题相同、位置相同）的每个文件；若参数或环境变量激活的 profile 能确定 Spring 读的是哪一个，则只列那一个。本进程读不了的文件，若 service account 也读不了，就写 service account；否则提示以该账号运行检查。此时其余各行读取参数、进程环境和打包默认值。`Binder` 生成 `ManagedAgentProperties`，Harness 探测使用 JDK HTTP client，数据库探测使用 JDBC，连接与 socket 超时均为 5 秒。
+`ManagedAgentServerApplication` 在 `SpringApplication.run` 之前拦截 `--check`，因此不会启动监听、调度器、数据源连接池或 worker。`ServerEnvironment` 按 `SpringApplication` 的方式准备 servlet 环境：参数、进程环境，然后经 `EnvironmentPostProcessorApplicationListener` 运行 classpath 上的所有 environment post-processor，并启用宽松绑定。它不创建 context；升级命令读取设置所用的 `ResolvedConfiguration` 也准备同一个环境。`config` 行先列出准备好的属性源来自的文件，再列出 Spring 在某个位置读到但其中没有任何设置的文件。准备过程抛出异常时，该行写明 Spring 拒绝的原因：被当作不存在或不可读的文件，或 YAML 错误所在的文件和行号。由于 Spring 的错误信息不包含这两者，需要在 Spring 会查找的文件中定位：列出自身错误与 Spring 一致（问题相同、位置相同）的每个文件；若参数或环境变量激活的 profile 能确定 Spring 读的是哪一个，则只列那一个。本进程读不了的文件，若 service account 也读不了，就写 service account；否则提示以该账号运行检查。此时其余各行读取参数、进程环境和打包默认值。
+
+文件是否含 secret 只按一条规则判断，即配置参考的规则：键名表示 password、token、key 或 secret（Spring 宽松绑定认可的任何写法都算），且不是 ID，也不是保存 secret 的文件的路径。这条规则作用于文件中的每个键：每个文档里的键（包括没有任何 profile 激活的文档）、注释掉的行里的键、config tree 值文件对应的属性，以及取值中的参数（例如 JDBC URL 的 `?password=`）或 URL 用户信息中的密码。同一路径可以既是配置文件又是 config tree 值文件（例如 config tree 导入在 `config/` 之上时的 `config/application.yml`），此时两种身份都要判断。`Binder` 生成 `ManagedAgentProperties`，Harness 探测使用 JDK HTTP client，数据库探测使用 JDBC，连接与 socket 超时均为 5 秒。
 
 ## 验收
 

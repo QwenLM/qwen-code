@@ -15,6 +15,7 @@ import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -102,6 +103,23 @@ class ServerEnvironmentTest {
     private static int freePort() throws IOException {
         try (ServerSocket probe = new ServerSocket(0)) {
             return probe.getLocalPort();
+        }
+    }
+
+    /**
+     * Skips where another account cannot reach the temporary directory, as
+     * under macOS's per-user TMPDIR.
+     */
+    private void assumeOthersCanSearchTheDirectory() {
+        for (Path parent = directory.toAbsolutePath().getParent(); parent != null;
+                parent = parent.getParent()) {
+            try {
+                assumeTrue(Files.getPosixFilePermissions(parent)
+                        .contains(PosixFilePermission.OTHERS_EXECUTE),
+                        parent + " shuts other accounts out");
+            } catch (IOException error) {
+                assumeTrue(false, parent + ": " + error.getMessage());
+            }
         }
     }
 
@@ -329,6 +347,7 @@ class ServerEnvironmentTest {
 
     @Test
     void namesTheServiceAccountWhereTheServerCannotReadTheFile() throws IOException {
+        assumeOthersCanSearchTheDirectory();
         // The guide's second terminal: neither root nor the service account
         // runs the check, with server.env's QWEN_MANAGED_AGENT_SERVICE_USER.
         Path locked = write("etc/application.yml", "server.port: 9090\n");
@@ -361,6 +380,7 @@ class ServerEnvironmentTest {
 
     @Test
     void namesTheAccountThatMustReadTheFileItCannot() throws IOException {
+        assumeOthersCanSearchTheDirectory();
         // As root reads every file, the failure Spring would meet is given.
         Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwxr-xr-x"));
         Path shared = write("shared.yml", "server.port: 9090\n");
@@ -639,6 +659,81 @@ class ServerEnvironmentTest {
                 ManagedAgentPreflight.configFileCheck(id, null).status());
         assertEquals("chmod 600 " + commented,
                 ManagedAgentPreflight.configFileCheck(commented, null).fix());
+        // One rule for every key, live or commented out, however spelled:
+        // Spring binds credential-key_id to credential-key-id, and the path
+        // to a file that holds a password is none.
+        Path spelled = write("conf/spelled.yml",
+                "qwen.managed-agent.runtime-broker.credential-key_id: reference-v2\n");
+        Path keyStore = write("conf/key-store.yml", "qwen.managed-agent.harness.pool:\n"
+                + "  key-store-password-file: /etc/qwen-managed-agent/cert.pass\n"
+                + "# key-store-password-file: /etc/qwen-managed-agent/old.pass\n"
+                + "# The password itself is in the file it names.\n");
+        Path cased = write("conf/cased.yml", "# Password: change-me\n");
+        // A value holds one, as a JDBC URL's parameter or a URL's user
+        // information does; so does a document no profile activates, and
+        // an XML comment.
+        Path jdbc = write("conf/jdbc.yml",
+                "spring.datasource.url: jdbc:mysql://db/qwen?user=qwen&password=s3cret\n");
+        Path userInfo = write("conf/user-info.properties",
+                "#qwen.managed-agent.harness.base-url=http://svc:s3cret@harness:4170\n");
+        Path inactive = write("conf/profiles.yml", "server.port: 9090\n---\n"
+                + "spring.config.activate.on-profile: never\n"
+                + "spring.datasource.password: s3cret\n");
+        Path commentedXml = write("conf/commented.xml",
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                + "<!DOCTYPE properties SYSTEM \"http://java.sun.com/dtd/properties.dtd\">\n"
+                + "<properties><entry key=\"server.port\">9090</entry>\n"
+                + "<!-- <entry key=\"spring.datasource.password\">s3cret</entry> -->\n"
+                + "</properties>\n");
+        Map<Path, ManagedAgentPreflight.Status> verdicts = new HashMap<>();
+        for (Path file : List.of(spelled, keyStore, cased, jdbc, userInfo, inactive,
+                commentedXml)) {
+            Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
+            verdicts.put(file, ManagedAgentPreflight.configFileCheck(file, null).status());
+        }
+        assertEquals(Map.of(
+                spelled, ManagedAgentPreflight.Status.PASS,
+                keyStore, ManagedAgentPreflight.Status.PASS,
+                cased, ManagedAgentPreflight.Status.WARN,
+                jdbc, ManagedAgentPreflight.Status.WARN,
+                userInfo, ManagedAgentPreflight.Status.WARN,
+                inactive, ManagedAgentPreflight.Status.WARN,
+                commentedXml, ManagedAgentPreflight.Status.WARN), verdicts);
+    }
+
+    @Test
+    void judgesAFileAConfigTreeAlsoReadsByBoth() throws IOException {
+        // A config tree imported over a configuration file's directory reads
+        // that file as a value too, of a property named application.yml.
+        Path both = write("config/application.yml", "spring.datasource.password: s3cret\n");
+        Files.setPosixFilePermissions(both, PosixFilePermissions.fromString("rw-r--r--"));
+        ManagedAgentPreflight.Prepared prepared = prepare(named("optional:file:" + both),
+                new ArrayList<>(), "--spring.config.import=optional:configtree:"
+                        + both.getParent() + "/");
+        assertEquals("s3cret", prepared.environment().getProperty("spring.datasource.password"));
+        assertEquals("application.yml", prepared.values().get(both));
+        assertEquals(List.of(both), prepared.files());
+        List<ManagedAgentPreflight.Check> rows = rows(prepared);
+        assertEquals(1, rows.size(), rows.toString());
+        assertEquals(ManagedAgentPreflight.Status.WARN, rows.get(0).status(), rows.toString());
+        assertEquals("chmod 600 " + both, rows.get(0).fix());
+        // A value file is judged by its value as well as by its property.
+        Path url = write("tree/spring.datasource.url", "jdbc:mysql://db/qwen?password=s3cret");
+        Path port = write("tree/server.port", "9090");
+        for (Path file : List.of(url, port)) {
+            Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
+        }
+        assertEquals(ManagedAgentPreflight.Status.WARN, ManagedAgentPreflight.configFileCheck(
+                url, null, "spring.datasource.url").status());
+        assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight.configFileCheck(
+                port, null, "server.port").status());
+        // A file whose extension Spring is told, as file:app.conf[.properties].
+        Path hinted = write("etc/app.conf", "spring.datasource.password=s3cret\n");
+        Files.setPosixFilePermissions(hinted, PosixFilePermissions.fromString("rw-r--r--"));
+        prepared = prepare(named("file:" + hinted + "[.properties]"), new ArrayList<>());
+        assertEquals("s3cret", prepared.environment().getProperty("spring.datasource.password"));
+        assertEquals(List.of(hinted), prepared.files());
+        assertEquals(ManagedAgentPreflight.Status.WARN, rows(prepared).get(0).status());
     }
 
     @Test
@@ -767,6 +862,12 @@ class ServerEnvironmentTest {
                 new ArrayList<>(), "--spring.config.name=renamed");
         assertEquals(List.of(directory.resolve("conf/renamed.yml")),
                 ServerEnvironment.files(prepared.environment(), directory));
+        // As a list Spring binds, from the variables that index it.
+        prepared = prepare(environment(Map.of(
+                "SPRING_CONFIG_ADDITIONAL_LOCATION", "optional:file:" + conf.getParent() + "/",
+                "SPRING_CONFIG_NAME_0", "renamed")), new ArrayList<>());
+        assertEquals(List.of(directory.resolve("conf/renamed.yml")),
+                ServerEnvironment.files(prepared.environment(), directory));
     }
 
     @Test
@@ -813,6 +914,7 @@ class ServerEnvironmentTest {
 
     @Test
     void checksEachFileAsTheServiceAccount() throws IOException {
+        assumeOthersCanSearchTheDirectory();
         Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwxr-xr-x"));
         Path shared = write("shared.yml", "server.port: 9090\n");
         Path own = write("own.yml", "server.port: 9091\n");
@@ -856,6 +958,8 @@ class ServerEnvironmentTest {
         assertEquals(ManagedAgentPreflight.Status.WARN, rows.get(0).status());
         assertEquals("no configuration file; packaged defaults and the"
                 + " environment only", rows.get(0).detail());
+        assertEquals("create a configuration file at a location Spring reads, such as"
+                + " config/application.yml, for the credential key ring", rows.get(0).fix());
     }
 
     @Test
@@ -923,17 +1027,19 @@ class ServerEnvironmentTest {
                 throw new AssertionError("--check did not finish: " + Files.readString(output));
             }
             String report = Files.readString(output);
-            // The report says where it read the relative locations.
-            assertTrue(report.contains("Managed Agent preflight in " + directory.toRealPath()
-                    + "\n") || report.contains("Managed Agent preflight in " + directory + "\n"),
-                    report);
+            // The report says where it read the relative locations: the
+            // working directory as the JVM sees it, /private/var for macOS's /var.
+            Path root = directory.toRealPath();
+            assertTrue(report.contains("Managed Agent preflight in " + root + "\n"), report);
             Map<String, List<String>> rows = new HashMap<>();
             report.lines().map(line -> line.split("\\s+", 3))
                     .filter(row -> row.length == 3)
                     .forEach(row -> rows.computeIfAbsent(row[1], name -> new ArrayList<>())
                             .add(row[0] + " " + row[2]));
             // The file with a setting first, then the one without.
-            assertEquals(List.of("PASS " + config, "PASS " + example), rows.get("config"), report);
+            assertEquals(List.of("PASS " + root.resolve(directory.relativize(config)),
+                    "PASS " + root.resolve(directory.relativize(example))),
+                    rows.get("config"), report);
             assertEquals(1, rows.get("server-port").size(), report);
             assertTrue(rows.get("server-port").get(0).contains(":" + free + " "), report);
         } finally {

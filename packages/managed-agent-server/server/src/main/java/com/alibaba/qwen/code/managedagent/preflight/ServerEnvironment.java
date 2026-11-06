@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.preflight;
 
-import org.springframework.boot.ApplicationContextFactory;
 import org.springframework.boot.DefaultBootstrapContext;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.WebApplicationType;
@@ -70,12 +69,6 @@ final class ServerEnvironment {
     private static final String IMPORT = "spring.config.import";
 
     private ServerEnvironment() {
-    }
-
-    /** Prepares a fresh servlet environment, as the server's own. */
-    static ConfigurableEnvironment prepare(String[] args) {
-        return prepare(args, ApplicationContextFactory.DEFAULT
-                .createEnvironment(WebApplicationType.SERVLET));
     }
 
     /**

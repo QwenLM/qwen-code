@@ -63,7 +63,6 @@ import java.sql.SQLTimeoutException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -75,6 +74,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -101,15 +101,23 @@ public final class ManagedAgentPreflight {
     private static final int KEY_BYTES = 32;
     private static final int MIN_JAVA_FEATURE = 21;
     private static final int DEFAULT_SERVER_PORT = 8080;
-    // In a file's text, commented-out lines among it; credential-key-id is
-    // an ID, not a key.
-    private static final Pattern SECRET_MARKER =
-            Pattern.compile("credential-key(?!-id)|signing-key|password");
     // A property whose last word is one of these holds a secret, in the
     // configuration reference's terms; credential-key-id and the paths to
     // files that hold one end otherwise.
     private static final List<String> SECRET_SUFFIXES =
             List.of("password", "token", "key", "keys", "secret");
+    // A key and its value on a commented-out line of YAML or .properties,
+    // such as "# credential-key: <key>" or "#spring.datasource.password=".
+    private static final Pattern COMMENTED_KEY = Pattern.compile(
+            "\\s*[#!]+\\s*(?:-\\s+)?[\"']?([^\\s:=\"'#!]+)[\"']?\\s*[:=](.*)");
+    // An entry of an XML properties file that a comment holds.
+    private static final Pattern XML_COMMENT = Pattern.compile("<!--(.*?)-->", Pattern.DOTALL);
+    private static final Pattern XML_ENTRY = Pattern.compile(
+            "<entry\\s+key\\s*=\\s*[\"']([^\"']*)[\"']\\s*>([^<]*)");
+    // A parameter of a value, such as a JDBC URL's ?password=, and the
+    // password of a URL's user information, as in https://user:secret@host.
+    private static final Pattern VALUE_PARAMETER = Pattern.compile("[?&;]([^=?&;#\\s]+)=");
+    private static final Pattern URL_PASSWORD = Pattern.compile("//[^/?#@\\s]*:[^/?#@\\s]+@");
 
     private ManagedAgentPreflight() {
     }
@@ -418,7 +426,8 @@ public final class ManagedAgentPreflight {
 
     /**
      * As above, for a config tree value file that holds this property's
-     * value, or null for a file that names its properties.
+     * value, or null for a file that names its properties. One path can be
+     * both, as application.yml is under a config tree imported over config/.
      */
     static Check configFileCheck(Path file, ServiceAccount account, String property) {
         String path = file.toString();
@@ -430,20 +439,99 @@ public final class ManagedAgentPreflight {
                             path + " is not readable by " + account.name(),
                             unreadableFix(account.name(), path));
         }
-        String content;
-        try {
-            content = text(Files.readAllBytes(file));
-        } catch (IOException error) {
-            return new Check("config", Status.WARN,
-                    path + ": cannot inspect permissions", null);
+        boolean secrets;
+        if (property != null && secretProperty(property)) {
+            // The property's name tells; its value need not be read.
+            secrets = true;
+        } else {
+            try {
+                secrets = holdsSecret(file, property != null, text(Files.readAllBytes(file)));
+            } catch (IOException error) {
+                return new Check("config", Status.WARN,
+                        path + ": cannot inspect permissions", null);
+            }
         }
-        // A file that names its properties is judged by the keys it declares,
-        // and by the markers in its text, commented-out lines among them.
-        boolean secrets = property == null
-                ? SECRET_MARKER.matcher(content).find() || declaresSecret(file)
-                : secretProperty(property);
         return secrets ? sharedSecretFileCheck("config", file, path)
                 : new Check("config", Status.PASS, path, null);
+    }
+
+    /**
+     * Whether a file holds a secret, by secretProperty's one rule: a key it
+     * declares names a secret, in any of its documents, which a profile may
+     * leave inactive, or on a commented-out line, or a value holds one, as a
+     * JDBC URL's ?password= does. A config tree value file named otherwise
+     * than a configuration file holds a value alone.
+     */
+    private static boolean holdsSecret(Path file, boolean value, String content) {
+        String name = file.getFileName().toString().toLowerCase(Locale.ROOT);
+        boolean yaml = name.endsWith(".yml") || name.endsWith(".yaml");
+        boolean xml = name.endsWith(".xml");
+        boolean properties = name.endsWith(".properties") || xml;
+        if (value && !yaml && !properties) {
+            return valueSecret(content);
+        }
+        // An extension hint, such as file:app.conf[.yml], names either loader.
+        List<PropertySourceLoader> loaders = yaml ? List.of(new YamlPropertySourceLoader())
+                : properties ? List.of(new PropertiesPropertySourceLoader())
+                : List.of(new YamlPropertySourceLoader(), new PropertiesPropertySourceLoader());
+        for (PropertySourceLoader loader : loaders) {
+            try {
+                for (PropertySource<?> source : loader.load(name, new FileSystemResource(file))) {
+                    if (source instanceof EnumerablePropertySource<?> declared) {
+                        for (String key : declared.getPropertyNames()) {
+                            Object held = declared.getProperty(key);
+                            if (secretProperty(key)
+                                    || held != null && valueSecret(held.toString())) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            } catch (IOException | RuntimeException error) {
+                // What does not parse declares no key; its comments still tell.
+            }
+        }
+        return commentedSecret(content, xml);
+    }
+
+    /** Whether a commented-out line holds a secret, as it would uncommented. */
+    private static boolean commentedSecret(String content, boolean xml) {
+        if (xml) {
+            Matcher comment = XML_COMMENT.matcher(content);
+            while (comment.find()) {
+                Matcher entry = XML_ENTRY.matcher(comment.group(1));
+                while (entry.find()) {
+                    if (secretProperty(entry.group(1)) || valueSecret(entry.group(2))) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        for (String line : content.split("\\R")) {
+            Matcher key = COMMENTED_KEY.matcher(line);
+            if (key.matches() && (secretProperty(key.group(1)) || valueSecret(key.group(2)))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether a value holds a secret: a parameter named as a secret
+     * property, or the password of a URL's user information.
+     */
+    private static boolean valueSecret(String value) {
+        if (URL_PASSWORD.matcher(value).find()) {
+            return true;
+        }
+        Matcher parameter = VALUE_PARAMETER.matcher(value);
+        while (parameter.find()) {
+            if (secretProperty(parameter.group(1))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -465,32 +553,8 @@ public final class ManagedAgentPreflight {
         return false;
     }
 
-    /** Whether a file declares a property that holds a secret. */
-    private static boolean declaresSecret(Path file) {
-        String name = file.getFileName().toString().toLowerCase(Locale.ROOT);
-        PropertySourceLoader loader = name.endsWith(".yml") || name.endsWith(".yaml")
-                ? new YamlPropertySourceLoader()
-                : name.endsWith(".properties") || name.endsWith(".xml")
-                        ? new PropertiesPropertySourceLoader() : null;
-        if (loader == null) {
-            return false;
-        }
-        try {
-            for (PropertySource<?> source : loader.load(name, new FileSystemResource(file))) {
-                if (source instanceof EnumerablePropertySource<?> declared
-                        && Arrays.stream(declared.getPropertyNames())
-                                .anyMatch(ManagedAgentPreflight::secretProperty)) {
-                    return true;
-                }
-            }
-        } catch (IOException | RuntimeException error) {
-            // A file that does not parse is judged by its text alone.
-        }
-        return false;
-    }
-
     // Spring reads YAML as UTF-8, or UTF-16 after a byte order mark, and
-    // .properties as ISO-8859-1. The markers are ASCII, which ISO-8859-1,
+    // .properties as ISO-8859-1. A comment's key is ASCII, which ISO-8859-1,
     // decoding any byte, reads in all but UTF-16.
     private static String text(byte[] bytes) {
         boolean utf16 = bytes.length >= 2
