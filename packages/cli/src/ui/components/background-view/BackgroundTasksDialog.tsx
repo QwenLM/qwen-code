@@ -1805,7 +1805,9 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         if (
           autoOpened &&
           (key.name === 'return' ||
-            ((key.sequence === 'x' || key.sequence === 'p') &&
+            ((key.sequence === 'x' ||
+              key.sequence === 'p' ||
+              key.sequence === 'r') &&
               !key.ctrl &&
               !key.meta))
         ) {

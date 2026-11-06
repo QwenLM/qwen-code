@@ -1842,6 +1842,36 @@ describe('BackgroundTasksDialog', () => {
       expect(h.workflowPause).toHaveBeenCalledWith('wf_test1234');
     });
 
+    it('ignores bare r until a navigation key, then resumes the selection', async () => {
+      // R4-2: bare k/j still move the selection (the R2-1 rule above), so
+      // prose typed at the unmounted composer can park the selection on a
+      // paused run. `r` was outside the deny-list, so the next `r` of the
+      // same sentence resumed a run the user deliberately paused.
+      const paused = entry({ id: 'a', agentId: 'a', status: 'paused' });
+      const wf = workflowEntry({
+        status: 'running',
+        pendingApprovals: [parkedApproval('wfap-1')],
+      });
+      const h = setup([paused, wf]);
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.dialogMode).toBe('list');
+      });
+      expect(h.probe.current!.state.autoOpened).toBe(true);
+
+      h.pressKey({ name: 'k' });
+      expect(h.probe.current!.state.selectedIndex).toBe(0);
+      h.pressKey({ sequence: 'r' });
+      expect(h.resume).not.toHaveBeenCalled();
+      expect(h.probe.current!.state.autoOpened).toBe(true);
+
+      h.pressKey({ name: 'up' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ sequence: 'r' });
+      expect(h.resume).toHaveBeenCalledWith('a');
+    });
+
     it('ignores Enter until a navigation key, then enters detail', async () => {
       const h = await autoSurfacedWorkflow();
 
