@@ -2552,6 +2552,32 @@ jobs:
               exit 0
             fi
           fi
+          # Review threads, resolved ones included, and standing change
+          # requests for the same token-free agent: a round that never sees a
+          # reviewer's Critical, or the author's claim to have fixed one, can
+          # certify a head that still carries it. Same query and shape as
+          # scripts/verify-pr-prepare.mjs; a test runs both over one set of
+          # pages. Best-effort, and absent on failure: the skill reads a
+          # missing file as unknown, never as nothing open.
+          # shellcheck disable=SC2016 # $owner and friends are GraphQL's
+          if ! gh api graphql --paginate --slurp -f owner="${GITHUB_REPOSITORY%/*}" \
+              -f name="${GITHUB_REPOSITORY#*/}" -F number="$PR_NUMBER" \
+              -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { latestOpinionatedReviews(first: 100) { nodes { state submittedAt url body author { login } authorAssociation commit { oid } } } reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line originalLine comments(first: 50) { totalCount nodes { createdAt url body author { login } authorAssociation originalCommit { oid } pullRequestReview { url } } } } } } } }' |
+            jq 'def who: {author: .author.login, association: .authorAssociation};
+              [.[].data.repository.pullRequest] as $p
+              | {threads: [$p[].reviewThreads.nodes[]
+                  | {resolved: .isResolved, outdated: .isOutdated, path, line, originalLine,
+                     commentCount: .comments.totalCount,
+                     comments: [.comments.nodes[] | who + {createdAt, url,
+                       review: .pullRequestReview.url, commit: .originalCommit.oid, body}]}],
+                 changeRequests: [$p[0].latestOpinionatedReviews.nodes[]
+                  | select(.state == "CHANGES_REQUESTED")
+                  | who + {submittedAt, commit: .commit.oid, url, body}]}' \
+              > "$RUNNER_TEMP/verify-context/review-threads.json" ||
+            [ ! -s "$RUNNER_TEMP/verify-context/review-threads.json" ]; then
+            rm -f "$RUNNER_TEMP/verify-context/review-threads.json"
+            echo "::warning::Could not snapshot the PR's review threads; the round reports them as not covered."
+          fi
           # Status comment with the live run link; publish-verify rewrites
           # this same comment with the final report. Best-effort.
           MARKER='<!-- qwen-triage:verify -->'

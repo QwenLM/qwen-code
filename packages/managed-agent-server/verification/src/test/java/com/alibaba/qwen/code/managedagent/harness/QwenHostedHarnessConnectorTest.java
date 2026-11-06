@@ -2615,6 +2615,44 @@ class QwenHostedHarnessConnectorTest {
     }
 
     @Test
+    void resolvesQuestionsThroughTheAuthorizedColdWorkspaceAttachment() throws Exception {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.loadSession(any(LoadHarnessSession.class))).thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("yolo");
+        SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
+                null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo", "hosted-workspace-files/1");
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("yolo");
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+        String actionId = "tool_approval_" + "b".repeat(32);
+        var response = new ObjectMapper().readTree("""
+                {"answers":[{"questionId":"q1","optionIds":["q1o2"],"text":"Custom 中😀"}],
+                 "inputRevision":7,"policyRevision":"hosted-user-question/1"}
+                """);
+        connector.resolveAction("tenant-a", SESSION_ID, actionId, response);
+        verify(client).resolveQuestion(attached, actionId,
+                List.of(Map.of("questionId", "q1", "optionIds", List.of("q1o2"), "text", "Custom 中😀")),
+                7L, "hosted-user-question/1");
+        verify(client, never()).resolveAction(any(), any(), any(), anyLong(), any());
+        verify(client).loadSession(any(LoadHarnessSession.class));
+        verify(execution, times(2)).authorizeActionResponse(session);
+        verify(execution).verifyMountForProbe(session.workspace());
+    }
+
+    @Test
     void takeoverSnapshotIsReportedUntilItsContinuationIsAdmitted() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities =

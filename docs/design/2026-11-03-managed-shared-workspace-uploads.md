@@ -2,6 +2,8 @@
 
 [English](2026-11-03-managed-shared-workspace-uploads.md) | [简体中文](2026-11-03-managed-shared-workspace-uploads.zh-CN.md)
 
+The rewind exclusion described below is superseded by [rewind without directory exclusion](2026-11-05-managed-rewind-concurrency.md). Shared uploads and physical maintenance protections remain.
+
 ## Problem and scope
 
 Ordinary Sessions already share a Workspace directory. Upload admission still

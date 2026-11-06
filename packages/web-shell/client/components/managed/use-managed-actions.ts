@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ManagedAgentPendingAction,
+  ManagedAgentActionResponse,
   ManagedAgentProvider,
   ManagedAgentSessionEvent,
 } from './managed-agent-provider';
 import { isNonRetryableClientError } from './managed-request-error';
+import {
+  canonicalQuestionAnswers,
+  questionResponseKey,
+} from './managed-question-response';
 
 // Re-reads shortly after the earliest expiry so an unanswered approval leaves
 // the page once the Harness has ended it.
@@ -63,7 +68,10 @@ export interface ManagedActionsState {
    * re-probes instead of treating one 403 as permanent for the mount.
    */
   respondForbidden: boolean;
-  respond(actionId: string, optionId: string): Promise<void>;
+  respond(
+    actionId: string,
+    response: ManagedAgentActionResponse,
+  ): Promise<void>;
   /** Reads the pending approvals again now. */
   retry(): void;
 }
@@ -122,6 +130,7 @@ export function useManagedActions(
   // read that still lists one shows it again, so a wrong report cannot hide
   // an approvable Action.
   const endedAnswers = useRef(new Set<string>());
+  const inFlight = useRef(new Map<string, typeof owner>());
   const trigger = useMemo(() => {
     let last = 0;
     for (const event of events) {
@@ -259,25 +268,42 @@ export function useManagedActions(
   current.current = { owner, actions };
 
   const respond = useCallback(
-    async (actionId: string, optionId: string) => {
+    async (actionId: string, response: ManagedAgentActionResponse) => {
       const target = actions.find(
         (entry) =>
           entry.actionId === actionId && !answered.has(actionKey(entry)),
       );
       if (!target || !reader) return;
       const key = actionKey(target);
+      if (inFlight.current.get(key) === owner) return;
+      inFlight.current.set(key, owner);
       const isPending = () =>
         current.current.owner === owner &&
         current.current.actions.some((entry) => actionKey(entry) === key);
-      setAnswered((current) => new Set(current).add(key));
+      if (target.kind !== 'question')
+        setAnswered((current) => new Set(current).add(key));
       try {
-        // One key per Action and option: a retried click replays the same
-        // durable operation instead of answering twice.
-        await reader.respond(target, optionId, {
+        if ((target.kind === 'question') !== (typeof response !== 'string')) {
+          throw new Error('Action response kind does not match the request');
+        }
+        const submitted =
+          target.kind === 'question' && typeof response !== 'string'
+            ? {
+                kind: 'question' as const,
+                answers: canonicalQuestionAnswers(target, response.answers),
+              }
+            : response;
+        const idempotencyKey =
+          target.kind === 'question' && typeof submitted !== 'string'
+            ? await questionResponseKey(target, submitted.answers)
+            : `${target.actionId}:${submitted}`;
+        if (!isPending()) return;
+        await reader.respond(target, submitted, {
           clientId,
-          idempotencyKey: `${target.actionId}:${optionId}`,
+          idempotencyKey,
         });
         if (!isPending()) return;
+        setAnswered((current) => new Set(current).add(key));
         if (answerFailure.current === key) {
           setAnswerError(undefined);
           answerFailure.current = undefined;
@@ -307,6 +333,7 @@ export function useManagedActions(
           // No retry can succeed, so keep the card hidden and read the list
           // again instead of offering an answer the service will refuse.
           endedAnswers.current.add(key);
+          setAnswered((current) => new Set(current).add(key));
           if (answerFailure.current === key) {
             answerFailure.current = undefined;
             setAnswerError(undefined);
@@ -322,6 +349,8 @@ export function useManagedActions(
         setAnswerError(failure);
         answerFailure.current = key;
         throw failure;
+      } finally {
+        if (inFlight.current.get(key) === owner) inFlight.current.delete(key);
       }
     },
     [actions, reader, clientId, owner, credentials, answered],
