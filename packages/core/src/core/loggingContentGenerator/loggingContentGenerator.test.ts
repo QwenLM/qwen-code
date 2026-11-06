@@ -1861,6 +1861,9 @@ describe('LoggingContentGenerator', () => {
         requestId: 'cache-write-request',
         isStreaming: true,
         toolCallParser: new StreamingToolCallParser(),
+        model: 'test-model',
+        modalities: { image: true, pdf: true, audio: true, video: true },
+        startTime: 0,
       } as Parameters<typeof OpenAIContentConverter.convertOpenAIChunkToLlm>[1],
     );
 
@@ -1900,6 +1903,9 @@ describe('LoggingContentGenerator', () => {
         requestId: 'no-cache-write-request',
         isStreaming: true,
         toolCallParser: new StreamingToolCallParser(),
+        model: 'test-model',
+        modalities: { image: true, pdf: true, audio: true, video: true },
+        startTime: 0,
       } as Parameters<typeof OpenAIContentConverter.convertOpenAIChunkToLlm>[1],
     );
 

@@ -60,19 +60,19 @@ const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
  *
  * `cache_write_tokens` is a standard OpenAI Chat Completions field, added to
  * the SDK's `PromptTokensDetails` in v7; this package pins v5, so the types
- * here predate it. Any prompt-caching provider reports it, not only proxies.
- * The value reaches GenAI telemetry's
+ * here predate it. Moonshot documents it under `prompt_tokens_details`; it is
+ * absent from providers that only report cache reads, and stays `undefined`
+ * there. The value reaches GenAI telemetry's
  * `gen_ai.usage.cache_creation.input_tokens` unchanged.
  */
 interface ExtendedCompletionUsage extends OpenAI.CompletionUsage {
   cached_tokens?: number;
   // The pinned SDK declares `prompt_tokens_details` without this member; both
-  // converters read it through this interface so there is one spelling.
-  prompt_tokens_details?:
-    | (OpenAI.CompletionUsage.PromptTokensDetails & {
-        cache_write_tokens?: number;
-      })
-    | null;
+  // converters read it through this interface so there is one spelling. The
+  // base member does not admit `null`, so the override must not either.
+  prompt_tokens_details?: OpenAI.CompletionUsage.PromptTokensDetails & {
+    cache_write_tokens?: number;
+  };
 }
 
 export interface ExtendedChatCompletionAssistantMessageParam
