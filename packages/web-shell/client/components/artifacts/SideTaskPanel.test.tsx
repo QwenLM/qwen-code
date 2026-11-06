@@ -179,6 +179,31 @@ it('creates a side task and reports the new session id', async () => {
   expect(onTitleChange).toHaveBeenCalledWith('side-task:draft:1', 'Side task');
 });
 
+it('keeps the derived clientId within the daemon limit for a details tab', async () => {
+  // The daemon rejects client ids over 128 chars (MAX_CLIENT_ID_LENGTH).
+  // A details tab id carries a uuid request id; with a uuid parent session
+  // the derived `side-task:<parent>:<tabId>` must still fit. A longer id
+  // 400s the pane's load and the initial prompt is never sent.
+  const parentId = 'da424824-c6a7-4ce5-a5fd-9b12c9255bef';
+  const requestId = '06a69fb6-7293-4f61-a279-e7b3963b1cd3';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    renderSideTask({
+      tabId: `side-task:details:${requestId}`,
+      parentSessionId: parentId,
+      sessionId: 'side-session-1',
+    });
+    await Promise.resolve();
+  });
+
+  const clientId = providerProps.current?.['clientId'];
+  expect(typeof clientId).toBe('string');
+  expect((clientId as string).length).toBeLessThanOrEqual(128);
+});
+
 it('does not report a failed creation after the draft unmounts', async () => {
   let rejectCreation: ((error: Error) => void) | undefined;
   const createSession = vi.fn(

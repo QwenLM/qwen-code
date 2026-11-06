@@ -95,10 +95,12 @@ first committing to an answer or discarding the question.
   explanation language follows the UI language rather than the daemon's
   output-language setting.
 - **One details task per pending question.** The details tab uses a stable id
-  derived from the parent session and the permission request id and is
-  upserted, not appended: repeat clicks focus the existing tab instead of
-  provisioning duplicate child sessions. `/btw side` keeps its unique
-  per-invocation draft id.
+  derived from the permission request id (a uuid; tabs are already bucketed
+  per parent session) and is upserted, not appended: repeat clicks focus the
+  existing tab instead of provisioning duplicate child sessions. The id stays
+  short because the pane derives its daemon clientId as
+  `side-task:<parentSessionId>:<tabId>` and the daemon rejects client ids over
+  128 characters. `/btw side` keeps its unique per-invocation draft id.
 - **The snapshot carries selection semantics.** Multi-select questions are
   marked `[multiSelect]` so the explanation covers combinable options without
   relying on the inherited transcript alone.

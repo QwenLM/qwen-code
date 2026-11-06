@@ -5669,8 +5669,12 @@ export function App({
       // A details side task is one-per-pending-question: repeat clicks focus
       // the existing tab instead of provisioning a duplicate child session.
       // /btw side keeps the unique draft id — each invocation is a new task.
+      // The id must stay short: SideTaskPanel derives the pane's clientId as
+      // `side-task:<parentSessionId>:<tabId>` and the daemon rejects client
+      // ids over 128 chars. The request id alone is unique (uuid); tabs are
+      // already bucketed per parent session.
       const id = detailsRequestId
-        ? `side-task:details:${parentSessionId}:${detailsRequestId}`
+        ? `side-task:details:${detailsRequestId}`
         : `side-task:draft:${Date.now()}:${++nextSideTaskTabIdRef.current}`;
       const tab: ArtifactPanelTab = {
         id,
