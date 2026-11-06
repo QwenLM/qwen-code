@@ -42,8 +42,7 @@ type ManagedSessionsNavigationProps = Pick<
 
 /** Change productScope with tenant/actor identity so saved selections and output caches are discarded. */
 export interface ManagedAgentWebShellProps
-  extends
-    Omit<JavaManagedAgentProviderOptions, 'baseUrl'>,
+  extends Omit<JavaManagedAgentProviderOptions, 'baseUrl'>,
     ManagedSessionsNavigationProps {
   managedAgentProvider?: ManagedAgentProvider;
   /**
@@ -65,7 +64,9 @@ export interface ManagedAgentWebShellProps
 
 function shellErrorFallback(language: WebShellLanguage) {
   return function ShellErrorFallback(error: Error, reset: () => void) {
-    return <RootErrorFallback error={error} onRetry={reset} language={language} />;
+    return (
+      <RootErrorFallback error={error} onRetry={reset} language={language} />
+    );
   };
 }
 
