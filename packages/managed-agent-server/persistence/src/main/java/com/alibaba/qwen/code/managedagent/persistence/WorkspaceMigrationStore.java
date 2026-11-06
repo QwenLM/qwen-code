@@ -454,8 +454,10 @@ public final class WorkspaceMigrationStore {
     }
 
     private void clearFence() {
-        check(jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", fence_operation_id = NULL WHERE tenant_key = ? AND storage_key = ? AND fence_operation_id = ?", JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                JdbcRuntimeBindingRepository.storageFenceKey(storage), id) == 1, "migration_conflict");
+        // The same index as owner(), which already locked this row.
+        check(jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", fence_operation_id = NULL"
+                + " WHERE alias_key = ? AND fence_operation_id = ?", JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+                id) == 1, "migration_conflict");
     }
 
     private Map<String, Object> requireRow(boolean lock) {

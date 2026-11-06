@@ -17,7 +17,8 @@ const graphemeSegmenter = new Intl.Segmenter(undefined, {
 export interface SessionState {
   sessions: SessionListItem[];
   hasMore: boolean;
-  nextCursor?: number;
+  /** Opaque continuation token from {@link ListSessionsResult.nextCursor}. */
+  nextCursor?: number | string;
 }
 
 /**

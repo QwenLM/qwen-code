@@ -3,14 +3,9 @@ package com.alibaba.qwen.code.runtimebroker.persistence;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
-import java.util.HexFormat;
 
 public final class JdbcCsiReadyAdmission {
     private JdbcCsiReadyAdmission() {
@@ -48,7 +43,7 @@ public final class JdbcCsiReadyAdmission {
             throws SQLException {
         String physicalKey;
         long registrationRevision;
-        String alias = aliasKey(original.request().getScope().getTenantId(), original.request().getStorageId());
+        String alias = JdbcRuntimeBindingRepository.storageAliasKey(original.request().getScope().getTenantId(), original.request().getStorageId());
         try (PreparedStatement statement = statement(connection,
                         "SELECT tenant_id, storage_id, physical_key, registration_revision FROM"
                                 + " ma_storage WHERE alias_key = ? AND storage_kind = 'CSI' AND"
@@ -86,20 +81,6 @@ public final class JdbcCsiReadyAdmission {
                                                         row, "binding_id"))
                         && original.generation() == row.getLong("runtime_generation") && !row.next());
             }
-        }
-    }
-
-    private static String aliasKey(String tenant, String storage) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            for (String field : new String[] {"qwen-csi-alias/1", tenant, storage}) {
-                byte[] bytes = field.getBytes(StandardCharsets.UTF_8);
-                digest.update(ByteBuffer.allocate(Integer.BYTES).putInt(bytes.length).array());
-                digest.update(bytes);
-            }
-            return HexFormat.of().formatHex(digest.digest());
-        } catch (NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException("SHA-256 unavailable", impossible);
         }
     }
 
