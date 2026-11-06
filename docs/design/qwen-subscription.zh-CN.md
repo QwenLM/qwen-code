@@ -86,9 +86,9 @@ CLI（Ink/OpenTUI）、桌面端和 VS Code 的订阅聊天及 MCP 搜索错误�
 
 ## 思考与搜索
 
-复用 ModelReasoningControls 和现有 session/ACP reasoning 设置。会员 `qwen3.8-max`、`qwen3.8-flash` 关闭时发送顶层 `enable_thinking: false` 且不带预算；低/中/高发送 true 和 4096/16384/32768，已有 xhigh/max 映射高档。移除冲突 reasoning/reasoning_effort 和嵌套 chat-template 思考开关，保留无关选项。显式原生预算继续有效，单次请求关闭移除预算，仍遵守强制思考元数据。未操作默认值、未知模型和其他供应商保持原样。
+复用 ModelReasoningControls 和现有 session/ACP reasoning 设置。Qwen 订阅来源的所有模型在控件和请求中都默认使用中等思考强度，用户显式选择优先。关闭时发送顶层 `enable_thinking: false` 且不带预算。低、中、高发送 true，预算分别为 4096、16384、32768，已有 xhigh/max 映射高档。移除冲突 reasoning/reasoning_effort 和嵌套 chat-template 思考开关，保留无关选项。显式原生预算继续有效。单次请求关闭会移除预算，仍遵守强制思考元数据。
 
-Max 已声明共用 UI 能力，Flash 只有请求映射，不增加能力声明。默认强度仍需产品确定。真实 Max 网关已接受关闭和三档预算，关闭无 reasoning_content、开启有；这证明参数接受和开关行为，不证明长推理预算严格执行或 Flash 支持。会员搜索复用现有 MCP 后端，动态注入 Bearer Token，HTTP 401 时刷新被拒 Token 并仅重试一次，取消归属工具请求。详见[会员 MCP 联网搜索](subscription-mcp-web-search.zh-CN.md)。
+真实 Max 网关已接受关闭和三档预算，关闭无 reasoning_content、开启有；这证明参数接受和开关行为，不证明长推理预算严格执行或 Flash 支持。会员搜索复用现有 MCP 后端，动态注入 Bearer Token，HTTP 401 时刷新被拒 Token 并仅重试一次，取消归属工具请求。详见[会员 MCP 联网搜索](subscription-mcp-web-search.zh-CN.md)。
 
 ## CLI 成功提示与账号命令
 

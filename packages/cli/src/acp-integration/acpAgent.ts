@@ -17966,6 +17966,7 @@ class QwenAgent implements Agent {
     if (
       activeRuntimeSnapshot ||
       (currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
+        currentAuthType !== AuthType.QWEN_SUBSCRIPTION &&
         !modelReasoning?.profile &&
         !deepSeekState &&
         !hasTieredManifestReasoning(reasoningModel)) ||
