@@ -13,6 +13,7 @@ import {
 import { SettingScope } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import {
+  clipToWidthFromEnd,
   getCachedStringWidth,
   sanitizeTerminalLine,
   truncateToWidth,
@@ -50,10 +51,15 @@ export function scopeRowWidth(
  */
 export function permissionScopeItems(rowWidth: number): PermissionScopeItem[] {
   const userLabel = sanitizeTerminalLine(t('User settings'));
+  const projectLabel = sanitizeTerminalLine(t('Project settings'));
   return [
     {
-      label: sanitizeTerminalLine(t('Project settings')),
-      description: sanitizeTerminalLine(t('Checked in at .qwen/settings.json')),
+      label: projectLabel,
+      description: fitScopeDescription(
+        sanitizeTerminalLine(t('Checked in at .qwen/settings.json')),
+        projectLabel,
+        rowWidth,
+      ),
       value: SettingScope.Workspace,
       key: 'project',
     },
@@ -66,6 +72,32 @@ export function permissionScopeItems(rowWidth: number): PermissionScopeItem[] {
       key: 'user',
     },
   ];
+}
+
+/**
+ * Bounds a fixed description to the row, keeping its tail: the Project row's
+ * file name is what this dialog exists to show, and the renderer clips with
+ * `wrap="truncate"`, which drops the tail instead. The prefix goes first and
+ * an ellipsis replaces it, so `.qwen/settings.json` survives a narrow row.
+ */
+function fitScopeDescription(
+  description: string,
+  label: string,
+  rowWidth: number,
+): string {
+  const budget = rowWidth - getCachedStringWidth(label) - SCOPE_LABEL_GAP;
+  if (getCachedStringWidth(description) <= budget) {
+    return description;
+  }
+  const ellipsis = '…';
+  if (budget <= getCachedStringWidth(ellipsis)) {
+    return truncateToWidth(description, budget);
+  }
+  const tail = clipToWidthFromEnd(
+    description,
+    budget - getCachedStringWidth(ellipsis),
+  );
+  return `${ellipsis}${tail}`;
 }
 
 function savedSettingsPath(label: string, rowWidth: number): string {
@@ -96,6 +128,10 @@ function savedSettingsPath(label: string, rowWidth: number): string {
   const nameOnly = `...${nodePath.sep}${name}`;
   if (getCachedStringWidth(nameOnly) <= budget) {
     return nameOnly;
+  }
+  // The elided form does not fit, but the bare file name is shorter and may.
+  if (getCachedStringWidth(name) <= budget) {
+    return name;
   }
   // Not even the bare name fits. Bound the description to the row anyway: an
   // overlong fallback is clipped by the renderer, which then decides what

@@ -169,6 +169,35 @@ describe('permissionScopeItems row width', () => {
 
     expect(item.description).toContain('settings.json');
   });
+
+  it.each([39, 40, 41, 42])(
+    'falls back to the bare name rather than truncating it at %i columns',
+    (rowColumns) => {
+      process.env['QWEN_HOME'] = '/opt/qwen-runtimes/shared/tenant-42/config';
+      const item = permissionScopeItems(rowColumns)[1]!;
+
+      // `.../settings.json` does not fit here, but `settings.json` does; the
+      // description used to jump straight to truncation and lose it.
+      expect(item.description).toContain('settings.json');
+      expect(getCachedStringWidth(item.description)).toBeLessThanOrEqual(
+        rowColumns -
+          getCachedStringWidth(item.label) -
+          SCOPE_LABEL_GAP,
+      );
+    },
+  );
+
+  it('fits the Project row to the same budget as the User row', () => {
+    // Both rows are painted at rowWidth; sizing only the User row left the
+    // Project row to the renderer's truncate, which drops `settings.json`.
+    for (const rowColumns of [39, 50, 53, 67]) {
+      const item = permissionScopeItems(rowColumns)[0]!;
+      const row = `${item.label}${' '.repeat(SCOPE_LABEL_GAP)}${item.description}`;
+
+      expect(getCachedStringWidth(row)).toBeLessThanOrEqual(rowColumns);
+      expect(row).toContain('settings.json');
+    }
+  });
 });
 
 const stripAnsi = (s: string): string =>

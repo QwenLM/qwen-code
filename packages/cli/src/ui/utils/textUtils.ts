@@ -201,6 +201,33 @@ export function clipToWidth(text: string, maxWidth: number): string {
 }
 
 /**
+ * The last `maxWidth` display columns of `text`, with no ellipsis. The mirror
+ * of `clipToWidth` for text whose tail is the part worth keeping, such as a
+ * file name at the end of a path. Grapheme- and width-aware by the same rule.
+ */
+export function clipToWidthFromEnd(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) {
+    return '';
+  }
+  if (getCachedStringWidth(text) <= maxWidth) {
+    return text;
+  }
+  let width = 0;
+  let result = '';
+  const segments = [...graphemeSegmenter.segment(text)];
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const segment = segments[i]!.segment;
+    const segmentWidth = getCachedStringWidth(segment);
+    if (width + segmentWidth > maxWidth) {
+      break;
+    }
+    result = segment + result;
+    width += segmentWidth;
+  }
+  return result;
+}
+
+/**
  * Truncate text to a display width (terminal cells), appending an ellipsis
  * when clipped. The clip is `clipToWidth` against the budget the ellipsis
  * leaves, so the boundary rule lives in exactly one place. Returns an empty
