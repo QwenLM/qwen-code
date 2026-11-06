@@ -65,6 +65,15 @@ it('advertises runtime stop only with its complete management predicate', () => 
   ).toContain('workspace_runtime_stop');
 });
 
+it('advertises workspace order only with persistent workspace storage', () => {
+  expect(getAdvertisedServeFeatures()).not.toContain('workspace_order');
+  expect(
+    getAdvertisedServeFeatures(undefined, {
+      persistentWorkspaceRegistrationAvailable: true,
+    }),
+  ).toContain('workspace_order');
+});
+
 it('advertises batched session catalogs for single and multiple workspaces', () => {
   expect(getAdvertisedServeFeatures()).toContain('session_catalog_batch');
   expect(

@@ -129,6 +129,7 @@ function renderSection(
     client: DaemonClient;
     reloadToken: number;
     expanded: boolean;
+    temporarilyCollapsed: boolean;
     sourceType: string;
     channelGroupingEnabled: boolean;
     organizationEnabled: boolean;
@@ -171,6 +172,7 @@ function renderSection(
           client={overrides.client ?? makeClient()}
           reloadToken={overrides.reloadToken ?? 0}
           expanded={overrides.expanded}
+          temporarilyCollapsed={overrides.temporarilyCollapsed}
           untrustedLabel="Untrusted"
           readOnlyLabel="Read-only"
           trustToOpenLabel="Trust to open"
@@ -1100,6 +1102,22 @@ describe('WorkspaceSection session loading', () => {
       (button) => button.textContent === 'Show all',
     );
     act(() => showAll?.click());
+    expect(container.textContent).toContain('Session 6');
+
+    renderSection({ client, expanded: true, temporarilyCollapsed: true });
+    await flush();
+    expect(
+      container
+        .querySelector('button[aria-expanded]')
+        ?.getAttribute('aria-expanded'),
+    ).toBe('false');
+    expect(
+      container.querySelector<HTMLElement>('[class*="sessions"]')?.style
+        .display,
+    ).toBe('none');
+    expect(container.textContent).toContain('Session 6');
+    renderSection({ client, expanded: true });
+    await flush();
     expect(container.textContent).toContain('Session 6');
 
     renderSection({ client, expanded: false });

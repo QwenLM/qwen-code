@@ -467,6 +467,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_display_name: NO_MANAGED_EQUIVALENT(
     'Workspace identity is the registered directory',
   ),
+  workspace_order: NO_MANAGED_EQUIVALENT(
+    'daemon-local workspace presentation order',
+  ),
   scratch_workspace_registration: {
     standing: 'managed',
     evidence: 'surface:WORKSPACE_CREATE',

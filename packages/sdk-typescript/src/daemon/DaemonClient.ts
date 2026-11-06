@@ -7484,6 +7484,22 @@ export class DaemonClient {
     );
   }
 
+  async getWorkspaceOrder(): Promise<{ cwds: string[] }> {
+    return this.jsonRequest('/workspace-order', 'GET /workspace-order', {
+      mode: 'rest',
+    });
+  }
+
+  async setWorkspaceOrder(
+    cwds: readonly string[],
+  ): Promise<{ cwds: string[] }> {
+    return this.jsonRequest('/workspace-order', 'POST /workspace-order', {
+      method: 'POST',
+      body: { cwds },
+      mode: 'rest',
+    });
+  }
+
   async updateWorkspace(
     workspaceSelector: string,
     update: DaemonWorkspaceUpdate,

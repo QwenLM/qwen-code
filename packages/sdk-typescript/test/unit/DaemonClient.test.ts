@@ -12191,6 +12191,34 @@ describe('DaemonClient', () => {
   });
 
   describe('workspace registration persistence', () => {
+    it('reads and saves shared workspace order through REST and propagates failures', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { cwds: ['/b', '/a'] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.getWorkspaceOrder()).resolves.toEqual({
+        cwds: ['/b', '/a'],
+      });
+      await expect(client.setWorkspaceOrder(['/b', '/a'])).resolves.toEqual({
+        cwds: ['/b', '/a'],
+      });
+      expect(calls.map((call) => [call.method, call.url, call.body])).toEqual([
+        ['GET', 'http://daemon/workspace-order', null],
+        [
+          'POST',
+          'http://daemon/workspace-order',
+          JSON.stringify({ cwds: ['/b', '/a'] }),
+        ],
+      ]);
+      const failed = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: async () => jsonResponse(500, { error: 'disk full' }),
+      });
+      await expect(failed.setWorkspaceOrder(['/a'])).rejects.toBeInstanceOf(
+        DaemonHttpError,
+      );
+    });
+
     it('updates and clears workspace metadata through direct REST', async () => {
       const { fetch, calls } = recordingFetch((req) =>
         jsonResponse(200, {

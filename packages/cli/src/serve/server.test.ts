@@ -952,6 +952,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'multi_workspace_session_shell',
   'dynamic_workspace_registration',
   'persistent_workspace_registration',
+  'workspace_order',
   'workspace_display_name',
   'scratch_workspace_registration',
   'git_workspace_clone',
@@ -3973,7 +3974,10 @@ describe('createServeApp', () => {
           ).toContain(feature);
           continue;
         }
-        if (feature === 'persistent_workspace_registration') {
+        if (
+          feature === 'persistent_workspace_registration' ||
+          feature === 'workspace_order'
+        ) {
           expect(
             predicate({ persistentWorkspaceRegistrationAvailable: true }),
           ).toBe(true);
