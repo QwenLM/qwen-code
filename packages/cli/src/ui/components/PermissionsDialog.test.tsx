@@ -180,9 +180,7 @@ describe('permissionScopeItems row width', () => {
       // description used to jump straight to truncation and lose it.
       expect(item.description).toContain('settings.json');
       expect(getCachedStringWidth(item.description)).toBeLessThanOrEqual(
-        rowColumns -
-          getCachedStringWidth(item.label) -
-          SCOPE_LABEL_GAP,
+        rowColumns - getCachedStringWidth(item.label) - SCOPE_LABEL_GAP,
       );
     },
   );
