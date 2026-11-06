@@ -61,6 +61,13 @@ interface MarkdownProps {
    */
   isStreaming?: boolean;
   tableMode?: MarkdownTableMode;
+  /**
+   * Renders the document inert: links become non-interactive labels and
+   * images are dropped in favour of their alt text. Use for model-supplied
+   * Markdown on render-only surfaces (approval dialogs) where a link or
+   * image must not fire navigation or a network request.
+   */
+  inert?: boolean;
 }
 
 // Keep the cost of repeatedly parsing a growing stream bounded. Short streams
@@ -732,6 +739,9 @@ const MarkdownSourceContext = createContext<MarkdownContentSource | undefined>(
   undefined,
 );
 const MarkdownDocumentContext = createContext<string | undefined>(undefined);
+// Inert rendering (approval dialogs): links render as labels, images as alt
+// text, so model-supplied Markdown cannot trigger navigation or requests.
+const MarkdownInertContext = createContext(false);
 
 interface PositionedCodeNode {
   readonly position?: {
@@ -892,6 +902,10 @@ function MarkdownLink({
 }: ComponentProps<'a'> & ExtraProps) {
   const renderMode = useTranscriptRenderMode();
   const openExternalLink = useExternalLinkOpener();
+  const inert = useContext(MarkdownInertContext);
+  if (inert) {
+    return <span className={styles.link}>{children}</span>;
+  }
   const footnote =
     node?.properties.dataFootnoteRef !== undefined ||
     node?.properties.dataFootnoteBackref !== undefined;
@@ -911,8 +925,7 @@ function MarkdownLink({
         }
         onClick={(event) => {
           const root = event.currentTarget.getRootNode() as
-            | Document
-            | ShadowRoot;
+            Document | ShadowRoot;
           const target = root.getElementById(href.slice(1));
           if (!target) return;
           event.preventDefault();
@@ -964,6 +977,10 @@ function MarkdownLink({
 
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   const renderMode = useTranscriptRenderMode();
+  const inert = useContext(MarkdownInertContext);
+  if (inert) {
+    return alt ? <span>{alt}</span> : null;
+  }
   const safeSrc = isSafeImageSrc(src, renderMode === 'document')
     ? src
     : undefined;
@@ -1109,6 +1126,7 @@ export const Markdown = memo(function Markdown({
   source,
   isStreaming,
   tableMode,
+  inert,
 }: MarkdownProps) {
   const { markdown, markdownTableMode } = useWebShellCustomization();
   const theme = useTheme();
@@ -1301,13 +1319,15 @@ export const Markdown = memo(function Markdown({
       className={source !== 'thinking' ? styles.content : undefined}
       data-markdown-source={source}
     >
-      <IsStreamingContext.Provider value={!!isStreaming}>
-        <MarkdownSourceContext.Provider value={source}>
-          <MarkdownDocumentContext.Provider value={renderedContent}>
-            {chartAwareMarkdown}
-          </MarkdownDocumentContext.Provider>
-        </MarkdownSourceContext.Provider>
-      </IsStreamingContext.Provider>
+      <MarkdownInertContext.Provider value={!!inert}>
+        <IsStreamingContext.Provider value={!!isStreaming}>
+          <MarkdownSourceContext.Provider value={source}>
+            <MarkdownDocumentContext.Provider value={renderedContent}>
+              {chartAwareMarkdown}
+            </MarkdownDocumentContext.Provider>
+          </MarkdownSourceContext.Provider>
+        </IsStreamingContext.Provider>
+      </MarkdownInertContext.Provider>
     </div>
   );
 });

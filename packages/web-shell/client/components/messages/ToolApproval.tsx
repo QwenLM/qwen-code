@@ -742,12 +742,18 @@ export function ToolApproval({
           // raw <pre>. Model-supplied text, so it is control-char sanitized
           // like every other approval render site; the sanitized text is
           // the tooltip and the plain text behind the aria-describedby.
+          // The dialog is a render-only surface, so the plan renders inert
+          // (links as plain labels, images as alt text): a link or image in
+          // the model's plan must not fire navigation or a network request.
+          // `data-approval-shortcuts-ignore` keeps the panel's approval
+          // hotkeys from reacting to events focused inside the plan subtree.
           <div
             className={`${styles.content} ${styles.planContent}`}
             id={commandId}
             title={contentDisplay}
+            data-approval-shortcuts-ignore
           >
-            <Markdown content={contentDisplay} />
+            <Markdown content={contentDisplay} inert />
           </div>
         ) : (
           <pre className={styles.content} id={commandId} title={contentDisplay}>

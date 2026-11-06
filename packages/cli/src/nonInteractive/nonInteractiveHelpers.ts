@@ -121,6 +121,7 @@ export function buildInitialSystemReminders(config: Config): Part[] {
       text: getPlanModeSystemReminder(
         config.getSdkMode?.(),
         config.isSessionWorkflowTodoContextActive?.() === true,
+        config.isTodoWriteEnabled?.() === true,
       ),
     });
   }

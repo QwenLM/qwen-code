@@ -33,6 +33,8 @@ describe('EnterPlanModeTool', () => {
       getExperimentalZedIntegration: vi.fn(() => false),
       getInputFormat: vi.fn(() => undefined),
       getSdkMode: vi.fn(() => false),
+      isSessionWorkflowTodoContextActive: vi.fn(() => false),
+      isTodoWriteEnabled: vi.fn(() => false),
     } as unknown as Config;
 
     tool = new EnterPlanModeTool(mockConfig);
@@ -224,6 +226,23 @@ describe('EnterPlanModeTool', () => {
       expect(result.llmContent).toContain('Present your plan directly');
       expect(result.llmContent).not.toContain(
         'by calling the exit_plan_mode tool',
+      );
+    });
+
+    it('passes the session workflow and todo_write gates through to the reminder', async () => {
+      (
+        mockConfig.isSessionWorkflowTodoContextActive as ReturnType<
+          typeof vi.fn
+        >
+      ).mockReturnValue(true);
+      (
+        mockConfig.isTodoWriteEnabled as ReturnType<typeof vi.fn>
+      ).mockReturnValue(true);
+      const invocation = tool.build({});
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toBe(
+        getPlanModeSystemReminder(false, true, true),
       );
     });
 

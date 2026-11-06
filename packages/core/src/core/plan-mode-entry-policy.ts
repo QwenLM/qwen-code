@@ -13,9 +13,12 @@ export const PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE =
 const PLAN_MODE_LIFECYCLE_REMINDERS = [
   getPlanModeSystemReminder(false),
   getPlanModeSystemReminder(true),
-  // Session Workflow on: the only extra variant enter_plan_mode can emit,
-  // since plan-only mode keeps its reminder unchanged.
-  getPlanModeSystemReminder(false, true),
+  // The Todo-capture variant, emitted when both the Session Workflow and
+  // todo_write gates are on. It is the only flag combination distinct from
+  // the first two entries (the sentence is off for plan-only mode and for
+  // todo_write off), and without it the finalizer would apply the
+  // truncation budget to the whole reminder.
+  getPlanModeSystemReminder(false, true, true),
 ];
 
 export function getPlanModeLifecyclePrefix(

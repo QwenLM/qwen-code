@@ -1191,6 +1191,75 @@ describe('ToolApproval accessibility', () => {
     ).toBe(plan);
   });
 
+  it('renders the plan inert: links as labels, images as alt text', () => {
+    // The approval dialog is a render-only surface: a link or image in the
+    // model's plan must not fire navigation or a network request, even for
+    // a "safe" external URL.
+    const plan = [
+      '## Plan',
+      '',
+      '- See [the docs](https://example.com/docs)',
+      '- See [trick](javascript:alert(1))',
+      '- ![](http://example.com/track.png)',
+      '- ![diagram](http://example.com/diagram.png)',
+    ].join('\n');
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+
+    const planPanel = container!.querySelector('[class*="planContent"]')!;
+    expect(planPanel).toBeTruthy();
+    // No live anchors at all — inert rendering replaces every link with a
+    // non-interactive label.
+    expect(planPanel.querySelector('a')).toBeNull();
+    expect(planPanel.textContent).toContain('the docs');
+    expect(planPanel.textContent).toContain('trick');
+    // Images are dropped in favour of their alt text (empty alt = nothing).
+    expect(planPanel.querySelector('img')).toBeNull();
+    expect(planPanel.textContent).toContain('diagram');
+  });
+
+  it('keeps raw HTML inert in the plan markdown', () => {
+    const plan =
+      '## Plan\n\n<script>window.__planPwned = true</script>\n\n- [x] **Step** done';
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+
+    expect(container!.querySelector('script')).toBeNull();
+    expect((window as { __planPwned?: boolean }).__planPwned).toBeUndefined();
+    // The markdown around the raw HTML still renders.
+    expect(container!.textContent).toContain('Step');
+  });
+
+  it('neutralises bidi and C0 controls in the plan markdown', () => {
+    const plan = '## Plan\u202e\n\n- Ship \u001b[31mstep\u001b[0m one';
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+
+    const planPanel = container!.querySelector('[class*="planContent"]')!;
+    const rendered = planPanel.textContent!;
+    // The rendered text and the tooltip must not re-introduce raw controls.
+    for (const control of ['\u202e', '\u001b']) {
+      expect(rendered).not.toContain(control);
+      expect(planPanel.getAttribute('title')).not.toContain(control);
+    }
+    expect(rendered).toContain('Ship');
+  });
+
+  it('exempts the plan subtree from approval shortcuts', () => {
+    render(undefined, planRequest);
+    expect(
+      container!
+        .querySelector('[class*="planContent"]')
+        ?.hasAttribute('data-approval-shortcuts-ignore'),
+    ).toBe(true);
+  });
+
   it('shows a dependency-free Plan Mode workflow as a list', () => {
     render(undefined, planRequest, [
       { id: 'review', content: 'Review the change', status: 'pending' },

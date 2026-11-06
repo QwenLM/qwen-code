@@ -1785,7 +1785,7 @@ describe('getPlanModeSystemReminder', () => {
   });
 
   it('instructs todo_write before exit_plan_mode for Session Workflow', () => {
-    const result = getPlanModeSystemReminder(false, true);
+    const result = getPlanModeSystemReminder(false, true, true);
 
     expectText(result, [
       'Before converging, capture the plan as a structured Todo list',
@@ -1800,12 +1800,21 @@ describe('getPlanModeSystemReminder', () => {
   });
 
   it('keeps the Todo reminder off when the gate is off or plan-only', () => {
-    // Gate off (default) and plan-only mode (SDK/subagents, which never run
-    // the interactive exit_plan_mode approval) must both stay text-only.
+    // Gate off (default), todo_write disabled, and plan-only mode
+    // (SDK/subagents, which never run the interactive exit_plan_mode
+    // approval) must all stay text-only.
     const base = getPlanModeSystemReminder();
     expectText(base, ['exit_plan_mode'], ['todo_write']);
+    // Session Workflow on but todo_write disabled: the Todo sentence must
+    // stay out — it is gated on the same flag as every other Todo
+    // instruction, not on the workflow context alone.
     expectText(
-      getPlanModeSystemReminder(true, true),
+      getPlanModeSystemReminder(false, true),
+      ['Present your plan'],
+      ['todo_write'],
+    );
+    expectText(
+      getPlanModeSystemReminder(true, true, true),
       ['Present your plan directly'],
       ['todo_write'],
     );
@@ -1813,7 +1822,7 @@ describe('getPlanModeSystemReminder', () => {
     // Todo-capture sentence inserted before the presentation instruction.
     const inserted =
       'Before converging, capture the plan as a structured Todo list: call the todo_write tool with one Todo per plan step (each with a stable id, status "pending", and blockedBy naming the steps that must complete first), so the plan can be reviewed as a task graph. Present your plan';
-    expect(getPlanModeSystemReminder(false, true)).toBe(
+    expect(getPlanModeSystemReminder(false, true, true)).toBe(
       base.replace('Present your plan', inserted),
     );
   });
