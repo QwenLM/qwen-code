@@ -1185,12 +1185,13 @@ export function createDaemonWorkspaceActions({
     },
 
     activateSubscription(options) {
+      const { workspaceCwd, ...request } = options ?? {};
       const workspace = requireWorkspaceClient(
         getClient,
-        getWorkspaceCwd,
+        () => workspaceCwd ?? getWorkspaceCwd(),
         'Connect Qwen Subscription failed',
       );
-      return workspace.activateSubscription(options);
+      return workspace.activateSubscription(request);
     },
 
     getSubscriptionConfig(options) {

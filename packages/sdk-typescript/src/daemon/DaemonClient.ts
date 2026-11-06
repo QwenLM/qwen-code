@@ -9420,7 +9420,11 @@ export class WorkspaceDaemonClient {
   }
 
   activateSubscription(
-    opts: { signal?: AbortSignal } = {},
+    opts: {
+      signal?: AbortSignal;
+      preserveModel?: boolean;
+      selectedModelId?: string;
+    } = {},
   ): Promise<DaemonSubscriptionActivation> {
     return this.client.workspaceJsonRequest(
       this.workspaceSelector,
@@ -9428,7 +9432,12 @@ export class WorkspaceDaemonClient {
       'POST /workspaces/:workspace/auth/subscription',
       {
         method: 'POST',
-        body: {},
+        body: {
+          ...(opts.preserveModel ? { preserveModel: true } : {}),
+          ...(opts.selectedModelId
+            ? { selectedModelId: opts.selectedModelId }
+            : {}),
+        },
         signal: opts.signal,
         mode: 'rest',
         timeoutMs: 65000,

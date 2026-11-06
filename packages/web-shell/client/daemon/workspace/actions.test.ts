@@ -25,7 +25,10 @@ describe('workspace actions', () => {
       baseUrl: 'http://localhost:3001',
       token: 'test-daemon-token',
     });
-    const options = { signal: new AbortController().signal };
+    const options = {
+      signal: new AbortController().signal,
+      preserveModel: true,
+    };
     await actions.getSubscriptionConfig(options);
     await actions.startSubscriptionLogin();
     await actions.getSubscriptionLogin('flow-1', options);
@@ -55,14 +58,17 @@ describe('workspace actions', () => {
       runtimeSync: { status: 'applied' },
     });
     const workspaceByCwd = vi.fn().mockReturnValue({ activateSubscription });
-    let cwd: string | undefined = '/secondary';
+    let cwd: string | undefined = '/primary';
     const actions = createDaemonWorkspaceActions({
       getClient: () => ({ workspaceByCwd }) as unknown as DaemonClient,
       getWorkspaceCwd: () => cwd,
       baseUrl: 'http://localhost:3001',
     });
     const options = { signal: new AbortController().signal };
-    await actions.activateSubscription(options);
+    await actions.activateSubscription({
+      ...options,
+      workspaceCwd: '/secondary',
+    });
     expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
     expect(activateSubscription).toHaveBeenCalledWith(options);
     cwd = undefined;

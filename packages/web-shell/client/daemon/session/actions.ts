@@ -1924,10 +1924,6 @@ export function createDaemonSessionActions({
       ) {
         throw new Error('Model refresh requires a connected workspace.');
       }
-      if (readOnly && session) {
-        // Invalidate older reconnect snapshots without starting a config write.
-        observeSessionConfig(sessionConfigGeneration, session);
-      }
       const isCurrent = (current = getConnection()) =>
         sessionRef.current === session &&
         current.sessionId === before.sessionId &&
@@ -1954,6 +1950,10 @@ export function createDaemonSessionActions({
       };
       await beforeRefresh?.({ workspaceCwd, sessionId: session?.sessionId });
       if (!isCurrent()) return;
+      if (readOnly && session) {
+        // Invalidate older reconnect snapshots without starting a config write.
+        observeSessionConfig(sessionConfigGeneration, session);
+      }
       const workspace = client.workspaceByCwd(workspaceCwd);
       if (!readOnly) {
         const reload = workspace.reloadModelProviders({
@@ -2045,6 +2045,24 @@ export function createDaemonSessionActions({
             : current,
         );
         if (!readOnly) checkSubscriptionSelection(models.models);
+        if (
+          options?.unavailableSubscriptionModelNotice &&
+          status.state._meta?.['authType'] === 'qwen-subscription' &&
+          currentModel &&
+          !models.models.some(
+            (model) =>
+              model.authType === 'qwen-subscription' &&
+              (model.id === currentModel || model.baseModelId === currentModel),
+          )
+        ) {
+          addNotice({
+            severity: 'warning',
+            category: 'user_action',
+            code: 'subscription.model_unavailable',
+            message: options.unavailableSubscriptionModelNotice,
+            recoverable: true,
+          });
+        }
       } else {
         const providers = await workspace.workspaceProviders();
         if (!isCurrent()) return;

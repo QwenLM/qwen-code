@@ -18,13 +18,10 @@ export async function activateSubscription(
   settings: LoadedSettings,
   config: Config,
   signal: AbortSignal,
-): Promise<SubscriptionUserInfo> {
+): Promise<{ info: SubscriptionUserInfo; modelSelectionRequired: boolean }> {
   signal.throwIfAborted();
   if (!settings.isTrusted) {
     throw new Error('Workspace is not trusted.');
-  }
-  if (!settings.workspaceSettingsActive) {
-    throw new Error('Open a project folder to activate Qwen Subscription.');
   }
   const enforced = settings.merged.security?.auth?.enforcedType;
   if (enforced && enforced !== AuthType.QWEN_SUBSCRIPTION) {
@@ -37,8 +34,31 @@ export async function activateSubscription(
     throw new Error('An active Qwen Plus or Pro subscription is required.');
   }
   const { models } = await config.refreshSubscriptionModels(signal);
-  const modelId = selectSubscriptionModel(models);
   signal.throwIfAborted();
+  const activeAuthType = config.getAuthType();
+  const savedModel = settings.merged.model?.name;
+  if (activeAuthType || savedModel) {
+    if (
+      !activeAuthType &&
+      settings.merged.security?.auth?.selectedType ===
+        AuthType.QWEN_SUBSCRIPTION &&
+      savedModel === config.getModel() &&
+      models.includes(savedModel)
+    ) {
+      await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+    }
+    const authType = config.getAuthType();
+    const modelSelectionRequired =
+      !authType ||
+      (authType === AuthType.QWEN_SUBSCRIPTION &&
+        !models.includes(config.getModel()));
+    config.setSubscriptionPlan(plan);
+    return { info, modelSelectionRequired };
+  }
+  if (!settings.workspaceSettingsActive) {
+    throw new Error('Open a project folder to activate Qwen Subscription.');
+  }
+  const modelId = selectSubscriptionModel(models);
   // After committing settings, finish the runtime switch even if the dialog closes.
   await applyProviderInstallPlan(
     {
@@ -58,5 +78,5 @@ export async function activateSubscription(
     },
   );
   config.setSubscriptionPlan(plan);
-  return info;
+  return { info, modelSelectionRequired: false };
 }

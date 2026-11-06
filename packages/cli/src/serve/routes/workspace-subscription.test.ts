@@ -291,7 +291,7 @@ it.each(['failed', 'deferred'])(
 );
 
 it.each(['qwen3.8-flash', 'removed-model'])(
-  'activates Max on explicit sign-in instead of the saved model %s',
+  'keeps the saved model %s on explicit sign-in',
   async (savedModel) => {
     const { app, persistSettings } = setup();
     mocks.models.mockResolvedValue({
@@ -309,17 +309,45 @@ it.each(['qwen3.8-flash', 'removed-model'])(
       '/workspaces/secondary/auth/subscription',
     );
     expect(response.status).toBe(200);
-    expect(response.body.modelId).toBe('qwen3.8-max');
-    expect(persistSettings).toHaveBeenCalledWith(
-      '/secondary',
-      expect.arrayContaining([
-        {
-          scope: SettingScope.Workspace,
-          key: 'model.name',
-          value: 'qwen3.8-max',
-        },
-      ]),
-      expect.any(Function),
+    expect(response.body.modelId).toBeNull();
+    expect(response.body.modelSelectionRequired ?? false).toBe(
+      savedModel !== 'qwen3.8-flash',
     );
+    expect(persistSettings).not.toHaveBeenCalled();
   },
 );
+
+it.each([
+  ['old-model(qwen-subscription)', true],
+  ['old-model(openai)', false],
+])(
+  'keeps the explicit selection %s and reports an unavailable subscription model',
+  async (selectedModelId, required) => {
+    const { app, persistSettings } = setup();
+    const response = await request(app)
+      .post('/workspaces/secondary/auth/subscription')
+      .send({ selectedModelId });
+    expect(response.status).toBe(200);
+    expect(response.body.modelId).toBeNull();
+    expect(response.body.modelSelectionRequired ?? false).toBe(required);
+    expect(persistSettings).not.toHaveBeenCalled();
+  },
+);
+
+it('refreshes the subscription catalog without persisting a model for a live session', async () => {
+  const { app, persistSettings, reloadModelProviders } = setup();
+  const response = await request(app)
+    .post('/workspaces/secondary/auth/subscription')
+    .send({ preserveModel: true });
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({
+    authType: 'qwen-subscription',
+    modelId: null,
+    runtimeSync: { status: 'applied' },
+  });
+  expect(mocks.models).toHaveBeenCalledOnce();
+  expect(persistSettings).not.toHaveBeenCalled();
+  expect(reloadModelProviders).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ workspaceCwd: '/secondary' }),
+  );
+});

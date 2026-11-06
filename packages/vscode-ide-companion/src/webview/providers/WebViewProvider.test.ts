@@ -2415,22 +2415,20 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         );
         expect(attached.calls.activate).toHaveBeenCalledWith({
           signal: expect.any(AbortSignal),
+          ...(sessionId ? { preserveModel: true } : {}),
         });
+        expect(attached.calls.setModel).not.toHaveBeenCalled();
         if (sessionId) {
-          expect(attached.calls.setModel).toHaveBeenCalledExactlyOnceWith(
-            sessionId,
-            'qwen3.8-max(qwen-subscription)',
-          );
+          expect(attached.calls.providers).not.toHaveBeenCalled();
         } else {
-          expect(attached.calls.setModel).not.toHaveBeenCalled();
+          expect(attached.calls.providers).toHaveBeenCalledOnce();
         }
-        expect(attached.calls.providers).toHaveBeenCalledOnce();
         expect(attached.postMessage).toHaveBeenCalledWith({
           type: 'qwenSubscriptionActivationResult',
           data: {
             flowId: attached.flowId,
             requestId: 'request',
-            modelId: 'qwen3.8-max',
+            modelId: sessionId ? null : 'qwen3.8-max',
           },
         });
         expect(attached.postMessage).not.toHaveBeenCalledWith(

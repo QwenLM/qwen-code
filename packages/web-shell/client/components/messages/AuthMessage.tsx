@@ -64,6 +64,12 @@ interface AuthMessageProps {
   allowAdd?: boolean;
   onMessage: (text: string, type?: 'status' | 'error') => void;
   onModelActivated?: (modelId: string) => void;
+  getWorkspaceCwd?: () => string | undefined;
+  getSelectedModel?: () => string;
+  onSessionSubscriptionActivated?: (
+    workspaceCwd: string,
+    sessionId: string,
+  ) => void;
   onClose: () => void;
 }
 
@@ -155,6 +161,9 @@ function normalizeModelIds(value: string): string[] {
 export function AuthMessage({
   onMessage,
   onModelActivated,
+  getWorkspaceCwd,
+  getSelectedModel,
+  onSessionSubscriptionActivated,
   onClose,
   allowAdd = true,
   dialog = false,
@@ -168,11 +177,47 @@ export function AuthMessage({
   const sessionActions = useActions();
   const connection = useConnection();
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
+  const connectionRef = useRef(connection);
+  connectionRef.current = connection;
   const ownerRef = useRef(sessionOwnerGuard.capture());
   const ownerChanged = !ownerRef.current.isCurrent();
   if (ownerChanged) ownerRef.current = sessionOwnerGuard.capture();
   const saveOperationRef = useRef(0);
-  const [subscriptionReal, setSubscriptionReal] = useState(false);
+  const [subscriptionTarget, setSubscriptionTarget] = useState<{
+    workspaceCwd: string | undefined;
+    sessionId: string | undefined;
+    selectedModelId: string | undefined;
+  }>();
+  const getSubscriptionContext = useCallback(() => {
+    const current = connectionRef.current;
+    const workspaceCwd = getWorkspaceCwd
+      ? getWorkspaceCwd()
+      : current.workspaceCwd;
+    const sessionId =
+      workspaceCwd === current.workspaceCwd ? current.sessionId : undefined;
+    return { workspaceCwd, sessionId };
+  }, [getWorkspaceCwd]);
+  const {
+    workspaceCwd: subscriptionWorkspace,
+    sessionId: subscriptionSession,
+  } = getSubscriptionContext();
+  const subscriptionTargetChanged =
+    subscriptionTarget !== undefined &&
+    (subscriptionTarget.workspaceCwd !== subscriptionWorkspace ||
+      subscriptionTarget.sessionId !== subscriptionSession);
+  useEffect(() => {
+    if (subscriptionTargetChanged) setSubscriptionTarget(undefined);
+  }, [subscriptionTargetChanged]);
+  const startSubscription = useCallback(() => {
+    const { workspaceCwd, sessionId } = getSubscriptionContext();
+    setSubscriptionTarget({
+      workspaceCwd,
+      sessionId,
+      selectedModelId: sessionId
+        ? connectionRef.current.currentModel
+        : undefined,
+    });
+  }, [getSubscriptionContext]);
   const [subscriptionEnabled, setSubscriptionEnabled] = useState(false);
   useEffect(() => {
     const abort = new AbortController();
@@ -296,7 +341,7 @@ export function AuthMessage({
     currentStep,
     loading,
     hasSubscriptionEntry,
-    subscriptionReal,
+    subscriptionTarget,
   ]);
 
   useEffect(() => {
@@ -308,7 +353,6 @@ export function AuthMessage({
   useEffect(() => {
     if (!ownerChanged) return;
     saveOperationRef.current += 1;
-    setSubscriptionReal(false);
     setSaving(false);
     setError(null);
   }, [ownerChanged]);
@@ -604,7 +648,7 @@ export function AuthMessage({
   const activate = useCallback(() => {
     if (view === 'groups') {
       if (hasSubscriptionEntry && groupIndex === 0) {
-        setSubscriptionReal(true);
+        startSubscription();
         return;
       }
       const group = groups[groupIndex - groupOffset];
@@ -679,6 +723,7 @@ export function AuthMessage({
     catalog,
     goNext,
     hasSubscriptionEntry,
+    startSubscription,
     groupOffset,
     groupIndex,
     groups,
@@ -1212,7 +1257,7 @@ export function AuthMessage({
               onFocus={() => setGroupIndex(0)}
               onClick={() => {
                 setGroupIndex(0);
-                setSubscriptionReal(true);
+                startSubscription();
               }}
             />
           )}
@@ -1287,54 +1332,82 @@ export function AuthMessage({
     activate();
   };
 
-  if (subscriptionReal)
+  if (subscriptionTarget && !subscriptionTargetChanged)
     return (
       <QwenSubscriptionFlow
         dialog={dialog}
         desktopSuccess={dialog && isDesktopShell()}
         transport={workspaceActions}
         onActivate={async (signal) => {
-          const owner = sessionOwnerGuard.capture();
-          const result = await workspaceActions
-            .activateSubscription({
-              signal,
-            })
-            .finally(() => {
-              signal.throwIfAborted();
-              if (!owner.isCurrent()) throw new Error('Session changed.');
-            });
+          const { workspaceCwd, sessionId } = subscriptionTarget;
+          if (!workspaceCwd)
+            throw new Error('Subscription activation requires a workspace.');
+          const assertTarget = () => {
+            signal.throwIfAborted();
+            const current = getSubscriptionContext();
+            if (
+              current.workspaceCwd !== workspaceCwd ||
+              current.sessionId !== sessionId
+            )
+              throw new DOMException(
+                'Subscription target changed.',
+                'AbortError',
+              );
+          };
+          assertTarget();
+          const selectedModelId = sessionId
+            ? (connectionRef.current.currentModel ??
+              subscriptionTarget.selectedModelId)
+            : getSelectedModel?.();
+          const preserveModel = Boolean(sessionId || selectedModelId);
+          const result = await workspaceActions.activateSubscription({
+            workspaceCwd,
+            signal,
+            ...(preserveModel ? { preserveModel: true } : {}),
+            ...(selectedModelId ? { selectedModelId } : {}),
+          });
+          assertTarget();
           if (result.runtimeSync.status === 'failed')
             throw new Error('Subscription runtime activation failed.');
-          if (connection.sessionId) {
-            await sessionActions.setModel(
-              `${result.modelId}(qwen-subscription)`,
-            );
-            signal.throwIfAborted();
-            if (!owner.isCurrent()) throw new Error('Session changed.');
-            await sessionActions.refreshModels(undefined, {
-              reloadProviders: false,
-            });
-            signal.throwIfAborted();
-            if (!owner.isCurrent()) throw new Error('Session changed.');
-          } else {
-            await sessionActions.refreshModels();
-            signal.throwIfAborted();
-            if (!owner.isCurrent()) throw new Error('Session changed.');
-            const providers = await workspaceActions.loadProviders();
-            signal.throwIfAborted();
-            if (!owner.isCurrent()) throw new Error('Session changed.');
-            if (
-              !providers.initialized ||
-              providers.current?.authType !== 'qwen-subscription' ||
-              ![
-                result.modelId,
-                `${result.modelId}(qwen-subscription)`,
-              ].includes(providers.current.modelId ?? '')
-            ) {
-              throw new Error(t('subscription.connectFailed'));
-            }
-            onModelActivated?.(`${result.modelId}(qwen-subscription)`);
+          if (sessionId) {
+            onSessionSubscriptionActivated?.(workspaceCwd, sessionId);
+            return result.modelSelectionRequired
+              ? { modelSelectionRequired: true }
+              : undefined;
           }
+          if (
+            connectionRef.current.status === 'connected' &&
+            connectionRef.current.workspaceCwd === workspaceCwd
+          ) {
+            await sessionActions
+              .refreshModels(
+                (target) => {
+                  if (target.sessionId || target.workspaceCwd !== workspaceCwd)
+                    throw new Error('Workspace changed.');
+                },
+                { reloadProviders: false },
+              )
+              .catch((error: unknown) => {
+                if (result.modelId) throw error;
+              });
+            assertTarget();
+          }
+          if (result.modelSelectionRequired)
+            return { modelSelectionRequired: true };
+          if (preserveModel || !result.modelId) return;
+          const modelId = `${result.modelId}(qwen-subscription)`;
+          const providers = await workspaceActions.loadProviders(workspaceCwd);
+          assertTarget();
+          const selectedModel = getSelectedModel?.();
+          if (selectedModel && selectedModel !== modelId) return;
+          if (
+            !providers.initialized ||
+            providers.current?.authType !== 'qwen-subscription' ||
+            ![result.modelId, modelId].includes(providers.current.modelId ?? '')
+          ) {
+            throw new Error(t('subscription.connectFailed'));
+          }
+          onModelActivated?.(modelId);
           return result.modelId;
         }}
         onActivated={(message) => {
@@ -1342,9 +1415,9 @@ export function AuthMessage({
           onClose();
         }}
         onModelsUnavailable={onClose}
-        onClose={() => setSubscriptionReal(false)}
+        onClose={() => setSubscriptionTarget(undefined)}
         onOtherProviders={() => {
-          setSubscriptionReal(false);
+          setSubscriptionTarget(undefined);
           setView('groups');
         }}
         onOpenExternal={(url) => {

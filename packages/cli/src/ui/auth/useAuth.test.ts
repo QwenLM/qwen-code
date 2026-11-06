@@ -647,34 +647,42 @@ describe('maskApiKey', () => {
   });
 });
 
-it('returns to the prompt and preserves the success summary after subscription activation', async () => {
-  activate.mockResolvedValue({
-    email: 'builder@example.com',
-    member_type: 'pro',
-  });
-  const config = { ...createConfig(), getModel: () => 'qwen3.8-max' };
-  const addItem = vi.fn();
-  const hook = renderHook(() =>
-    useAuthCommand(createSettings() as never, config as never, addItem),
-  );
-  act(() => hook.result.current.openAuthDialog());
-  expect(hook.result.current.isAuthDialogOpen).toBe(true);
-  await act(async () => {
-    await hook.result.current.handleSubscriptionSubmit(
-      new AbortController().signal,
+it.each([false, true])(
+  'returns to the prompt with the subscription result (model selection required: %s)',
+  async (modelSelectionRequired) => {
+    activate.mockResolvedValue({
+      info: { email: 'builder@example.com', member_type: 'pro' },
+      modelSelectionRequired,
+    });
+    const config = { ...createConfig(), getModel: () => 'qwen3.8-max' };
+    config.getAuthType.mockReturnValue(
+      modelSelectionRequired ? undefined : AuthType.QWEN_SUBSCRIPTION,
     );
-  });
-  expect(hook.result.current.isAuthDialogOpen).toBe(false);
-  expect(addItem).toHaveBeenCalledWith(
-    {
-      type: 'info',
-      text: '✓ Signed in successfully · builder@example.com\n✓ Current plan: Qwen Pro. Qwen Code is ready.\n  Model: qwen3.8-max. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.\n  Common commands: /usage   /upgrade   /model   /status   /logout',
-      presentation: 'subscription-success',
-    },
-    expect.any(Number),
-  );
-  hook.unmount();
-});
+    const addItem = vi.fn();
+    const hook = renderHook(() =>
+      useAuthCommand(createSettings() as never, config as never, addItem),
+    );
+    act(() => hook.result.current.openAuthDialog());
+    expect(hook.result.current.isAuthDialogOpen).toBe(true);
+    await act(async () => {
+      await hook.result.current.handleSubscriptionSubmit(
+        new AbortController().signal,
+      );
+    });
+    expect(hook.result.current.isAuthDialogOpen).toBe(false);
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: modelSelectionRequired
+          ? '✓ Signed in successfully · builder@example.com\n✓ The selected model, qwen3.8-max, is no longer available. Run /model to choose another model.'
+          : '✓ Signed in successfully · builder@example.com\n✓ Current plan: Qwen Pro. Qwen Code is ready.\n  Model: qwen3.8-max. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.\n  Common commands: /usage   /upgrade   /model   /status   /logout',
+        presentation: 'subscription-success',
+      },
+      expect.any(Number),
+    );
+    hook.unmount();
+  },
+);
 
 it('does not close or publish success if activation fails or is cancelled', async () => {
   const addItem = vi.fn();
@@ -693,8 +701,8 @@ it('does not close or publish success if activation fails or is cancelled', asyn
   const controller = new AbortController();
   controller.abort();
   activate.mockResolvedValue({
-    email: 'builder@example.com',
-    member_type: 'pro',
+    info: { email: 'builder@example.com', member_type: 'pro' },
+    modelSelectionRequired: false,
   });
   await act(async () => {
     await expect(

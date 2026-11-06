@@ -1968,13 +1968,21 @@ function AuthDialogFlow({
         onBack={goBack}
         onModelSelectionRequired={onClose}
         onConnect={async (signal, authorizationUrl) => {
-          const info = await activateSubscription(settings, config, signal);
+          const { info, modelSelectionRequired } = await activateSubscription(
+            settings,
+            config,
+            signal,
+          );
           signal.throwIfAborted();
           notify?.(
             subscriptionSuccessMessage(
               info,
-              config.getModel(),
+              modelSelectionRequired ||
+                config.getAuthType() === AuthType.QWEN_SUBSCRIPTION
+                ? config.getModel()
+                : undefined,
               authorizationUrl,
+              modelSelectionRequired,
             ),
             'subscription-success',
           );

@@ -1927,6 +1927,7 @@ export class WebViewProvider {
             flowId?: string;
             requestId?: string;
             message?: string;
+            selectedModelId?: string;
           }
         | undefined;
       const flow = this.sidebarSubscription;
@@ -1943,40 +1944,47 @@ export class WebViewProvider {
         };
         try {
           assertOwner();
+          const selectedModelId =
+            typeof data.selectedModelId === 'string'
+              ? data.selectedModelId
+              : undefined;
           const result = await owner.client
             .workspaceByCwd(owner.workspaceCwd)
             .activateSubscription({
               signal,
+              ...(owner.sessionId || selectedModelId
+                ? { preserveModel: true }
+                : {}),
+              ...(selectedModelId ? { selectedModelId } : {}),
             });
           assertOwner();
           if (result.runtimeSync.status === 'failed')
             throw new Error('Subscription runtime activation failed.');
-          if (owner.sessionId) {
-            await owner.client.setSessionModel(
-              owner.sessionId,
-              `${result.modelId}(qwen-subscription)`,
-            );
+          const modelId = owner.sessionId ? null : result.modelId;
+          if (modelId) {
+            const providers = await owner.client
+              .workspaceByCwd(owner.workspaceCwd)
+              .workspaceProviders();
             assertOwner();
-          }
-          const providers = await owner.client
-            .workspaceByCwd(owner.workspaceCwd)
-            .workspaceProviders();
-          assertOwner();
-          if (
-            !providers.initialized ||
-            providers.current?.authType !== 'qwen-subscription' ||
-            ![result.modelId, `${result.modelId}(qwen-subscription)`].includes(
-              providers.current.modelId ?? '',
-            )
-          ) {
-            throw new Error('Subscription runtime activation failed.');
+            if (
+              !providers.initialized ||
+              providers.current?.authType !== 'qwen-subscription' ||
+              ![modelId, `${modelId}(qwen-subscription)`].includes(
+                providers.current.modelId ?? '',
+              )
+            ) {
+              throw new Error('Subscription runtime activation failed.');
+            }
           }
           this.sendMessageToWebView({
             type: 'qwenSubscriptionActivationResult',
             data: {
               flowId: flow.id,
               requestId: data.requestId,
-              modelId: result.modelId,
+              modelId,
+              ...(result.modelSelectionRequired
+                ? { modelSelectionRequired: true }
+                : {}),
             },
           });
         } catch (error) {

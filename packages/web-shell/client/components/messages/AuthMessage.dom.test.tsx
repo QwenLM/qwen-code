@@ -29,7 +29,11 @@ const { actions, ownerGuard, ownerState, sessionState, sessionActions } =
         }),
       },
       ownerState,
-      sessionState: { sessionId: undefined as string | undefined },
+      sessionState: {
+        sessionId: undefined as string | undefined,
+        workspaceCwd: '/workspace',
+        status: 'connected' as 'connected' | 'connecting',
+      },
       sessionActions: { setModel: vi.fn(), refreshModels: vi.fn() },
     };
   });
@@ -59,6 +63,8 @@ beforeEach(() => {
     providers: [],
   });
   sessionState.sessionId = undefined;
+  sessionState.workspaceCwd = '/workspace';
+  sessionState.status = 'connected';
   sessionActions.setModel.mockReset().mockResolvedValue({});
   sessionActions.refreshModels.mockReset().mockResolvedValue(undefined);
   actions.cancelSubscriptionLogin.mockReset().mockResolvedValue(undefined);
@@ -755,27 +761,44 @@ describe('subscription development entry', () => {
     expect(dialog?.textContent).toContain('手动连接本地服务、代理或其他供应商');
   });
 
-  async function openAuth(dialog = false, language: 'en' | 'zh-CN' = 'en') {
+  async function openAuth(
+    dialog = false,
+    language: 'en' | 'zh-CN' = 'en',
+    getWorkspaceCwd?: () => string,
+    getSelectedModel?: () => string,
+  ) {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
     const onClose = vi.fn();
     const onMessage = vi.fn();
     const onModelActivated = vi.fn();
-    await act(async () => {
-      root!.render(
-        <I18nProvider language={language}>
-          <AuthMessage
-            dialog={dialog}
-            onMessage={onMessage}
-            onModelActivated={onModelActivated}
-            onClose={onClose}
-          />
-        </I18nProvider>,
-      );
-      await Promise.resolve();
-    });
-    return { onClose, onMessage, onModelActivated };
+    const onSessionSubscriptionActivated = vi.fn();
+    const rerender = () =>
+      act(async () => {
+        root!.render(
+          <I18nProvider language={language}>
+            <AuthMessage
+              dialog={dialog}
+              getWorkspaceCwd={getWorkspaceCwd}
+              getSelectedModel={getSelectedModel}
+              onMessage={onMessage}
+              onModelActivated={onModelActivated}
+              onSessionSubscriptionActivated={onSessionSubscriptionActivated}
+              onClose={onClose}
+            />
+          </I18nProvider>,
+        );
+        await Promise.resolve();
+      });
+    await rerender();
+    return {
+      onClose,
+      onMessage,
+      onModelActivated,
+      onSessionSubscriptionActivated,
+      rerender,
+    };
   }
   it('keeps Qwen authorization in provider step 2 and returns to the provider wizard', async () => {
     vi.spyOn(window, 'open').mockReturnValue(null);
@@ -910,73 +933,219 @@ describe('subscription development entry', () => {
       delete (window as Window & { __TAURI__?: unknown }).__TAURI__;
     },
   );
-  it.each(['success', 'failure', 'owner-change'] as const)(
-    'automatically activates the selected workspace and switches its current session (%s)',
-    async (outcome) => {
+  it.each(['reconnect', 'switch session', 'switch workspace'] as const)(
+    'continues authorization only while the original conversation is selected (%s)',
+    async (change) => {
       sessionState.sessionId = 'current-session';
-      let finishRefresh!: () => void;
-      sessionActions.refreshModels.mockImplementation(
-        () =>
-          new Promise<void>((resolve, reject) => {
-            finishRefresh = () =>
-              outcome === 'failure'
-                ? reject(new Error('Catalog offline'))
-                : resolve();
-          }),
-      );
+      sessionState.workspaceCwd = '/secondary';
       actions.getSubscriptionConfig.mockResolvedValue({
         enabled: true,
-        plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
+        plansUrl: 'https://plans.example',
+      });
+      let finishLogin!: () => void;
+      actions.startSubscriptionLogin.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishLogin = () =>
+              resolve({
+                id: 'paid',
+                status: 'ready',
+                userInfo: {
+                  sub: 'user',
+                  email: 'user@example.test',
+                  member_type: 'pro',
+                },
+              });
+          }),
+      );
+
+      const completion = await openAuth();
+      const entry = container!.querySelector<HTMLButtonElement>(
+        'button[aria-label="Qwen Account with Subscription"]',
+      )!;
+      await act(async () => entry.click());
+      if (change === 'reconnect') {
+        sessionState.status = 'connecting';
+      } else {
+        sessionState.sessionId = 'other-session';
+        if (change === 'switch workspace')
+          sessionState.workspaceCwd = '/primary';
+      }
+      ownerState.version += 1;
+      await completion.rerender();
+      await act(async () => finishLogin());
+
+      if (change !== 'reconnect') {
+        expect(actions.cancelSubscriptionLogin).toHaveBeenCalledWith('paid');
+        expect(actions.activateSubscription).not.toHaveBeenCalled();
+        expect(
+          completion.onSessionSubscriptionActivated,
+        ).not.toHaveBeenCalled();
+        expect(completion.onMessage).not.toHaveBeenCalled();
+        return;
+      }
+      expect(actions.activateSubscription).toHaveBeenCalledExactlyOnceWith({
+        workspaceCwd: '/secondary',
+        signal: expect.any(AbortSignal),
+        preserveModel: true,
+      });
+      expect(
+        completion.onSessionSubscriptionActivated,
+      ).toHaveBeenCalledExactlyOnceWith('/secondary', 'current-session');
+      expect(completion.onMessage).toHaveBeenCalledExactlyOnceWith(
+        'Signed in successfully',
+      );
+      expect(completion.onClose).toHaveBeenCalledOnce();
+      expect(sessionActions.setModel).not.toHaveBeenCalled();
+      expect(sessionActions.refreshModels).not.toHaveBeenCalled();
+    },
+  );
+
+  it('retries a failed runtime reload without starting a new login', async () => {
+    sessionState.sessionId = 'current-session';
+    sessionState.workspaceCwd = '/secondary';
+    actions.getSubscriptionConfig.mockResolvedValue({
+      enabled: true,
+      plansUrl: 'https://plans.example',
+    });
+    actions.startSubscriptionLogin.mockResolvedValue({
+      id: 'paid',
+      status: 'ready',
+      userInfo: {
+        sub: 'user',
+        email: 'user@example.test',
+        member_type: 'pro',
+      },
+    });
+    actions.activateSubscription.mockResolvedValueOnce({
+      authType: 'qwen-subscription',
+      modelId: 'qwen3.8-max',
+      runtimeSync: { status: 'failed' },
+    });
+    const completion = await openAuth();
+    const entry = container!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Qwen Account with Subscription"]',
+    )!;
+    await act(async () => entry.click());
+    expect(container!.textContent).toContain(
+      'Could not connect Qwen Subscription. Please try again.',
+    );
+    expect(completion.onMessage).not.toHaveBeenCalled();
+    expect(completion.onSessionSubscriptionActivated).not.toHaveBeenCalled();
+
+    const retry = [...container!.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Try again',
+    )!;
+    await act(async () => retry.click());
+    expect(actions.startSubscriptionLogin).toHaveBeenCalledOnce();
+    expect(
+      actions.activateSubscription.mock.calls.map(
+        ([target]) => target.workspaceCwd,
+      ),
+    ).toEqual(['/secondary', '/secondary']);
+    expect(completion.onMessage).toHaveBeenCalledExactlyOnceWith(
+      'Signed in successfully',
+    );
+  });
+
+  it.each([false, true])(
+    'offers /model for an unavailable subscription selection (desktop: %s)',
+    async (desktop) => {
+      const host = window as Window & { __TAURI__?: unknown };
+      if (desktop) host.__TAURI__ = { core: { invoke: vi.fn() } };
+      try {
+        actions.getSubscriptionConfig.mockResolvedValue({
+          enabled: true,
+          plansUrl: 'https://plans.example',
+        });
+        actions.startSubscriptionLogin.mockResolvedValue({
+          id: 'paid',
+          status: 'ready',
+          userInfo: {
+            sub: 'user',
+            email: 'user@example.test',
+            member_type: 'pro',
+          },
+        });
+        actions.activateSubscription.mockResolvedValue({
+          authType: 'qwen-subscription',
+          modelId: null,
+          modelSelectionRequired: true,
+          runtimeSync: { status: 'applied' },
+        });
+        const completion = await openAuth(desktop);
+        await act(async () =>
+          document
+            .querySelector<HTMLButtonElement>(
+              'button[aria-label="Qwen Account with Subscription"]',
+            )!
+            .click(),
+        );
+        const hint = 'Select Model (/model)';
+        if (desktop) {
+          expect(
+            document.querySelector('[data-subscription-success]')?.textContent,
+          ).toBe(hint);
+        } else {
+          expect(completion.onMessage).toHaveBeenCalledExactlyOnceWith(hint);
+        }
+        expect(document.body.textContent).not.toContain('Qwen Code is ready');
+      } finally {
+        delete host.__TAURI__;
+      }
+    },
+  );
+
+  it.each(['', 'existing-model(openai)'])(
+    'activates the welcome composer workspace with pending model %j',
+    async (selectedModel) => {
+      sessionState.workspaceCwd = '/primary';
+      actions.getSubscriptionConfig.mockResolvedValue({
+        enabled: true,
+        plansUrl: 'https://plans.example',
       });
       actions.startSubscriptionLogin.mockResolvedValue({
         id: 'paid',
         status: 'ready',
         userInfo: {
           sub: 'user',
-          name: 'User',
           email: 'user@example.test',
           member_type: 'pro',
         },
       });
-      const completion = await openAuth();
-      const entry = [...container!.querySelectorAll('button')].find(
-        (item) =>
-          item.getAttribute('aria-label') === 'Qwen Account with Subscription',
+      const completion = await openAuth(
+        false,
+        'en',
+        () => '/secondary',
+        () => selectedModel,
+      );
+      const entry = container!.querySelector<HTMLButtonElement>(
+        'button[aria-label="Qwen Account with Subscription"]',
       )!;
       await act(async () => entry.click());
-      expect(
-        [...container!.querySelectorAll('button')].some(
-          (item) => item.textContent === 'Connect',
-        ),
-      ).toBe(false);
-      expect(completion.onClose).not.toHaveBeenCalled();
-      expect(completion.onMessage).not.toHaveBeenCalled();
-      expect(sessionActions.refreshModels).toHaveBeenCalledOnce();
-      if (outcome === 'owner-change') ownerState.version += 1;
-      await act(async () => finishRefresh());
-      if (outcome !== 'success') {
-        expect(completion.onClose).not.toHaveBeenCalled();
-        expect(completion.onMessage).not.toHaveBeenCalled();
-        return;
-      }
-      expect(completion.onClose).toHaveBeenCalledOnce();
-      expect(actions.activateSubscription).toHaveBeenCalledWith({
+
+      expect(actions.activateSubscription).toHaveBeenCalledExactlyOnceWith({
+        workspaceCwd: '/secondary',
         signal: expect.any(AbortSignal),
+        ...(selectedModel
+          ? { preserveModel: true, selectedModelId: selectedModel }
+          : {}),
       });
-      expect(sessionActions.setModel).toHaveBeenCalledWith(
-        'qwen3.8-max(qwen-subscription)',
-      );
-      expect(sessionActions.refreshModels).toHaveBeenCalledExactlyOnceWith(
-        undefined,
-        { reloadProviders: false },
-      );
-      expect(sessionActions.setModel.mock.invocationCallOrder[0]).toBeLessThan(
-        sessionActions.refreshModels.mock.invocationCallOrder[0]!,
-      );
-      expect(completion.onModelActivated).not.toHaveBeenCalled();
-      expect(completion.onMessage).toHaveBeenCalledExactlyOnceWith(
-        '✓ Signed in successfully · user@example.test  \n✓ Current plan: Qwen Pro. Qwen Code is ready.  \nModel: qwen3.8-max. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.  \nCommon commands: /usage   /upgrade   /model   /status   /logout',
-      );
+      expect(sessionActions.refreshModels).not.toHaveBeenCalled();
+      if (selectedModel) {
+        expect(actions.loadProviders).not.toHaveBeenCalled();
+        expect(completion.onModelActivated).not.toHaveBeenCalled();
+        expect(completion.onMessage).toHaveBeenCalledExactlyOnceWith(
+          'Signed in successfully',
+        );
+      } else {
+        expect(actions.loadProviders).toHaveBeenCalledExactlyOnceWith(
+          '/secondary',
+        );
+        expect(completion.onModelActivated).toHaveBeenCalledExactlyOnceWith(
+          'qwen3.8-max(qwen-subscription)',
+        );
+      }
     },
   );
 
@@ -1108,77 +1277,44 @@ describe('subscription development entry', () => {
     },
   );
 
-  it.each(['unmount', 'session-change'])(
-    'ignores a late model loading failure after %s',
-    async (change) => {
-      actions.getSubscriptionConfig.mockResolvedValue({
-        enabled: true,
-        plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
-      });
-      actions.startSubscriptionLogin.mockResolvedValue({
-        id: 'paid',
-        status: 'ready',
-        userInfo: {
-          sub: 'user',
-          email: 'user@example.test',
-          member_type: 'pro',
-        },
-      });
-      let failActivation!: (error: unknown) => void;
-      actions.activateSubscription.mockImplementation(
-        () =>
-          new Promise((_resolve, reject) => {
-            failActivation = reject;
-          }),
-      );
-      const completion = await openAuth();
-      const clickButton = async (label: string) => {
-        const button = [...container!.querySelectorAll('button')].find((item) =>
-          item.textContent?.includes(label),
-        )!;
-        await act(async () => button.click());
-      };
-      await clickButton('Qwen');
-      if (change === 'unmount') await act(async () => root!.render(null));
-      expect(completion.onClose).not.toHaveBeenCalled();
-      await act(async () => {
-        if (change === 'session-change') ownerState.version += 1;
-        failActivation({ body: { code: 'subscription_models_unavailable' } });
-      });
-      expect(completion.onClose).not.toHaveBeenCalled();
-      expect(completion.onMessage).not.toHaveBeenCalled();
-    },
-  );
-
-  it('cancels an active login when the session owner changes', async () => {
+  it('ignores a late model loading failure after unmount', async () => {
     actions.getSubscriptionConfig.mockResolvedValue({
       enabled: true,
       plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
     });
     actions.startSubscriptionLogin.mockResolvedValue({
-      id: 'flow-2',
-      status: 'waiting',
+      id: 'paid',
+      status: 'ready',
+      userInfo: {
+        sub: 'user',
+        email: 'user@example.test',
+        member_type: 'pro',
+      },
     });
-    actions.cancelSubscriptionLogin.mockResolvedValue(undefined);
-    await openAuth();
-    const button = [...container!.querySelectorAll('button')].find(
-      (item) =>
-        item.getAttribute('aria-label') === 'Qwen Account with Subscription',
-    )!;
+    let failActivation!: (error: unknown) => void;
+    actions.activateSubscription.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          failActivation = reject;
+        }),
+    );
+    const completion = await openAuth();
+    const clickButton = async (label: string) => {
+      const button = [...container!.querySelectorAll('button')].find((item) =>
+        item.textContent?.includes(label),
+      )!;
+      await act(async () => button.click());
+    };
+    await clickButton('Qwen');
+    await act(async () => root!.render(null));
+    expect(completion.onClose).not.toHaveBeenCalled();
     await act(async () => {
-      button.click();
+      failActivation({ body: { code: 'subscription_models_unavailable' } });
     });
-    ownerState.version += 1;
-    await act(async () => {
-      root!.render(
-        <I18nProvider language="en">
-          <AuthMessage onMessage={vi.fn()} onClose={vi.fn()} />
-        </I18nProvider>,
-      );
-    });
-    expect(actions.cancelSubscriptionLogin).toHaveBeenCalledWith('flow-2');
-    expect(container!.textContent).not.toContain('Waiting for sign-in');
+    expect(completion.onClose).not.toHaveBeenCalled();
+    expect(completion.onMessage).not.toHaveBeenCalled();
   });
+
   it('keeps the subscription entry hidden when capability is disabled or unavailable', async () => {
     actions.getSubscriptionConfig.mockRejectedValue(new Error('offline'));
     await openAuth();
@@ -1195,7 +1331,7 @@ describe('subscription development entry', () => {
     ['en', 'plus', true],
     ['zh-CN', 'pro', false],
   ] as const)(
-    'shows desktop success after session synchronization (%s, %s)',
+    'shows desktop success once activation completes (%s, %s)',
     async (language, plan, existingSession) => {
       (window as Window & { __TAURI__?: unknown }).__TAURI__ = {
         core: { invoke: vi.fn() },
@@ -1220,11 +1356,21 @@ describe('subscription development entry', () => {
         });
         let finish!: () => void;
         const synchronize = existingSession
-          ? sessionActions.setModel
+          ? actions.activateSubscription
           : sessionActions.refreshModels;
         synchronize.mockReturnValue(
-          new Promise<void>((resolve) => {
-            finish = resolve;
+          new Promise<unknown>((resolve) => {
+            finish = () => {
+              if (existingSession) {
+                resolve({
+                  authType: 'qwen-subscription',
+                  modelId: 'qwen3.8-max',
+                  runtimeSync: { status: 'applied' },
+                });
+              } else {
+                resolve(undefined);
+              }
+            };
           }),
         );
         const completion = await openAuth(true, language);
@@ -1244,19 +1390,23 @@ describe('subscription development entry', () => {
         expect(completion.onClose).not.toHaveBeenCalled();
         await act(async () => finish());
         const success = document.querySelector('[data-subscription-success]')!;
-        expect(success.textContent).toContain(
-          language === 'en' ? 'Signed in successfully' : '登录成功',
-        );
-        expect(success.textContent).toContain('long-account@example.test');
-        expect(success.textContent).toContain(
-          plan === 'plus' ? 'Qwen Plus' : 'Qwen Pro',
-        );
-        expect(success.textContent).toContain('qwen3.8-max');
-        expect(success.textContent).toContain(
-          language === 'en'
-            ? 'Common commands: /usage   /upgrade   /model   /status   /logout'
-            : '常用命令：/usage   /upgrade   /model   /status   /logout',
-        );
+        if (existingSession) {
+          expect(success.textContent).toBe('Signed in successfully');
+        } else {
+          expect(success.textContent).toContain(
+            language === 'en' ? 'Signed in successfully' : '登录成功',
+          );
+          expect(success.textContent).toContain('long-account@example.test');
+          expect(success.textContent).toContain(
+            plan === 'plus' ? 'Qwen Plus' : 'Qwen Pro',
+          );
+          expect(success.textContent).toContain('qwen3.8-max');
+          expect(success.textContent).toContain(
+            language === 'en'
+              ? 'Common commands: /usage   /upgrade   /model   /status   /logout'
+              : '常用命令：/usage   /upgrade   /model   /status   /logout',
+          );
+        }
         expect(completion.onMessage).not.toHaveBeenCalled();
         expect(completion.onClose).not.toHaveBeenCalled();
         await act(async () =>

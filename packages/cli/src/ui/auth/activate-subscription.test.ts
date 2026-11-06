@@ -5,6 +5,7 @@
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -32,10 +33,14 @@ const settings = {
   merged: {},
   isTrusted: true,
   workspaceSettingsActive: true,
+  workspace: { settings: {} },
+  user: { settings: {} },
   setValues: vi.fn(),
 } as unknown as LoadedSettings;
 function config() {
   return {
+    getAuthType: vi.fn(),
+    getModel: vi.fn(),
     refreshSubscriptionModels: vi
       .fn()
       .mockResolvedValue({ models: ['qwen3.8-max'], cached: false }),
@@ -53,7 +58,7 @@ beforeEach(() => {
   mocks.createAdapter.mockReset().mockReturnValue(mocks.adapter);
 });
 afterEach(() => vi.unstubAllEnvs());
-it('installs the subscription in the project without writing user settings', async () => {
+it('saves the initial subscription model in project settings', async () => {
   const runtime = config();
   const signal = new AbortController().signal;
   await activateSubscription(settings, runtime, signal);
@@ -123,9 +128,10 @@ it('selects the first served model when Max is unavailable', async () => {
 });
 
 it.each(['qwen3.8-flash', 'removed-model'])(
-  'selects Max on explicit sign-in instead of the saved model %s',
+  'retains the saved subscription model %s on explicit sign-in',
   async (savedModel) => {
     const runtime = config();
+    vi.mocked(runtime.getModel).mockReturnValue(savedModel);
     vi.mocked(runtime.refreshSubscriptionModels).mockResolvedValue({
       models: ['qwen3.8-flash', 'qwen3.8-max'],
       cached: false,
@@ -137,12 +143,45 @@ it.each(['qwen3.8-flash', 'removed-model'])(
         model: { name: savedModel },
       },
     } as unknown as LoadedSettings;
-    await activateSubscription(existing, runtime, new AbortController().signal);
-    expect(mocks.apply.mock.calls[0][0].modelSelection.modelId).toBe(
-      'qwen3.8-max',
-    );
+    vi.mocked(runtime.refreshAuth).mockImplementation(async () => {
+      vi.mocked(runtime.getAuthType).mockReturnValue(
+        AuthType.QWEN_SUBSCRIPTION,
+      );
+    });
+    await expect(
+      activateSubscription(existing, runtime, new AbortController().signal),
+    ).resolves.toMatchObject({
+      modelSelectionRequired: savedModel === 'removed-model',
+    });
+    expect(mocks.apply).not.toHaveBeenCalled();
+    expect(runtime.syncModelSelection).not.toHaveBeenCalled();
+    if (savedModel === 'qwen3.8-flash') {
+      expect(runtime.refreshAuth).toHaveBeenCalledWith(
+        AuthType.QWEN_SUBSCRIPTION,
+      );
+    } else {
+      expect(runtime.refreshAuth).not.toHaveBeenCalled();
+    }
   },
 );
+
+it('loads the subscription catalog while keeping the active API-key model', async () => {
+  const runtime = config();
+  vi.mocked(runtime.getAuthType).mockReturnValue(AuthType.USE_OPENAI);
+  vi.mocked(runtime.getModel).mockReturnValue('api-key-model');
+  const signal = new AbortController().signal;
+  await expect(
+    activateSubscription(settings, runtime, signal),
+  ).resolves.toEqual({
+    info: { member_type: 'pro' },
+    modelSelectionRequired: false,
+  });
+  expect(runtime.refreshSubscriptionModels).toHaveBeenCalledWith(signal);
+  expect(runtime.setSubscriptionPlan).toHaveBeenCalledWith('pro');
+  expect(mocks.apply).not.toHaveBeenCalled();
+  expect(runtime.syncModelSelection).not.toHaveBeenCalled();
+  expect(runtime.refreshAuth).not.toHaveBeenCalled();
+});
 it('honors the authentication policy without DEV', async () => {
   const restricted = {
     ...settings,
@@ -176,17 +215,24 @@ it('rejects an untrusted workspace without falling back to user settings', async
   expect(mocks.apply).not.toHaveBeenCalled();
 });
 
-it('requires a project when workspace settings are inactive', async () => {
-  const inactive = {
+it('requires a project only when saving an initial subscription model', async () => {
+  const noProject = {
     ...settings,
     workspaceSettingsActive: false,
   } as LoadedSettings;
+  const runtime = config();
+  const signal = new AbortController().signal;
   await expect(
-    activateSubscription(inactive, config(), new AbortController().signal),
+    activateSubscription(noProject, runtime, signal),
   ).rejects.toThrow('Open a project folder');
-  expect(mocks.userInfo).not.toHaveBeenCalled();
+  vi.mocked(runtime.getAuthType).mockReturnValue(AuthType.USE_OPENAI);
+  await expect(
+    activateSubscription(noProject, runtime, signal),
+  ).resolves.toMatchObject({
+    modelSelectionRequired: false,
+  });
   expect(mocks.createAdapter).not.toHaveBeenCalled();
-  expect(inactive.setValues).not.toHaveBeenCalled();
+  expect(mocks.apply).not.toHaveBeenCalled();
 });
 
 it('keeps committed disk settings and runtime consistent when the dialog closes during refresh', async () => {
@@ -232,7 +278,10 @@ it('keeps committed disk settings and runtime consistent when the dialog closes 
   try {
     await expect(
       activateSubscription(settings, runtime, controller.signal),
-    ).resolves.toEqual({ member_type: 'pro' });
+    ).resolves.toEqual({
+      info: { member_type: 'pro' },
+      modelSelectionRequired: false,
+    });
     const disk = JSON.parse(readFileSync(file, 'utf8')) as Record<
       string,
       unknown
