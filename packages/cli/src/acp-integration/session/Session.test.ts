@@ -5,8 +5,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { MockInstance } from 'vitest';
 import { Buffer } from 'node:buffer';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -28,8 +29,11 @@ import {
 import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
+import { ChatRecordingService } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import type { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import {
+  buildSessionHistoryFromConversation,
   getApiHistoryPromptId,
   markApiHistoryPrompt,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
@@ -5340,6 +5344,92 @@ describe('Session', () => {
       );
     });
 
+    it.each([
+      ['model-error', 'receipt-ok'],
+      ['model-error', 'receipt-fails'],
+      ['cancelled', 'receipt-ok'],
+      ['cancelled', 'receipt-fails'],
+    ] as const)(
+      'preserves the shared tool-round %s outcome when %s',
+      async (outcome, receipt) => {
+        const execute = useTool(core.Kind.Read, 'read_file');
+        execute.mockResolvedValue({
+          llmContent: 'PRIVATE_UNSENT_TOOL_RESULT',
+          returnDisplay: 'read complete',
+        });
+        let pushes = 0;
+        Object.assign(mockChat, {
+          getUserContentPushCount: vi.fn(() => pushes),
+        });
+        const original = new Error('original model setup failure');
+        const writeError = new Error('receipt write failed');
+        const recordAdmission = vi.fn(async (parts: readonly Part[]) => {
+          if (receipt === 'receipt-fails') throw writeError;
+          return [{ parts, decision: 'admitted' as const }];
+        });
+        Object.assign(mockChatRecordingService, {
+          recordToolResultAdmission: recordAdmission,
+        });
+
+        const send = useSharedRounds();
+        send
+          .mockImplementationOnce(() =>
+            (async function* () {
+              pushes++;
+              yield toolCall({
+                id: 'unsent-read',
+                name: 'read_file',
+                args: {},
+              });
+              yield finished();
+            })(),
+          )
+          .mockImplementationOnce(() =>
+            (async function* () {
+              if (outcome === 'model-error') throw original;
+              await session.cancelPendingPrompt();
+              yield { type: core.LlmEventType.UserCancelled };
+            })(),
+          );
+
+        const result = await prompt().then(
+          (response) => ({ response }),
+          (error: unknown) => ({ error }),
+        );
+
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(execute).toHaveBeenCalledOnce();
+        expect(pushes).toBe(1);
+        expect(recordAdmission).toHaveBeenCalledOnce();
+        expect(JSON.stringify(recordAdmission.mock.calls[0][0])).toContain(
+          'PRIVATE_UNSENT_TOOL_RESULT',
+        );
+        const history = JSON.stringify(
+          vi.mocked(mockChat.addHistory).mock.calls,
+        );
+        if (receipt === 'receipt-fails') {
+          expect(history).not.toContain('PRIVATE_UNSENT_TOOL_RESULT');
+        } else {
+          expect(history).toContain('PRIVATE_UNSENT_TOOL_RESULT');
+        }
+        if (outcome === 'cancelled') {
+          expect(result).toEqual({
+            response: expect.objectContaining({ stopReason: 'cancelled' }),
+          });
+        } else {
+          expect('error' in result ? result.error : result.response).toBe(
+            original,
+          );
+        }
+        if (receipt === 'receipt-fails') {
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            'Failed to settle unsent ACP tool results after the round stopped',
+            writeError,
+          );
+        }
+      },
+    );
+
     it('judges a next-speaker continuation in the round by its own response', async () => {
       const execute = useTool(core.Kind.Edit, 'write_file');
       let pushes = 0;
@@ -6732,6 +6822,140 @@ describe('Session', () => {
         expect(
           mockChatRecordingService.recordCronPrompt,
         ).not.toHaveBeenCalled();
+      });
+
+      it('recovers a legacy cron tool result cancelled while building the next message', async () => {
+        const directory = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'qwen-cron-result-'),
+        );
+        const recordingPath = path.join(directory, 'recording.jsonl');
+        mockConfig.getProjectRoot = () => directory;
+        mockConfig.getResumedSessionData = () => undefined;
+        mockConfig.getCliVersion = () => 'test';
+        const recorder = new ChatRecordingService(mockConfig, undefined, true);
+        recorder.activate({
+          sessionId: 'test-session-id',
+          appendJsonLine: (record: unknown) =>
+            fs.appendFile(recordingPath, JSON.stringify(record) + '\n'),
+        } as SessionWriterLease);
+        const recordResult = vi.spyOn(recorder, 'recordToolResult');
+        const recordAdmission = vi.spyOn(recorder, 'recordToolResultAdmission');
+        // Keep other Session setup on the normal mocks. These are the real
+        // recorder calls needed by the legacy cron turn under test.
+        Object.assign(mockChatRecordingService, {
+          recordCronPrompt: recorder.recordCronPrompt.bind(recorder),
+          recordToolResult: recorder.recordToolResult.bind(recorder),
+          recordToolResultAdmission:
+            recorder.recordToolResultAdmission.bind(recorder),
+        });
+
+        try {
+          fireCron('cron read');
+          mockConfig.isUnifiedAgentLoopEnabled = vi.fn(() => false);
+          mockConfig.getDisableAllHooks = vi.fn(() => false);
+          mockConfig.getMessageBus = vi.fn().mockReturnValue({
+            request: vi.fn().mockResolvedValue({ success: true, output: {} }),
+          });
+          mockConfig.hasHooksForEvent = vi.fn(
+            (event: string) => event === 'UserPromptSubmit',
+          );
+          const execute = useTool(core.Kind.Read, 'read_file');
+          execute.mockResolvedValue({
+            llmContent: 'PRIVATE_CRON_TOOL_RESULT',
+            returnDisplay: 'read complete',
+          });
+          const call = { id: 'late-cron-read', name: 'read_file', args: {} };
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(createEmptyStream())
+            .mockImplementationOnce(async () =>
+              (async function* () {
+                // The mocked model stream owns the assistant call record.
+                recorder.recordAssistantTurn({
+                  model: 'test-model',
+                  message: [{ functionCall: call }],
+                });
+                yield {
+                  type: core.StreamEventType.CHUNK,
+                  value: { functionCalls: [call] },
+                };
+              })(),
+            );
+          let cancelled: Promise<void> | undefined;
+          vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
+            () => {
+              if (recordResult.mock.calls.length === 1 && !cancelled) {
+                // The real next-message builder invokes this after the tool
+                // batch returned and before it checks the cron abort signal.
+                cancelled = session.cancelPendingPrompt();
+              }
+              return undefined;
+            },
+          );
+
+          await prompt();
+          await vi.waitFor(() =>
+            expect(
+              mockConfig.endAutomaticActiveTodoWorkChain,
+            ).toHaveBeenCalled(),
+          );
+          expect(cancelled).toBeDefined();
+          await cancelled;
+          await recorder.flush();
+
+          expect(execute).toHaveBeenCalledOnce();
+          expect(recordResult).toHaveBeenCalledOnce();
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          const records = (await fs.readFile(recordingPath, 'utf8'))
+            .trimEnd()
+            .split('\n')
+            .map((line) => JSON.parse(line) as ChatRecord);
+          const completions = records.filter(
+            (record) => record.type === 'tool_result',
+          );
+          expect(completions).toHaveLength(1);
+          expect(completions[0].requiresToolResultAdmission).toBe(true);
+          expect(completions[0].message?.parts).toContainEqual(
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: call.id }),
+            }),
+          );
+          const restored = buildSessionHistoryFromConversation({
+            messages: records,
+          });
+          const restoredResponses = restored.apiHistory
+            .flatMap((content) => content.parts ?? [])
+            .filter((part) => part.functionResponse?.id === call.id);
+          const receipts = records.filter(
+            (record) => record.subtype === 'tool_result_admission',
+          );
+          const liveResponses = vi
+            .mocked(mockChat.addHistory)
+            .mock.calls.flatMap(([content]) => content.parts ?? [])
+            .filter((part) => part.functionResponse?.id === call.id);
+          expect({
+            recovered: restoredResponses.length,
+            receipts: receipts.length,
+            live: liveResponses.length,
+          }).toEqual({ recovered: 1, receipts: 1, live: 1 });
+          expect(JSON.stringify(restoredResponses)).toContain(
+            'PRIVATE_CRON_TOOL_RESULT',
+          );
+          expect(recordAdmission).toHaveBeenCalledExactlyOnceWith(
+            expect.any(Array),
+            undefined,
+          );
+          expect(receipts).toHaveLength(1);
+          expect(receipts[0].systemPayload).toMatchObject({
+            decision: 'admitted',
+            recordUuids: [completions[0].uuid],
+          });
+          expect(liveResponses.map((part) => part.functionResponse)).toEqual(
+            restoredResponses.map((part) => part.functionResponse),
+          );
+        } finally {
+          await fs.rm(directory, { recursive: true, force: true });
+        }
       });
 
       it("sends a cron fire's tool results back as a ToolResult round", async () => {
@@ -14974,35 +15198,92 @@ describe('Session', () => {
       },
     );
 
-    it('does not persist a shared model default for a standalone session', async () => {
-      session.dispose();
-      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
-      session = new Session(
-        'test-session-id',
-        mockConfig,
-        mockClient,
-        mockSettings,
-      );
+    it.each([
+      [AuthType.USE_OPENAI, 'qwen3-coder-flash', false],
+      [AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max', true],
+    ] as const)(
+      'switches standalone %s using only the session config',
+      async (authType, modelId, refresh) => {
+        session.dispose();
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+          'standalone',
+        );
+        const refreshSubscriptionModels = vi.fn().mockResolvedValue({
+          models: [modelId],
+          cached: false,
+        });
+        Object.assign(mockConfig, { refreshSubscriptionModels });
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
 
-      await session.setModel(
-        {
-          sessionId: 'test-session-id',
-          modelId: `qwen3-coder-flash(${AuthType.USE_OPENAI})`,
-        },
-        { persistDefault: true },
-      );
+        await session.setModel(
+          {
+            sessionId: 'test-session-id',
+            modelId: `${modelId}(${authType})`,
+          },
+          { persistDefault: true },
+        );
 
-      expect(mockConfig.switchModel).toHaveBeenCalledWith(
-        AuthType.USE_OPENAI,
-        'qwen3-coder-flash',
-        undefined,
-      );
-      expect(mockSettings.setValue).not.toHaveBeenCalled();
-      expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
-        modelId: 'qwen3-coder-flash',
-        authType: AuthType.USE_OPENAI,
-      });
-    });
+        expect(mockConfig.switchModel).toHaveBeenCalledWith(
+          authType,
+          modelId,
+          undefined,
+        );
+        expect(mockSettings.setValue).not.toHaveBeenCalled();
+        if (refresh) {
+          expect(refreshSubscriptionModels).toHaveBeenCalledOnce();
+          expect(refreshSubscriptionModels).toHaveBeenCalledBefore(
+            switchModelSpy,
+          );
+        } else {
+          expect(refreshSubscriptionModels).not.toHaveBeenCalled();
+        }
+        expect(
+          mockChatRecordingService.recordSessionModel,
+        ).toHaveBeenCalledWith({
+          modelId,
+          authType,
+        });
+      },
+    );
+
+    it.each([
+      'qwen3.8-max(qwen-subscription)',
+      '$runtime|qwen-subscription|qwen3.8-max(openai)',
+    ])(
+      'enforces session auth policy for %s before refreshing models',
+      async (modelId) => {
+        session.dispose();
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+          'standalone',
+        );
+        const refreshSubscriptionModels = vi.fn();
+        Object.assign(mockConfig, { refreshSubscriptionModels });
+        mockSettings.merged.security = {
+          auth: { enforcedType: AuthType.USE_OPENAI },
+        };
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+
+        await expect(
+          session.setModel({
+            sessionId: 'test-session-id',
+            modelId,
+          }),
+        ).rejects.toMatchObject({ data: { errorKind: 'auth_type_enforced' } });
+        expect(refreshSubscriptionModels).not.toHaveBeenCalled();
+        expect(switchModelSpy).not.toHaveBeenCalled();
+        expect(mockSettings.setValue).not.toHaveBeenCalled();
+      },
+    );
 
     it('propagates errors from config.switchModel', async () => {
       const configError = new Error('Invalid model');
@@ -15019,6 +15300,347 @@ describe('Session', () => {
   });
 
   describe('sendAvailableCommandsUpdate', () => {
+    describe('wire update deduplication', () => {
+      const initialSnapshot = {
+        availableCommands: [
+          {
+            name: 'init',
+            description: 'Initialize project context',
+            input: null,
+          },
+        ],
+      };
+      const changedSnapshot = {
+        availableCommands: [
+          { name: 'review', description: 'Review code changes', input: null },
+        ],
+      };
+      let buildSnapshot: MockInstance<
+        Session['buildAvailableCommandsSnapshot']
+      >;
+
+      beforeEach(() => {
+        buildSnapshot = vi
+          .spyOn(session, 'buildAvailableCommandsSnapshot')
+          .mockResolvedValue(initialSnapshot);
+        mockConfig.refreshWorkflowMode = vi.fn();
+        mockConfig.getSkillManager = vi.fn().mockReturnValue(null);
+      });
+
+      it('sends the first empty snapshot and refreshes Workflow mode on duplicates', async () => {
+        buildSnapshot.mockResolvedValue({ availableCommands: [] });
+
+        await session.sendAvailableCommandsUpdate();
+        buildSnapshot.mockResolvedValue({ availableCommands: [] });
+        await session.sendAvailableCommandsUpdate();
+
+        expect(buildSnapshot).toHaveBeenCalledTimes(2);
+        expect(mockConfig.refreshWorkflowMode).toHaveBeenCalledTimes(2);
+        expect(mockClient.sessionUpdate).toHaveBeenCalledExactlyOnceWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [],
+          },
+        });
+      });
+
+      it('keeps successful hashes scoped to each Session', async () => {
+        await session.sendAvailableCommandsUpdate();
+        session.dispose();
+        session = new Session(
+          'second-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+        vi.spyOn(session, 'buildAvailableCommandsSnapshot').mockResolvedValue(
+          initialSnapshot,
+        );
+
+        await session.sendAvailableCommandsUpdate();
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(2);
+        expect(vi.mocked(mockClient.sessionUpdate).mock.calls[1][0]).toEqual({
+          sessionId: 'second-session-id',
+          update: {
+            sessionUpdate: 'available_commands_update',
+            ...initialSnapshot,
+          },
+        });
+      });
+
+      it('sends changed commands and a return to an earlier successful snapshot', async () => {
+        await session.sendAvailableCommandsUpdate();
+        buildSnapshot.mockResolvedValue(changedSnapshot);
+        await session.sendAvailableCommandsUpdate();
+        await session.sendAvailableCommandsUpdate();
+        buildSnapshot.mockResolvedValue(initialSnapshot);
+        await session.sendAvailableCommandsUpdate();
+
+        expect(
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.map(([notification]) => notification.update),
+        ).toEqual(
+          [initialSnapshot, changedSnapshot, initialSnapshot].map(
+            (snapshot) => ({
+              sessionUpdate: 'available_commands_update',
+              ...snapshot,
+            }),
+          ),
+        );
+        expect(mockConfig.refreshWorkflowMode).toHaveBeenCalledTimes(4);
+      });
+
+      it('sends changes to command metadata even when names stay the same', async () => {
+        await session.sendAvailableCommandsUpdate();
+        const snapshot = {
+          availableCommands: [
+            {
+              ...initialSnapshot.availableCommands[0],
+              _meta: { altNames: ['initialize'] },
+            },
+          ],
+        };
+        buildSnapshot.mockResolvedValue(snapshot);
+        await session.sendAvailableCommandsUpdate();
+        await session.sendAvailableCommandsUpdate();
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(2);
+        expect(
+          vi.mocked(mockClient.sessionUpdate).mock.calls[1][0].update,
+        ).toEqual({ sessionUpdate: 'available_commands_update', ...snapshot });
+      });
+
+      it('sends skill body changes and retains only a fixed-size wire hash', async () => {
+        const skill = {
+          name: 'review',
+          description: 'Review code changes',
+          body: 'x'.repeat(2_550_000),
+          filePath: '/skills/review/SKILL.md',
+          level: 'user',
+        };
+        const snapshot = {
+          ...initialSnapshot,
+          availableSkills: ['review'],
+          availableSkillDetails: [skill],
+        };
+        buildSnapshot.mockResolvedValue(snapshot);
+        await session.sendAvailableCommandsUpdate();
+        buildSnapshot.mockResolvedValue({
+          ...snapshot,
+          availableSkillDetails: [{ ...skill, body: `${skill.body}y` }],
+        });
+        await session.sendAvailableCommandsUpdate();
+        await session.sendAvailableCommandsUpdate();
+
+        const updates = vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.map(([notification]) => notification.update);
+        expect(updates).toHaveLength(2);
+        expect(updates[0]).toEqual({
+          sessionUpdate: 'available_commands_update',
+          availableCommands: snapshot.availableCommands,
+          _meta: {
+            availableSkills: snapshot.availableSkills,
+            availableSkillDetails: [skill],
+          },
+        });
+        expect(updates[1]).toEqual({
+          ...updates[0],
+          _meta: {
+            availableSkills: snapshot.availableSkills,
+            availableSkillDetails: [{ ...skill, body: `${skill.body}y` }],
+          },
+        });
+        const hash = createHash('sha256')
+          .update(JSON.stringify(updates[1]))
+          .digest('hex');
+        expect(hash).toHaveLength(64);
+        expect(session).toHaveProperty(
+          'lastSuccessfulAvailableCommandsHash',
+          hash,
+        );
+        expect(mockConfig.refreshWorkflowMode).toHaveBeenCalledTimes(3);
+      });
+
+      it('retries the same update queued behind a failed send', async () => {
+        const error = new Error('client update failed');
+        let rejectSend!: (error: Error) => void;
+        vi.mocked(mockClient.sessionUpdate).mockImplementationOnce(
+          () =>
+            new Promise<void>((_resolve, reject) => {
+              rejectSend = reject;
+            }),
+        );
+        const first = session.refreshSkillsFromSettings();
+        const failure = first.catch((error: unknown) => error);
+        const retry = session.refreshSkillsFromSettings();
+        await vi.waitFor(() =>
+          expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1),
+        );
+        expect(buildSnapshot).toHaveBeenCalledTimes(1);
+
+        rejectSend(error);
+        await expect(failure).resolves.toBe(error);
+        await expect(retry).resolves.toBeUndefined();
+        await session.sendAvailableCommandsUpdate();
+
+        expect(buildSnapshot).toHaveBeenCalledTimes(3);
+        expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(2);
+        const calls = vi.mocked(mockClient.sessionUpdate).mock.calls;
+        expect(calls[1][0].update).toEqual(calls[0][0].update);
+      });
+
+      it('recovers the queue after snapshot discovery fails', async () => {
+        buildSnapshot.mockRejectedValueOnce(
+          new Error('Command discovery failed'),
+        );
+
+        await expect(
+          session.sendAvailableCommandsUpdate(),
+        ).resolves.toBeUndefined();
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+        await session.sendAvailableCommandsUpdate();
+
+        expect(buildSnapshot).toHaveBeenCalledTimes(2);
+        expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+      });
+
+      it('serializes concurrent duplicates until the first send succeeds', async () => {
+        let finishSend!: () => void;
+        vi.mocked(mockClient.sessionUpdate).mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              finishSend = resolve;
+            }),
+        );
+        const first = session.sendAvailableCommandsUpdate();
+        const duplicate = session.sendAvailableCommandsUpdate();
+        await vi.waitFor(() =>
+          expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1),
+        );
+        expect(buildSnapshot).toHaveBeenCalledTimes(1);
+        expect(session).toHaveProperty(
+          'lastSuccessfulAvailableCommandsHash',
+          undefined,
+        );
+
+        finishSend();
+        await Promise.all([first, duplicate]);
+
+        expect(buildSnapshot).toHaveBeenCalledTimes(2);
+        expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+        expect(mockConfig.refreshWorkflowMode).toHaveBeenCalledTimes(2);
+      });
+
+      it('builds and sends concurrent changes in call order', async () => {
+        let finishBuild!: (snapshot: typeof initialSnapshot) => void;
+        let finishSend!: () => void;
+        buildSnapshot
+          .mockImplementationOnce(
+            () =>
+              new Promise((resolve) => {
+                finishBuild = resolve;
+              }),
+          )
+          .mockResolvedValueOnce(changedSnapshot);
+        vi.mocked(mockClient.sessionUpdate).mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              finishSend = resolve;
+            }),
+        );
+        const first = session.sendAvailableCommandsUpdate();
+        const changed = session.sendAvailableCommandsUpdate();
+        const reverted = session.sendAvailableCommandsUpdate();
+        await vi.waitFor(() => expect(buildSnapshot).toHaveBeenCalledTimes(1));
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+
+        finishBuild(initialSnapshot);
+        await vi.waitFor(() =>
+          expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1),
+        );
+        expect(buildSnapshot).toHaveBeenCalledTimes(1);
+        finishSend();
+        await Promise.all([first, changed, reverted]);
+
+        expect(buildSnapshot).toHaveBeenCalledTimes(3);
+        expect(
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.map(([notification]) => notification.update),
+        ).toEqual(
+          [initialSnapshot, changedSnapshot, initialSnapshot].map(
+            (snapshot) => ({
+              sessionUpdate: 'available_commands_update',
+              ...snapshot,
+            }),
+          ),
+        );
+      });
+
+      it('drops queued updates when disposed before the queue runs', async () => {
+        const pending = session.sendAvailableCommandsUpdate();
+        session.dispose();
+        await pending;
+
+        expect(buildSnapshot).not.toHaveBeenCalled();
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+      });
+
+      it('does not send or build later queued updates when disposed during a build', async () => {
+        let finishBuild!: (snapshot: typeof initialSnapshot) => void;
+        buildSnapshot.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finishBuild = resolve;
+            }),
+        );
+        const first = session.sendAvailableCommandsUpdate();
+        const queued = session.sendAvailableCommandsUpdate();
+        await vi.waitFor(() => expect(buildSnapshot).toHaveBeenCalledTimes(1));
+
+        session.dispose();
+        finishBuild(initialSnapshot);
+        await Promise.all([first, queued]);
+
+        expect(buildSnapshot).toHaveBeenCalledTimes(1);
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+        expect(session).toHaveProperty(
+          'lastSuccessfulAvailableCommandsHash',
+          undefined,
+        );
+      });
+
+      it('does not commit a hash or send queued updates when disposed during a send', async () => {
+        let finishSend!: () => void;
+        vi.mocked(mockClient.sessionUpdate).mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              finishSend = resolve;
+            }),
+        );
+        const first = session.sendAvailableCommandsUpdate();
+        const queued = session.sendAvailableCommandsUpdate();
+        await vi.waitFor(() =>
+          expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1),
+        );
+
+        session.dispose();
+        finishSend();
+        await Promise.all([first, queued]);
+
+        expect(buildSnapshot).toHaveBeenCalledTimes(1);
+        expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+        expect(session).toHaveProperty(
+          'lastSuccessfulAvailableCommandsHash',
+          undefined,
+        );
+      });
+    });
+
     it('sends available_commands_update from getAvailableCommands()', async () => {
       getAvailableCommandsSpy.mockResolvedValueOnce([
         {
@@ -15837,6 +16459,25 @@ describe('Session', () => {
       expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
     });
 
+    it.each([true, false])(
+      'atomically re-reads User and Workspace skill settings (success=%s)',
+      (success) => {
+        vi.mocked(
+          mockSettings.reloadScopesFromDiskAtomically,
+        ).mockReturnValueOnce(success);
+        if (success)
+          expect(() => session.reloadSkillSettings(true)).not.toThrow();
+        else
+          expect(() => session.reloadSkillSettings(true)).toThrow(
+            'Failed to reload user skill settings',
+          );
+        expect(
+          mockSettings.reloadScopesFromDiskAtomically,
+        ).toHaveBeenCalledWith([SettingScope.Workspace, SettingScope.User]);
+        expect(mockSettings.reloadScopeFromDisk).not.toHaveBeenCalled();
+      },
+    );
+
     it('refreshes workspace skill settings, commands, and SkillManager consumers', async () => {
       const suppressNextSlashReload = vi.fn();
       const notifyConfigChanged = vi.fn().mockResolvedValue(undefined);
@@ -15860,6 +16501,13 @@ describe('Session', () => {
       );
       expect(suppressNextSlashReload).toHaveBeenCalledTimes(1);
       expect(notifyConfigChanged).toHaveBeenCalledTimes(1);
+
+      await session.refreshSkillsFromSettings();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+      expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledTimes(2);
+      expect(suppressNextSlashReload).toHaveBeenCalledTimes(2);
+      expect(notifyConfigChanged).toHaveBeenCalledTimes(2);
     });
 
     it('publishes refreshed skill content without reloading settings or notifying twice', async () => {
@@ -15929,6 +16577,70 @@ describe('Session', () => {
         expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1),
       );
       expect(getAvailableCommandsSpy).toHaveBeenCalledTimes(1);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(getAvailableCommandsSpy).toHaveBeenCalledTimes(2);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    it('drops a snapshot when standalone activation becomes held during its build', async () => {
+      session.dispose();
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+      vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+      mockConfig.getSkillManager = vi.fn().mockReturnValue(null);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const expectation = {
+        canonicalSessionId: 'test-session-id',
+        root: { canonicalPath: '/managed', device: 1, inode: 2 },
+        child: {
+          name: 'child',
+          canonicalPath: '/managed/child',
+          device: 1,
+          inode: 3,
+        },
+      };
+      const assertIdentity = vi.fn().mockResolvedValue(undefined);
+      const snapshot = { availableCommands: [] };
+      let finishBuild!: (value: typeof snapshot) => void;
+      const buildSnapshot = vi
+        .spyOn(session, 'buildAvailableCommandsSnapshot')
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finishBuild = resolve;
+            }),
+        )
+        .mockResolvedValue(snapshot);
+      session.installPendingManagedConversationBinding(
+        expectation,
+        assertIdentity,
+      );
+      await session.commitManagedConversationBinding(expectation);
+      await session.releaseManagedConversationBinding(expectation);
+      await vi.waitFor(() => expect(buildSnapshot).toHaveBeenCalledTimes(1));
+
+      session.installPendingManagedConversationBinding(
+        expectation,
+        assertIdentity,
+      );
+      finishBuild(snapshot);
+      await session.sendAvailableCommandsUpdate();
+
+      expect(buildSnapshot).toHaveBeenCalledTimes(1);
+      expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+
+      await session.commitManagedConversationBinding(expectation);
+      await session.releaseManagedConversationBinding(expectation);
+      await session.sendAvailableCommandsUpdate();
+
+      expect(buildSnapshot).toHaveBeenCalledTimes(3);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
     });
 
     it('notifies SkillManager when the command update fails', async () => {

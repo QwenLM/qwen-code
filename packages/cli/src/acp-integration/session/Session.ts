@@ -2827,6 +2827,8 @@ export class Session implements SessionContext {
   private unsubscribeApprovalModeChange?: () => void;
   private unsubscribeWorkflowModeChange?: () => void;
   private workflowModeUpdateQueue: Promise<void> = Promise.resolve();
+  private availableCommandsUpdateTail: Promise<void> = Promise.resolve();
+  private lastSuccessfulAvailableCommandsHash?: string;
   private unsubscribeRequestLifecycle?: () => void;
   private requestLifecycleSessionId: string;
   private readonly requestLifecycleExecutions = new Set<string>();
@@ -8839,8 +8841,17 @@ export class Session implements SessionContext {
       toolRequests,
       preparationTracker,
     } = round;
-    const keepUnsent = (unsent: Content, full: boolean) =>
-      round.keepUnsent(unsent, full);
+    const keepUnsentAfterFailure = async (unsent: Content, full: boolean) => {
+      try {
+        await round.keepUnsent(unsent, full);
+      } catch (error) {
+        if (round.toolOutputParts.length === 0) throw error;
+        debugLogger.warn(
+          'Failed to settle unsent ACP tool results after the round stopped',
+          error,
+        );
+      }
+    };
     let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
     let streamStartTime = Date.now();
     const requestRouteKey = await this.#requestRouteKeyForModel(
@@ -9102,7 +9113,7 @@ export class Session implements SessionContext {
           if (signal.aborted) {
             markApiHistoryPrompt(message, responseCapture.turnId);
           }
-          await keepUnsent(message, signal.aborted);
+          await keepUnsentAfterFailure(message, signal.aborted);
         }
         return {
           ended: await this.#endFailedModelRound(
@@ -9144,7 +9155,7 @@ export class Session implements SessionContext {
       this.todoStopGuard.suspend();
       if (!pushed) {
         markApiHistoryPrompt(message, responseCapture.turnId);
-        await keepUnsent(message, true);
+        await keepUnsentAfterFailure(message, true);
       }
       return { ended: { stopReason: 'cancelled' } };
     }
@@ -9172,7 +9183,7 @@ export class Session implements SessionContext {
       this.todoStopGuard.suspend();
       await showBackgroundResponse();
       if (!pushed) {
-        await keepUnsent(message, round.keepFullOnStop === true);
+        await round.keepUnsent(message, round.keepFullOnStop === true);
       }
       if (roundStop === 'session_token_limit') {
         return { ended: { stopReason: 'max_tokens' } };
@@ -13214,6 +13225,13 @@ export class Session implements SessionContext {
                   turnCount++;
                   if (ac.signal.aborted) {
                     this.todoStopGuard.suspend();
+                    if (toolOutputParts.length > 0) {
+                      await this.#preserveUnsentMessageHistory(
+                        nextMessage,
+                        true,
+                        toolOutputParts,
+                      );
+                    }
                     return;
                   }
 
@@ -15049,7 +15067,18 @@ export class Session implements SessionContext {
     if (updateFailed) throw updateError;
   }
 
-  reloadSkillSettings(): void {
+  reloadSkillSettings(includeUserSettings = false): void {
+    if (includeUserSettings) {
+      if (
+        !this.settings.reloadScopesFromDiskAtomically([
+          SettingScope.Workspace,
+          SettingScope.User,
+        ])
+      ) {
+        throw new Error('Failed to reload user skill settings');
+      }
+      return;
+    }
     this.settings.reloadScopeFromDisk(SettingScope.Workspace);
   }
 
@@ -15062,24 +15091,41 @@ export class Session implements SessionContext {
     );
   }
 
-  private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
-    if (this.#isAutomaticWorkHeld()) return;
-    const { availableCommands, availableSkills, availableSkillDetails } =
-      await this.buildAvailableCommandsSnapshot();
-    this.config.refreshWorkflowMode?.();
-    const update: SessionUpdate = {
-      sessionUpdate: 'available_commands_update',
-      availableCommands,
-      ...(availableSkills !== undefined
-        ? {
-            _meta: {
-              availableSkills,
-              ...(availableSkillDetails ? { availableSkillDetails } : {}),
-            },
-          }
-        : {}),
-    };
-    await this.sendUpdate(update);
+  private sendAvailableCommandsUpdateOrThrow(): Promise<void> {
+    const pending = this.availableCommandsUpdateTail.then(async () => {
+      if (this.disposed || this.#isAutomaticWorkHeld()) return;
+      const { availableCommands, availableSkills, availableSkillDetails } =
+        await this.buildAvailableCommandsSnapshot();
+      if (this.disposed || this.#isAutomaticWorkHeld()) return;
+      this.config.refreshWorkflowMode?.();
+      const update: SessionUpdate = {
+        sessionUpdate: 'available_commands_update',
+        availableCommands,
+        ...(availableSkills !== undefined
+          ? {
+              _meta: {
+                availableSkills,
+                ...(availableSkillDetails ? { availableSkillDetails } : {}),
+              },
+            }
+          : {}),
+      };
+      const hash = createHash('sha256')
+        .update(JSON.stringify(update))
+        .digest('hex');
+      if (
+        hash === this.lastSuccessfulAvailableCommandsHash ||
+        this.disposed ||
+        this.#isAutomaticWorkHeld()
+      ) {
+        return;
+      }
+      await this.sendUpdate(update);
+      if (this.disposed || this.#isAutomaticWorkHeld()) return;
+      this.lastSuccessfulAvailableCommandsHash = hash;
+    });
+    this.availableCommandsUpdateTail = pending.catch(() => undefined);
+    return pending;
   }
 
   #withBackgroundPermission(
@@ -15232,6 +15278,25 @@ export class Session implements SessionContext {
         undefined,
         `authType cannot be determined for modelId "${parsed.modelId}"`,
       );
+    }
+
+    const enforcedAuthType = this.settings.merged.security?.auth?.enforcedType;
+    const modelAuthType = parsed.modelId.startsWith(RUNTIME_SNAPSHOT_PREFIX)
+      ? parsed.modelId.split('|', 3)[1]
+      : selectedAuthType;
+    if (enforcedAuthType && enforcedAuthType !== modelAuthType) {
+      throw RequestError.invalidParams(
+        { errorKind: 'auth_type_enforced' },
+        'Authentication is restricted by policy.',
+      );
+    }
+
+    if (
+      this.requiresManagedConversationBinding &&
+      selectedAuthType === AuthType.QWEN_SUBSCRIPTION &&
+      !resolvedRoute
+    ) {
+      await this.config.refreshSubscriptionModels();
     }
 
     const requireCachedCredentials =
