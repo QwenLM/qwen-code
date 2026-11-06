@@ -5,11 +5,12 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ModRuntime } from './runtime.js';
+import { ModRuntime, type ModPromptQueue } from './runtime.js';
 import {
   MOD_MAX_BYTES,
   type ModLog,
   type ModOptions,
+  type ModQueuedPrompt,
   type ModSessionFacts,
 } from './types.js';
 import type { ModToolNext } from './tool-events.js';
@@ -337,9 +338,10 @@ describe('ModRuntime with the real QuickJS worker', () => {
         return next(e);
       });
       on('classic.Stop', ($, e, next) => next(e));
-      // Added in Claude Code 2.1.316.
+      // Added in Claude Code 2.1.316 and 2.1.318.
       on('prompt.paint', ($, e, next) => next(e));
       on('ui.place', ($, e, next) => next(e));
+      on('ui.backdrop', ($, e, next) => next(e));
       on('ui.render', {component:'Spinner'}, ($, e, next) => next(e));
       on('session.start', async ($, e, next) => {
         await $.command.register({name:'hello',description:'Hello'});
@@ -350,7 +352,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
     expect(logs).toEqual([
       {
         to: 'transcript',
-        text: 'Hooks for unsupported events will not run: classic.Stop, prompt.*, prompt.edit, prompt.paint, ui.place, ui.render',
+        text: 'Hooks for unsupported events will not run: classic.Stop, prompt.*, prompt.edit, prompt.paint, ui.backdrop, ui.place, ui.render',
       },
     ]);
     expect(await runtime.runCommand('hello', '', signal())).toBe('still works');
@@ -422,7 +424,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
       {
         version: '1.2.3+wrapped',
         qwen: {
-          claudeCode: '2.1.316',
+          claudeCode: '2.1.318',
           events: [
             'clock.now',
             'clock.sleep',
@@ -800,6 +802,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
   const createTurns = async (
     sources: string[],
     abortTurn?: (turnId: string) => void,
+    queuePrompt?: ModPromptQueue,
   ) => {
     const runtime = await ModRuntime.createGroup(
       sources.map((source, index) => ({
@@ -818,6 +821,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
       abortTurn,
       undefined,
       true,
+      queuePrompt,
     );
     runtimes.push(runtime);
     return runtime;
@@ -1328,6 +1332,252 @@ describe('ModRuntime with the real QuickJS worker', () => {
       expect.stringContaining('Unsupported prompt.submit result fields'),
       expect.stringContaining('broken'),
     ]);
+  });
+
+  describe('$.prompt.submit', () => {
+    const queueing = () => {
+      const queued: ModQueuedPrompt[] = [];
+      return {
+        queued,
+        queue: (prompt: ModQueuedPrompt) => void queued.push(prompt),
+      };
+    };
+
+    it("raises prompt.submit through every hook but the caller's and queues what arrives", async () => {
+      const { queued, queue } = queueing();
+      const runtime = await createTurns(
+        [
+          `export function register(on) {
+            on('prompt.submit', ($, e, next) => {
+              $.ui.log('mod-0 heard:' + JSON.stringify(e));
+              return next({...e, text: e.text + '!', context: ['from mod-0']});
+            });
+            on('turn.start', async ($, e, next) => {
+              $.ui.log('result:' + JSON.stringify(await $.prompt.submit({text: 'next step'})));
+              return next(e);
+            });
+          }`,
+          `export function register(on) {
+            on('prompt.submit', async ($, e, next) => {
+              // A hook that submits does not hear its own submission.
+              if (e.origin.kind === 'composer')
+                $.ui.log('echo:' + JSON.stringify(await $.prompt.submit({text: 'echo', asUser: true})));
+              else $.ui.log('mod-1 heard:' + e.text);
+              return next(e);
+            });
+          }`,
+        ],
+        undefined,
+        queue,
+      );
+      await runtime.startTurn({ text: 'go', turnId: 'turn-1' }, signal());
+      expect(queued).toEqual([
+        { plugin: 'mod-0', text: 'next step!', context: ['from mod-0'] },
+      ]);
+      expect(logs.map((log) => log.text)).toEqual([
+        'mod-0 heard:{"text":"next step","wait":false,"origin":{"kind":"plugin","name":"mod-0"}}',
+        'mod-1 heard:next step!',
+        'result:{"text":"next step!","context":["from mod-0"],"origin":{"kind":"plugin","name":"mod-0"}}',
+      ]);
+
+      logs.length = 0;
+      expect(await runtime.submitPrompt(prompt, signal())).toEqual({
+        text: 'Fix it!',
+        context: ['from mod-0'],
+      });
+      // Nor does a hook it runs beneath: mod-0's hook passed this prompt on.
+      expect(queued.at(-1)).toEqual({
+        plugin: 'mod-1',
+        text: 'echo',
+        asUser: true,
+      });
+      expect(logs.map((log) => log.text)).toEqual([
+        'mod-0 heard:{"text":"Fix it","wait":false,"origin":{"kind":"composer"}}',
+        'echo:{"text":"echo","origin":{"kind":"plugin","name":"mod-1","asUser":true}}',
+      ]);
+    });
+
+    it('resolves a drop, queuing nothing, when a hook or the host refuses', async () => {
+      const { queued, queue } = queueing();
+      const submitting = `export function register(on) {
+        on('turn.start', async ($, e, next) => {
+          for (const text of ['secret', 'answer', 'full', ' ', 'blank'])
+            $.ui.log(JSON.stringify(await $.prompt.submit({text})));
+          return next(e);
+        });
+      }`;
+      const runtime = await createTurns(
+        [
+          `export function register(on) {
+            on('prompt.submit', ($, e, next) => {
+              if (!e.text.trim()) $.ui.log('"heard a blank prompt"');
+              return e.text === 'secret' ? {drop: 'it holds a secret'}
+                : e.text === 'answer' ? {text: 'mine'}
+                : next(e.text === 'blank' ? {...e, text: ''} : e);
+            });
+          }`,
+          submitting,
+        ],
+        undefined,
+        (prompt) =>
+          prompt.text === 'full' ? 'the queue is full' : queue(prompt),
+      );
+      await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      expect(queued).toEqual([]);
+      expect(logs.map((log) => JSON.parse(log.text))).toEqual([
+        { drop: 'it holds a secret' },
+        { drop: 'a hook answered without passing the prompt on' },
+        { drop: 'the queue is full' },
+        { drop: 'the prompt is empty' },
+        { drop: 'a hook left the prompt empty' },
+      ]);
+
+      logs.length = 0;
+      // No hook hears a prompt the host would not run, nor lists the method.
+      const hostless = await createTurns([
+        `export function register(on) {
+          on('prompt.submit', ($, e, next) => { $.ui.log('heard'); return next(e); });
+        }`,
+        submitting,
+      ]);
+      await hostless.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      expect(logs.map((log) => JSON.parse(log.text))).toEqual(
+        Array(5).fill({ drop: 'this host does not run prompts a Mod submits' }),
+      );
+    });
+
+    it('queues a call its hook does not await, once, as it last arrived', async () => {
+      const { queued, queue } = queueing();
+      const runtime = await createTurns(
+        [
+          `export function register(on) {
+            on('turn.start', ($, e, next) => {
+              void $.prompt.submit({text: 'later'});
+              return next(e);
+            });
+          }`,
+          `export function register(on) {
+            on('prompt.submit', async ($, e, next) => {
+              // Still running once the hook that submitted has returned.
+              await $.clock.sleep(30);
+              $.ui.log('first:' + JSON.stringify(await next(e)));
+              return next({...e, text: e.text + ' retry'});
+            });
+          }`,
+        ],
+        undefined,
+        queue,
+      );
+      await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      expect(queued).toEqual([{ plugin: 'mod-0', text: 'later retry' }]);
+      expect(logs.map((log) => log.text)).toEqual([
+        'first:{"text":"later","origin":{"kind":"plugin","name":"mod-0"}}',
+      ]);
+    });
+
+    it('keeps charging the caller while the other Mods hear its submit', async () => {
+      const { queued, queue } = queueing();
+      const runtime = await createTurns(
+        [
+          `export function register(on) {
+            on('turn.start', async ($, e, next) => {
+              void $.prompt.submit({text: 'later'});
+              const before = next.budget.remainingMs;
+              await $.clock.sleep(300);
+              $.ui.log('charged:' + (before - next.budget.remainingMs >= 250));
+              return next(e);
+            });
+          }`,
+          `export function register(on) {
+            on('prompt.submit', async ($, e, next) => {
+              await $.clock.sleep(600);
+              return next(e);
+            });
+          }`,
+        ],
+        undefined,
+        queue,
+      );
+      await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      expect(logs.map((log) => log.text)).toEqual(['charged:true']);
+      expect(queued).toEqual([{ plugin: 'mod-0', text: 'later' }]);
+    });
+
+    it('refuses a prompt too long for a Mod payload before it is queued', async () => {
+      const { queued, queue } = queueing();
+      const runtime = await createTurns(
+        [
+          `export function register(on) {
+            on('prompt.submit', ($, e, next) =>
+              next(e.text === 'grow' ? {...e, text: 'y'.repeat(140000)} : e));
+          }`,
+          `export function register(on) {
+            on('turn.start', async ($, e, next) => {
+              // Past half a payload, and in the band where the answer, which
+              // echoes the origin, would no longer fit one.
+              for (const text of ['x'.repeat(140000), 'x'.repeat(262100), 'grow'])
+                $.ui.log(JSON.stringify(await $.prompt.submit({text})));
+              // Too large for the bridge, the call rejects rather than throws.
+              const huge = $.prompt.submit({text: 'x'.repeat(300000)});
+              $.ui.log(await huge.then(() => 'resolved', (error) => 'rejected:' + error));
+              return next(e);
+            });
+          }`,
+        ],
+        undefined,
+        queue,
+      );
+      await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      expect(queued).toEqual([]);
+      expect(logs.map((log) => log.text)).toEqual([
+        JSON.stringify({ drop: 'the prompt is too long for a Mod payload' }),
+        JSON.stringify({ drop: 'the prompt is too long for a Mod payload' }),
+        JSON.stringify({
+          drop: 'a hook made the prompt too long for a Mod payload',
+        }),
+        expect.stringMatching(/^rejected:.*too large/),
+      ]);
+    });
+
+    it('lists the method only for a host that runs such prompts', async () => {
+      const reporting = `export function register(on) {
+        on('turn.start', async ($, e, next) => {
+          $.ui.log(String((await $.session.version()).qwen.methods.includes('prompt.submit')));
+          return next(e);
+        });
+      }`;
+      for (const queue of [() => undefined, undefined]) {
+        const runtime = await createTurns([reporting], undefined, queue);
+        await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      }
+      expect(logs.map((log) => log.text)).toEqual(['true', 'false']);
+    });
+
+    it('rejects a call of the wrong shape', async () => {
+      const { queued, queue } = queueing();
+      const runtime = await createTurns(
+        [
+          `export function register(on) {
+            on('turn.start', async ($, e, next) => {
+              for (const args of [{text: 1}, {text: 'a', asUser: false},
+                {text: 'a', attachments: []}, {text: 'a', origin: {kind: 'composer'}}])
+                $.ui.log(await $.prompt.submit(args).then(() => 'ok', String));
+              return next(e);
+            });
+          }`,
+        ],
+        undefined,
+        queue,
+      );
+      await runtime.startTurn({ text: '', turnId: 'turn-1' }, signal());
+      expect(queued).toEqual([]);
+      expect(logs.map((log) => log.text)).toEqual([
+        expect.stringContaining('takes { text, asUser? }'),
+        expect.stringContaining('takes { text, asUser? }'),
+        expect.stringContaining('does not take attachments'),
+        expect.stringContaining('takes { text, asUser? }'),
+      ]);
+    });
   });
 
   it('lets a .catch drop a prompt its failed guard never passed on', async () => {
