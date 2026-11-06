@@ -42,7 +42,8 @@ type ManagedSessionsNavigationProps = Pick<
 
 /** Change productScope with tenant/actor identity so saved selections and output caches are discarded. */
 export interface ManagedAgentWebShellProps
-  extends Omit<JavaManagedAgentProviderOptions, 'baseUrl'>,
+  extends
+    Omit<JavaManagedAgentProviderOptions, 'baseUrl'>,
     ManagedSessionsNavigationProps {
   managedAgentProvider?: ManagedAgentProvider;
   /**
@@ -62,8 +63,33 @@ export interface ManagedAgentWebShellProps
   style?: CSSProperties;
 }
 
-/** Managed-only 产品入口，不创建 daemon workspace/session context。 */
+function shellErrorFallback(language: WebShellLanguage) {
+  return (error: Error, reset: () => void) => (
+    <RootErrorFallback error={error} onRetry={reset} language={language} />
+  );
+}
+
+/**
+ * Managed-only 产品入口，不创建 daemon workspace/session context。
+ *
+ * The provider (and its `baseUrl` guard) resolves one level below this
+ * boundary: an error boundary cannot catch a throw from the component that
+ * renders it, and a host mounting before its config resolves would otherwise
+ * get a blank container instead of the shell's own fallback.
+ */
 export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
+  return (
+    <ErrorBoundary
+      label="managed-agent-web-shell-config"
+      resetKeys={[props.baseUrl, props.managedAgentProvider]}
+      fallback={shellErrorFallback(normalizeLanguage(props.language))}
+    >
+      <ManagedAgentWebShellRoot {...props} />
+    </ErrorBoundary>
+  );
+}
+
+function ManagedAgentWebShellRoot(props: ManagedAgentWebShellProps) {
   const {
     sessionId,
     managedAgentProvider,
@@ -190,13 +216,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
     <ErrorBoundary
       label="managed-agent-web-shell-root"
       resetKeys={[provider.storageKey, selectedSessionId]}
-      fallback={(error, reset) => (
-        <RootErrorFallback
-          error={error}
-          onRetry={reset}
-          language={resolvedLanguage}
-        />
-      )}
+      fallback={shellErrorFallback(resolvedLanguage)}
     >
       <ThemeProvider value={theme}>
         <BrandProvider value={brand}>

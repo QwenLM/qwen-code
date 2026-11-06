@@ -33,8 +33,7 @@ const mocks = vi.hoisted(() => ({
   loadToolDetails: undefined as ToolDetailsLoader | undefined,
   clearEditor: vi.fn(),
   editorProps: undefined as
-    | ComponentProps<(typeof import('../ChatEditor'))['ChatEditor']>
-    | undefined,
+    ComponentProps<(typeof import('../ChatEditor'))['ChatEditor']> | undefined,
   client: {
     listSessions: vi.fn(),
     getSession: vi.fn(),
@@ -92,9 +91,8 @@ vi.mock('../MessageList', () => ({
 }));
 
 vi.mock('../ChatEditor', async () => {
-  const { forwardRef, useImperativeHandle, useRef, useState } = await import(
-    'react'
-  );
+  const { forwardRef, useImperativeHandle, useRef, useState } =
+    await import('react');
   return {
     ChatEditor: forwardRef<
       EditorHandle,
@@ -2006,6 +2004,14 @@ describe('ManagedSessionsPage', () => {
       }),
     );
     await render('s1');
+    // A send failure in s1 leaves a banner behind: openSession also clears it,
+    // so pin both halves of the shared navigation path.
+    mocks.client.submitPrompt.mockRejectedValueOnce(
+      new Error('Submit exploded'),
+    );
+    await input('For session A');
+    await click('Send');
+    expect(container.textContent).toContain('Submit exploded');
     const open = [...container.querySelectorAll('button')].find(
       (item) => item.textContent === 'Open the original conversation',
     );
@@ -2014,6 +2020,7 @@ describe('ManagedSessionsPage', () => {
       open!.click();
       await flush();
     });
+    expect(container.textContent).not.toContain('Submit exploded');
     // Without the workspace id the host-side handler clears the managed
     // workspace selection the owner session belongs to.
     expect(onSelect).toHaveBeenCalledWith('s2', 'ws-2');
