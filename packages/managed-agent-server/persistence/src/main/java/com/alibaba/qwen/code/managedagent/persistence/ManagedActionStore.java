@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHostedRecoveryRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedUserQuestions;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -192,13 +193,15 @@ public class ManagedActionStore
             String state = payload.path("state").asText();
             require(
                     id.matches("tool_approval_[0-9a-f]{32}")
-                            && "permission".equals(payload.path("kind").asText())
+                            && List.of("permission", "question").contains(payload.path("kind").asText())
                             && "tool_call".equals(payload.path("source").asText())
                             && List.of("requested", "decided", "expired", "cancelled")
                                     .contains(state));
             JsonNode ref = payload.path("optionsRef");
             StoredResource resource = resource(ref, "managed-action-options", resources);
             JsonNode options = read(new String(resource.bytes(), StandardCharsets.UTF_8));
+            boolean question = ManagedUserQuestions.isQuestion(options);
+            require((question ? "question" : "permission").equals(payload.path("kind").asText()));
             List<String> optionFields = new ArrayList<>(List.of(
                     "v",
                     "requestId",
@@ -209,11 +212,11 @@ public class ManagedActionStore
                     "inputRevision",
                     "createdAt",
                     "expiresAt",
-                    "options"));
-            if (options.path("v").asLong() == 2 || options.path("v").asLong() == 3 && options.has("inputRef")) {
+                    question ? "questions" : "options"));
+            if (question || options.path("v").asLong() == 2 || options.path("v").asLong() == 3 && options.has("inputRef")) {
                 optionFields.add("inputRef");
             }
-            if (options.path("v").asLong() == 3) {
+            if (question || options.path("v").asLong() == 3) {
                 optionFields.add("continuationRef");
             }
             if (options.has("requiresHumanDecision")) {
@@ -224,7 +227,7 @@ public class ManagedActionStore
             require(
                     safeNumber(options.path("v"))
                             && (options.path("v").asLong() == 1
-                                    || options.path("v").asLong() == 2 || options.path("v").asLong() == 3)
+                                    || options.path("v").asLong() == 2 || options.path("v").asLong() == 3 || question)
                             && id.equals(options.path("requestId").asText())
                             && safeNumber(options.path("inputRevision"))
                             && options.path("inputRevision").asLong()
@@ -232,21 +235,24 @@ public class ManagedActionStore
                             && options.path("inputRevision").asLong() >= 1
                             && options.path("policyRevision")
                                     .asText()
-                                    .equals("hosted-tool-approval/1")
+                                    .equals(question ? ManagedUserQuestions.POLICY : "hosted-tool-approval/1")
                             && text(options.path("turnId"))
                             && text(options.path("functionCallId"))
                             && text(options.path("toolName"))
                             && safeNumber(options.path("createdAt"))
                             && safeNumber(options.path("expiresAt"))
                             && options.path("expiresAt").asLong()
-                                    > options.path("createdAt").asLong()
-                            && options.path("options").isArray()
-                            && options.path("options").size() == 2
-                            && "allow".equals(options.path("options").get(0).path("id").asText())
-                            && "deny".equals(options.path("options").get(1).path("id").asText()));
-            for (JsonNode option : options.path("options")) {
-                closed(option, "id", "label");
-                require(text(option.path("label")));
+                                    > options.path("createdAt").asLong());
+            if (question) {
+                validateQuestionResources(sessionId, options, resources);
+            } else {
+                require(options.path("options").isArray() && options.path("options").size() == 2
+                        && "allow".equals(options.path("options").get(0).path("id").asText())
+                        && "deny".equals(options.path("options").get(1).path("id").asText()));
+                for (JsonNode option : options.path("options")) {
+                    closed(option, "id", "label");
+                    require(text(option.path("label")));
+                }
             }
             if (options.has("inputRef")) {
                 String inputKind = options.path("inputRef").path("kind").asText();
@@ -265,7 +271,7 @@ public class ManagedActionStore
                             && options.path("functionCallId").equals(continuation.path("calls").get(ordinal).path("call").path("callId")));
                 }
             }
-            if (options.path("v").asLong() == 3) {
+            if (question || options.path("v").asLong() == 3) {
                 ManagedHostedRecoveryRecords.reference(options.path("continuationRef"), "hosted-approval-continuation", tenantId, workspaceId, sessionId, resources, hostedReferences);
             }
             Action previous = find(tenantId, sessionId, id).orElse(null);
@@ -281,11 +287,12 @@ public class ManagedActionStore
             if ("decided".equals(state)) {
                 StoredResource decided = resource(decision, "managed-action-decision", resources);
                 JsonNode body = read(new String(decided.bytes(), StandardCharsets.UTF_8));
-                closed(body, "v", "optionId", "inputRevision", "policyRevision");
+                closed(body, "v", question ? "answers" : "optionId", "inputRevision", "policyRevision");
                 require(
                         safeNumber(body.path("v"))
-                                && body.path("v").asLong() == 1
-                                && List.of("allow", "deny").contains(body.path("optionId").asText())
+                                && body.path("v").asLong() == (question ? 2 : 1)
+                                && (question ? validAnswers(options, body.path("answers"))
+                                        : List.of("allow", "deny").contains(body.path("optionId").asText()))
                                 && body.path("inputRevision").equals(options.path("inputRevision"))
                                 && body.path("policyRevision")
                                         .equals(options.path("policyRevision"))
@@ -352,6 +359,41 @@ public class ManagedActionStore
                         false,
                         "action:" + id + ":" + event.path("sequence").asLong());
             }
+        }
+    }
+
+    private void validateQuestionResources(String sessionId, JsonNode options, Function<String, StoredResource> resources) {
+        require("ask_user_question".equals(options.path("toolName").asText())
+                && options.path("requiresHumanDecision").isBoolean() && options.path("requiresHumanDecision").booleanValue());
+        JsonNode input = read(new String(resource(options.path("inputRef"), "managed-tool-input", resources).bytes(), StandardCharsets.UTF_8));
+        closed(input, "harnessSessionId", "runtimeSessionId", "payloadJson");
+        require(sessionId.equals(input.path("harnessSessionId").asText()) && text(input.path("payloadJson")));
+        JsonNode payload = read(input.path("payloadJson").textValue());
+        closed(payload, "toolName", "input");
+        require("ask_user_question".equals(payload.path("toolName").asText()));
+        try {
+            require(ManagedUserQuestions.questionsFromInput(payload.get("input")).equals(options.path("questions")));
+        } catch (IllegalArgumentException error) {
+            require(false);
+        }
+        JsonNode continuation = read(new String(resource(options.path("continuationRef"), "hosted-approval-continuation", resources).bytes(), StandardCharsets.UTF_8));
+        JsonNode call = continuation.path("calls").path(0);
+        require(continuation.path("calls").size() == 1 && continuation.path("approvalOrdinal").asInt(-1) == 0
+                && "approval".equals(continuation.path("stage").asText())
+                && continuation.path("actionId").equals(options.path("requestId"))
+                && continuation.path("promptId").equals(options.path("turnId"))
+                && input.path("runtimeSessionId").equals(continuation.path("runtime").path("runtimeSessionId"))
+                && call.path("inputRef").equals(options.path("inputRef"))
+                && call.path("actionId").equals(options.path("requestId"))
+                && call.path("call").path("callId").equals(options.path("functionCallId"))
+                && "ask_user_question".equals(call.path("call").path("name").asText()));
+    }
+
+    private static boolean validAnswers(JsonNode options, JsonNode answers) {
+        try {
+            return ManagedUserQuestions.canonicalAnswers(options.path("questions"), answers, false).equals(answers);
+        } catch (IllegalArgumentException error) {
+            return false;
         }
     }
 
@@ -676,8 +718,9 @@ public class ManagedActionStore
                     "Only the Session owner with current OPERATOR access may approve a public plan.");
         }
         if (body.size() != 3
-                || !body.path("optionId").isTextual()
-                || !List.of("allow", "deny").contains(body.path("optionId").asText())
+                || (ManagedUserQuestions.isQuestion(o) ? !validAnswers(o, body.path("answers"))
+                        : !body.path("optionId").isTextual()
+                                || !List.of("allow", "deny").contains(body.path("optionId").asText()))
                 || !body.path("inputRevision").isIntegralNumber()
                 || body.path("inputRevision").asLong() != o.path("inputRevision").asLong()
                 || !body.path("policyRevision").equals(o.path("policyRevision"))) {

@@ -1768,7 +1768,7 @@
             "description": "Aggregate pending Actions from this public root Session and its direct children; responses use each Action owning Session."
           }
         ],
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
+        "description": "Serves Hosted permission and structured question Actions. Question answers preserve the original question and option IDs, allow one to four answers, and are bounded to 32 KiB of canonical UTF-8 JSON. vote_recorded remains planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/actions/{actionId}": {
@@ -1812,7 +1812,7 @@
             "$ref": "#/components/responses/Forbidden"
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
+        "description": "Serves Hosted permission and structured question Actions. Question answers preserve the original question and option IDs, allow one to four answers, and are bounded to 32 KiB of canonical UTF-8 JSON. vote_recorded remains planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/actions/{actionId}/responses": {
@@ -1876,7 +1876,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
+        "description": "Serves Hosted permission and structured question Actions. Question answers preserve the original question and option IDs, allow one to four answers, and are bounded to 32 KiB of canonical UTF-8 JSON. vote_recorded remains planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/close": {
@@ -2065,7 +2065,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
+        "description": "Serves Hosted permission and structured question Actions. Question answers preserve the original question and option IDs, allow one to four answers, and are bounded to 32 KiB of canonical UTF-8 JSON. vote_recorded remains planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/actions/get": {
@@ -2114,7 +2114,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
+        "description": "Serves Hosted permission and structured question Actions. Question answers preserve the original question and option IDs, allow one to four answers, and are bounded to 32 KiB of canonical UTF-8 JSON. vote_recorded remains planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/actions/respond": {
@@ -2165,7 +2165,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
+        "description": "Serves Hosted permission and structured question Actions. Question answers preserve the original question and option IDs, allow one to four answers, and are bounded to 32 KiB of canonical UTF-8 JSON. vote_recorded remains planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/sessions/close": {
@@ -10419,13 +10419,14 @@
           },
           "options": {
             "type": "array",
-            "maxItems": 50,
+            "minItems": 2,
+            "maxItems": 4,
             "items": {
               "$ref": "#/components/schemas/ActionOption"
             }
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "implemented"
       },
       "ActionSource": {
         "type": "object",
@@ -10563,7 +10564,9 @@
           "policy_revision",
           "created_at",
           "expires_at",
-          "questions"
+          "questions",
+          "function_call_id",
+          "tool_name"
         ],
         "properties": {
           "id": {
@@ -10607,16 +10610,31 @@
             "minLength": 1,
             "maxLength": 128
           },
+          "turn_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "function_call_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "tool_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
           "questions": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 20,
+            "maxItems": 4,
             "items": {
               "$ref": "#/components/schemas/ActionQuestion"
             }
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "allOf": [
           {
             "if": {
@@ -10678,7 +10696,7 @@
           "option_ids": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 50,
+            "maxItems": 4,
             "uniqueItems": true,
             "items": {
               "type": "string",
@@ -10692,13 +10710,17 @@
             "maxLength": 8192
           }
         },
-        "x-qwen-implementation-status": "planned",
-        "anyOf": [
+        "x-qwen-implementation-status": "implemented",
+        "allOf": [
           {
-            "required": ["option_ids"]
-          },
-          {
-            "required": ["text"]
+            "anyOf": [
+              {
+                "required": ["option_ids"]
+              },
+              {
+                "required": ["text"]
+              }
+            ]
           }
         ]
       },
@@ -10748,13 +10770,13 @@
           "answers": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 20,
+            "maxItems": 4,
             "items": {
               "$ref": "#/components/schemas/QuestionAnswer"
             }
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "implemented"
       },
       "ActionResponseRequest": {
         "oneOf": [
@@ -11132,7 +11154,7 @@
           "optionIds": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 50,
+            "maxItems": 4,
             "uniqueItems": true,
             "items": {
               "type": "string",
@@ -11146,13 +11168,17 @@
             "maxLength": 8192
           }
         },
-        "x-qwen-implementation-status": "planned",
-        "anyOf": [
+        "x-qwen-implementation-status": "implemented",
+        "allOf": [
           {
-            "required": ["optionIds"]
-          },
-          {
-            "required": ["text"]
+            "anyOf": [
+              {
+                "required": ["optionIds"]
+              },
+              {
+                "required": ["text"]
+              }
+            ]
           }
         ]
       },
@@ -11189,13 +11215,14 @@
           },
           "options": {
             "type": "array",
-            "maxItems": 50,
+            "minItems": 2,
+            "maxItems": 4,
             "items": {
               "$ref": "#/components/schemas/WebShellActionOption"
             }
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "implemented"
       },
       "WebShellCommandOperation": {
         "type": "object",
@@ -11452,7 +11479,9 @@
           "policyRevision",
           "createdAt",
           "expiresAt",
-          "questions"
+          "questions",
+          "functionCallId",
+          "toolName"
         ],
         "properties": {
           "actionId": {
@@ -11496,16 +11525,31 @@
             "minLength": 1,
             "maxLength": 128
           },
+          "turnId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "functionCallId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "toolName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
           "questions": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 20,
+            "maxItems": 4,
             "items": {
               "$ref": "#/components/schemas/WebShellActionQuestion"
             }
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "allOf": [
           {
             "if": {
@@ -11745,13 +11789,13 @@
           "answers": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 20,
+            "maxItems": 4,
             "items": {
               "$ref": "#/components/schemas/WebShellQuestionAnswer"
             }
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "implemented"
       },
       "WebShellOperation": {
         "oneOf": [
@@ -11789,7 +11833,7 @@
           "includeChildren": {
             "type": "boolean",
             "default": false,
-            "description": "Include pending permission Actions of this public root Session and its direct children; each Action retains its actual owning sessionId."
+            "description": "Include pending Actions of this public root Session and its direct children; each Action retains its actual owning sessionId."
           }
         }
       },
