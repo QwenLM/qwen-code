@@ -1309,4 +1309,33 @@ describe('output budget key written by the installer', () => {
       }),
     ).toEqual({ max_tokens: 1000, max_completion_tokens: 4096 });
   });
+
+  it('replaces a preserved family key with a new max_tokens value on a model that reads max_tokens', () => {
+    // The "new budget replaces the preserved keys" guard, in the shape the
+    // stale-key migration does not cover: the migration only moves
+    // `max_tokens` onto `max_completion_tokens` for GPT-5 / o-series ids, so
+    // a preserved `max_completion_tokens` (or `max_new_tokens`) on gpt-4.1
+    // plus a new value relies on the guard alone. Without it the entry
+    // would come out as `{ max_completion_tokens: 4096, max_tokens: 8000 }`,
+    // the pair the endpoint rejects.
+    const inputs = {
+      ...customInputs(['gpt-4.1']),
+      protocol: AuthType.USE_OPENAI,
+    };
+    const rerunOver = (samplingParams: Record<string, unknown>) => {
+      const existing = modelsOf(buildInstallPlanSrc(customProvider, inputs));
+      existing[0]!.generationConfig = { samplingParams };
+      return modelsOf(
+        buildInstallPlanSrc(
+          customProvider,
+          { ...inputs, advancedConfig: { maxTokens: 8000 } },
+          existing,
+        ),
+      )[0]!.generationConfig?.samplingParams;
+    };
+    expect(
+      rerunOver({ max_completion_tokens: 4096, temperature: 0.2 }),
+    ).toEqual({ temperature: 0.2, max_tokens: 8000 });
+    expect(rerunOver({ max_new_tokens: 2048 })).toEqual({ max_tokens: 8000 });
+  });
 });
