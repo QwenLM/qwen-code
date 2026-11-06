@@ -220,15 +220,23 @@ export function SkillsManagerPage({
   );
   const targetWorkspaceCwd = workspaceCwd ?? workspace.workspaceCwd;
   const toggleScopeEpoch = useRef(0);
+  const archiveScope = useMemo(
+    () => ({ active: true }),
+    // Each owner needs a distinct token for callbacks captured before a switch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [targetWorkspaceCwd, workspace.client],
+  );
   useLayoutEffect(() => {
+    archiveScope.active = true;
     setNotice(null);
     setBusySkill(null);
     setListNotice(null);
     setInstallWarning(null);
     return () => {
+      archiveScope.active = false;
       toggleScopeEpoch.current += 1;
     };
-  }, [targetWorkspaceCwd, workspace.client]);
+  }, [archiveScope]);
   const targetsActiveWorkspace =
     connection.workspaceCwd !== undefined
       ? targetWorkspaceCwd === connection.workspaceCwd
@@ -321,13 +329,16 @@ export function SkillsManagerPage({
   async function completeArchiveInstall(
     result: DaemonSkillMutationResult,
   ): Promise<void> {
+    if (!archiveScope.active) return;
     let warning = result.activationWarning;
     await reloadConfig().catch(() => undefined);
+    if (!archiveScope.active) return;
     try {
       await ensureRuntime({ throwOnError: true });
     } catch (error) {
       warning ??= error instanceof Error ? error.message : String(error);
     }
+    if (!archiveScope.active) return;
     setListNotice(t('skills.install.succeeded', { name: result.skillName }));
     setInstallWarning(
       warning

@@ -177,8 +177,8 @@ afterEach(() => {
 });
 
 describe('SkillsManagerPage', () => {
-  async function uploadArchive(size: number) {
-    await renderPage();
+  async function uploadArchive(size: number, workspaceCwd?: string) {
+    await renderPage(workspaceCwd);
     const open = Array.from(container.querySelectorAll('button')).find(
       (item) => item.textContent?.trim() === 'Upload',
     );
@@ -264,6 +264,87 @@ describe('SkillsManagerPage', () => {
         'runtime activation failed',
       );
       expect(document.body.textContent).not.toContain('installed successfully');
+    },
+  );
+
+  describe.each(['workspace', 'client', 'return'] as const)(
+    'when the archive owner changes via %s',
+    (change) => {
+      it.each(['upload', 'refresh', 'activation'])(
+        'discards old notices during %s and still reports a new install',
+        async (phase) => {
+          workspaceState.current.capabilities.features = [
+            'workspace_skill_manage',
+            'skill_archive_install',
+          ];
+          let finish!: () => void;
+          const pending = new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+          const installed = {
+            skillName: 'old-owner',
+            scope: 'workspace',
+            attemptId: 'attempt',
+            archiveSha256: 'a'.repeat(64),
+            activationWarning: 'old runtime unavailable',
+          };
+          skillsState.current.installArchive.mockImplementationOnce(
+            async () => {
+              if (phase === 'upload') await pending;
+              return installed;
+            },
+          );
+          if (phase === 'refresh') {
+            skillsState.current.reloadConfig.mockImplementationOnce(
+              async () => pending,
+            );
+          }
+          skillsState.current.ensureRuntime.mockImplementation(
+            async (options?: { throwOnError?: boolean }) => {
+              if (phase === 'activation' && options?.throwOnError)
+                await pending;
+            },
+          );
+          await uploadArchive(3);
+          if (change === 'client') {
+            workspaceState.current.client = {};
+            await renderPage();
+          } else {
+            await renderPage('/workspace/secondary');
+            if (change === 'return') await renderPage();
+          }
+          await act(async () => {
+            finish();
+            await pending;
+          });
+          expect(container.textContent).not.toContain('installed successfully');
+          expect(container.textContent).not.toContain(
+            'old runtime unavailable',
+          );
+          expect(skillsState.current.reloadConfig).toHaveBeenCalledTimes(
+            phase === 'upload' ? 0 : 1,
+          );
+          expect(skillsState.current.ensureRuntime).toHaveBeenCalledTimes(
+            phase === 'activation' ? 2 : 1,
+          );
+
+          skillsState.current.installArchive.mockResolvedValue({
+            ...installed,
+            skillName: 'current-owner',
+            activationWarning: undefined,
+          });
+          await uploadArchive(
+            3,
+            change === 'workspace' ? '/workspace/secondary' : undefined,
+          );
+          expect(container.textContent).toContain(
+            'Skill “current-owner” installed successfully.',
+          );
+          expect(container.textContent).not.toContain(
+            'old runtime unavailable',
+          );
+        },
+      );
     },
   );
 

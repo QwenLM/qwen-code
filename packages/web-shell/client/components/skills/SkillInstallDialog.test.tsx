@@ -263,6 +263,62 @@ describe('native Skill archive dialog', () => {
     expect(original.install).toHaveBeenCalledOnce();
   });
 
+  it.each(['button', 'escape'])(
+    'preserves a pending attempt and its owner after closing with %s and reopening',
+    async (closeMethod) => {
+      const original = archive();
+      original.install.mockRejectedValueOnce(
+        new DaemonSkillInstallError(attemptId, new TypeError('disconnected')),
+      );
+      original.lookup.mockResolvedValueOnce(undefined);
+      await renderDialog('en', original);
+      await selectZip();
+      await submit();
+      await act(async () => {
+        if (closeMethod === 'escape') {
+          document.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+          );
+        } else {
+          Array.from(document.querySelectorAll('button'))
+            .find((button) => button.textContent?.trim() === 'close')!
+            .click();
+        }
+      });
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+      const next = archive();
+      for (const open of [false, true]) {
+        await act(async () => {
+          root.render(
+            <I18nProvider language="en">
+              <SkillInstallDialog
+                open={open}
+                onOpenChange={onOpenChange}
+                onInstall={onInstall}
+                archive={next}
+              />
+            </I18nProvider>,
+          );
+        });
+      }
+      const buttons = Array.from(document.querySelectorAll('button'));
+      expect(
+        buttons.find((button) => button.textContent === 'Upload')?.disabled,
+      ).toBe(true);
+      const check = buttons.find(
+        (button) => button.textContent === 'Check result',
+      );
+      expect(check).toBeDefined();
+      await act(async () => check!.click());
+      expect(original.lookup).toHaveBeenCalledTimes(2);
+      expect(original.committed).toHaveBeenCalledWith(installed);
+      expect(original.install).toHaveBeenCalledOnce();
+      expect(next.install).not.toHaveBeenCalled();
+      expect(next.lookup).not.toHaveBeenCalled();
+      expect(next.committed).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['not_committed', 'recovery_required'] as const)(
     'shows a confirmed %s outcome without retrying',
     async (state) => {

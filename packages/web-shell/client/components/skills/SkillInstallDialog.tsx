@@ -319,7 +319,7 @@ export function SkillInstallDialog({
       onOpenChange={(nextOpen) => {
         if (installing) return;
         onOpenChange(nextOpen);
-        if (!nextOpen) reset();
+        if (!nextOpen && !pending) reset();
       }}
     >
       <DialogContent
@@ -484,7 +484,7 @@ export function SkillInstallDialog({
                 return;
               }
               onOpenChange(false);
-              reset();
+              if (!pending) reset();
             }}
             disabled={installing && !controller}
           >
