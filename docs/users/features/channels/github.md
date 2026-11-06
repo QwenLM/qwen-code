@@ -197,11 +197,36 @@ so the session that follows the PR handles the event with its existing context.
 - The injected prompt marks all GitHub content as untrusted event data. The
   session's reply stays in the session; it is **not** published to GitHub
   automatically, and the session may act on GitHub through its own tools.
-- Comment sender gates still apply before delivery. When several sessions are
-  bound to the same PR, the most recently updated non-archived session wins;
-  channel-owned sessions are never candidates. With `boundSessionActions`
-  configured, routing becomes role-aware instead: one winner per role,
-  fan-out across roles (see below).
+- Comment sender, repository and pairing gates still apply before delivery.
+  When several sessions are bound to the same PR, the most recently updated
+  non-archived session wins; channel-owned sessions are never candidates. With
+  `boundSessionActions` configured, routing becomes role-aware instead: one
+  winner per role, fan-out across roles (see below).
+- A plain conversation comment on a bound PR reaches the session without a
+  mention when the repository's group sender policy is an allowlist that lists
+  the sender: the mention requirement (`groups.*.requireMention`) keeps ambient
+  chatter out of public replies, and a bound event stays private. Accounts in
+  `operators` keep the mention requirement: a bound session usually acts on
+  GitHub as an operator's account, so list that account in `operators` (which
+  also lets it manage shared sessions), or its own comments come back to it as
+  new turns. Repositories that admit any sender (where every drive-by or bot
+  comment would otherwise become a session turn), the PR's own description and
+  unbound threads still need a mention, and unlisted senders are not delivered
+  at all. Notifications GitHub gives the `author` or `comment` reason are the
+  exception, as before: every comment there that passes the sender gate is
+  forwarded, an operator's included. GitHub keeps a thread's `mention` reason
+  once the bot is mentioned in it, so those rules then apply instead. With
+  `messageRoutes` and no `defaultMessageRoute`, a plain comment also needs a
+  route prefix. On threads GitHub lists as a mention, assignment or review
+  request, such a comment is delivered as a `comment` event, so with
+  `boundSessionActions` it reaches the roles whose templates cover `comment` or
+  `default`, never through a template keyed by the thread's reason (`mention`,
+  `review_requested`); and it is never answered in public: if no bound session
+  is left, it is dropped. The channel only sees comments its account is
+  notified about and reads PR conversation comments, not inline review comments
+  (see Known Limitations); to follow comments on PRs the bot account did not
+  open or review, have that account watch the repository, and include
+  `subscribed` if you set `reasonFilter`.
 - When no bound session exists (or it cannot be restored), **comment** events
   fall back to the normal channel path and its public-reply contract — on a
   complete binding snapshot; while the snapshot is partial or its refresh is
