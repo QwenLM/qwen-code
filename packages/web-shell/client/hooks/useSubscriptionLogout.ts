@@ -33,19 +33,25 @@ export function useSubscriptionLogout(options: Options) {
   const sessionAuthType = connection.sessionId
     ? connection.context?.state._meta?.['authType']
     : undefined;
-  const loadAuthType = useCallback(async () => {
-    if (connectionRef.current.sessionId) {
-      return (await sessionActions.getContext()).state._meta?.['authType'];
-    }
-    if (!workspaceCwd) return undefined;
-    return (await actions.loadProviders(workspaceCwd)).current?.authType;
-  }, [actions, sessionActions, workspaceCwd]);
+  const canCheckAvailability =
+    !connection.sessionId || connection.status === 'connected';
+  const loadAuthType = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      if (connectionRef.current.sessionId) {
+        const context = await sessionActions.getContext(opts);
+        return context.state._meta?.['authType'];
+      }
+      if (!workspaceCwd) return undefined;
+      return (await actions.loadProviders(workspaceCwd)).current?.authType;
+    },
+    [actions, sessionActions, workspaceCwd],
+  );
 
   useEffect(() => {
     const abort = new AbortController();
     const owner = ownerGuard.capture();
     setAvailable(false);
-    if (workspaceCwd && connection.providers) {
+    if (workspaceCwd && connection.providers && canCheckAvailability) {
       void actions
         .getSubscriptionConfig({ signal: abort.signal })
         .then(async (config) => {
@@ -56,7 +62,7 @@ export function useSubscriptionLogout(options: Options) {
             !config.signedIn
           )
             return;
-          const authType = await loadAuthType();
+          const authType = await loadAuthType({ silent: true });
           const latest = await actions.getSubscriptionConfig({
             signal: abort.signal,
           });
@@ -77,6 +83,7 @@ export function useSubscriptionLogout(options: Options) {
     connection.sessionId,
     connection.currentModel,
     connection.providers,
+    canCheckAvailability,
     sessionAuthType,
     loadAuthType,
   ]);

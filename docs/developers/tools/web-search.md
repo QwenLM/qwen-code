@@ -13,16 +13,16 @@ For DashScope, the built-in tool issues a self-contained search request to a sma
 
 If you configured nothing under `tools.webSearch`, the tool registers whenever the model you are running can back the search request with the same credentials:
 
-| How you signed in                                                                                                          | Built-in search                                 |
-| -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code) — **Plus or Pro**                             | on                                              |
-| Alibaba ModelStudio → **Standard API Key**                                                                                 | on                                              |
-| Alibaba ModelStudio → **Token Plan**                                                                                       | on                                              |
-| Alibaba ModelStudio → **Coding Plan**                                                                                      | off — its endpoint is not verified for this API |
-| QwenCloud → **Standard API Key**                                                                                           | on                                              |
-| QwenCloud → **Token Plan**                                                                                                 | on                                              |
-| An OpenAI-compatible `modelProviders` or Custom Provider entry on a recognized DashScope Responses host, with a direct key | on                                              |
-| Third-party providers (OpenRouter, DeepSeek, ModelScope, …), custom endpoints on other hosts, local models                 | off                                             |
+| How you signed in                                                                                                               | Built-in search                                 |
+| ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli) — **Plus or Pro** | on                                              |
+| Alibaba ModelStudio → **Standard API Key**                                                                                      | on                                              |
+| Alibaba ModelStudio → **Token Plan**                                                                                            | on                                              |
+| Alibaba ModelStudio → **Coding Plan**                                                                                           | off — its endpoint is not verified for this API |
+| QwenCloud → **Standard API Key**                                                                                                | on                                              |
+| QwenCloud → **Token Plan**                                                                                                      | on                                              |
+| An OpenAI-compatible `modelProviders` or Custom Provider entry on a recognized DashScope Responses host, with a direct key      | on                                              |
+| Third-party providers (OpenRouter, DeepSeek, ModelScope, …), custom endpoints on other hosts, local models                      | off                                             |
 
 DashScope searches bill the same key as your main model; subscription searches reuse your Qwen login credentials. Permission handling follows the active approval mode and rules; in `default` approval mode the first search asks for confirmation. When your provider cannot back the tool, it simply does not appear at startup — no startup warning.
 
