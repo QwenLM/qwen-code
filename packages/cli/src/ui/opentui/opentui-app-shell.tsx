@@ -124,6 +124,7 @@ import {
   type OpenTuiDispatchOutcome,
 } from './commands-dispatch.js';
 import { isExitInProgress } from './exit-lifecycle.js';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import { injectCapturedInput } from './early-input.js';
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
@@ -205,6 +206,11 @@ export interface OpenTuiAppProps {
     args: Record<string, unknown>,
     restoreResponseBinding?: RestoreToolResponseBinding,
   ) => boolean;
+  /**
+   * Runs the next prompt a Mod submitted with `$.prompt.submit` as a turn of
+   * its own; false when none could start.
+   */
+  onRunModPrompt?: () => boolean;
   onRetryPrompt?: () => void;
   onInputProcessed?: () => void;
   /** Reaches the entry after `/quit`; receives the closing history rows. */
@@ -309,6 +315,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     extensionRefreshState,
     renderMain,
     onSubmitPrompt,
+    onRunModPrompt,
     onQuit,
     onTranscriptReset,
     onTranscriptEvent,
@@ -1236,7 +1243,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     ],
   );
 
-  const onSubmit = useCallback(
+  const submitInput = useCallback(
     async (
       text: string,
       imagePaths?: readonly string[],
@@ -1386,6 +1393,32 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       addInfoItem,
       props.onTranscriptEvent,
     ],
+  );
+
+  // Composer submissions still being routed: the gate awaits the command
+  // registry and the dispatch before any turn starts, so a Mod's prompt must
+  // not take the idle moment from under them.
+  const submittingRef = useRef(0);
+  // Re-runs the drain of the Mods' prompts below.
+  const [modPromptRevision, setModPromptRevision] = useState(0);
+  const onSubmit = useCallback(
+    async (
+      text: string,
+      imagePaths?: readonly string[],
+      options?: OpenTuiSubmitOptions,
+    ): Promise<boolean> => {
+      // The person's own input, a command too, lets the Mods' prompts start
+      // turns again.
+      getInteractiveModSession(config)?.notePersonPrompt();
+      submittingRef.current += 1;
+      try {
+        return await submitInput(text, imagePaths, options);
+      } finally {
+        submittingRef.current -= 1;
+        setModPromptRevision((revision) => revision + 1);
+      }
+    },
+    [config, submitInput],
   );
 
   // Runs the commands the mid-turn gate held back, in submission order, once
@@ -1540,6 +1573,42 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     runShellCommand,
     config,
     props.composerHandle,
+  ]);
+
+  // A Mod's own prompts (`$.prompt.submit`) run each as a turn of its own
+  // once the session is idle: after the person's queued input, and not
+  // while a dialog owns the UI, a `!` command runs, or a submission or
+  // command is still being routed.
+  useEffect(
+    () =>
+      getInteractiveModSession(config)?.subscribePrompts(() =>
+        setModPromptRevision((revision) => revision + 1),
+      ),
+    [config],
+  );
+  useEffect(() => {
+    if (
+      !onRunModPrompt ||
+      isExitInProgress() ||
+      streaming ||
+      dialog ||
+      shellControllersRef.current.size > 0 ||
+      deferredCommandsRef.current.length > 0 ||
+      drainingRef.current ||
+      submittingRef.current > 0 ||
+      gateway.isBusy() ||
+      !getInteractiveModSession(config)?.hasSubmittedPrompts
+    )
+      return;
+    onRunModPrompt();
+  }, [
+    streaming,
+    dialog,
+    deferredRevision,
+    modPromptRevision,
+    gateway,
+    onRunModPrompt,
+    config,
   ]);
 
   const hostHistory = host.getHistory();

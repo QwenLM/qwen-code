@@ -68,6 +68,11 @@ import {
   MODS_FAILED_TO_INITIALIZE,
 } from '../../services/interactive-mod-session.js';
 import type { ModTurn } from '../../services/mod-session.js';
+import {
+  frameModPrompt,
+  modPromptRow,
+} from '../../services/mod-prompt-frame.js';
+import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import type { ServerLlmStreamEvent } from '@qwen-code/qwen-code-core';
 import {
   livePromptEvents,
@@ -177,6 +182,8 @@ export interface OpenTuiSubmitOptions {
    * starts this turn; it rides the turn's first send.
    */
   promptContext?: readonly string[];
+  /** The prompt a Mod submitted with `$.prompt.submit` that the turn runs. */
+  modPrompt?: ModQueuedPrompt;
 }
 
 export interface ForegroundShellOwner {
@@ -219,6 +226,11 @@ export interface OpenTuiLiveTurn {
     imagePaths?: readonly string[],
     options?: OpenTuiSubmitOptions,
   ): boolean;
+  /**
+   * Runs the next prompt a Mod submitted with `$.prompt.submit` as a turn of
+   * its own. False when a turn is in flight or no prompt waits.
+   */
+  runModPrompt(): boolean;
   /** Aborts the in-flight turn (Esc). */
   interrupt(onSettled?: OpenTuiCancelSettled): void;
   retryLastPrompt(): void;
@@ -717,6 +729,7 @@ export function useOpenTuiLiveTurn(
           submittedPrompt: turnOptions?.submittedPrompt,
           humanInput: turnOptions?.humanInput,
           promptContext,
+          modPrompt: turnOptions?.modPrompt,
           workflowModeEligible: editablePrompt !== undefined,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           isCurrentTurn: () => seq === turnSeqRef.current,
@@ -743,6 +756,9 @@ export function useOpenTuiLiveTurn(
             onStreamEvent: (event: ServerLlmStreamEvent) => modTurn?.saw(event),
             onToolsCancelled: () => {
               toolsCancelled = true;
+              // The person declined every tool, which stops the session's
+              // work as Esc does; Esc and a Mod's `$.turn.abort` abort first.
+              if (!abort.signal.aborted) mods.stopSubmittedPrompts();
             },
           }),
           // Steering reaches the model mid-turn as no prompt of its own, so
@@ -871,6 +887,10 @@ export function useOpenTuiLiveTurn(
           // An interrupt settles as a cancel whether or not a Mod ended the
           // turn first; only a Mod's end alone lets the queue go on.
           if (abort.signal.aborted && (!modEnded || active.interrupted)) {
+            // A Mod's prompt the person stopped has no row to take back, but
+            // the next prompt must not reach the model behind it.
+            if (turnOptions?.modPrompt)
+              config.getLlmClient()?.stripOrphanedUserEntriesFromHistory(true);
             const settled = active.onCancelSettled;
             let queued = settled ? popQueue() : null;
             // A prompt the hooks still held was never shown or sent, so it
@@ -1113,12 +1133,31 @@ export function useOpenTuiLiveTurn(
     [config, apply, pushQueue, runTurn, hooksHear],
   );
 
+  const runModPrompt = useCallback((): boolean => {
+    if (!mountedRef.current || streamingRef.current) return false;
+    const prompt = getInteractiveModSession(config)?.takeSubmittedPrompt();
+    if (!prompt) return false;
+    const promptId = nextLivePromptId(config);
+    // A notice naming the Mod, not a row the person typed: it is not
+    // recalled, rewound to or logged as the person's input.
+    apply({ type: 'info', text: modPromptRow(prompt.plugin, prompt.text) });
+    void runTurn(frameModPrompt(prompt), promptId, {
+      submittedPrompt: prompt.text,
+      ...(prompt.context?.length ? { promptContext: prompt.context } : {}),
+      modPrompt: prompt,
+    });
+    return true;
+  }, [config, apply, runTurn]);
+
   const interrupt = useCallback(
     (onSettled?: OpenTuiCancelSettled) => {
       skipRetryDelayRef.current = undefined;
       failedRequestRef.current = null;
       const active = activeTurnRef.current;
       if (active && active.seq === turnSeqRef.current) {
+        // The person stopped the session's work: the Mods' prompts still
+        // queued do not start, nor do those the stopped turn's hooks submit.
+        getInteractiveModSession(config)?.stopSubmittedPrompts();
         active.interrupted = true;
         active.onCancelSettled ??= onSettled;
         updateExecutingShells([]);
@@ -1127,7 +1166,7 @@ export function useOpenTuiLiveTurn(
         onSettled?.({ kind: 'cancelled', queued: null, prompt: null });
       }
     },
-    [updateExecutingShells],
+    [config, updateExecutingShells],
   );
 
   const scheduleTool = useCallback(
@@ -1282,6 +1321,7 @@ export function useOpenTuiLiveTurn(
     messageQueue: queue,
     popQueue,
     submit,
+    runModPrompt,
     interrupt,
     retryLastPrompt,
     notifyInputProcessed,

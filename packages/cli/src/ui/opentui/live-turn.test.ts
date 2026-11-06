@@ -59,6 +59,8 @@ import {
   useOpenTuiLiveTurn,
 } from './live-turn.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
+import { frameModPrompt } from '../../services/mod-prompt-frame.js';
+import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import {
   framePasteExpansion,
   REWRITE_CHANGED_PASTE,
@@ -2198,12 +2200,18 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
         _promptId?: string,
       ) => turn,
     );
-    vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
+    const submitted: ModQueuedPrompt[] = [];
+    const mods = {
       startTurn,
-    } as unknown as ReturnType<
-      typeof interactiveMods.getInteractiveModSession
-    >);
-    return { turn, startTurn };
+      stopSubmittedPrompts: vi.fn(),
+      takeSubmittedPrompt: vi.fn(() => submitted.shift()),
+    };
+    vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue(
+      mods as unknown as ReturnType<
+        typeof interactiveMods.getInteractiveModSession
+      >,
+    );
+    return { turn, startTurn, mods, submitted };
   };
   const options = (turn: number) =>
     live.turns[turn - 1].options as LivePromptOptions;
@@ -2353,6 +2361,118 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
     options(2).onPromptAdmitted?.();
     expect(startTurn.mock.calls.map(([text]) => text)).toEqual(['Fix it', '']);
     await settle(result);
+  });
+
+  const modConfig = () => {
+    const stripOrphanedUserEntriesFromHistory = vi.fn();
+    return {
+      config: {
+        getLlmClient: () => ({ stripOrphanedUserEntriesFromHistory }),
+      } as unknown as Config,
+      stripOrphanedUserEntriesFromHistory,
+    };
+  };
+
+  it("runs a Mod's prompt framed, under a line naming the Mod", async () => {
+    const { startTurn, mods, submitted } = installMods();
+    const logger = { logMessage: vi.fn(async () => {}) };
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({
+        config: modConfig().config,
+        logger: logger as unknown as Logger,
+      }),
+    );
+    expect(result.current.runModPrompt()).toBe(false);
+    submitted.push(
+      {
+        plugin: 'followup-mod',
+        text: 'List the <TODOs>',
+        context: ['from the hook'],
+      },
+      { plugin: 'other-mod', text: '/compress', asUser: true },
+    );
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    // One turn at a time: the next waits, still queued.
+    act(() => expect(result.current.runModPrompt()).toBe(false));
+    // Taken once with nothing waiting, once to run: none while it runs.
+    expect(mods.takeSubmittedPrompt).toHaveBeenCalledTimes(2);
+    expect(live.turns[0].prompt).toBe(
+      frameModPrompt({
+        plugin: 'followup-mod',
+        text: 'List the <TODOs>',
+        context: ['from the hook'],
+      }),
+    );
+    expect(options(1)).toMatchObject({
+      submittedPrompt: 'List the <TODOs>',
+      promptContext: ['from the hook'],
+      modPrompt: { plugin: 'followup-mod', text: 'List the <TODOs>' },
+      workflowModeEligible: false,
+    });
+    expect(
+      result.current.items.map((item) => [
+        item.kind,
+        'text' in item ? item.text : '',
+      ]),
+    ).toEqual([['info', 'Mod followup-mod: List the <TODOs>']]);
+    options(1).onPromptAdmitted?.();
+    expect(startTurn.mock.calls[0][0]).toBe('List the <TODOs>');
+    await settle(result);
+
+    // An `asUser` prompt reaches the model as it is, and a slash-form one is
+    // no command.
+    live.holds.add(2);
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    expect(live.turns[1].prompt).toBe('/compress');
+    expect(options(2).modPrompt).toEqual({
+      plugin: 'other-mod',
+      text: '/compress',
+      asUser: true,
+    });
+    expect(options(2).promptContext).toBeUndefined();
+    await settle(result);
+    expect(result.current.items.some((item) => item.kind === 'user')).toBe(
+      false,
+    );
+    // Nothing a Mod sent is logged as the person's input.
+    expect(logger.logMessage).not.toHaveBeenCalled();
+    expect(mods.stopSubmittedPrompts).not.toHaveBeenCalled();
+  });
+
+  it("stops the Mods' prompts when the person stops a turn, not when a Mod ends it", async () => {
+    const { startTurn, mods, submitted } = installMods();
+    const { config, stripOrphanedUserEntriesFromHistory } = modConfig();
+    const { result } = renderHook(() => useOpenTuiLiveTurn({ config }));
+    submitted.push({ plugin: 'followup-mod', text: 'one' });
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    options(1).onPromptAdmitted?.();
+    act(() => result.current.interrupt());
+    expect(mods.stopSubmittedPrompts).toHaveBeenCalledTimes(1);
+    await settle(result);
+    // The stopped Mod prompt must not stay in front of the next one.
+    expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalledWith(true);
+
+    // A Mod's `$.turn.abort` keeps them.
+    live.holds.add(2);
+    submitted.push({ plugin: 'followup-mod', text: 'two' });
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    options(2).onPromptAdmitted?.();
+    act(() => expect(startTurn.mock.calls[1][2]()).toBe(true));
+    await settle(result);
+    expect(mods.stopSubmittedPrompts).toHaveBeenCalledTimes(1);
+    expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalledTimes(1);
+
+    // Declining every tool stops them as Esc does, once.
+    live.holds.add(3);
+    act(() => result.current.submit('person'));
+    options(3).onPromptAdmitted?.();
+    options(3).onToolsCancelled?.();
+    expect(mods.stopSubmittedPrompts).toHaveBeenCalledTimes(2);
+    await settle(result);
+
+    // Esc with no turn running stops nothing.
+    act(() => result.current.interrupt());
+    expect(mods.stopSubmittedPrompts).toHaveBeenCalledTimes(2);
   });
 
   it('offers no turn hooks without a Mod session', () => {
@@ -2721,6 +2841,7 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
       hearsPrompts: true,
       submitPrompt,
       startTurn,
+      stopSubmittedPrompts: vi.fn(),
     } as unknown as ReturnType<
       typeof interactiveMods.getInteractiveModSession
     >);
@@ -3102,6 +3223,7 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
       get failed() {
         return state.failed;
       },
+      stopSubmittedPrompts: vi.fn(),
       ready,
       submitPrompt,
       startTurn: vi.fn(() => ({ id: 't', saw: vi.fn(), complete: vi.fn() })),
