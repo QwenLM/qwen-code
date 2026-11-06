@@ -594,6 +594,32 @@ describe('ci.yml lint HOME isolation', () => {
         ENV_WRITES,
         `${id} must publish exactly HOME/USERPROFILE, XDG_CACHE_HOME and COREPACK_HOME via GITHUB_ENV`,
       );
+      // GITHUB_ENV is last-write-wins, so the guard cannot stop at step 0: a
+      // later step that republishes an isolated key silently reverts the home
+      // for the steps that run PR code while step 0 still matches. The npm
+      // cache step is a legitimate later writer, so only the isolated keys
+      // are banned — not every later `$GITHUB_ENV` append.
+      // `[^\w]`, not `\s`: the realistic form is `printf 'HOME=%s\n'` inside
+      // quotes, which a whitespace-only prefix let through.
+      const ISOLATED_KEY =
+        /(^|[^\w])(HOME|USERPROFILE|COREPACK_HOME|XDG_CACHE_HOME)=/;
+      for (const [index, step] of steps.entries()) {
+        if (index === 0) continue;
+        for (const line of String(step.run ?? '')
+          .split('\n')
+          .map((l) => l.trim())) {
+          assert.ok(
+            !(line.includes('${GITHUB_ENV}') && ISOLATED_KEY.test(line)),
+            `${id} step ${index} (${step.name}) must not republish an isolated HOME key via GITHUB_ENV`,
+          );
+        }
+        for (const key of Object.keys(step.env ?? {})) {
+          assert.ok(
+            !/^(HOME|USERPROFILE|COREPACK_HOME|XDG_CACHE_HOME)$/.test(key),
+            `${id} step ${index} (${step.name}) must not override ${key} for a single step`,
+          );
+        }
+      }
     }
   });
 
