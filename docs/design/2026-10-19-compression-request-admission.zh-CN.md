@@ -38,7 +38,7 @@
 
 ### 缩减
 
-缩减后的请求把每个文本片段（工具结果、工具调用参数、模型文本和用户消息）截到 4,000 字，复用载荷过大时的上限（#10380）。被截短的片段保留开头。不丢掉任何轮次，所以每个 function call 都保留它的 response，角色也保持交替。以 `<system-reminder>` 或钩子上下文块开头的片段，如果截断落在这个块里面，会在截断处之后补回块的结束标签：如果像普通文字一样截断，它会缺了结束标签，把后面的文字也包进去。IDE 上下文被前置到用户提示所在的片段里，虽然片段以用户提示结尾，它也算这样的块。只有结束标签越过上限的块保留到结束标签为止，之后的内容截掉。
+缩减后的请求把每个文本片段（工具结果、工具调用参数、模型文本和用户消息）截到 4,000 字，复用载荷过大时的上限（#10380）。被截短的片段保留开头。不丢掉任何轮次，所以每个 function call 都保留它的 response，角色也保持交替。以 `<system-reminder>`、钩子上下文块或 `<task-notification>` 开头的片段，以及以这类块结尾的文字（比如调度器在输出之后追加了提醒的工具结果），如果截断落在这个块里面，会在截断处之后补回块的结束标签：如果像普通文字一样截断，它会缺了结束标签，把后面的文字也包进去。IDE 上下文被前置到用户提示所在的片段里，虽然片段以用户提示结尾，它也算这样的块。只有结束标签越过上限的块保留到结束标签为止，之后的内容截掉。只认文字开头或结尾处的块：写入方会转义块正文里的标签，但工具读到的文件和用户输入的文字不转义，其中的标签按原样保留。
 
 缩减后仍无法留出下限时，压缩返回 `COMPRESSION_FAILED_INPUT_TOO_LARGE`，不发送任何请求。它和其他失败一样计入熔断次数。载荷过大时的压缩（#10380）在计算大小之前就截短了每个片段，缩减已经没有可截的内容；留不出下限的请求同样在本地拒绝，而不是带着被压低的预算发出去。413 恢复以这个状态结束时，给出开新会话的提示：它不同于临时的侧查询失败，之后的发送只会让历史更长。
 
@@ -56,7 +56,7 @@
 
 第二次失败，或任何其他错误，仍像以前一样返回 `COMPRESSION_FAILED_API_ERROR`。
 
-`getContextLengthExceededInfo` 只从把输入和输出预算分开写的报错里报告输入本身的大小（`promptTokens`）：OpenAI 的 "resulted in N tokens"、从 "you requested N tokens (… in the completion)" 里减去输出部分（OpenAI、DeepSeek、旧版 vLLM、OpenRouter）、Anthropic 的 "prompt is too long"、vLLM 的 "your prompt contains N input tokens" 和 "your request has N input tokens"、Gemini 的旧写法、llama.cpp 和 SGLang。没有分项的 "you requested N tokens" 总数报告为 `requestedTokens`；只说输出的写法（"you requested N tokens in the completion"）不给数字。每种写法都只在报错的单个片段内匹配，所以不会把别的字段里的数字配到这句话上。`actualTokens` 仍是被动压缩路径一直读取的那个数。vLLM 的 "contains at least N" 写法表示分词在哪里停下，不是请求的实际大小，因此仍只取窗口。窗口从 "maximum context length is N" 和 SGLang 的 "maximum context length of N" 读出，都标为 `limitKind: 'total'`，所以 SGLang 拒绝后的重试按 SGLang 写明的窗口来算。
+`getContextLengthExceededInfo` 只从把输入和输出预算分开写的报错里报告输入本身的大小（`promptTokens`）：OpenAI 的 "resulted in N tokens"、从 "you requested N tokens (… in the completion)" 里减去输出部分（OpenAI、DeepSeek、旧版 vLLM、OpenRouter）、Anthropic 的 "prompt is too long"、vLLM 的 "your prompt contains N input tokens" 和 "your request has N input tokens"、Gemini 的旧写法、llama.cpp、SGLang、TGI 的 `inputs` 数（两种写法）、vLLM 的 "Input length (N)" 和 Bedrock 的 "prompt tokens (N)"。没有分项的 "you requested N tokens" 总数报告为 `requestedTokens`；只说输出的写法（"you requested N tokens in the completion"）不给数字。每种写法都只在报错的单个片段内匹配，所以不会把别的字段里的数字配到这句话上。`actualTokens` 仍是被动压缩路径一直读取的那个数。vLLM 的 "contains at least N" 写法表示分词在哪里停下，不是请求的实际大小，因此仍只取窗口。窗口从 "maximum context length is N" 和 SGLang 的 "maximum context length of N" 读出，都标为 `limitKind: 'total'`，所以 SGLang 拒绝后的重试按 SGLang 写明的窗口来算。
 
 ### 被截断的摘要
 
@@ -90,7 +90,7 @@
 
 ## 验证
 
-- `compactionInputSlimming.test.ts` 中的单元测试：在 500 字和 4,000 字两种上限下，过长的提醒被截短并重新闭合；截断落在合并到用户提示前面的 IDE 上下文里、或落在钩子上下文块里时，同样重新闭合；在上限之前已闭合的提醒不会被闭合两次；只有闭合标签越过上限时，提醒保持完整。
+- `compactionInputSlimming.test.ts` 中的单元测试：在 500 字和 4,000 字两种上限下，过长的提醒被截短并重新闭合；截断落在合并到用户提示前面的 IDE 上下文里、或落在钩子上下文块里时，同样重新闭合；在上限之前已闭合的提醒不会被闭合两次；只有闭合标签越过上限时，提醒保持完整；被截断的任务通知重新闭合；追加在工具输出或错误信息之后的提醒被截断时重新闭合，只有这个提醒的闭合标签越过上限时工具输出保持完整，工具自身输出里引用的标签和被截掉的提醒都不补闭合标签。
 - `contextLengthError.test.ts` 中的单元测试：从每种支持的写法读出输入大小、没有分项的总数报告为 requested、分词截止处、只给上限的信息、单纯的数字比较和只说输出的写法都不报告数字，以及 `actualTokens` 不变。
 - `chatCompressionService.test.ts` 中的单元测试（`issue #9455`），使用一个强制 `prompt + max_tokens <= window`（测试设置时还强制输入上限）、并可按高于本地估算计数的后端：
   - 放得下的请求原样发送；
@@ -101,17 +101,17 @@
   - 带数字重试、无数字重试、重试一次后放弃、其他错误不重试，以及在请求被拒时恰好中止；
   - 8K 窗口按四分之一窗口的预算完成压缩，2K 窗口在本地拒绝；
   - 重试按拒绝信息给出的更小窗口来算，该窗口放不下任何重试时在本地拒绝，以及服务端在该窗口用完处截断的重试会被丢弃；
-  - 只是输出超了时，原样重发同一个请求并减少输出空间，分别针对分出输出部分的报错、只给总数的报错，以及比主模型窗口更小的压缩模型；
+  - 只是输出超了时，原样重发同一个请求并减少输出空间，分别针对分出输出部分的报错、TGI 的写法、只给总数的报错，以及比主模型窗口更小的压缩模型；
   - 保留的文字（没超过上限、按高密度计费的中文消息）比截掉的工具输出更密时，重试仍放得下；
   - 报错写明的输入上限之上的超出量；
-  - 数字远低于估算或与同一信息里的上限矛盾时被忽略；
+  - 数字远低于估算或与同一信息里的上限矛盾时被忽略，以及数字为估算的 0.6 时被采信、为 0.4 时被忽略；
   - 没有分项的总数被当作上界，分别针对发送途中输出被压低和没有被压低的情况；
   - 服务端窗口小于配置窗口时，单纯 "N tokens > M" 写法的拒绝；
   - 数字表明请求本该放得下时发送缩减后的请求（只写输入数、不写上限的写法）；
   - 重试按 SGLang 以 "maximum context length of N" 写明的窗口来算，且只有按这个窗口才放得下；
   - 服务商算出的数比估算少时，重试仍放得下，以及这个数表明缩减后的请求放不下时不发送重试；
   - 单条用户消息比整个窗口还大的会话能完成压缩，而不是被拒绝。
-- `chatCompressionService.test.ts` 中的单元测试（`issue #7960`）：占满窗口的轮次被缩减，而不是以下限为 1 的预算发送；服务端在窗口用完处停止输出、在 snapshot 中间被截断的摘要会被丢弃；usage 没有撑满窗口或只报告输入数时，未闭合的 snapshot 会被保留；不带标签的完整摘要会被保留；闭合后又提到标签的完整摘要也会被保留。
+- `chatCompressionService.test.ts` 中的单元测试（`issue #7960`）：占满窗口的轮次被缩减，而不是以下限为 1 的预算发送；服务端在窗口用完处停止输出、在 snapshot 中间被截断的摘要会被丢弃；usage 没有撑满窗口或只报告输入数时，未闭合的 snapshot 会被保留；不带标签的完整摘要会被保留；闭合后又提到标签的完整摘要也会被保留；前面的文字示例闭合了标签、真正的 snapshot 在中间被截断时，摘要会被丢弃。
 - 新状态文案的 CLI 测试，以及一个 `llm-chat.test.ts` 用例：413 恢复以这个状态结束时给出开新会话的提示。
 - 对新逻辑做了 27 个变异的变异测试（准入缩减、本地拒绝、四分之一窗口下限、拒绝信息给出的窗口、未标类型的上限、窗口不超过配置值、数字低于估算时放大删减量、只降输出的重发、两项数字合理性检查、没有分项的总数整体采用且不减去发送的预算、平均密度定预算、只重试一次的上限、第二次被拒的状态、"必须更小"的检查、两处 token 计数标志、未闭合 snapshot 检查、它要求的撑满窗口、所需的 provider 报告的输出数及所用的窗口、输入上限一项、重试的下限、本该放得下时的兜底，以及把过长提醒像普通文字一样截断或整段替换、而不是截短后重新闭合）：每个变异都至少让一个测试失败。
 
@@ -135,3 +135,4 @@
 - 按片段估算密度下限（比如英文每 4 个字符 1 个 token、中文每 2 个字符 1 个 token），删掉的内容很密时，超出量检查就能接受缩减后的请求。
 - 压缩遥测只在压缩走完全程时记录，所以这个状态和 API 失败都不会出现在遥测里。在失败返回处带上状态记录遥测，就能在看板上比较两者。
 - Anthropic 的 "input length and `max_tokens` exceed context limit: P + C > L" 不会被识别为上下文超长。识别它也会改变主对话路径的行为；对重试来说，它直接给出了输入大小。
+- 另有一些超长报错同样不会被识别为上下文超长：xAI、Together 的 "The input (N tokens) is longer than"、SiliconFlow、Bedrock Titan、vLLM 引擎层的 "decoder prompt"、llama.cpp 无法拆分的输入、Kimi 的旧写法、MiniMax、智谱的 "Prompt exceeds max length"、LM Studio 和 Ollama 的 llama-server。它们的压缩请求被拒时仍像以前一样失败。识别它们也会改变主对话何时压缩，所以应当单独改动，就像 #16245 为 TGI 做的那样。
