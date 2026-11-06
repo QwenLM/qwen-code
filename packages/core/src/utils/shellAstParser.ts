@@ -1180,6 +1180,11 @@ async function classifyInternal(
     const safety = mergeSafety(
       ...root.namedChildren.map(evaluateStatementSafety),
     );
+    // tree-sitter ends a word at \r, \v and \f, but bash keeps them inside it:
+    // in `git remote show ssh://host/repo\r-n` git receives the one argument
+    // `repo\r-n` and queries the host. The words read here are then not the
+    // ones bash runs, so a read-only verdict is withheld; a write stays one.
+    if (safety === 'read-only' && /[\r\v\f]/.test(command)) return 'unknown';
     if (safety === 'read-only' && command.includes('\\\n')) {
       const normalizedSafety = await classifyInternal(
         command.replaceAll('\\\n', ''),

