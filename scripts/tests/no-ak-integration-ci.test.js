@@ -440,10 +440,32 @@ describe('no-AK integration CI wiring', () => {
       );
     }
 
+    // The gate runs as three shards over test_build's tree; the aggregate
+    // job carries the required check name and fails when the build or any
+    // shard fails.
     expect(gateJob).toContain(
+      "    name: 'Integration Tests (no-AK, shard ${{ matrix.shard }}/3)'",
+    );
+    expect(gateJob).toContain(
+      "    needs:\n      - 'classify_pr'\n      - 'test_build'\n",
+    );
+    expect(gateJob).toContain('        shard: [1, 2, 3]');
+    expect(gateJob).toContain(
+      `npm run ${NO_AK_SCRIPT} -- --shard=\${{ matrix.shard }}/3`,
+    );
+    const resultJob = getWorkflowJob(workflow, 'integration_no_ak_result');
+    expect(resultJob).toContain(
       "    name: 'Integration Tests (no-AK, No Sandbox)'",
     );
-    expect(gateJob).toContain("    needs: 'classify_pr'");
+    expect(resultJob).toContain(
+      "      - 'test_build'\n      - 'integration_no_ak'\n",
+    );
+    expect(resultJob).toContain(
+      'test "$BUILD_RESULT" = success && test "$SHARDS_RESULT" = success',
+    );
+    expect(
+      resultJob.split('\n').find((line) => line.startsWith('    if:')),
+    ).toBe(gateJob.split('\n').find((line) => line.startsWith('    if:')));
     // Same runner routing as the Ubuntu gate, never a hard-coded pool.
     expect(gateJob).toContain('needs.classify_pr.outputs.ubuntu_runner');
     const jobIf = gateJob
@@ -500,7 +522,9 @@ describe('no-AK integration CI wiring', () => {
     expect(trustedClassifier).toContain(
       'trusted-ci-classifier/.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}"',
     );
-    expect(trustedClassifier).toContain('docs_only|github_ci_only|full) ;;');
+    expect(trustedClassifier).toContain(
+      'docs_only|github_ci_only|java_only|full) ;;',
+    );
     expect(trustedClassifier).toContain('profile=full');
     // The classify_pr job output resolves against the step ID: renaming it
     // empties the output and every consumer silently falls back to `full` —
@@ -539,7 +563,12 @@ describe('no-AK integration CI wiring', () => {
       // steps.ci_profile.outputs.ci_profile, so every downstream profile
       // gate mis-compares; dropping the case line lets an unexpected
       // profile value pass through unnormalized.
-      expect(profileStep).toContain('docs_only|github_ci_only|full) ;;');
+      // java_only either passes through (the gate and test skip their
+      // steps on it) or, in lint_and_static, maps to its full payload.
+      expect(profileStep).toMatch(
+        /docs_only\|github_ci_only\|(?:java_only\|)?full\) ;;/,
+      );
+      expect(profileStep).toContain('java_only');
       expect(profileStep).toContain(
         'echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"',
       );
