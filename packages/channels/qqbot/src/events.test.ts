@@ -482,6 +482,35 @@ describe('handleC2C', () => {
     expect(env.senderTag).toBe('bot');
   });
 
+  it('logs a forwarded bot message once per chat per minute', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    const forwardedLines = () =>
+      stderr.mock.calls.filter(([line]) =>
+        String(line).includes('forwardBotMessages: bot-authored message'),
+      ).length;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ id: 'm1', author: { bot: true, user_openid: 'bot-1' } }),
+    );
+    pvt['handleC2C'](
+      makeC2CEvent({ id: 'm2', author: { bot: true, user_openid: 'bot-1' } }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(forwardedLines()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(61_000);
+    pvt['handleC2C'](
+      makeC2CEvent({ id: 'm3', author: { bot: true, user_openid: 'bot-1' } }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(forwardedLines()).toBe(2);
+    stderr.mockRestore();
+  });
+
   it('forwards a routed bot !command to the model instead of the shell', async () => {
     const ch = makeChannel({
       forwardBotMessages: true,
@@ -3542,6 +3571,50 @@ describe('inbound media', () => {
     expect(env.text).toBe('(image)');
     expect(env.senderTag).toBe('bot');
     expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
+  it('leaves a media-only forwarded bot C2C message for the base attribution', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [imageAttachment()],
+        author: { bot: true, user_openid: 'bot-1' },
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.senderTag).toBe('bot');
+    expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
+  it('keeps the forwarded-bot marker when the media download fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('offline');
+      }),
+    );
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [imageAttachment()],
+        author: { bot: true, user_openid: 'bot-1' },
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(User sent media but download failed)');
+    expect(env.senderTag).toBe('bot');
   });
 
   it('keeps the caption as user text when an image is attached', async () => {

@@ -482,6 +482,8 @@ export class QQChannel extends ChannelBase {
   private _keywordTriggerCache: RegExp[] | null = null;
   /** Rate-limit timestamps for keyword non-match log entries (chatId → last log ms). */
   private _lastKeywordNoMatchLog: Map<string, number> = new Map();
+  /** Rate-limit timestamps for forwarded-bot notices (chatId → last log ms). */
+  private _lastForwardedBotLog: Map<string, number> = new Map();
 
   /** Accumulation buffer for cron/non-prompt textChunk events. */
   private cronBuffer: Map<string, CronBufferEntry> = new Map();
@@ -1759,6 +1761,7 @@ export class QQChannel extends ChannelBase {
     }
     this.cronBuffer.clear();
     this._lastKeywordNoMatchLog.clear();
+    this._lastForwardedBotLog.clear();
     this.flushQQState();
     this.backupGlobalSessions();
     if (this.readyTimeout) {
@@ -6006,6 +6009,22 @@ export class QQChannel extends ChannelBase {
     }
     return false;
   }
+
+  /**
+   * One rate-limited stderr line per chat per minute when a forwarded bot
+   * message is accepted. Forwarding is the one enabled path whose only brake is
+   * the model's own judgement, so an operator needs to see it is live; the line
+   * carries no sender name or payload, only the sanitized chat id.
+   */
+  private logForwardedBotMessage(chatId: string): void {
+    const now = Date.now();
+    if (now - (this._lastForwardedBotLog.get(chatId) ?? 0) < 60_000) return;
+    this._lastForwardedBotLog.set(chatId, now);
+    process.stderr.write(
+      `[QQ:${this.name}] forwardBotMessages: bot-authored message in ${sanitizeLogText(chatId, 64)} forwarded\n`,
+    );
+  }
+
   /**
    * Extract common group-message fields shared by handleGroup and handleGroupAll.
    * Returns null when the message has no meaningful text after @-tag stripping.
@@ -6150,6 +6169,7 @@ export class QQChannel extends ChannelBase {
     const text = isSlash
       ? sanitizePromptText(safeCleanText)
       : `${head}${body}${suffixFromBotOpenId}`;
+    if (forwardedBot) this.logForwardedBotMessage(chatId);
 
     return {
       isAtBot: effectiveIsAtBot,
@@ -6327,7 +6347,7 @@ export class QQChannel extends ChannelBase {
     const body = sanitizePromptText(safeContent);
     const mediaOnly = !body && media.length > 0;
     const text = mediaOnly
-      ? `${botTag}${mediaPlaceholder(media)}`
+      ? mediaPlaceholder(media)
       : isSlash || this.config.messageRoutes
         ? body
         : `[atMention=true] ${botTag}[${safeName}]: ${body}`;
@@ -6337,16 +6357,20 @@ export class QQChannel extends ChannelBase {
       senderName,
       chatId,
       text,
-      ...(forwardedBot && !mediaOnly ? { senderTag: QQ_BOT_SENDER_TAG } : {}),
+      ...(forwardedBot ? { senderTag: QQ_BOT_SENDER_TAG } : {}),
       messageId: event.id,
       isGroup: false,
       isMentioned: true,
       isReplyToBot: false,
       ...(mediaOnly ? { syntheticText: true as const } : {}),
-      ...(isSlash || this.config.messageRoutes
+      // A forwarded bot's media-only text is a bare placeholder with no sender
+      // line, so leave it unprefixed: ChannelBase then renders the senderTag
+      // (and keeps it when a failed download replaces the placeholder).
+      ...(isSlash || this.config.messageRoutes || (forwardedBot && mediaOnly)
         ? {}
         : { alreadyPrefixed: true as const }),
     };
+    if (forwardedBot) this.logForwardedBotMessage(chatId);
     this.dispatchInbound(envelope, media).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] C2C handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
@@ -6708,6 +6732,7 @@ export class QQChannel extends ChannelBase {
     }
     this.botOpenIdByGroup.delete(groupId);
     this._lastKeywordNoMatchLog.delete(groupId);
+    this._lastForwardedBotLog.delete(groupId);
     this.recentInbound.delete(groupId);
     // Clean up cron buffers targeting this group (always, regardless of config flag)
     let cleanedCron = 0;
