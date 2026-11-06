@@ -100,9 +100,10 @@ browser's own operating system. The guide follows the platform the page reports
 in three outcomes: macOS renders the macOS guide, Windows renders the Windows
 guide, and a phone or tablet (Apple mobile, or any non-Windows touch device such
 as Android) renders neither, along with none of the copy that points at the
-guides. A desktop platform the page cannot identify keeps both guides rather
-than losing the help. The guide starts collapsed, with a chevron beside the
-heading to expand or collapse the instructions.
+guides. A non-touch desktop platform the page cannot identify keeps both guides
+rather than losing the help; any non-Windows touch device is treated as mobile,
+whatever platform string it reports. The guide starts collapsed, with a chevron
+beside the heading to expand or collapse the instructions.
 The web page cannot detect OS-level permission; do not claim that it can.
 
 On the first eligible panel appearance, attempt authorization once per browser
