@@ -71,17 +71,17 @@ final class JournalCommit {
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        // An ordinary commit queues on its own Session row, not the tenant
-        // placement guard: lifecycle begin, settle and Harness placement all
-        // lock this row before they write, so none of them can land
-        // mid-commit, and commits of other Sessions no longer wait here. It
-        // is the first statement, so every later plain read sees what those
-        // writers committed before it. Lifecycle-authority commits took both
-        // guards above; CSI-pinned Sessions take them behind this root in
-        // lockCsiContinuation (design 2026-11-03-managed-journal-commit-tenant-guard).
-        Boolean rootPin = fencing.lockSessionFirst(tenantId, sessionId);
         JournalStoreRows.validateStableId(request.writerId(), "writerId");
         ValidatedCommit validated = validateCommit(request);
+        if (HostedCleanupReferences.containsCleanup(validated.recordBytes())) {
+            fencing.lockPlacementBounded(tenantId);
+        }
+        // Other ordinary commits queue on their Session before any consistent
+        // read, so lifecycle and placement cannot change it mid-commit. Cleanup
+        // commits already hold placement; lifecycle authority holds both guards.
+        // CSI-pinned Sessions take them behind this root in
+        // lockCsiContinuation (design 2026-11-03-managed-journal-commit-tenant-guard).
+        Boolean rootPin = fencing.lockSessionFirst(tenantId, sessionId);
         HarnessPlacementStore.Placement placement = fencing.requirePlacement(tenantId, request.workspaceId(),
                 sessionId, writerToken, request.writerId(), false);
         boolean promotes = ManagedHostedRecoveryRecords.requiresVersionTwo(validated.recordBytes(), request.resources())
@@ -150,10 +150,13 @@ final class JournalCommit {
             return replay(existing, request, validated.recordDigest(),
                     writerToken);
         }
-        // The storage's alias and directory rows order this commit against
-        // migration and physical fences; migration prepare checks idleness on
-        // committed data after locking them, so the guard adds nothing here.
-        fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
+        // Physical fencing and migration require stopped writers. Ordinary
+        // commits only read storage state and need not block member updates.
+        if (authority == null && csiOriginal == null) {
+            fencing.requireSessionStorageOpenForRead(tenantId, request.workspaceId(), sessionId);
+        } else {
+            fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
+        }
         JournalStoreRows.HeadRow head = csiHead == null
                 ? fencing.requireHeadAfterCsiCheck(tenantId, sessionId) : csiHead;
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);

@@ -49,7 +49,8 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
     private final List<String> command;
     private final Duration startupTimeout;
     private final HttpRuntimeTransport transport = new HttpRuntimeTransport();
-    private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService executor = Executors.newThreadPerTaskExecutor(
+            Thread.ofVirtual().name("runtime-kubernetes-", 0).factory());
     private final Map<RuntimeProvisionSeed, Placement> placements = new ConcurrentHashMap<>();
     private final Map<List<Object>, Placement> placementsByLease = new ConcurrentHashMap<>();
 
@@ -301,10 +302,8 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
         if (lease == null) {
             return null;
         }
-        synchronized (placements) {
-            return placementsByLease.get(List.of(lease.getRuntimeInstanceId(), lease.getLeaseId(),
-                    lease.getEpoch(), lease.getToken()));
-        }
+        return placementsByLease.get(List.of(lease.getRuntimeInstanceId(), lease.getLeaseId(),
+                lease.getEpoch(), lease.getToken()));
     }
 
     private static List<Object> ownershipKey(RuntimeProvisionSeed seed) {
