@@ -617,6 +617,39 @@ class ManagedSessionLifecycleTest {
     }
 
     @Test
+    void answersTheTitleTheDispatcherDeliveredFirst() throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        boolean[] raced = {false};
+        AgentStateStore racing = mock(AgentStateStore.class, delegatesTo(store));
+        doAnswer(call -> {
+            // The dispatcher wins the claim the request just admitted, so the
+            // request's own claim finds nothing and has to wait for the
+            // delivery instead of answering "already being delivered".
+            if (raced[0]) {
+                return java.util.Optional.empty();
+            }
+            raced[0] = true;
+            var candidate = (com.alibaba.qwen.code.managedagent.model.StoreModels.RenameDelivery) call
+                    .getArgument(0);
+            var delivery = store.claimRename(candidate, "dispatcher", Duration.ofMinutes(1))
+                    .orElseThrow();
+            store.markRenameSubmitted(delivery, "dispatcher");
+            store.completeSessionRename(delivery, "dispatcher", FixtureHarness.BOOT_ID);
+            return java.util.Optional.empty();
+        }).when(racing).claimRename(any(), anyString(), any());
+        ManagedAgentService subject = new ManagedAgentService(racing,
+                new RequestDigests(), null, harness, null, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+
+        var result = subject.renameSession(tenant, null, "dispatcher-race", sessionId, "renamed");
+
+        assertThat(result.body().metadata().get("title")).isEqualTo("renamed");
+        assertThat(result.replayed()).isTrue();
+        assertThat(store.findCommand(tenant, "RENAME_SESSION", "dispatcher-race").orElseThrow().status())
+                .isEqualTo("COMPLETED");
+    }
+
+    @Test
     void expiredTitleOwnerCannotRetireTheReplacementOwnersReceipt() throws Exception {
         String tenant = tenant();
         String sessionId = attachedSession(tenant);
