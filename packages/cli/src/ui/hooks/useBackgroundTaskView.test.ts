@@ -7,7 +7,11 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import type { Config, WorkflowTask } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  WorkflowApproval,
+  WorkflowTask,
+} from '@qwen-code/qwen-code-core';
 import { useBackgroundTaskView, entryId } from './useBackgroundTaskView.js';
 
 interface FakeRegistry {
@@ -553,9 +557,7 @@ describe('useBackgroundTaskView', () => {
         return workflows;
       },
     });
-    const { result, unmount } = renderHook(() =>
-      useBackgroundTaskView(config),
-    );
+    const { result, unmount } = renderHook(() => useBackgroundTaskView(config));
 
     // 1. mount registers a responder (not just the badge callback).
     expect(workflowReg.setApprovalRequestCallback).toHaveBeenCalledWith(
@@ -567,7 +569,10 @@ describe('useBackgroundTaskView', () => {
     // approval shows up in `entries`.
     const readsBefore = reads;
     workflows = [
-      { ...workflows[0], pendingApprovals: [pending] } as unknown as WorkflowTask,
+      {
+        ...workflows[0],
+        pendingApprovals: [pending],
+      } as unknown as WorkflowTask,
     ];
     act(() => workflowReg.fireApprovalRequest());
     expect(reads).toBeGreaterThan(readsBefore);

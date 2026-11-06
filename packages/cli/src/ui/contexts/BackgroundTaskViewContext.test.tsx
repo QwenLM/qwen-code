@@ -16,9 +16,7 @@ import {
   useBackgroundTaskViewState,
 } from './BackgroundTaskViewContext.js';
 
-const workflowEntry = (
-  pendingApprovalIds: string[] = [],
-): WorkflowTask =>
+const workflowEntry = (pendingApprovalIds: string[] = []): WorkflowTask =>
   ({
     id: 'wf-1',
     kind: 'workflow',
