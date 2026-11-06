@@ -25,6 +25,7 @@ import {
   type RestoreToolResponseBinding,
 } from '../utils/restore-tool-response.js';
 import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
+import { t } from '../../i18n/index.js';
 import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import {
   InteractiveModToolScheduler,
@@ -774,6 +775,7 @@ export async function* livePromptEvents(
         return parseAndFormatApiError(
           error,
           config.getContentGeneratorConfig()?.authType,
+          t,
         );
       } catch {
         return error instanceof Error ? error.message : String(error);

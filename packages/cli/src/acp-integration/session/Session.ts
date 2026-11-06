@@ -414,6 +414,7 @@ import {
 } from '../extension-skills.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
+import { subscriptionQuotaFromError } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import type {
   AvailableCommand,
   ContentBlock,
@@ -1250,6 +1251,9 @@ function formatCompressionDiagnostic(
   // API-reported figure on a different scale than a later banner.
   const formatCount = (count?: number, isEstimated?: boolean) =>
     count === undefined ? 'unknown' : isEstimated ? `~${count}` : String(count);
+  if (info.strategy === 'notes') {
+    return `Started a new context from local notes (${formatCount(info.originalTokenCount, info.originalTokenCountIsEstimated)} to ${formatCount(info.newTokenCount, info.newTokenCountIsEstimated)} tokens).${warningSuffix}`;
+  }
   return (
     `IMPORTANT: This conversation ${reasonClause}. ` +
     `A compressed context will be sent for future messages (compressed from: ` +
@@ -4739,7 +4743,35 @@ export class Session implements SessionContext {
     }
   }
 
-  async reloadModelProvidersFromDisk(): Promise<void> {
+  async reloadModelProvidersFromDisk(options?: {
+    subscriptionSignedOut?: boolean;
+  }): Promise<void> {
+    if (
+      options?.subscriptionSignedOut &&
+      this.config.getAuthType() === AuthType.QWEN_SUBSCRIPTION
+    ) {
+      this.config
+        .getBackgroundTaskRegistry()
+        .abortAll({ notify: false, persistedStatus: 'cancelled' });
+      this.config.setSubscriptionPlan(undefined);
+      const authType = this.config.getAuthType();
+      const currentModelId = authType
+        ? getCurrentAcpModelId(
+            buildAcpModelOptions(this.config.getAllConfiguredModels()),
+            this.config.getModel(),
+            authType,
+            this.config.getCurrentModelRegistryBaseUrl(),
+          )
+        : '';
+      await this.client.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: this.sessionId,
+        currentModelId,
+        subscriptionSignedOut: true,
+      });
+      await this.sendAvailableCommandsUpdate();
+      return;
+    }
     if (
       !this.settings.reloadScopesFromDiskAtomically([
         SettingScope.User,
@@ -7374,17 +7406,30 @@ export class Session implements SessionContext {
                 goalTurn?.origin !== 'runtime' &&
                 !isRetry
               ) {
+                const attachmentReferences = readDaemonAttachmentReferences(
+                  promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
+                );
+                const resourceLinks = params.prompt
+                  .filter((block) => block.type === 'resource_link')
+                  .map((block) => structuredClone(block));
                 const recorder = this.config.getChatRecordingService();
                 if (this.config.getChatCompression?.()?.strategy === 'notes')
                   notesPromptRecorder = recorder;
                 notesPromptUuid = recorder?.recordUserMessage(
                   promptText,
                   goalTurn?.permit,
-                  promptDisplayText !== undefined || inputAnnotations
+                  promptDisplayText !== undefined ||
+                    inputAnnotations ||
+                    attachmentReferences ||
+                    resourceLinks.length > 0
                     ? {
                         displayText: promptDisplayText ?? promptText,
                         hookContext: '',
                         ...(inputAnnotations ? { inputAnnotations } : {}),
+                        ...(attachmentReferences
+                          ? { attachmentReferences }
+                          : {}),
+                        ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
                       }
                     : undefined,
                   promptId,
@@ -9396,6 +9441,7 @@ export class Session implements SessionContext {
 
     const errorStatus = getErrorStatus(error);
     const errorMessage = error instanceof Error ? error.message : String(error);
+    const quota = subscriptionQuotaFromError(error);
     const hookSystem = this.config.getHookSystem?.();
     if (
       !this.config.getDisableAllHooks?.() &&
@@ -9413,9 +9459,20 @@ export class Session implements SessionContext {
     }
 
     if (errorStatus === 429) {
-      throw new RequestError(429, 'Rate limit exceeded. Try again later.');
+      throw new RequestError(
+        429,
+        this.config.getAuthType() === AuthType.QWEN_SUBSCRIPTION
+          ? errorMessage
+          : 'Rate limit exceeded. Try again later.',
+      );
     }
 
+    if (quota) {
+      throw new RequestError(-32603, errorMessage, {
+        details: errorMessage,
+        subscriptionQuota: quota,
+      });
+    }
     throw error;
   }
 
@@ -14888,7 +14945,18 @@ export class Session implements SessionContext {
     if (updateFailed) throw updateError;
   }
 
-  reloadSkillSettings(): void {
+  reloadSkillSettings(includeUserSettings = false): void {
+    if (includeUserSettings) {
+      if (
+        !this.settings.reloadScopesFromDiskAtomically([
+          SettingScope.Workspace,
+          SettingScope.User,
+        ])
+      ) {
+        throw new Error('Failed to reload user skill settings');
+      }
+      return;
+    }
     this.settings.reloadScopeFromDisk(SettingScope.Workspace);
   }
 

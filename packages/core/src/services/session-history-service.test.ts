@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -47,10 +47,15 @@ describe('session history projection', () => {
     );
     await fs.mkdir(path.dirname(transcript), { recursive: true });
     reader = new SessionTranscriptReader(workspace, undefined, runtime);
-    service = new SessionHistoryService(reader, sessionId, () => 10000);
+    service = new SessionHistoryService(
+      () => reader,
+      sessionId,
+      () => 10000,
+    );
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(runtime, { recursive: true, force: true });
   });
 
@@ -83,6 +88,11 @@ describe('session history projection', () => {
           id: 'read',
           response: {
             output: 'RECOVERY_KEY=canary',
+            inline_data: {
+              mime_type: 'image/png',
+              data: 'SNAKE_BASE64_CANARY',
+            },
+            customMedia: { 'MEDIA-TYPE': 'audio/wav', source: 'AUDIO_CANARY' },
             content: [
               { type: 'image', data: 'hidden_base64', mimeType: 'image/png' },
             ],
@@ -141,6 +151,8 @@ describe('session history projection', () => {
     expect(result).toContain('RECOVERY_KEY=canary');
     expect(result).toContain('media omitted');
     for (const hidden of [
+      'SNAKE_BASE64_CANARY',
+      'AUDIO_CANARY',
       'hidden_base64',
       'media_base64',
       'private replay',
@@ -161,6 +173,58 @@ describe('session history projection', () => {
         ),
       ).entries,
     ).toEqual([]);
+  });
+
+  it('reads relocated transcripts while preserving project-bound cursor validation', async () => {
+    await append('user', [{ text: 'first' }]);
+    await append('user', [{ text: 'second' }]);
+    const first = JSON.parse(
+      await service.query({ action: 'list', limit: 1 }, signal),
+    );
+    workspace = path.join(runtime, 'other-project');
+    const next = path.join(
+      new Storage(workspace, runtime).getProjectDir(),
+      'chats',
+      `${sessionId}.jsonl`,
+    );
+    await fs.mkdir(path.dirname(next), { recursive: true });
+    await fs.rename(transcript, next);
+    reader = new SessionTranscriptReader(workspace, undefined, runtime);
+    expect(
+      JSON.parse(
+        await service.query(
+          { action: 'read', ref: first.entries[0].ref },
+          signal,
+        ),
+      ).entries[0].text,
+    ).toBe('first');
+    await expect(
+      service.query({ action: 'list', cursor: first.nextCursor }, signal),
+    ).rejects.toThrow('History cursor expired. Start a new list or search.');
+    expect(
+      JSON.parse(await service.query({ action: 'list' }, signal)).entries.map(
+        (entry: { text: string }) => entry.text,
+      ),
+    ).toEqual(['first', 'second']);
+  });
+
+  it('bounds token probes for a large recorded entry by the response byte budget', async () => {
+    const id = await append('user', [{ text: 'large text '.repeat(100000) }]);
+    const byteLength = vi.spyOn(Buffer, 'byteLength');
+    const result = JSON.parse(
+      await service.query({ action: 'read', ref: `${id}:0` }, signal),
+    );
+    expect(result.entries[0].nextStart).toBeGreaterThan(0);
+    expect(byteLength).toHaveBeenCalled();
+    expect(
+      Math.max(
+        ...byteLength.mock.calls.flatMap(([text]) =>
+          typeof text === 'string' && text.startsWith('{"entries":')
+            ? [text.length]
+            : [],
+        ),
+      ),
+    ).toBeLessThan(17000);
   });
 
   it('paginates a frozen snapshot and preserves refs across ordinary compaction', async () => {
@@ -290,7 +354,7 @@ describe('session history projection', () => {
       service.query({ action: 'list' }, cancelled.signal),
     ).rejects.toThrow();
     const lowBudget = new SessionHistoryService(
-      new SessionTranscriptReader(workspace, undefined, runtime),
+      () => new SessionTranscriptReader(workspace, undefined, runtime),
       sessionId,
       () => 50,
     );

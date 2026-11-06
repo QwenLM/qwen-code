@@ -71,6 +71,26 @@ describe('session context tools', () => {
     expect(tool.description).toMatch(/\bstart\b/u);
     expect(tool.description).toMatch(/\bcursor\b/u);
   });
+  it('returns the owning chat context budget through get_context_remaining', async () => {
+    const { config, chat } = fixture();
+    const remaining = {
+      windowId: 'window',
+      estimatedInputTokens: 100,
+      remainingAutomatic: 900,
+      hardLimitHeadroom: 1500,
+      source: 'local_estimate',
+    };
+    Object.assign(chat, { getContextRemaining: () => remaining });
+    const result = await new SessionContextTool(
+      config,
+      ToolNames.GET_CONTEXT_REMAINING,
+    )
+      .build({})
+      .execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(JSON.parse(result.llmContent as string)).toEqual(remaining);
+  });
+
   it('captures the response at invocation time and returns a durable write revision', async () => {
     const { config, notes, response } = fixture();
     const tool = new SessionContextTool(config, ToolNames.SESSION_NOTES);
@@ -201,11 +221,16 @@ describe('session history concurrent recording', () => {
     seed = JSON.parse((await fs.readFile(transcript, 'utf8')).trim());
     vi.spyOn(lease, 'appendJsonLine');
     const history = new SessionHistoryService(
-      new SessionTranscriptReader(workspace, undefined, runtime),
+      () => new SessionTranscriptReader(workspace, undefined, runtime),
       sessionId,
       () => 10000,
     );
-    Object.assign(chat, { getSessionHistoryService: () => history });
+    Object.assign(chat, {
+      getSessionHistoryService: () => {
+        recorder.assertNotesWriterReady();
+        return history;
+      },
+    });
     tool = new SessionContextTool(config, ToolNames.SESSION_HISTORY);
     hookCalled = false;
   });
@@ -215,6 +240,32 @@ describe('session history concurrent recording', () => {
     await recorder?.close();
     vi.restoreAllMocks();
     await fs.rm(runtime, { recursive: true, force: true });
+  });
+
+  it('lets an admitted history read and handoff close drain without writer loss', async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const append = lease.appendJsonLine.bind(lease);
+    vi.mocked(lease.appendJsonLine).mockImplementationOnce(async (...args) => {
+      started();
+      await blocked;
+      return append(...args);
+    });
+    recorder.recordUserMessage([{ text: 'in flight' }]);
+    await entered;
+    const query = tool
+      .build({ action: 'list' })
+      .execute(new AbortController().signal);
+    const close = recorder.close({ handoff: true });
+    release();
+    expect((await query).error).toBeUndefined();
+    await expect(close).resolves.toBeUndefined();
   });
 
   function queueWritesDuringRead(afterQueue: () => void = () => {}) {

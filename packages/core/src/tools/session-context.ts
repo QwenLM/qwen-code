@@ -161,13 +161,11 @@ class SessionContextInvocation extends BaseToolInvocation<
           break;
         }
         case ToolNames.SESSION_HISTORY: {
-          const chat = this.chat;
+          const history = this.chat.getSessionHistoryService();
           output = await this.config
             .getChatRecordingService()!
             .runWithWriteBarrier(() =>
-              chat
-                .getSessionHistoryService()
-                .query(this.params as SessionHistoryRequest, signal),
+              history.query(this.params as SessionHistoryRequest, signal),
             );
           break;
         }

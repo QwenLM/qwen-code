@@ -1456,6 +1456,94 @@ describe('LlmChat', async () => {
     });
   });
 
+  it('sends a pending prompt once when compaction has already included it', async () => {
+    streamMock().mockImplementation(async () => textStream('answer'));
+    vi.spyOn(chat, 'tryCompress').mockImplementation(
+      async (_id, _force, _signal, options) => {
+        expect(options?.pendingUserMessage).toBeDefined();
+        chat.setHistory([
+          userText('checkpoint'),
+          modelText('ack'),
+          options!.pendingUserMessage!,
+        ]);
+        options?.onPendingMessageIncluded?.();
+        return {
+          compressionStatus: CompressionStatus.COMPRESSED,
+          originalTokenCount: 1000,
+          newTokenCount: 20,
+        };
+      },
+    );
+    await sendDrain('UNIQUE_PENDING_PROMPT', 'pending-once');
+    expect(
+      JSON.stringify(streamMock().mock.calls[0][0].contents).match(
+        /UNIQUE_PENDING_PROMPT/gu,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('emits one notes warning per committed context window', async () => {
+    const { SessionNotesService } = await import(
+      '../services/session-notes-service.js'
+    );
+    const { applySessionNotesRecord } = await import(
+      '../services/session-notes-state.js'
+    );
+    const state = { windowId: 'window', sourceLeafUuid: 'source' };
+    const recorder = {
+      getSessionId: () => mockConfig.getSessionId(),
+      getSessionNotesState: () => structuredClone(state),
+      assertNotesWriterReady: vi.fn(),
+      observeNotesInput: () => structuredClone(state),
+      recordAssistantTurn: vi.fn(),
+    };
+    chat = newChat({ recorder });
+    const notes = new SessionNotesService(
+      mockConfig,
+      recorder as unknown as ConstructorParameters<
+        typeof SessionNotesService
+      >[1],
+    );
+    vi.spyOn(chat, 'getSessionNotesService').mockReturnValue(notes);
+    mockGeneratorConfig({ contextWindowSize: 128000 });
+    streamMock().mockImplementation(async () => textStream('answer'));
+    const compression = vi.spyOn(chat, 'tryCompress').mockResolvedValue({
+      compressionStatus: CompressionStatus.NOOP,
+      originalTokenCount: 1000,
+      newTokenCount: 1000,
+    });
+    for (const id of ['first', 'second', 'new-window']) {
+      if (id === 'new-window')
+        applySessionNotesRecord(state, {
+          type: 'system',
+          subtype: 'chat_compression',
+          uuid: 'new-window',
+          parentUuid: null,
+          sessionId: 'session',
+          timestamp: '2026-11-06T00:00:00.000Z',
+          cwd: '/test',
+          version: 'test',
+          systemPayload: {
+            compressedHistory: [],
+            info: {
+              compressionStatus: CompressionStatus.COMPRESSED,
+              originalTokenCount: 90000,
+              newTokenCount: 1000,
+            },
+          },
+        });
+      chat.setLastPromptTokenCount(90000, false);
+      await sendDrain('continue', id);
+    }
+    expect(
+      compression.mock.calls.map((call) =>
+        JSON.stringify(call[3]?.pendingUserMessage).includes(
+          'Context is filling up.',
+        ),
+      ),
+    ).toEqual([true, false, true]);
+  });
+
   it('Nov5 R2-17 retries the notes warning after a failed pre-send compression', async () => {
     const { SessionNotesService } = await import(
       '../services/session-notes-service.js'

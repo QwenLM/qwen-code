@@ -54,7 +54,7 @@ function historyJson(value: unknown): string {
       ].includes(key)
     )
       return undefined;
-    if (key === 'inlineData' || key === 'fileData')
+    if (/^(?:inline|file)[_-]?data$/iu.test(key))
       return '[Recorded media omitted]';
     if (
       entry &&
@@ -73,9 +73,10 @@ function historyJson(value: unknown): string {
     if (
       entry &&
       typeof entry === 'object' &&
-      'data' in entry &&
-      ('mimeType' in entry ||
-        'media_type' in entry ||
+      ('data' in entry || 'source' in entry) &&
+      (Object.keys(entry).some((name) =>
+        /^(?:mime|media)[_-]?type$/iu.test(name),
+      ) ||
         ('type' in entry && entry.type === 'base64'))
     )
       return '[Recorded media omitted]';
@@ -139,7 +140,7 @@ export class SessionHistoryService {
   private readonly cursors = new Map<string, HistoryCursor>();
 
   constructor(
-    private readonly reader: SessionTranscriptReader,
+    private readonly getReader: () => SessionTranscriptReader,
     private readonly sessionId: string,
     private readonly remainingTokens: () => number,
   ) {}
@@ -154,6 +155,7 @@ export class SessionHistoryService {
         'Too little context remains for history retrieval. Save notes and start a new context first.',
       );
     }
+    const reader = this.getReader();
     const fits = (value: unknown) => {
       const text = JSON.stringify(value);
       return (
@@ -167,10 +169,7 @@ export class SessionHistoryService {
       preview: boolean,
     ): HistoryEntry => {
       let low = 0;
-      let high = Math.min(
-        entry.text.length - start,
-        preview ? 240 : entry.text.length,
-      );
+      let high = Math.min(entry.text.length - start, preview ? 240 : 16 * 1024);
       while (low < high) {
         const middle = Math.ceil((low + high) / 2);
         if (
@@ -205,7 +204,7 @@ export class SessionHistoryService {
       const match = /^([^:]+):(\d+)$/u.exec(request.ref ?? '');
       if (!match)
         throw new Error('Use a history ref returned by list or search.');
-      const page = await this.reader
+      const page = await reader
         .readContextHistory(this.sessionId, { recordId: match[1] }, signal)
         .catch((error: unknown) => {
           if (error instanceof SessionTranscriptPageTooLargeError) {
@@ -264,7 +263,7 @@ export class SessionHistoryService {
     if (request.action === 'search' && !query)
       throw new Error('A nonempty literal search query is required.');
     const offset = saved?.offset ?? 0;
-    const page = await this.reader
+    const page = await reader
       .readContextHistory(
         this.sessionId,
         { snapshot: saved?.snapshot, offset, limit: 100 },

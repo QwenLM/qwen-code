@@ -118,6 +118,16 @@ describe('notes compaction commit boundary', () => {
     };
   }
 
+  it('reports distinct automatic and hard headroom from the owning notes window', () => {
+    const { chat, config } = fixture();
+    config.getAutoCompactThreshold = () => 0.5;
+    const result = chat.getContextRemaining();
+    expect(result.windowId).toBe('later-window');
+    expect(result.estimatedInputTokens).toBeGreaterThanOrEqual(22000);
+    expect(result.remainingAutomatic + result.estimatedInputTokens).toBe(64000);
+    expect(result.hardLimitHeadroom + result.estimatedInputTokens).toBe(105000);
+  });
+
   it('Nov5 R2-16 counts an inflated notes fallback as a compression failure', async () => {
     const { chat } = fixture();
     chat.setLastPromptTokenCount(115000, false);
@@ -189,6 +199,19 @@ describe('notes compaction commit boundary', () => {
     const committed = vi.mocked(recorder.recordChatCompressionStrict).mock
       .calls[0][0];
     expect(committed.compressedHistory).toEqual(chat.getHistory());
+    expect(recorder.recordChatCompressionStrict).toHaveBeenCalledWith(
+      expect.objectContaining({ compressedHistory: chat.getHistory() }),
+      expect.objectContaining({
+        revision: 'note',
+        windowId: 'window',
+        sourceLeafUuid: 'source',
+      }),
+      undefined,
+      expect.objectContaining({
+        windowId: 'later-window',
+        sourceLeafUuid: 'later-source',
+      }),
+    );
     expect(recorder.recordChatCompression).not.toHaveBeenCalled();
   });
 
@@ -225,6 +248,40 @@ describe('notes compaction commit boundary', () => {
       expect.anything(),
     );
     expect(post).toHaveBeenCalledOnce();
+  });
+
+  it('retains live input and the pending reset when the captured notes snapshot loses the CAS race', async () => {
+    const { chat, recorder, post } = fixture();
+    const completeReset = vi.spyOn(
+      SessionNotesService.prototype,
+      'completePendingReset',
+    );
+    let reject!: (error: Error) => void;
+    vi.mocked(recorder.recordChatCompressionStrict).mockImplementation(
+      () =>
+        new Promise((_resolve, fail) => {
+          reject = fail;
+        }),
+    );
+    const transition = chat.tryCompress('prompt', true, undefined, {
+      notesRevision: 'note',
+    });
+    const failure = transition.catch((error: unknown) => error);
+    await vi.waitFor(() =>
+      expect(recorder.recordChatCompressionStrict).toHaveBeenCalledOnce(),
+    );
+    chat.addHistory({
+      role: 'user',
+      parts: [{ text: 'arrived during compression' }],
+    });
+    const live = chat.getHistory();
+    reject(new Error('Session notes state changed'));
+    expect(await failure).toMatchObject({
+      message: 'Session notes state changed',
+    });
+    expect(chat.getHistory()).toEqual(live);
+    expect(completeReset).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalled();
   });
 
   it('preserves history on write failure and on a stale explicit revision', async () => {

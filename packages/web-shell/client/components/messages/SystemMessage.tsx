@@ -1,4 +1,5 @@
 import { parseDaemonBackgroundTurn } from '@qwen-code/sdk/daemon';
+import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import { useSubagentDetails } from '../../subagentDetailsContext';
 import { memo, useCallback } from 'react';
 import {
@@ -141,18 +142,23 @@ function formatContextCompression(
   if (meta.phase === 'progress') return t('contextUsage.compressing');
   if (meta.phase === 'noop') return t('contextCompression.noop');
   const { result } = meta;
-  const line = t('contextCompression.result', {
-    from: formatCompressionTokens(
-      result.originalTokenCount,
-      result.originalTokenCountIsEstimated,
-      language,
-    ),
-    to: formatCompressionTokens(
-      result.newTokenCount,
-      result.newTokenCountIsEstimated,
-      language,
-    ),
-  });
+  const line = t(
+    result.strategy === 'notes'
+      ? 'contextCompression.notesResult'
+      : 'contextCompression.result',
+    {
+      from: formatCompressionTokens(
+        result.originalTokenCount,
+        result.originalTokenCountIsEstimated,
+        language,
+      ),
+      to: formatCompressionTokens(
+        result.newTokenCount,
+        result.newTokenCountIsEstimated,
+        language,
+      ),
+    },
+  );
   return result.warning ? `${line}  \n${result.warning}` : line;
 }
 
@@ -172,6 +178,21 @@ export const SystemMessage = memo(function SystemMessage({
   onRetryClick,
 }: SystemMessageProps) {
   const { language, t } = useI18n();
+  if (
+    variant === 'error' &&
+    data &&
+    typeof data === 'object' &&
+    'subscriptionQuota' in data
+  ) {
+    content =
+      formatSubscriptionQuotaDisplay(data.subscriptionQuota, t) ?? content;
+  }
+  if (
+    content ===
+    'Your login credentials are no longer valid. Run /auth to sign in again.'
+  ) {
+    content = t('subscription.loginRequired');
+  }
   const backgroundDetails = useSubagentDetails()?.onOpenBackground;
   const [copied, flashCopied] = useCopiedFlash();
   const handleCopy = useCallback(() => {

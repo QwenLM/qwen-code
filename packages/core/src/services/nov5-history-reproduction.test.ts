@@ -42,7 +42,11 @@ describe('Nov5 history regressions', () => {
     );
     await fs.mkdir(path.dirname(transcript), { recursive: true });
     reader = new SessionTranscriptReader(workspace, undefined, runtime);
-    service = new SessionHistoryService(reader, sessionId, () => 10000);
+    service = new SessionHistoryService(
+      () => reader,
+      sessionId,
+      () => 10000,
+    );
   });
 
   afterEach(async () => {
@@ -112,7 +116,11 @@ describe('Nov5 history regressions', () => {
   });
 
   it('R2-3 emits a CJK preview and advances at a 400-token budget', async () => {
-    service = new SessionHistoryService(reader, sessionId, () => 400);
+    service = new SessionHistoryService(
+      () => reader,
+      sessionId,
+      () => 400,
+    );
     await append('user', [{ text: '中'.repeat(5000) }]);
     let page = JSON.parse(await service.query({ action: 'list' }, signal));
     console.log('R2-3 page', {

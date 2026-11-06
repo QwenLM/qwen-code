@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { t } from './i18n/index.js';
 import { isWrappedSystemReminderPart } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -106,6 +107,8 @@ import type { ControlService } from './nonInteractive/control/ControlService.js'
 
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
 import { ModSession, type ModTurn } from './services/mod-session.js';
+import { frameModPrompt } from './services/mod-prompt-frame.js';
+import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
   AlreadyReportedError,
@@ -375,6 +378,19 @@ function emitLoopDetectedMessage(
   return message;
 }
 
+/** Emits a slash command's reply as an assistant message. */
+function emitNonInteractiveAssistantText(
+  adapter: JsonOutputAdapterInterface,
+  message: string,
+): void {
+  adapter.startAssistantMessage();
+  adapter.processEvent({
+    type: LlmEventType.Content,
+    value: message,
+  } as unknown as Parameters<JsonOutputAdapterInterface['processEvent']>[0]);
+  adapter.finalizeAssistantMessage();
+}
+
 /**
  * Emits a final message for slash command results.
  * Note: systemMessage should already be emitted before calling this function.
@@ -391,12 +407,7 @@ async function emitNonInteractiveFinalMessage(params: {
 
   // JSON output mode: emit assistant message and result
   // (systemMessage should already be emitted by caller)
-  adapter.startAssistantMessage();
-  adapter.processEvent({
-    type: LlmEventType.Content,
-    value: message,
-  } as unknown as Parameters<JsonOutputAdapterInterface['processEvent']>[0]);
-  adapter.finalizeAssistantMessage();
+  emitNonInteractiveAssistantText(adapter, message);
 
   const metrics = uiTelemetryService.getMetrics();
   const usage = computeUsageFromMetrics(metrics);
@@ -930,6 +941,8 @@ export async function runNonInteractive(
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      // A prompt a Mod submitted, which runs as a turn of its own.
+      modPrompt?: ModQueuedPrompt;
       todoWorkChainId?: string;
       monitorId?: string;
       sdkNotification?: {
@@ -944,6 +957,21 @@ export async function runNonInteractive(
       };
     }
     const localQueue: LocalQueueItem[] = [];
+    // The Mods' own prompts wait for the session to be idle, as the queue's
+    // other items do.
+    const pullModPrompts = () => {
+      for (
+        let prompt = modSession?.takeSubmittedPrompt();
+        prompt;
+        prompt = modSession?.takeSubmittedPrompt()
+      )
+        localQueue.push({
+          displayText: prompt.text,
+          modelText: frameModPrompt(prompt),
+          sendMessageType: SendMessageType.UserQuery,
+          modPrompt: prompt,
+        });
+    };
     const sdkOnlyMonitorQueue: LocalQueueItem[] = [];
     const isCancelledMonitorEvent = (item: LocalQueueItem) =>
       Boolean(
@@ -958,6 +986,12 @@ export async function runNonInteractive(
       if (item.sdkNotification) {
         adapter.emitSystemMessage('task_notification', item.sdkNotification);
       }
+    };
+    // The client did not send a Mod's prompt, so it learns of it as it does of
+    // a notification: the text as a user message, then who submitted it.
+    const emitModPromptToSdk = (prompt: ModQueuedPrompt) => {
+      adapter.emitUserMessage([{ text: prompt.text }]);
+      adapter.emitSystemMessage('mod_prompt', { mod: prompt.plugin });
     };
     const flushQueuedNotificationsToSdk = (queue: LocalQueueItem[]) => {
       while (queue.length > 0) {
@@ -1204,6 +1238,12 @@ export async function runNonInteractive(
       let prompt = input;
       let rewrittenText: string | undefined;
       let promptContext: string[] | undefined;
+      // A slash command answered with a message while a Mod's prompt waits:
+      // the run starts no turn of its own and goes on to run that prompt.
+      let commandReplied = false;
+      // The worktree notice a command's reply could not carry; the first
+      // request the run sends takes it instead.
+      let deferredReminder: string | undefined;
 
       if (options.continueInterrupted) {
         // Read the full history, not a bounded tail: the Retry send path in
@@ -1260,6 +1300,14 @@ export async function runNonInteractive(
       }
 
       if (!initialPartList) {
+        // The person's own message, a slash command too, lets the Mods'
+        // prompts start turns again.
+        if (
+          !options.fromTool &&
+          (options.sendMessageType ?? SendMessageType.UserQuery) ===
+            SendMessageType.UserQuery
+        )
+          modSession?.notePersonPrompt();
         let slashHandled = false;
         if (isSlashCommand(input)) {
           const slashCommandResult = await handleSlashCommand(
@@ -1377,6 +1425,26 @@ export async function runNonInteractive(
               break;
             }
             case 'message': {
+              // A Mod command that submitted a prompt hands the work on to
+              // the model: its reply is shown, and the prompt's turn starts
+              // once the run is idle, as after a turn.
+              if (
+                slashCommandResult.messageType !== 'error' &&
+                modSession?.hasSubmittedPrompts
+              ) {
+                // Text output prints only the run's last answer, which is
+                // the Mod turn's, so the reply is written as it comes.
+                if (outputFormat === OutputFormat.TEXT)
+                  process.stdout.write(`${slashCommandResult.content}\n`);
+                else
+                  emitNonInteractiveAssistantText(
+                    adapter,
+                    slashCommandResult.content,
+                  );
+                commandReplied = true;
+                slashHandled = true;
+                break;
+              }
               // systemMessage already emitted above
               await emitNonInteractiveFinalMessage({
                 message: slashCommandResult.content,
@@ -1500,11 +1568,17 @@ export async function runNonInteractive(
       // Continuation turns must not prepend reminder text: a ToolResult
       // payload's functionResponse parts have to stay at the HEAD of the
       // user message or Anthropic-compatible backends reject the pairing.
+      // A command's reply sends the model nothing, so its notice waits for
+      // the first request the run sends.
+      const remind = (text: string) => {
+        if (commandReplied) deferredReminder = text;
+        else initialPartList = withReminder(initialPartList ?? [], text);
+      };
       const startupNotice = options.continueInterrupted
         ? null
         : config.consumePendingStartupWorktreeNotice();
       if (startupNotice) {
-        initialPartList = withReminder(initialPartList, startupNotice);
+        remind(startupNotice);
         adapter.emitSystemMessage('worktree_started', {
           notice: startupNotice,
         });
@@ -1519,10 +1593,7 @@ export async function runNonInteractive(
             sessionId,
           );
           if (restored.contextMessage) {
-            initialPartList = withReminder(
-              initialPartList,
-              restored.contextMessage,
-            );
+            remind(restored.contextMessage);
             // Surface the notice in the JSON stream so SDK consumers
             // can react to it (logging, UI hints, etc.).
             adapter.emitSystemMessage('worktree_restored', {
@@ -1618,7 +1689,11 @@ export async function runNonInteractive(
         continueSendType ??
         options.sendMessageType ??
         SendMessageType.UserQuery;
-      if (!activeGoalTurn && initialSendType === SendMessageType.UserQuery) {
+      if (
+        !activeGoalTurn &&
+        !commandReplied &&
+        initialSendType === SendMessageType.UserQuery
+      ) {
         try {
           const runtime = await config.getGoalRuntimeReady();
           observeGoalRuntime(runtime);
@@ -2763,6 +2838,7 @@ export async function runNonInteractive(
                 const errorText = parseAndFormatApiError(
                   event.value.error,
                   config.getContentGeneratorConfig()?.authType,
+                  outputFormat === OutputFormat.TEXT ? t : undefined,
                 );
                 if (outputFormat === OutputFormat.TEXT) {
                   process.stderr.write(`${errorText}\n`);
@@ -2907,9 +2983,14 @@ export async function runNonInteractive(
         }
         hasUnsentToolResponse = false;
 
-        turnCount++;
+        // A command's reply is not a turn: the run goes straight on to the
+        // end of a turn, where the Mods' prompts start.
+        const replyOnly = commandReplied;
+        commandReplied = false;
+        if (!replyOnly) turnCount++;
         const goalTurn = activeGoalTurn;
-        await enforceSessionTurnLimit(goalTurn?.origin === 'runtime');
+        if (!replyOnly)
+          await enforceSessionTurnLimit(goalTurn?.origin === 'runtime');
 
         let sendType: SendMessageType;
         if (goalTurn && isFirstGoalSegment) {
@@ -3024,7 +3105,10 @@ export async function runNonInteractive(
             : {}),
         };
         let shouldFinalizeTurn: boolean;
-        if (sharedAgentLoop) {
+        if (replyOnly) {
+          isFirstTurn = false;
+          shouldFinalizeTurn = true;
+        } else if (sharedAgentLoop) {
           const result = await runOnSharedLoop(
             {
               parts: currentMessages[0]?.parts || [],
@@ -3183,6 +3267,7 @@ export async function runNonInteractive(
               const errorText = parseAndFormatApiError(
                 event.value.error,
                 config.getContentGeneratorConfig()?.authType,
+                outputFormat === OutputFormat.TEXT ? t : undefined,
               );
               if (outputFormat === OutputFormat.TEXT) {
                 process.stderr.write(`${errorText}\n`);
@@ -3410,7 +3495,10 @@ export async function runNonInteractive(
             // of the queue. Cron prompts run individually — each needs its
             // own slash/shell/@ preprocessing and approval cycle.
             const targetType = localQueue[0]!.sendMessageType;
-            let splitIdx = targetType === SendMessageType.Cron ? 1 : 0;
+            let splitIdx =
+              targetType === SendMessageType.Cron || localQueue[0]!.modPrompt
+                ? 1
+                : 0;
             if (splitIdx === 0) {
               while (
                 splitIdx < localQueue.length &&
@@ -3430,6 +3518,7 @@ export async function runNonInteractive(
             for (const queueItem of batch) {
               emitNotificationToSdk(queueItem);
             }
+            if (batch[0]?.modPrompt) emitModPromptToSdk(batch[0].modPrompt);
 
             const item = {
               displayText: batch.map((i) => i.displayText).join('; '),
@@ -3437,28 +3526,65 @@ export async function runNonInteractive(
               sendMessageType: targetType,
               todoWorkChainId: batch[0]?.todoWorkChainId,
             };
+            const modPrompt = batch[0]?.modPrompt;
 
             turnCount++;
             await enforceSessionTurnLimit(false);
 
-            let itemMessages: Content[] = [
-              { role: 'user', parts: [{ text: item.modelText }] },
-            ];
+            const itemParts = deferredReminder
+              ? (withReminder(
+                  [{ text: item.modelText }],
+                  deferredReminder,
+                ) as Part[])
+              : [{ text: item.modelText }];
+            deferredReminder = undefined;
+            let itemMessages: Content[] = [{ role: 'user', parts: itemParts }];
             let itemIsFirstTurn = true;
             let itemModelOverride: string | undefined;
             const itemPromptId = `${prompt_id}/automatic/${turnCount}`;
+            // A Mod's prompt is a prompt like a typed one: UserPromptSubmit
+            // hears it, and the Mods hear its turn.
+            let itemTurn: ModTurn | undefined;
+            const firstOptions: SendMessageOptions = modPrompt
+              ? {
+                  type: SendMessageType.UserQuery,
+                  modelOverride: itemModelOverride,
+                  submittedPrompt: modPrompt.text,
+                  submittedByMod: modPrompt.plugin,
+                  ...(modPrompt.asUser && { submittedAsUser: true }),
+                  // Recall looks for what the Mod asked, not the frame.
+                  memoryRecallQuery: modPrompt.text,
+                  ...(modPrompt.context?.length && {
+                    promptContext: modPrompt.context,
+                  }),
+                  ...(modSession && {
+                    onPromptAdmitted: () => {
+                      itemTurn = modTurn = modSession.startTurn(
+                        modPrompt.text,
+                        abortController.signal,
+                        () => {
+                          if (abortController.signal.aborted) return false;
+                          abortController.abort(new ModTurnAbortedError());
+                          return true;
+                        },
+                        itemPromptId,
+                      );
+                    },
+                  }),
+                }
+              : {
+                  type: item.sendMessageType,
+                  modelOverride: itemModelOverride,
+                  notificationDisplayText: item.displayText,
+                  todoWorkChainId: item.todoWorkChainId,
+                };
 
             if (sharedAgentLoop) {
               const result = await runOnSharedLoop(
                 {
                   parts: itemMessages[0]?.parts || [],
                   promptId: itemPromptId,
-                  options: {
-                    type: item.sendMessageType,
-                    modelOverride: itemModelOverride,
-                    notificationDisplayText: item.displayText,
-                    todoWorkChainId: item.todoWorkChainId,
-                  },
+                  options: firstOptions,
                 },
                 {
                   setModelOverride: (override) => {
@@ -3486,6 +3612,7 @@ export async function runNonInteractive(
                     flushQueuedNotificationsToSdk(localQueue);
                     finalizeOneShotMonitors();
                   },
+                  onEvent: (event) => itemTurn?.saw(event),
                   tracksPreview: false,
                 },
               );
@@ -3504,6 +3631,13 @@ export async function runNonInteractive(
                 await settleBeforeTerminalOutput();
                 await handleMaxTurnsExceededError(config);
               }
+              // A duplicate provider call raises no LoopDetected event, so the
+              // turn ends as an error here, as it does on the legacy loop.
+              await itemTurn?.complete(
+                result.reason === 'duplicate_provider_call'
+                  ? 'error'
+                  : undefined,
+              );
               return;
             }
 
@@ -3515,16 +3649,12 @@ export async function runNonInteractive(
                 itemMessages[0]?.parts || [],
                 abortController.signal,
                 itemPromptId,
-                {
-                  type: itemIsFirstTurn
-                    ? item.sendMessageType
-                    : SendMessageType.ToolResult,
-                  modelOverride: itemModelOverride,
-                  ...(itemIsFirstTurn && {
-                    notificationDisplayText: item.displayText,
-                    todoWorkChainId: item.todoWorkChainId,
-                  }),
-                },
+                itemIsFirstTurn
+                  ? { ...firstOptions, modelOverride: itemModelOverride }
+                  : {
+                      type: SendMessageType.ToolResult,
+                      modelOverride: itemModelOverride,
+                    },
               );
               itemIsFirstTurn = false;
 
@@ -3553,6 +3683,7 @@ export async function runNonInteractive(
                   await routeAbort();
                 }
                 discardAbandonedAttempt(event, itemToolCallRequests);
+                itemTurn?.saw(event);
                 adapter.processEvent(event);
                 if (
                   event.type === LlmEventType.HookSystemMessage &&
@@ -3578,6 +3709,7 @@ export async function runNonInteractive(
                   const errorText = parseAndFormatApiError(
                     event.value.error,
                     config.getContentGeneratorConfig()?.authType,
+                    outputFormat === OutputFormat.TEXT ? t : undefined,
                   );
                   if (outputFormat === OutputFormat.TEXT) {
                     process.stderr.write(`${errorText}\n`);
@@ -3640,6 +3772,7 @@ export async function runNonInteractive(
                 break;
               }
             }
+            await itemTurn?.complete();
           };
 
           // Single-flight drain: concurrent callers wait for the running drain so
@@ -3653,7 +3786,7 @@ export async function runNonInteractive(
           const drainLocalQueue = (): Promise<void> => {
             if (drainPromise) return drainPromise;
             const p = (async () => {
-              while (localQueue.length > 0) {
+              while ((pullModPrompts(), localQueue.length > 0)) {
                 if (loopDetected) return;
                 // Stop draining once a queued item's structured_output
                 // call captured the terminal contract — no point running
@@ -4019,8 +4152,16 @@ export async function runNonInteractive(
       if (recoverableCancellation) {
         return 130;
       }
-      await handleError(error, config);
+      await handleError(
+        error,
+        config,
+        undefined,
+        outputFormat === OutputFormat.TEXT ? t : undefined,
+      );
     } finally {
+      // A prompt a Mod submitted that this run did not start does not wait
+      // for the next one, which a stream-json session runs on the same Mods.
+      modSession?.discardSubmittedPrompts();
       if (ownsModSession) await modSession?.close();
       await modSession?.flushOutput();
       await failClosedActiveGoalTurn(

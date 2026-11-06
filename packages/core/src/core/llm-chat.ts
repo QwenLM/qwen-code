@@ -2712,11 +2712,12 @@ export class LlmChat {
       throw new Error('Local notes and history are unavailable in this chat.');
     notes.assertAvailable();
     this.historyService ??= new SessionHistoryService(
-      new SessionTranscriptReader(
-        this.config.getProjectRoot(),
-        undefined,
-        this.config.storage.getRuntimeBaseDir(),
-      ),
+      () =>
+        new SessionTranscriptReader(
+          this.config.getProjectRoot(),
+          undefined,
+          this.config.storage.getRuntimeBaseDir(),
+        ),
       notes.sessionId,
       () => this.getContextRemaining().hardLimitHeadroom,
     );

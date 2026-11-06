@@ -124,7 +124,10 @@ import {
   foldLiveEvent,
   snapshotCanonicalHistory,
 } from './live-session-model.js';
-import { projectHistoryToStreamEvents } from './item-projection.js';
+import {
+  projectHistoryToStreamEvents,
+  projectItemToStreamEvent,
+} from './item-projection.js';
 import { ToolCallStatus, type HistoryItem } from '../types.js';
 import type {
   LiveAssistantItem,
@@ -755,6 +758,83 @@ describe('OpenTuiTranscriptView', () => {
       />,
     );
     expect(container.textContent).toContain('✕ Model not found (try /model)');
+  });
+
+  it.each([
+    ['run_shell_command', 'zh'],
+    ['read_file', 'zh'],
+    ['run_shell_command', 'zh-TW'],
+    ['read_file', 'zh-TW'],
+  ])(
+    'preserves literal successful %s output under %s',
+    async (tool, language) => {
+      const { setLanguageAsync } = await import('../../i18n/index.js');
+      await setLanguageAsync(language);
+      const literal =
+        "You've used up your weekly credits. Please try again after the reset.";
+      const view = render(
+        <OpenTuiTranscriptView
+          thoughtsExpanded
+          items={[
+            toolItem({
+              tool,
+              done: true,
+              success: true,
+              output: literal,
+              detailedDisplay: tool === 'read_file' ? literal : undefined,
+            }),
+          ]}
+        />,
+      );
+      try {
+        expect(view.container.textContent).toContain(literal);
+        expect(view.container.textContent).not.toContain('周额度已用完');
+        expect(view.container.textContent).not.toContain('週額度已用完');
+      } finally {
+        view.unmount();
+        await setLanguageAsync('en');
+      }
+    },
+  );
+
+  it('renders the shared quota message in Chinese in OpenTUI', async () => {
+    const { parseAndFormatApiError } = await import(
+      '@qwen-code/qwen-code-core/utils/errorParsing.js'
+    );
+    const { initializeI18n, setLanguageAsync, t } = await import(
+      '../../i18n/index.js'
+    );
+    await initializeI18n('zh');
+    try {
+      const { container } = render(
+        <OpenTuiTranscriptView
+          items={[
+            {
+              kind: 'error',
+              id: 'quota',
+              text: parseAndFormatApiError(
+                {
+                  message: 'quota fallback',
+                  status: 402,
+                  subscriptionQuota: {
+                    type: 'subscription_quota',
+                    memberType: 'pro',
+                    resetAt: Math.floor(Date.now() / 1000) + 3 * 3600,
+                  },
+                },
+                undefined,
+                t,
+              ),
+            },
+          ]}
+        />,
+      );
+      expect(container.textContent).toContain(
+        '周额度已用完，预计将于3小时后恢复，请在额度恢复后重试。',
+      );
+    } finally {
+      await setLanguageAsync('en');
+    }
   });
 
   it('strips bidi overrides from arena file lists and group labels (R1-26)', () => {
@@ -1764,6 +1844,46 @@ describe('OpenTuiTranscriptView scroll host', () => {
     expect(mocks.renderer.count('frame')).toBe(0);
     expect(view.scrollListeners()).toBe(0);
   });
+});
+
+it('preserves subscription success styles through history projection and folding', () => {
+  const event = projectItemToStreamEvent(
+    {
+      type: 'info',
+      presentation: 'subscription-success',
+      text: '✓ Signed in successfully · builder@example.com\n✓ Current plan: Qwen Pro. Qwen Code is ready.\n  Model: qwen3.8-max. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.\n  Common commands: /usage   /upgrade   /model   /status   /logout',
+    },
+    {},
+  );
+  expect(event).not.toBeNull();
+  const { container, getByText } = render(
+    <OpenTuiTranscriptView items={foldLiveEvent([], event!)} />,
+  );
+  expect(container.textContent).not.toContain('●');
+  expect(container.querySelectorAll(`[data-fg="${C.green}"]`)).toHaveLength(2);
+  expect(
+    getByText('Signed in successfully · builder@example.com').getAttribute(
+      'data-fg',
+    ),
+  ).toBe(C.text);
+  expect(
+    getByText('Current plan: Qwen Pro. Qwen Code is ready.').getAttribute(
+      'data-fg',
+    ),
+  ).toBe(C.text);
+  expect(
+    getByText(
+      'Model: qwen3.8-max. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.',
+    ).getAttribute('data-fg'),
+  ).toBe(C.dim);
+  expect(
+    getByText(
+      'Common commands: /usage   /upgrade   /model   /status   /logout',
+      {
+        normalizer: (text) => text.trim(),
+      },
+    ).getAttribute('data-fg'),
+  ).toBe(C.dim);
 });
 
 describe('Ink compact read-summary parity', () => {
