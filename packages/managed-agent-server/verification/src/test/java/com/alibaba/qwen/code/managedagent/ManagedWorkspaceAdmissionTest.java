@@ -1070,6 +1070,154 @@ class ManagedWorkspaceAdmissionTest {
                                         .isEqualTo("session_not_found")));
     }
 
+    // The settle arm answers a recorded outcome through the same TOCTOU
+    // window as the COMPLETED read-back below it: a non-creator OPERATOR
+    // whose pre-read missed the recorder's row must meet the same creator
+    // gate there, never a 200 the COMPLETED arm refuses with 409.
+    @Test
+    void theSettleArmKeepsTheCreatorGateForANonCreatorOperator() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        grant(tenant, "ws-a", "actor-b", true);
+        String sessionId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a",
+                        "."))
+                .build())
+                .sessionId();
+        ManagedAgentProperties enabled = new ManagedAgentProperties();
+        enabled.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        UnavailableHarnessConnector harness =
+                new UnavailableHarnessConnector() {
+                    @Override
+                    public boolean isAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public Attachment createOrLoad(String tenantId,
+                            String sessionId, boolean loadExisting) {
+                        return new Attachment("boot");
+                    }
+
+                    @Override
+                    public boolean supportsFencedTitles() {
+                        return true;
+                    }
+
+                    @Override
+                    public void rename(String tenantId, String sessionId,
+                            String title) {
+                    }
+                };
+        // actor-a admits the rename; the row stays PENDING until the
+        // dispatcher delivers it inside actor-b's raced call below.
+        String digest = new RequestDigests().digest(java.util.Map.of(
+                "sessionId", sessionId, "title", "new title"));
+        var admitted = gated.beginSessionRename(tenant, "rename", digest,
+                sessionId, "new title", "actor-a");
+        com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore racing =
+                mock(com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore.class,
+                        org.mockito.AdditionalAnswers.delegatesTo(gated));
+        // actor-b's pre-read misses the row the recorder committed after
+        // it in the raced timeline; every later read sees the row.
+        java.util.concurrent.atomic.AtomicBoolean preRead =
+                new java.util.concurrent.atomic.AtomicBoolean(true);
+        org.mockito.Mockito.doAnswer(call -> {
+            if (preRead.compareAndSet(true, false)) {
+                return java.util.Optional.empty();
+            }
+            return gated.findCommand(call.getArgument(0),
+                    call.getArgument(1), call.getArgument(2));
+        }).when(racing).findCommand(
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyString());
+        // The raced admission answers exactly what the store's
+        // duplicate-key winner path answers when the recorder's receipt
+        // commits between the request's snapshot pre-read and its receipt
+        // insert: the winner's PENDING row, replayed, no actor gate on that
+        // path. Simulating the post-race answer here keeps the test
+        // deterministic; the entry gate's own refusal of a visible
+        // recorder row is covered by the store-level replay tests.
+        org.mockito.Mockito.doAnswer(call ->
+                new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationCommand(
+                        sessionId, "PENDING", true,
+                        admitted.renameRevision()))
+                .when(racing).beginSessionRename(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.anyString());
+        // The dispatcher wins the claim actor-b's request just admitted
+        // and completes the delivery while the request waits.
+        org.mockito.Mockito.doAnswer(call -> {
+            var candidate = (com.alibaba.qwen.code.managedagent.model.StoreModels.RenameDelivery) call
+                    .getArgument(0);
+            var delivery = gated.claimRename(candidate, "dispatcher",
+                    Duration.ofMinutes(1)).orElseThrow();
+            gated.markRenameSubmitted(delivery, "dispatcher");
+            gated.completeSessionRename(delivery, "dispatcher", "boot");
+            return java.util.Optional.empty();
+        }).when(racing).claimRename(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any());
+        ManagedAgentService settleService = new ManagedAgentService(racing,
+                new RequestDigests(), mock(HarnessCoordinator.class), harness,
+                registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        // Through the settle arm: the live-Session creator refusal, not a
+        // 200 carrying the recorder's outcome.
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> settleService.renameSession(tenant,
+                        "actor-b", "rename", sessionId, "new title"))
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                            assertThat(error.getStatus()).isEqualTo(409);
+                            assertThat(error.getCode())
+                                    .isEqualTo("workspace_unavailable");
+                        }));
+        // The refusal must come from the settle arm's creator gate, not an
+        // earlier admission gate: the dispatcher's delivery completed, so
+        // the request reached the claim and waited for the settle.
+        assertThat(store.findCommand(tenant, "RENAME_SESSION", "rename")
+                .orElseThrow().status()).isEqualTo("COMPLETED");
+        // The COMPLETED arm answers the identical request identically.
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> settleService.renameSession(tenant,
+                        "actor-b", "rename", sessionId, "new title"))
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                            assertThat(error.getStatus()).isEqualTo(409);
+                            assertThat(error.getCode())
+                                    .isEqualTo("workspace_unavailable");
+                        }));
+        // The recorder still replays its own completed outcome.
+        transaction.executeWithoutResult(status -> {
+            var replay = settleService.renameSession(tenant, "actor-a",
+                    "rename", sessionId, "new title");
+            assertThat(replay.replayed()).isTrue();
+            assertThat(replay.body().metadata().get("title"))
+                    .isEqualTo("new title");
+        });
+    }
+
     // The grant-less arm of the rename replay gate: with the key recorded
     // as a completed rename of the Session, every title shape — over-long,
     // blank, control-bearing — must answer the same 404 a fresh key

@@ -90,7 +90,7 @@ final class JournalCommit {
                         return false;
                     }
                     JsonNode body = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
-                    return body != null && body.path("v").asInt() == 3;
+                    return body != null && (body.path("v").asInt() == 3 || body.path("v").asInt() == 4);
                 });
         if (promotes) {
             readerVersion.requireReadable(2);

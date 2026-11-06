@@ -80,7 +80,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `concurrency` | — | 整数 | `4` | 重叠策略为 `allow` 的单个自动化定义可同时持有的未结束运行数；超出后，再到期的槽位记为 `skipped`，原因为 `count_limit`。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。 |
-| `enabled` | `QWEN_MANAGED_AGENT_AUTOMATION_ENABLED` | 布尔 | `false` | 是否运行自动化扫描器，并受理自动化的创建、修改、退役与手动运行路由；关闭时这些路由返回 `409 automation_unavailable`，读取路由照常应答。这些路由还要求开启 `qwen.managed-agent.session-store.enabled`。开启后，自动化的计数或时长若不为正，启动时拒绝。 |
+| `enabled` | `QWEN_MANAGED_AGENT_AUTOMATION_ENABLED` | 布尔 | `true` | 是否运行自动化扫描器，并受理自动化的创建、修改、退役与手动运行路由；关闭时这些路由返回 `409 automation_unavailable`，读取路由照常应答。这些路由还要求开启 `qwen.managed-agent.session-store.enabled`。开启后，自动化的计数或时长若不为正，启动时拒绝。 |
 | `late-tolerance` | `QWEN_MANAGED_AGENT_AUTOMATION_LATE_TOLERANCE` | 时长 | `5m` | 扫描器发现到期槽位时，允许其迟到多久仍按计划触发。更迟的槽位按定义的补跑策略（`none`、`latest` 或 `bounded`）处理，未被补跑的记为错过。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
 | `lease` | `QWEN_MANAGED_AGENT_AUTOMATION_LEASE` | 时长 | `60s` | 扫描器或手动运行持有自动化定义租约的时长，从认领该定义时起算；租约过期后其他节点即可认领该定义，自该认领起，原持有者对它的写入都会被拒绝。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
 | `lookback` | `QWEN_MANAGED_AGENT_AUTOMATION_LOOKBACK` | 时长 | `24h` | 扫描器为定义推导到期槽位时最多回看的时长；早于该窗口（或早于定义启用时刻）的槽位既不触发也不记录，从而限定所有补跑的范围。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
