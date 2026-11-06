@@ -231,6 +231,13 @@ class TestChannel extends ChannelBase {
     }
   }
 
+  preflightForTest(
+    envelope: Envelope,
+    options: { waiveGroupMention?: boolean } = {},
+  ): Promise<boolean> {
+    return Promise.resolve(this.preflightInbound(envelope, options));
+  }
+
   enableCancelCommand(): void {
     this.registerCancelCommand();
   }
@@ -915,6 +922,73 @@ describe('ChannelBase', () => {
           'result',
         ),
       ).rejects.toBe(error);
+    });
+  });
+
+  describe('waiving the group mention requirement', () => {
+    const groupMessage = (overrides: Partial<Envelope> = {}) =>
+      envelope({ isGroup: true, chatId: 'g1', ...overrides });
+
+    it('admits an unmentioned group message only on request', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        groups: { '*': { requireMention: true } },
+      });
+
+      expect(await ch.preflightForTest(groupMessage())).toBe(false);
+      expect(
+        await ch.preflightForTest(groupMessage(), { waiveGroupMention: true }),
+      ).toBe(true);
+    });
+
+    it.each([
+      ['a disabled group policy', { groupPolicy: 'disabled' as const }],
+      [
+        'a group missing from the allowlist',
+        { groupPolicy: 'allowlist' as const, groups: { other: {} } },
+      ],
+      [
+        'a sender outside the group allowlist',
+        {
+          groupPolicy: 'open' as const,
+          groups: {
+            '*': {
+              requireMention: true,
+              senders: 'allowlist' as const,
+              allowedUsers: ['someone-else'],
+            },
+          },
+        },
+      ],
+    ])('still rejects %s', async (_label, config) => {
+      const ch = createChannel(config);
+
+      expect(
+        await ch.preflightForTest(groupMessage(), { waiveGroupMention: true }),
+      ).toBe(false);
+    });
+
+    it('neither admits nor opens a pairing request for an unapproved paired group', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-waive-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const ch = createChannel({
+          groupPolicy: 'pairing',
+          groups: { '*': { requireMention: true } },
+        });
+
+        expect(
+          await ch.preflightForTest(groupMessage(), {
+            waiveGroupMention: true,
+          }),
+        ).toBe(false);
+        expect(new PairingStore('test-chan', '/tmp').listPending()).toEqual([]);
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
     });
   });
 
