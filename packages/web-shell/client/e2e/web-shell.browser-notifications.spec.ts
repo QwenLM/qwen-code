@@ -358,10 +358,10 @@ for (const kind of ['approval', 'question'] as const) {
         }),
       )
       .toBe(true);
-    // Only the guide for the platform the *browser* reports renders; the other
-    // OS's steps do not apply and listing them was the bug this spec pins. A
-    // platform the component cannot identify keeps both, which is what CI's
-    // Linux Chromium reports.
+    // Every rendered guide must be one this spec knows how to drive, and there
+    // is at least one: a platform the component cannot identify keeps both,
+    // which is what CI's Linux Chromium reports. Which single guide a named
+    // platform gets is pinned by the component table test, not here.
     const rendered = await help.locator('details').count();
     expect(rendered).toBeGreaterThan(0);
     expect(rendered).toBeLessThanOrEqual(KNOWN_GUIDES.length);
