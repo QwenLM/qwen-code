@@ -74,7 +74,8 @@ function fixture() {
       .mockResolvedValue({
         enabled: true,
         signedIn: true,
-        plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code&client=plugin',
+        plansUrl:
+          'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_plugin',
       }),
     signOutSubscription: vi
       .fn<Transport['signOutSubscription']>()
@@ -121,7 +122,8 @@ describe('native subscription authentication', () => {
       f.transport.getSubscriptionConfig.mockResolvedValue({
         enabled: true,
         signedIn: false,
-        plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code&client=plugin',
+        plansUrl:
+          'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_plugin',
       });
       finish(true);
       await settle();
@@ -138,7 +140,8 @@ describe('native subscription authentication', () => {
         f.transport.getSubscriptionConfig.mockResolvedValue({
           enabled: true,
           signedIn,
-          plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code&client=plugin',
+          plansUrl:
+            'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_plugin',
         });
         f.isSubscriptionModel.mockResolvedValue(false);
         const result = f.run(action);
@@ -214,7 +217,8 @@ describe('native subscription authentication', () => {
       .mockResolvedValueOnce({
         enabled: true,
         signedIn: true,
-        plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code&client=plugin',
+        plansUrl:
+          'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_plugin',
       })
       .mockImplementationOnce(
         () =>
@@ -228,7 +232,8 @@ describe('native subscription authentication', () => {
     finish({
       enabled: true,
       signedIn: true,
-      plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code&client=plugin',
+      plansUrl:
+        'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_plugin',
     });
     await expect(result).resolves.toEqual({ kind: 'cancelled' });
     expect(mocks.openExternal).not.toHaveBeenCalled();
@@ -239,7 +244,7 @@ describe('native subscription authentication', () => {
     const result = f.run('upgrade');
     await settle();
     expect(mocks.openExternal).toHaveBeenCalledWith(
-      'https://chat.qwen.ai/?memberPlan=qwen_code&client=plugin',
+      'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_plugin',
     );
     expect(f.picker.status()).toContain('plans opened');
     expect(f.transport.signOutSubscription).not.toHaveBeenCalled();
@@ -262,7 +267,8 @@ describe('native subscription authentication', () => {
     f.owner.abort();
     finish({
       enabled: true,
-      plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code&client=plugin',
+      plansUrl:
+        'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_plugin',
     });
     await expect(result).resolves.toEqual({ kind: 'cancelled' });
     expect(mocks.openExternal).not.toHaveBeenCalled();

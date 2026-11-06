@@ -1116,8 +1116,8 @@ curl -X POST http://127.0.0.1:4170/workspace/auth/device-flow \
 # → 201 {
 #     "deviceFlowId": "fa07c61b-…",
 #     "userCode": "USER-1",
-#     "verificationUri": "https://chat.qwen.ai/api/v1/oauth2/device?client=cli",
-#     "verificationUriComplete": "https://chat.qwen.ai/...?user_code=USER-1&client=cli",
+#     "verificationUri": "https://chat.qwen.ai/api/v1/oauth2/device?client=qwen_code_cli",
+#     "verificationUriComplete": "https://chat.qwen.ai/...?user_code=USER-1&client=qwen_code_cli",
 #     "expiresAt": 1700000600000,
 #     "intervalMs": 5000,
 #     "attached": false

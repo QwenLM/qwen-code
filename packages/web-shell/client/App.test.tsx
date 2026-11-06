@@ -12805,7 +12805,8 @@ describe('App subscription logout command', () => {
     mockWorkspaceActions.getSubscriptionConfig.mockResolvedValue({
       enabled: true,
       signedIn: true,
-      plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code&client=desktop',
+      plansUrl:
+        'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_desktop',
     });
     testState.prompt = '/logout';
   });
@@ -12871,7 +12872,7 @@ describe('App subscription logout command', () => {
       await clickSubmit(container);
       await flush();
       expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
-        url: 'https://chat.qwen.ai/?memberPlan=qwen_code&client=desktop',
+        url: 'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_desktop',
       });
       expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     } finally {

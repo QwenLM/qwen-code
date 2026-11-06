@@ -11,7 +11,7 @@ Make sure you have:
 - A terminal or command prompt open
 - A code project to work with
 - **One of the following**:
-  - A Qwen account with a **Plus or Pro subscription** from [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code&client=cli), which unlocks access to **Qwen Code and Agent**
+  - A Qwen account with a **Plus or Pro subscription** from [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_cli), which unlocks access to **Qwen Code and Agent**
   - An API key or Token Plan subscription from 千问AI平台 / **QwenCloud** ([China](https://platform.qianwenai.com/docs/developer-guides/administration/api-keys) / [International](https://docs.qwencloud.com/developer-guides/administration/api-keys)) — the recommended setup
   - An API key from **Alibaba Cloud ModelStudio** ([Beijing](https://bailian.console.aliyun.com/) / [intl](https://modelstudio.console.alibabacloud.com/))
   - An **Alibaba Cloud Token Plan** ([Beijing](https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856) / [intl](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model)) subscription
@@ -72,7 +72,7 @@ qwen
 
 The first-run menu lets you connect a model provider. Choose one of:
 
-- [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&client=cli) — sign in with your Qwen account to access **Qwen Code and Agent** with your **Plus or Pro subscription**. If you don’t have a subscription yet, visit [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code&client=cli) to subscribe to Plus or Pro, then return to Qwen Code and select [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&client=cli).
+- [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_cli) — sign in with your Qwen account to access **Qwen Code and Agent** with your **Plus or Pro subscription**. If you don’t have a subscription yet, visit [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_cli) to subscribe to Plus or Pro, then return to Qwen Code and select [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_cli).
 - **QwenCloud** — the recommended setup. Opens a sub-menu:
   - **Token Plan**: subscription with a monthly Credit quota on a dedicated endpoint (Personal and Team editions).
   - **Standard API Key**: pay-as-you-go, connect with an existing platform API key.

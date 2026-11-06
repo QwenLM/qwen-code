@@ -17,7 +17,7 @@ const flow = vi.hoisted(() => ({
     user_code: 'BCDF-GHJK',
     verification_uri: 'https://chat.qwen.ai/authorize',
     verification_uri_complete:
-      'https://chat.qwen.ai/authorize?user_code=BCDF-GHJK&client=cli',
+      'https://chat.qwen.ai/authorize?user_code=BCDF-GHJK&client=qwen_code_cli',
     expires_in: 600,
     interval: 5,
     expiresAt: Date.now() + 600_000,
@@ -51,7 +51,7 @@ it('shows the real authorization link and cancels without signing out', async ()
     <SubscriptionDialog onBack={onBack} onSwitchProvider={vi.fn()} />,
   );
   try {
-    expect(ui.lastFrame()).toContain('client=cli');
+    expect(ui.lastFrame()).toContain('client=qwen_code_cli');
     expect(ui.lastFrame()).not.toContain('LOCAL-MOCK');
     await settle(100);
     ui.stdin.write('\u001b');

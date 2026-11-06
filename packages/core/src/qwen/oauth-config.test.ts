@@ -19,7 +19,7 @@ it('opens Code plans on the web home without device authorization parameters', (
   expect(url.pathname).toBe('/');
   expect([...url.searchParams]).toEqual([
     ['memberPlan', 'qwen_code'],
-    ['client', 'cli'],
+    ['client', 'qwen_code_cli'],
   ]);
   expect(url.hash).toBe('');
 });
@@ -30,7 +30,7 @@ it('replaces stale web client tags without losing device parameters or fragments
     'plugin',
   );
   expect(url).toBe(
-    'https://chat.qwen.ai/device?code=123&client=plugin#confirm',
+    'https://chat.qwen.ai/device?code=123&client=qwen_code_plugin#confirm',
   );
   const other = 'https://chat.qwen.ai.example.test/device?code=123';
   expect(withQwenChatClient(other, 'plugin')).toBe(other);

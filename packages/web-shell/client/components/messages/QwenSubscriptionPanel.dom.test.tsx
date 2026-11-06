@@ -17,7 +17,7 @@ const ready: DaemonSubscriptionFlow = {
   userInfo: user,
 };
 const authorizationUrl =
-  'https://chat.qwen.ai/authorize?user_code=TEST-CODE&client=desktop';
+  'https://chat.qwen.ai/authorize?user_code=TEST-CODE&client=qwen_code_desktop';
 const transport = {
   getSubscriptionConfig: vi.fn(),
   startSubscriptionLogin: vi.fn(),
@@ -36,7 +36,8 @@ beforeEach(() => {
   vi.resetAllMocks();
   transport.getSubscriptionConfig.mockResolvedValue({
     enabled: true,
-    plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code&client=desktop',
+    plansUrl:
+      'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_desktop',
   });
   transport.startSubscriptionLogin.mockResolvedValue(ready);
   transport.getSubscriptionUserInfo.mockResolvedValue(user);
@@ -160,7 +161,7 @@ it('starts authorization directly after the native picker selection and opens th
   await click('View Plans');
   expect(open.mock.calls.map(([url]) => url)).toEqual([
     authorizationUrl,
-    'https://chat.qwen.ai/?memberPlan=qwen_code&client=desktop',
+    'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_desktop',
   ]);
 });
 
@@ -195,7 +196,7 @@ it.each(
     });
     expect(open.mock.calls.map(([url]) => url)).toEqual([
       authorizationUrl,
-      'https://chat.qwen.ai/?memberPlan=qwen_code&client=desktop',
+      'https://chat.qwen.ai/?memberPlan=qwen_code&client=qwen_code_desktop',
     ]);
   },
 );

@@ -26,6 +26,11 @@ export function getQwenOAuthConfig(): {
 
 export type QwenChatClient = 'cli' | 'desktop' | 'plugin';
 
+function formatQwenChatUrl(url: URL, client: QwenChatClient): string {
+  url.searchParams.set('client', `qwen_code_${client}`);
+  return url.toString();
+}
+
 export function withQwenChatClient(
   rawUrl: string,
   client: QwenChatClient,
@@ -37,8 +42,7 @@ export function withQwenChatClient(
     return rawUrl;
   }
   if (url.origin !== getQwenOAuthConfig().webOrigin) return rawUrl;
-  url.searchParams.set('client', client);
-  return url.toString();
+  return formatQwenChatUrl(url, client);
 }
 
 export function getQwenSubscriptionAuthorizationUrl(
@@ -47,13 +51,11 @@ export function getQwenSubscriptionAuthorizationUrl(
 ): string {
   const url = new URL('/authorize', getQwenOAuthConfig().webOrigin);
   url.searchParams.set('user_code', userCode);
-  url.searchParams.set('client', client);
-  return url.toString();
+  return formatQwenChatUrl(url, client);
 }
 
 export function getQwenSubscriptionPlansUrl(client: QwenChatClient): string {
   const url = new URL('/', getQwenOAuthConfig().webOrigin);
   url.searchParams.set('memberPlan', 'qwen_code');
-  url.searchParams.set('client', client);
-  return url.toString();
+  return formatQwenChatUrl(url, client);
 }
