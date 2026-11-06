@@ -54,21 +54,25 @@ const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
 
 /**
- * Extended usage type that supports both OpenAI standard format and alternative formats
- * Some models return cached_tokens at the top level instead of in prompt_tokens_details
+ * Extended usage type that supports both OpenAI standard format and alternative
+ * formats: some models return cached_tokens at the top level instead of in
+ * prompt_tokens_details.
+ *
+ * `cache_write_tokens` is a standard OpenAI Chat Completions field, added to
+ * the SDK's `PromptTokensDetails` in v7; this package pins v5, so the types
+ * here predate it. Any prompt-caching provider reports it, not only proxies.
+ * The value reaches GenAI telemetry's
+ * `gen_ai.usage.cache_creation.input_tokens` unchanged.
  */
 interface ExtendedCompletionUsage extends OpenAI.CompletionUsage {
   cached_tokens?: number;
-}
-
-/**
- * Prompt breakdown fields the OpenAI SDK's `PromptTokensDetails` does not
- * declare. Gateways that proxy a provider with prompt caching (Moonshot,
- * DeepSeek and others) report cache writes there; the value reaches GenAI
- * telemetry's `gen_ai.usage.cache_creation.input_tokens` unchanged.
- */
-interface ExtendedPromptTokensDetails {
-  cache_write_tokens?: number;
+  // The pinned SDK declares `prompt_tokens_details` without this member; both
+  // converters read it through this interface so there is one spelling.
+  prompt_tokens_details?:
+    | (OpenAI.CompletionUsage.PromptTokensDetails & {
+        cache_write_tokens?: number;
+      })
+    | null;
 }
 
 export interface ExtendedChatCompletionAssistantMessageParam
@@ -1551,12 +1555,8 @@ export function convertOpenAIResponseToLlm(
     const cachedInputTokensReported =
       typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
       typeof extendedUsage.cached_tokens === 'number';
-    const cacheWriteTokens = (
-      usage.prompt_tokens_details as
-        | ExtendedPromptTokensDetails
-        | null
-        | undefined
-    )?.cache_write_tokens;
+    const cacheWriteTokens =
+      extendedUsage.prompt_tokens_details?.cache_write_tokens;
     const providerReasoningTokens =
       usage.completion_tokens_details?.reasoning_tokens;
     let thinkingTokens = providerReasoningTokens;
@@ -2187,12 +2187,8 @@ export function convertOpenAIChunkToLlm(
     const cachedInputTokensReported =
       typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
       typeof extendedUsage.cached_tokens === 'number';
-    const cacheWriteTokens = (
-      usage.prompt_tokens_details as
-        | ExtendedPromptTokensDetails
-        | null
-        | undefined
-    )?.cache_write_tokens;
+    const cacheWriteTokens =
+      extendedUsage.prompt_tokens_details?.cache_write_tokens;
 
     const hasTokenBreakdown =
       totalTokens === 0 || promptTokens !== 0 || completionTokens !== 0;
