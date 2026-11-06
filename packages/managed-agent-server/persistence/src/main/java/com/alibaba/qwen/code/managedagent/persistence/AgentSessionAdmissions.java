@@ -145,7 +145,6 @@ final class AgentSessionAdmissions {
         List<Map<String, Object>> input = command.input();
         String payloadDigest = command.payloadDigest();
         WorkspaceSelection selection = command.selection();
-        String requestedApprovalMode = command.requestedApprovalMode();
         boolean approvalSelectionSupported = command.approvalSelectionSupported();
         Boolean requestedPlanMode = command.requestedPlanMode();
         boolean planModeSupported = command.planModeSupported();
@@ -187,26 +186,11 @@ final class AgentSessionAdmissions {
             throw new ManagedAgentException(400, "unsupported_model",
                     "The model is not published for this Agent.");
         }
-        // Resolve the revision and compile the stored definition before Workspace
-        // resolution. External-profile eligibility and requested approval/plan
-        // options are checked after the Workspace determines the effective profile.
         AgentSessionPolicies.AgentPin resolvedPin = sessionPolicies.resolveAgentPin(tenantId, agentId, requestedRevision, true);
         requireCreationScope(tenantId, idempotencyKey, true);
         ResolvedBinding workspace = workspaces.resolveForCreation(tenantId, actorId, selection);
         boolean external = workspaces.isExternal(workspace.binding());
-        if (external) {
-            if (!AgentSessionPolicies.externalFilesAllowedOrRefuse(workspaces, workspace.binding())
-                    || !"qwen-code".equals(agentId)
-                    || resolvedPin.digest() != null || resolvedPin.hooks() || resolvedPin.mcp()
-                    || Boolean.TRUE.equals(requestedPlanMode) || !skills.isEmpty() || extensionPins != null
-                    || input.stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {
-                throw AgentSessionPolicies.workspaceExecutionUnavailable();
-            }
-            resolvedPin = new AgentSessionPolicies.AgentPin(resolvedPin.revision(), null, resolvedPin.approvalMode(),
-                    WorkspaceToolProfiles.EXTERNAL_FILES, false, false);
-        }
-        AgentSessionPolicies.AgentPin pin = AgentSessionPolicies.selectApprovalMode(
-                resolvedPin, requestedApprovalMode, approvalSelectionSupported);
+        AgentSessionPolicies.AgentPin pin = ExternalWorkspaceSessionPolicies.creationPin(external, workspaces, workspace.binding(), resolvedPin, command);
         boolean planMode = Boolean.TRUE.equals(requestedPlanMode);
         if (planMode && (!planModeSupported || !approvalSelectionSupported
                 || pin.hooks() || pin.mcp() || !(WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
