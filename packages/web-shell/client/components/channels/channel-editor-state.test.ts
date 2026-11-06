@@ -13,6 +13,8 @@ import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
   invalidRepositoryGroupEntries,
+  isRepoFilterActive,
+  normalizeRepositoryFilterInput,
   repositoryAllowlistIds,
   retainedRepositorySettings,
   validateChannelEditorDraft,
@@ -2951,5 +2953,193 @@ describe('GitHub poll interval', () => {
     expect(
       validateChannelEditorDraft(GITHUB_POLLING, draft, [], instance),
     ).toEqual({ pollInterval: 'outOfRange' });
+  });
+});
+
+describe('GitHub repository event filter', () => {
+  const REPO_FILTER: DaemonChannelTypeDescriptor = {
+    ...GITHUB,
+    fields: [
+      ...GITHUB.fields,
+      {
+        key: 'repoFilterMode',
+        label: 'Repository Filter',
+        kind: 'enum',
+        default: 'off',
+        options: [
+          { value: 'off', label: 'off' },
+          { value: 'allowlist', label: 'allowlist' },
+          { value: 'blocklist', label: 'blocklist' },
+        ],
+      },
+      {
+        key: 'repoFilter',
+        label: 'Filtered Repositories',
+        kind: 'string-list',
+      },
+    ],
+  };
+
+  function filterDraft(
+    mode: string,
+    list: string,
+    instance?: DaemonChannelInstanceSnapshot,
+  ): ChannelEditorDraft {
+    const draft = createChannelEditorDraft(REPO_FILTER, instance);
+    draft.name = 'my-bot';
+    draft.values.useLocalGh = true;
+    draft.values.repoFilterMode = mode;
+    draft.values.repoFilter = list;
+    return draft;
+  }
+
+  describe('normalizeRepositoryFilterInput', () => {
+    it('shortens pasted GitHub web URLs to owner/repo', () => {
+      expect(
+        normalizeRepositoryFilterInput(
+          'https://github.com/Octo/Repo, https://github.com/Octo/Repo/pull/123, https://ghe.example.com/octo/repo.git/, octo/repo',
+        ),
+      ).toBe('octo/repo');
+    });
+
+    it('shortens URLs carrying a query or fragment', () => {
+      expect(
+        normalizeRepositoryFilterInput(
+          'https://github.com/Octo/Repo?tab=readme-ov-file, https://github.com/Octo/Repo#readme',
+        ),
+      ).toBe('octo/repo');
+    });
+
+    it('does not shorten non-repository GitHub URLs', () => {
+      // orgs/community looks like owner/repo but is an organization page;
+      // shortening it would silently filter a nonexistent repository.
+      expect(
+        normalizeRepositoryFilterInput(
+          'https://github.com/orgs/community, https://github.com/settings/profile',
+        ),
+      ).toBe(
+        'https://github.com/orgs/community, https://github.com/settings/profile',
+      );
+      expect(
+        validateChannelEditorDraft(
+          REPO_FILTER,
+          filterDraft('allowlist', 'https://github.com/orgs/community'),
+          [],
+        ),
+      ).toEqual({ repoFilter: 'invalidRepoId' });
+    });
+
+    it('lowercases and deduplicates plain entries', () => {
+      expect(
+        normalizeRepositoryFilterInput('Owner/Repo, owner/repo, other/repo'),
+      ).toBe('owner/repo, other/repo');
+    });
+
+    it('passes non-URL entries through for validation to name', () => {
+      expect(normalizeRepositoryFilterInput('not-a-repo, a/b')).toBe(
+        'not-a-repo, a/b',
+      );
+      expect(normalizeRepositoryFilterInput('  ')).toBe('');
+    });
+  });
+
+  it('isRepoFilterActive only accepts the two list modes', () => {
+    expect(isRepoFilterActive('allowlist')).toBe(true);
+    expect(isRepoFilterActive('blocklist')).toBe(true);
+    expect(isRepoFilterActive('off')).toBe(false);
+    expect(isRepoFilterActive(undefined)).toBe(false);
+  });
+
+  it('seeds Off for a new draft and for an instance without the keys', () => {
+    expect(createChannelEditorDraft(REPO_FILTER).values.repoFilterMode).toBe(
+      'off',
+    );
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'my-bot',
+      config: { type: 'github', useLocalGh: true },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    expect(
+      createChannelEditorDraft(REPO_FILTER, instance).values.repoFilterMode,
+    ).toBe('off');
+  });
+
+  it('requires a non-empty list while a mode is active', () => {
+    expect(
+      validateChannelEditorDraft(REPO_FILTER, filterDraft('allowlist', ''), []),
+    ).toEqual({ repoFilter: 'repoFilterRequired' });
+    expect(
+      validateChannelEditorDraft(
+        REPO_FILTER,
+        filterDraft('blocklist', '  '),
+        [],
+      ),
+    ).toEqual({ repoFilter: 'repoFilterRequired' });
+  });
+
+  it('rejects entries that are not owner/repo after normalization', () => {
+    expect(
+      validateChannelEditorDraft(
+        REPO_FILTER,
+        filterDraft('blocklist', 'not-a-repo'),
+        [],
+      ),
+    ).toEqual({ repoFilter: 'invalidRepoId' });
+  });
+
+  it('accepts pasted URLs and ignores the list while off', () => {
+    expect(
+      validateChannelEditorDraft(
+        REPO_FILTER,
+        filterDraft('allowlist', 'https://github.com/Octo/Repo/pull/1'),
+        [],
+      ),
+    ).toEqual({});
+    expect(
+      validateChannelEditorDraft(
+        REPO_FILTER,
+        filterDraft('off', 'not-a-repo'),
+        [],
+      ),
+    ).toEqual({});
+  });
+
+  it('normalizes the list in the save payload while a mode is active', () => {
+    const request = buildChannelUpsertRequest(
+      REPO_FILTER,
+      filterDraft(
+        'blocklist',
+        'https://github.com/Octo/Repo/pull/9, Other/Repo',
+      ),
+      'rev-1',
+    );
+    expect(request.config['repoFilterMode']).toBe('blocklist');
+    expect(request.config['repoFilter']).toEqual(['octo/repo', 'other/repo']);
+  });
+
+  it('keeps a parked list exactly as stored while the mode is off', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'my-bot',
+      config: {
+        type: 'github',
+        useLocalGh: true,
+        repoFilterMode: 'off',
+        repoFilter: ['Owner/Parked'],
+      },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(REPO_FILTER, instance);
+    draft.name = 'my-bot';
+    const request = buildChannelUpsertRequest(
+      REPO_FILTER,
+      draft,
+      'rev-1',
+      instance,
+    );
+    expect(request.config['repoFilter']).toEqual(['Owner/Parked']);
   });
 });

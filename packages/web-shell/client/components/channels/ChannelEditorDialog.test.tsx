@@ -3772,3 +3772,178 @@ describe('Channel editor progressive disclosure', () => {
     expect(trigger?.textContent).toContain('已配置 2 项');
   });
 });
+
+describe('GitHub repository event filter', () => {
+  // Same field keys as the real descriptor; labels intentionally differ from
+  // the i18n values so a missing FIELD_LABEL_KEYS entry surfaces the
+  // untranslated descriptor fallback instead of passing the assertions.
+  const GITHUB_REPO_FILTER: DaemonChannelTypeDescriptor = {
+    ...GITHUB_LOCAL_GH,
+    fields: [
+      ...GITHUB_LOCAL_GH.fields,
+      {
+        key: 'repoFilterMode',
+        label: 'Repo filter mode (descriptor)',
+        kind: 'enum',
+        default: 'off',
+        options: [
+          { value: 'off', label: 'off' },
+          { value: 'allowlist', label: 'allowlist' },
+          { value: 'blocklist', label: 'blocklist' },
+        ],
+      },
+      {
+        key: 'repoFilter',
+        label: 'Repo filter list (descriptor)',
+        kind: 'string-list',
+      },
+    ],
+  };
+
+  const FILTER_INSTANCE: DaemonChannelInstanceSnapshot = {
+    name: 'github-bot',
+    config: { type: 'github', useLocalGh: true },
+    secrets: {},
+    startsWithServe: false,
+    runtime: { state: 'stopped' },
+  };
+
+  async function saveDialog() {
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+  }
+
+  it('defaults to Off and hides the repository list', async () => {
+    await renderDialog({
+      descriptor: GITHUB_REPO_FILTER,
+      instance: FILTER_INSTANCE,
+    });
+
+    expect(fieldByLabel('Repository Filter')).not.toBeNull();
+    expect(inputByLabel('Filtered Repositories')).toBeNull();
+  });
+
+  it('renders the Chinese labels', async () => {
+    await renderDialog({
+      descriptor: GITHUB_REPO_FILTER,
+      instance: FILTER_INSTANCE,
+      language: 'zh-CN',
+    });
+
+    expect(fieldByLabel('按仓库过滤')).not.toBeNull();
+    await selectOption('按仓库过滤', '黑名单 — 除列出的仓库以外');
+    expect(inputByLabel('过滤的仓库')).not.toBeNull();
+  });
+
+  it('reveals the list for an active mode and saves normalized repositories', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_REPO_FILTER,
+      instance: FILTER_INSTANCE,
+      onSave,
+    });
+
+    await selectOption(
+      'Repository Filter',
+      'Blocklist — all except listed repositories',
+    );
+    const input = inputByLabel('Filtered Repositories');
+    expect(input).not.toBeNull();
+    await act(async () => {
+      setInputValue(input!, 'https://github.com/Octo/Repo/pull/123, octo/repo');
+    });
+    await saveDialog();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0]![1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['repoFilterMode']).toBe('blocklist');
+    expect(request.config['repoFilter']).toEqual(['octo/repo']);
+  });
+
+  it('blocks an active mode with an empty list and retires the error on Off', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_REPO_FILTER,
+      instance: FILTER_INSTANCE,
+      onSave,
+    });
+
+    await selectOption(
+      'Repository Filter',
+      'Allowlist — only listed repositories',
+    );
+    await saveDialog();
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'List at least one repository, or set Repository Filter to Off.',
+    );
+
+    await selectOption('Repository Filter', 'Off — all repositories');
+    expect(document.body.textContent).not.toContain(
+      'List at least one repository, or set Repository Filter to Off.',
+    );
+    expect(inputByLabel('Filtered Repositories')).toBeNull();
+
+    await saveDialog();
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0]![1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['repoFilterMode']).toBe('off');
+  });
+
+  it('rejects entries that are not owner/repo after normalization', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_REPO_FILTER,
+      instance: FILTER_INSTANCE,
+      onSave,
+    });
+
+    await selectOption(
+      'Repository Filter',
+      'Blocklist — all except listed repositories',
+    );
+    await act(async () => {
+      setInputValue(inputByLabel('Filtered Repositories')!, 'not-a-repo');
+    });
+    await saveDialog();
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'Enter each repository as owner/repo.',
+    );
+  });
+
+  it('keeps a parked list exactly as stored while the mode is off', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_REPO_FILTER,
+      instance: {
+        ...FILTER_INSTANCE,
+        config: {
+          ...FILTER_INSTANCE.config,
+          repoFilterMode: 'off',
+          repoFilter: ['Owner/Parked'],
+        },
+      },
+      onSave,
+    });
+
+    await saveDialog();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0]![1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['repoFilterMode']).toBe('off');
+    expect(request.config['repoFilter']).toEqual(['Owner/Parked']);
+  });
+});

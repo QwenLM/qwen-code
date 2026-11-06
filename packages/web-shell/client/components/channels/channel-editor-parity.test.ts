@@ -11,6 +11,7 @@ import type {
   DaemonChannelTypeDescriptor,
 } from '@qwen-code/sdk/daemon';
 import {
+  buildChannelUpsertRequest,
   createChannelEditorDraft,
   validateChannelEditorDraft,
 } from './channel-editor-state';
@@ -99,5 +100,111 @@ describe('bound-delivery rule parity (editor mirror vs daemon authority)', () =>
     } else {
       expect(daemonMessage).toBeUndefined();
     }
+  });
+});
+
+const REPO_FILTER_CASES = [
+  {
+    name: 'active allowlist with an empty list',
+    mode: 'allowlist',
+    repos: [] as string[] | undefined,
+    code: 'repoFilterRequired',
+    daemon: /requires at least one owner\/repo entry/,
+  },
+  {
+    name: 'active blocklist without a list',
+    mode: 'blocklist',
+    repos: undefined,
+    code: 'repoFilterRequired',
+    daemon: /must be an array of owner\/repo/,
+  },
+  {
+    name: 'malformed entry',
+    mode: 'blocklist',
+    repos: ['not-a-repo'],
+    code: 'invalidRepoId',
+    daemon: /must be owner\/repo repository names/,
+  },
+  {
+    name: 'valid allowlist',
+    mode: 'allowlist',
+    repos: ['octo/repo'],
+    code: undefined,
+    daemon: undefined,
+  },
+  {
+    name: 'valid blocklist',
+    mode: 'blocklist',
+    repos: ['octo/repo'],
+    code: undefined,
+    daemon: undefined,
+  },
+  {
+    name: 'off with a stale list',
+    mode: 'off',
+    repos: ['not-a-repo'],
+    code: undefined,
+    daemon: undefined,
+  },
+] as const;
+
+describe('repository filter rule parity (editor mirror vs daemon authority)', () => {
+  it.each(REPO_FILTER_CASES)('$name', ({ mode, repos, code, daemon }) => {
+    const config: Record<string, unknown> = {
+      type: 'github',
+      useLocalGh: true,
+      repoFilterMode: mode,
+    };
+    if (repos !== undefined) config['repoFilter'] = [...repos];
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'parity',
+      config,
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(descriptor, instance);
+    draft.name = 'parity';
+
+    const clientCode = validateChannelEditorDraft(
+      descriptor,
+      draft,
+      [],
+      instance,
+    )['repoFilter'];
+    expect(clientCode).toBe(code);
+
+    const daemonMessage = management.validateConfig?.(config);
+    if (daemon) {
+      expect(daemonMessage).toMatch(daemon);
+    } else {
+      expect(daemonMessage).toBeUndefined();
+    }
+  });
+
+  it('shortens pasted URLs before the daemon authority sees them', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'parity',
+      config: { type: 'github', useLocalGh: true },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(descriptor, instance);
+    draft.name = 'parity';
+    draft.values['repoFilterMode'] = 'blocklist';
+    draft.values['repoFilter'] = 'https://github.com/Octo/Repo/pull/9';
+
+    expect(validateChannelEditorDraft(descriptor, draft, [], instance)).toEqual(
+      {},
+    );
+    const { config } = buildChannelUpsertRequest(
+      descriptor,
+      draft,
+      'rev-1',
+      instance,
+    );
+    expect(config['repoFilter']).toEqual(['octo/repo']);
+    expect(management.validateConfig?.(config)).toBeUndefined();
   });
 });

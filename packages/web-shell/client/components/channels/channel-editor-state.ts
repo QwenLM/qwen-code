@@ -56,6 +56,7 @@ export type ChannelEditorValidationCode =
   | 'invalidGroupId'
   | 'invalidOption'
   | 'invalidRepoId'
+  | 'repoFilterRequired'
   | 'conflictingRepoAliases'
   | 'invalidGroupEntry'
   | 'number'
@@ -87,6 +88,62 @@ export function repositoryAllowlistIds(value: string): string[] {
   return [...new Set(toList(value.toLowerCase()))].filter((id) =>
     REPOSITORY_FULL_NAME_RE.test(id),
   );
+}
+
+/** Whether the repository event filter processes a list at all. */
+export function isRepoFilterActive(mode: unknown): boolean {
+  return mode === 'allowlist' || mode === 'blocklist';
+}
+
+const GITHUB_REPOSITORY_URL_RE =
+  /^https?:\/\/[^/]+\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:[/?#].*)?$/;
+
+/**
+ * GitHub areas whose two-segment URLs look like `owner/repo` but are not
+ * repositories. Shortening one would silently filter a nonexistent
+ * repository — fatal under an allowlist — so these URLs pass through
+ * unchanged and validation rejects them by name instead.
+ */
+const GITHUB_RESERVED_URL_PATHS = new Set([
+  'orgs',
+  'organizations',
+  'users',
+  'settings',
+  'notifications',
+  'marketplace',
+  'explore',
+  'topics',
+  'collections',
+  'sponsors',
+  'events',
+  'accounts',
+  'search',
+  'issues',
+  'pulls',
+  'discussions',
+  'codespaces',
+  'enterprise',
+  'team',
+]);
+
+/**
+ * Canonicalize the repository filter input: lowercase, deduplicate, and
+ * shorten pasted GitHub web URLs (repository, PR, or issue pages, with an
+ * optional `.git`, trailing path, query, or fragment) to `owner/repo`.
+ * Entries that are not repository URLs pass through unchanged so validation
+ * can name them. Shared by the validator and the save path so the two
+ * cannot disagree.
+ */
+export function normalizeRepositoryFilterInput(value: string): string {
+  const entries = toList(value).map((entry) => {
+    const match = GITHUB_REPOSITORY_URL_RE.exec(entry);
+    const shortened =
+      match && !GITHUB_RESERVED_URL_PATHS.has(match[1].toLowerCase())
+        ? `${match[1]}/${match[2]}`
+        : entry;
+    return shortened.toLowerCase();
+  });
+  return [...new Set(entries)].join(', ');
 }
 
 export function toList(value: string): string[] {
@@ -224,6 +281,7 @@ function initialFieldValue(
       if (field.key === 'privatePolicy')
         return configuredPrivatePolicy(instance);
       if (field.key === 'groupPolicy') return 'disabled';
+      if (field.key === 'repoFilterMode') return 'off';
       if (field.key === 'outputMode') return field.default ?? '';
       if (field.key === 'dmPolicy') return 'open';
       if (field.key !== 'sessionScope') return '';
@@ -433,6 +491,22 @@ export function validateChannelEditorDraft(
       draft.values['deliverToBoundSessions'] !== true
     ) {
       errors['prWatchEvents'] = 'requiresBoundDelivery';
+    }
+    // Mirror validateRepoFilterConfig: an active mode needs a non-empty list
+    // of owner/repo entries. While the mode is off the list is ignored (and
+    // hidden), matching the runtime's ignore-while-off rule, so a parked list
+    // never strands a save on a field the operator cannot see.
+    if (isRepoFilterActive(draft.values['repoFilterMode'])) {
+      const normalized = normalizeRepositoryFilterInput(
+        String(draft.values['repoFilter'] ?? ''),
+      );
+      if (!normalized) {
+        errors['repoFilter'] = 'repoFilterRequired';
+      } else if (
+        toList(normalized).some((id) => !REPOSITORY_FULL_NAME_RE.test(id))
+      ) {
+        errors['repoFilter'] = 'invalidRepoId';
+      }
     }
   }
   if (
@@ -842,6 +916,21 @@ export function buildChannelUpsertRequest(
       continue;
     }
     assignField(config, field, draft.values[field.key]);
+  }
+  if (
+    repositoryOnly &&
+    isRepoFilterActive(config['repoFilterMode']) &&
+    Array.isArray(config['repoFilter'])
+  ) {
+    // Same canonicalization the validator applied, so pasted URLs reach the
+    // daemon as owner/repo. Gated on the active mode: a parked list stays
+    // exactly as stored on an unrelated save.
+    const normalized = normalizeRepositoryFilterInput(
+      config['repoFilter']
+        .filter((entry): entry is string => typeof entry === 'string')
+        .join(', '),
+    );
+    config['repoFilter'] = normalized ? normalized.split(', ') : [];
   }
   if (repositoryOnly) {
     // The editor used to persist the injected private-access defaults here
