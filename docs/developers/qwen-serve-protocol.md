@@ -40,7 +40,7 @@ Matched origins receive the standard CORS response headers on every request:
 ```
 Access-Control-Allow-Origin: <echoed origin>
 Vary: Origin
-Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
 Access-Control-Allow-Headers: Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID, X-Qwen-Event-Epoch
 Access-Control-Max-Age: 86400
 Access-Control-Expose-Headers: Retry-After, X-Qwen-Event-Epoch, X-Qwen-SSE-Stream-Id
@@ -712,6 +712,7 @@ nothing.
 | `realtime_voice`                         | the macOS WebShell daemon has Live Voice enabled and the native Host opted in with `QWEN_SERVE_LIVE_NATIVE_HOST=1` (off by default; see below). `/live/status` reports readiness, but the capability is withdrawn until the feature is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `realtime_voice_web`                     | Live Voice is enabled and the Web Shell page may itself be the audio endpoint over WS `/live/web`, on any platform, and the default endpoint (the native Host is macOS-only and opt-in). The route authenticates like `/voice/stream` (bearer subprotocol), requires a trusted primary workspace, and speaks the Live Host protocol with a reduced hello: microphone permission plus the audio input/output self-checks. A single Host lease remains: a native Host supersedes a browser (`4010`), a browser never displaces a native Host (`4009`), and a second tab takes over only with `?takeover=1`. `/live/status` reports `host.kind: "browser"`; screen capture needs a shared screen (below), and a shortcut change is stored for the next native Host rather than registered.                                                                                                                                                                                                                                                                        |
 | `web_terminal`                           | ACP HTTP is enabled, so the authenticated Web Terminal endpoint is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `user_skill_activation`                  | User settings persistence is available. `PUT /skills/activation` saves exact-name User preferences and queues asynchronous propagation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 <!-- conditional-serve-features:end -->
 
@@ -826,11 +827,42 @@ launcher; clients cannot supply a version or command.
 - `POST /daemon/update/restart` requires a prepared update, otherwise it returns
   `409 update_not_ready`. It responds with `202` and `state: "restarting"` before
   activating the update, gracefully closing the daemon, and replacing the process
-  with the updated launcher. Repeated clicks share one restart. The replacement
+  with the updated launcher. Repeated clicks share one restart. After responding,
+  the daemon re-resolves the current release once: if it is newer than the
+  prepared one and one-click covers it, the newer release is staged and the
+  prepared payload is discarded, so a long-lived daemon lands on the current
+  latest rather than on whatever was latest when it first prepared. The newer
+  payload is committed to before the superseded one is discarded, and that
+  discard is best-effort: a failed discard leaks disk but never orphans the
+  newer payload or falls back to one that may be half removed. `latestVersion`
+  then reports the newer target while `state` stays `restarting`. A failed
+  re-resolve or staging applies the prepared release instead; the click is never
+  stranded on the running version by a registry failure. The replacement
   preserves PID, working directory, CLI options, bound port, and effective daemon
   token, clears old version pins, and does not reopen a browser. The client polls
   GET until `currentVersion` changes, then reloads the document at the URL
-  captured when the update was requested. Standalone launcher validation runs before closing
+  captured when the update was requested. Because staging runs after the `202`
+  and can take minutes, the client measures its restart deadline from continuous
+  unreachability, not from the click: a daemon that keeps answering is still
+  working. A generous absolute cap (20 minutes) backstops a daemon
+  that stays reachable but never leaves `restarting`. It sits above the whole
+  staging chain, not above a single timeout constant: a standalone archive
+  download tries OSS and then GitHub sequentially with a five-minute budget
+  _each_, and the checksum and signature fetches add up to two more minutes, so
+  one restage can spend about twelve minutes downloading and verifying before
+  activation; the managed npm child is capped at ten. Every give-up path keeps a
+  retryable entry on screen, because a wedged daemon keeps reporting
+  `restarting`, which the control does not otherwise display. Once the restart is
+  acknowledged, `restarting` is sticky until the
+  process is replaced, so a reachable daemon that reports any other state with an
+  unchanged `currentVersion` means the replacement did not land on the new build;
+  the client stops waiting, publishes that settled state, and reports a failure
+  rather than waiting forever for a version change. That check applies only to a
+  poll _initiated_ after the acknowledgement: the status and restart requests are
+  independent, so a poll started earlier can deliver a pre-restart snapshot
+  afterwards, and reading that as a settled daemon would report a false failure
+  and suppress the reload a successful update still owes the user.
+  Standalone launcher validation runs before closing
   services; a failed check leaves the daemon running. Failures after shutdown
   begins or during process replacement are not guaranteed to recover.
 
@@ -839,10 +871,18 @@ background, and displays its version-adjacent update button when a prepared
 update is ready or when an available update carries manual instructions. In the
 manual-instructions state the button opens a popover with the instructions from
 the check and never prepares or restarts. Preparation and readiness survive workspace runtime
-reloads. Ordinary daemon shutdown discards the prepared download. Activation
+reloads. A prepared update pins its target: polling GET, including
+`?refresh=true`, keeps reporting the prepared `latestVersion` and never
+re-downloads, so a daemon that stays alive across several releases does not
+churn downloads in the background. Only the restart re-resolves the target.
+Ordinary daemon shutdown discards the prepared download. Activation
 failures keep the daemon running and report `error`; the next check after the
 one-minute error cache can prepare a new download for retry. Disabling automatic
 updates removes readiness and cleans the download before a restart can begin.
+Once a restart is in flight it is undisturbed: while the state is `restarting`
+the status, prepare and restart routes all return without consulting the
+operator setting, and shutdown cleanup is a no-op, so a restage that takes
+minutes cannot have its payload pulled out from under it.
 Clicking the button in the ready state explicitly restarts the entire daemon
 and interrupts its active sessions.
 
@@ -4475,6 +4515,39 @@ Response (200):
 ```
 
 Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, or `invalid_enabled_flag`. Authentication, workspace trust, client identity, unexpected persistence failures, and runtime-generation failures fail the whole request through the standard route gates. `errors` remains in the response for wire compatibility and is empty for structurally valid names. Batch-level `activation`, `sessionsRefreshed`, and `sessionsFailed` describe child liveness and the single live-session refresh shared by all changed results. A batch in which no target changed can still answer `applied` when a child is live or `deferred` when none exists, matching the single-Skill no-op response, so derive what actually changed from each result's `changed` flag. When at least one target changes, the daemon emits the same `settings_changed` mutation metadata as the single-Skill route; every `skills.disabled` / `skills.enabled` event from that request shares one `mutation.id`.
+
+#### `PUT /skills/activation`
+
+Capability: `user_skill_activation` (advertised when User settings persistence is available). This process-global mutation saves User Skill preferences without requiring a trusted workspace or scanning installed Skills. It uses the usual authenticated mutation gates; an optional `X-Qwen-Client-Id` must belong to a still-managed runtime, including one being drained.
+
+```json
+{
+  "skillNames": ["rust:pdf", "go:review"],
+  "state": "enabled"
+}
+```
+
+Supply 1–100 names (at most 256 characters each). Names are trimmed and deduplicated case-insensitively. `state` is `enabled` or `disabled`. Only `disabled` accepts `mode`: `hard` (default) or `default`. Names need not be installed yet. Invalid batches are rejected before any write.
+
+Qwen reads the latest User settings under its settings write lock, adds each explicit name to `skills.enabled`, `skills.disabled`, or `skills.defaultDisabled`, and removes that same name from the other two lists in one save. Other names, spellings, scopes, and settings are preserved. In particular, enabling `rust:pdf` does not remove a `pdf` restriction. Explicit bare names retain the existing matching rules. System restrictions still apply.
+
+```json
+{
+  "scope": "user",
+  "state": "enabled",
+  "results": [
+    { "skillName": "rust:pdf", "changed": true },
+    { "skillName": "go:review", "changed": true }
+  ],
+  "propagation": "queued"
+}
+```
+
+Disabled responses also include the normalized `mode`. `propagation` describes scheduling, not measured availability: `queued` means at least one live runtime queued a refresh; `deferred` means saved settings await runtime lifecycle work; `not_required` means this request changed nothing. A no-op neither writes nor emits events and does not certify completion of earlier refreshes. Read the existing workspace configuration and runtime Skill status endpoints for effective state.
+
+Successful changes invalidate configuration caches and broadcast ordinary `settings_changed` events with `scope: "user"`. Refreshes re-read User and Workspace settings atomically; failed configuration or session refreshes retain pending work for lifecycle recovery and bounded retries. Existing workspace-only refresh behavior is unchanged.
+
+Malformed input returns HTTP 400 (`invalid_skill_names`, `invalid_skill_name`, `invalid_skill_activation_state`, or `invalid_skill_activation_mode`). A primary runtime generation closed before commit returns HTTP 503 with `Retry-After: 1`, as on settings routes. The SDK exposes `setUserSkillsActivation(skillNames, activation, { clientId? })` and sends one PUT without a preliminary configuration read.
 
 #### `POST /workspace/init`
 

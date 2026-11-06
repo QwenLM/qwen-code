@@ -510,6 +510,14 @@ export interface PersistDisabledSkillsBatchResult {
   }>;
 }
 
+export interface PersistUserSkillsActivationResult {
+  outcomes: PersistDisabledSkillsBatchOutcome[];
+  settingsChanges: Array<{
+    key: 'skills.disabled' | 'skills.defaultDisabled' | 'skills.enabled';
+    value: string[] | undefined;
+  }>;
+}
+
 export class WorkspaceSkillNotFoundError extends Error {
   constructor(readonly skillName: string) {
     super(`Skill not found: ${skillName}`);
