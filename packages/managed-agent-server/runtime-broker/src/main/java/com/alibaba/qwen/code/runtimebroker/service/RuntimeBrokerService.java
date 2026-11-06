@@ -2158,54 +2158,14 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
             } finally {
                 context.unlock();
             }
-            // R17-2 / R18-1: a Hook-configured Shell turn shares this broker and
-            // its finish() skips the release, so a background run that outlives
-            // the turn can hold the Runtime. Observe the unproven background rows
-            // before the busy check — a provable exit settles the row and
-            // un-wedges a routine detach — but stop nothing: this handback is
-            // observe-and-hold (#13800), not a drain. The excluded check clears
-            // only what the observation settled; the un-excluded re-read then
-            // refuses any row still live or unproven, so the mount is never
-            // handed back over a running writer. This stays a mount handback —
-            // the owner id is not tombstoned and remains re-acquirable (R13-1).
+            // R17-2 / R18-1: observe the unproven background rows (stop nothing —
+            // observe-and-hold, #13800), then hand back under the claim/busy/
+            // unproven guard in releaseMountAfterSweep: a provable exit un-wedges
+            // a routine detach, a live or unproven row keeps the mount. Mount
+            // handback only — the owner id stays re-acquirable (R13-1).
             return executionRecovery.settleUnprovenBackgroundRows(context, false)
-                    .thenCompose(ignored -> {
-                        context.lock();
-                        try {
-                            if (!claimId.equals(context.mountClaim())) {
-                                throw conflict("runtime_session_conflict",
-                                        "Mount claim was superseded by a later acquire");
-                            }
-                            if (context.hasActiveControl()
-                                    || executionRepository.hasActiveByRuntimeSession(
-                                            context.binding().getBindingId(),
-                                            context.binding().getGeneration(), runtimeId,
-                                            new java.util.HashSet<>(context.backgroundProcesses()))) {
-                                throw conflict("runtime_session_busy",
-                                        "Runtime Session has an active operation");
-                            }
-                            // The observation settles only provable exits; a
-                            // background row still live or unproven keeps the
-                            // mount. Re-read without the exclusion so a row the
-                            // sweep could not settle is never handed back over.
-                            if (executionRepository.hasActiveByRuntimeSession(
-                                    context.binding().getBindingId(),
-                                    context.binding().getGeneration(), runtimeId)) {
-                                throw conflict("runtime_session_busy",
-                                        "Runtime Session has an active background process");
-                            }
-                            if (executionRepository.hasUnprovenCaptureByRuntimeSession(
-                                    context.binding().getBindingId(),
-                                    context.binding().getGeneration(), runtimeId)) {
-                                throw conflict("workspace_writer_unproven",
-                                        "A settled execution never proved its writer stopped");
-                            }
-                            return safeStage(() -> transport.releaseMount(context.lease(),
-                                    context.session())).toCompletableFuture();
-                        } finally {
-                            context.unlock();
-                        }
-                    });
+                    .thenCompose(ignored -> executionRecovery.releaseMountAfterSweep(
+                            context, claimId, runtimeId));
         });
     }
 
