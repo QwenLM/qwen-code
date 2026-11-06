@@ -692,6 +692,58 @@ describe('getVersion', () => {
       expect(result.previousReleaseTag).toBe('v0.6.1');
     });
 
+    it('should keep the preview-derived base when the latest dist-tag is missing', () => {
+      // First stable release: previews exist but nothing has shipped stable,
+      // so the rollback-aware latest lookup returns null.
+      const mockWithMissingLatest = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.7.0-preview.1';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          throw new Error('npm error code E404');
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.7.0-preview.0', '0.7.0-preview.1']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithMissingLatest);
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.7.0');
+      expect(result.npmTag).toBe('latest');
+    });
+
+    it('should ignore an invalid latest dist-tag when deriving the stable base', () => {
+      const mockWithInvalidLatest = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.7.0-preview.1';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return 'banana';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.7.0-preview.0', '0.7.0-preview.1']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithInvalidLatest);
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.7.0');
+      expect(result.npmTag).toBe('latest');
+    });
+
     it('should read the published latest through the rollback-aware lookup', () => {
       // A rolled-back `latest` dist-tag must not become the stable base:
       // 0.11.0 is the highest published stable even though the tag says
