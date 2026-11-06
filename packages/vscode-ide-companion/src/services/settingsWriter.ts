@@ -16,6 +16,7 @@ import {
   CUSTOM_API_KEY_ENV_PREFIX,
   Storage,
   applyProviderInstallPlan,
+  getDefaultBaseUrlForProtocol,
   preserveModelProviderPlaceholders,
   type ProviderProtocolConfig,
   resolveMetadataKey,
@@ -422,7 +423,8 @@ export function writeModelProvidersConfig(params: {
     const model = ensureNestedObject(settings, 'model');
     model.name = params.activeModel;
     model.baseUrl =
-      params.modelProviders[params.activeModel] || 'https://api.openai.com/v1';
+      params.modelProviders[params.activeModel] ||
+      getDefaultBaseUrlForProtocol(AuthType.USE_OPENAI);
   }
 
   for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
