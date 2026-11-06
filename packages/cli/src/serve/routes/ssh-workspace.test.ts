@@ -595,6 +595,7 @@ describe.skipIf(process.platform === 'win32')(
       for (const suffix of [
         '/acp',
         '/voice',
+        '/language',
         '/voice/transcribe',
         '/trust/request',
         '/trust/grant',

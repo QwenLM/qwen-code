@@ -15,6 +15,11 @@ import {
   HostedCompressionRefusal,
 } from './hosted-context-compression.js';
 import { extensionInstructionText } from './hosted-extension-tool-context.js';
+import {
+  parseHostedModelConfig,
+  parseHostedModelConfigDigest,
+  type HostedModelConfigReader,
+} from './hosted-model-config.js';
 
 import {
   parseHostedApprovalSelection,
@@ -70,6 +75,7 @@ import {
   parseHostedActionOptions,
   hostedLiveApprovalPoll,
 } from './hosted-tool-approval.js';
+import { readHostedQuestionDecision } from './hosted-user-question.js';
 
 import {
   HOSTED_RECOVERY_RESOURCE_KINDS,
@@ -653,6 +659,8 @@ interface HostedSession {
   storeBaseUrl: string;
   definition: Record<string, unknown> | null;
   agentDefinition?: HostedAgentDefinition;
+  modelConfigDigest?: string;
+  modelConfig?: HostedModelConfigReader;
   sessionSkillsRef?: ManagedSessionDurableRef;
   skills?: HostedSkillCatalog;
   baseSkills?: HostedSkillCatalog;
@@ -886,6 +894,7 @@ function compressionFor(session: HostedSession): HostedContextCompression {
     session: session.managed,
     cwd: session.cwd,
     agentDefinition: session.agentDefinition,
+    modelConfig: session.modelConfig,
     instructions: async () =>
       [
         await readHostedAgentInstructions(
@@ -944,6 +953,7 @@ async function runHostedLifecycleHook(
   event: HookEventName,
   operationId: string,
   fields: Record<string, unknown>,
+  kind?: 'legacy-close',
 ): Promise<unknown> {
   if (!session.hooks) return undefined;
   await session.hooks.ensureReady();
@@ -968,6 +978,9 @@ async function runHostedLifecycleHook(
           cwd: session.cwd,
           signal,
           scope,
+          modelConfig: session.modelConfig
+            ? () => session.modelConfig!(kind)
+            : undefined,
         },
         run,
       );
@@ -2695,6 +2708,7 @@ async function verifyWorkspaceRestore(
     }
     if (ref.kind === 'managed-definition') {
       const definition = object(JSON.parse(bytes.toString('utf8')));
+      parseHostedModelConfigDigest(definition?.['modelConfigDigest']);
       const sessionSkills = parseSessionSkillsRef(
         definition?.['sessionSkillsRef'],
       );
@@ -3618,8 +3632,11 @@ async function executeHostedTurn(
         );
       const action = authority.action(actionId)!;
       await harness.resolveDurableWait();
+      if (action.state === 'decided' && options.v === 4)
+        await readHostedQuestionDecision(session.managed, action, options);
       if (
         action.state === 'decided' &&
+        options.v !== 4 &&
         !hostedActionAllowed(action, options.policyRevision) &&
         !hostedActionDenied(action, options.policyRevision)
       )
@@ -3630,9 +3647,11 @@ async function executeHostedTurn(
         index === plan.approvalOrdinal
           ? {
               ...item,
-              refusal: hostedActionAllowed(action, options.policyRevision)
-                ? null
-                : 'Original approval denied the call.',
+              refusal:
+                (options.v === 4 && action.state === 'decided') ||
+                hostedActionAllowed(action, options.policyRevision)
+                  ? null
+                  : 'Original approval denied the call.',
             }
           : item,
       );
@@ -3850,6 +3869,7 @@ async function executeHostedTurn(
                   monitors: session.monitors,
                   backgroundLane: session.backgroundLane,
                   childAgents: childAgentsOf(session),
+                  childDepth: session.childDepth,
                   messages: session.messages,
                   teams: session.teams,
                   commands: session.commands,
@@ -3909,6 +3929,7 @@ async function executeHostedTurn(
                   launch: workflowLaunch,
                   signal: abort.signal,
                   agentDefinition: session.agentDefinition,
+                  modelConfig: session.modelConfig,
                 })
               : await runHostedHarnessTextTurn({
                   sessionId,
@@ -3967,6 +3988,7 @@ async function executeHostedTurn(
                   modelScope,
                   workspaceContext,
                   agentDefinition: session.agentDefinition,
+                  modelConfig: session.modelConfig,
                   publicChildModelRoute: session.publicChildModelRoute,
                   modelSelection: await readHostedTurnModelSelection(
                     session.managed,
@@ -4632,8 +4654,12 @@ export function registerHostedHarnessSessionRoutes(
     }
     const sessionId = create ? body?.['sessionId'] : req.params['id'];
     let agentDefinition: HostedAgentDefinition | undefined;
+    let modelConfigDigest: string | undefined;
     let sessionSkillsRef: ManagedSessionDurableRef | undefined;
     try {
+      modelConfigDigest = parseHostedModelConfigDigest(
+        body?.['modelConfigDigest'],
+      );
       sessionSkillsRef = parseSessionSkillsRef(body?.['sessionSkillsRef']);
       agentDefinition = parseHostedAgentDefinition(
         body?.['agentDefinition'],
@@ -4901,8 +4927,12 @@ export function registerHostedHarnessSessionRoutes(
     }
     if (
       resident &&
-      !create &&
-      !sameHostedAgentDefinition(resident.agentDefinition, agentDefinition)
+      ((!create &&
+        !sameHostedAgentDefinition(
+          resident.agentDefinition,
+          agentDefinition,
+        )) ||
+        resident.modelConfigDigest !== modelConfigDigest)
     ) {
       error(res, 409, 'hosted_agent_definition_conflict');
       return;
@@ -5794,6 +5824,7 @@ export function registerHostedHarnessSessionRoutes(
                   engine: 'managed',
                   sessionId,
                   ...(agentDefinition ? { agentDefinition } : {}),
+                  ...(modelConfigDigest ? { modelConfigDigest } : {}),
                   ...(publicChildAgentsVersion === 1
                     ? { publicChildAgentsVersion }
                     : {}),
@@ -5878,6 +5909,12 @@ export function registerHostedHarnessSessionRoutes(
       let savedSessionSkillsRef: ManagedSessionDurableRef | undefined;
       let skills: HostedSkillCatalog | undefined;
       try {
+        if (
+          parseHostedModelConfigDigest(definition?.['modelConfigDigest']) !==
+          modelConfigDigest
+        ) {
+          throw new Error('Session model configuration binding changed.');
+        }
         savedAgentDefinition = parseHostedAgentDefinition(
           definition?.['agentDefinition'],
         );
@@ -6020,6 +6057,22 @@ export function registerHostedHarnessSessionRoutes(
         storeBaseUrl: store.baseUrl,
         definition,
         agentDefinition: savedAgentDefinition,
+        ...(modelConfigDigest
+          ? {
+              modelConfigDigest,
+              modelConfig: async (kind) => {
+                try {
+                  return parseHostedModelConfig(
+                    await stores.modelConfig(modelConfigDigest, kind),
+                    modelConfigDigest,
+                  );
+                } catch (cause) {
+                  if (namedStoreFailure(cause)) throw cause;
+                  throw new HostedModelUnavailableError();
+                }
+              },
+            }
+          : {}),
         ...(publicChildAgentsVersion === 1
           ? { publicChildAgentsVersion: 1 as const }
           : {}),
@@ -10945,6 +10998,7 @@ export function registerHostedHarnessSessionRoutes(
             monitors: session.monitors,
             backgroundLane: session.backgroundLane,
             childAgents: childAgentsOf(session),
+            childDepth: session.childDepth,
             messages: session.messages,
             teams: session.teams,
             commands: session.commands,
@@ -11214,6 +11268,7 @@ export function registerHostedHarnessSessionRoutes(
             signal: abort.signal,
             workspaceContext,
             agentDefinition: session.agentDefinition,
+            modelConfig: session.modelConfig,
             publicChildModelRoute: session.publicChildModelRoute,
             modelSelection: await readHostedTurnModelSelection(
               session.managed,
@@ -12674,12 +12729,14 @@ export function registerHostedHarnessSessionRoutes(
             HookEventName.SessionEnd,
             `session-end:${req.params['id']}`,
             { reason: 'other' },
+            'legacy-close',
           );
           await runHostedLifecycleHook(
             session,
             HookEventName.SessionDelete,
             `session-delete:${req.params['id']}`,
             { deleted_session_id: req.params['id'] },
+            'legacy-close',
           );
         } finally {
           session.hooksBusy = false;

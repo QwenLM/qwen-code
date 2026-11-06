@@ -65,7 +65,7 @@ For self-hosted instances, set `baseUrl`:
 | Option                   | Default                   | Description                                                                                       |
 | ------------------------ | ------------------------- | ------------------------------------------------------------------------------------------------- |
 | `token`                  | (required)                | PAT with `read_api` + `api` scopes                                                                |
-| `pollInterval`           | `60000`                   | Poll interval in ms                                                                               |
+| `pollInterval`           | `60000`                   | Poll interval in ms, clamped to a maximum of `86400000` (one day)                                 |
 | `baseUrl`                | `https://gitlab.com`      | GitLab instance URL                                                                               |
 | `action_prompt_template` | (required for processing) | Maps GitLab action names to metadata templates                                                    |
 | `groupPolicy`            | `"disabled"`              | Must be `"open"`, `"allowlist"` with the project listed, or `"pairing"` with the project approved |

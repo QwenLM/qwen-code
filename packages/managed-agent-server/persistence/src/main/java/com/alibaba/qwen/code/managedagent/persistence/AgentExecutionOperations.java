@@ -83,7 +83,6 @@ final class AgentExecutionOperations {
     OperationAdmission beginContextCompression(String tenantId, String sessionId,
             String actorId, String actorDigest, String key, String digest,
             long expectedCompactionRevision, boolean supported) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         ContextBinding binding = session.workspace();
         if (binding == null) {
@@ -112,7 +111,7 @@ final class AgentExecutionOperations {
                     "Hosted context compression is unavailable.");
         }
         AgentSessionPolicies.requireSessionStatus(session.status(), "ACTIVE");
-        WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, binding.getStorageId());
+        WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, binding.getStorageId());
         sessionPolicies.requireCwdChangeRegistryFacts(session);
         if (contextCompressionState(tenantId, sessionId).compactionRevision() != expectedCompactionRevision) {
             throw new ManagedAgentException(409, "compaction_revision_conflict",
@@ -425,7 +424,6 @@ final class AgentExecutionOperations {
     CwdChangeOutcome completeCwdChangeOperation(String tenantId,
             String sessionId, String operationId, String owner,
             long claimGeneration) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         OperationRecord operation = lifecycleOperations.findSessionOperation(tenantId, sessionId, operationId, true)
                 .orElseThrow(() -> new IllegalStateException("Session operation is unavailable"));
@@ -573,7 +571,6 @@ final class AgentExecutionOperations {
         // a lost 202 survives capability and state changes; only a new
         // request rechecks the Session state, the task's cancel action
         // and the one-open-operation rule, atomically with its insert.
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         Optional<OperationRecord> existing = lifecycleOperations.replayOperation(tenantId, sessionId,
                 OperationKind.TASK_CANCEL, actorDigest, idempotencyKey);
@@ -620,7 +617,7 @@ final class AgentExecutionOperations {
         // every sibling bound admission refuses it: a cancel admitted
         // behind the fence would wedge the migration's idle checks.
         if (session.workspace() != null) {
-            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId,
+            WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId,
                     session.workspace().getStorageId());
         }
         sessionPolicies.requireNoOpenOperation(tenantId, sessionId);
@@ -678,14 +675,14 @@ final class AgentExecutionOperations {
                                     + " <= ? AND EXISTS (SELECT 1 FROM ma_session private_scope"
                                     + " WHERE private_scope.tenant_id = ma_operation.tenant_id AND"
                                     + " private_scope.session_id = ma_operation.session_id AND"
-                                    + " private_scope.csi_guard = FALSE) ORDER BY available_at"
+                                    + " private_scope.is_csi_guard = FALSE) ORDER BY available_at"
                                     + " LIMIT ?",
                                 lifecycleOperations.operationTargetMapper,
                                 now,
                                 limit));
         if (targets.size() < limit) {
             targets.addAll(jdbc.query(
-                            "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind = 'TASK_CANCEL' AND delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) ORDER BY claim_until LIMIT ?",
+                            "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind = 'TASK_CANCEL' AND delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.is_csi_guard = FALSE) ORDER BY claim_until LIMIT ?",
                     lifecycleOperations.operationTargetMapper, limit - targets.size()));
         }
         return List.copyOf(targets);
@@ -700,7 +697,7 @@ final class AgentExecutionOperations {
                     + " 'RECOVERY_BLOCKED' AND available_at <= ? AND delivery_state = 'BLOCKED'"
                     + " AND EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id ="
                     + " ma_operation.tenant_id AND s.session_id = ma_operation.session_id AND"
-                    + " s.csi_guard = FALSE) ORDER BY available_at LIMIT ?",
+                    + " s.is_csi_guard = FALSE) ORDER BY available_at LIMIT ?",
                 (result, row) -> new ParkedOperation(result.getString("tenant_id"),
                         result.getString("session_id"), result.getString("operation_id"),
                         result.getString("operation_kind")),
@@ -858,7 +855,6 @@ final class AgentExecutionOperations {
             long retryAt) {
         String tenantId = parked.tenantId();
         String sessionId = parked.sessionId();
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         // Only a still-parked row: the claim's own late reply or a later
         // title may have settled it since the evidence was read.
