@@ -15,7 +15,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 
 function renderWithRules(
   rules: Array<{ raw: string; invalid?: boolean }>,
-  options?: { storedAllowRules?: string[] },
+  options?: { storedAllowRules?: string[]; workspaceOnly?: boolean },
 ): ReturnType<typeof render> & { setValue: Mock } {
   const config = {
     getPermissionManager: () => ({
@@ -46,9 +46,10 @@ function renderWithRules(
   const setValue = vi.fn();
   const settings = {
     merged: {},
-    forScope: () => ({
-      settings: { permissions: { allow: storedAllowRules } },
-    }),
+    forScope: (scope: string) =>
+      options?.workspaceOnly && scope !== 'Workspace'
+        ? { settings: {} }
+        : { settings: { permissions: { allow: storedAllowRules } } },
     setValue,
   } as unknown as LoadedSettings;
 
@@ -161,6 +162,35 @@ describe('PermissionsDialog', () => {
       expect(setValue).toHaveBeenCalledWith('User', 'permissions.allow', [
         'Bash(docker *)',
       ]),
+    );
+  });
+
+  it('deletes a rule stored only in the workspace scope', async () => {
+    // The user scope has no rule list at all, so the delete has to walk on to
+    // the workspace scope where the entry lives.
+    const { lastFrame, stdin, setValue } = renderWithRules(
+      [{ raw: 'Bash(docker *)' }],
+      { storedAllowRules: ['Bash(docker *)'], workspaceOnly: true },
+    );
+
+    await vi.waitFor(() =>
+      expect(lastFrame() ?? '').toContain('Bash(docker *)'),
+    );
+    stdin.write('\u001B[B');
+    await vi.waitFor(() =>
+      expect(lastFrame() ?? '').toContain('› 2. Bash(docker *)'),
+    );
+    stdin.write('\r');
+    await vi.waitFor(() =>
+      expect(lastFrame() ?? '').toContain('Delete allow rule?'),
+    );
+    stdin.write('\r');
+    await vi.waitFor(() =>
+      expect(setValue).toHaveBeenCalledWith(
+        'Workspace',
+        'permissions.allow',
+        [],
+      ),
     );
   });
 });

@@ -1356,6 +1356,40 @@ describe('permissions data and mutations', () => {
     expect(written).toEqual([]);
   });
 
+  it('does not append a duplicate over a padded stored entry', () => {
+    // A settings file can hold a padded spelling of the rule the operator adds
+    // again; an exact compare would append a second copy that the next start
+    // lists twice.
+    const { settings, written } = createFakeSettings({
+      user: { permissions: { allow: ['  Bash(git *)  '] } } as Settings,
+    });
+    (settings.merged as Record<string, unknown>)['permissions'] = {
+      allow: ['  Bash(git *)  '],
+    };
+    addPermissionRule(
+      config,
+      settings,
+      'Bash(git *)',
+      'allow',
+      SettingScope.User,
+    );
+    expect(written).toEqual([]);
+  });
+
+  it('persists the deletion of a rule stored only in the workspace scope', () => {
+    // The user scope has no rule list at all, so the delete has to walk on to
+    // the workspace scope where the entry lives.
+    const { settings, written } = createFakeSettings({
+      workspace: { permissions: { allow: ['Bash(git *)'] } } as Settings,
+    });
+    deletePermissionRule(config, settings, 'Bash(git *)', 'allow');
+    expect(written).toContainEqual({
+      scope: SettingScope.Workspace,
+      key: 'permissions.allow',
+      value: [],
+    });
+  });
+
   it('deletes a rule from the manager and the persisting scope', () => {
     const { settings, written } = createFakeSettings({
       user: { permissions: { allow: ['Bash(git *)'] } } as Settings,

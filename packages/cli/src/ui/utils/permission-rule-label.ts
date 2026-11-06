@@ -44,3 +44,45 @@ export function withoutDeletedRule(
   if (index === -1) return null;
   return rules.filter((_, i) => i !== index);
 }
+
+/**
+ * The stored list with `ruleText` appended, or `null` when it is already there.
+ *
+ * The comparison is the same trimmed one the delete path uses. A settings file
+ * may hold a padded spelling of a rule the operator adds again, and an exact
+ * compare would append a second copy that the next start lists twice.
+ */
+export function withAddedRule(
+  rules: readonly unknown[],
+  ruleText: string,
+): unknown[] | null {
+  const trimmed = ruleText.trim();
+  if (
+    rules.some((rule) => typeof rule === 'string' && rule.trim() === trimmed)
+  ) {
+    return null;
+  }
+  return [...rules, ruleText];
+}
+
+/**
+ * `withoutDeletedRule` applied to whichever of the user and workspace scopes
+ * holds the rule, with the same first-match and scope-order rules both
+ * dialogs' delete handlers need. Returns the scope to write, or `null` when
+ * neither scope holds the rule.
+ */
+export function withoutDeletedRuleInScopes<T>(
+  scopes: readonly T[],
+  rulesFor: (scope: T) => readonly unknown[] | undefined,
+  raw: string,
+): { scope: T; rules: unknown[] } | null {
+  for (const scope of scopes) {
+    const rules = rulesFor(scope);
+    if (!rules) continue;
+    const updated = withoutDeletedRule(rules, raw);
+    if (updated) {
+      return { scope, rules: updated };
+    }
+  }
+  return null;
+}

@@ -92,7 +92,10 @@ import {
   type OpenTuiModelEntry,
 } from './dialogs-model.js';
 import type { PermissionRuleEntry } from './dialogs-permissions.js';
-import { withoutDeletedRule } from '../utils/permission-rule-label.js';
+import {
+  withAddedRule,
+  withoutDeletedRuleInScopes,
+} from '../utils/permission-rule-label.js';
 import type {
   McpResourceInfo,
   McpServerAction,
@@ -779,8 +782,9 @@ export function addPermissionRule(
         | Record<string, string[]>
         | undefined
     )?.[type] ?? [];
-  if (!current.includes(ruleText)) {
-    settings.setValue(scope, key, [...current, ruleText]);
+  const updated = withAddedRule(current, ruleText);
+  if (updated) {
+    settings.setValue(scope, key, updated);
   }
 }
 
@@ -793,21 +797,25 @@ export function deletePermissionRule(
 ): void {
   const manager = config?.getPermissionManager?.();
   manager?.removePersistentRule(raw, type);
-  for (const scope of ['user', 'workspace'] as const) {
-    const settingScope = persistScopeToSettingScope(scope);
-    const scopeSettings = settings.forScope(settingScope).settings;
-    const rules = (scopeSettings as Record<string, unknown>)['permissions'] as
-      | Record<string, string[]>
-      | undefined;
-    const scopeRules = rules?.[type];
-    // `parseRule` trims, so a stored entry with surrounding whitespace has to
-    // match the trimmed rule or the removal never reaches the settings file.
-    if (!scopeRules) continue;
-    const updated = withoutDeletedRule(scopeRules, raw);
-    if (updated) {
-      settings.setValue(settingScope, `permissions.${type}`, updated);
-      break;
-    }
+  const deleted = withoutDeletedRuleInScopes(
+    ['user', 'workspace'] as const,
+    (scope) => {
+      const settingScope = persistScopeToSettingScope(scope);
+      const scopeSettings = settings.forScope(settingScope).settings;
+      return (
+        (scopeSettings as Record<string, unknown>)['permissions'] as
+          | Record<string, string[]>
+          | undefined
+      )?.[type];
+    },
+    raw,
+  );
+  if (deleted) {
+    settings.setValue(
+      persistScopeToSettingScope(deleted.scope),
+      `permissions.${type}`,
+      deleted.rules,
+    );
   }
 }
 

@@ -21,7 +21,8 @@ import { Colors } from '../colors.js';
 import { t } from '../../i18n/index.js';
 import {
   permissionRuleLabel,
-  withoutDeletedRule,
+  withAddedRule,
+  withoutDeletedRuleInScopes,
 } from '../utils/permission-rule-label.js';
 import type { PermissionManager } from '@qwen-code/qwen-code-core/permissions/permission-manager.js';
 import type {
@@ -506,8 +507,9 @@ export function PermissionsDialog({
         'permissions'
       ] as Record<string, string[]> | undefined;
       const currentRules = perms?.[ruleType] ?? [];
-      if (!currentRules.includes(pendingRuleText)) {
-        settings.setValue(scope, key, [...currentRules, pendingRuleText]);
+      const updated = withAddedRule(currentRules, pendingRuleText);
+      if (updated) {
+        settings.setValue(scope, key, updated);
       }
 
       // Refresh and go back
@@ -525,22 +527,21 @@ export function PermissionsDialog({
     // Remove from PermissionManager in-memory
     pm.removePersistentRule(deleteTarget.rule.raw, ruleType);
 
-    // Persist removal — find and remove from settings
-    // We try both User and Workspace scopes
-    for (const scope of [SettingScope.User, SettingScope.Workspace]) {
-      const scopeSettings = settings.forScope(scope).settings;
-      const perms = (scopeSettings as Record<string, unknown>)[
-        'permissions'
-      ] as Record<string, string[]> | undefined;
-      const scopeRules = perms?.[ruleType];
-      // `parseRule` trims, so compare against the trimmed stored entry or a
-      // rule written with surrounding whitespace is removed from memory only.
-      if (!scopeRules) continue;
-      const updated = withoutDeletedRule(scopeRules, deleteTarget.rule.raw);
-      if (updated) {
-        settings.setValue(scope, `permissions.${ruleType}`, updated);
-        break;
-      }
+    // Persist removal — a rule may live in the user or the workspace scope.
+    const deleted = withoutDeletedRuleInScopes(
+      [SettingScope.User, SettingScope.Workspace],
+      (scope) =>
+        (settings.forScope(scope).settings as Record<string, unknown>)?.[
+          'permissions'
+        ]?.[ruleType] as unknown[] | undefined,
+      deleteTarget.rule.raw,
+    );
+    if (deleted) {
+      settings.setValue(
+        deleted.scope,
+        `permissions.${ruleType}`,
+        deleted.rules,
+      );
     }
 
     refreshRules();
