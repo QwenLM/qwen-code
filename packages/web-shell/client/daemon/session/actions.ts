@@ -1924,10 +1924,6 @@ export function createDaemonSessionActions({
       ) {
         throw new Error('Model refresh requires a connected workspace.');
       }
-      if (readOnly && session) {
-        // Invalidate older reconnect snapshots without starting a config write.
-        observeSessionConfig(sessionConfigGeneration, session);
-      }
       const isCurrent = (current = getConnection()) =>
         sessionRef.current === session &&
         current.sessionId === before.sessionId &&
@@ -1954,6 +1950,10 @@ export function createDaemonSessionActions({
       };
       await beforeRefresh?.({ workspaceCwd, sessionId: session?.sessionId });
       if (!isCurrent()) return;
+      if (readOnly && session) {
+        // Invalidate older reconnect snapshots without starting a config write.
+        observeSessionConfig(sessionConfigGeneration, session);
+      }
       const workspace = client.workspaceByCwd(workspaceCwd);
       if (!readOnly) {
         const reload = workspace.reloadModelProviders({
@@ -2944,10 +2944,14 @@ export function createDaemonSessionActions({
       }
     },
 
-    async getContext() {
+    async getContext(opts) {
+      const currentSession = sessionRef.current;
+      if (!currentSession && opts?.silent) {
+        throw new Error('Daemon session is not connected');
+      }
       const session = requireSessionForAction(
         addNotice,
-        sessionRef.current,
+        currentSession,
         'Load context failed',
         'load_context',
       );
@@ -2993,6 +2997,9 @@ export function createDaemonSessionActions({
             ? { ...current, workflowModeStatus: 'unknown' }
             : current,
         );
+        if (opts?.silent && isTransientSessionReadError(error)) {
+          throw error;
+        }
         throw dispatchActionError(
           addNotice,
           'Load context failed',

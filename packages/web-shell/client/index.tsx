@@ -51,6 +51,11 @@ export type {
 export {
   type ManagedAgentCommandOptions,
   type ManagedAgentPendingAction,
+  type ManagedAgentPendingPermissionAction,
+  type ManagedAgentPendingQuestionAction,
+  type ManagedAgentQuestionAnswer,
+  type ManagedAgentQuestionResponse,
+  type ManagedAgentActionResponse,
   type ManagedAgentProvider,
   type ManagedAgentRequestOptions,
   type ManagedAgentRuntimeState,
