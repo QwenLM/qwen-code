@@ -6,6 +6,12 @@ import type {
   ManagedExtensionSettings,
   ManagedExtensionSnapshot,
   ManagedExtensionSelection,
+  ManagedExtensionImportMetadata,
+  ManagedExtensionInspection,
+  ManagedRuntimeSkillCandidates,
+  ManagedRuntimeSkillSnapshot,
+  ManagedRuntimeSkillImport,
+  ManagedRuntimeSkillOwner,
 } from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import type {
@@ -13,6 +19,12 @@ import type {
   ManagedMcpManagementSnapshot,
 } from './managed-mcp-management-types';
 import type { ManagedToolResultReader } from './managed-tool-result-types';
+import type {
+  ManagedMcpOAuthAttempt,
+  ManagedMcpOAuthSnapshot,
+  ManagedMcpOAuthRevocation,
+  ManagedMcpOAuthStart,
+} from './managed-mcp-oauth-types';
 
 export type ManagedAgentSessionPhase =
   | 'created'
@@ -449,6 +461,54 @@ export interface ManagedAgentProvider {
       archive: Blob,
       options: ManagedAgentCommandOptions,
     ): Promise<ManagedExtensionPackageOperation>;
+    importPackage?(
+      workspaceId: string,
+      extensionId: string | undefined,
+      metadata: ManagedExtensionImportMetadata,
+      source: Blob,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedExtensionPackageOperation>;
+    previewPackage?(
+      workspaceId: string,
+      metadata: ManagedExtensionImportMetadata,
+      source: Blob,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionInspection>;
+    runtimeSkillCandidates?(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedRuntimeSkillCandidates>;
+    runtimeSkillSnapshot?(
+      sessionId: string,
+      input: {
+        owner: ManagedRuntimeSkillOwner;
+        path: string;
+        digest: string;
+        target: ManagedExtensionImportMetadata['target'];
+      },
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedRuntimeSkillSnapshot>;
+    importRuntimeSkill?(
+      sessionId: string,
+      input: ManagedRuntimeSkillImport & { extensionId?: string },
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedExtensionPackageOperation>;
+    inspect?(
+      workspaceId: string,
+      pin: ManagedExtensionPin,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionInspection>;
+    lookupPackageOperation?(
+      workspaceId: string,
+      kind: 'publish' | 'settings',
+      idempotencyKey: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionPackageOperation>;
+    lookupApplyOperation?(
+      sessionId: string,
+      idempotencyKey: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionSnapshot>;
     settings(
       workspaceId: string,
       extensionId: string,
@@ -486,6 +546,37 @@ export interface ManagedAgentProvider {
       pin: ManagedExtensionPin,
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedExtensionCatalog['extensions'][number]>;
+  };
+  readonly mcpOAuth?: {
+    query(
+      sessionId: string,
+      extensions: ManagedExtensionPin[] | undefined,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedMcpOAuthSnapshot>;
+    start(
+      sessionId: string,
+      input: {
+        serverId: string;
+        browserNonce: string;
+        pin?: ManagedExtensionPin;
+      },
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedMcpOAuthStart>;
+    status(
+      sessionId: string,
+      attemptId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedMcpOAuthAttempt>;
+    complete(
+      sessionId: string,
+      input: { attemptId: string; browserNonce: string },
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedMcpOAuthAttempt>;
+    revoke(
+      sessionId: string,
+      input: { credentialId: string; expectedGeneration: number },
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedMcpOAuthRevocation>;
   };
   readonly mcpManagement?: {
     /** Explicit tenant/actor namespace for pending commands saved in this tab. */

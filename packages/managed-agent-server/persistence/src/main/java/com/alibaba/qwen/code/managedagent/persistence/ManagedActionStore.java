@@ -487,6 +487,7 @@ public class ManagedActionStore
                 String.class,
                 tenantId,
                 sessionId);
+        ManagedMcpOAuthAdmission.requireActor(jdbc, tenantId, sessionId, actorId);
         byte[] actorKey = actorScopeKey(tenantId, actorId);
         OwnerRow ownerRow = ownerRow(tenantId, sessionId);
         // The immutable owner arms answer before the replay; the mutable

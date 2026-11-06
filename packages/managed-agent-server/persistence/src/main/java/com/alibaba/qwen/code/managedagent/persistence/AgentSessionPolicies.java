@@ -207,8 +207,17 @@ final class AgentSessionPolicies {
         return ManagedMcpSettings.find(jdbc, session.tenantId(), session.sessionId()) != null || pinned;
     }
 
+    void requirePersonalMcpActor(String tenant, String session, String actor) {
+        ManagedMcpOAuthAdmission.requireActor(jdbc, tenant, session, actor);
+    }
+
+    void requirePersonalMcpUnattended(String tenant, String session) {
+        ManagedMcpOAuthAdmission.requireUnattendedAllowed(jdbc, tenant, session);
+    }
+
     SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        ManagedMcpOAuthAdmission.requireActor(jdbc, tenantId, sessionId, actorId);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
             throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
         }
@@ -285,12 +294,20 @@ final class AgentSessionPolicies {
         return session;
     }
 
+    boolean canApplyExtensions(SessionRecord session) {
+        return workspaceFilesEnabled && "ACTIVE".equals(session.status())
+                && Set.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP).contains(session.toolProfile())
+                && sessionQueries.findChildLineage(session.tenantId(), session.sessionId()) == null
+                && !hasActiveTurn(session.tenantId(), session.sessionId());
+    }
+
     void requireConfigurationCommit(String tenantId, String workspaceId, String sessionId, JsonNode body) {
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || !workspaceId.equals(session.workspace().getWorkspaceId())) {
             throw new ManagedAgentException(409, "unsupported_feature", "Extension management is unavailable.");
         }
         requireSessionStatus(session.status(), "ACTIVE");
+        ManagedMcpOAuthAdmission.commit(jdbc, tenantId, sessionId, body);
         var lineage = sessionQueries.findChildLineage(tenantId, sessionId);
         if (lineage != null) {
             requireChildExtensionBootstrap(session, lineage, body);
@@ -516,6 +533,7 @@ final class AgentSessionPolicies {
             String sessionId, String key, String digest, String modelId, long expectedRevision,
             boolean supported) {
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        ManagedMcpOAuthAdmission.requireActor(jdbc, tenantId, sessionId, actorId);
         if (session.workspace() == null) {
             throw new ManagedAgentException(400, "unsupported_feature",
                     "Model selection requires a Workspace Session");
@@ -590,6 +608,7 @@ final class AgentSessionPolicies {
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
             boolean liveSupported, Map<String, List<String>> requestedRules, boolean rulesSupported, boolean autoSupported) {
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        ManagedMcpOAuthAdmission.requireActor(jdbc, tenantId, sessionId, actorId);
         if (session.workspace() == null) {
             throw new ManagedAgentException(400, "unsupported_feature",
                     "Approval selection requires a Workspace Session");

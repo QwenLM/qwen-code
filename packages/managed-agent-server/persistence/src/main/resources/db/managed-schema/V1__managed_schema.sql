@@ -35,6 +35,9 @@ CREATE TABLE ma_session (
     tool_profile VARCHAR(64) DEFAULT 'hosted-workspace-files/1' COMMENT 'Hosted tool capability profile admitted for the Session.',
     creator_actor_key VARBINARY(2048) NULL COMMENT 'Encoded identity of the actor that created the Session.',
     owner_actor_key VARBINARY(2048) NULL COMMENT 'Encoded identity of the actor that owns the Session.',
+    personal_execution_actor_key CHAR(64) COMMENT 'Committed personal MCP execution principal, or NULL for shared execution.',
+    personal_auth_config_revision BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Configuration revision that projected the personal execution principal.',
+    CONSTRAINT ck_ma_personal_execution_actor CHECK (personal_execution_actor_key IS NULL OR personal_auth_config_revision > 0),
     parent_session_id VARBINARY(512) NULL COMMENT 'Immediate parent Session identity for a child Session.',
     root_session_id VARBINARY(512) NULL COMMENT 'Root Session identity of the child-Session lineage.',
     parent_child_run_id VARBINARY(2048) NULL COMMENT 'Child-run identity in the immediate parent Session.',
@@ -886,6 +889,58 @@ CREATE TABLE ma_extension_operation (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_extension_operation_id PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Idempotent Workspace extension publication and settings mutation receipts.';
+
+CREATE TABLE ma_mcp_oauth_attempt (
+    attempt_key CHAR(64) NOT NULL COMMENT 'Hashed actor-scoped authorization attempt identity.',
+    scope_key CHAR(64) NOT NULL COMMENT 'Hashed tenant, Workspace and actor identity.',
+    tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
+    actor_id VARBINARY(512) NOT NULL COMMENT 'Authenticated actor owning this authorization.',
+    attempt_id VARBINARY(128) NOT NULL COMMENT 'Opaque authorization attempt identity.',
+    state_hash CHAR(64) NOT NULL COMMENT 'Digest of the single-use OAuth state.',
+    nonce_hash CHAR(64) NOT NULL COMMENT 'Digest of the initiating browser nonce.',
+    request_digest CHAR(64) NOT NULL COMMENT 'Digest for rejecting conflicting authorization retries.',
+    state VARCHAR(32) NOT NULL COMMENT 'Authorization state: pending, code_received, exchanging, completed or failed.',
+    expires_at_ms BIGINT UNSIGNED NOT NULL COMMENT 'Authorization expiry in Unix epoch milliseconds.',
+    binding_json LONGTEXT NOT NULL COMMENT 'Immutable provider, resource, scopes and package binding.',
+    encryption_key_id VARBINARY(128) NOT NULL COMMENT 'Identifier of the key protecting authorization secrets.',
+    encrypted_values LONGTEXT NOT NULL COMMENT 'Encrypted state, PKCE verifier and temporary authorization code.',
+    credential_id VARBINARY(128) COMMENT 'Credential produced by a completed authorization.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Creation time in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_mcp_oauth_attempt_business_key UNIQUE (attempt_key),
+    CONSTRAINT uk_ma_mcp_oauth_attempt_state UNIQUE (state_hash),
+    CONSTRAINT ck_ma_mcp_oauth_attempt_state CHECK (CASE state WHEN 'pending' THEN 7 WHEN 'code_received' THEN 13 WHEN 'exchanging' THEN 10 WHEN 'completed' THEN 9 WHEN 'failed' THEN 6 ELSE -1 END = CHAR_LENGTH(state)),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_mcp_oauth_attempt_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Expiring single-use personal MCP OAuth authorization attempts.';
+
+CREATE INDEX idx_ma_mcp_oauth_attempt_scope ON ma_mcp_oauth_attempt (scope_key, expires_at_ms);
+
+CREATE TABLE ma_mcp_credential (
+    credential_key CHAR(64) NOT NULL COMMENT 'Hashed actor-scoped credential identity.',
+    scope_key CHAR(64) NOT NULL COMMENT 'Hashed tenant, Workspace and actor identity.',
+    tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
+    actor_id VARBINARY(512) NOT NULL COMMENT 'Authenticated actor owning this grant.',
+    credential_id VARBINARY(128) NOT NULL COMMENT 'Opaque personal credential identity.',
+    binding_json LONGTEXT NOT NULL COMMENT 'Immutable server, provider, resource, scopes and package binding.',
+    generation BIGINT UNSIGNED NOT NULL COMMENT 'Revocation fence, unchanged by ordinary token refresh.',
+    state VARCHAR(32) NOT NULL COMMENT 'Grant state: active, refreshing, reauthorization_required or revoked.',
+    expires_at_ms BIGINT UNSIGNED NOT NULL COMMENT 'Access token expiry in Unix epoch milliseconds.',
+    encryption_key_id VARBINARY(128) NOT NULL COMMENT 'Identifier of the key protecting the grant.',
+    encrypted_values LONGTEXT NOT NULL COMMENT 'Encrypted access and refresh tokens.',
+    refresh_lease VARBINARY(128) COMMENT 'Owner of an in-flight refresh exchange.',
+    refresh_until_ms BIGINT UNSIGNED COMMENT 'Refresh lease deadline in Unix epoch milliseconds.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Creation time in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_mcp_credential_business_key UNIQUE (credential_key),
+    CONSTRAINT ck_ma_mcp_credential_generation CHECK (generation > 0),
+    CONSTRAINT ck_ma_mcp_credential_state CHECK (CASE state WHEN 'active' THEN 6 WHEN 'refreshing' THEN 10 WHEN 'reauthorization_required' THEN 24 WHEN 'revoked' THEN 7 ELSE -1 END = CHAR_LENGTH(state)),
+    CONSTRAINT ck_ma_mcp_credential_lease CHECK ((refresh_lease IS NULL AND refresh_until_ms IS NULL) OR (refresh_lease IS NOT NULL AND refresh_until_ms IS NOT NULL)),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_mcp_credential_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Encrypted actor-owned MCP grants with refresh and revocation fences.';
+
+CREATE INDEX idx_ma_mcp_credential_scope ON ma_mcp_credential (scope_key, gmt_create);
 
 CREATE TABLE ma_storage (
     alias_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and logical storage identity.',

@@ -144,11 +144,17 @@ function stdioDefinition(serverRevision = 1): ManagedMcpDefinition {
 
 function runtime(
   definitions: readonly ManagedMcpDefinition[] = [stdioDefinition()],
+  accessToken?: import('./managed-mcp-oauth.js').ManagedMcpAccessTokenProvider,
 ): ManagedMcpRuntime {
   const instance = new ManagedMcpRuntime(
     { ...sessionKey, workspaceGeneration: '1' },
     async (id) => (id === runtimeSessionId ? directory : undefined),
-    { version: 1, servers: definitions } satisfies ManagedMcpManifest,
+    {
+      version: definitions.some((definition) => definition.oauth) ? 2 : 1,
+      servers: definitions,
+    } satisfies ManagedMcpManifest,
+    undefined,
+    accessToken,
   );
   runtimes.push(instance);
   return instance;
@@ -1732,17 +1738,30 @@ describe('Managed MCP Runtime', () => {
     ).toBe('managed_mcp_grant_invalid');
   });
 
-  it.each(['streamable-http', 'sse'] as const)(
-    'runs real %s discovery and raw resource requests',
-    async (transport) => {
+  it.each([
+    ['streamable-http', false],
+    ['sse', false],
+    ['streamable-http', true],
+    ['sse', true],
+  ] as const)(
+    'runs real %s discovery and raw resource requests (personal OAuth=%s)',
+    async (transport, personal) => {
       let events: ServerResponse | undefined;
       let failPrompts = true;
       const methods: string[] = [];
       const accepts: string[] = [];
+      const bearerTokens: string[] = [];
+      let issued = 0;
       const server = createServer(async (request, response) => {
-        expect(request.headers['authorization']).toBe(
-          'Bearer scoped-test-secret',
-        );
+        if (personal) {
+          expect(request.headers['authorization']).toMatch(
+            /^Bearer current-access-[0-9]+$/,
+          );
+          bearerTokens.push(String(request.headers['authorization']));
+        } else
+          expect(request.headers['authorization']).toBe(
+            'Bearer scoped-test-secret',
+          );
         if (request.method === 'DELETE') {
           response.writeHead(503).end();
           return;
@@ -1819,18 +1838,31 @@ describe('Managed MCP Runtime', () => {
         server.listen(0, '127.0.0.1', resolve),
       );
       const address = server.address() as { port: number };
-      const instance = runtime([
-        {
-          tenantId: sessionKey.tenantId,
-          workspaceId: sessionKey.workspaceId,
-          serverId: 'fixture',
-          serverRevision: 1,
-          definitionDigest,
-          transport,
-          url: `http://127.0.0.1:${address.port}/mcp`,
-          headers: { Authorization: 'Bearer scoped-test-secret' },
-        },
-      ]);
+      const instance = runtime(
+        [
+          {
+            tenantId: sessionKey.tenantId,
+            workspaceId: sessionKey.workspaceId,
+            serverId: 'fixture',
+            serverRevision: 1,
+            definitionDigest,
+            transport,
+            url: `http://127.0.0.1:${address.port}/mcp`,
+            ...(personal
+              ? {
+                  oauth: {
+                    resourceUri: `http://127.0.0.1:${address.port}/mcp`,
+                    credentialId: 'credential',
+                    credentialGeneration: 1,
+                    configRevision: 1,
+                    executionActorKey: 'a'.repeat(64),
+                  },
+                }
+              : { headers: { Authorization: 'Bearer scoped-test-secret' } }),
+          },
+        ],
+        personal ? async () => `current-access-${++issued}` : undefined,
+      );
       const configured = await settled(instance, configure());
       if (transport === 'sse') expect(accepts).toEqual(['text/event-stream']);
       expect(configured.error).toBeUndefined();
@@ -1880,6 +1912,10 @@ describe('Managed MCP Runtime', () => {
       expect(result.response?.['contents']).toEqual([
         { uri: 'data://binary', blob: 'AQID' },
       ]);
+      if (personal) {
+        expect(bearerTokens.length).toBeGreaterThan(3);
+        expect(new Set(bearerTokens).size).toBe(bearerTokens.length);
+      }
       expect(
         methods.filter((method) => method === 'resources/read'),
       ).toHaveLength(1);

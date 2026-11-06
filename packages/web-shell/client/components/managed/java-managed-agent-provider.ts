@@ -289,6 +289,51 @@ export function createJavaManagedAgentProvider(
           request.idempotencyKey,
           request.signal,
         ),
+      importPackage: (workspaceId, extensionId, metadata, source, request) =>
+        client.importExtensionPackage(
+          workspaceId,
+          extensionId,
+          metadata,
+          source,
+          request.idempotencyKey,
+          request.signal,
+        ),
+      inspect: (workspaceId, pin, request) =>
+        client.inspectExtensionPackage(workspaceId, pin, request.signal),
+      previewPackage: (workspaceId, metadata, source, request) =>
+        client.previewExtensionPackage(
+          workspaceId,
+          metadata,
+          source,
+          request.signal,
+        ),
+      runtimeSkillCandidates: (sessionId, request) =>
+        client.getRuntimeSkillCandidates(sessionId, request.signal),
+      runtimeSkillSnapshot: (sessionId, input, request) =>
+        client.snapshotRuntimeSkill(sessionId, input, request.signal),
+      importRuntimeSkill: (sessionId, input, request) =>
+        client.importRuntimeSkill(
+          sessionId,
+          input,
+          request.idempotencyKey,
+          request.signal,
+        ),
+      lookupPackageOperation: (workspaceId, kind, key, request) =>
+        client.lookupExtensionPackageOperation(
+          workspaceId,
+          kind,
+          key,
+          request.signal,
+        ),
+      lookupApplyOperation: async (sessionId, key, request) =>
+        requireExtensionSnapshot(
+          await client.lookupExtensionApplyOperation(
+            sessionId,
+            key,
+            request.signal,
+          ),
+          sessionId,
+        ),
       settings: (workspaceId, extensionId, request) =>
         client.getExtensionSettings(workspaceId, extensionId, request.signal),
       saveSettings: (workspaceId, extensionId, revision, values, request) =>
@@ -340,6 +385,23 @@ export function createJavaManagedAgentProvider(
         ),
       package: (workspaceId, pin, request) =>
         client.getExtensionPackage(workspaceId, pin, request.signal),
+    },
+    mcpOAuth: {
+      query: (sessionId, extensions, request) =>
+        client.queryMcpOAuth(sessionId, extensions, request.signal),
+      start: (sessionId, input, request) =>
+        client.startMcpOAuth(
+          sessionId,
+          input,
+          request.idempotencyKey,
+          request.signal,
+        ),
+      status: (sessionId, attemptId, request) =>
+        client.getMcpOAuthStatus(sessionId, attemptId, request.signal),
+      complete: (sessionId, input, request) =>
+        client.completeMcpOAuth(sessionId, input, request.signal),
+      revoke: (sessionId, input, request) =>
+        client.revokeMcpOAuth(sessionId, input, request.signal),
     },
     mcpManagement: {
       storageScope: options.productScope?.trim()

@@ -17,6 +17,11 @@ import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import { MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST } from './managed-extension-profile.js';
 
 const cleanups: Array<() => Promise<void>> = [];
+const personalBinding = {
+  serverId: 'sample:tools',
+  credentialId: 'mcred_11111111-1111-4111-8111-111111111111',
+  credentialGeneration: 2,
+};
 afterEach(async () => {
   vi.restoreAllMocks();
   for (const cleanup of cleanups.splice(0)) await cleanup();
@@ -175,6 +180,16 @@ async function fixture() {
     control,
     callbacks,
     command,
+    reopen: async () => {
+      const reopened = new HostedExtensionSession(
+        session,
+        { baseUrl: 'http://127.0.0.1:1', token: 'fixture-no-traffic' },
+        { mcpRevision: 0, mcpServers: [], hookCatalog: null },
+        callbacks,
+      );
+      await reopened.open();
+      return reopened;
+    },
     failPrepare: (fail = true) => {
       rejectPrepare = fail;
     },
@@ -185,6 +200,148 @@ async function fixture() {
 }
 
 describe('Hosted extension Session configuration', () => {
+  it('persists v2 references on reload and rejects legacy writes before touching the Runtime', async () => {
+    const context = await fixture();
+    const command = {
+      ...context.command(),
+      selectionVersion: 2,
+      mcpAuthBindings: [personalBinding],
+    };
+    await context.manager.submit(command);
+    const reference = context.manager.activeBundleRef;
+    const reloaded = await context.reopen();
+    expect(reloaded.activeBundleRef).toEqual(reference);
+    expect(await reloaded.active()).toMatchObject({
+      formatVersion: 2,
+      executionActorKey: command.actorKey,
+      mcpAuthBindings: [personalBinding],
+    });
+    expect(await reloaded.snapshot()).toMatchObject({
+      revision: 1,
+      selectionVersion: 2,
+      mcpAuthBindings: [personalBinding],
+      operation: { operationId: command.operationId, state: 'active' },
+    });
+    context.control.mockClear();
+    context.warm.mockClear();
+    await expect(reloaded.submit(context.command(1))).rejects.toThrow(
+      'version 2',
+    );
+    expect(context.control).not.toHaveBeenCalled();
+    expect(context.warm).not.toHaveBeenCalled();
+    expect(reloaded.activeBundleRef).toEqual(reference);
+  });
+
+  it('preserves personal ownership when independently adding MCP and rejects another actor', async () => {
+    const context = await fixture();
+    const command = {
+      ...context.command(),
+      selectionVersion: 2,
+      mcpAuthBindings: [personalBinding],
+    };
+    await context.manager.submit(command);
+    const server = {
+      serverId: 'independent',
+      serverRevision: 1,
+      definitionDigest: 'c'.repeat(64),
+    };
+    const definitions = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'mcpDefinitions')
+      .mockResolvedValue([{ ...server, transport: 'stdio' }]);
+    const add = {
+      operationId: randomUUID(),
+      actorKey: command.actorKey,
+      expectedRevision: 0,
+      action: 'add' as const,
+      serverId: server.serverId,
+      server,
+    };
+    await expect(
+      context.manager.submitMcp({ ...add, actorKey: 'd'.repeat(64) }),
+    ).rejects.toThrow('another actor');
+    expect(definitions).not.toHaveBeenCalled();
+    await context.manager.submitMcp(add);
+    expect(await context.manager.active()).toMatchObject({
+      formatVersion: 2,
+      configRevision: 2,
+      executionActorKey: command.actorKey,
+      mcpAuthBindings: [personalBinding],
+      packages: [{ pin: command.extensions[0] }],
+      independentMcpSelections: [{ ...server, state: 'enabled' }],
+    });
+    expect(await (await context.reopen()).snapshot()).toMatchObject({
+      selectionVersion: 2,
+      mcpAuthBindings: [personalBinding],
+    });
+    const prepare = context.control.mock.calls
+      .map(([operation]) => operation)
+      .filter((operation) => operation.kind === 'extension-prepare')
+      .at(-1)!;
+    expect(prepare.command).toMatchObject({
+      selectionVersion: 2,
+      actorKey: command.actorKey,
+      mcpAuthBindings: [personalBinding],
+    });
+  });
+
+  it('restores previous personal references as a newer revision after a failed binding removal', async () => {
+    const context = await fixture();
+    const initial = {
+      ...context.command(),
+      selectionVersion: 2,
+      mcpAuthBindings: [personalBinding],
+    };
+    await context.manager.submit(initial);
+    context.failActivation();
+    const failed = {
+      ...context.command(1),
+      selectionVersion: 2,
+      mcpAuthBindings: [],
+    };
+    await expect(context.manager.submit(failed)).rejects.toThrow(
+      'lost activation response',
+    );
+    const reloaded = await context.reopen();
+    expect(await reloaded.active()).toMatchObject({
+      mcpAuthBindings: [personalBinding],
+      executionActorKey: initial.actorKey,
+    });
+    expect(await reloaded.snapshot()).toMatchObject({
+      selectionVersion: 2,
+      mcpAuthBindings: [],
+      revision: 2,
+      operation: { state: 'recovery_required' },
+    });
+    context.failActivation(false);
+    await reloaded.recoverPrevious(failed.operationId);
+    expect(await reloaded.active()).toMatchObject({
+      formatVersion: 2,
+      configRevision: 3,
+      executionActorKey: initial.actorKey,
+      mcpAuthBindings: [personalBinding],
+    });
+    expect(await (await context.reopen()).snapshot()).toMatchObject({
+      revision: 3,
+      selectionVersion: 2,
+      mcpAuthBindings: [personalBinding],
+      operation: {
+        operationId: failed.operationId,
+        mode: 'recoverPrevious',
+        state: 'active',
+      },
+    });
+    const preparation = context.control.mock.calls
+      .map(([operation]) => operation)
+      .filter((operation) => operation.kind === 'extension-prepare')
+      .at(-1)!;
+    expect(preparation.command).toMatchObject({
+      selectionVersion: 2,
+      actorKey: initial.actorKey,
+      mcpAuthBindings: [personalBinding],
+    });
+    expect(preparation.operationId).not.toBe(failed.operationId);
+  });
+
   it('blocks a failed initial selection on reload until an explicit repair is active', async () => {
     const context = await fixture();
     const initial = context.command();

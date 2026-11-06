@@ -312,6 +312,9 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
+    public boolean canApplyExtensions(SessionRecord session) { return sessionPolicies.canApplyExtensions(session); }
+
+    @Override
     @Transactional(propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)
     public void requireConfigurationCommit(String tenantId, String workspaceId, String sessionId, JsonNode body) {
         sessionPolicies.requireConfigurationCommit(tenantId, workspaceId, sessionId, body);
@@ -641,6 +644,19 @@ public class ManagedAgentStore implements AgentStateStore {
     @Override
     public boolean hasExecutionRegistryFacts(String tenantId, String sessionId) {
         return sessionQueries.hasExecutionRegistryFacts(tenantId, sessionId);
+    }
+
+    @Override
+    public boolean supportsPersonalMcpExecution() { return true; }
+
+    @Override
+    public void requirePersonalMcpActor(String tenant, String session, String actor) {
+        sessionPolicies.requirePersonalMcpActor(tenant, session, actor);
+    }
+
+    @Override
+    public void requirePersonalMcpUnattended(String tenant, String session) {
+        sessionPolicies.requirePersonalMcpUnattended(tenant, session);
     }
 
     @Override
