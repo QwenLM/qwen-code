@@ -21,6 +21,7 @@ export interface SkillInfo {
   name: string;
   description: string;
   argumentHint?: string;
+  extensionName?: string;
 }
 
 export type SlashCommandCompletionKind = 'command' | 'subcommand';
