@@ -28,6 +28,7 @@ import {
   parseUserInvocableField,
   qualifySkillName,
   validateSkillName,
+  AUTO_MEMORY_SKILL_NAME,
 } from './types.js';
 import type { Config } from '../config/config.js';
 import { parsePriorityField, validateConfig } from './skill-load.js';
@@ -55,6 +56,19 @@ import {
 
 const debugLogger = createDebugLogger('SKILL_MANAGER');
 const SKILLS_CONFIG_DIR = 'skills';
+/**
+ * Bundled skills that `Config.isSkillEnabled` hides when the feature they
+ * serve is off: `generated-ui` without the generated-UI runtime, and
+ * `auto-memory` without legacy managed auto-memory. Both the listing and a
+ * by-name load consult it, so the two cannot disagree. `generated-ui` is
+ * spelled out because its module sits above this one in the import graph.
+ * A Config stand-in that builds a SkillManager must answer `isSkillEnabled`
+ * for these (see the daemon's skills catalog).
+ */
+const CONDITIONAL_BUNDLED_SKILLS: ReadonlySet<string> = new Set([
+  'generated-ui',
+  AUTO_MEMORY_SKILL_NAME,
+]);
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
 // Skills have a fixed layout (<skill-name>/SKILL.md), so depth 2 is enough to
@@ -95,6 +109,7 @@ export class SkillManager {
   private slashReloadSuppressed = false;
   private parseErrors: Map<string, SkillError> = new Map();
   private discoveryHasErrors = false;
+  private discoveryHasReadErrors = false;
   private readonly watchers: Map<string, FSWatcher> = new Map();
   private watchStarted = false;
   private refreshTimer: NodeJS.Timeout | null = null;
@@ -307,6 +322,11 @@ export class SkillManager {
     return this.discoveryHasErrors;
   }
 
+  /** Whether discovery could not read every enabled source. */
+  hasDiscoveryReadErrors(): boolean {
+    return this.discoveryHasReadErrors;
+  }
+
   private collectCachedSkills(level?: SkillLevel): SkillConfig[] {
     const skills: SkillConfig[] = [];
     const seenNames = new Set<string>();
@@ -324,7 +344,7 @@ export class SkillManager {
       for (const skill of levelSkills) {
         if (
           level === 'bundled' &&
-          skill.name === 'generated-ui' &&
+          CONDITIONAL_BUNDLED_SKILLS.has(skill.name) &&
           !this.config.isSkillEnabled(skill)
         )
           continue;
@@ -455,8 +475,17 @@ export class SkillManager {
     const skillsCache = new Map<SkillLevel, SkillConfig[]>();
     this.parseErrors.clear();
     let discoveryHasErrors = false;
-    const onDiscoveryError = () => {
+    let discoveryHasReadErrors = false;
+    const onDiscoveryError = (error?: unknown) => {
       discoveryHasErrors = true;
+      if (
+        !(
+          error instanceof SkillError &&
+          error.code === SkillErrorCode.PARSE_ERROR
+        )
+      ) {
+        discoveryHasReadErrors = true;
+      }
     };
 
     // Safe mode: only load bundled (system) skills
@@ -500,6 +529,7 @@ export class SkillManager {
 
     // Publish completeness with the cache produced by this scan.
     this.discoveryHasErrors = discoveryHasErrors;
+    this.discoveryHasReadErrors = discoveryHasReadErrors;
     this.skillsCache = skillsCache;
 
     // Rebuild the activation registry so that newly added/removed `paths:`
@@ -1010,7 +1040,7 @@ export class SkillManager {
    */
   private async listSkillsAtLevel(
     level: SkillLevel,
-    onDiscoveryError?: () => void,
+    onDiscoveryError?: (error?: unknown) => void,
   ): Promise<SkillConfig[]> {
     if (this.config.getBareMode()) {
       debugLogger.debug(`Skipping ${level} level skills in bare mode`);
@@ -1135,7 +1165,7 @@ export class SkillManager {
   async loadSkillsFromDir(
     baseDir: string,
     level: SkillLevel,
-    onDiscoveryError?: () => void,
+    onDiscoveryError?: (error?: unknown) => void,
   ): Promise<SkillConfig[]> {
     debugLogger.debug(`Loading skills from directory: ${baseDir}`);
     try {
@@ -1210,7 +1240,7 @@ export class SkillManager {
             return await this.parseSkillFileInternal(skillManifest, level);
           } catch (error) {
             if (!(isNodeError(error) && error.code === 'ENOENT')) {
-              onDiscoveryError?.();
+              onDiscoveryError?.(error);
             }
             if (error instanceof SkillError) {
               debugLogger.error(
@@ -1266,7 +1296,7 @@ export class SkillManager {
         (skill) =>
           skill.name === name &&
           (level !== 'bundled' ||
-            name !== 'generated-ui' ||
+            !CONDITIONAL_BUNDLED_SKILLS.has(name) ||
             this.config.isSkillEnabled(skill)),
       ) || null
     );

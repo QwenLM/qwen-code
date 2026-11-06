@@ -6,7 +6,10 @@
 
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
-import type { ModCommandPresentation } from '@qwen-code/qwen-code-core/mods/types.js';
+import type {
+  ModCommandPresentation,
+  ModQueuedPrompt,
+} from '@qwen-code/qwen-code-core/mods/types.js';
 import type {
   ModRenderElement,
   ModRenderInput,
@@ -20,6 +23,10 @@ import { ModSession, type ModTurn } from './mod-session.js';
 import type { ICommandLoader } from './types.js';
 
 const sessions = new WeakMap<Config, InteractiveModSession>();
+
+/** The line a prompt sent to Mods that failed to load is refused with. */
+export const MODS_FAILED_TO_INITIALIZE =
+  'Mods failed to initialize. Fix the Mod configuration and restart. /help and /quit remain available.';
 
 export function isModRecoveryCommand(
   command: SlashCommand | undefined,
@@ -67,6 +74,8 @@ export class InteractiveModSession implements ICommandLoader {
     this.rejectStartup = reject;
   });
   private initialization?: Promise<void>;
+  private started = false;
+  private startupFailed = false;
   private closing?: Promise<void>;
   private listener?: (text: string) => void;
   private readonly logs: Array<{ text: string; sessionId: string }> = [];
@@ -76,6 +85,8 @@ export class InteractiveModSession implements ICommandLoader {
   };
   private sites: readonly ModRenderSite[] = [];
   private prompts = false;
+  private runsPrompts = false;
+  private readonly promptListeners = new Set<() => void>();
   // The band's last tree, kept until a new answer lands; none draws nothing.
   private band?: ModBand;
   private revision = 0;
@@ -92,6 +103,10 @@ export class InteractiveModSession implements ICommandLoader {
       presentation: () => this.presentation,
       sites: () => this.sites,
       prompts: () => this.prompts,
+      runsPrompts: () => this.runsPrompts,
+      promptQueued: () => {
+        for (const listener of this.promptListeners) listener();
+      },
       draw: (tree, owner) => {
         const band =
           tree.type === 'engine'
@@ -114,23 +129,31 @@ export class InteractiveModSession implements ICommandLoader {
   }
 
   /**
-   * Loads the Mods once; `sites` names the render sites the host draws, and
-   * `prompts` says whether it raises `prompt.submit`.
+   * Loads the Mods once; `sites` names the render sites the host draws,
+   * `prompts` says whether it raises `prompt.submit`, and `runsPrompts`
+   * whether it runs the prompts the Mods submit with `$.prompt.submit`.
    */
   initialize(
     sites: readonly ModRenderSite[] = [],
-    { prompts = false }: { prompts?: boolean } = {},
+    {
+      prompts = false,
+      runsPrompts = false,
+    }: { prompts?: boolean; runsPrompts?: boolean } = {},
   ): Promise<void> {
     if (!this.initialization) {
       this.sites = sites;
       this.prompts = prompts;
+      this.runsPrompts = runsPrompts;
     }
     this.initialization ??= this.session.initialize(this.lifetime.signal).then(
       () => {
         this.session.flushLogs();
+        this.started = true;
         this.resolveStartup();
       },
       (error: unknown) => {
+        this.started = true;
+        this.startupFailed = true;
         this.emit(
           `Mods failed to initialize: ${sanitizeTerminalLine(String(error)).slice(0, 2000)}`,
           this.config.getSessionId(),
@@ -146,9 +169,27 @@ export class InteractiveModSession implements ICommandLoader {
     return this.startup;
   }
 
+  /**
+   * Whether startup is still under way, so which hooks the Mods bring is
+   * unknown. False once the Mods load or fail, or the session fails to start.
+   */
+  get starting(): boolean {
+    return !this.closing && !this.started;
+  }
+
+  /**
+   * Whether the Mods themselves failed to load, so every prompt is refused.
+   * A session that failed to start before loading them reports its own error
+   * instead.
+   */
+  get failed(): boolean {
+    return !this.closing && this.startupFailed;
+  }
+
   failStartup(error: unknown): void {
     if (this.initialization) return;
     this.initialization = this.startup;
+    this.started = true;
     this.rejectStartup(error);
   }
 
@@ -228,6 +269,40 @@ export class InteractiveModSession implements ICommandLoader {
       : this.session.submitPrompt(text, signal);
   }
 
+  /** Hears each prompt a Mod queues with `$.prompt.submit`. */
+  readonly subscribePrompts = (listener: () => void): (() => void) => {
+    this.promptListeners.add(listener);
+    return () => this.promptListeners.delete(listener);
+  };
+
+  /** Whether a prompt a Mod submitted waits for the session to be idle. */
+  get hasSubmittedPrompts(): boolean {
+    return !this.closing && this.session.hasSubmittedPrompts;
+  }
+
+  /** The next prompt a Mod submitted, to run now as a turn of its own. */
+  takeSubmittedPrompt(): ModQueuedPrompt | undefined {
+    return this.closing ? undefined : this.session.takeSubmittedPrompt();
+  }
+
+  /** Puts back a prompt whose turn could not start. */
+  returnSubmittedPrompt(prompt: ModQueuedPrompt): void {
+    if (!this.closing) this.session.returnSubmittedPrompt(prompt);
+  }
+
+  /** The person sent a prompt, so the Mods' prompts may start turns again. */
+  notePersonPrompt(): void {
+    this.session.notePersonPrompt();
+  }
+
+  /**
+   * The person stopped the running turn: drops the Mods' queued prompts and
+   * refuses new ones until the person sends a prompt again.
+   */
+  stopSubmittedPrompts(): void {
+    this.session.stopSubmittedPrompts();
+  }
+
   startTurn(
     text: string,
     signal: AbortSignal,
@@ -251,6 +326,7 @@ export class InteractiveModSession implements ICommandLoader {
         this.logs.length = 0;
         this.band = undefined;
         for (const listener of this.bandListeners) listener();
+        this.promptListeners.clear();
         if (sessions.get(this.config) === this) sessions.delete(this.config);
       }
     })();

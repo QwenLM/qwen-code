@@ -59,6 +59,8 @@ export interface ChannelWebhookConfigSource {
 export interface ServeOptions {
   hostname: string;
   port: number;
+  /** Launcher-owned Conversations working root, fixed until daemon restart. */
+  conversationsDir?: string;
   /** Deployment boundary for provider selection and exposed surfaces. */
   profile?: ServeProfile;
   /**

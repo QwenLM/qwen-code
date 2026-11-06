@@ -203,6 +203,10 @@ export interface FetchPolicyOptions {
   maxBytes: number;
   /** Same-host redirect hops to follow before erroring. */
   maxRedirects: number;
+  /** Disable browser-style transient retries for API requests. */
+  retryTransient?: boolean;
+  /** Read bounded JSON error bodies for API callers that display business errors. */
+  readErrorBody?: boolean;
   headers?: Record<string, string>;
   /** Caller cancellation (e.g. the tool's abort signal). */
   signal?: AbortSignal;
@@ -215,6 +219,7 @@ export interface FetchPolicyResponse {
   contentType: string;
   /** Content-Disposition header, if any — carries the server's filename. */
   contentDisposition: string;
+  retryAfter?: string;
   body: Buffer;
   /** URL after any followed same-host redirects. */
   finalUrl: string;
@@ -280,6 +285,7 @@ export async function fetchWithPolicy(
     first = await fetchPolicyAttempt(url, options, signal, timeoutSignal);
   } catch (error) {
     if (
+      options.retryTransient !== false &&
       error instanceof FetchError &&
       error.code !== undefined &&
       RETRYABLE_ERROR_CODES.has(error.code) &&
@@ -296,6 +302,7 @@ export async function fetchWithPolicy(
   }
 
   if (
+    options.retryTransient !== false &&
     first.kind === 'response' &&
     RETRYABLE_STATUSES.has(first.status) &&
     !signal.aborted
@@ -407,28 +414,28 @@ async function fetchPolicyAttempt(
         continue;
       }
 
-      // The sole caller discards the body of every non-2xx response (only the
-      // status/statusText feed its failure message, and the 403/429 retry path
-      // inspects the status alone). Cancel the body without buffering it:
-      // otherwise an oversized error page reports EMSGSIZE instead of its real
-      // status, and a slow-trickling error body can burn the whole timeout for
-      // bytes that are never read.
-      if (response.status < 200 || response.status >= 300) {
+      const failed = response.status < 200 || response.status >= 300;
+      const responseInfo = {
+        kind: 'response' as const,
+        status: response.status,
+        statusText: response.statusText,
+        contentType: response.headers.get('content-type') ?? '',
+        contentDisposition: response.headers.get('content-disposition') ?? '',
+        ...(response.headers.get('retry-after')
+          ? { retryAfter: response.headers.get('retry-after')! }
+          : {}),
+        finalUrl: currentUrl,
+      };
+      // Web page callers only use status; avoid buffering slow or oversized error pages.
+      if (failed && !options.readErrorBody) {
         await response.body?.cancel().catch(() => {});
-        return {
-          kind: 'response',
-          status: response.status,
-          statusText: response.statusText,
-          contentType: response.headers.get('content-type') ?? '',
-          contentDisposition: response.headers.get('content-disposition') ?? '',
-          body: Buffer.alloc(0),
-          finalUrl: currentUrl,
-        };
+        return { ...responseInfo, body: Buffer.alloc(0) };
       }
 
       const contentLength = Number(response.headers.get('content-length'));
       if (Number.isFinite(contentLength) && contentLength > options.maxBytes) {
         await response.body?.cancel().catch(() => {});
+        if (failed) return { ...responseInfo, body: Buffer.alloc(0) };
         throw new FetchError(
           `Response too large: ${contentLength} bytes exceeds the ${options.maxBytes}-byte limit`,
           'EMSGSIZE',
@@ -456,6 +463,8 @@ async function fetchPolicyAttempt(
           }
         } catch (error) {
           await reader.cancel().catch(() => {});
+          if (failed && !options.signal?.aborted)
+            return { ...responseInfo, body: Buffer.alloc(0) };
           if (error instanceof FetchError) throw error;
           return wrapAbort(error);
         } finally {
@@ -463,15 +472,7 @@ async function fetchPolicyAttempt(
         }
       }
 
-      return {
-        kind: 'response',
-        status: response.status,
-        statusText: response.statusText,
-        contentType: response.headers.get('content-type') ?? '',
-        contentDisposition: response.headers.get('content-disposition') ?? '',
-        body: Buffer.concat(chunks, total),
-        finalUrl: currentUrl,
-      };
+      return { ...responseInfo, body: Buffer.concat(chunks, total) };
     } finally {
       await dispatcher?.close();
     }
