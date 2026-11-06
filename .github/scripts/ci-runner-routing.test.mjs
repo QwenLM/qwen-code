@@ -456,6 +456,25 @@ describe('ci.yml lint HOME isolation', () => {
     /outputs\.lint_runner/.test(String(job['runs-on'] ?? '')),
   );
 
+  // The one run-unique path per lane. create, the gate's QWEN_HOME and the
+  // cleanup must all name it: a `home=` that drifts at one site leaves the
+  // others pointing at a directory this run never cleared.
+  const HOME_TEMPLATE = {
+    lint_and_static: 'qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}',
+    integration_no_ak: 'qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}',
+  };
+
+  // The `$GITHUB_ENV` writers, by value. It is last-write-wins, so an added
+  // HOME/USERPROFILE writer (or a dropped `HOME=%s`) must break equality;
+  // COREPACK_HOME stays inside the run-unique home (corepack does not
+  // re-verify entries on cache hit — a shared home is a poisoning channel)
+  // and XDG_CACHE_HOME rides the SHA-256-verified linter-archive cache.
+  const ENV_WRITES = [
+    'printf \'HOME=%s\\nUSERPROFILE=%s\\n\' "$home" "$home" >> "${GITHUB_ENV}"',
+    'printf \'XDG_CACHE_HOME=%s\\n\' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" >> "${GITHUB_ENV}"',
+    'printf \'COREPACK_HOME=%s\\n\' "${home}/.cache/node/corepack" >> "${GITHUB_ENV}"',
+  ];
+
   it('scopes the ungated routing to the recorded lanes', () => {
     // The decision record scopes the boundary change to Lint & Static and
     // (2026-11-02, same trust class — PR code on the pool, zero secrets by
@@ -491,39 +510,9 @@ describe('ci.yml lint HOME isolation', () => {
       'Create isolated HOME',
       'no_ak must isolate HOME from its first step',
     );
-    const create = String(steps[0].run ?? '');
-    assert.ok(
-      create.includes('qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'),
-      'no_ak HOME path must be run-unique',
-    );
-    assert.ok(
-      create.includes('rm -rf') &&
-        create.indexOf('rm -rf') < create.indexOf('mkdir'),
-      'must clear the HOME before creating it',
-    );
-    // Pin the publication by its template, not by a `HOME=` substring:
-    // COREPACK_HOME= and XDG_CACHE_HOME= both satisfy a substring check, so
-    // deleting the real HOME/USERPROFILE line kept this test green.
-    const homePublish = create
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.startsWith('printf '));
-    assert.ok(
-      homePublish.includes(
-        'printf \'HOME=%s\\nUSERPROFILE=%s\\n\' "$home" "$home" >> "${GITHUB_ENV}"',
-      ),
-      'must publish HOME/USERPROFILE from the resolved $home via GITHUB_ENV',
-    );
-    assert.ok(
-      create.includes('COREPACK_HOME=') &&
-        create.includes('"${home}/.cache/node/corepack"'),
-      'COREPACK_HOME must stay inside the run-unique HOME',
-    );
-    assert.ok(
-      create.includes('XDG_CACHE_HOME=') &&
-        create.includes('RUNNER_TOOL_CACHE'),
-      'must share the verified linter-archive cache',
-    );
+    // The create/cleanup step text is pinned by VALUE in the two shared tests
+    // below, which iterate every ungated lane; looped substring checks used to
+    // survive a `-v2` path drift, a dropped `HOME=%s` and an added HOME writer.
     // Job env must stay empty of HOME (the runner context is illegal there).
     assert.equal(ciDoc.jobs.integration_no_ak.env?.HOME, undefined);
 
@@ -531,12 +520,13 @@ describe('ci.yml lint HOME isolation', () => {
       (s) => s.name === 'Run required no-AK integration gate',
     );
     assert.ok(gate, 'integration gate step missing');
-    const home = String(gate.env?.QWEN_HOME ?? '');
-    assert.ok(
-      home.startsWith(
-        '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}',
-      ),
-      `QWEN_HOME must derive from the run-unique home, got: ${home}`,
+    // By value, not by prefix: a drifted create path or a `-v2` suffix would
+    // satisfy `startsWith` while QWEN_HOME pointed at a directory this run
+    // never cleared.
+    assert.equal(
+      gate.env?.QWEN_HOME,
+      '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen',
+      'QWEN_HOME must be the run-unique home the create step built',
     );
     // Zero-secrets contract, enforced by VALUE not by name: every env key
     // outside QWEN_HOME must be the empty string, and the step must
@@ -569,25 +559,6 @@ describe('ci.yml lint HOME isolation', () => {
       'ANTHROPIC_AUTH_TOKEN must be present and empty (SDK auth-resolver ' +
         'back-fill; deleting the scrub key escapes the value whitelist)',
     );
-
-    // Reclamation: the run-unique home must be removed at the end so it
-    // does not accumulate in RUNNER_TEMP on this persistent pool.
-    const clean = steps.find((s) => s.name === 'Clean isolated HOME');
-    assert.ok(clean, 'no_ak cleanup step missing');
-    assert.equal(clean.if, '${{ always() }}');
-    // Pin the template the create step builds, not just the `qwen-no-ak-home-`
-    // prefix: a cleanup that dropped `-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}`
-    // would still satisfy a prefix check while removing a path nothing used.
-    assert.ok(
-      String(clean.run).includes(
-        '${RUNNER_TEMP}/qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}',
-      ) && !String(clean.run).includes('"$HOME"'),
-      'cleanup must remove the exact run-unique path the create step builds',
-    );
-    assert.ok(
-      steps[steps.length - 1]?.name !== 'Run required no-AK integration gate',
-      'the gate must not be the last step (cleanup follows)',
-    );
   });
 
   it('publishes a run-unique HOME from the first step, not job env', () => {
@@ -607,33 +578,21 @@ describe('ci.yml lint HOME isolation', () => {
       const steps = job.steps ?? [];
       assert.equal(steps[0]?.name, 'Create isolated HOME', id);
       const run = String(steps[0]?.run ?? '');
+      const lines = run.split('\n').map((line) => line.trim());
+      // The declared `home=` by value: a `-v2` suffix here leaves the gate's
+      // QWEN_HOME and the cleanup aimed at a directory this run never built.
       assert.ok(
-        run.includes('GITHUB_RUN_ID') && run.includes('GITHUB_RUN_ATTEMPT'),
-        `${id} HOME path must be run-unique`,
+        lines.includes(`home="\${RUNNER_TEMP}/${HOME_TEMPLATE[id]}"`),
+        `${id} must build its run-unique HOME from the lane template`,
       );
       assert.ok(
         run.includes('rm -rf') && run.indexOf('rm -rf') < run.indexOf('mkdir'),
         `${id} must clear the path before creating it`,
       );
-      assert.ok(
-        run.includes('HOME=') &&
-          run.includes('USERPROFILE=') &&
-          run.includes('GITHUB_ENV'),
-        `${id} must publish HOME/USERPROFILE via GITHUB_ENV`,
-      );
-      // Linter archives are SHA-256-verified on every cache hit (lint.js), so
-      // the shared tool cache is safe for them. Corepack does NOT re-verify
-      // extracted entries on hit (reproduced on 0.34.6 and 0.36.0), so
-      // COREPACK_HOME must stay inside the run-unique HOME — a shared one is
-      // a cross-job poisoning channel. Deleting either line reds this.
-      assert.ok(
-        run.includes('XDG_CACHE_HOME=') && run.includes('RUNNER_TOOL_CACHE'),
-        `${id} must share the verified linter-archive cache`,
-      );
-      assert.ok(
-        run.includes('COREPACK_HOME=') &&
-          run.includes('"${home}/.cache/node/corepack"'),
-        `${id} COREPACK_HOME must stay inside the run-unique HOME`,
+      assert.deepEqual(
+        lines.filter((line) => line.includes('${GITHUB_ENV}')),
+        ENV_WRITES,
+        `${id} must publish exactly HOME/USERPROFILE, XDG_CACHE_HOME and COREPACK_HOME via GITHUB_ENV`,
       );
     }
   });
@@ -662,10 +621,14 @@ describe('ci.yml lint HOME isolation', () => {
           `${id} cleanup must be the final step`,
         );
       }
-      // The constructed path, never $HOME: a failed init must not aim the
-      // removal at the account's real home.
-      assert.ok(String(clean.run).includes('qwen-'), id);
-      assert.ok(!String(clean.run).includes('"$HOME"'), id);
+      // The realized removal by value, never $HOME: any `qwen-*` path passes a
+      // substring check, so a retargeted `rm -rf` (or an `echo` stand-in)
+      // would leave the run-unique home to accumulate on this persistent pool.
+      assert.equal(
+        String(clean.run),
+        `rm -rf -- "\${RUNNER_TEMP}/${HOME_TEMPLATE[id]}"`,
+        `${id} must reclaim the exact run-unique HOME the create step built`,
+      );
     }
   });
 });
