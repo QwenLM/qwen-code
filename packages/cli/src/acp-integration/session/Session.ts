@@ -14896,7 +14896,18 @@ export class Session implements SessionContext {
     if (updateFailed) throw updateError;
   }
 
-  reloadSkillSettings(): void {
+  reloadSkillSettings(includeUserSettings = false): void {
+    if (includeUserSettings) {
+      if (
+        !this.settings.reloadScopesFromDiskAtomically([
+          SettingScope.Workspace,
+          SettingScope.User,
+        ])
+      ) {
+        throw new Error('Failed to reload user skill settings');
+      }
+      return;
+    }
     this.settings.reloadScopeFromDisk(SettingScope.Workspace);
   }
 

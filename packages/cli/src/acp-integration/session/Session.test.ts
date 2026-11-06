@@ -15184,6 +15184,25 @@ describe('Session', () => {
       expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
     });
 
+    it.each([true, false])(
+      'atomically re-reads User and Workspace skill settings (success=%s)',
+      (success) => {
+        vi.mocked(
+          mockSettings.reloadScopesFromDiskAtomically,
+        ).mockReturnValueOnce(success);
+        if (success)
+          expect(() => session.reloadSkillSettings(true)).not.toThrow();
+        else
+          expect(() => session.reloadSkillSettings(true)).toThrow(
+            'Failed to reload user skill settings',
+          );
+        expect(
+          mockSettings.reloadScopesFromDiskAtomically,
+        ).toHaveBeenCalledWith([SettingScope.Workspace, SettingScope.User]);
+        expect(mockSettings.reloadScopeFromDisk).not.toHaveBeenCalled();
+      },
+    );
+
     it('refreshes workspace skill settings, commands, and SkillManager consumers', async () => {
       const suppressNextSlashReload = vi.fn();
       const notifyConfigChanged = vi.fn().mockResolvedValue(undefined);
