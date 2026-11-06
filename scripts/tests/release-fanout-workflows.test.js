@@ -70,6 +70,17 @@ describe.each(workflows)('$path failure reporting', ({ path, titlePrefix }) => {
     expect(step.env.FAILURE_TITLE_PREFIX).toBe(titlePrefix);
     // A reconciliation failure must never turn a shipped release red.
     expect(step['continue-on-error']).toBe(true);
+
+    // The reader's prefix has to be the one the notifier actually writes, or
+    // the close silently matches nothing and the stale issue stays open. Take
+    // it from the notifier's own `--title` rather than restating the literal a
+    // third time.
+    const notifier = yml.jobs['report-failure'].steps.find(
+      (entry) => entry.name === 'Create failure issue',
+    );
+    const title = notifier.run.match(/--title "([^"]*)"/)?.[1];
+    expect(title, notifier.run).toBeDefined();
+    expect(title.startsWith(titlePrefix), title).toBe(true);
   });
 });
 
