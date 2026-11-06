@@ -23,6 +23,14 @@ on:
       - 'main'
       - 'release/**'
       - 'omni-experiment'
+    # The default three plus ready_for_review: a draft skips the no-AK
+    # integration gate and the browser smoke, so leaving draft has to start
+    # the run that includes them.
+    types:
+      - 'opened'
+      - 'synchronize'
+      - 'reopened'
+      - 'ready_for_review'
   merge_group:
   # The macOS and Windows lanes' ONLY remaining trigger, and therefore this
   # repository's only signal about a host that is not Linux with a GNU
@@ -394,7 +402,7 @@ jobs:
             fi
           fi
           case "${profile}" in
-            docs_only|github_ci_only|full) ;;
+            docs_only|github_ci_only|java_only|full) ;;
             *)
               echo "::error::Trusted CI profile classifier returned '${profile}'; running full CI."
               profile=full
@@ -602,7 +610,7 @@ jobs:
           fi
           profile="${TRUSTED_CI_PROFILE:-full}"
           case "${profile}" in
-            docs_only|github_ci_only|full) ;;
+            docs_only|github_ci_only|java_only|full) ;;
             *) profile=full ;;
           esac
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
@@ -687,7 +695,7 @@ jobs:
           # runners, so such state persists. Start the shard-owned cache
           # empty — and only that exact path, so a runner-exported shared
           # cache and lint's already-warmed run-unique home stay untouched.
-          if [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
+          if [ -n "${RUNNER_TEMP:-}" ] && [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
             rm -rf -- "${COREPACK_HOME}"
           fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
@@ -699,10 +707,27 @@ jobs:
           echo "npm cache: ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
+      # base_key is the key the base commit's own push run saved under. A
+      # bare prefix restore returns the NEWEST entry, which can be many main
+      # commits away from this branch; once any root file or build script
+      # differs, every workspace rebuilds ("29 of 29 workspaces changed").
+      # The base commit is fetched treeless-of-blobs: the key reads blob ids
+      # from its trees, never file contents. A failed fetch only drops back
+      # to the prefix restore.
       - name: 'Hash the build inputs'
         id: 'build_key'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'echo "key=$(node scripts/ci-build-cache.mjs key)" >> "${GITHUB_OUTPUT}"'
+        env:
+          BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}'
+        run: |-
+          echo "key=$(node scripts/ci-build-cache.mjs key)" >> "${GITHUB_OUTPUT}"
+          base_key=''
+          if [ -n "${BASE_SHA}" ] &&
+             git fetch --quiet --no-tags --depth=1 --filter=blob:none origin "${BASE_SHA}"; then
+            base_key="$(node scripts/ci-build-cache.mjs key --at "${BASE_SHA}")" || base_key=''
+          fi
+          echo "base_key=${base_key}" >> "${GITHUB_OUTPUT}"
+          echo "Base ${BASE_SHA:-none} build key: ${base_key:-none}"
 
       # A push to main always builds from scratch, so every cache a pull
       # request starts from is a clean build of main; a pull request whose
@@ -710,6 +735,12 @@ jobs:
       # The path stays relative: actions/cache versions an entry by its path,
       # and runner.temp differs between pool hosts, so one host could never
       # restore what another saved.
+      #
+      # The key carries no runner.arch. The x64-labelled pool includes ARM64
+      # hosts, and every built path is JavaScript except the bundle's opentui
+      # native library, which `build` recopies for the host after restoring
+      # and every consumer recopies after unpacking (`host-assets`). Split
+      # by arch, each half of the pool restored the other half's misses.
       - name: 'Restore the build cache'
         id: 'build_cache'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name != 'push' }}"
@@ -718,13 +749,58 @@ jobs:
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
           path: '.qwen-build-cache'
-          key: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.build_key.outputs.key }}'
-          restore-keys: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-'
+          key: 'qwen-build-v2-${{ runner.os }}-${{ steps.build_key.outputs.key }}'
+          restore-keys: |-
+            qwen-build-v2-${{ runner.os }}-${{ steps.build_key.outputs.base_key || 'no-base-key' }}
+            qwen-build-v2-${{ runner.os }}-
 
+      # DEV=true makes the bundle write dist/esbuild.json, the metafile the
+      # serve fast-path closure check below reads; nothing else in the build
+      # reads DEV.
       - name: 'Build'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         timeout-minutes: 25
+        env:
+          DEV: 'true'
         run: 'node scripts/ci-build-cache.mjs build .qwen-build-cache'
+
+      # These checks read the built tree. They used to run in Lint & Static,
+      # which built and bundled the CLI a second time for them (~9 minutes);
+      # here they read the tree every other lane tests, in seconds. They stay
+      # required: `Test (ubuntu-latest, Node 22.x)` passes only when this job
+      # does. Linux-only on purpose — macOS/Windows run `test:ci` alone.
+      - name: 'Check serve fast-path bundle closure'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        timeout-minutes: 5
+        run: 'node scripts/check-serve-fast-path-bundle.js'
+
+      # cli sources name core modules by path (`.../config/storage.js`). In the
+      # repo those resolve through tsconfig paths or vitest aliases; in the
+      # published package neither exists and Node resolves them against core's
+      # `exports`, where one `./*` entry carries all of them. Nothing else
+      # exercises that entry, so without this a change to it — or to the
+      # dist layout — leaves every suite green and breaks `qwen` at startup.
+      - name: 'Check core subpath exports resolve'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        timeout-minutes: 5
+        run: 'npm run check:core-subpath-exports'
+
+      # The generator imports core's dist, so it lives with the build too.
+      - name: 'Generate settings schema'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run generate:settings-schema'
+
+      - name: 'Check settings schema is up-to-date'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          if [[ -n $(git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json) ]]; then
+            echo "Error: settings.schema.json is out of date."
+            echo "Please run: npm run generate:settings-schema"
+            echo "Then commit the updated schema file."
+            git diff packages/vscode-ide-companion/schemas/settings.schema.json
+            exit 1
+          fi
+          echo "Settings schema is up-to-date"
 
       - name: 'Pack the build cache'
         id: 'pack_build_cache'
@@ -741,7 +817,7 @@ jobs:
         uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
           path: '.qwen-build-cache'
-          key: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.build_key.outputs.key }}'
+          key: 'qwen-build-v2-${{ runner.os }}-${{ steps.build_key.outputs.key }}'
 
       # Everything the build wrote: the ignored, untracked paths outside
       # node_modules, which each shard's own install recreates. The
@@ -1013,7 +1089,7 @@ jobs:
           fi
           profile="${TRUSTED_CI_PROFILE:-full}"
           case "${profile}" in
-            docs_only|github_ci_only|full) ;;
+            docs_only|github_ci_only|java_only|full) ;;
             *) profile=full ;;
           esac
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
@@ -1118,7 +1194,7 @@ jobs:
           # runners, so such state persists. Start the shard-owned cache
           # empty — and only that exact path, so a runner-exported shared
           # cache and lint's already-warmed run-unique home stay untouched.
-          if [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
+          if [ -n "${RUNNER_TEMP:-}" ] && [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
             rm -rf -- "${COREPACK_HOME}"
           fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
@@ -1154,6 +1230,7 @@ jobs:
         run: |-
           tar -xzf "${RUNNER_TEMP}/unit-test-tree/unit-test-tree.tgz"
           rm -rf "${RUNNER_TEMP}/unit-test-tree"
+          node scripts/ci-build-cache.mjs host-assets
 
       - name: 'Report npm cache usage (self-hosted)'
         if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
@@ -1701,11 +1778,21 @@ jobs:
             echo "::warning::classify_pr produced no ci_profile output (classifier job failed or was skipped); running full CI."
           fi
           profile="${TRUSTED_CI_PROFILE:-full}"
+          scripts_unit=false
           case "${profile}" in
             docs_only|github_ci_only|full) ;;
+            # A change confined to the Java packages skips the TypeScript
+            # build and test lanes, so this job runs its whole payload (the
+            # Flyway and contract checks included) plus the scripts/tests
+            # suites, seventeen of which read the Java trees.
+            java_only)
+              profile=full
+              scripts_unit=true
+              ;;
             *) profile=full ;;
           esac
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
+          echo "scripts_unit=${scripts_unit}" >> "${GITHUB_OUTPUT}"
           echo "Selected CI profile: ${profile}"
 
       # Deliberately gated on skip_ci ONLY, not on the CI profile: a PR that
@@ -1905,7 +1992,7 @@ jobs:
           # runners, so such state persists. Start the shard-owned cache
           # empty — and only that exact path, so a runner-exported shared
           # cache and lint's already-warmed run-unique home stay untouched.
-          if [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
+          if [ -n "${RUNNER_TEMP:-}" ] && [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then
             rm -rf -- "${COREPACK_HOME}"
           fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
@@ -1972,43 +2059,9 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node scripts/lint.js --sensitive-keywords'
 
-      # Keep this Linux-only PR gate explicit. macOS/Windows merge-queue jobs run
-      # npm run test:ci only, so they intentionally do not repeat this
-      # platform-independent bundle closure check.
-      - name: 'Check serve fast-path bundle closure'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run check:serve-fast-path-bundle'
-
-      # cli sources name core modules by path (`.../config/storage.js`). In the
-      # repo those resolve through tsconfig paths or vitest aliases; in the
-      # published package neither exists and Node resolves them against core's
-      # `exports`, where one `./*` entry carries all of them. Nothing else
-      # exercises that entry, so without this a change to it — or to the
-      # dist layout — leaves every suite green and breaks `qwen` at startup.
-      # Runs after the step above has already built the workspace.
-      - name: 'Check core subpath exports resolve'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run check:core-subpath-exports'
-
       - name: 'Run i18n check'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check-i18n'
-
-      - name: 'Generate settings schema'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run generate:settings-schema'
-
-      - name: 'Check settings schema is up-to-date'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: |-
-          if [[ -n $(git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json) ]]; then
-            echo "Error: settings.schema.json is out of date."
-            echo "Please run: npm run generate:settings-schema"
-            echo "Then commit the updated schema file."
-            git diff packages/vscode-ide-companion/schemas/settings.schema.json
-            exit 1
-          fi
-          echo "Settings schema is up-to-date"
 
       - name: 'Generate Web Shell and VS Code companion notices'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
@@ -2064,6 +2117,20 @@ jobs:
             node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} &&
               echo "::warning::helper tests failed once and the retry absorbed it; attempt-1 failures: $(grep -E '^not ok' "${RUNNER_TEMP}/helper-attempt1.log" | head -5 | paste -sd ';' -) — count this toward the #12772 helper-battery recurrence threshold"
           }
+
+      # Only on a java_only change, whose unit-test shards skip: the
+      # scripts/tests suites that name the Java trees. Selected by content so
+      # a new suite joins without editing this step; the rest of
+      # scripts/tests reads the TypeScript build, which this job never makes.
+      - name: 'Run scripts/tests for a Java-only change'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.scripts_unit == 'true' }}"
+        run: |-
+          mapfile -t suites < <(git grep -l -E 'managed-agent-server/|sdk-java/' -- 'scripts/tests/*.test.*')
+          if [ "${#suites[@]}" -eq 0 ]; then
+            echo '::error::Found no scripts/tests suite naming the Java trees.'
+            exit 1
+          fi
+          npm run test:scripts:unit -- "${suites[@]}"
 
       # Reclaim the run-unique HOME (constructed path, never $HOME) before the
       # failure collector, which must stay last.
@@ -2121,14 +2188,24 @@ jobs:
     # unknown one to `full`), and dropping the `test` edge lets this
     # 35-minute lane run beside Test instead of behind it. `|| 'full'`
     # extends that fail-safe to a classifier that emitted nothing at all.
+    #
+    # It tests test_build's tree instead of building its own. Each shard
+    # used to rebuild every workspace (~10 minutes, four times per run):
+    # this lane's ARM64 cache was saved once and never refreshed, so it
+    # restored a stale build every time. The tree is JavaScript apart from
+    # the opentui native library, which `host-assets` recopies for ARM64.
+    # Drafts skip it, as they skip the no-AK integration gate.
     needs:
       - 'classify_pr'
+      - 'test_build'
     if: |-
       ${{
         !cancelled() &&
         (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
         needs.classify_pr.outputs.skip_ci != 'true' &&
-        (needs.classify_pr.outputs.ci_profile || 'full') == 'full'
+        (needs.classify_pr.outputs.ci_profile || 'full') == 'full' &&
+        needs.test_build.result == 'success' &&
+        !github.event.pull_request.draft
       }}
     # Keep the classifier's trust and hosted overrides, but use ARM64 for
     # this lane independently of the ordinary Linux CI fleet. The history
@@ -2330,51 +2407,58 @@ jobs:
             echo 'font baseline check: skipped (script not present in this checkout)'
             exit 0
           fi
+          # A recoverable setup gap should not emit a failure annotation.
+          if GITHUB_ACTIONS='' bash .github/scripts/ecs-runner/check-font-baseline.sh; then
+            exit 0
+          fi
+          # Keep PR-supplied code at the runner's existing privilege level.
+          font_stage="$(mktemp -d "${RUNNER_TEMP:-/tmp}/qwen-fonts.XXXXXX")"
+          trap 'rm -rf -- "${font_stage}"' EXIT
+          mkdir -p "${font_stage}/lists/partial" "${font_stage}/packages"
+          apt-get -o "Dir::State::lists=${font_stage}/lists" update -qq
+          (
+            cd "${font_stage}/packages"
+            apt-get -o "Dir::State::lists=${font_stage}/lists" download fonts-dejavu-core fonts-dejavu-mono
+          )
+          for archive in "${font_stage}"/packages/*.deb; do
+            dpkg-deb --extract "${archive}" "${font_stage}/extracted"
+          done
+          font_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/fonts/qwen-ci"
+          mkdir -p "${font_dir}"
+          cp -R "${font_stage}/extracted/usr/share/fonts/." "${font_dir}/"
+          fc-cache -f "${font_dir}"
           bash .github/scripts/ecs-runner/check-font-baseline.sh
 
-      # The install leaves the build to scripts/ci-build-cache.mjs, which
-      # starts from test_build's newest clean build of main where one is
-      # cached and rebuilds only the workspaces whose inputs changed.
+      # The build comes from test_build's tree below, not from `prepare`.
       - name: 'Install dependencies'
         env:
           QWEN_SKIP_PREPARE: '1'
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
-      - name: 'Hash the build inputs'
-        id: 'build_key'
-        run: 'echo "key=$(node scripts/ci-build-cache.mjs key)" >> "${GITHUB_OUTPUT}"'
-
-      - name: 'Restore the build cache'
-        id: 'build_cache'
-        timeout-minutes: 5
+      # Same handoff as the unit-test shards (see `test`).
+      - name: 'Download the built tree'
+        id: 'download_tree'
+        timeout-minutes: 15
         continue-on-error: true
-        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
-          path: '.qwen-build-cache'
-          key: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.build_key.outputs.key }}'
-          restore-keys: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-'
+          name: 'unit-test-tree'
+          path: '${{ runner.temp }}/unit-test-tree'
 
-      - name: 'Build'
-        run: 'node scripts/ci-build-cache.mjs build .qwen-build-cache'
+      - name: 'Retry downloading the built tree'
+        if: "${{ steps.download_tree.outcome == 'failure' }}"
+        timeout-minutes: 15
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'unit-test-tree'
+          path: '${{ runner.temp }}/unit-test-tree'
 
-      # This lane runs on the ARM64 pool, which test_build may not. When the
-      # restore found nothing, the first shard saves the clean build it made.
-      - name: 'Pack the build cache'
-        id: 'pack_build_cache'
-        if: "${{ matrix.shard == 1 && steps.build_cache.outputs.cache-matched-key == '' }}"
+      - name: 'Unpack the built tree'
         run: |-
-          rm -rf .qwen-build-cache
-          node scripts/ci-build-cache.mjs pack .qwen-build-cache
-
-      - name: 'Save the build cache'
-        if: "${{ steps.pack_build_cache.outcome == 'success' }}"
-        timeout-minutes: 5
-        continue-on-error: true
-        uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
-        with:
-          path: '.qwen-build-cache'
-          key: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.build_key.outputs.key }}'
+          tar -xzf "${RUNNER_TEMP}/unit-test-tree/unit-test-tree.tgz"
+          rm -rf "${RUNNER_TEMP}/unit-test-tree"
+          node scripts/ci-build-cache.mjs host-assets
 
       - name: 'Install Playwright Chromium and WebKit (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
@@ -2490,13 +2574,16 @@ jobs:
     name: 'web-shell E2E Smoke (ubuntu-latest, Node 22.x)'
     needs:
       - 'classify_pr'
+      - 'test_build'
       - 'web_shell_e2e_smoke'
     if: |-
       ${{
         !cancelled() &&
         (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
         needs.classify_pr.outputs.skip_ci != 'true' &&
-        (needs.classify_pr.outputs.ci_profile || 'full') == 'full'
+        (needs.classify_pr.outputs.ci_profile || 'full') == 'full' &&
+        needs.test_build.result == 'success' &&
+        !github.event.pull_request.draft
       }}
     # The shards' runners: a hosted runner queued this one-line check for
     # 13 minutes after the last shard finished.
@@ -2865,8 +2952,16 @@ jobs:
   # so adding it is a no-op for existing PR/push runs. Reuses the exact
   # `test:integration:cli:sandbox:none` script from `release.yml`.
   integration_no_ak:
-    name: 'Integration Tests (no-AK, No Sandbox)'
-    needs: 'classify_pr'
+    name: 'Integration Tests (no-AK, shard ${{ matrix.shard }}/3)'
+    # Since #16133 test_build uploads the tree this gate tests. Installing
+    # with `prepare` here rebuilt and rebundled it from scratch — about ten
+    # minutes, the longest single step on the required path — and the ~50
+    # files then ran one at a time (one fork on the pool, below), seventeen
+    # more minutes. The shards unpack the shared tree and split the files
+    # three ways; integration_no_ak_result keeps the required check name.
+    needs:
+      - 'classify_pr'
+      - 'test_build'
     # The deterministic no-credential integration set (#8313) used to run as a
     # step inside the Ubuntu `test` job. That made it invisible to anything
     # that reads check names: the `Integration Tests (CLI, No Sandbox)` check
@@ -2877,18 +2972,50 @@ jobs:
     # routing as the Ubuntu gate; same PR + merge-queue events; same profile
     # gate, classified here because depending on `test` for its output would
     # serialize this job behind the hour-long unit run.
-    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
-    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    #
+    # A draft pull request skips it (and the browser smoke): it cannot merge,
+    # and `ready_for_review` starts the full run that gates the merge.
+    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && !github.event.pull_request.draft }}"
+    # Reads lint_runner, NOT ubuntu_runner: like lint_and_static, this lane
+    # executes PR code on the pool for every pull request — accepted under the
+    # same 2026-10-31 decision, and it carries NO secrets by construction
+    # (every model key is emptied at the integration step; the job's only
+    # token is the read-only checkout grant). The lane publishes a run-unique
+    # HOME from its first step (lint's shape) and empties every model key at
+    # the gate, so the pool exposure is the class already accepted for lint.
+    # test and integration_cli keep the association-gated ubuntu_runner.
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'') }}'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     # Dependency installation alone can exceed 30 minutes on a contended shared
     # ECS host, before the separately bounded 20-minute integration step starts.
-    # Same self-hosted scoping as `test` (this lane keeps the association-gated
-    # ubuntu_runner, unlike lint_and_static): hosted fallback routing
-    # keeps the pre-contention ceiling, and the ARM64 fleet — which carries
-    # no `ecs-qwen` label — gets the contended-pool allowance it runs under.
-    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''60'' || ''30'') }}'
+    # Same self-hosted scoping as lint_and_static (60/30 like its 90/45):
+    # hosted fallback routing keeps the pre-contention ceiling, and the ARM64
+    # fleet — which carries no `ecs-qwen` label — gets the contended-pool
+    # allowance it runs under.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''60'' || ''30'') }}'
     permissions:
       contents: 'read'
     steps:
+      # This lane's fork code starts at the local checkout action and the
+      # install (lifecycle scripts AND scripts/prepare.js — build+bundle),
+      # not at the gate step, so isolate HOME from the FIRST step like
+      # lint_and_static: publish a run-unique HOME via GITHUB_ENV (job env
+      # cannot read the runner context), keep the content-verified linter
+      # cache shared, and keep COREPACK_HOME inside the per-run home
+      # (corepack does not re-verify entries on cache hit — a shared home is
+      # a cross-job poisoning channel). The gate step's key scrub stays.
+      - name: 'Create isolated HOME'
+        run: |-
+          home="${RUNNER_TEMP}/qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf -- "$home"
+          mkdir -p "$home" "${RUNNER_TOOL_CACHE}/qwen-ci-cache"
+          printf 'HOME=%s\nUSERPROFILE=%s\n' "$home" "$home" >> "${GITHUB_ENV}"
+          printf 'XDG_CACHE_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" >> "${GITHUB_ENV}"
+          printf 'COREPACK_HOME=%s\n' "${home}/.cache/node/corepack" >> "${GITHUB_ENV}"
+
       - name: 'Restore workspace ownership'
         run: |-
           set -uo pipefail
@@ -3009,8 +3136,9 @@ jobs:
         with:
           expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
 
-      # KEEP IN SYNC with the `test` job's profile step so a docs-only or
-      # github-ci-only PR skips this gate exactly when it skips the unit run.
+      # KEEP IN SYNC with the `test` job's profile step so a docs-only,
+      # java_only or github-ci-only PR skips this gate exactly when it skips
+      # the unit run.
       - name: 'Use trusted CI profile'
         id: 'ci_profile'
         env:
@@ -3021,7 +3149,7 @@ jobs:
           fi
           profile="${TRUSTED_CI_PROFILE:-full}"
           case "${profile}" in
-            docs_only|github_ci_only|full) ;;
+            docs_only|github_ci_only|java_only|full) ;;
             *) profile=full ;;
           esac
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
@@ -3038,23 +3166,28 @@ jobs:
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
 
-      - name: 'Configure persistent npm cache (self-hosted)'
+      # HOME is per-run (isolated above), so this cache dies with the job —
+      # the name must not promise persistence. The cold install is the
+      # accepted cost (review round-3); a shared pnpm store is a follow-up.
+      - name: 'Configure per-run npm cache (self-hosted)'
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: |-
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using npm cache at ${cache_dir}"
+          echo "Using per-run npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Disk floor gate (self-hosted)'
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
+      # The build comes from test_build's tree below, not from `prepare`.
       - name: 'Install Dependencies'
-        if: "${{ steps.ci_profile.outputs.ci_profile == 'full' }}"
+        if: "${{ needs.test_build.result == 'success' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
@@ -3065,15 +3198,46 @@ jobs:
           echo "npm cache: ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
+      # Same handoff as the unit-test shards (see `test`).
+      - name: 'Download the built tree'
+        id: 'download_tree'
+        if: "${{ needs.test_build.result == 'success' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        timeout-minutes: 15
+        continue-on-error: true
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'unit-test-tree'
+          path: '${{ runner.temp }}/unit-test-tree'
+
+      - name: 'Retry downloading the built tree'
+        if: "${{ steps.download_tree.outcome == 'failure' }}"
+        timeout-minutes: 15
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'unit-test-tree'
+          path: '${{ runner.temp }}/unit-test-tree'
+
+      - name: 'Unpack the built tree'
+        if: "${{ needs.test_build.result == 'success' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          tar -xzf "${RUNNER_TEMP}/unit-test-tree/unit-test-tree.tgz"
+          rm -rf "${RUNNER_TEMP}/unit-test-tree"
+          node scripts/ci-build-cache.mjs host-assets
+
       - name: 'Run required no-AK integration gate'
-        if: "${{ steps.ci_profile.outputs.ci_profile == 'full' }}"
+        if: "${{ needs.test_build.result == 'success' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         timeout-minutes: 20
+        # HOME/USERPROFILE come from the first step's GITHUB_ENV publication
+        # (run-unique, cleared before use). QWEN_HOME rides the same home.
+        # The key scrub below is the zero-secrets contract: pinned by the
+        # routing battery (every non-path env value must be '').
         env:
-          HOME: '${{ runner.temp }}/qwen-no-ak-home'
-          USERPROFILE: '${{ runner.temp }}/qwen-no-ak-home'
-          QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'
+          QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen'
           API_KEY: ''
           ANTHROPIC_API_KEY: ''
+          # The SDK auth resolver back-fills this from env; a runner-account
+          # residue would survive into fork PR code (review round-3).
+          ANTHROPIC_AUTH_TOKEN: ''
           ANTHROPIC_BASE_URL: ''
           ANTHROPIC_MODEL: ''
           BAILIAN_CODING_PLAN_API_KEY: ''
@@ -3101,9 +3265,40 @@ jobs:
           QWENCLOUD_TOKEN_PLAN_API_KEY: ''
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
-          mkdir -p "${HOME}" "${QWEN_HOME}"
-          npm run typecheck:integration
-          npm run test:integration:no-ak:sandbox:none
+          mkdir -p "${QWEN_HOME}"
+          if [ "${{ matrix.shard }}" = 1 ]; then
+            npm run typecheck:integration
+          fi
+          npm run test:integration:no-ak:sandbox:none -- --shard=${{ matrix.shard }}/3
+
+      # Reclaim the run-unique HOME (constructed path, never $HOME) so it
+      # does not accumulate in RUNNER_TEMP on this persistent pool.
+      - name: 'Clean isolated HOME'
+        if: '${{ always() }}'
+        run: 'rm -rf -- "${RUNNER_TEMP}/qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'
+
+  # The required check. It passes only when the build and every shard pass,
+  # so a failed test_build (whose shards skip their steps) still fails it.
+  integration_no_ak_result:
+    name: 'Integration Tests (no-AK, No Sandbox)'
+    needs:
+      - 'classify_pr'
+      - 'test_build'
+      - 'integration_no_ak'
+    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && !github.event.pull_request.draft }}"
+    # ubuntu_runner, not the shards' lint_runner: the routing battery keeps
+    # the fork-admitting route to the lanes that isolate HOME, and this job
+    # checks out nothing.
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Require the build and every no-AK integration shard to pass'
+        env:
+          BUILD_RESULT: '${{ needs.test_build.result }}'
+          SHARDS_RESULT: '${{ needs.integration_no_ak.result }}'
+        run: 'test "$BUILD_RESULT" = success && test "$SHARDS_RESULT" = success'
 
   integration_cli:
     name: 'Integration Tests (CLI, No Sandbox)'

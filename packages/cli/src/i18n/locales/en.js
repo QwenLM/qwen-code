@@ -23,8 +23,6 @@ export default {
   '{{count}} hours': '{{count}} hours',
   Retry: 'Retry',
   'Connecting…': 'Connecting…',
-  'Could not connect Qwen Subscription. Please try again.':
-    'Could not connect Qwen Subscription. Please try again.',
   'Loading models from provider…': 'Loading models from provider…',
   'Recommended models · provider list unavailable, showing built-ins':
     'Recommended models · provider list unavailable, showing built-ins',
