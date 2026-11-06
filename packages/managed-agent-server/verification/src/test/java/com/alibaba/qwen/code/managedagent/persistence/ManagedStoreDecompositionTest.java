@@ -148,7 +148,7 @@ class ManagedStoreDecompositionTest {
                 authorizeLifecycle/5::REQUIRED:DEFAULT:false skipContended/2:- lockBounded/1:-
                 lockBoundedResult/1:- namedRootDeadlock/1:- authorizeOrdinary/4::REQUIRED:DEFAULT:false
                 approvalSelection/4::REQUIRED:DEFAULT:false usesDataSource/1:- lockSnapshotWriter/4:-
-                lockPublicationWriter/6:- lockPublicationWriter/7:- acquireWriter/4::REQUIRED:DEFAULT:false acquireWriter/5::REQUIRED:DEFAULT:false
+                lockPublicationWriter/6:- lockPublicationWriter/8:- acquireWriter/4::REQUIRED:DEFAULT:false acquireWriter/5::REQUIRED:DEFAULT:false
                 renewWriter/4::REQUIRED:DEFAULT:false renewWriter/5::REQUIRED:DEFAULT:false sealWriter/4::REQUIRED:DEFAULT:false
                 sealWriter/5::REQUIRED:DEFAULT:false quiesceOwnership/4::REQUIRED:DEFAULT:false releaseOwnership/4::REQUIRED:DEFAULT:false
                 blockRecovery/4::REQUIRED:DEFAULT:false commit/4::REQUIRED:DEFAULT:false commit/5::REQUIRED:DEFAULT:false

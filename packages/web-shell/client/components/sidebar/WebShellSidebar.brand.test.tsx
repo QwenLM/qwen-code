@@ -3,124 +3,58 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { WebShellBrand } from '../../brandContext';
+import {
+  DAEMON_APPROVAL_MODES,
+  createSidebarMocks,
+  installSidebarDomShims,
+  sidebarSessionPage,
+  staticSidebarSessionCatalogQuery,
+} from '../../test/sidebarHarness';
+
 const catalogOptions = vi.hoisted(() => vi.fn());
 const catalogRefresh = vi.hoisted(() => vi.fn());
 
-const { connection, workspace, workspaceActions, active, pinned, archived } =
-  vi.hoisted(() => {
-    const makeSessions = () => {
-      const state = {
-        sessions: [] as never[],
-        loading: false,
-        error: null as Error | null,
-        data: [] as never[] | undefined,
-        reload: vi.fn().mockResolvedValue(undefined),
-        deleteSession: vi.fn().mockResolvedValue(true),
-        archiveSession: vi.fn().mockResolvedValue(true),
-        unarchiveSession: vi.fn().mockResolvedValue(true),
-        exportSession: vi.fn(),
-      };
-      state.data = state.sessions;
-      return state;
-    };
-    return {
-      connection: {
-        status: 'connected',
-        sessionId: null as string | null,
-        workspaceCwd: '/tmp/project',
-        capabilities: { qwenCodeVersion: '1.2.3', features: [] },
-      },
-      workspace: {
-        capabilities: undefined,
-        client: {
-          workspaceByCwd: vi.fn(() => ({
-            listWorkspaceSessions: vi.fn().mockResolvedValue([]),
-            listSessionGroups: vi.fn().mockResolvedValue({
-              groups: [],
-              colorOptions: [],
-            }),
-          })),
-        },
-        refreshCapabilities: vi.fn(),
-      },
-      workspaceActions: {
-        addWorkspace: vi.fn(),
-        removeWorkspace: vi.fn(),
-        listSessionGroups: vi.fn().mockResolvedValue({
-          groups: [],
-          colorOptions: [],
-        }),
-        createSessionGroup: vi.fn(),
-        updateSessionGroup: vi.fn(),
-        deleteSessionGroup: vi.fn(),
-        updateSessionOrganization: vi.fn(),
-      },
-      active: makeSessions(),
-      pinned: makeSessions(),
-      archived: makeSessions(),
-    };
-  });
+const mocks = createSidebarMocks({
+  connectionCapabilities: { qwenCodeVersion: '1.2.3', features: [] },
+});
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
-  useConnection: () => connection,
-  useActions: () => ({ renameSession: vi.fn() }),
-  useWorkspace: () => workspace,
-  useWorkspaceActions: () => workspaceActions,
-  useChannels: () => ({ data: undefined, catalog: [], channels: {} }),
-  useSessions: (options?: { archiveState?: string; group?: string }) => {
-    if (options?.archiveState === 'archived') return archived;
-    if (options?.group === 'pinned') return pinned;
-    return active;
-  },
+  DAEMON_APPROVAL_MODES,
+  useConnection: () => mocks.connection,
+  useActions: () => mocks.actions,
+  useWorkspace: () => mocks.workspace,
+  useWorkspaceActions: () => mocks.workspaceActions,
+  useChannels: () => mocks.channels,
+  useSessions: (options?: { archiveState?: string; group?: string }) =>
+    sidebarSessionPage(mocks, options),
 }));
 
 vi.mock('../../session-catalog/session-catalog-hooks', () => ({
   useWebShellSessions: (options?: {
+    enabled?: boolean;
+    autoLoad?: boolean;
     archiveState?: string;
     group?: string;
   }) => {
     catalogOptions(options);
-    if (options?.archiveState === 'archived') return archived;
-    if (options?.group === 'pinned') return pinned;
-    return active;
+    return sidebarSessionPage(mocks, options);
   },
   useSessionCatalogController: () => ({
-    refreshQueries: vi.fn(),
+    refreshQueries: mocks.refreshSessionCatalogQueries,
     invalidateWorkspace: vi.fn(),
     refreshWorkspace: catalogRefresh,
     renamed: vi.fn(),
   }),
   useSessionCatalogPolling: () => undefined,
-  useSessionCatalogQuery: () => ({
-    sessions: [],
-    loading: false,
-    error: undefined,
-    reload: vi.fn(),
-  }),
-  useSessionCatalogQueries: vi.fn(() => []),
+  useSessionCatalogQuery: () => staticSidebarSessionCatalogQuery(),
+  useSessionCatalogQueries: mocks.useSessionCatalogQueries,
 }));
 
 const { I18nProvider } = await import('../../i18n');
 const { BrandProvider } = await import('../../brandContext');
 const { WebShellSidebar } = await import('./WebShellSidebar');
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-if (!globalThis.PointerEvent) {
-  globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
-}
-if (!Element.prototype.hasPointerCapture) {
-  Element.prototype.hasPointerCapture = () => false;
-}
-if (!Element.prototype.setPointerCapture) {
-  Element.prototype.setPointerCapture = () => {};
-}
-if (!Element.prototype.releasePointerCapture) {
-  Element.prototype.releasePointerCapture = () => {};
-}
-if (!Element.prototype.scrollIntoView) {
-  Element.prototype.scrollIntoView = () => {};
-}
+installSidebarDomShims();
 
 let root: Root;
 let container: HTMLDivElement;
