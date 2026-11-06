@@ -121,6 +121,7 @@ describe('ci failure patrol workflow', () => {
       'DOCKER_HOST',
       'GH_TOKEN',
       'GITHUB_TOKEN',
+      'QWEN_HOME',
       'QWEN_SANDBOX_IMAGE',
     ]);
     expect(classifier.env.GH_TOKEN).toBe('');
@@ -311,11 +312,25 @@ describe('ci failure patrol workflow', () => {
     expect(classifier.env.DOCKER_HOST).toBe('');
     expect(classifier.env.DOCKER_CONTEXT).toBe('default');
 
-    // The job cap must cover the resolver's own 10-minute pull budget plus the
-    // classifier step, or a cold host gets killed mid-pull and produces nothing.
-    expect(classify['timeout-minutes']).toBeGreaterThanOrEqual(
-      classifier['timeout-minutes'] + 10,
+    // The resolver can attempt TWO sequential 10-minute pulls — the requested
+    // image, then a fallback to the latest GHCR semver — so its step must be
+    // capped below the job exactly like the classifier. Without that cap a cold
+    // host eats the whole job and the model never runs at all.
+    expect(resolve['timeout-minutes']).toBeGreaterThanOrEqual(10);
+    expect(resolve['timeout-minutes']).toBeLessThan(
+      classify['timeout-minutes'],
     );
+    // Both bounded steps, plus room for scan (~2 observed) and job setup, must
+    // fit inside the job cap.
+    expect(
+      resolve['timeout-minutes'] + classifier['timeout-minutes'],
+    ).toBeLessThan(classify['timeout-minutes']);
+
+    // ensure / resolve / classifier share one gate. If they desync, the
+    // classifier runs with an empty image reference or an empty CLI version.
+    const ensure = classify.steps.find((step) => step.id === 'ensure_qwen');
+    expect(resolve.if).toBe(ensure.if);
+    expect(classifier.if).toBe(ensure.if);
   });
 
   it('behaviorally proves the resolve step reports timing and propagates failure', () => {
@@ -390,7 +405,15 @@ describe('ci failure patrol workflow', () => {
     const scan = classify.steps.find((step) => step.id === 'scan');
     expect(scan.run).toContain('rm -f "${WORKDIR}/ci-flaky-decisions.json"');
     expect(scan.run).toContain('rm -rf "${QWEN_HOME}"');
-    expect(classify.env.QWEN_HOME).toContain('runner.temp');
+    // The rm -rf target is pinned in the step's own env rather than inherited
+    // from a job-level value: on the shared pool $GITHUB_ENV is writable by
+    // anything running at the runner's uid. Both ends must name one directory.
+    const classifier = classify.steps.find((step) =>
+      step.uses?.includes('qwen-code-action'),
+    );
+    expect(scan.env.QWEN_HOME).toContain('runner.temp');
+    expect(scan.env.QWEN_HOME).toBe(classifier.env.QWEN_HOME);
+    expect(classify.env?.QWEN_HOME).toBeUndefined();
     const names = classify.steps.map((step) => step.name);
     expect(names.indexOf('Scan stale PR failures')).toBeLessThan(
       names.indexOf('Classify with ci-flaky-patrol skill'),

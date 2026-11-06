@@ -27,14 +27,12 @@ jobs:
     # hosted pool: one round waited 2h09m for a runner, and 17 of 20 recent
     # ticks were cancelled with zero jobs — they never received one at all.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # Covers the cold-host worst case: the image resolver budgets 10 minutes
-    # for the pull, scan ~2, classifier 5. Warm rounds are far shorter. A cap
-    # below that sum kills the pull mid-flight and the round produces nothing.
+    # Budget: resolve step 12 + classifier step 5, leaving 3 for scan (~2
+    # observed) and job setup. Warm rounds are far shorter. The resolver can
+    # attempt TWO sequential 10-minute pulls — the requested image, then a
+    # fallback to the latest GHCR semver — so its step is capped below the job
+    # exactly like the classifier: a cold host costs one round, not the job.
     timeout-minutes: 20
-    env:
-      # The ECS workspace persists across jobs, so the agent home must be
-      # per-run or one round's session state leaks into the next.
-      QWEN_HOME: '${{ runner.temp }}/qwen-patrol-home'
     permissions:
       actions: 'read'
       contents: 'read'
@@ -103,6 +101,11 @@ jobs:
         id: 'scan'
         env:
           GH_TOKEN: '${{ github.token }}'
+          # Step env, not a job-level value: this name is the target of the
+          # rm -rf below, and on the shared pool $GITHUB_ENV is writable by
+          # anything running at the runner's uid. Must match the classifier's
+          # QWEN_HOME; a test binds the two so they cannot drift apart.
+          QWEN_HOME: '${{ runner.temp }}/qwen-patrol-home'
         run: |-
           mkdir -p "${WORKDIR}"
           # The ECS workspace persists across jobs. A decisions file left by an
@@ -138,6 +141,11 @@ jobs:
       - name: 'Resolve sandbox image'
         id: 'sandbox_image'
         if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        # Below the job cap, like the classifier. The resolver's own pull timer
+        # is 10 minutes and it can fall back to a second pull, so without a step
+        # cap a cold host could consume the whole job and leave nothing for the
+        # model. 12 covers one full pull plus the digest inspect.
+        timeout-minutes: 12
         env:
           # Absolute path so a planted '${RUNNER_TEMP}/qwen-bin' or $GITHUB_PATH
           # entry cannot shadow the binary the resolver spawns.
@@ -183,6 +191,9 @@ jobs:
           # pool-shared currentContext, so name the context explicitly.
           DOCKER_HOST: ''
           DOCKER_CONTEXT: 'default'
+          # Per-run agent home: the ECS workspace persists across jobs. Must
+          # match the QWEN_HOME the scan step resets.
+          QWEN_HOME: '${{ runner.temp }}/qwen-patrol-home'
         uses: 'QwenLM/qwen-code-action@05f81718976f3b7da657422e6e8e4d372b8621d7'
         with:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
