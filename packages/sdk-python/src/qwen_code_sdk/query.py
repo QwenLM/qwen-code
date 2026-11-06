@@ -134,8 +134,7 @@ class Query:
                 # budget, so it must carry the caller's value rather than
                 # leaving the CLI to assume the default.
                 "timeout": {
-                    "controlRequest": self._options.timeout.control_request
-                    * 1000,
+                    "controlRequest": self._options.timeout.control_request * 1000,
                 },
             }
             if self._options.mcp_servers:
