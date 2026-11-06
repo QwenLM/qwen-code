@@ -532,3 +532,17 @@ describe('validateAuthMethod', () => {
     expect(result).toContain('CUSTOM_API_KEY');
   });
 });
+
+describe('Qwen Subscription authentication', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.each([undefined, 'false', 'true'])(
+    'accepts subscription auth without an API key when DEV=%s',
+    (dev) => {
+      vi.stubEnv('DEV', false);
+      if (dev === undefined) delete process.env['DEV'];
+      else process.env['DEV'] = dev;
+      expect(validateAuthMethod('qwen-subscription')).toBeNull();
+    },
+  );
+});

@@ -1,6 +1,7 @@
 import { basename, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type {
+  ChannelBoundSessions,
   ChannelConfig,
   ChannelMemoryCallbacks,
   ChannelMemoryEntry,
@@ -257,6 +258,12 @@ export interface ChannelBaseOptions {
   bridgeRecovery?: () => Promise<void> | undefined;
   groupHistoryPath?: string;
   loopController?: ChannelLoopController;
+  /**
+   * Daemon-backed delivery into PR-bound sessions the channel does not own.
+   * Only the daemon channel worker provides it; adapters must treat its
+   * absence as "feature unavailable" and keep channel-session routing.
+   */
+  boundSessions?: ChannelBoundSessions;
   observedContacts?: {
     observe(
       channelName: string,
@@ -325,6 +332,13 @@ export interface ChannelLoopController {
     channelName: string,
     target: SessionTarget,
   ): Promise<ChannelLoop[]>;
+  /**
+   * List every loop in a chat regardless of sender, thread or route. Optional:
+   * `listForTarget` needs the creator's exact target, which chat-wide state
+   * changes (the bot was removed from a group, a group's active messages were
+   * disabled) cannot supply.
+   */
+  listForChat?(channelName: string, chatId: string): Promise<ChannelLoop[]>;
   disable(id: string): Promise<boolean>;
   validateCron(cron: string): void;
   nextFireTime?(job: ChannelLoop): Date;
@@ -493,6 +507,7 @@ export abstract class ChannelBase {
   // re-post once per still-pending request, but never per trigger.
   private readonly groupPairingNotified = new Map<string, string>();
   private readonly loopController?: ChannelLoopController;
+  protected readonly boundSessions?: ChannelBoundSessions;
   private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
   private readonly namedSessions?: NamedSessionManager;
   private readonly observedContactEnvelopes = new WeakSet<Envelope>();
@@ -1440,6 +1455,7 @@ export abstract class ChannelBase {
         ),
     );
     this.loopController = options?.loopController;
+    this.boundSessions = options?.boundSessions;
     this.observedContacts = options?.observedContacts;
     this.bridgeRecovery = options?.bridgeRecovery;
 
@@ -3142,6 +3158,17 @@ export abstract class ChannelBase {
 
   protected getResponseSourceLabel(sessionId: string): string | undefined {
     return this.activePrompts.get(sessionId)?.sourceLabel;
+  }
+
+  /**
+   * True while the session's live turn is an unattended one (loop or webhook
+   * task). Base delivers such a turn once, in full, through pushProactive and
+   * never calls onResponseComplete, so an adapter whose sink flushes streamed
+   * chunks would post the same text twice. Adapters without an inbound anchor
+   * (QQ) gate on this; the base chunk bookkeeping still runs either way.
+   */
+  protected isProactivePromptTurn(sessionId: string): boolean {
+    return this.activePrompts.get(sessionId)?.loopPrompt === true;
   }
 
   protected getInboundErrorSourceLabel(envelope: Envelope): string | undefined {
@@ -4855,6 +4882,25 @@ export abstract class ChannelBase {
     }
 
     return `Loop ${job.id}: ${job.cron}`;
+  }
+
+  /**
+   * Disable every enabled loop in a chat. Adapters call this when the chat can
+   * no longer receive proactive messages (the bot was removed from a group, or
+   * a group's active messages were disabled), so orphaned loops stop burning
+   * unattended turns. Needs the chat-scoped controller lookup; returns how many
+   * jobs were disabled.
+   */
+  protected async disableLoopJobsForChat(chatId: string): Promise<number> {
+    if (!this.loopController?.listForChat) return 0;
+    const jobs = await this.loopController.listForChat(this.name, chatId);
+    let disabled = 0;
+    for (const job of jobs) {
+      if (job.enabled && (await this.loopController.disable(job.id))) {
+        disabled++;
+      }
+    }
+    return disabled;
   }
 
   private async listLoopsFromTool(

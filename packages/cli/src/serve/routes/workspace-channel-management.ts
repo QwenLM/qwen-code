@@ -18,6 +18,8 @@ import type {
   ChannelEventType,
 } from '@qwen-code/channel-base';
 import { supportedChannelCatalog } from '../../commands/channel/channel-registry.js';
+import { readSettingsSnapshot } from '../../config/settings.js';
+import { channelLinkMetaForEvents } from '../channel-link-meta.js';
 import type {
   ChannelPairingApprovalSubject,
   ChannelManagementService,
@@ -57,6 +59,13 @@ interface RegisterWorkspaceChannelManagementRoutesDeps {
     res: Response,
     runtime: WorkspaceRuntime,
   ) => string | undefined | null;
+  /**
+   * The daemon's boot-time environment snapshot. Parent-process runtimes
+   * without an overlay resolve settings variables against it; reading the
+   * live process environment here would couple a read-only route to shared
+   * mutable state.
+   */
+  daemonEnv: Readonly<NodeJS.ProcessEnv>;
   conversationRuntimeActivity?: ConversationRuntimeActivityGate;
 }
 
@@ -524,12 +533,45 @@ export function registerWorkspaceChannelManagementRoutes(
         // A managed Channel's working directory must canonicalize to this
         // workspace, so its journal lives in the workspace's own scope.
         const scopeDir = channelEventScopeDir(runtime.workspaceCwd);
-        res.status(200).json(
-          await readChannelEvents({
-            scopeDirs: [scopeDir],
-            ...query,
-          }),
-        );
+        const result = await readChannelEvents({
+          scopeDirs: [scopeDir],
+          ...query,
+        });
+        // The management listing is scope-local, but workers run with the
+        // merged settings; attach non-secret link metadata so events of
+        // user/system-scope channels owned by this workspace stay linkable.
+        // readSettingsSnapshot is side-effect-free (no process.env writes,
+        // no corruption recovery) and resolves ${VAR} against the runtime's
+        // effective environment, so one workspace's read can neither leak
+        // into another's nor mutate the daemon. A corrupt or unreadable
+        // settings layer throws; the journal itself must stay readable, so
+        // degrade to unlinked rows instead of a 500.
+        let channelLinkMeta: Record<string, unknown> = {};
+        try {
+          channelLinkMeta = channelLinkMetaForEvents(
+            result.events,
+            runtime.workspaceCwd,
+            (cwd) => {
+              const loaded = readSettingsSnapshot(cwd, {
+                environment: runtime.env.effectiveEnv ?? deps.daemonEnv,
+                workspaceTrusted: runtime.trusted,
+              });
+              const merged = loaded.merged as {
+                channels?: Record<string, unknown>;
+              };
+              return merged.channels ?? {};
+            },
+          );
+        } catch {
+          // Link metadata is best-effort decoration on a diagnostic view.
+        }
+        res
+          .status(200)
+          .json(
+            Object.keys(channelLinkMeta).length > 0
+              ? { ...result, channelLinkMeta }
+              : result,
+          );
       } catch (error) {
         sendManagementError(res, error);
       }

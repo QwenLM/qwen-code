@@ -504,6 +504,7 @@ describe('AppContainer State Management', () => {
       authError: null,
       onAuthError: vi.fn(),
       isAuthDialogOpen: false,
+      isAuthDialogDismissible: false,
       isAuthenticating: false,
       pendingAuthType: undefined,
       externalAuthState: null,
@@ -515,6 +516,7 @@ describe('AppContainer State Management', () => {
       state: {
         authError: null,
         isAuthDialogOpen: false,
+        isAuthDialogDismissible: false,
         isAuthenticating: false,
         pendingAuthType: undefined,
         externalAuthState: null,
@@ -932,6 +934,7 @@ describe('AppContainer State Management', () => {
       await vi.waitFor(() =>
         expect(initialize).toHaveBeenCalledWith(['AbovePrompt'], {
           prompts: true,
+          runsPrompts: true,
         }),
       );
 
@@ -1556,6 +1559,166 @@ describe('AppContainer State Management', () => {
           />,
         );
       }).not.toThrow();
+    });
+
+    it.each([
+      ['the folder is explicitly trusted', { trusted: true }],
+      ['every hook is disabled', { trusted: false, disableAllHooks: true }],
+      ['the block is approved and served', { trusted: false, served: true }],
+    ] as Array<
+      [
+        string,
+        { trusted: boolean; disableAllHooks?: boolean; served?: boolean },
+      ]
+    >)(
+      'does not warn about withheld project hooks when %s',
+      async (_, state) => {
+        const addItem = vi.fn();
+        mockedUseHistory.mockReturnValue({
+          history: [],
+          addItem,
+          updateItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+          truncateToItem: vi.fn(),
+        });
+        vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+        vi.spyOn(mockConfig, 'isExplicitlyTrustedFolder').mockReturnValue(
+          state.trusted,
+        );
+        vi.spyOn(mockConfig, 'getDisableAllHooks').mockReturnValue(
+          state.disableAllHooks ?? false,
+        );
+        vi.spyOn(mockConfig, 'getProjectHooks').mockReturnValue(
+          state.served ? { SessionStart: [] } : undefined,
+        );
+        const settings = {
+          ...mockSettings,
+          workspace: { settings: { hooks: { SessionStart: [] } } },
+        } as unknown as LoadedSettings;
+
+        const { unmount } = render(
+          <AppContainer
+            config={mockConfig}
+            settings={settings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        await act(async () => {});
+
+        expect(addItem).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            text: expect.stringContaining(
+              'Project hooks in .qwen/settings.json',
+            ),
+          }),
+          expect.any(Number),
+        );
+        unmount();
+      },
+    );
+
+    it('warns when an untrusted folder with the trust feature on leaves nothing to approve', async () => {
+      // pending === false here means "no approvable object" (the untrusted
+      // workspace contributes no settings), not "approved": the warning is
+      // the only signal that project hooks are absent, so it must survive.
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'isExplicitlyTrustedFolder').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'getDisableAllHooks').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'isProjectHooksApprovalGated').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'isProjectHooksPendingApproval').mockReturnValue(
+        false,
+      );
+      vi.spyOn(mockConfig, 'getProjectHooks').mockReturnValue(undefined);
+      const settings = {
+        ...mockSettings,
+        workspace: {
+          settings: {
+            hooks: {
+              SessionStart: [
+                { hooks: [{ type: 'command', command: 'echo x' }] },
+              ],
+            },
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      const { unmount } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await act(async () => {});
+
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.WARNING,
+          text: expect.stringContaining(
+            'Project hooks in .qwen/settings.json were not loaded',
+          ),
+        }),
+        expect.any(Number),
+      );
+      unmount();
+    });
+
+    it('warns once when an untrusted interactive session withholds project hooks', async () => {
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'isExplicitlyTrustedFolder').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'getDisableAllHooks').mockReturnValue(false);
+      const settings = {
+        ...mockSettings,
+        workspace: {
+          settings: {
+            hooks: {
+              SessionStart: [
+                { hooks: [{ type: 'command', command: 'echo x' }] },
+              ],
+            },
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      const { unmount } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await act(async () => {});
+
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.WARNING,
+          text: expect.stringContaining('Project hooks in .qwen/settings.json'),
+        }),
+        expect.any(Number),
+      );
+      unmount();
     });
 
     it('renders with startup warnings', () => {
@@ -4877,6 +5040,7 @@ describe('AppContainer State Management', () => {
       canUndoLastLoggedUserMessage: boolean;
       turnProducedMeaningfulContent: boolean;
       wasGoalTurn?: boolean;
+      wasModPromptTurn?: boolean;
     }) => void;
     let capturedOnCancelSubmit: CapturedCancelSubmit | null = null;
 
@@ -5375,79 +5539,85 @@ describe('AppContainer State Management', () => {
       expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
     });
 
-    it('strips the orphaned continuation prompt when a Goal turn is cancelled', async () => {
-      const mockStripOrphans = vi.fn();
-      const mockTruncateToItem = vi.fn();
-      mockedUseTextBuffer.mockReturnValue({
-        text: '',
-        setText: vi.fn(),
-      });
-      mockedUseHistory.mockReturnValue({
-        history: [{ id: 1, type: 'info', text: 'Request cancelled.' }],
-        addItem: vi.fn(),
-        updateItem: vi.fn(),
-        clearItems: vi.fn(),
-        loadHistory: vi.fn(),
-        truncateToItem: mockTruncateToItem,
-      });
-      mockedUseLogger.mockReturnValue({
-        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
-        removeLastUserMessage: vi.fn().mockResolvedValue(true),
-      });
-      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
-        initialize: vi.fn().mockResolvedValue(undefined),
-        setTools: vi.fn().mockResolvedValue(undefined),
-        isInitialized: vi.fn().mockReturnValue(false),
-        stripOrphanedUserEntriesFromHistory: mockStripOrphans,
-      } as unknown as LlmClient);
-      installCancelCapture({
-        streamingState: 'responding',
-        submitQuery: vi.fn(),
-        initError: null,
-        pendingHistoryItems: [],
-        thought: null,
-        cancelOngoingRequest: vi.fn(),
-        retryLastPrompt: vi.fn(),
-      });
-      mockedUseMessageQueue.mockReturnValue({
-        removeGoalTurns: vi.fn().mockReturnValue([]),
-        messageQueue: [],
-        addMessage: vi.fn(),
-        clearQueue: vi.fn(),
-        getQueuedMessagesText: vi.fn().mockReturnValue(''),
-        popAllMessages: vi.fn().mockReturnValue(null),
-        drainQueue: vi.fn().mockReturnValue([]),
-        popNextTurn: vi.fn().mockReturnValue(null),
-      });
+    it.each([
+      ['a Goal continuation turn', { wasGoalTurn: true }],
+      ["a Mod's own prompt turn", { wasModPromptTurn: true }],
+    ] as const)(
+      'strips the orphaned prompt when %s is cancelled',
+      async (_turn, flag) => {
+        const mockStripOrphans = vi.fn();
+        const mockTruncateToItem = vi.fn();
+        mockedUseTextBuffer.mockReturnValue({
+          text: '',
+          setText: vi.fn(),
+        });
+        mockedUseHistory.mockReturnValue({
+          history: [{ id: 1, type: 'info', text: 'Request cancelled.' }],
+          addItem: vi.fn(),
+          updateItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+          truncateToItem: mockTruncateToItem,
+        });
+        mockedUseLogger.mockReturnValue({
+          getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+          removeLastUserMessage: vi.fn().mockResolvedValue(true),
+        });
+        vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
+          initialize: vi.fn().mockResolvedValue(undefined),
+          setTools: vi.fn().mockResolvedValue(undefined),
+          isInitialized: vi.fn().mockReturnValue(false),
+          stripOrphanedUserEntriesFromHistory: mockStripOrphans,
+        } as unknown as LlmClient);
+        installCancelCapture({
+          streamingState: 'responding',
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          removeGoalTurns: vi.fn().mockReturnValue([]),
+          messageQueue: [],
+          addMessage: vi.fn(),
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(''),
+          popAllMessages: vi.fn().mockReturnValue(null),
+          drainQueue: vi.fn().mockReturnValue([]),
+          popNextTurn: vi.fn().mockReturnValue(null),
+        });
 
-      render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
 
-      await Promise.resolve();
-      await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
 
-      // A Goal continuation turn adds no UI user item, so lastTurnUserItem is
-      // null and the auto-restore branch (with its own orphan strip) bails.
-      // wasGoalTurn must trigger the strip independently so the synthetic
-      // "no new real user input" prompt can't merge into the next message.
-      triggerCancel({
-        pendingItem: null,
-        lastTurnUserItem: null,
-        canUndoLastLoggedUserMessage: false,
-        turnProducedMeaningfulContent: false,
-        wasGoalTurn: true,
-      });
+        // A Goal continuation turn and a Mod's own prompt add no UI user item,
+        // so lastTurnUserItem is null and the auto-restore branch (with its own
+        // orphan strip) bails. The flag must trigger the strip independently
+        // so the stopped prompt can't reach the model with the next message.
+        triggerCancel({
+          pendingItem: null,
+          lastTurnUserItem: null,
+          canUndoLastLoggedUserMessage: false,
+          turnProducedMeaningfulContent: false,
+          ...flag,
+        });
 
-      expect(mockStripOrphans).toHaveBeenCalledWith(true);
-      // Auto-restore itself bailed: there was no user item to rewind.
-      expect(mockTruncateToItem).not.toHaveBeenCalled();
-    });
+        expect(mockStripOrphans).toHaveBeenCalledWith(true);
+        // Auto-restore itself bailed: there was no user item to rewind.
+        expect(mockTruncateToItem).not.toHaveBeenCalled();
+      },
+    );
 
     it.each([
       ['queue', false, true, false, false],
@@ -8145,6 +8315,7 @@ describe('AppContainer State Management', () => {
         authError: null,
         onAuthError: vi.fn(),
         isAuthDialogOpen: false,
+        isAuthDialogDismissible: false,
         isAuthenticating: true,
         pendingAuthType: undefined,
         externalAuthState: null,
@@ -8156,6 +8327,7 @@ describe('AppContainer State Management', () => {
         state: {
           authError: null,
           isAuthDialogOpen: false,
+          isAuthDialogDismissible: false,
           isAuthenticating: true,
           pendingAuthType: undefined,
           externalAuthState: null,
@@ -8775,6 +8947,51 @@ describe('AppContainer State Management', () => {
 
       expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
     });
+
+    it.each(['qwen3.8-max', 'another-provider-model'])(
+      'updates the displayed model on auth completion without a model notification (%s)',
+      async (model) => {
+        const getModel = vi
+          .spyOn(mockConfig, 'getModel')
+          .mockReturnValue('coder-model');
+        const trigger = captureModelChangeListener(mockConfig);
+        const view = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        await act(async () => {
+          await flushEffects();
+        });
+        const baselineRemountKey = capturedUIState.historyRemountKey;
+        expect(capturedUIState.currentModel).toBe('coder-model');
+        const onAuthChange = mockedUseAuthCommand.mock.lastCall?.[3] as
+          | (() => void)
+          | undefined;
+        expect(onAuthChange).toBeTypeOf('function');
+        getModel.mockReturnValue(model);
+        mockStdout.write.mockClear();
+        await act(async () => {
+          onAuthChange!();
+        });
+        expect(capturedUIState.currentModel).toBe(model);
+        expect(capturedUIState.historyRemountKey).toBeGreaterThan(
+          baselineRemountKey,
+        );
+        expect(mockStdout.write).toHaveBeenCalledWith(
+          ansiEscapes.clearTerminal,
+        );
+        mockStdout.write.mockClear();
+        trigger.notify(model);
+        expect(mockStdout.write).not.toHaveBeenCalledWith(
+          ansiEscapes.clearTerminal,
+        );
+        view.unmount();
+      },
+    );
 
     it('skips refreshStatic when the notified model matches the current one', async () => {
       vi.spyOn(mockConfig, 'getModel').mockReturnValue('model-a');

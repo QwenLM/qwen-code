@@ -5,10 +5,15 @@ import java.net.URI;
 /** One scheduler reconciliation result for a physical Runtime. */
 public final class RuntimeObservation {
     public enum Outcome {
+        /** An identified Runtime is ready; the Broker must still attest its lease. */
         READY,
+        /** The original resource is starting; reconcile again without replacement. */
         STARTING,
+        /** The resource is absent; loss and stop evidence govern recovery authority. */
         NOT_FOUND,
+        /** Resource identity conflicts; automatic recovery must stop. */
         CONFLICT,
+        /** No conclusive observation; retry without treating uncertainty as loss. */
         UNKNOWN
     }
 

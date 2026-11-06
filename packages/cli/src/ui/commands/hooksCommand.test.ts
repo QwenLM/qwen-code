@@ -4,8 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { hooksCommand } from './hooksCommand.js';
+import {
+  HOOK_APPROVALS_FILENAME,
+  getProjectHooksForApproval,
+  loadHookApprovals,
+  resetHookApprovalsForTesting,
+} from '../../config/hook-approvals.js';
+import { appEvents, AppEvent } from '../../utils/events.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 import { SettingScope } from '../../config/settings.js';
@@ -22,10 +32,13 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 describe('hooksCommand', () => {
+  let approvalsDir: string;
   let mockContext: ReturnType<typeof createMockCommandContext>;
   let mockConfig: {
     getHookSystem: ReturnType<typeof vi.fn>;
     setHooksFromSettings: ReturnType<typeof vi.fn>;
+    setProjectHooksPendingApproval: ReturnType<typeof vi.fn>;
+    isProjectHooksApprovalGated: ReturnType<typeof vi.fn>;
     getBareMode: ReturnType<typeof vi.fn>;
     isSafeMode: ReturnType<typeof vi.fn>;
     getTopTierMcpServers: ReturnType<typeof vi.fn>;
@@ -33,9 +46,17 @@ describe('hooksCommand', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    approvalsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hooks-cmd-'));
+    process.env['QWEN_CODE_HOOK_APPROVALS_PATH'] = path.join(
+      approvalsDir,
+      HOOK_APPROVALS_FILENAME,
+    );
+    resetHookApprovalsForTesting();
 
     mockConfig = {
       setHooksFromSettings: vi.fn(),
+      setProjectHooksPendingApproval: vi.fn(),
+      isProjectHooksApprovalGated: vi.fn().mockReturnValue(false),
       getBareMode: vi.fn().mockReturnValue(false),
       isSafeMode: vi.fn().mockReturnValue(false),
       getTopTierMcpServers: vi.fn(),
@@ -59,6 +80,13 @@ describe('hooksCommand', () => {
         },
       },
     });
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    delete process.env['QWEN_CODE_HOOK_APPROVALS_PATH'];
+    resetHookApprovalsForTesting();
+    fs.rmSync(approvalsDir, { recursive: true, force: true });
   });
 
   it('opts in to running during streaming', () => {
@@ -145,6 +173,11 @@ describe('hooksCommand', () => {
         safeMode?: boolean;
         bareMode?: boolean;
         hookSystem?: 'none';
+        gated?: boolean;
+        projectHooks?: Record<string, unknown>;
+        /** What `${VAR}` resolution made of `projectHooks`. */
+        resolvedProjectHooks?: Record<string, unknown>;
+        env?: Record<string, string>;
       } = {},
     ) {
       const hookSystem = {
@@ -161,6 +194,10 @@ describe('hooksCommand', () => {
           .fn()
           .mockReturnValue(opts.hookSystem === 'none' ? undefined : hookSystem),
         setHooksFromSettings: vi.fn(),
+        setProjectHooksPendingApproval: vi.fn(),
+        isProjectHooksApprovalGated: vi
+          .fn()
+          .mockReturnValue(opts.gated ?? false),
         getBareMode: vi.fn().mockReturnValue(opts.bareMode ?? false),
         isSafeMode: vi.fn().mockReturnValue(opts.safeMode ?? false),
         getTopTierMcpServers: vi.fn(),
@@ -176,7 +213,15 @@ describe('hooksCommand', () => {
             reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
             getSystemHooks: () => systemHooks,
             getUserHooks: () => userHooks,
-            getProjectHooks: () => projectHooks,
+            getProjectHooks: () =>
+              opts.resolvedProjectHooks ?? opts.projectHooks ?? projectHooks,
+            workspace: {
+              path: '/work/repo/.qwen/settings.json',
+              originalSettings: {
+                hooks: (opts.projectHooks ?? projectHooks) as never,
+                env: opts.env,
+              },
+            },
           },
         },
       });
@@ -208,6 +253,72 @@ describe('hooksCommand', () => {
       expect(
         config.setHooksFromSettings.mock.invocationCallOrder[0],
       ).toBeLessThan(hookSystem.reload.mock.invocationCallOrder[0]);
+    });
+
+    const runnable = {
+      SessionStart: [
+        { hooks: [{ type: 'command', command: './setup.sh ${TOKEN}' }] },
+      ],
+    };
+    const resolved = {
+      SessionStart: [
+        { hooks: [{ type: 'command', command: './setup.sh secret' }] },
+      ],
+    };
+
+    it.each([
+      ['unapproved', undefined, undefined, true, true],
+      ['rejected', 'rejected', undefined, true, false],
+      ['approved', 'approved', undefined, false, false],
+      ['approved before settings.env changed', 'approved', 'other', true, true],
+    ] as const)(
+      'gates %s project hooks before the registry reloads',
+      async (_label, decision, tokenAfter, gated, prompted) => {
+        // The decision binds the unresolved block, as startup hashed it.
+        const { context, config, hookSystem } = makeReloadContext({
+          gated: true,
+          projectHooks: runnable,
+          resolvedProjectHooks: resolved,
+          env: { TOKEN: 'secret' },
+        });
+        const settings = context.services.settings!;
+        if (decision) {
+          await loadHookApprovals().setState(
+            getProjectHooksForApproval(settings)!,
+            decision,
+          );
+        }
+        if (tokenAfter) {
+          settings.workspace.originalSettings.env = { TOKEN: tokenAfter };
+        }
+        const onPending = vi.fn();
+        appEvents.on(AppEvent.ProjectHooksPendingApprovalChanged, onPending);
+
+        await hooksCommand.action!(context, '');
+
+        appEvents.off(AppEvent.ProjectHooksPendingApprovalChanged, onPending);
+        expect(config.setProjectHooksPendingApproval).toHaveBeenCalledWith(
+          gated,
+          decision === 'rejected' && !tokenAfter,
+        );
+        expect(
+          config.setProjectHooksPendingApproval.mock.invocationCallOrder[0],
+        ).toBeLessThan(hookSystem.reload.mock.invocationCallOrder[0]);
+        expect(onPending).toHaveBeenCalledTimes(prompted ? 1 : 0);
+        expect(config.getWorkingDir).not.toHaveBeenCalled();
+      },
+    );
+
+    it('leaves an ungated session alone', async () => {
+      const onPending = vi.fn();
+      appEvents.on(AppEvent.ProjectHooksPendingApprovalChanged, onPending);
+      const { context, config } = makeReloadContext({ projectHooks: runnable });
+
+      await hooksCommand.action!(context, '');
+
+      appEvents.off(AppEvent.ProjectHooksPendingApprovalChanged, onPending);
+      expect(config.setProjectHooksPendingApproval).not.toHaveBeenCalled();
+      expect(onPending).not.toHaveBeenCalled();
     });
 
     it('does not file a repository-authored external-context server under system hooks', async () => {
@@ -365,6 +476,9 @@ describe('hooksCommand', () => {
         matcher?: string;
         config: { type: string; command?: string; name?: string };
       }>;
+      withheldApproval?: Record<string, unknown>;
+      withheldTrust?: Record<string, unknown>;
+      rejected?: boolean;
     }) {
       const sessionConfig = {
         getHookSystem: vi.fn().mockReturnValue({
@@ -378,12 +492,65 @@ describe('hooksCommand', () => {
           }),
         }),
         getSessionId: vi.fn().mockReturnValue('sid'),
+        getWithheldProjectHooks: vi.fn().mockReturnValue(opts.withheldApproval),
+        getTrustWithheldProjectHooks: vi
+          .fn()
+          .mockReturnValue(opts.withheldTrust),
+        isProjectHooksRejected: vi.fn().mockReturnValue(opts.rejected ?? false),
       };
       return createMockCommandContext({
         executionMode: 'non_interactive',
         services: { config: sessionConfig },
       });
     }
+
+    it('lists approval-withheld project hooks as disabled instead of claiming none', async () => {
+      const ctx = makeContext({
+        configHooks: [],
+        withheldApproval: {
+          SessionStart: [
+            {
+              hooks: [
+                { type: 'command', command: 'node marker.mjs', name: 'marker' },
+              ],
+            },
+          ],
+        },
+      });
+
+      const result = await hooksCommand.action!(ctx, '');
+
+      expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+      const content = (result as { content: string }).content;
+      expect(content).toContain('1 total');
+      expect(content).toContain('marker');
+      expect(content).toContain('disabled (not approved)');
+    });
+
+    it('names a rejection and the trust gate with their own reasons', async () => {
+      const rejectedCtx = makeContext({
+        configHooks: [],
+        withheldApproval: {
+          Stop: [{ hooks: [{ type: 'command', command: 'x' }] }],
+        },
+        rejected: true,
+      });
+      const rejectedResult = await hooksCommand.action!(rejectedCtx, '');
+      expect((rejectedResult as { content: string }).content).toContain(
+        'disabled (rejected)',
+      );
+
+      const trustCtx = makeContext({
+        configHooks: [],
+        withheldTrust: {
+          Stop: [{ hooks: [{ type: 'command', command: 'y' }] }],
+        },
+      });
+      const trustResult = await hooksCommand.action!(trustCtx, '');
+      expect((trustResult as { content: string }).content).toContain(
+        'disabled (folder not trusted)',
+      );
+    });
 
     it('groups hooks under matcher headings', async () => {
       const ctx = makeContext({

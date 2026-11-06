@@ -9,62 +9,19 @@ import {
   probeDesktopRelay,
 } from '../../desktop-relay/desktop-relay-client';
 import type { WebShellSidebarFooterItem } from './WebShellSidebar';
+import {
+  DAEMON_APPROVAL_MODES,
+  createSidebarMocks,
+  installSidebarDomShims,
+  sidebarSessionPage,
+  staticSidebarSessionCatalogQuery,
+} from '../../test/sidebarHarness';
 
-const { connection, workspace, workspaceActions, active, pinned, archived } =
-  vi.hoisted(() => {
-    const makeSessions = () => {
-      const state = {
-        sessions: [] as never[],
-        loading: false,
-        error: null as Error | null,
-        data: [] as never[] | undefined,
-        reload: vi.fn().mockResolvedValue(undefined),
-        deleteSession: vi.fn().mockResolvedValue(true),
-        archiveSession: vi.fn().mockResolvedValue(true),
-        unarchiveSession: vi.fn().mockResolvedValue(true),
-        exportSession: vi.fn(),
-      };
-      state.data = state.sessions;
-      return state;
-    };
-    return {
-      connection: {
-        status: 'connected',
-        sessionId: null as string | null,
-        workspaceCwd: '/tmp/project',
-        capabilities: undefined,
-      },
-      workspace: {
-        baseUrl: '',
-        capabilities: undefined as { features?: string[] } | undefined,
-        client: {
-          workspaceByCwd: vi.fn(() => ({
-            listWorkspaceSessions: vi.fn().mockResolvedValue([]),
-            listSessionGroups: vi.fn().mockResolvedValue({
-              groups: [],
-              colorOptions: [],
-            }),
-          })),
-        },
-        refreshCapabilities: vi.fn(),
-      },
-      workspaceActions: {
-        addWorkspace: vi.fn(),
-        removeWorkspace: vi.fn(),
-        listSessionGroups: vi.fn().mockResolvedValue({
-          groups: [],
-          colorOptions: [],
-        }),
-        createSessionGroup: vi.fn(),
-        updateSessionGroup: vi.fn(),
-        deleteSessionGroup: vi.fn(),
-        updateSessionOrganization: vi.fn(),
-      },
-      active: makeSessions(),
-      pinned: makeSessions(),
-      archived: makeSessions(),
-    };
-  });
+const mocks = createSidebarMocks({
+  workspaceBaseUrl: '',
+  connection: { capabilities: undefined },
+});
+const { connection, workspace } = mocks;
 
 // Counts every mount of the browser-local bridge hook. The sidebar gate is the
 // only thing between a remote daemon and a client directory, so pin the hook
@@ -92,63 +49,34 @@ vi.mock('../../local-files/useLocalFilesBridge', () => ({
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
-  useConnection: () => connection,
-  useActions: () => ({ renameSession: vi.fn() }),
-  useWorkspace: () => workspace,
-  useWorkspaceActions: () => workspaceActions,
-  useChannels: () => ({ data: undefined, catalog: [], channels: {} }),
-  useSessions: (options?: { archiveState?: string; group?: string }) => {
-    if (options?.archiveState === 'archived') return archived;
-    if (options?.group === 'pinned') return pinned;
-    return active;
-  },
+  DAEMON_APPROVAL_MODES,
+  useConnection: () => mocks.connection,
+  useActions: () => mocks.actions,
+  useWorkspace: () => mocks.workspace,
+  useWorkspaceActions: () => mocks.workspaceActions,
+  useChannels: () => mocks.channels,
+  useSessions: (options?: { archiveState?: string; group?: string }) =>
+    sidebarSessionPage(mocks, options),
 }));
 
 vi.mock('../../session-catalog/session-catalog-hooks', () => ({
-  useWebShellSessions: (options?: {
-    archiveState?: string;
-    group?: string;
-  }) => {
-    if (options?.archiveState === 'archived') return archived;
-    if (options?.group === 'pinned') return pinned;
-    return active;
-  },
+  useWebShellSessions: (options?: { archiveState?: string; group?: string }) =>
+    sidebarSessionPage(mocks, options),
   useSessionCatalogController: () => ({
-    refreshQueries: vi.fn(),
+    refreshQueries: mocks.refreshSessionCatalogQueries,
     invalidateWorkspace: vi.fn(),
     refreshWorkspace: vi.fn(),
     renamed: vi.fn(),
   }),
   useSessionCatalogPolling: () => undefined,
-  useSessionCatalogQuery: () => ({
-    sessions: [],
-    loading: false,
-    error: undefined,
-    reload: vi.fn(),
-  }),
-  useSessionCatalogQueries: vi.fn(() => []),
+  useSessionCatalogQuery: () => staticSidebarSessionCatalogQuery(),
+  useSessionCatalogQueries: mocks.useSessionCatalogQueries,
 }));
 
 const { I18nProvider } = await import('../../i18n');
 const { WebShellSidebar } = await import('./WebShellSidebar');
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-if (!globalThis.PointerEvent) {
-  globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
-}
-if (!Element.prototype.hasPointerCapture) {
-  Element.prototype.hasPointerCapture = () => false;
-}
-if (!Element.prototype.setPointerCapture) {
-  Element.prototype.setPointerCapture = () => {};
-}
-if (!Element.prototype.releasePointerCapture) {
-  Element.prototype.releasePointerCapture = () => {};
-}
-if (!Element.prototype.scrollIntoView) {
-  Element.prototype.scrollIntoView = () => {};
-}
+installSidebarDomShims();
 
 const LOCAL_FILES_LABEL = 'Local files';
 const DESKTOP_RELAY_LABEL = 'Use this computer';

@@ -131,9 +131,13 @@ final class JournalStoreRows {
     }
 
     ActivationLeaseRow activationLeaseRow(HeadRow head) {
+        // Every activation renewal reads this row, three times a minute per
+        // resident Session. Renewals update the activation row in place, so
+        // without idx_ma_session_journal_tx_activation the lookup walked back
+        // over every transaction the activation had committed.
         var rows = jdbc.query("SELECT journal_revision, record_bytes, record_digest, activation_lease_until,"
                         + " activation_renewal_seq FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                        + " AND activation_epoch = ? AND operation IN ('installActivation', 'renewActivation')"
+                        + " AND activation_epoch = ? AND is_activation_record = TRUE"
                         + " ORDER BY journal_revision DESC LIMIT 1", (result, index) -> {
                             try {
                                 byte[] raw = result.getBytes("record_bytes");
@@ -449,7 +453,7 @@ final class JournalStoreRows {
                                 + " p.publication_id WHERE p.tenant_id = ? AND p.workspace_id = ?"
                                 + " AND p.session_id = ? AND p.admission_resource_id = ? AND"
                                 + " p.producer_phase IN ('FINISHED', 'REFERENCED') AND"
-                                + " p.quarantined = FALSE AND o.slot_key = X'61646d697373696f6e'"
+                                + " p.is_quarantined = FALSE AND o.slot_key = X'61646d697373696f6e'"
                                 + " AND o.capture_state = 'VERIFIED' AND o.resource_id = ? AND"
                                 + " o.capture_object_key = ? AND o.sha256 = ? AND o.byte_length ="
                                 + " ?",
@@ -488,7 +492,7 @@ final class JournalStoreRows {
         if ("managed-tool-outcome".equals(resource.kind())) {
             Long quarantined = jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture"
                             + " WHERE tenant_id = ? AND workspace_id = ? AND session_id = ?"
-                            + " AND admission_resource_id = ? AND quarantined = TRUE",
+                            + " AND admission_resource_id = ? AND is_quarantined = TRUE",
                     Long.class, resource.tenantId(), resource.workspaceId(),
                     resource.sessionId(), resource.resourceId());
             if (quarantined != null && quarantined > 0) {
