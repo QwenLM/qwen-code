@@ -1643,6 +1643,26 @@ export const HOSTED_AGENT_WAIT_ABANDONED_TEXT =
   'The turn was cancelled before the child agent finished; the child keeps running and its committed result is retained.';
 
 /**
+ * The tool names whose never-started proof is the child-run ledger
+ * (admitLaunch commits the record before dispatch): one membership fact
+ * for every arm that either reads that ledger or must decline without
+ * it. A future child-run-backed tool joins HERE, never as another
+ * inline two-name literal.
+ */
+export const CHILD_LEDGER_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'agent',
+  'workflow',
+]);
+
+/**
+ * The answer a settlement writes for a child-ledger call it cannot
+ * prove anything about: the ledger is unavailable in this generation,
+ * so the fold names the unknown instead of claiming the call never ran.
+ */
+export const HOSTED_CHILD_LEDGER_UNKNOWN_TEXT =
+  'The child run for this call kept its own ledger, which this recovery does not hold; its outcome is unknown and its record is retained.';
+
+/**
  * The never-admitted answer for a sibling call the dead batch never
  * reached: the live admission's own wording, also what the cancel
  * route's settlement writes for the parked round's remaining agent
@@ -4223,9 +4243,7 @@ export class HostedWorkspaceToolTurn {
           } else if (
             !sharedExtensionWorkspace &&
             !agentBackground &&
-            calls.some(
-              (other) => other.name !== 'agent' && other.name !== 'workflow',
-            )
+            calls.some((other) => !CHILD_LEDGER_TOOL_NAMES.has(other.name))
           ) {
             // The same one-batch candidacy: a sibling outside a child
             // launch holds the mount for exactly the wait the foreground
@@ -4289,9 +4307,7 @@ export class HostedWorkspaceToolTurn {
             validationError = `Hosted workflow run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
           } else if (
             !agentBackground &&
-            calls.some(
-              (other) => other.name !== 'agent' && other.name !== 'workflow',
-            )
+            calls.some((other) => !CHILD_LEDGER_TOOL_NAMES.has(other.name))
           ) {
             validationError =
               'Hosted workflow run_in_background=false cannot share a batch with a tool other than agent or workflow; the sibling would hold the Workspace mount the child needs.';

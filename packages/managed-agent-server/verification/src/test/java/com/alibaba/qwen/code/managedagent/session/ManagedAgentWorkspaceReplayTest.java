@@ -168,8 +168,8 @@ class ManagedAgentWorkspaceReplayTest {
         registry = new ManagedWorkspaceRegistry(jdbc);
         properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(),
-                Clock.systemUTC(), events -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(),
+                Clock.systemUTC(), events -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     // The recorded submit must answer through a Workspace-files outage, like
@@ -241,8 +241,8 @@ class ManagedAgentWorkspaceReplayTest {
         // A non-yolo approval mode keeps the actions capability live before
         // the delete; the store snapshots it at construction.
         properties.getHarness().setApprovalMode("default");
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(),
-                Clock.systemUTC(), events -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(),
+                Clock.systemUTC(), events -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String tenant = "tenant-" + UUID.randomUUID();
         String sessionId = boundSession(tenant);
         ManagedAgentService service = service(new AtomicBoolean(true));

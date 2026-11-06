@@ -133,6 +133,9 @@ vi.mock('@qwen-code/channel-base', async () => {
       protected getResponseSourceLabel(_sessionId: string): undefined {
         return undefined;
       }
+      protected disableLoopJobsForChat(_chatId: string): Promise<number> {
+        return Promise.resolve(0);
+      }
       protected formatMarkdownAttributedText(
         text: string,
         sourceLabel?: string,
