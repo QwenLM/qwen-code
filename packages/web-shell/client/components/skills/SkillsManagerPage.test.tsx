@@ -10,6 +10,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonWorkspaceSkillStatus } from '@qwen-code/web-shell/daemon-react-sdk';
+import type { DaemonCapabilities } from '@qwen-code/sdk/daemon';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -33,6 +34,8 @@ const { connectionState, skillsState, workspaceState } = vi.hoisted(() => ({
       reloadConfig: vi.fn(),
       setEnabled: vi.fn(),
       install: vi.fn(),
+      installArchive: vi.fn(),
+      lookupInstallAttempt: vi.fn(),
       remove: vi.fn(),
     },
   },
@@ -42,6 +45,7 @@ const { connectionState, skillsState, workspaceState } = vi.hoisted(() => ({
       client: {},
       capabilities: {
         features: ['workspace_skill_settings_toggle'],
+        limits: undefined as DaemonCapabilities['limits'],
       },
     },
   },
@@ -148,17 +152,20 @@ beforeEach(() => {
   skillsState.current.configSkills = undefined;
   skillsState.current.loading = false;
   skillsState.current.error = undefined;
-  skillsState.current.ensureRuntime.mockClear();
+  skillsState.current.ensureRuntime.mockReset().mockResolvedValue(undefined);
   skillsState.current.reload.mockReset();
-  skillsState.current.reloadConfig.mockReset();
+  skillsState.current.reloadConfig.mockReset().mockResolvedValue(undefined);
   skillsState.current.setEnabled.mockReset().mockResolvedValue({
     changed: true,
   });
   skillsState.current.install.mockReset();
+  skillsState.current.installArchive.mockReset();
+  skillsState.current.lookupInstallAttempt.mockReset();
   skillsState.current.remove.mockReset();
   workspaceState.current.capabilities.features = [
     'workspace_skill_settings_toggle',
   ];
+  workspaceState.current.capabilities.limits = undefined;
   connectionState.current.sessionId = undefined;
   connectionState.current.workspaceCwd = '/workspace/demo';
   workspaceState.current.client = {};
@@ -170,6 +177,96 @@ afterEach(() => {
 });
 
 describe('SkillsManagerPage', () => {
+  async function uploadArchive(size: number) {
+    await renderPage();
+    const open = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Upload',
+    );
+    expect(open).toBeDefined();
+    await act(async () => open!.click());
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const tab = Array.from(dialog.querySelectorAll('[role="tab"]')).find(
+      (item) => item.textContent === 'ZIP',
+    );
+    await act(async () =>
+      tab!.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      ),
+    );
+    const file = new File(['zip'], 'demo.zip', { type: 'application/zip' });
+    Object.defineProperty(file, 'size', { value: size });
+    const input = dialog.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(input, 'files', { value: [file] });
+    await act(async () =>
+      input.dispatchEvent(new Event('change', { bubbles: true })),
+    );
+    const submit = Array.from(dialog.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Upload',
+    );
+    await act(async () => submit!.click());
+    return file;
+  }
+
+  it('passes native capabilities and their advertised limit into the install dialog', async () => {
+    workspaceState.current.capabilities.features = [
+      'workspace_skill_manage',
+      'skill_archive_install',
+    ];
+    workspaceState.current.capabilities.limits = {
+      maxSkillArchiveBytes: 10 * 1024 * 1024,
+    };
+    await uploadArchive(12 * 1024 * 1024);
+    expect(document.body.textContent).toContain('10 MiB compressed limit');
+    expect(skillsState.current.installArchive).not.toHaveBeenCalled();
+    expect(skillsState.current.install).not.toHaveBeenCalled();
+  });
+
+  it.each(['client', 'daemon'])(
+    'keeps a confirmed archive installation successful with a %s activation warning',
+    async (source) => {
+      workspaceState.current.capabilities.features = [
+        'workspace_skill_manage',
+        'skill_archive_install',
+      ];
+      skillsState.current.installArchive.mockResolvedValue({
+        skillName: 'demo',
+        scope: 'workspace',
+        attemptId: 'attempt',
+        archiveSha256: 'a'.repeat(64),
+        ...(source === 'daemon'
+          ? { activationWarning: 'runtime unavailable' }
+          : {}),
+      });
+      skillsState.current.ensureRuntime.mockImplementation(
+        async (options?: { throwOnError?: boolean }) => {
+          if (options?.throwOnError && source === 'client')
+            throw new Error('runtime unavailable');
+        },
+      );
+      const file = await uploadArchive(20 * 1024 * 1024);
+      expect(skillsState.current.installArchive).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'demo', data: file }),
+        'workspace',
+      );
+      expect(skillsState.current.reloadConfig).toHaveBeenCalledOnce();
+      expect(skillsState.current.ensureRuntime).toHaveBeenCalledTimes(2);
+      expect(skillsState.current.ensureRuntime).toHaveBeenLastCalledWith({
+        throwOnError: true,
+      });
+      expect(document.body.textContent).toContain('installed successfully');
+      expect(document.body.textContent).toContain(
+        'runtime activation failed: runtime unavailable',
+      );
+      expect(skillsState.current.install).not.toHaveBeenCalled();
+      expect(skillsState.current.lookupInstallAttempt).not.toHaveBeenCalled();
+      await renderPage('/another-workspace');
+      expect(document.body.textContent).not.toContain(
+        'runtime activation failed',
+      );
+      expect(document.body.textContent).not.toContain('installed successfully');
+    },
+  );
+
   const disabledSkill: DaemonWorkspaceSkillStatus = {
     kind: 'skill',
     status: 'disabled',
