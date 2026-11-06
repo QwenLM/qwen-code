@@ -43,14 +43,12 @@ import com.alibaba.qwen.code.runtimebroker.transport.ManagedHoldFamily;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedHookProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMcpProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMonitorProtocol;
+import org.apache.commons.codec.digest.DigestUtils;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -1659,12 +1657,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                         if (bytes.length > 256 * 1024) {
                             throw invalid("runtime_payload_invalid", "Tool payload exceeds 256 KiB");
                         }
-                        String digest;
-                        try {
-                            digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-                        } catch (NoSuchAlgorithmException exception) {
-                            throw new IllegalStateException(exception);
-                        }
+                        String digest = "sha256:" + DigestUtils.sha256Hex(bytes);
                         if (!digest.equals(record.getRequestDigest())) {
                             throw conflict("runtime_idempotency_conflict", "Tool payload differs from its reserved digest");
                         }
