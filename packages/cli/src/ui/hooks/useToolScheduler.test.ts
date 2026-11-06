@@ -207,13 +207,13 @@ describe('useReactToolScheduler in YOLO Mode', () => {
         response: expect.objectContaining({
           resultDisplay: 'YOLO Formatted tool output',
           responseParts: [
-            {
+            expect.objectContaining({
               functionResponse: {
                 id: 'yoloCall',
                 name: 'mockToolRequiresConfirmation',
                 response: { output: expectedOutput },
               },
-            },
+            }),
           ],
         }),
       }),
@@ -226,6 +226,111 @@ describe('useReactToolScheduler in YOLO Mode', () => {
       return item?.tools?.[0]?.confirmationDetails;
     });
     expect(confirmationCall).toBeUndefined();
+  });
+
+  it("hands a batch's completion to its own callback instead of onComplete", async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockToolRequiresConfirmation);
+    (mockToolRequiresConfirmation.execute as Mock).mockResolvedValue({
+      llmContent: 'awaited output',
+      returnDisplay: 'awaited output',
+    } as ToolResult);
+    const onBatchComplete = vi.fn(async () => {});
+
+    const { result } = renderSchedulerInYoloMode();
+    const schedule = result.current[1];
+    const request: ToolCallRequestInfo = {
+      callId: 'awaitedCall',
+      name: 'mockToolRequiresConfirmation',
+      args: { data: 'any data' },
+    } as any;
+
+    act(() => {
+      schedule(
+        request,
+        new AbortController().signal,
+        undefined,
+        onBatchComplete,
+      );
+    });
+    for (let step = 0; step < 3; step++) {
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+    }
+
+    expect(onBatchComplete).toHaveBeenCalledWith([
+      expect.objectContaining({ status: 'success', request }),
+    ]);
+    expect(onComplete).not.toHaveBeenCalled();
+
+    // A later batch without its own callback goes back to onComplete.
+    act(() => {
+      schedule(
+        { ...request, callId: 'laterCall' },
+        new AbortController().signal,
+      );
+    });
+    for (let step = 0; step < 3; step++) {
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+    }
+    expect(onBatchComplete).toHaveBeenCalledOnce();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({
+        status: 'success',
+        request: expect.objectContaining({ callId: 'laterCall' }),
+      }),
+    ]);
+  });
+
+  it("releases a batch's callback when scheduling fails without completing it", async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    (mockTool.execute as Mock).mockResolvedValue({
+      llmContent: 'later output',
+      returnDisplay: 'later output',
+    } as ToolResult);
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValueOnce(new Error('already running'));
+    const onBatchComplete = vi.fn(async () => {});
+    const { result } = renderSchedulerInYoloMode();
+    const request = {
+      callId: 'reusedCall',
+      name: 'mockTool',
+      args: {},
+    } as ToolCallRequestInfo;
+
+    act(() => {
+      result.current[1](
+        request,
+        new AbortController().signal,
+        undefined,
+        onBatchComplete,
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    // The caller stops waiting, with no calls.
+    expect(onBatchComplete).toHaveBeenCalledOnce();
+    expect(onBatchComplete).toHaveBeenCalledWith([]);
+    scheduleSpy.mockRestore();
+
+    // A later batch reusing the call id goes to onComplete, not the old one.
+    act(() => {
+      result.current[1](request, new AbortController().signal);
+    });
+    for (let step = 0; step < 3; step++) {
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+    }
+    expect(onBatchComplete).toHaveBeenCalledOnce();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({ status: 'success', request }),
+    ]);
   });
 
   it('keeps shell heartbeats out of liveOutput while retaining display chunks', async () => {
@@ -384,13 +489,13 @@ describe('useReactToolScheduler', () => {
         response: expect.objectContaining({
           resultDisplay: 'Formatted tool output',
           responseParts: [
-            {
+            expect.objectContaining({
               functionResponse: {
                 id: 'call1',
                 name: 'mockTool',
                 response: { output: 'Tool output' },
               },
-            },
+            }),
           ],
         }),
       }),
@@ -491,13 +596,13 @@ describe('useReactToolScheduler', () => {
           resultDisplay: message,
           contentLength: modelFacingMessage.length,
           responseParts: [
-            {
+            expect.objectContaining({
               functionResponse: {
                 id: request.callId,
                 name: ToolNames.TOOL_CALL,
                 response: { error: modelFacingMessage },
               },
-            },
+            }),
           ],
         }),
       }),
@@ -634,7 +739,7 @@ describe('useReactToolScheduler', () => {
             errorType: undefined,
             executionStatus: 'not_started',
             responseParts: [
-              {
+              expect.objectContaining({
                 functionResponse: {
                   id: request.callId,
                   name: ToolNames.TOOL_CALL,
@@ -642,7 +747,7 @@ describe('useReactToolScheduler', () => {
                     error: `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}[Operation Cancelled] Reason: Tool call cancelled before execution.`,
                   },
                 },
-              },
+              }),
             ],
           }),
         }),
@@ -725,7 +830,7 @@ describe('useReactToolScheduler', () => {
           callId: request.callId,
           errorType: undefined,
           executionStatus: 'not_started',
-          responseParts: [cancelledPart(request)],
+          responseParts: [expect.objectContaining(cancelledPart(request))],
         }),
       }),
       expect.objectContaining({
@@ -735,7 +840,9 @@ describe('useReactToolScheduler', () => {
           callId: secondRequest.callId,
           errorType: undefined,
           executionStatus: 'not_started',
-          responseParts: [cancelledPart(secondRequest)],
+          responseParts: [
+            expect.objectContaining(cancelledPart(secondRequest)),
+          ],
         }),
       }),
     ]);
@@ -1294,13 +1401,13 @@ describe('useReactToolScheduler', () => {
       response: expect.objectContaining({
         resultDisplay: 'Display 1',
         responseParts: [
-          {
+          expect.objectContaining({
             functionResponse: {
               id: 'multi1',
               name: 'tool1',
               response: { output: 'Output 1' },
             },
-          },
+          }),
         ],
       }),
     });
@@ -1310,13 +1417,13 @@ describe('useReactToolScheduler', () => {
       response: expect.objectContaining({
         resultDisplay: 'Display 2',
         responseParts: [
-          {
+          expect.objectContaining({
             functionResponse: {
               id: 'multi2',
               name: 'tool2',
               response: { output: 'Output 2' },
             },
-          },
+          }),
         ],
       }),
     });

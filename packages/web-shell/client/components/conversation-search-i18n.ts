@@ -10,29 +10,31 @@ import { useI18n, type WebShellLanguage } from '../i18n';
 type Message = string | ((vars?: Record<string, string | number>) => string);
 
 // 搜索文案只随交互组件加载，避免进入只读 HTML 导出的共享翻译包。
+const EN_MESSAGES: Record<string, Message> = {
+  'chat.searchConversation': 'Search this conversation',
+  'chat.searchConversationPlaceholder': 'Search messages and code…',
+  'chat.searchConversationHint': 'Enter a keyword to find earlier content.',
+  'chat.searchingConversation': 'Searching conversation history…',
+  'chat.searchLoadedOnly':
+    'Only loaded messages are available. Update Qwen Code to search all history.',
+  'chat.searchResultPosition': (vars) =>
+    `${vars?.['current']} / ${vars?.['total']} results`,
+  'chat.searchNoResults': 'No matching messages.',
+  'chat.searchPrevious': 'Previous result',
+  'chat.searchNext': 'Next result',
+  'chat.searchResults': 'Search results',
+  'chat.searchResultsLimited': (vars) =>
+    `Showing the first ${vars?.['count']} results. Refine your search for more specific matches.`,
+  'chat.searchFailed':
+    'Could not search all history. Results may be incomplete.',
+  'chat.searchLocateFailed':
+    'This result could not be located. Search again to refresh it.',
+  'chat.searchUser': 'You',
+  'chat.searchAssistant': 'Assistant',
+};
+
 const messages: Record<WebShellLanguage, Record<string, Message>> = {
-  en: {
-    'chat.searchConversation': 'Search this conversation',
-    'chat.searchConversationPlaceholder': 'Search messages and code…',
-    'chat.searchConversationHint': 'Enter a keyword to find earlier content.',
-    'chat.searchingConversation': 'Searching conversation history…',
-    'chat.searchLoadedOnly':
-      'Only loaded messages are available. Update Qwen Code to search all history.',
-    'chat.searchResultPosition': (vars) =>
-      `${vars?.['current']} / ${vars?.['total']} results`,
-    'chat.searchNoResults': 'No matching messages.',
-    'chat.searchPrevious': 'Previous result',
-    'chat.searchNext': 'Next result',
-    'chat.searchResults': 'Search results',
-    'chat.searchResultsLimited': (vars) =>
-      `Showing the first ${vars?.['count']} results. Refine your search for more specific matches.`,
-    'chat.searchFailed':
-      'Could not search all history. Results may be incomplete.',
-    'chat.searchLocateFailed':
-      'This result could not be located. Search again to refresh it.',
-    'chat.searchUser': 'You',
-    'chat.searchAssistant': 'Assistant',
-  },
+  en: EN_MESSAGES,
   'zh-CN': {
     'chat.searchConversation': '搜索当前会话',
     'chat.searchConversationPlaceholder': '搜索消息和代码…',
@@ -53,6 +55,9 @@ const messages: Record<WebShellLanguage, Record<string, Message>> = {
     'chat.searchUser': '你',
     'chat.searchAssistant': '助手',
   },
+  // Not translated yet — same partial-catalog policy as the ru table in
+  // i18n.tsx (#13391): ru reuses the EN copy.
+  ru: EN_MESSAGES,
 };
 
 export function useConversationSearchI18n() {

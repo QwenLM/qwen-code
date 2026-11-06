@@ -46,10 +46,16 @@ describe('SpotBugs gate witness', () => {
     );
     const byName = (name) => steps.filter((step) => step.name === name);
 
-    // Hosted MySQL, MariaDB and both EventTransport gate jobs each stage the
-    // sibling modules before their own verify; the Hosted failover job
-    // stages them before packaging the jar its arms run.
-    const staging = byName('Install Managed Agent dependencies');
+    // Hosted MySQL, the MySQL job's combined install-and-verify step and
+    // both EventTransport gate jobs each stage the sibling modules before
+    // their own verify; the Hosted failover job stages them before packaging
+    // the jar its arms run.
+    const mergedStep =
+      'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration';
+    const staging = [
+      ...byName('Install Managed Agent dependencies'),
+      ...byName(mergedStep),
+    ];
     expect(staging.length).toBe(5);
     for (const step of staging) {
       expect(step.run).toContain('packages/sdk-java/qwencode/pom.xml');
@@ -57,14 +63,22 @@ describe('SpotBugs gate witness', () => {
     }
 
     const enforcing = [
-      ...byName('Run Managed Agent tests, Checkstyle, and MySQL integration'),
+      ...byName(mergedStep),
       ...byName('Verify Hosted Java, Spring and MySQL processes'),
       ...byName('Verify the EventTransport broker gates'),
       ...byName('Verify the EventTransport multi-node gates'),
     ];
     expect(enforcing.length).toBe(4);
     for (const step of enforcing) {
-      expect(step.run).toContain('verify');
+      // Match the command line only: the MariaDB job's merged step explains
+      // its own incident in comments that say 'verify', so a bare
+      // toContain('verify') would let prose witness the phase after a real
+      // narrowing to `clean test`.
+      const commands = step.run
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('#'))
+        .join('\n');
+      expect(commands).toMatch(/\bclean verify\b/);
       expect(step.run).not.toContain('spotbugs.skip');
     }
 

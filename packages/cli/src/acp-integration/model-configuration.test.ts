@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config, ContentGeneratorConfig } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  ContentGeneratorConfig,
+  ContentGeneratorConfigSources,
+} from '@qwen-code/qwen-code-core';
 import {
   buildInstallPlan,
   findProviderById,
@@ -12,7 +16,10 @@ import {
   parseModelReasoningCapabilities,
   resolveBaseUrl,
 } from '@qwen-code/qwen-code-core';
-import { resolveReasoningCapabilities } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import {
+  resolveReasoningCapabilities,
+  resolveReasoningForModel,
+} from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -70,28 +77,401 @@ describe('default reasoning configuration', () => {
 
 describe('model configuration manifest', () => {
   it.each([
+    [{ samplingParams: { model: 'deepseek-v4-pro' } }, ['high', 'max'], 'high'],
+    [{ extra_body: { model: 'deepseek-v4-pro' } }, ['high', 'max'], 'high'],
+    [
+      {
+        samplingParams: { model: 'deepseek-v4-pro' },
+        extra_body: { model: 'deepseek-v4.1-flash-1017' },
+      },
+      ['low', 'high', 'max'],
+      'low',
+    ],
+    [
+      {
+        samplingParams: { model: 'deepseek-v4.1-flash-1017' },
+        extra_body: { model: 'deepseek-v4-pro' },
+      },
+      ['high', 'max'],
+      'high',
+    ],
+  ] as const)(
+    'matches DeepSeek options, validation and display to final model in %j',
+    (overrides, efforts, currentValue) => {
+      const generation = {
+        model: 'deepseek-v4.1-flash-1017',
+        authType: 'openai',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        reasoning: { effort: 'low' },
+        ...overrides,
+      } as ContentGeneratorConfig;
+      const config = {
+        getModel: () => generation.model,
+        getContentGeneratorConfig: () => generation,
+      } as unknown as Config;
+      const reasoning = resolveReasoningForModel(config, generation);
+      expect(getConfiguredModelReasoning(config)).toEqual(reasoning);
+      expect(reasoning).toMatchObject({ efforts });
+      expect(
+        isReasoningSelectionSupported(
+          generation.model,
+          'low',
+          false,
+          reasoning,
+        ),
+      ).toBe(currentValue === 'low');
+      expect(
+        buildModelReasoningRoutePreview(generation, reasoning, 'low')?.[0],
+      ).toMatchObject({
+        currentValue,
+        options: [{ value: 'none' }, ...efforts.map((value) => ({ value }))],
+      });
+      expect(getReasoningForDisplay(config, generation)).toEqual({
+        effort: currentValue,
+      });
+    },
+  );
+
+  it('keeps the final model declaration ahead of the configured DeepSeek declaration', () => {
+    const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+    const generation = {
+      model: 'deepseek-v4.1-flash-1017',
+      authType: 'openai',
+      baseUrl,
+      thinkingMandatory: true,
+      extra_body: { model: 'deepseek-v4-pro' },
+      reasoningSnapshot: [
+        {
+          id: 'deepseek-v4.1-flash-1017',
+          authType: 'openai',
+          baseUrl,
+          reasoning: {
+            thinking: true,
+            disableField: 'enable_thinking',
+            efforts: ['low'],
+            defaultEffort: 'low',
+          },
+        },
+        {
+          id: 'deepseek-v4-pro',
+          authType: 'openai',
+          baseUrl,
+          reasoning: {
+            thinking: true,
+            disableField: 'enable_thinking',
+            efforts: ['max'],
+            defaultEffort: 'max',
+          },
+        },
+      ],
+    } as ContentGeneratorConfig;
+    const config = {
+      getModel: () => generation.model,
+      getContentGeneratorConfig: () => generation,
+    } as unknown as Config;
+    const reasoning = resolveReasoningForModel(config, generation);
+    expect(getConfiguredModelReasoning(config)).toEqual(reasoning);
+    expect(reasoning).toMatchObject({ efforts: ['max'], defaultEffort: 'max' });
+    expect(
+      buildModelReasoningRoutePreview(generation, reasoning, undefined)?.[0],
+    ).toMatchObject({
+      currentValue: 'max',
+      options: [{ value: 'none' }, { value: 'max' }],
+    });
+    expect(getReasoningForDisplay(config, generation)).toEqual({
+      effort: 'max',
+    });
+  });
+
+  it('does not restore the configured model manifest after a static model override', () => {
+    const generation = {
+      model: 'gpt-5.5',
+      authType: 'openai',
+      extra_body: { model: 'unknown-target' },
+    } as ContentGeneratorConfig;
+    const config = {
+      getModel: () => generation.model,
+      getContentGeneratorConfig: () => generation,
+    } as unknown as Config;
+    expect(getConfiguredModelReasoning(config)).toBeUndefined();
+    expect(
+      buildModelReasoningRoutePreview(generation, undefined, 'high'),
+    ).toBeUndefined();
+    expect(
+      getGptReasoningOverrideState({
+        ...generation,
+        samplingParams: { reasoning_effort: 'high' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    ['deepseek-flash', 'https://api.deepseek.com/v1', ['low', 'high', 'max']],
+    [
+      'deepseek-v4.1-flash',
+      'https://model-proxy.alibaba-inc.com/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
+      'deepseek-v4.1-flash',
+      'https://model-proxy.aliyun-inc.com/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
+      'deepseek-v4.1-flash',
+      'https://model-proxy.alicloudapi.com/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
+      'deepseek-v4.1-flash-1017',
+      'https://gateway.cn-shanghai.pai-eas.aliyuncs.com/api/predict/demo/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
+      'DeepSeek-V4-Pro',
+      'https://gateway.cn-shanghai.pai-eas.aliyuncs.com/api/predict/demo/v1',
+      ['high', 'max'],
+    ],
+    [
+      'deepseek-v4.1-flash-1017',
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
+      'deepseek-v4-pro',
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      ['high', 'max'],
+    ],
+  ] as const)(
+    'resolves built-in DeepSeek controls for %s on %s',
+    (model, baseUrl, efforts) => {
+      const generation = {
+        model,
+        baseUrl,
+        authType: 'openai',
+      } as ContentGeneratorConfig;
+      const reasoning = resolveReasoningCapabilities(generation, undefined);
+      expect(
+        buildModelReasoningRoutePreview(
+          generation,
+          reasoning,
+          undefined,
+          true,
+        )?.[0],
+      ).toMatchObject({
+        currentValue: 'high',
+        options: [{ value: 'none' }, ...efforts.map((value) => ({ value }))],
+        _meta: { 'qwenCode/reasoning': { defaultEffort: 'high' } },
+      });
+    },
+  );
+
+  it.each([
+    [{ reasoning: { effort: 'low' } }, undefined, 'low'],
+    [{ reasoning: { effort: 'max' } }, 'medium', 'high'],
+    [{ extra_body: { reasoning_effort: 'max' } }, undefined, 'max'],
+    [{ samplingParams: { reasoning: { effort: 'max' } } }, undefined, 'max'],
+    [{ extra_body: { thinking: { type: 'disabled' } } }, undefined, 'none'],
+    [{ extra_body: { thinking: { type: 'disabled' } } }, 'max', 'max'],
+    [
+      { reasoning: { effort: 'low' }, extra_body: { reasoning_effort: 'max' } },
+      'medium',
+      'max',
+    ],
+  ] as const)(
+    'projects effective DeepSeek defaults %j with persisted %s',
+    (configured, selection, currentValue) => {
+      const generation = {
+        model: 'deepseek-flash',
+        authType: 'openai',
+        baseUrl: 'https://api.deepseek.com/v1',
+        ...configured,
+      } as ContentGeneratorConfig;
+      const reasoning = resolveReasoningCapabilities(generation, undefined);
+      expect(
+        buildModelReasoningRoutePreview(generation, reasoning, selection)?.[0]
+          ?.currentValue,
+      ).toBe(currentValue);
+    },
+  );
+
+  it('uses declared legacy DeepSeek capabilities for opaque previews and static overrides', () => {
+    const generation = {
+      model: 'deepseek-flash',
+      authType: 'openai',
+      baseUrl: 'https://api.deepseek.com/v1',
+      extra_body: {
+        thinking: { type: 'disabled' },
+        reasoning: { effort: 'max', budget_tokens: 8192 },
+      },
+      reasoningSnapshot: [
+        {
+          id: 'deepseek-flash',
+          authType: 'openai',
+          baseUrl: 'https://api.deepseek.com/v1',
+          reasoning: {
+            thinking: true,
+            efforts: ['low', 'high', 'max'],
+            defaultEffort: 'high',
+            disableField: 'thinking',
+          },
+        },
+      ],
+    } as ContentGeneratorConfig;
+    const config = {
+      getModel: () => generation.model,
+      getContentGeneratorConfig: () => generation,
+    } as unknown as Config;
+    const reasoning = resolveReasoningForModel(config, generation);
+    expect(getConfiguredModelReasoning(config)).toEqual(reasoning);
+    expect(reasoning?.profile).toBeUndefined();
+    expect(
+      buildModelReasoningRoutePreview(
+        generation,
+        reasoning,
+        undefined,
+        true,
+      )?.[0]?.currentValue,
+    ).toBe('none');
+    expect(getReasoningForDisplay(config, generation)).toBe(false);
+    clearReasoningRequestOverrides(generation);
+    expect(generation.extra_body).toEqual({
+      reasoning: { budget_tokens: 8192 },
+    });
+    expect(getReasoningForDisplay(config, generation)).toEqual({
+      effort: 'high',
+    });
+  });
+
+  it('keeps an explicit DeepSeek profile declaration ahead of the built-in capability', () => {
+    const generation = {
+      model: 'deepseek-flash',
+      authType: 'openai',
+      baseUrl: 'https://api.deepseek.com/v1',
+    } as ContentGeneratorConfig;
+    const reasoning = resolveReasoningCapabilities(generation, {
+      profile: 'openai-effort',
+      efforts: ['medium', 'high'],
+      defaultEffort: 'medium',
+    });
+    expect(
+      buildModelReasoningRoutePreview(generation, reasoning, undefined)?.[0],
+    ).toMatchObject({
+      currentValue: 'medium',
+      options: [{ value: 'none' }, { value: 'medium' }, { value: 'high' }],
+    });
+  });
+
+  it('shows provider default for a legacy DeepSeek declaration without a default tier', () => {
+    const generation = {
+      model: 'deepseek-flash',
+      authType: 'openai',
+      baseUrl: 'https://api.deepseek.com/v1',
+      reasoningSnapshot: [
+        {
+          id: 'deepseek-flash',
+          authType: 'openai',
+          baseUrl: 'https://api.deepseek.com/v1',
+          reasoning: {
+            thinking: true,
+            efforts: ['low', 'max'],
+            disableField: 'thinking',
+          },
+        },
+      ],
+    } as ContentGeneratorConfig;
+    const config = {} as Config;
+    const reasoning = resolveReasoningForModel(config, generation);
+    expect(
+      buildModelReasoningRoutePreview(
+        generation,
+        reasoning,
+        undefined,
+        true,
+      )?.[0]?.currentValue,
+    ).toBe('default');
+    expect(getReasoningForDisplay(config, generation)).toEqual({
+      effort: undefined,
+    });
+  });
+
+  it('clears DeepSeek request overrides without dropping nested siblings', () => {
+    const generation = {
+      model: 'deepseek-flash',
+      authType: 'openai',
+      baseUrl: 'https://api.deepseek.com/v1',
+      extra_body: {
+        thinking: { type: 'disabled' },
+        reasoning: { effort: 'max', budget_tokens: 8192 },
+      },
+      samplingParams: {
+        reasoning_effort: 'low',
+        reasoning: { effort: 'low' },
+        seed: 7,
+      },
+    } as ContentGeneratorConfig;
+    clearReasoningRequestOverrides(generation);
+    expect(generation.extra_body).toEqual({
+      reasoning: { budget_tokens: 8192 },
+    });
+    expect(generation.samplingParams).toEqual({ seed: 7 });
+  });
+
+  it('clears explicit DeepSeek off provenance when restoring an off preset', () => {
+    const live: ContentGeneratorConfig = {
+      model: 'deepseek-flash',
+      authType: 'openai' as ContentGeneratorConfig['authType'],
+      baseUrl: 'https://api.deepseek.com/v1',
+      reasoning: false,
+    };
+    const rebuildable = { ...live };
+    const sources: ContentGeneratorConfigSources = {
+      reasoning: { kind: 'settings', settingsPath: 'model.reasoningEffort' },
+    };
+    const rebuildableSources = { ...sources };
+    const config = {
+      getContentGeneratorConfig: () => live,
+      getContentGeneratorConfigSources: () => sources,
+      getModelsConfig: () => ({
+        getGenerationConfig: () => rebuildable,
+        getGenerationConfigSources: () => rebuildableSources,
+      }),
+    } as unknown as Config;
+    applyReasoningSelection(config, 'none');
+    expect(sources['reasoning']).toEqual({
+      kind: 'programmatic',
+      detail: 'reasoning selection',
+    });
+    applyReasoningSelection(config, 'default', false);
+    expect(live.reasoning).toBe(false);
+    expect(rebuildable.reasoning).toBe(false);
+    expect(sources['reasoning']).toBeUndefined();
+    expect(rebuildableSources['reasoning']).toBeUndefined();
+  });
+
+  it.each([
     ['moonshot', 'kimi-k3', ['low', 'high', 'max'], 'max'],
     ['moonshot', 'kimi-k2.7-code', ['default'], 'default'],
     ['moonshot', 'kimi-k2.7-code-highspeed', ['default'], 'default'],
     ['moonshot', 'kimi-k2.6', ['none', 'default'], 'default'],
     ['deepseek', 'deepseek-v4-pro', ['none', 'low', 'high', 'max'], 'high'],
-    ['deepseek', 'deepseek-v4-flash', ['none', 'low', 'high', 'max'], 'high'],
+    ['deepseek', 'deepseek-flash', ['none', 'low', 'high', 'max'], 'high'],
     [
       'alibabaStandard',
       'qwen3.8-max',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     [
       'alibabaStandard',
       'qwen3.8-max-0902',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     [
       'alibabaStandard',
       'qwen3.8-flash',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     ['alibabaStandard', 'deepseek-v4-pro', ['none', 'high', 'max'], 'high'],
@@ -102,12 +482,16 @@ describe('model configuration manifest', () => {
       'high',
     ],
     ['alibabaStandard', 'kimi-k3', ['low', 'high', 'max'], 'max'],
-    ['token-plan', 'qwen3.8-max', ['low', 'medium', 'xhigh'], 'xhigh'],
-    ['token-plan', 'qwen3.8-max-preview', ['low', 'medium', 'xhigh'], 'xhigh'],
+    [
+      'token-plan',
+      'qwen3.8-max',
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      'xhigh',
+    ],
     [
       'token-plan',
       'qwen3.8-flash',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     [
@@ -342,18 +726,30 @@ describe('model configuration manifest', () => {
     expect(getConfiguredModelReasoning(config)).toBeUndefined();
   });
 
-  it('registers the exact stable qwen3.8-max reasoning controls', () => {
-    expect(getModelConfiguration('qwen3.8-max')).toEqual({
-      reasoning: {
-        thinking: true,
-        efforts: ['low', 'medium', 'xhigh'],
-        defaultEffort: 'xhigh',
-      },
-    });
-  });
+  it.each(['qwen3.8-max', 'qwen3.8-flash'])(
+    'registers the exact stable %s reasoning controls',
+    (modelId) => {
+      expect(getModelConfiguration(modelId)).toEqual({
+        reasoning: {
+          thinking: true,
+          efforts: ['low', 'medium', 'xhigh'],
+          defaultEffort: 'xhigh',
+        },
+      });
+    },
+  );
 
-  it('builds the stable qwen3.8-max default reasoning option', () => {
-    expect(buildModelReasoningConfigOption('qwen3.8-max')).toMatchObject({
+  it.each([
+    'qwen-latest-series-invite-202610-m6',
+    'QWEN-LATEST-SERIES-INVITE-202610-m6',
+    'qwen4',
+    'qwen4-plus',
+    'Qwen4-Max-2026-10-01',
+  ])('registers the stable tiered controls for %s', (modelId) => {
+    expect(getModelConfiguration(modelId)).toEqual(
+      getModelConfiguration('qwen3.8-max'),
+    );
+    expect(buildModelReasoningConfigOption(modelId)).toMatchObject({
       id: 'reasoning_effort',
       currentValue: 'xhigh',
       options: [
@@ -367,6 +763,114 @@ describe('model configuration manifest', () => {
       },
     });
   });
+
+  it.each(['qwen-latest-series-other', 'company-qwen4', 'qwen3.9-max'])(
+    'does not register tiered controls for %s',
+    (modelId) => {
+      expect(getModelConfiguration(modelId)).toBeUndefined();
+    },
+  );
+
+  it.each(['qwen4-plus', 'qwen-latest-series-invite-202610-m6'])(
+    'projects tiered controls for %s on opaque duplicate-endpoint routes',
+    (model) => {
+      const baseUrl =
+        'https://llm-a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+      const generation = {
+        model,
+        authType: 'openai',
+        baseUrl,
+        reasoningSnapshot: [
+          { id: model, authType: 'openai', baseUrl, reasoning: undefined },
+          {
+            id: model,
+            authType: 'openai',
+            baseUrl:
+              'https://llm-b.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+            reasoning: undefined,
+          },
+        ],
+        reasoningRouteBaseUrl: baseUrl,
+      } as unknown as ContentGeneratorConfig;
+      expect(
+        buildModelReasoningRoutePreview(
+          generation,
+          resolveReasoningForModel(undefined, generation),
+          undefined,
+          true,
+        )?.[0],
+      ).toMatchObject({
+        currentValue: 'xhigh',
+        options: [
+          { value: 'none' },
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'xhigh' },
+        ],
+      });
+    },
+  );
+
+  it('keeps opaque routes without a known contract control-free', () => {
+    const generation = {
+      model: 'qwen3.7-plus',
+      authType: 'openai',
+      baseUrl: 'https://llm-a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    } as ContentGeneratorConfig;
+    expect(
+      buildModelReasoningRoutePreview(generation, undefined, undefined, true),
+    ).toBeUndefined();
+  });
+
+  it('does not re-tier the display for a declared new-alias route', () => {
+    const generation = {
+      model: 'deepseek-v4.1-flash-custom',
+      authType: 'openai',
+      baseUrl:
+        'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      reasoning: { effort: 'xhigh' },
+    } as ContentGeneratorConfig;
+    const config = {
+      getModel: () => generation.model,
+      getContentGeneratorConfig: () => generation,
+      getResolvedModelConfig: () => ({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['low', 'medium', 'high'],
+            defaultEffort: 'medium',
+            disableField: 'reasoning_effort',
+          },
+        },
+      }),
+    } as unknown as Config;
+    // The display reports the configured tier as the user set it. The
+    // declared-capability wire path separately drops an out-of-ladder tier
+    // (pinned by the sibling pipeline test); the built-in normalizer must
+    // not re-tier the display into a tier the user did not choose.
+    expect(getReasoningForDisplay(config, generation)).toEqual({
+      effort: 'xhigh',
+    });
+  });
+
+  it.each(['qwen3.8-max', 'qwen3.8-flash'])(
+    'builds the stable %s default reasoning option',
+    (modelId) => {
+      expect(buildModelReasoningConfigOption(modelId)).toMatchObject({
+        id: 'reasoning_effort',
+        currentValue: 'xhigh',
+        options: [
+          { value: 'none' },
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'xhigh' },
+        ],
+        _meta: {
+          'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+        },
+      });
+    },
+  );
 
   it('omits Thinking off when qwen3.8-max requires thinking', () => {
     expect(
@@ -416,6 +920,17 @@ describe('model configuration manifest', () => {
     ['qwen3.8-max', 'max', false, false],
     ['qwen3.8-max', 'none', false, true],
     ['qwen3.8-max', 'none', true, false],
+    ['qwen3.8-flash', 'low', false, true],
+    ['qwen3.8-flash', 'medium', false, true],
+    ['qwen3.8-flash', 'xhigh', false, true],
+    ['qwen3.8-flash', 'high', false, false],
+    ['qwen3.8-flash', 'max', false, false],
+    ['qwen3.8-flash', 'none', false, true],
+    ['qwen3.8-flash', 'none', true, false],
+    ['qwen-latest-series-invite-202610-m6', 'low', false, true],
+    ['qwen-latest-series-invite-202610-m6', 'max', false, false],
+    ['qwen4-plus', 'none', false, true],
+    ['qwen4-plus', 'none', true, false],
     ['qwen3.7-plus', 'default', false, true],
     ['qwen3.7-plus', 'none', false, true],
     ['qwen3.7-plus', 'low', false, false],
@@ -430,11 +945,14 @@ describe('model configuration manifest', () => {
     },
   );
 
-  it('wraps the stable default option for workspace preview', () => {
-    expect(buildModelReasoningConfigPreview('qwen3.8-max')).toEqual([
-      buildModelReasoningConfigOption('qwen3.8-max'),
-    ]);
-  });
+  it.each(['qwen3.8-max', 'qwen3.8-flash'])(
+    'wraps the stable %s default option for workspace preview',
+    (modelId) => {
+      expect(buildModelReasoningConfigPreview(modelId)).toEqual([
+        buildModelReasoningConfigOption(modelId),
+      ]);
+    },
+  );
 
   it('preserves mandatory thinking in the workspace preview', () => {
     expect(
@@ -453,6 +971,10 @@ describe('model configuration manifest', () => {
     ['qwen3.8-max', 'none', false, { enabled: false }],
     ['qwen3.8-max', 'max', false, {}],
     ['qwen3.8-max', 'none', true, {}],
+    ['qwen3.8-flash', 'medium', false, { enabled: true, effort: 'medium' }],
+    ['qwen3.8-flash', 'none', false, { enabled: false }],
+    ['qwen3.8-flash', 'max', false, {}],
+    ['qwen3.8-flash', 'none', true, {}],
   ] as const)(
     'projects persisted %s selection %s with mandatory=%s',
     (modelId, selection, mandatory, expected) => {
@@ -795,7 +1317,8 @@ describe('external reasoning controls', () => {
         capabilities: { reasoning: declaration },
       }),
     } as unknown as Config;
-    const reasoning = getConfiguredModelReasoning(config);
+    const reasoning = resolveReasoningForModel(config, generation);
+    expect(getConfiguredModelReasoning(config)).toEqual(reasoning);
     expect(
       buildModelReasoningRoutePreview(generation, reasoning, undefined)?.[0],
     ).toMatchObject({

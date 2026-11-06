@@ -45,7 +45,7 @@ nothing. The skill's environment contract states what the lane provides.
 
 Left under _Not covered_ in the skill, and still owned by `sdk-java.yml`:
 
-- MariaDB / MySQL failsafe integration tests and the hosted harness. Those
+- MySQL 8.4 failsafe integration tests and the hosted harness. Those
   need a database and a bundled `dist/cli.js`.
 - The Java 11 and Java 17 matrix.
 - Re-running Java tests through the flakiness gate.

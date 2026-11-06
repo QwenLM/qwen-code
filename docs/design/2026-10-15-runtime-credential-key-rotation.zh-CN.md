@@ -4,7 +4,7 @@
 
 ## 状态
 
-已在 #13202 对应改动中实现；该改动合入前，发布版本中仍不可用。
+针对 #13202 的基础密钥环支持已由 #14317 合入。#14408 对应改动将同一配置扩展到 operator recovery，并增加仅包含 ID 的诊断；运行时验收仍是独立门禁。
 
 ## 问题
 
@@ -37,6 +37,12 @@ qwen:
 
 每把已配置密钥解码后都必须正好为 32 字节。active key ID 不得同时出现在 `previous-credential-keys` 中。持久化 key ID 未配置时，系统继续以 `Runtime credential key is unavailable` 失败。映射键必须写成 Spring 方括号形式（`'[…]'`）：宽松绑定会规整普通键（`legacy/v1` 无论加引号与否都会绑定为 `legacyv1`），其他写法都会静默匹配不到任何持久化记录。
 
+Spring 绑定的 operator-recovery 入口读取相同的 active pair 和 previous-key 映射，保持轮换后的 active key，不再要求运维人员临时把旧密钥设为 active。通过 `SPRING_CONFIG_ADDITIONAL_LOCATION` 加载同一份外部 YAML；previous-key 映射仍没有环境变量映射协议。CSI/迁移维护入口（含 CSI Hosted 探针）保留现有单密钥输入契约。
+
+key ID 是已随密文保存的非 secret 标识。protector 成功构造后，记录一次解析后的 active ID 和排序后的 configured IDs。密钥不可用错误包含 requested ID 与同一份解析后密钥环；既有包含 ID 的密钥校验错误也采用同样的转义。复用 fastjson2 的 JSON 字符串编码与 `EscapeNoneAscii`，精确保留 ID 拼写，同时转义控制字符及 Unicode 换行分隔符。绝不记录 key map、密钥字节、明文、密文或 lease token。这些诊断用于人工对照持久化 ID，不会执行启动扫描，也不能证明每条记录均可读取。
+
+key ID 只能使用非 secret 标签，不得把密钥材料放入 ID。缺密钥错误返回通用 HTTP 500，响应中不包含 key ID。只有真正的 Broker 已关闭异常映射为 HTTP 503 `runtime_broker_closed`，ID 中含有 `closed` 不得改变该分类。
+
 ## 轮换步骤
 
 1. 备份数据库和当前完整 key ring。
@@ -50,6 +56,8 @@ qwen:
 
 - Protector 回归用例验证：active key 负责加密、previous key 生成的 secret 可以解密、只持有旧密钥的 protector 无法读取新密文、active/previous ID 重复时拒绝配置。
 - Spring 集成测试绑定 `previous-credential-keys`，通过已配置的 `SecretProtector` 解密 previous-key secret，并证明新加密使用 active ID。
+- 现有 Hosted operator-recovery 场景使用新的 active pair 与已绑定的旧密钥映射运行真实维护子进程，检查原始 provision-seed 密文与 key ID 保持不变。父 broker 同时配置两把可读密钥。以 seed 为凭据来源的 worker 不会在 runtime-credential 列重复存储 token，不能要求其存储契约明确省略的 lease 重加密。
+- 诊断回归用例捕获一次成功构造摘要和密钥不可用错误，检查精确 ID 可见性、控制字符转义以及不包含 secret 值。完整 Java、Linux/MySQL 与 Hosted 验证结果必须单独报告；仅有源码修改不能证明验收通过。
 - 既有错误 context、错误 key、篡改、最大 token 和新 IV 覆盖继续适用，因为密文格式和 AES-GCM 操作没有变化。
 
 ## 验收标准
@@ -58,3 +66,5 @@ qwen:
 - 轮换后创建的 binding 记录新的 active key ID。
 - 缺失、格式错误、长度错误或重复的密钥配置会安全失败。
 - 只配置既有 active key pair 的部署保持原有行为。
+- Operator recovery 能通过已配置的 previous-key 映射读取轮换前的 binding，并保持原始 provision seed 不变。
+- 启动与密钥不可用诊断只展示转义后的 ID，使解析后的密钥环可检查，同时不记录 secret 值。

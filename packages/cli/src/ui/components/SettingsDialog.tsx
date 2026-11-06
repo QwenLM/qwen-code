@@ -316,6 +316,12 @@ export function SettingsDialog({
               }
             }
 
+            if (key === 'ui.disableWorkflowKeywordTrigger') {
+              config?.setWorkflowKeywordTriggerEnabled(
+                settings.merged.ui?.disableWorkflowKeywordTrigger !== true,
+              );
+            }
+
             // Remove from modifiedSettings since it's now saved
             setModifiedSettings((prev) => {
               const updated = new Set(prev);

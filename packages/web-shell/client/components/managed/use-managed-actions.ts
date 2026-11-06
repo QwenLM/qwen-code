@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ManagedAgentPendingAction,
+  ManagedAgentActionResponse,
   ManagedAgentProvider,
   ManagedAgentSessionEvent,
 } from './managed-agent-provider';
 import { isNonRetryableClientError } from './managed-request-error';
+import {
+  canonicalQuestionAnswers,
+  questionResponseKey,
+} from './managed-question-response';
 
 // Re-reads shortly after the earliest expiry so an unanswered approval leaves
 // the page once the Harness has ended it.
@@ -29,6 +34,10 @@ const ENDED_ACTION_CODES: ReadonlySet<string> = new Set([
   'action_already_resolved',
 ]);
 
+function actionKey(action: ManagedAgentPendingAction): string {
+  return `${action.sessionId}:${action.actionId}`;
+}
+
 function endedAction(failure: unknown): boolean {
   const code =
     typeof failure === 'object' && failure !== null && 'code' in failure
@@ -38,6 +47,7 @@ function endedAction(failure: unknown): boolean {
 }
 
 export interface ManagedActionsState {
+  actions: readonly ManagedAgentPendingAction[];
   /** The approval to show; answered ones stay hidden while they settle. */
   action?: ManagedAgentPendingAction;
   /** Reading the pending approvals failed; retries run in the background. */
@@ -58,7 +68,10 @@ export interface ManagedActionsState {
    * re-probes instead of treating one 403 as permanent for the mount.
    */
   respondForbidden: boolean;
-  respond(actionId: string, optionId: string): Promise<void>;
+  respond(
+    actionId: string,
+    response: ManagedAgentActionResponse,
+  ): Promise<void>;
   /** Reads the pending approvals again now. */
   retry(): void;
 }
@@ -76,10 +89,27 @@ export function useManagedActions(
   clientId: string,
   enabled: boolean | undefined,
   events: readonly ManagedAgentSessionEvent[],
+  includeChildren = false,
 ): ManagedActionsState {
   const reader = enabled === false ? undefined : provider.actions;
+  const credentials = useMemo(
+    () => ({ provider, clientId }),
+    [provider, clientId],
+  );
+  const owner = useMemo(
+    () => ({ credentials, sessionId }),
+    [credentials, sessionId],
+  );
+  const ownerRef = useRef(owner);
+  ownerRef.current = owner;
+  const [visible, setVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const changed = () => setVisible(!document.hidden);
+    document.addEventListener('visibilitychange', changed);
+    return () => document.removeEventListener('visibilitychange', changed);
+  }, []);
   const [pending, setPending] = useState<{
-    sessionId?: string;
+    owner?: typeof owner;
     actions: ManagedAgentPendingAction[];
   }>({ actions: [] });
   const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
@@ -100,6 +130,7 @@ export function useManagedActions(
   // read that still lists one shows it again, so a wrong report cannot hide
   // an approvable Action.
   const endedAnswers = useRef(new Set<string>());
+  const inFlight = useRef(new Map<string, typeof owner>());
   const trigger = useMemo(() => {
     let last = 0;
     for (const event of events) {
@@ -117,7 +148,11 @@ export function useManagedActions(
     loadFailures.current = 0;
     answerFailure.current = undefined;
     endedAnswers.current.clear();
-  }, [sessionId]);
+  }, [owner]);
+
+  useEffect(() => {
+    setForbiddenSessions(new Set());
+  }, [credentials]);
 
   useEffect(() => {
     if (!reader || !sessionId) {
@@ -127,6 +162,7 @@ export function useManagedActions(
       loadFailures.current = 0;
       return undefined;
     }
+    if (includeChildren && !visible) return undefined;
     if (enabled === undefined) {
       // So is a reload, which is how a user retries from the page: the
       // reader comes back with the same Session and a fresh retry budget.
@@ -136,14 +172,18 @@ export function useManagedActions(
     const abort = new AbortController();
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     reader
-      .listPending(sessionId, { clientId, signal: abort.signal })
+      .listPending(sessionId, {
+        clientId,
+        signal: abort.signal,
+        ...(includeChildren ? { includeChildren: true } : {}),
+      })
       .then((actions) => {
-        if (abort.signal.aborted) return;
+        if (abort.signal.aborted || ownerRef.current !== owner) return;
         loadFailures.current = 0;
-        setPending({ sessionId, actions });
+        setPending({ owner, actions });
         setLoadError(undefined);
         const stillListed = actions
-          .map((entry) => entry.actionId)
+          .map(actionKey)
           .filter((id) => endedAnswers.current.has(id));
         endedAnswers.current.clear();
         if (stillListed.length > 0) {
@@ -158,21 +198,29 @@ export function useManagedActions(
         // would announce a stale failure beside an unrelated card.
         if (
           answerFailure.current !== undefined &&
-          !actions.some((entry) => entry.actionId === answerFailure.current)
+          !actions.some((entry) => actionKey(entry) === answerFailure.current)
         ) {
           answerFailure.current = undefined;
           setAnswerError(undefined);
         }
+        if (includeChildren) {
+          retryTimer = setTimeout(
+            () => setRevision((value) => value + 1),
+            3_000,
+          );
+        }
       })
       .catch((failure: unknown) => {
-        if (abort.signal.aborted) return;
+        if (abort.signal.aborted || ownerRef.current !== owner) return;
         setLoadError(failure);
         // A 4xx the service will answer the same way every time is not a
         // hiccup: retrying it only burns requests, and the Retry button would
         // keep offering an attempt that cannot succeed. Timeouts and rate
         // limits still back off as before.
         if (isNonRetryableClientError(failure)) return;
-        const delay = LOAD_RETRY_DELAYS_MS[loadFailures.current];
+        const delay =
+          LOAD_RETRY_DELAYS_MS[loadFailures.current] ??
+          (includeChildren ? 10_000 : undefined);
         loadFailures.current += 1;
         if (delay !== undefined) {
           retryTimer = setTimeout(
@@ -185,7 +233,17 @@ export function useManagedActions(
       abort.abort();
       clearTimeout(retryTimer);
     };
-  }, [reader, enabled, sessionId, clientId, trigger, revision]);
+  }, [
+    reader,
+    enabled,
+    sessionId,
+    clientId,
+    trigger,
+    revision,
+    owner,
+    includeChildren,
+    visible,
+  ]);
 
   const earliestExpiry = pending.actions.length
     ? Math.min(...pending.actions.map((action) => action.expiresAt))
@@ -200,32 +258,53 @@ export function useManagedActions(
   }, [earliestExpiry]);
 
   const actions = useMemo(
-    () => (pending.sessionId === sessionId ? pending.actions : []),
-    [pending.sessionId, pending.actions, sessionId],
+    () => (pending.owner === owner ? pending.actions : []),
+    [pending.owner, pending.actions, owner],
   );
   // `pending.sessionId` is set by the success branch of a read only.
-  const loaded = pending.sessionId === sessionId;
-  const action = actions.find((entry) => !answered.has(entry.actionId));
-  const current = useRef({ sessionId, actions });
-  current.current = { sessionId, actions };
+  const loaded = pending.owner === owner;
+  const action = actions.find((entry) => !answered.has(actionKey(entry)));
+  const current = useRef({ owner, actions });
+  current.current = { owner, actions };
 
   const respond = useCallback(
-    async (actionId: string, optionId: string) => {
-      const target = actions.find((entry) => entry.actionId === actionId);
+    async (actionId: string, response: ManagedAgentActionResponse) => {
+      const target = actions.find(
+        (entry) =>
+          entry.actionId === actionId && !answered.has(actionKey(entry)),
+      );
       if (!target || !reader) return;
+      const key = actionKey(target);
+      if (inFlight.current.get(key) === owner) return;
+      inFlight.current.set(key, owner);
       const isPending = () =>
-        current.current.sessionId === target.sessionId &&
-        current.current.actions.some((entry) => entry.actionId === actionId);
-      setAnswered((current) => new Set(current).add(actionId));
+        current.current.owner === owner &&
+        current.current.actions.some((entry) => actionKey(entry) === key);
+      if (target.kind !== 'question')
+        setAnswered((current) => new Set(current).add(key));
       try {
-        // One key per Action and option: a retried click replays the same
-        // durable operation instead of answering twice.
-        await reader.respond(target, optionId, {
+        if ((target.kind === 'question') !== (typeof response !== 'string')) {
+          throw new Error('Action response kind does not match the request');
+        }
+        const submitted =
+          target.kind === 'question' && typeof response !== 'string'
+            ? {
+                kind: 'question' as const,
+                answers: canonicalQuestionAnswers(target, response.answers),
+              }
+            : response;
+        const idempotencyKey =
+          target.kind === 'question' && typeof submitted !== 'string'
+            ? await questionResponseKey(target, submitted.answers)
+            : `${target.actionId}:${submitted}`;
+        if (!isPending()) return;
+        await reader.respond(target, submitted, {
           clientId,
-          idempotencyKey: `${target.actionId}:${optionId}`,
+          idempotencyKey,
         });
         if (!isPending()) return;
-        if (answerFailure.current === actionId) {
+        setAnswered((current) => new Set(current).add(key));
+        if (answerFailure.current === key) {
           setAnswerError(undefined);
           answerFailure.current = undefined;
         }
@@ -235,7 +314,8 @@ export function useManagedActions(
           typeof failure === 'object' &&
           failure !== null &&
           'code' in failure &&
-          (failure as { code?: unknown }).code === 'action_forbidden'
+          (failure as { code?: unknown }).code === 'action_forbidden' &&
+          ownerRef.current.credentials === credentials
         ) {
           // Responding requires the Session's owner or a Workspace operator,
           // which the service decides from the viewer's Workspace role row
@@ -252,8 +332,9 @@ export function useManagedActions(
         if (endedAction(failure)) {
           // No retry can succeed, so keep the card hidden and read the list
           // again instead of offering an answer the service will refuse.
-          endedAnswers.current.add(actionId);
-          if (answerFailure.current === actionId) {
+          endedAnswers.current.add(key);
+          setAnswered((current) => new Set(current).add(key));
+          if (answerFailure.current === key) {
             answerFailure.current = undefined;
             setAnswerError(undefined);
           }
@@ -262,15 +343,17 @@ export function useManagedActions(
         }
         setAnswered((current) => {
           const next = new Set(current);
-          next.delete(actionId);
+          next.delete(key);
           return next;
         });
         setAnswerError(failure);
-        answerFailure.current = actionId;
+        answerFailure.current = key;
         throw failure;
+      } finally {
+        if (inFlight.current.get(key) === owner) inFlight.current.delete(key);
       }
     },
-    [actions, reader, clientId],
+    [actions, reader, clientId, owner, credentials, answered],
   );
 
   const retry = useCallback(() => {
@@ -286,13 +369,17 @@ export function useManagedActions(
   }, []);
 
   return {
+    actions,
     action,
     loadError,
     loaded,
     answerError:
-      answerFailure.current === action?.actionId ? answerError : undefined,
-    respondForbidden:
-      sessionId !== undefined && forbiddenSessions.has(sessionId),
+      action && answerFailure.current === actionKey(action)
+        ? answerError
+        : undefined,
+    respondForbidden: includeChildren
+      ? action !== undefined && forbiddenSessions.has(action.sessionId)
+      : sessionId !== undefined && forbiddenSessions.has(sessionId),
     respond,
     retry,
   };

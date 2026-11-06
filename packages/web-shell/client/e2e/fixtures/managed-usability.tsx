@@ -3,6 +3,9 @@ import { ManagedAgentWebShell } from '../../ManagedAgentWebShell';
 
 createRoot(document.getElementById('root')!).render(
   <ManagedAgentWebShell
+    sessionId={
+      new URLSearchParams(window.location.search).get('session') ?? undefined
+    }
     baseUrl={window.location.origin}
     productScope="managed-ui-test:actor"
     getHeaders={() => ({ 'X-Qwen-Tenant-Id': 'managed-ui-test' })}
