@@ -180,8 +180,6 @@ const EN: Messages = {
   'subscription.networkFailed': 'The network request failed or timed out.',
   'subscription.modelsUnavailable':
     'Could not load models. Your account is still signed in. Please try again.',
-  'subscription.connectFailed':
-    'Could not connect Qwen Subscription. Please try again.',
   'subscription.connected': (v) =>
     `✓ Signed in successfully · ${v?.email ?? ''}  \n✓ Current plan: Qwen ${v?.plan ?? ''}. Qwen Code is ready.${v?.model ? `  \nModel: ${v.model}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.` : ''}${v?.url ? `  \nIf the browser didn't open, visit:  \n${v.url}` : ''}  \nCommon commands: /usage   /upgrade   /model   /status   /logout`,
   'subscription.signedIn': (v) => `Signed in successfully · ${v?.email ?? ''}`,
@@ -5158,7 +5156,6 @@ const ZH: Messages = {
   'subscription.rateLimited': '请求过多，请稍后重试。',
   'subscription.networkFailed': '网络请求失败或超时。',
   'subscription.modelsUnavailable': '无法加载模型。已保留登录态，请重试。',
-  'subscription.connectFailed': '无法连接 Qwen 订阅，请重试。',
   'subscription.connected': (v) =>
     `✓ 登录成功 · ${v?.email ?? ''}  \n✓ 当前套餐：Qwen ${v?.plan ?? ''}，已可使用 Qwen Code${v?.model ? `  \n模型：${v.model}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。` : ''}${v?.url ? `  \n如果浏览器未打开，请访问：  \n${v.url}` : ''}  \n常用命令：/usage   /upgrade   /model   /status   /logout`,
   'subscription.signedIn': (v) => `登录成功 · ${v?.email ?? ''}`,
