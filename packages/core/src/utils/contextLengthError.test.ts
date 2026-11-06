@@ -444,6 +444,26 @@ describe('contextLengthError', () => {
         "Requested token count exceeds the model's maximum context length of 32768 tokens. You requested a total of 40000 tokens: 36000 tokens from the input messages and 4000 tokens for the completion. Please reduce the number of tokens in the input messages or the completion to fit within the limit.",
         36_000,
       ],
+      [
+        'TGI, prompt and output over the total',
+        'Input validation error: `inputs` tokens + `max_new_tokens` must be <= 32768. Given: 23362 `inputs` tokens and 12629 `max_new_tokens`',
+        23_362,
+      ],
+      [
+        'TGI, prompt over the input limit',
+        'Input validation error: `inputs` must have less than 32000 tokens. Given: 40000',
+        40_000,
+      ],
+      [
+        'vLLM, input length past the window',
+        "Input length (40000) exceeds model's maximum context length (32768).",
+        40_000,
+      ],
+      [
+        'Bedrock, prompt tokens past the model maximum',
+        'prompt tokens (40000) exceed model maximum (32768)',
+        40_000,
+      ],
     ])('reads the prompt count from %s', (_label, message, promptTokens) => {
       const info = getContextLengthExceededInfo(new Error(message));
 
@@ -476,6 +496,14 @@ describe('contextLengthError', () => {
       [
         'a requested output budget alone',
         "This model's maximum context length is 4096 tokens. However, you requested 1000000 tokens in the completion.",
+      ],
+      [
+        'a maximum input length',
+        'Prompt is too long: the maximum input length (32768) was exceeded.',
+      ],
+      [
+        'a maximum count of prompt tokens',
+        'Prompt is too long: maximum prompt tokens (32768) exceeded.',
       ],
     ])('reports no prompt count for %s', (_label, message) => {
       const info = getContextLengthExceededInfo(new Error(message));

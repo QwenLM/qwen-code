@@ -58,6 +58,15 @@ const PROMPT_TOKEN_PATTERNS = [
   /\brequest\s*\(\s*(\d[\d,]*)\s*tokens?\s*\)\s*exceeds\b/i,
   // SGLang: "36000 tokens from the input messages"
   /\b(\d[\d,]*)\s+tokens?\s+from the input messages\b/i,
+  // TGI: "Given: 23362 `inputs` tokens and 12629 `max_new_tokens`"
+  /\bGiven:\s*(\d[\d,]*)\s*`?inputs`?\s+tokens\b/i,
+  // TGI: "`inputs` must have less than 32000 tokens. Given: 40000"
+  /\binputs`?\s+must have less than\s+\d[\d,]*\s+tokens\.?\s*Given:\s*(\d[\d,]*)/i,
+  // vLLM: "Input length (40000) exceeds model's maximum context length". The
+  // verb must follow, as in the next one: "maximum input length (N)" is a limit.
+  /\binput length\s*\(\s*(\d[\d,]*)\s*\)\s*exceeds?\b/i,
+  // Bedrock: "prompt tokens (40000) exceed model maximum (32768)"
+  /\bprompt tokens\s*\(\s*(\d[\d,]*)\s*\)\s*exceeds?\b/i,
 ];
 
 /**

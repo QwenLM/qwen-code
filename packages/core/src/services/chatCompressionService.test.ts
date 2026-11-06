@@ -3977,6 +3977,15 @@ describe('issue #9455: compression requests fit the receiving window', () => {
           `completion.`,
       );
 
+  /** TGI's wording: the prompt's size as its `inputs` count, beside the total. */
+  const tgiRejection =
+    (window: number) => (promptTokens: number, maxOutputTokens: number) =>
+      new Error(
+        `Input validation error: \`inputs\` tokens + \`max_new_tokens\` must ` +
+          `be <= ${window}. Given: ${promptTokens} \`inputs\` tokens and ` +
+          `${maxOutputTokens} \`max_new_tokens\``,
+      );
+
   /**
    * The prompt's size with no figure for the window, as from a server or
    * gateway whose wording for the window this parser does not read.
@@ -4329,6 +4338,27 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     expect(
       sent[1]!.promptTokens + sent[1]!.maxOutputTokens,
     ).toBeLessThanOrEqual(SMALL_WINDOW);
+  });
+
+  it("resends the same request with less output room on TGI's wording", async () => {
+    // TGI states the prompt's size as its `inputs` count. Read, that count
+    // shows the prompt alone leaves the summary its reserve; unread, the
+    // retry would cut every long tool result instead.
+    configureWindow(SMALL_WINDOW);
+    mockBackend({
+      ratio: 1.6,
+      window: SMALL_WINDOW,
+      rejection: tgiRejection(SMALL_WINDOW),
+    });
+
+    const result = await compressHistory(toolSession(4, 12_000), 20_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.contents).toEqual(sent[0]!.contents);
+    expect(sent[1]!.maxOutputTokens).toBe(
+      SMALL_WINDOW - sent[0]!.promptTokens - COMPACTION_BUDGET_SAFETY_MARGIN,
+    );
   });
 
   it('sends the reduced request when the count says the request should have fit', async () => {
