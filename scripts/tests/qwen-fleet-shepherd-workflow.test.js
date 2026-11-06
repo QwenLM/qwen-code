@@ -4156,11 +4156,15 @@ ACTIONS_TOKEN='workflow-token-value'
         1,
     ).toBe(2);
     // Bounded by a page cap, never an open-ended --paginate. The page SIZE is
-    // part of that contract: the short-page test below reads `-lt 100`, so a
-    // halved per_page would stamp a truncated enumeration complete.
+    // part of that contract: the cap bounds the reachable depth at
+    // QUEUE_MAX_PAGES × per_page, so a halved per_page would halve how much of
+    // a deep queue can be read before the census gives up.
     expect(censusBlock).toContain('QUEUE_PAGE <= QUEUE_MAX_PAGES');
     expect(censusBlock).toContain('per_page=100');
-    expect(censusBlock).toContain('-lt 100');
+    // Only an EMPTY page ends the listing. GitHub returns short pages while
+    // the queue is far deeper (measured: total_count 225 with 99 runs in one
+    // payload), so `-lt 100` certified a fraction of the queue as complete.
+    expect(censusBlock).toContain('-eq 0');
     expect(censusBlock).not.toContain('--paginate');
     // The census is read-only, and the denylist has to name the mutating shape
     // this workflow uses five lines away in another mode.
@@ -4249,11 +4253,36 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s' "$QUEUE_OK" "$QUEUE_COMPLETE" "$QUEUE_DEPTH" "$
       }
     };
 
-    // One short page: depth is the API's total_count, the enumerated count is
-    // the runs actually read, and both are reported.
-    const short = replay({ pages: [page([run(1), run(2), run(3)], 3)] });
+    // A short page then an empty one: depth is the API's total_count, the
+    // enumerated count is the runs actually read, and both are reported. The
+    // empty page is what closes the listing, and it costs one extra request.
+    const short = replay({
+      pages: [page([run(1), run(2), run(3)], 3), page([], 3)],
+    });
     expect(short.summary).toBe('true|true|3|19|3|3|0|');
-    expect(short.calls).toHaveLength(2);
+    expect(short.calls).toHaveLength(3);
+
+    // THE case R9-1 is about: page 1 comes back SHORT but non-empty while the
+    // queue is way deeper, and page 2 still has runs. Ending on the short page
+    // certified 99 of 225 as the whole queue, wrote it as the next tick's
+    // baseline, and reported the unread remainder as digested. Both following
+    // pages must be fetched.
+    const shortMid = replay({
+      pages: [
+        page(
+          Array.from({ length: 99 }, (_, i) => run(3000 + i)),
+          225,
+        ),
+        page([run(4000), run(4001)], 225),
+        page([], 225),
+      ],
+    });
+    expect(shortMid.summary).toBe('true|true|225|19|101|101|0|');
+    expect(
+      shortMid.calls.filter((c) => c.includes('status=queued')),
+    ).toHaveLength(3);
+    expect(shortMid.calls.some((c) => c.endsWith('page=2'))).toBe(true);
+    expect(shortMid.calls.some((c) => c.endsWith('page=3'))).toBe(true);
 
     // An exactly-full page is NOT the end: the next page is fetched, and its
     // emptiness is what closes the enumeration. A page-count stop would
@@ -4292,12 +4321,21 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s' "$QUEUE_OK" "$QUEUE_COMPLETE" "$QUEUE_DEPTH" "$
       false,
     );
 
+    // On that failure path the diagnostic's `enumerated` is the loop's QUEUE_N
+    // — the post-loop recompute is skipped precisely because QUEUE_OK is false.
+    // It must report how far the enumeration GOT, so the value accumulates:
+    // two pages read before the third failed is 200, not the last page's 100.
+    const brokenLate = replay({ pages: [hundred(1), hundred(101)] });
+    expect(brokenLate.summary).toBe('false|false|1000||200|0|0|');
+    expect(brokenLate.calls).toHaveLength(3); // pages 1-2 ok, page 3 failed
+
     // A failed in-progress read voids the whole census: queued-vs-running is
     // the pair that distinguishes a saturated pool from a stalled dispatcher,
     // and half of it would read as "nothing is running".
-    expect(replay({ pages: [page([run(1)], 1)], running: null }).summary).toBe(
-      'false|true|1||1|0|0|',
-    );
+    expect(
+      replay({ pages: [page([run(1)], 1), page([], 1)], running: null })
+        .summary,
+    ).toBe('false|true|1||1|0|0|');
 
     // An unreadable total_count is a failure too, not a depth of zero.
     expect(replay({ pages: [{ workflow_runs: [run(1)] }] }).summary).toBe(
@@ -4326,15 +4364,19 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s' "$QUEUE_OK" "$QUEUE_COMPLETE" "$QUEUE_DEPTH" "$
     // The trailing split/trend fields are whatever the failed jq left behind;
     // QUEUE_OK=false means the dashboard renders none of them.
     expect(
-      replay({ pages: [page([{ id: 1, created_at: 'not-a-date' }], 1)] })
-        .summary,
+      replay({
+        pages: [page([{ id: 1, created_at: 'not-a-date' }], 1), page([], 1)],
+      }).summary,
     ).toMatch(/^false\|true\|1\|19\|1\|/);
 
     // The aged tail is counted separately, and the trend still SPANS it: a
     // run that merely crossed the age line is still queued, not digested.
     expect(
       replay({
-        pages: [page([run(1), run(2), run(3, 4320), run(4, 4320)], 4)],
+        pages: [
+          page([run(1), run(2), run(3, 4320), run(4, 4320)], 4),
+          page([], 4),
+        ],
         prev: '3,4',
       }).summary,
     ).toBe('true|true|4|19|4|2|2|digested 0 · new 2 · still queued 2');
@@ -4343,7 +4385,7 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s' "$QUEUE_OK" "$QUEUE_COMPLETE" "$QUEUE_DEPTH" "$
     // sample, carried through the same block that records the next one.
     expect(
       replay({
-        pages: [page([run(2), run(3), run(4), run(5)], 4)],
+        pages: [page([run(2), run(3), run(4), run(5)], 4), page([], 4)],
         prev: '1,2,3',
       }).summary,
     ).toBe('true|true|4|19|4|4|0|digested 1 · new 2 · still queued 2');
@@ -4693,6 +4735,7 @@ printf '|%s' "$QUEUE_IDS"`,
           101,
         ),
         page([run(1099)], 101),
+        page([], 101),
       ],
     }).split('|');
     expect(boundary.slice(0, 3)).toEqual(['true', 'true', '100']);
@@ -4705,7 +4748,7 @@ printf '|%s' "$QUEUE_IDS"`,
     // the merge fix cannot double-count today.
     expect(
       replay({
-        pages: [page([run(1), run(2)], 2)],
+        pages: [page([run(1), run(2)], 2), page([], 2)],
         prev: '1,2,2,3',
       }),
     ).toBe('true|true|2|1,2');

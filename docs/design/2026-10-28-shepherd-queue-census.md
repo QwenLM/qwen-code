@@ -41,7 +41,10 @@ comments, and a scheduled scan of open PRs. None of them reads a queue metric.
 One census block in the shepherd's run step, plus one dashboard section.
 
 **Enumeration.** `GET /repos/{repo}/actions/runs?status=queued&per_page=100&page=N`,
-up to `QUEUE_MAX_PAGES` (5) pages, stopping at the first short page. A second
+up to `QUEUE_MAX_PAGES` (5) pages, stopping only at an **empty** page. A short
+page is not the end: GitHub returns fewer than `per_page` runs while the queue
+is far deeper (measured live: `total_count` 225 with 99 runs in one payload), so
+the page cap is the only truncation state. A second
 read takes the `in_progress` total. Both use the workflow token, whose `actions`
 scope is guaranteed, as the liveness reads already do.
 
@@ -207,7 +210,9 @@ the file's existing convention of extracting the program from the workflow and
 replaying it against fixtures with real `jq` and a PATH-stubbed `gh`:
 
 - Contract: read-only, repo-wide, workflow token, page cap, fail-closed wording.
-- Enumeration: short page, exactly-full page followed by an empty one, cap reached
+- Enumeration: empty page, a short-but-non-empty page followed by a further
+  non-empty one (the case that certifies truncation if a short page ends the
+  listing), exactly-full page followed by an empty one, cap reached
   (no sixth request), env-tuned cap, failed page, failed in-progress read,
   unreadable `total_count`, empty queue, aged split, and a payload jq cannot
   parse.

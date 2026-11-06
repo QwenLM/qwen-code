@@ -669,11 +669,14 @@ jobs:
               echo "::warning::queued-run enumeration failed at page ${QUEUE_PAGE}; queue census skipped this tick"
               break
             fi
-            # Committed only on success: the substitution above captures the
-            # empty stdout of a failing jq, so assigning directly would leave
-            # QUEUE_N empty for the diagnostic line that reports how far the
-            # enumeration got.
-            QUEUE_N="${QUEUE_PAGE_N}"
+            # Accumulated, and only on success: the substitution above captures
+            # the empty stdout of a failing jq, so assigning directly would
+            # leave QUEUE_N empty for the diagnostic line. That line is the ONLY
+            # reader of this value — a census that reaches the merge below
+            # recomputes QUEUE_N from the de-duplicated whole — so it has to
+            # report how far a FAILED enumeration got, not its last page's
+            # length.
+            QUEUE_N=$((QUEUE_N + QUEUE_PAGE_N))
             if [[ "${QUEUE_PAGE}" == "1" ]] && ! QUEUE_DEPTH="$(jq -er '.total_count' /tmp/queue-page.json 2> /dev/null)"; then
               QUEUE_OK=false
               # jq prints "null" before exiting nonzero; the substitution has
@@ -682,9 +685,14 @@ jobs:
               echo "::warning::queued-run total_count unreadable; queue census skipped this tick"
               break
             fi
-            # A short page is the last page. Stopping on the page COUNT alone
-            # would call an exactly-full queue truncated forever.
-            if [[ "${QUEUE_PAGE_N}" -lt 100 ]]; then
+            # Only an EMPTY page ends the listing. A short page does NOT:
+            # GitHub returns pages shorter than per_page while the queue is
+            # far deeper — measured live in one payload, total_count 225 with
+            # 99 runs — so treating a short page as the end certified a
+            # fraction of the queue as complete, wrote that fraction as the
+            # next tick's baseline, and reported the unread remainder as
+            # digested. The page cap above is now the ONLY truncation state.
+            if [[ "${QUEUE_PAGE_N}" -eq 0 ]]; then
               QUEUE_COMPLETE=true
               break
             fi
@@ -718,8 +726,8 @@ jobs:
             # a read-only report. A payload jq cannot read voids the census,
             # exactly like a failed API read.
             #
-            # QUEUE_N is the last PAGE's length inside the loop; the census
-            # needs the whole enumeration.
+            # Inside the loop QUEUE_N accumulates page lengths, for the failure
+            # diagnostic; the census needs the DE-DUPLICATED whole enumeration.
             QUEUE_N="$(jq -r 'length' /tmp/queue-runs.json)" || QUEUE_OK=false
             # One definition of "aged", shared by the split, the waits and the
             # breakdown so they can never disagree about which population they

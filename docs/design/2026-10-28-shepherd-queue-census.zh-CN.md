@@ -33,7 +33,9 @@ autofix 自己发现不了：它的输入是 issue 标签、PR 评审、评论�
 shepherd 运行步骤中的一个普查块，加上一个 Dashboard 区块。
 
 **枚举。** `GET /repos/{repo}/actions/runs?status=queued&per_page=100&page=N`，
-最多 `QUEUE_MAX_PAGES`（5）页，遇到第一个不满页即停。另一次读取取 `in_progress` 总数。
+最多 `QUEUE_MAX_PAGES`（5）页，**只有空页**才结束。不满页不是结束：队列远深于 `per_page`
+时 GitHub 也会返回不满一页（实测同一载荷里 `total_count` 为 225、runs 只有 99 条），因此
+页数上限是唯一的截断状态。另一次读取取 `in_progress` 总数。
 两次都用 workflow token，其 `actions` 权限有保证，与既有的 liveness 读取一致。
 
 **两个 population。** 创建时间达到 `QUEUE_AGED_HOURS`（24）小时的算陈旧尾部，其余为活
@@ -151,7 +153,8 @@ workflow 名字里的 CR、LF、TAB 一律折叠成空格、管道符转义，�
 workflow 中抽取程序，用真实 `jq` 与 PATH 打桩的 `gh` 对夹具回放。
 
 - 契约：只读、全仓、workflow token、页数上限、失败即关闭的措辞。
-- 枚举：不满页、恰好满页后接空页、触顶（不发第 6 次请求）、env 调过的上限、失败页、
+- 枚举：空页、不满但非空的页后面还跟着非空页（若以不满页作结束就会把截断认证为完整的那
+  一例）、恰好满页后接空页、触顶（不发第 6 次请求）、env 调过的上限、失败页、
   在跑数读取失败、`total_count` 不可读、空队列、陈旧拆分，以及 jq 无法解析的载荷。
 - 趋势：换血与排空之别、完全排空、无上一跳样本、尾随分隔符，以及跨过年龄线的 run 仍计为
   仍在排队。
