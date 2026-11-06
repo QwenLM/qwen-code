@@ -16642,6 +16642,7 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'web_fetch',
       'glob',
+      'ask_user_question',
     ]);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
@@ -16692,6 +16693,7 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'web_fetch',
       'glob',
+      'ask_user_question',
     ]);
     expect(state.model).toHaveBeenCalledTimes(2);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(

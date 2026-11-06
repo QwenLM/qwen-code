@@ -60,6 +60,9 @@ Session、仅前台 worker、resident CSI profile 和子 Session 声明该工具
 的回答。取消和过期结束原等待，不编造回答。保留写入租约、activation 和
 Workspace generation 检查。
 
+无状态 Action journal 校验与基于 SQL 的 Action Store 分开，遵守现有类大小
+门槛；这一拆分不改变事务归属、锁、资源校验或拒绝语义。
+
 浏览器根据规范化的结构化回答及 Action/版本身份计算长度受限的幂等键，不在键
 或浏览器存储中保存回答文本。采用仓库固定版本的浏览器 SHA-256 库，确保普通
 局域网 HTTP 无需 Web Crypto 也能回答。同步的提交中状态阻止重复点击。投递失败或不确定

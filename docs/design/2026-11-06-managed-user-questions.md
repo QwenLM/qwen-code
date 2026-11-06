@@ -71,6 +71,10 @@ after decision but before the result must reuse the stored answer. Cancellation
 and expiry settle the existing wait without inventing an answer. Writer lease,
 activation and Workspace generation checks remain in force.
 
+Stateless Action journal validation lives separately from the SQL-backed Action
+Store, preserving the existing class-size ratchet. This separation does not
+change transaction ownership, locks, resource checks or rejection semantics.
+
 The browser computes a bounded idempotency key from canonical structured
 answers and Action/revision identity. It does not store answer text in the key
 or browser storage. It uses the repository's pinned browser SHA-256 library so

@@ -26,13 +26,20 @@ import org.springframework.transaction.annotation.Transactional;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
+
+import static com.alibaba.qwen.code.managedagent.persistence.ManagedActionJournalValidation.closed;
+import static com.alibaba.qwen.code.managedagent.persistence.ManagedActionJournalValidation.read;
+import static com.alibaba.qwen.code.managedagent.persistence.ManagedActionJournalValidation.require;
+import static com.alibaba.qwen.code.managedagent.persistence.ManagedActionJournalValidation.resource;
+import static com.alibaba.qwen.code.managedagent.persistence.ManagedActionJournalValidation.safeNumber;
+import static com.alibaba.qwen.code.managedagent.persistence.ManagedActionJournalValidation.text;
+import static com.alibaba.qwen.code.managedagent.persistence.ManagedActionJournalValidation.validAnswers;
+import static com.alibaba.qwen.code.managedagent.persistence.ManagedActionJournalValidation.validateQuestionResources;
 
 @Repository
 @Qualifier("managedAgentTransactionManager")
@@ -359,41 +366,6 @@ public class ManagedActionStore
                         false,
                         "action:" + id + ":" + event.path("sequence").asLong());
             }
-        }
-    }
-
-    private void validateQuestionResources(String sessionId, JsonNode options, Function<String, StoredResource> resources) {
-        require("ask_user_question".equals(options.path("toolName").asText())
-                && options.path("requiresHumanDecision").isBoolean() && options.path("requiresHumanDecision").booleanValue());
-        JsonNode input = read(new String(resource(options.path("inputRef"), "managed-tool-input", resources).bytes(), StandardCharsets.UTF_8));
-        closed(input, "harnessSessionId", "runtimeSessionId", "payloadJson");
-        require(sessionId.equals(input.path("harnessSessionId").asText()) && text(input.path("payloadJson")));
-        JsonNode payload = read(input.path("payloadJson").textValue());
-        closed(payload, "toolName", "input");
-        require("ask_user_question".equals(payload.path("toolName").asText()));
-        try {
-            require(ManagedUserQuestions.questionsFromInput(payload.get("input")).equals(options.path("questions")));
-        } catch (IllegalArgumentException error) {
-            require(false);
-        }
-        JsonNode continuation = read(new String(resource(options.path("continuationRef"), "hosted-approval-continuation", resources).bytes(), StandardCharsets.UTF_8));
-        JsonNode call = continuation.path("calls").path(0);
-        require(continuation.path("calls").size() == 1 && continuation.path("approvalOrdinal").asInt(-1) == 0
-                && "approval".equals(continuation.path("stage").asText())
-                && continuation.path("actionId").equals(options.path("requestId"))
-                && continuation.path("promptId").equals(options.path("turnId"))
-                && input.path("runtimeSessionId").equals(continuation.path("runtime").path("runtimeSessionId"))
-                && call.path("inputRef").equals(options.path("inputRef"))
-                && call.path("actionId").equals(options.path("requestId"))
-                && call.path("call").path("callId").equals(options.path("functionCallId"))
-                && "ask_user_question".equals(call.path("call").path("name").asText()));
-    }
-
-    private static boolean validAnswers(JsonNode options, JsonNode answers) {
-        try {
-            return ManagedUserQuestions.canonicalAnswers(options.path("questions"), answers, false).equals(answers);
-        } catch (IllegalArgumentException error) {
-            return false;
         }
     }
 
@@ -854,58 +826,5 @@ public class ManagedActionStore
                 op.operationId(),
                 owner,
                 op.claimGeneration());
-    }
-
-    private static StoredResource resource(
-            JsonNode ref, String kind, Function<String, StoredResource> resources) {
-        closed(ref, "resourceId", "kind", "schemaVersion", "byteLength", "digest");
-        require(
-                text(ref.path("resourceId"))
-                        && kind.equals(ref.path("kind").asText())
-                        && safeNumber(ref.path("schemaVersion"))
-                        && ref.path("schemaVersion").asLong() == 1
-                        && safeNumber(ref.path("byteLength"))
-                        && ref.path("digest").asText().matches("[0-9a-f]{64}"));
-        StoredResource resource = resources.apply(ref.path("resourceId").asText());
-        require(
-                resource != null
-                        && kind.equals(resource.kind())
-                        && resource.schemaVersion() == 1
-                        && resource.byteLength() == ref.path("byteLength").asLong()
-                        && resource.digest().equals(ref.path("digest").asText()));
-        return resource;
-    }
-
-    private static void closed(JsonNode value, String... fields) {
-        require(value.isObject());
-        Set<String> actual = new HashSet<>();
-        value.fieldNames().forEachRemaining(actual::add);
-        require(actual.equals(Set.of(fields)));
-    }
-
-    private static boolean safeNumber(JsonNode value) {
-        return value.isIntegralNumber()
-                && value.canConvertToLong()
-                && value.asLong() >= 0
-                && value.asLong() <= 9007199254740991L;
-    }
-
-    private static boolean text(JsonNode value) {
-        return value.isTextual() && !value.asText().isBlank();
-    }
-
-    private JsonNode read(String value) {
-        JsonNode result = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(value);
-        require(result != null);
-        return result;
-    }
-
-    private static void require(boolean valid) {
-        if (!valid) {
-            throw new ManagedAgentException(
-                    400,
-                    "managed_session_action_rejected",
-                    "The Action journal record is invalid.");
-        }
     }
 }
