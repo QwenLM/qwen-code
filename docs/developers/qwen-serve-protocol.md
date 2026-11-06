@@ -40,7 +40,7 @@ Matched origins receive the standard CORS response headers on every request:
 ```
 Access-Control-Allow-Origin: <echoed origin>
 Vary: Origin
-Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
 Access-Control-Allow-Headers: Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID, X-Qwen-Event-Epoch
 Access-Control-Max-Age: 86400
 Access-Control-Expose-Headers: Retry-After, X-Qwen-Event-Epoch, X-Qwen-SSE-Stream-Id

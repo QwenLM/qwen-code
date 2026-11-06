@@ -70,6 +70,10 @@ Workspace 与 User 配置；现有合并规则继续排除未信任 Workspace �
 现有有界重试与 runtime epoch 行为。只刷新 Workspace 时的会话失败语义不变。
 后续刷新失败不回滚已保存配置，runtime capability 状态呈现失败。
 
+配对 child 对已接收的 Skill 变更返回确认及实际刷新计数。部分会话或缓存刷新
+失败仍作为刷新错误传递给 coordinator，保留待处理 User 工作，但不会隔离已确认
+变更的通道。原子配置重读失败仍拒绝该变更。
+
 当 Managed 会话仍在线而工作区控制通道为 cold 或 starting 时，继续向在线会话
 传播，不因本次写入单独启动控制通道。控制通道也能确认前，保留待处理 User
 重读。完全冷态的 runtime 仍等待正常启动。

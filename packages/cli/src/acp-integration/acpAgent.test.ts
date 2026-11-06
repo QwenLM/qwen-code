@@ -37878,6 +37878,64 @@ describe('sessionLanguage multi-session propagation', () => {
     },
   );
 
+  it('acknowledges User Skill cache failures but rejects settings reload failures', async () => {
+    const reloadScopesFromDiskAtomically = vi.fn().mockReturnValue(true);
+    const settings = {
+      merged: {},
+      reloadScopesFromDiskAtomically,
+    } as unknown as LoadedSettings;
+    const refreshCache = vi.fn().mockRejectedValue(new Error('cache failed'));
+    const agentPromise = runAcpAgent(
+      makeConfig({
+        getSkillManager: () => ({ refreshCache }),
+      }) as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    const change = {
+      v: 1,
+      revision: 1,
+      kind: 'skills',
+      reason: 'all',
+      includeUserSettings: true,
+    };
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, change),
+      ).resolves.toEqual({
+        v: 1,
+        revision: 1,
+        acknowledged: true,
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 0,
+        configsFailed: 1,
+        reason: 'all',
+      });
+      expect(reloadScopesFromDiskAtomically).toHaveBeenCalledExactlyOnceWith([
+        SettingScope.Workspace,
+        SettingScope.User,
+      ]);
+      reloadScopesFromDiskAtomically.mockReturnValue(false);
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+          ...change,
+          revision: 2,
+        }),
+      ).rejects.toThrow('Failed to reload workspace skill settings');
+      expect(refreshCache).toHaveBeenCalledOnce();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it.each([false, true])(
     'refreshes busy skill sessions and reports per-session failures (user=%s)',
     async (includeUserSettings) => {
@@ -37978,10 +38036,14 @@ describe('sessionLanguage multi-session propagation', () => {
           ...(includeUserSettings ? { includeUserSettings } : {}),
         },
       );
+      await expect(workspaceChange).resolves.toMatchObject({
+        acknowledged: true,
+        revision: 1,
+        sessionsRefreshed: 1,
+        sessionsFailed: 1,
+        configsFailed: 0,
+      });
       if (includeUserSettings) {
-        await expect(workspaceChange).rejects.toThrow(
-          'User Skill settings did not reach every session',
-        );
         refresh2.mockResolvedValue(undefined);
         await expect(
           agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
@@ -37992,11 +38054,6 @@ describe('sessionLanguage multi-session propagation', () => {
             includeUserSettings: true,
           }),
         ).resolves.toMatchObject({ acknowledged: true, revision: 2 });
-      } else {
-        await expect(workspaceChange).resolves.toMatchObject({
-          acknowledged: true,
-          revision: 1,
-        });
       }
 
       mockConnectionState.resolve();

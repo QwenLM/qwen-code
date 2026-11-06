@@ -11100,16 +11100,7 @@ class QwenAgent implements Agent {
                     : {}),
                 },
               );
-              if (
-                params['includeUserSettings'] === true &&
-                (Number(result['sessionsFailed'] ?? 0) > 0 ||
-                  Number(result['configsFailed'] ?? 0) > 0)
-              ) {
-                throw new Error(
-                  'User Skill settings did not reach every session',
-                );
-              }
-              break;
+              return { ...result, v: 1, revision, acknowledged: true };
             }
             default:
               throw RequestError.invalidParams(

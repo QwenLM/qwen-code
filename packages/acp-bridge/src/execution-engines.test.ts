@@ -4754,6 +4754,67 @@ describe('workspace change propagation', () => {
     ).resolves.toMatchObject({ sessionId: 'managed-2' });
   });
 
+  it.each(['sessionsFailed', 'configsFailed'] as const)(
+    'keeps a channel usable after a partial User skill refresh (%s)',
+    async (failure) => {
+      let failed = true;
+      const quarantine = recordQuarantineEvents();
+      const p = paired(
+        { telemetry: quarantine.telemetry },
+        engineChannel('legacy', {
+          extMethodImpl: () => ({ sessionsFailed: 0, configsFailed: 0 }),
+        }),
+        engineChannel('managed', {
+          extMethodImpl: (method, params) => ({
+            ...acknowledge(method, params),
+            [failure]: failed ? 1 : 0,
+          }),
+        }),
+      );
+      const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await p.bridge.preheat();
+      const refresh = () =>
+        p.bridge.invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+          { includeUserSettings: true },
+        );
+
+      const error = await refresh().catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+      expect(error).toMatchObject({
+        message: 'User Skill settings did not reach every session',
+      });
+      expect(quarantine.named('started')).toEqual([]);
+      expect(p.managed.killed).toBe(false);
+      await p.bridge.sendPrompt(
+        session.sessionId,
+        prompt(session.sessionId, 'still usable'),
+      );
+
+      failed = false;
+      await expect(refresh()).resolves.toMatchObject({
+        sessionsFailed: 0,
+        configsFailed: 0,
+      });
+      expect(
+        p.managed.agent.extMethodCalls
+          .filter(
+            (call) => call.method === SERVE_CONTROL_EXT_METHODS.workspaceChange,
+          )
+          .map((call) => ({
+            revision: call.params['revision'],
+            includeUserSettings: call.params['includeUserSettings'],
+          })),
+      ).toEqual([
+        { revision: 1, includeUserSettings: true },
+        { revision: 2, includeUserSettings: true },
+      ]);
+      expect(quarantine.named('started')).toEqual([]);
+      expect(p.managed.killed).toBe(false);
+    },
+  );
+
   it('quarantines an engine that does not acknowledge a permission change and cancels its turn', async () => {
     const running = deferred<void>();
     const quarantine = recordQuarantineEvents();

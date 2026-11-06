@@ -6217,10 +6217,14 @@ async function runQwenServeImpl(
         const { SettingScope } = settingsRuntime.settings;
         const fresh = loadSettingsForPersistence(workspace);
         const userSkills = fresh.user.originalSettings.skills;
+        const asList = (value: unknown): string[] =>
+          Array.isArray(value)
+            ? value.filter((name): name is string => typeof name === 'string')
+            : [];
         const initial = {
-          disabled: userSkills?.disabled ?? [],
-          defaultDisabled: userSkills?.defaultDisabled ?? [],
-          enabled: userSkills?.enabled ?? [],
+          disabled: asList(userSkills?.disabled),
+          defaultDisabled: asList(userSkills?.defaultDisabled),
+          enabled: asList(userSkills?.enabled),
         };
         let next = initial;
         const outcomes = skillNames.map((skillName) => {

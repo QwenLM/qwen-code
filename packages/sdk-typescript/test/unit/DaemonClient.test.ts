@@ -7967,6 +7967,44 @@ describe('DaemonClient', () => {
   });
 
   describe('setUserSkillsActivation', () => {
+    it('uses REST when the client has an ACP transport', async () => {
+      const response = {
+        scope: 'user',
+        state: 'enabled',
+        propagation: 'queued',
+        results: [{ skillName: 'pdf', changed: true }],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(404, { error: 'No ACP mapping' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await expect(
+        client.setUserSkillsActivation(['pdf'], { state: 'enabled' }),
+      ).resolves.toEqual(response);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/skills/activation',
+        method: 'PUT',
+      });
+      expect(transportFetch).not.toHaveBeenCalled();
+    });
+
     it.each([
       { state: 'enabled' },
       { state: 'disabled' },

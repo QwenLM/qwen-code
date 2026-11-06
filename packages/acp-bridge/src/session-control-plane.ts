@@ -4150,14 +4150,22 @@ export function createSessionControlPlane(
   async function propagateWorkspaceChange(
     change: WorkspaceChange,
     timeoutMs: number,
-  ): Promise<{ revision: number; unacknowledged: string[] }> {
+  ): Promise<{
+    revision: number;
+    unacknowledged: string[];
+    skillsRefreshFailed: boolean;
+  }> {
     // Legacy is workspace control. A Legacy channel that replaced a timed-out
     // one while the command ran has read the current settings itself.
     const targets = liveChannelInfos().filter(
       (ci) => ci.harness.executionEngine !== 'legacy',
     );
     if (targets.length === 0) {
-      return { revision: workspaceChangeRevision, unacknowledged: [] };
+      return {
+        revision: workspaceChangeRevision,
+        unacknowledged: [],
+        skillsRefreshFailed: false,
+      };
     }
     const revision = ++workspaceChangeRevision;
     const params = {
@@ -4174,6 +4182,7 @@ export function createSessionControlPlane(
       response['revision'] === revision &&
       response['acknowledged'] === true;
     const unacknowledged: string[] = [];
+    let skillsRefreshFailed = false;
     await Promise.all(
       targets.map(async (ci) => {
         // Sent outside workspace control, like a Managed resource read: a slow
@@ -4189,7 +4198,18 @@ export function createSessionControlPlane(
             timeoutMs,
             SERVE_CONTROL_EXT_METHODS.workspaceChange,
           );
-          if (acknowledges(response)) return;
+          if (acknowledges(response)) {
+            if (
+              change.kind === 'skills' &&
+              change.payload['includeUserSettings'] === true &&
+              isRecord(response) &&
+              (Number(response['sessionsFailed'] ?? 0) > 0 ||
+                Number(response['configsFailed'] ?? 0) > 0)
+            ) {
+              skillsRefreshFailed = true;
+            }
+            return;
+          }
         } catch (error) {
           // An exited channel's sessions are gone, and a fresh session starts
           // a new channel that reads current settings.
@@ -4209,7 +4229,7 @@ export function createSessionControlPlane(
         refuseUnacknowledgedChannel(ci, revision, change.tightening);
       }),
     );
-    return { revision, unacknowledged };
+    return { revision, unacknowledged, skillsRefreshFailed };
   }
 
   /**
@@ -13983,10 +14003,11 @@ export function createSessionControlPlane(
       } else {
         controlError = new SessionNotFoundError(`workspace-command:${method}`);
       }
-      const { revision, unacknowledged } = await propagateWorkspaceChange(
-        change,
-        invokeOpts?.timeoutMs ?? initTimeoutMs,
-      );
+      const { revision, unacknowledged, skillsRefreshFailed } =
+        await propagateWorkspaceChange(
+          change,
+          invokeOpts?.timeoutMs ?? initTimeoutMs,
+        );
       if (unacknowledged.length > 0) {
         throw new WorkspaceChangePartiallyAppliedError(
           revision,
@@ -13997,6 +14018,9 @@ export function createSessionControlPlane(
         );
       }
       if (controlError !== undefined) throw controlError;
+      if (skillsRefreshFailed) {
+        throw new Error('User Skill settings did not reach every session');
+      }
       return result as T;
     },
 

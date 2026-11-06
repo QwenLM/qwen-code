@@ -14,6 +14,7 @@ import {
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { WorkspaceSkillManagementError } from '../workspace-skill-management.js';
+import { getWorkspaceRuntimeCoordinator } from '../workspace-runtime-coordinator.js';
 import {
   WorkspaceSkillNotFoundError,
   type PersistUserSkillsActivationResult,
@@ -155,10 +156,20 @@ function createHarness(trusted = true, runtimeLive = false) {
   const persistUserSkillsActivation = vi.fn(
     async (
       names: readonly string[],
-      _activation: UserSkillActivation,
+      activation: UserSkillActivation,
     ): Promise<PersistUserSkillsActivationResult> => ({
       outcomes: names.map((skillName) => ({ skillName, changed: true })),
-      settingsChanges: [{ key: 'skills.enabled', value: [...names] }],
+      settingsChanges: [
+        {
+          key:
+            activation.state === 'enabled'
+              ? 'skills.enabled'
+              : activation.mode === 'default'
+                ? 'skills.defaultDisabled'
+                : 'skills.disabled',
+          value: [...names],
+        },
+      ],
     }),
   );
   const app = express();
@@ -241,13 +252,37 @@ describe('workspace Skill management routes', () => {
         type: 'settings_changed',
         data: {
           scope: 'user',
-          key: 'skills.enabled',
+          key:
+            activation.state === 'enabled'
+              ? 'skills.enabled'
+              : activation.mode === 'default'
+                ? 'skills.defaultDisabled'
+                : 'skills.disabled',
           value: ['rust:pdf', 'future'],
         },
         originatorClientId: 'client-1',
       });
       expect(h.invalidateSkillsConfigStatus).toHaveBeenCalledWith('/workspace');
       expect(h.getSkillsConfigStatus).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([true, false])(
+    'schedules a User settings reload with runtimeLive=%s',
+    async (runtimeLive) => {
+      const h = createHarness(true, runtimeLive);
+      const reconcile = vi.spyOn(
+        getWorkspaceRuntimeCoordinator(h.runtime),
+        'reconcileSkillsConfiguration',
+      );
+
+      const result = await request(h.app)
+        .put('/skills/activation')
+        .send({ skillNames: ['pdf'], state: 'enabled' })
+        .expect(200);
+
+      expect(result.body.propagation).toBe(runtimeLive ? 'queued' : 'deferred');
+      expect(reconcile).toHaveBeenCalledWith({ userSettings: true });
     },
   );
 

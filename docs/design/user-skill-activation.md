@@ -85,6 +85,11 @@ and runtime-epoch behavior govern failures. Workspace-only session-failure
 semantics remain unchanged. Persistence is not rolled back by a later refresh
 failure; runtime capability status exposes that failure.
 
+Paired children acknowledge a received Skill change with the actual refresh
+counts. Partial session or cache failures reach the coordinator as refresh
+errors, retaining pending User work without quarantining an acknowledged
+channel. An atomic settings reload failure still rejects the change.
+
 If Managed sessions remain live while the workspace control channel is cold
 or starting, propagate to those sessions without starting control solely for
 this write. Keep the User reload pending until control can also acknowledge

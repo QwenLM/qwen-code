@@ -1459,6 +1459,34 @@ describe('workspace skill settings persistence', () => {
     ).toEqual({ $version: 4, skills: { disabled: ['workspace-only'] } });
   });
 
+  it.each([{ value: 'pdf' }, { value: [null] }])(
+    'ignores malformed User Skill lists without rewriting unrelated lists: %j',
+    async ({ value }) => {
+      writeSkillSettings([]);
+      const settingsPath = path.join(qwenHome, 'settings.json');
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({
+          skills: { disabled: value, defaultDisabled: value, enabled: value },
+        }),
+      );
+      const { persistUserSkillsActivation: persist } =
+        await captureSkillPersistence([]);
+
+      await expect(
+        persist!(workspace, ['future'], { state: 'enabled' }),
+      ).resolves.toEqual({
+        outcomes: [{ skillName: 'future', changed: true }],
+        settingsChanges: [{ key: 'skills.enabled', value: ['future'] }],
+      });
+      expect(JSON.parse(fs.readFileSync(settingsPath, 'utf8')).skills).toEqual({
+        disabled: value,
+        defaultDisabled: value,
+        enabled: ['future'],
+      });
+    },
+  );
+
   it('serializes User Skill mutations with other primary User settings writes', async () => {
     writeSkillSettings([]);
     const deps = await captureSkillPersistence([]);
