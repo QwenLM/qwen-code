@@ -58,6 +58,7 @@ function isScopedTool(
   return (
     (opts.restrictReadsToMemoryPaths &&
       (toolName === ToolNames.READ_FILE ||
+        toolName === ToolNames.GLOB ||
         toolName === ToolNames.GREP ||
         toolName === ToolNames.LS)) ||
     toolName === ToolNames.EDIT ||
@@ -309,6 +310,7 @@ async function evaluateScopedDecision(
       return isReadOnly ? 'allow' : 'deny';
     }
     case ToolNames.READ_FILE:
+    case ToolNames.GLOB:
     case ToolNames.GREP:
     case ToolNames.LS:
       if (!opts.restrictReadsToMemoryPaths) return 'default';
@@ -361,6 +363,9 @@ function getScopedDenyRule(
     case ToolNames.READ_FILE:
       if (!opts.restrictReadsToMemoryPaths) return undefined;
       return `ManagedAutoMemory(read_file: only within ` + `${allowedRoots})`;
+    case ToolNames.GLOB:
+      if (!opts.restrictReadsToMemoryPaths) return undefined;
+      return `ManagedAutoMemory(glob: only within ` + `${allowedRoots})`;
     case ToolNames.GREP:
       if (!opts.restrictReadsToMemoryPaths) return undefined;
       return `ManagedAutoMemory(grep_search: only within ` + `${allowedRoots})`;

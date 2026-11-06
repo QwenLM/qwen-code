@@ -23,7 +23,8 @@ import {
   getUserAutoMemoryRoot,
 } from './paths.js';
 
-const { EDIT, GREP, LS, READ_FILE, SHELL, WEB_FETCH, WRITE_FILE } = ToolNames;
+const { EDIT, GLOB, GREP, LS, READ_FILE, SHELL, WEB_FETCH, WRITE_FILE } =
+  ToolNames;
 
 function restoreEnv(key: string, value: string | undefined) {
   if (value === undefined) delete process.env[key];
@@ -115,6 +116,7 @@ describe('createMemoryScopedAgentConfig', () => {
 
     const restricted = scopedPm({ restrictReadsToMemoryPaths: true });
     await evalIs(restricted, READ_FILE, transcript, 'deny');
+    await evalIs(restricted, GLOB, transcript, 'deny');
     await evalIs(restricted, GREP, getAutoMemoryRoot(projectRoot), 'allow');
     await evalIs(restricted, LS, getUserAutoMemoryRoot(), 'allow');
   });

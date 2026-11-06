@@ -22,6 +22,10 @@ import * as glob from 'glob';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { createMemoryScopedAgentConfig } from '../memory/memory-scoped-agent-config.js';
+import {
+  clearAutoMemoryRootCache,
+  getAutoMemoryRoot,
+} from '../memory/paths.js';
 
 vi.mock('glob', { spy: true });
 
@@ -873,19 +877,37 @@ describe('GrepTool', () => {
       expect(result.llmContent).toContain('1 file omitted by permission rules');
     });
 
-    it('keeps search working with a memory-scoped permission manager', async () => {
-      const scopedConfig = createMemoryScopedAgentConfig(
-        mockConfig,
-        tempRootDir,
-      );
+    it('restricts memory-scoped search results to memory paths', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_LOCAL', '1');
+      clearAutoMemoryRootCache();
+      try {
+        const memoryRoot = getAutoMemoryRoot(tempRootDir);
+        const allowedPath = path.join(memoryRoot, 'allowed.md');
+        const deniedPath = path.join(tempRootDir, 'outside-memory.md');
+        await fs.mkdir(memoryRoot, { recursive: true });
+        await fs.writeFile(allowedPath, 'memory scoped marker');
+        await fs.writeFile(deniedPath, 'memory scoped marker');
+        const scopedConfig = createMemoryScopedAgentConfig(
+          mockConfig,
+          tempRootDir,
+          { restrictReadsToMemoryPaths: true },
+        );
 
-      const result = await run(
-        { pattern: 'hello' },
-        new GrepTool(scopedConfig),
-      );
+        const result = await run(
+          { pattern: 'memory scoped marker' },
+          new GrepTool(scopedConfig),
+        );
 
-      expect(result.llmContent).toContain('Found 2 matches');
-      expect(result.llmContent).not.toContain('hasDenyRules is not a function');
+        expect(result.llmContent).toContain('allowed.md');
+        expect(result.llmContent).not.toContain('outside-memory.md');
+        expect(result.llmContent).toContain(
+          '1 file omitted by permission rules',
+        );
+        expect(result.resultFilePaths).toEqual([allowedPath]);
+      } finally {
+        vi.unstubAllEnvs();
+        clearAutoMemoryRootCache();
+      }
     });
 
     it('keeps results unchanged without a permission manager', async () => {

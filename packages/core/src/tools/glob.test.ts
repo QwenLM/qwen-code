@@ -20,6 +20,11 @@ import { ToolErrorType } from './tool-error.js';
 import * as glob from 'glob';
 import type { Path as GlobResultPath } from 'glob';
 import { PermissionManager } from '../permissions/permission-manager.js';
+import { createMemoryScopedAgentConfig } from '../memory/memory-scoped-agent-config.js';
+import {
+  clearAutoMemoryRootCache,
+  getAutoMemoryRoot,
+} from '../memory/paths.js';
 
 vi.mock('glob', { spy: true });
 
@@ -1104,6 +1109,39 @@ describe('GlobTool', () => {
       expectFound(result, 1, 'older.sortme');
       expect(result.llmContent).not.toContain('newer.sortme');
       expect(result.llmContent).toContain('1 file omitted by permission rules');
+    });
+
+    it('restricts memory-scoped glob results to memory paths', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_LOCAL', '1');
+      clearAutoMemoryRootCache();
+      try {
+        const memoryRoot = getAutoMemoryRoot(tempRootDir);
+        const allowedPath = path.join(memoryRoot, 'allowed.memoryscope');
+        const deniedPath = path.join(tempRootDir, 'outside.memoryscope');
+        await fs.mkdir(memoryRoot, { recursive: true });
+        await fs.writeFile(allowedPath, 'allowed');
+        await fs.writeFile(deniedPath, 'denied');
+        const scopedConfig = createMemoryScopedAgentConfig(
+          mockConfig,
+          tempRootDir,
+          { restrictReadsToMemoryPaths: true },
+        );
+
+        const result = await run(
+          { pattern: '**/*.memoryscope' },
+          new GlobTool(scopedConfig),
+        );
+
+        expect(result.llmContent).toContain(allowedPath);
+        expect(result.llmContent).not.toContain(deniedPath);
+        expect(result.llmContent).toContain(
+          '1 file omitted by permission rules',
+        );
+        expect(result.resultFilePaths).toEqual([allowedPath]);
+      } finally {
+        vi.unstubAllEnvs();
+        clearAutoMemoryRootCache();
+      }
     });
 
     it('keeps results unchanged without a permission manager', async () => {

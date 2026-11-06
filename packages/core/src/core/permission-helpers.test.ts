@@ -110,25 +110,26 @@ describe('selectPathsDeniedByPermissionRules', () => {
     expect(evaluate).not.toHaveBeenCalled();
   });
 
-  it('does not inspect deny matchers when the manager has no deny rules', async () => {
+  it('skips evaluation when the manager has ask rules but no deny rules', async () => {
     const pm = new PermissionManager({
       getPermissionsAllow: () => [],
-      getPermissionsAsk: () => [],
+      getPermissionsAsk: () => ['Read(./file.txt)'],
       getPermissionsDeny: () => [],
       getProjectRoot: () => process.cwd(),
       getCwd: () => process.cwd(),
     });
     pm.initialize();
-    const findMatchingDenyRule = vi.spyOn(pm, 'findMatchingDenyRule');
+    const evaluate = vi.spyOn(pm, 'evaluate');
 
-    await selectPathsDeniedByPermissionRules(
-      pm,
-      ToolNames.GREP,
-      process.cwd(),
-      [path.resolve('file.txt')],
-    );
-
-    expect(findMatchingDenyRule).not.toHaveBeenCalled();
+    expect(
+      await selectPathsDeniedByPermissionRules(
+        pm,
+        ToolNames.GREP,
+        process.cwd(),
+        [path.resolve('file.txt')],
+      ),
+    ).toEqual(new Set());
+    expect(evaluate).not.toHaveBeenCalled();
   });
 });
 
