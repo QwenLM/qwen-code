@@ -1968,6 +1968,8 @@ const SIDEBAR_COLLAPSED_STORAGE_KEY = 'qwen-code-web-shell-sidebar-collapsed';
 const ENVIRONMENT_PANEL_OPEN_STORAGE_KEY =
   'qwen-code-web-shell-environment-panel-open';
 const RIGHT_PANEL_STATE_STORAGE_KEY = 'qwen-code-web-shell-right-panel-state';
+const DETAILS_CHILDREN_STORAGE_KEY = 'qwen-code-web-shell-details-children';
+const DETAILS_TAB_ID_PREFIX = 'side-task:details:';
 
 function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   enabled: boolean;
@@ -2081,6 +2083,67 @@ function writeStoredBooleanMap(
   } catch (error) {
     console.warn(
       '[web-shell] failed to persist environment panel state:',
+      error,
+    );
+  }
+}
+
+// Pending AskUser request -> details side-task child, per parent session.
+// Survives closing the details tab (and reloads) so "Ask for details" reopens
+// the existing child instead of provisioning a duplicate. One entry per
+// parent: a session has at most one pending question, so a newer details
+// task supersedes the resolved question's association.
+type StoredDetailsChildren = Record<string, Record<string, string>>;
+
+function readStoredDetailsChildren(key: string): StoredDetailsChildren {
+  if (typeof window === 'undefined') return {};
+  try {
+    const stored = window.localStorage.getItem(key);
+    if (!stored) return {};
+    const parsed = JSON.parse(stored) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    const storedStates = { ...(parsed as Record<string, unknown>) };
+    if (storedStates['v'] !== undefined && storedStates['v'] !== 1) return {};
+    delete storedStates['v'];
+    const result: StoredDetailsChildren = {};
+    for (const [sessionKey, value] of Object.entries(storedStates).slice(
+      -MAX_ARTIFACT_PANEL_SESSION_STATES,
+    )) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        continue;
+      }
+      const entries: Record<string, string> = {};
+      for (const [requestId, childId] of Object.entries(
+        value as Record<string, unknown>,
+      )) {
+        if (typeof childId === 'string' && childId)
+          entries[requestId] = childId;
+      }
+      if (Object.keys(entries).length > 0) result[sessionKey] = entries;
+    }
+    return result;
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+  return {};
+}
+
+function writeStoredDetailsChildren(
+  key: string,
+  value: StoredDetailsChildren,
+): void {
+  try {
+    while (Object.keys(value).length > MAX_ARTIFACT_PANEL_SESSION_STATES) {
+      const oldestSessionKey = Object.keys(value)[0];
+      if (!oldestSessionKey) break;
+      delete value[oldestSessionKey];
+    }
+    window.localStorage.setItem(key, JSON.stringify({ v: 1, ...value }));
+  } catch (error) {
+    console.warn(
+      '[web-shell] failed to persist details side-task associations:',
       error,
     );
   }
@@ -5189,6 +5252,10 @@ export function App({
   const artifactPanelPersistedStatesRef = useRef(
     initialArtifactPanelPersistedStates,
   );
+  const [initialDetailsChildren] = useState(() =>
+    readStoredDetailsChildren(DETAILS_CHILDREN_STORAGE_KEY),
+  );
+  const detailsChildrenRef = useRef(initialDetailsChildren);
   const initialArtifactPanelOpen = Boolean(
     panelStateKey && initialArtifactPanelPersistedStates[panelStateKey]?.open,
   );
@@ -5663,9 +5730,28 @@ export function App({
           !archivedSideTaskCatalog.loaded)));
   const nextSideTaskTabIdRef = useRef(0);
   const createSideTask = useCallback(
-    (initialPrompt?: string, detailsRequestId?: string) => {
+    (
+      initialPrompt?: string,
+      detailsRequestId?: string,
+      existingChildSessionId?: string,
+    ) => {
       const parentSessionId = connection.sessionId;
       if (!parentSessionId || !sideTasksAvailable) return false;
+      // This question already has a details child: focus whichever tab shows
+      // it (the details tab or a catalog reopen) instead of adding a second
+      // tab for the same session.
+      if (existingChildSessionId) {
+        const openTab = artifactPanelTabsRef.current.find(
+          (item) =>
+            item.kind === 'side_task' &&
+            item.sessionId === existingChildSessionId,
+        );
+        if (openTab) {
+          setActiveArtifactPanelTabId(openTab.id);
+          setArtifactPanelOpen(true);
+          return true;
+        }
+      }
       // A details side task is one-per-pending-question: repeat clicks focus
       // the existing tab instead of provisioning a duplicate child session.
       // /btw side keeps the unique draft id — each invocation is a new task.
@@ -5674,7 +5760,7 @@ export function App({
       // ids over 128 chars. The request id alone is unique (uuid); tabs are
       // already bucketed per parent session.
       const id = detailsRequestId
-        ? `side-task:details:${detailsRequestId}`
+        ? `${DETAILS_TAB_ID_PREFIX}${detailsRequestId}`
         : `side-task:draft:${Date.now()}:${++nextSideTaskTabIdRef.current}`;
       const tab: ArtifactPanelTab = {
         id,
@@ -5682,10 +5768,16 @@ export function App({
         title: t('sideTask.title'),
         parentSessionId,
         workspaceCwd: connection.workspaceCwd,
-        nameFromFirstPrompt: true,
-        ...(initialPrompt?.trim()
-          ? { initialPrompt: initialPrompt.trim() }
-          : {}),
+        // Reopening an existing child attaches to it directly: no draft and
+        // no initial prompt, so nothing is provisioned or sent again.
+        ...(existingChildSessionId
+          ? { sessionId: existingChildSessionId }
+          : {
+              nameFromFirstPrompt: true,
+              ...(initialPrompt?.trim()
+                ? { initialPrompt: initialPrompt.trim() }
+                : {}),
+            }),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === id) ? tabs : [...tabs, tab],
@@ -5859,6 +5951,22 @@ export function App({
       const sideTaskTab =
         createdTab?.kind === 'side_task' ? createdTab : undefined;
       if (!sideTaskTab) return;
+      if (tabId.startsWith(DETAILS_TAB_ID_PREFIX)) {
+        // Remember which child explains this pending question so closing the
+        // tab (or reloading) cannot trick "Ask for details" into provisioning
+        // a duplicate. One entry per parent supersedes the resolved question.
+        const requestId = tabId.slice(DETAILS_TAB_ID_PREFIX.length);
+        if (requestId && sideTaskTab.parentSessionId) {
+          detailsChildrenRef.current = {
+            ...detailsChildrenRef.current,
+            [sideTaskTab.parentSessionId]: { [requestId]: sessionId },
+          };
+          writeStoredDetailsChildren(
+            DETAILS_CHILDREN_STORAGE_KEY,
+            detailsChildrenRef.current,
+          );
+        }
+      }
       optimisticSideTaskIdsRef.current.add(sessionId);
       setSideTaskCatalog((catalog) => {
         if (catalog.parentSessionId !== sideTaskTab.parentSessionId) {
@@ -19840,13 +19948,20 @@ export function App({
   // offers the /btw-side escape hatch: a side task that explains the question
   // without answering it or touching the main session.
   const handleAskUserDetails = useCallback(() => {
-    if (!pendingAskUserApproval) return;
-    const questions = formatAskUserQuestions(pendingAskUserApproval.rawInput);
+    const request = pendingAskUserApproval;
+    const parentSessionId = connection.sessionId;
+    if (!request || !parentSessionId) return;
+    // The association outlives the details tab (and reloads): a closed tab
+    // must reopen its existing child, not provision a second one.
+    const existingChild =
+      detailsChildrenRef.current[parentSessionId]?.[request.id];
+    const questions = formatAskUserQuestions(request.rawInput);
     createSideTask(
       t('askUser.detailsPrompt', { questions }),
-      pendingAskUserApproval.id,
+      request.id,
+      existingChild,
     );
-  }, [pendingAskUserApproval, createSideTask, t]);
+  }, [pendingAskUserApproval, connection.sessionId, createSideTask, t]);
 
   // Runs once the daemon has settled the cancelled turn, so the transcript
   // holds everything the turn produced.

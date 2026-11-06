@@ -12289,6 +12289,7 @@ beforeEach(() => {
   mockReleaseDetachedWebTerminal.mockReset();
   localStorage.removeItem('qwen-code-web-shell-environment-panel-open');
   localStorage.removeItem('qwen-code-web-shell-right-panel-state');
+  localStorage.removeItem('qwen-code-web-shell-details-children');
   Object.defineProperty(document, 'hidden', {
     configurable: true,
     get: () => false,
@@ -34797,6 +34798,124 @@ describe('App session callbacks', () => {
       testState.latestArtifactPanelProps?.tabs ?? []
     ).filter((tab) => tab.kind === 'side_task');
     expect(sideTaskTabs).toHaveLength(1);
+  });
+
+  it('reopens the existing details child after its tab is closed', async () => {
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    act(() => testState.latestAskUserQuestionOnAskDetails!());
+    await flush();
+    const panel = testState.latestArtifactPanelProps!;
+    const createdTab = panel.tabs.find((tab) => tab.kind === 'side_task')!;
+    expect(createdTab).toEqual(
+      expect.objectContaining({ sessionId: 'details-side-task' }),
+    );
+    // The association is persisted, so it survives tab close and reloads.
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-details-children'),
+    ).toContain('details-side-task');
+
+    act(() => panel.onCloseTab(createdTab.id));
+    await flush();
+    // The panel unmounts when its last tab closes, so assert on the DOM
+    // rather than the captured (now stale) panel props.
+    expect(
+      container.querySelector('button[title="Details side task"]'),
+    ).toBeNull();
+
+    act(() => testState.latestAskUserQuestionOnAskDetails!());
+    await flush();
+
+    // Closing the tab must not orphan the child: the second click reopens
+    // the same session instead of provisioning another one.
+    expect(
+      mockWorkspace.client.createSideTaskSession,
+    ).toHaveBeenCalledExactlyOnceWith(
+      'session-1',
+      { name: 'Side task' },
+      'client-1',
+    );
+    const reopened = testState.latestArtifactPanelProps?.tabs.find(
+      (tab) => tab.kind === 'side_task',
+    );
+    expect(reopened).toEqual(
+      expect.objectContaining({ sessionId: 'details-side-task' }),
+    );
+    expect(
+      reopened?.kind === 'side_task' ? reopened.initialPrompt : undefined,
+    ).toBeUndefined();
+  });
+
+  it('focuses a catalog-reopened details child instead of adding a tab', async () => {
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    act(() => testState.latestAskUserQuestionOnAskDetails!());
+    await flush();
+    const panel = testState.latestArtifactPanelProps!;
+    const createdTab = panel.tabs.find((tab) => tab.kind === 'side_task')!;
+    act(() => panel.onCloseTab(createdTab.id));
+    await flush();
+
+    // Reopen the same child from the side-task catalog: its tab id is
+    // side-task:<sessionId>, not the details-request id.
+    act(() => {
+      testState.latestArtifactPanelProps?.onOpenSideTask?.({
+        sessionId: 'details-side-task',
+        title: 'Details side task',
+        workspaceCwd: '/tmp/project',
+      });
+    });
+    await flush();
+
+    act(() => testState.latestAskUserQuestionOnAskDetails!());
+    await flush();
+
+    expect(
+      mockWorkspace.client.createSideTaskSession,
+    ).toHaveBeenCalledExactlyOnceWith(
+      'session-1',
+      { name: 'Side task' },
+      'client-1',
+    );
+    const sideTaskTabs = (
+      testState.latestArtifactPanelProps?.tabs ?? []
+    ).filter((tab) => tab.kind === 'side_task');
+    expect(sideTaskTabs).toHaveLength(1);
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(
+      sideTaskTabs[0]!.id,
+    );
   });
 
   it('passes a directive to /fork as a regular background-agent directive', async () => {

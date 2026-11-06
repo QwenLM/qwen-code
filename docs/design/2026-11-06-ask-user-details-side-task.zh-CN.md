@@ -74,9 +74,12 @@ E2E 轮；证据见 `.qwen/e2e-tests/`）。
   机制落到 en），解释语言跟随 UI 语言，而不是 daemon 的输出语言设置。
 - **每个待答问题一个细节任务。** 细节 tab 用权限请求 id（uuid；tab 已按父会话
   分桶）派生的稳定 id，按 upsert 而非追加：重复点击聚焦已有 tab，不会重复创建
-  子会话。id 必须短——面板派生的 daemon clientId 形如
-  `side-task:<父会话>:<tabId>`，daemon 拒绝超过 128 字符的 clientId。
-  `/btw side` 保持每次调用唯一的草稿 id。
+  子会话。「问题→子会话」关联还按父会话持久化（localStorage），因此比 tab 更
+  长寿：关闭细节 tab 后再点击会重新打开同一子会话（不新建草稿、不重发提示词）；
+  从侧边任务目录以 `side-task:<sessionId>` tab 重新打开的子会话会被聚焦而非
+  重复。每个父会话一条关联，新问题取代已解决问题的关联，存储有界。tab id 必须
+  短——面板派生的 daemon clientId 形如 `side-task:<父会话>:<tabId>`，daemon
+  拒绝超过 128 字符的 clientId。`/btw side` 保持每次调用唯一的草稿 id。
 - **快照携带选择语义。** 多选问题标记 `[multiSelect]`，让解释覆盖可组合的
   选项，而不只依赖继承的转录。
 - **操作行可换行。** 第五个按钮可能把行撑出窄视口，而 flex-end 行的溢出发生
