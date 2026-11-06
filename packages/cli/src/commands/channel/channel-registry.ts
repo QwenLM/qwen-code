@@ -243,6 +243,25 @@ function assertManagementField(
       );
     }
   }
+  const maximum = (field as { maximum?: unknown }).maximum;
+  if (maximum !== undefined) {
+    if (field.kind !== 'number') {
+      throw new Error(
+        `Channel field "${path}" can only declare maximum on number fields.`,
+      );
+    }
+    if (typeof maximum !== 'number' || !Number.isFinite(maximum)) {
+      throw new Error(`Channel field "${path}" must declare a finite maximum.`);
+    }
+    if (
+      field.exclusiveMinimum !== undefined &&
+      maximum <= field.exclusiveMinimum
+    ) {
+      throw new Error(
+        `Channel field "${path}" declares a maximum that leaves no valid value.`,
+      );
+    }
+  }
   if (field.kind === 'enum') {
     if (!Array.isArray(field.options) || field.options.length === 0) {
       throw new Error(

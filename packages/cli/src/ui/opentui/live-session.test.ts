@@ -922,8 +922,10 @@ describe('livePromptEvents', () => {
       'terminal tool.call',
     );
     expect(sendMessageStream).not.toHaveBeenCalled();
-    // OpenTUI offers the band above the prompt.
-    expect(initializeMods).toHaveBeenCalledExactlyOnceWith(['AbovePrompt']);
+    // OpenTUI offers the band above the prompt and raises prompt.submit.
+    expect(initializeMods).toHaveBeenCalledExactlyOnceWith(['AbovePrompt'], {
+      prompts: true,
+    });
   });
 
   it('waits for the shared initialization before the first send', async () => {
@@ -1749,6 +1751,30 @@ describe('livePromptEvents', () => {
       submittedPrompt: '@file.txt raw composer text',
     });
     expect(secondOptions).toEqual({ type: SendMessageType.ToolResult });
+  });
+
+  it("rides the Mods' prompt context on the first send only", async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 'ctx-tool',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    await drain(
+      livePromptEvents(config, 'payload', undefined, {
+        submittedPrompt: 'payload',
+        promptContext: ['Mod context'],
+      }),
+    );
+    const [first, second] = sendMessageStream.mock.calls.map(
+      (call) => (call as unknown[])[3],
+    );
+    expect(first).toEqual({
+      type: SendMessageType.UserQuery,
+      submittedPrompt: 'payload',
+      promptContext: ['Mod context'],
+    });
+    expect(second).toEqual({ type: SendMessageType.ToolResult });
   });
 
   it('forwards a human declaration only on the initial send, independently from submittedPrompt', async () => {

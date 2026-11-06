@@ -50,8 +50,12 @@ public final class WorkspaceCsiWorkerAckMain {
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY")));
         var runtimeSessions = new JdbcRuntimeSessionRepository(source);
         var executions = new JdbcToolExecutionRepository(source);
-        var sessionStore = new ManagedSessionStore(jdbc);
-        sessionStore.configureHarnessRules(new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        var sessionStore = new ManagedSessionStore(jdbc,
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(jdbc), null,
+                new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(),
+                com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
+                null, null, null, null, null,
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
         var grants = new ToolPublicationStore(jdbc, manager, sessionStore, executions, bindings,
                 new ToolPublicationStore.Capacity(16L * 1024 * 1024, 64L * 1024 * 1024,
                         256L * 1024 * 1024, 64));
