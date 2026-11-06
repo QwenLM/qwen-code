@@ -30183,9 +30183,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
       ]) {
         await expect(
           agent.unstable_listSessions({ cwd: '/tmp/project', cursor }),
-        ).rejects.toThrow(
-          `Invalid cursor: "${cursor}" is not a valid numeric cursor`,
-        );
+        ).rejects.toThrow(`Invalid cursor: "${cursor}" is not a valid cursor`);
       }
       expect(SessionService).not.toHaveBeenCalled();
     } finally {
@@ -30222,6 +30220,54 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
           excludeSourceTypes: ['agent-host', 'agent'],
         });
       }
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('passes a composite cursor through so page 2 stays reachable', async () => {
+    const listSessions = vi.fn().mockResolvedValue({
+      items: [],
+      nextCursor: undefined,
+    });
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          listSessions,
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+    const { agent, agentPromise } = await bootAgent();
+
+    try {
+      await agent.unstable_listSessions({
+        cwd: '/tmp/project',
+        cursor: '1700000000000|session-a.jsonl',
+      });
+      expect(listSessions).toHaveBeenCalledWith({
+        cursor: '1700000000000|session-a.jsonl',
+        size: undefined,
+        excludeSourceTypes: ['agent-host', 'agent'],
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('rejects a composite cursor with an empty mtime prefix', async () => {
+    const { agent, agentPromise } = await bootAgent();
+
+    try {
+      await expect(
+        agent.unstable_listSessions({
+          cwd: '/tmp/project',
+          cursor: '|session-a.jsonl',
+        }),
+      ).rejects.toThrow(
+        'Invalid cursor: "|session-a.jsonl" is not a valid cursor',
+      );
+      expect(SessionService).not.toHaveBeenCalled();
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
@@ -38289,12 +38335,18 @@ describe('sessionLanguage multi-session propagation', () => {
     },
   );
 
-  it.each([true, false])(
-    'checks workspace settings reload without sessions (success=%s)',
-    async (success) => {
+  it.each([
+    [true, false],
+    [false, false],
+    [true, true],
+    [false, true],
+  ])(
+    'checks settings reload without sessions (success=%s, user=%s)',
+    async (success, includeUserSettings) => {
       const settings = {
         merged: {},
         reloadScopeFromDisk: vi.fn().mockReturnValue(success),
+        reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(success),
       } as unknown as LoadedSettings;
       const agentPromise = runAcpAgent(
         makeConfig() as unknown as Config,
@@ -38310,7 +38362,10 @@ describe('sessionLanguage multi-session propagation', () => {
       try {
         const result = agent.extMethod(
           SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-          { reason: 'settings' },
+          {
+            reason: 'settings',
+            ...(includeUserSettings ? { includeUserSettings } : {}),
+          },
         );
         if (success) {
           await expect(result).resolves.toEqual({
@@ -38325,9 +38380,22 @@ describe('sessionLanguage multi-session propagation', () => {
             'Failed to reload workspace skill settings',
           );
         }
-        expect(settings.reloadScopeFromDisk).toHaveBeenCalledExactlyOnceWith(
-          SettingScope.Workspace,
-        );
+        if (includeUserSettings) {
+          expect(
+            settings.reloadScopesFromDiskAtomically,
+          ).toHaveBeenCalledExactlyOnceWith([
+            SettingScope.Workspace,
+            SettingScope.User,
+          ]);
+          expect(settings.reloadScopeFromDisk).not.toHaveBeenCalled();
+        } else {
+          expect(settings.reloadScopeFromDisk).toHaveBeenCalledExactlyOnceWith(
+            SettingScope.Workspace,
+          );
+          expect(
+            settings.reloadScopesFromDiskAtomically,
+          ).not.toHaveBeenCalled();
+        }
       } finally {
         mockConnectionState.resolve();
         await agentPromise;
@@ -38335,49 +38403,18 @@ describe('sessionLanguage multi-session propagation', () => {
     },
   );
 
-  it('refreshes busy skill sessions and reports per-session failures', async () => {
-    const bootstrapSettings = {
+  it('acknowledges User Skill cache failures but rejects settings reload failures', async () => {
+    const reloadScopesFromDiskAtomically = vi.fn().mockReturnValue(true);
+    const settings = {
       merged: {},
-      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
-      getSystemHooks: vi.fn().mockReturnValue(undefined),
-      getUserHooks: vi.fn().mockReturnValue({}),
-      getProjectHooks: vi.fn().mockReturnValue({}),
+      reloadScopesFromDiskAtomically,
     } as unknown as LoadedSettings;
-    const cfg1 = makeConfig({
-      getSessionId: vi.fn().mockReturnValue('skill-1'),
-    });
-    const cfg2 = makeConfig({
-      getSessionId: vi.fn().mockReturnValue('skill-2'),
-    });
-    const refresh1 = vi.fn().mockResolvedValue(undefined);
-    const refresh2 = vi.fn().mockRejectedValue(new Error('client closed'));
-    const reload1 = vi.fn();
-    const reload2 = vi.fn();
-
-    vi.mocked(loadSettings).mockReturnValue(bootstrapSettings);
-    vi.mocked(loadCliConfig)
-      .mockResolvedValueOnce(cfg1 as unknown as Config)
-      .mockResolvedValueOnce(cfg2 as unknown as Config);
-    vi.mocked(Session).mockImplementation(
-      (id) =>
-        ({
-          getDefaultReasoningConfig: vi.fn(),
-          getId: vi.fn().mockReturnValue(id),
-          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
-          getConfig: vi.fn().mockReturnValue(id === 'skill-1' ? cfg1 : cfg2),
-          isIdle: vi.fn().mockReturnValue(false),
-          reloadSkillSettings: id === 'skill-1' ? reload1 : reload2,
-          refreshSkillsFromSettings: id === 'skill-1' ? refresh1 : refresh2,
-          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
-          startCronScheduler: vi.fn(),
-          dispose: vi.fn(),
-        }) as unknown as InstanceType<typeof Session>,
-    );
-
+    const refreshCache = vi.fn().mockRejectedValue(new Error('cache failed'));
     const agentPromise = runAcpAgent(
-      makeConfig() as unknown as Config,
-      bootstrapSettings,
+      makeConfig({
+        getSkillManager: () => ({ refreshCache }),
+      }) as unknown as Config,
+      settings,
       mockArgv,
     );
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
@@ -38386,36 +38423,168 @@ describe('sessionLanguage multi-session propagation', () => {
         return mockConnectionState.promise;
       },
     });
-
-    await agent.newSession({ cwd: '/skills', mcpServers: [] });
-    await agent.newSession({ cwd: '/skills', mcpServers: [] });
-    vi.mocked(bootstrapSettings.reloadScopeFromDisk).mockClear();
-    await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh, {
-        reason: 'settings',
-      }),
-    ).resolves.toEqual({
-      sessionsRefreshed: 1,
-      sessionsFailed: 1,
-      configsRefreshed: 0,
-      configsFailed: 0,
-      reason: 'settings',
-    });
-
-    expect(bootstrapSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
-      SettingScope.Workspace,
-    );
-    expect(refresh1).toHaveBeenCalledOnce();
-    expect(refresh2).toHaveBeenCalledOnce();
-    expect(reload1).toHaveBeenCalledOnce();
-    expect(reload2).toHaveBeenCalledOnce();
-    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
-      'Session skill-2 skill refresh failed: Error: client closed',
-    );
-
-    mockConnectionState.resolve();
-    await agentPromise;
+    const change = {
+      v: 1,
+      revision: 1,
+      kind: 'skills',
+      reason: 'all',
+      includeUserSettings: true,
+    };
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, change),
+      ).resolves.toEqual({
+        v: 1,
+        revision: 1,
+        acknowledged: true,
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 0,
+        configsFailed: 1,
+        reason: 'all',
+      });
+      expect(reloadScopesFromDiskAtomically).toHaveBeenCalledExactlyOnceWith([
+        SettingScope.Workspace,
+        SettingScope.User,
+      ]);
+      reloadScopesFromDiskAtomically.mockReturnValue(false);
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+          ...change,
+          revision: 2,
+        }),
+      ).rejects.toThrow('Failed to reload workspace skill settings');
+      expect(refreshCache).toHaveBeenCalledOnce();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
+
+  it.each([false, true])(
+    'refreshes busy skill sessions and reports per-session failures (user=%s)',
+    async (includeUserSettings) => {
+      const bootstrapSettings = {
+        merged: {},
+        reloadScopeFromDisk: vi.fn().mockReturnValue(true),
+        reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
+        getSystemHooks: vi.fn().mockReturnValue(undefined),
+        getUserHooks: vi.fn().mockReturnValue({}),
+        getProjectHooks: vi.fn().mockReturnValue({}),
+      } as unknown as LoadedSettings;
+      const cfg1 = makeConfig({
+        getSessionId: vi.fn().mockReturnValue('skill-1'),
+      });
+      const cfg2 = makeConfig({
+        getSessionId: vi.fn().mockReturnValue('skill-2'),
+      });
+      const refresh1 = vi.fn().mockResolvedValue(undefined);
+      const refresh2 = vi.fn().mockRejectedValue(new Error('client closed'));
+      const reload1 = vi.fn();
+      const reload2 = vi.fn();
+
+      vi.mocked(loadSettings).mockReturnValue(bootstrapSettings);
+      vi.mocked(loadCliConfig)
+        .mockResolvedValueOnce(cfg1 as unknown as Config)
+        .mockResolvedValueOnce(cfg2 as unknown as Config);
+      vi.mocked(Session).mockImplementation(
+        (id) =>
+          ({
+            getDefaultReasoningConfig: vi.fn(),
+            getId: vi.fn().mockReturnValue(id),
+            shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+            getConfig: vi.fn().mockReturnValue(id === 'skill-1' ? cfg1 : cfg2),
+            isIdle: vi.fn().mockReturnValue(false),
+            reloadSkillSettings: id === 'skill-1' ? reload1 : reload2,
+            refreshSkillsFromSettings: id === 'skill-1' ? refresh1 : refresh2,
+            sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+            installRewriter: vi.fn(),
+            startCronScheduler: vi.fn(),
+            dispose: vi.fn(),
+          }) as unknown as InstanceType<typeof Session>,
+      );
+
+      const agentPromise = runAcpAgent(
+        makeConfig() as unknown as Config,
+        bootstrapSettings,
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      });
+
+      await agent.newSession({ cwd: '/skills', mcpServers: [] });
+      await agent.newSession({ cwd: '/skills', mcpServers: [] });
+      vi.mocked(bootstrapSettings.reloadScopeFromDisk).mockClear();
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh, {
+          reason: 'settings',
+          ...(includeUserSettings ? { includeUserSettings } : {}),
+        }),
+      ).resolves.toEqual({
+        sessionsRefreshed: 1,
+        sessionsFailed: 1,
+        configsRefreshed: 0,
+        configsFailed: 0,
+        reason: 'settings',
+      });
+
+      if (includeUserSettings) {
+        expect(
+          bootstrapSettings.reloadScopesFromDiskAtomically,
+        ).toHaveBeenCalledWith([SettingScope.Workspace, SettingScope.User]);
+        expect(reload1).toHaveBeenCalledWith(true);
+        expect(reload2).toHaveBeenCalledWith(true);
+      } else {
+        expect(bootstrapSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
+          SettingScope.Workspace,
+        );
+      }
+      expect(refresh1).toHaveBeenCalledOnce();
+      expect(refresh2).toHaveBeenCalledOnce();
+      expect(reload1).toHaveBeenCalledOnce();
+      expect(reload2).toHaveBeenCalledOnce();
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        'Session skill-2 skill refresh failed: Error: client closed',
+      );
+
+      const workspaceChange = agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceChange,
+        {
+          v: 1,
+          revision: 1,
+          kind: 'skills',
+          reason: 'settings',
+          ...(includeUserSettings ? { includeUserSettings } : {}),
+        },
+      );
+      await expect(workspaceChange).resolves.toMatchObject({
+        acknowledged: true,
+        revision: 1,
+        sessionsRefreshed: 1,
+        sessionsFailed: 1,
+        configsFailed: 0,
+      });
+      if (includeUserSettings) {
+        refresh2.mockResolvedValue(undefined);
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+            v: 1,
+            revision: 2,
+            kind: 'skills',
+            reason: 'settings',
+            includeUserSettings: true,
+          }),
+        ).resolves.toMatchObject({ acknowledged: true, revision: 2 });
+      }
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('adds and removes a workspace directory across live sessions and settings', async () => {
     // Canonicalize the temp root: macOS `os.tmpdir()` returns `/var/...` while
