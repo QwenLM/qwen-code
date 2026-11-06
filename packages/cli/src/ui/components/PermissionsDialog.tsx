@@ -530,10 +530,12 @@ export function PermissionsDialog({
     // Persist removal — a rule may live in the user or the workspace scope.
     const deleted = withoutDeletedRuleInScopes(
       [SettingScope.User, SettingScope.Workspace],
-      (scope) =>
-        (settings.forScope(scope).settings as Record<string, unknown>)?.[
-          'permissions'
-        ]?.[ruleType] as unknown[] | undefined,
+      (scope) => {
+        const perms = (
+          settings.forScope(scope).settings as Record<string, unknown>
+        )?.['permissions'] as Record<string, unknown[] | undefined> | undefined;
+        return perms?.[ruleType];
+      },
       deleteTarget.rule.raw,
     );
     if (deleted) {
