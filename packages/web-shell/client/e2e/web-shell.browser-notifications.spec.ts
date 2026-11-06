@@ -14,6 +14,19 @@ interface CapturedNotification {
   close(): void;
 }
 
+/**
+ * The guides `BrowserNotificationControl` renders for a `navigator.platform`.
+ * Mirrors the component's rule: iOS/iPadOS get none, Windows and macOS get
+ * their own, and anything unrecognized keeps both rather than losing help.
+ */
+function platformGuidesFor(platform: string): string[] {
+  const appleMobile = /iPhone|iPad|iPod/i.test(platform);
+  if (appleMobile) return [];
+  if (/^Win/i.test(platform)) return ['Windows'];
+  if (/Mac/i.test(platform)) return ['macOS'];
+  return ['macOS', 'Windows'];
+}
+
 declare global {
   interface Window {
     __taskNotifications: CapturedNotification[];
@@ -348,13 +361,16 @@ for (const kind of ['approval', 'question'] as const) {
         }),
       )
       .toBe(true);
-    // Only the running host's guide renders; the other OS's steps do not
-    // apply here and listing them was the bug this spec now pins.
-    const hostSystem = process.platform === 'win32' ? 'Windows' : 'macOS';
-    const otherSystem = hostSystem === 'macOS' ? 'Windows' : 'macOS';
-    await expect(help).toContainText(new RegExp(hostSystem));
-    await expect(help).not.toContainText(new RegExp(otherSystem));
-    for (const system of [hostSystem]) {
+    // Only the guide for the platform the *browser* reports renders; the other
+    // OS's steps do not apply and listing them was the bug this spec pins. A
+    // platform the component cannot identify keeps both, which is what CI's
+    // Linux Chromium reports.
+    const browserPlatform = await page.evaluate(() => navigator.platform);
+    const expectedSystems = platformGuidesFor(browserPlatform);
+    await expect
+      .poll(() => help.locator('details').count())
+      .toBe(expectedSystems.length);
+    for (const system of expectedSystems) {
       const guide = help.locator('details').filter({ hasText: system });
       const summary = guide.locator('summary');
       await expect(guide).not.toHaveAttribute('open');
