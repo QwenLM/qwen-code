@@ -741,6 +741,7 @@ function availableSkillInfos(status: {
     name: string;
     description?: string;
     argumentHint?: string;
+    extensionName?: string;
   }>;
 }): SkillInfo[] {
   return (status.skills ?? [])
@@ -749,6 +750,7 @@ function availableSkillInfos(status: {
       name: skill.name,
       description: skill.description ?? '',
       ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
+      ...(skill.extensionName ? { extensionName: skill.extensionName } : {}),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -11945,11 +11947,18 @@ export function App({
           creationSessionContext?.kind === 'workspace'
             ? creationSessionContext.cwd
             : undefined;
+        const draftProviders = connectionRef.current.providers;
+        // Reapplying the effective workspace default would save it again,
+        // potentially overwriting a different default in user settings.
+        const useWorkspaceDefault =
+          !reasoningEffort &&
+          draftProviders?.workspaceCwd === catalogWorkspaceCwd &&
+          draftProviders?.current?.modelId === modelId;
         try {
           await createAndAttachSessionForPrompt({
             sessionActions: sessionActions as typeof sessionActions &
               SessionActionsWithCreate,
-            modelId,
+            modelId: useWorkspaceDefault ? undefined : modelId,
             reasoningEffort,
             modeId,
             planMode,
@@ -20668,6 +20677,87 @@ export function App({
     ],
   );
 
+  const subscriptionModelRefreshes = useRef(new Map<string, string>());
+  const refreshSubscriptionModels = useCallback(() => {
+    const { status, sessionId, workspaceCwd, currentModel } =
+      connectionRef.current;
+    const key = getLogicalSessionKey(sessionId, workspaceCwd);
+    const modelId = key && subscriptionModelRefreshes.current.get(key);
+    if (
+      status !== 'connected' ||
+      !key ||
+      !modelId ||
+      currentModel !== modelId
+    ) {
+      return;
+    }
+    const owner = sessionOwnerGuard.capture({ includeRecovery: true });
+    if (!owner.isCurrent()) return;
+    return sessionActions
+      .refreshModels(
+        (target) => {
+          if (
+            getLogicalSessionKey(target.sessionId, target.workspaceCwd) !== key
+          )
+            throw new Error('Session changed.');
+        },
+        { reloadProviders: false },
+      )
+      .then(() => {
+        const current = connectionRef.current;
+        if (
+          owner.isCurrent() &&
+          current.status === 'connected' &&
+          getLogicalSessionKey(current.sessionId, current.workspaceCwd) ===
+            key &&
+          current.currentModel === modelId &&
+          subscriptionModelRefreshes.current.get(key) === modelId
+        ) {
+          subscriptionModelRefreshes.current.delete(key);
+        }
+      })
+      .catch(() => {
+        // The model picker's refresh remains available if this read fails.
+      });
+  }, [sessionActions, sessionOwnerGuard]);
+  useEffect(() => {
+    void refreshSubscriptionModels();
+  }, [
+    connection.currentModel,
+    connection.status,
+    logicalSessionKey,
+    refreshSubscriptionModels,
+  ]);
+
+  const activateSessionSubscriptionModel = useCallback(
+    async (
+      workspaceCwd: string | undefined,
+      sessionId: string,
+      modelId: string,
+    ) => {
+      const key = getLogicalSessionKey(sessionId, workspaceCwd);
+      const isTarget = () => {
+        const current = connectionRef.current;
+        return (
+          getLogicalSessionKey(current.sessionId, current.workspaceCwd) === key
+        );
+      };
+      if (!key || !isTarget()) {
+        throw new DOMException('Subscription target changed.', 'AbortError');
+      }
+      if (connectionRef.current.status === 'connected') {
+        await sessionActions.setModel(modelId);
+      } else {
+        // The daemon can switch a live session while its event stream reconnects.
+        await workspace.client.setSessionModel(sessionId, modelId);
+      }
+      if (!isTarget()) return;
+      subscriptionModelRefreshes.current.set(key, modelId);
+      await refreshSubscriptionModels();
+    },
+    [refreshSubscriptionModels, sessionActions, workspace.client],
+  );
+
   const handleWorkflowModeChange = useCallback(
     (requested: boolean) => {
       if (sessionWriteBlockedRef.current || !connectionRef.current.sessionId) {
@@ -22443,8 +22533,11 @@ export function App({
           {modelManagementPolicy.allowAdd && showAuthDialog && (
             <AuthMessage
               dialog
+              standalone={isDesktopShell() && sessionIsStandalone}
               allowAdd={modelManagementPolicy.allowAdd}
+              getWorkspaceCwd={getComposerWorkspaceCwd}
               onModelActivated={selectWelcomeModel}
+              activateSessionSubscriptionModel={activateSessionSubscriptionModel}
               onMessage={(text, type = 'status') => {
                 store.dispatch([
                   type === 'error'
