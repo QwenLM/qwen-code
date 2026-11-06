@@ -47,6 +47,8 @@ jobs:
       # CI_BOT_PAT, so the pool allowlist must be enforced before any secret is
       # handed to the runner.
       - name: 'Check runner environment'
+        id: 'guard'
+        timeout-minutes: 2
         env:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           RUNNER_NAME: '${{ runner.name }}'
@@ -70,9 +72,14 @@ jobs:
             esac
             # The classifier runs inside the docker sandbox. Without a daemon
             # that otherwise surfaces only after the classifier's 5-minute
-            # budget is already spent. Fail in seconds instead.
-            if ! docker info > /dev/null 2>&1; then
-              echo "::error::docker daemon is not reachable on this runner; the sandboxed classifier cannot start."
+            # budget is already spent. Fail in seconds instead — and bound the
+            # probe itself: a wedged daemon that accepts the connection and
+            # never answers would otherwise hang here, before the scan, where
+            # neither the resolve nor the classifier step cap applies and even
+            # an empty-candidate round would block the serialized patrol for
+            # the whole job budget.
+            if ! timeout 10 docker info > /dev/null 2>&1; then
+              echo "::error::docker daemon did not answer within 10s on this runner; the sandboxed classifier cannot start."
               exit 1
             fi
           fi
@@ -86,7 +93,16 @@ jobs:
           test -n "${bot_login}"
           echo "bot_login=${bot_login}" >> "${GITHUB_OUTPUT}"
 
+      # See the same step in act: a previous round's sandboxed agent can write
+      # .git, and a planted filter executes during this checkout's clean/reset
+      # while HEAD still resolves to the trusted SHA. Rebuild the metadata.
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout trusted event commit'
+        id: 'checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
         with:
           ref: '${{ github.sha }}'
@@ -210,6 +226,14 @@ jobs:
               "tools": {
                 "sandbox": true,
                 "core": ["read_file", "write_file"]
+              },
+              "permissions": {
+                "deny": [
+                  "write_file(/.git/config)",
+                  "write_file(/.git/hooks/**)",
+                  "write_file(**/.git/config)",
+                  "write_file(**/.git/hooks/**)"
+                ]
               }
             }
           prompt: |-
@@ -260,8 +284,11 @@ jobs:
     steps:
       # This job holds the write-capable CI_BOT_PAT, so it gets the same pool
       # allowlist as classify. No docker preflight: act only runs the driver's
-      # GitHub reads and writes, never a sandboxed agent.
+      # GitHub reads and writes, never a sandboxed agent. The id is load-bearing:
+      # the always() reset step below must be able to require this step's success.
       - name: 'Check runner environment'
+        id: 'guard'
+        timeout-minutes: 2
         env:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           RUNNER_NAME: '${{ runner.name }}'
@@ -283,7 +310,19 @@ jobs:
             esac
           fi
 
+      # A reused workspace can carry Git metadata a previous round's sandboxed
+      # agent wrote: the classifier mounts the workspace read-write and its two
+      # file tools do not exclude .git. A planted filter then executes during
+      # this checkout's own clean/reset, with HEAD still resolving to the
+      # trusted SHA — so a pinned ref and persist-credentials: false do not
+      # help. Discard the metadata and let checkout rebuild it, as triage does.
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout trusted event commit'
+        id: 'checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
         with:
           ref: '${{ github.sha }}'
@@ -313,7 +352,13 @@ jobs:
             --trusted-marker-login "${{ needs.classify.outputs.bot_login }}"
 
       - name: 'Reset successful failure state'
-        if: '${{ always() }}'
+        # always() alone is not enough on a persistent runner: it also fires
+        # when the guard rejected this host, or when checkout failed, and this
+        # step hands CI_BOT_PAT to a script read out of the workspace. Without
+        # a successful checkout that script is whatever a previous round left
+        # behind, so the allowlist would not actually close the write path.
+        # Require both, and keep always() so a failed act still resets state.
+        if: "${{ always() && steps.guard.outcome == 'success' && steps.checkout.outcome == 'success' }}"
         continue-on-error: true
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'

@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -17,6 +18,18 @@ const workflow = readFileSync(
 );
 const yml = parse(workflow);
 const skill = readFileSync('.qwen/skills/ci-flaky-patrol/SKILL.md', 'utf8');
+
+// coreutils timeout is present on both runner families this workflow targets,
+// but not on a stock macOS dev host. Probe it the way the autofix suite probes
+// bash mapfile rather than assuming the developer platform matches the runner.
+const hasTimeoutCommand = (() => {
+  try {
+    execFileSync('timeout', ['--version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 describe('ci failure patrol workflow', () => {
   it('runs every ten minutes with serialized configurable batches', () => {
@@ -419,4 +432,168 @@ describe('ci failure patrol workflow', () => {
       names.indexOf('Classify with ci-flaky-patrol skill'),
     );
   });
+
+  it('gates the token-bearing reset on the guard and a successful checkout', () => {
+    // always() keeps the reset running after a failed act, which is the point.
+    // On a persistent runner it must NOT also fire after the guard rejected the
+    // host or the checkout failed: this step hands CI_BOT_PAT to a script read
+    // out of the workspace, and without a successful checkout that script is
+    // whatever a previous round left there. The allowlist alone does not close
+    // the write path.
+    const act = yml.jobs.act;
+    const reset = act.steps.find(
+      (step) => step.name === 'Reset successful failure state',
+    );
+    expect(reset.env.GH_TOKEN).toContain('CI_BOT_PAT');
+    expect(reset.if).toContain('always()');
+    // No disjunction: an || would let one success bypass the other requirement.
+    expect(reset.if).not.toContain('||');
+    const required = [
+      ...reset.if.matchAll(/steps\.([\w-]+)\.outcome == 'success'/g),
+    ].map((match) => match[1]);
+    expect(required.sort()).toEqual(['checkout', 'guard']);
+    for (const id of required) {
+      expect(
+        act.steps.find((step) => step.id === id),
+        `reset requires steps.${id}.outcome, so that step must carry the id`,
+      ).toBeTruthy();
+    }
+    const ids = act.steps.map((step) => step.id);
+    expect(ids.indexOf('guard')).toBeLessThan(ids.indexOf('checkout'));
+    // Both rejected paths really do produce a non-success outcome: the guard
+    // exits 1 on an unapproved host (proved against the real shell above), and
+    // a failed checkout leaves its own outcome failed, so the conjunction is
+    // false in both cases rather than only in the happy path.
+    expect(act.steps.find((step) => step.id === 'guard').run).toContain(
+      'refusing to run here',
+    );
+  });
+
+  it('denies the classifier the Git metadata writes it could otherwise plant', () => {
+    // Rebuilding .git before checkout closes the cross-round path. This closes
+    // the same-round one: the post-checkout cleanup still runs git commands
+    // after the agent has had write access to the workspace.
+    const classifier = yml.jobs.classify.steps.find((step) =>
+      step.uses?.includes('qwen-code-action'),
+    );
+    const deny = JSON.parse(classifier.with.settings).permissions?.deny ?? [];
+    for (const rule of [
+      'write_file(/.git/config)',
+      'write_file(/.git/hooks/**)',
+      'write_file(**/.git/config)',
+      'write_file(**/.git/hooks/**)',
+    ]) {
+      expect(deny).toContain(rule);
+    }
+  });
+
+  it('behaviorally proves a planted Git filter cannot ride into the next round', () => {
+    const recreate = yml.jobs.classify.steps.find(
+      (step) => step.name === 'Recreate runner Git metadata',
+    );
+    for (const job of [yml.jobs.classify, yml.jobs.act]) {
+      const names = job.steps.map((step) => step.name);
+      const at = names.indexOf('Recreate runner Git metadata');
+      expect(at).toBeGreaterThanOrEqual(0);
+      expect(at).toBeLessThan(names.indexOf('Checkout trusted event commit'));
+      expect(job.steps[at].if).toContain("runner.environment == 'self-hosted'");
+      expect(job.steps[at].run).toContain('rm -rf -- "$GITHUB_WORKSPACE/.git"');
+    }
+
+    const dir = mkdtempSync(join(tmpdir(), 'patrol-git-'));
+    const sentinel = join(dir, 'PWNED');
+    const payload = join(dir, 'payload.sh');
+    const git = (args) =>
+      execFileSync('git', args, {
+        cwd: dir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    try {
+      git(['init', '-q']);
+      git(['config', 'user.email', 'patrol@example.test']);
+      git(['config', 'user.name', 'patrol']);
+      writeFileSync(join(dir, 'driver.mjs'), 'original\n');
+      writeFileSync(join(dir, '.gitattributes'), 'driver.mjs filter=evil\n');
+      git(['add', '.']);
+      git(['commit', '-qm', 'seed']);
+      // Everything below needs only write_file — the classifier's sole write
+      // tool. No shell, no credential, no network.
+      writeFileSync(payload, `#!/bin/sh\ntouch '${sentinel}'\ncat\n`);
+      chmodSync(payload, 0o755);
+      git(['config', 'filter.evil.smudge', payload]);
+      git(['config', 'filter.evil.clean', payload]);
+
+      // Positive control: without the rebuild, checkout's own clean/reset
+      // executes the planted filter while HEAD stays the trusted commit. If
+      // this ever stops firing the fixture is dead and the assertions below
+      // would pass vacuously.
+      writeFileSync(join(dir, 'driver.mjs'), 'tampered\n');
+      const trustedHead = git(['rev-parse', 'HEAD']).trim();
+      git(['reset', '--hard', 'HEAD']);
+      expect(existsSync(sentinel)).toBe(true);
+      expect(git(['rev-parse', 'HEAD']).trim()).toBe(trustedHead);
+
+      // The fix: discard the metadata, so checkout rebuilds it from nothing.
+      rmSync(sentinel, { force: true });
+      execFileSync('bash', ['-c', recreate.run], {
+        env: { ...process.env, GITHUB_WORKSPACE: dir },
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      expect(existsSync(join(dir, '.git'))).toBe(false);
+      expect(existsSync(sentinel)).toBe(false);
+
+      // Rebuilt metadata carries no filter, so the next reset is inert.
+      git(['init', '-q']);
+      let leaked = 'unset';
+      try {
+        leaked = git(['config', '--get', 'filter.evil.smudge']).trim();
+      } catch {
+        leaked = '';
+      }
+      expect(leaked).toBe('');
+      expect(existsSync(sentinel)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!hasTimeoutCommand)(
+    'behaviorally proves a wedged docker daemon cannot hang the preflight',
+    () => {
+      // A daemon that accepts the call and never answers is worse than an
+      // absent one: the preflight runs before the scan, so neither the resolve
+      // nor the classifier step cap applies, and even an empty-candidate round
+      // would hold the serialized patrol for the whole job budget.
+      const guard = yml.jobs.classify.steps[0];
+      expect(guard.run).toContain('timeout 10 docker info');
+      expect(guard['timeout-minutes']).toBeLessThanOrEqual(2);
+      const dir = mkdtempSync(join(tmpdir(), 'patrol-wedged-'));
+      writeFileSync(join(dir, 'docker'), '#!/bin/sh\nsleep 60\n');
+      chmodSync(join(dir, 'docker'), 0o755);
+      const started = Date.now();
+      let status = 0;
+      try {
+        execFileSync('bash', ['-c', guard.run], {
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            RUNNER_ENVIRONMENT: 'self-hosted',
+            RUNNER_NAME: 'ecs-qwen-hk1-1',
+          },
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          timeout: 30000,
+        });
+      } catch (e) {
+        status = e.status ?? -1;
+      }
+      const elapsed = Date.now() - started;
+      rmSync(dir, { recursive: true, force: true });
+      expect(status).not.toBe(0);
+      // Bounded by the probe's own ten seconds, not the twenty-minute job cap.
+      expect(elapsed).toBeLessThan(25000);
+    },
+  );
 });
