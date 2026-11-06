@@ -73,6 +73,11 @@ jobs:
       infra_only: '${{ steps.infra.outputs.infra_only }}'
       pr_number: '${{ steps.destination.outputs.pr_number }}'
       file_issue: '${{ steps.destination.outputs.file_issue }}'
+      # Whether this run should be rerun rather than filed. Kept separate from
+      # `file_issue` because a timeout still inside its rerun budget is rerun
+      # *and* not filed; one flag gating both suppressed the dispatch too and
+      # left a timed-out main run neither rerun nor recorded.
+      rerun_pending: '${{ steps.destination.outputs.rerun_pending }}'
       comment_body: '${{ steps.summary.outputs.body }}'
       # Empty when the run named no failing test; that emptiness routes the
       # record to the workflow's aggregate issue downstream.
@@ -291,6 +296,7 @@ jobs:
           set -euo pipefail
           pr_number=''
           file_issue=false
+          rerun_pending=false
           # A timed-out run is rerun whole, so the occurrence is filed when that
           # rerun also fails — not while it is still re-executing. Filing it now
           # would record a red main for a head that is about to be retried.
@@ -344,10 +350,12 @@ jobs:
             # rerun_infra reruns this run; its own completion reports the
             # result. Suppress only the filing, not the dispatch.
             file_issue=false
+            rerun_pending=true
             echo "Run timed out and has not exhausted its reruns; rerun_infra owns the outcome."
           fi
           echo "pr_number=${pr_number}" >> "${GITHUB_OUTPUT}"
           echo "file_issue=${file_issue}" >> "${GITHUB_OUTPUT}"
+          echo "rerun_pending=${rerun_pending}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Download failed job logs'
         id: 'download'
@@ -557,7 +565,10 @@ jobs:
   rerun_infra:
     name: 'Rerun infrastructure-only failures'
     needs: 'analyze'
-    if: "${{ (needs.analyze.outputs.infra_only == 'true' || (needs.analyze.outputs.cancellation_kind == 'timeout' && needs.analyze.outputs.timeout_attempts_exhausted != 'true')) && needs.analyze.outputs.file_issue == 'true' && needs.analyze.outputs.provisional != 'true' }}"
+    # A timed-out run is rerun on `rerun_pending`, not on `file_issue`: the
+    # destination clears `file_issue` precisely for the timeout that still has
+    # reruns left, so gating the dispatch on it skipped the rerun.
+    if: "${{ ((needs.analyze.outputs.infra_only == 'true' && needs.analyze.outputs.file_issue == 'true') || (needs.analyze.outputs.cancellation_kind == 'timeout' && needs.analyze.outputs.rerun_pending == 'true')) && needs.analyze.outputs.provisional != 'true' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:

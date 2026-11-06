@@ -226,7 +226,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
 
     it('reports an approval failure with no workflow_run pull_requests association', () => {
       const resolved = resolve([pr()]);
-      expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
+      expect(resolved.output).toBe(
+        'pr_number=14472\nfile_issue=false\nrerun_pending=false\n',
+      );
       expect(resolved.stdout).not.toContain('::warning::');
       expect(resolved.args).toContain('state=all');
       expect(resolved.args).toContain('--paginate');
@@ -245,7 +247,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
           },
         }),
       ]);
-      expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
+      expect(resolved.output).toBe(
+        'pr_number=14472\nfile_issue=false\nrerun_pending=false\n',
+      );
     });
     it('passes the attempt to the destination guard', () => {
       // Without this wiring the guard reads an empty attempt and every
@@ -266,7 +270,7 @@ cat "\${RUNNER_TEMP}/pulls.json"
     });
     it('also files an issue when the failed PR already merged', () => {
       expect(resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })]).output).toBe(
-        'pr_number=14472\nfile_issue=true\n',
+        'pr_number=14472\nfile_issue=true\nrerun_pending=false\n',
       );
     });
     it.each(['pull_request', 'pull_request_review'])(
@@ -281,7 +285,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
           EVENT_NAME: eventName,
           RUN_ATTEMPT: '2',
         });
-        expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
+        expect(resolved.output).toBe(
+          'pr_number=14472\nfile_issue=false\nrerun_pending=false\n',
+        );
         expect(resolved.stdout).toContain(
           "Attempt 2 of the PR's pre-merge workflow",
         );
@@ -295,7 +301,7 @@ cat "\${RUNNER_TEMP}/pulls.json"
           EVENT_NAME: 'workflow_dispatch',
           HEAD_BRANCH: 'ci/java',
         }).output,
-      ).toBe('pr_number=14472\nfile_issue=true\n');
+      ).toBe('pr_number=14472\nfile_issue=true\nrerun_pending=false\n');
     });
 
     it('files a rerun of a fresh dispatch on a merged PR branch', () => {
@@ -308,7 +314,7 @@ cat "\${RUNNER_TEMP}/pulls.json"
           HEAD_BRANCH: 'ci/java',
           RUN_ATTEMPT: '2',
         }).output,
-      ).toBe('pr_number=14472\nfile_issue=true\n');
+      ).toBe('pr_number=14472\nfile_issue=true\nrerun_pending=false\n');
     });
     it('falls back to filing when the attempt is unreadable', () => {
       // The guard must not turn a missing payload field into silence: before
@@ -317,7 +323,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
       const resolved = resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
         RUN_ATTEMPT: '',
       });
-      expect(resolved.output).toBe('pr_number=14472\nfile_issue=true\n');
+      expect(resolved.output).toBe(
+        'pr_number=14472\nfile_issue=true\nrerun_pending=false\n',
+      );
       expect(resolved.stdout).toContain(
         'No run_attempt in the workflow_run payload',
       );
@@ -330,7 +338,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
         const resolved = resolve([
           pr({ head: { sha: 'new-head', repo: { full_name: repo } } }),
         ]);
-        expect(resolved.output).toBe('pr_number=\nfile_issue=false\n');
+        expect(resolved.output).toBe(
+          'pr_number=\nfile_issue=false\nrerun_pending=false\n',
+        );
         expect(resolved.stdout).toContain('::warning::');
       }
     });
@@ -339,12 +349,14 @@ cat "\${RUNNER_TEMP}/pulls.json"
       // closed-unmerged PR satisfies every other term but must not be handed
       // a permanent bot comment.
       const closed = resolve([pr({ state: 'closed' })]);
-      expect(closed.output).toBe('pr_number=\nfile_issue=false\n');
+      expect(closed.output).toBe(
+        'pr_number=\nfile_issue=false\nrerun_pending=false\n',
+      );
       expect(closed.stdout).toContain('::warning::');
       expect(
         resolve([pr({ state: 'closed', merged_at: '2026-10-17T16:15:57Z' })])
           .output,
-      ).toBe('pr_number=14472\nfile_issue=true\n');
+      ).toBe('pr_number=14472\nfile_issue=true\nrerun_pending=false\n');
     });
     it('never files an issue for a contributor-triggered run, even on a main-named branch', () => {
       // A fork PR can be opened from the contributor's own main branch
@@ -366,7 +378,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
           HEAD_REPO: 'someone/qwen-code',
         },
       );
-      expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
+      expect(resolved.output).toBe(
+        'pr_number=14472\nfile_issue=false\nrerun_pending=false\n',
+      );
     });
     it.each(['workflow_dispatch', 'schedule'])(
       'files a main %s failure without a PR',
@@ -375,7 +389,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
           EVENT_NAME: event,
           HEAD_BRANCH: 'main',
         });
-        expect(resolved.output).toBe('pr_number=\nfile_issue=true\n');
+        expect(resolved.output).toBe(
+          'pr_number=\nfile_issue=true\nrerun_pending=false\n',
+        );
         expect(resolved.args).toBe('');
         expect(resolved.stdout).not.toContain('::warning::');
       },
@@ -390,7 +406,7 @@ cat "\${RUNNER_TEMP}/pulls.json"
           HEAD_BRANCH: 'main',
           RUN_ATTEMPT: '2',
         }).output,
-      ).toBe('pr_number=\nfile_issue=true\n');
+      ).toBe('pr_number=\nfile_issue=true\nrerun_pending=false\n');
     });
     it('warns and reports nothing when the run resolves to no destination', () => {
       // A manual dispatch on a branch with no open PR is admitted and then
@@ -400,8 +416,47 @@ cat "\${RUNNER_TEMP}/pulls.json"
         EVENT_NAME: 'workflow_dispatch',
         HEAD_BRANCH: 'ci/java-experiment',
       });
-      expect(resolved.output).toBe('pr_number=\nfile_issue=false\n');
+      expect(resolved.output).toBe(
+        'pr_number=\nfile_issue=false\nrerun_pending=false\n',
+      );
       expect(resolved.stdout).toContain('::warning::');
+    });
+    it('dispatches a timed-out run it does not yet file', () => {
+      // The destination clears `file_issue` for exactly the timeout that still
+      // has reruns left. Gating the dispatch on that same flag skipped the
+      // rerun as well, so the run was neither re-executed nor filed and the
+      // timeout disappeared (#16214). `rerun_pending` carries the dispatch.
+      const resolved = resolve([], {
+        EVENT_NAME: 'push',
+        HEAD_BRANCH: 'main',
+        HEAD_SHA: 'tested-head',
+        CANCELLATION_KIND: 'timeout',
+        TIMEOUT_ATTEMPTS_EXHAUSTED: 'false',
+      });
+
+      expect(resolved.output).toContain('file_issue=false');
+      expect(resolved.output).toContain('rerun_pending=true');
+      const evaluate = (condition, needs) =>
+        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
+          needs,
+          () => true,
+        );
+      const needs = {
+        analyze: {
+          result: 'success',
+          outputs: {
+            infra_only: 'false',
+            file_issue: 'false',
+            rerun_pending: 'true',
+            cancellation_kind: 'timeout',
+            timeout_attempts_exhausted: 'false',
+            provisional: 'false',
+          },
+        },
+        rerun_infra: { result: 'skipped' },
+      };
+      expect(evaluate(String(jobs.rerun_infra.if), needs)).toBe(true);
+      expect(evaluate(String(jobs.file_issue.if), needs)).toBe(false);
     });
     it('degrades to no destination when the PR listing fails', () => {
       // The lookup must fail soft like its neighbouring reads: a transient
@@ -410,7 +465,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
       for (const body of ['{"message": "Bad credentials"}', '']) {
         const gh = `#!/usr/bin/env bash\nprintf '%s' '${body}'\nexit 1\n`;
         const resolved = resolve([], {}, gh);
-        expect(resolved.output).toBe('pr_number=\nfile_issue=false\n');
+        expect(resolved.output).toBe(
+          'pr_number=\nfile_issue=false\nrerun_pending=false\n',
+        );
         expect(resolved.stdout).toContain('::warning::');
       }
     });
@@ -945,9 +1002,11 @@ esac
         expect(resolved.output).toContain('timeout_attempts_exhausted=true');
         expect(resolved.stdout).toContain('filing instead of rerunning');
         // The gate that dispatches the rerun must refuse once exhausted, or
-        // the writer's decision never reaches it.
+        // the writer's decision never reaches it. `rerun_pending` is the
+        // destination's answer to exactly this question: it stays false once
+        // the attempt budget is spent, and is the flag a timeout dispatches on.
         expect(String(jobs.rerun_infra.if)).toContain(
-          "needs.analyze.outputs.timeout_attempts_exhausted != 'true'",
+          "needs.analyze.outputs.rerun_pending == 'true'",
         );
         expect(String(jobs.file_issue.if)).toContain(
           "needs.analyze.outputs.timeout_attempts_exhausted == 'true'",
