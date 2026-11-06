@@ -153,7 +153,9 @@ bodies/<name>.md     # 动作引用的评论/review 正文
      （与 finalize 一致）。幂等：bot 自己在该 commit 上已 `APPROVED`、或已存在
      `CHANGES_REQUESTED`，都抑制重复。
    - `close-pr` / `close-issue`：仅当目标仍 open。
-   - `labels`：先验证每个 label 存在再应用；永不创建。
+   - `labels`：先验证每个 label 存在再应用，永不创建，并拒绝 SKILL.md 划为
+     禁区的 process label（`welcome-pr`、`maintainer`、`help wanted`、
+     `good first issue`）。
    - `defer`：运行搬过来的 maintainer 解析器，发带解析出的 @mention 的评论
      （解析不出就不带），best-effort 加 assignee。
 
@@ -253,6 +255,9 @@ stream-json`。显式环境携带只读 `GH_TOKEN`、`BOT_LOGIN`、draft 目录�
   用例、去重、幂等、解析器、逐动作失败报告），对 stub 的 `gh` 运行。
 - `.github/workflows/.size-baseline` —— 本 PR 内 bump `qwen-triage.yml` 条目
   （见「约束与风险」）。
+- `.github/workflows/.ci-budget` —— 为新 publish job bump `qwen-triage.yml`
+  条目（7→8 jobs、声明 timeout 280→290 分钟）；否则姊妹棘轮会中止
+  `Lint & Static`。
 - 本设计文档对。
 
 ## 约束与风险
@@ -327,5 +332,6 @@ vitest 套件在 `PATH` 缺 `jq` 时会静默跳过 jq 门控用例；`.mjs` 套
   skill 的 defer 路径只发 issue comment 加 assignee，从不提交 `COMMENT` review。
   该步骤的 `deferred` 分支今天看起来不可达。
 - `SKILL.md` 禁止触碰 `welcome-pr` process label，而
-  `references/issue-workflow.md` 指示给无复现 bug 加它。publisher 只校验 label
-  存在性，不裁决这个冲突。
+  `references/issue-workflow.md` 曾指示给无复现 bug 加它。评审期间已解决：
+  publisher 现在在唯一写入收口处拒绝所有 process label，issue-workflow 的
+  指令也已与该规则对齐。

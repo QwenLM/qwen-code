@@ -1419,7 +1419,10 @@ jobs:
         continue-on-error: true
         uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
         with:
-          name: 'triage-drafts-${{ steps.resolve.outputs.number }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          # Same expression as the download side: if the run died before
+          # 'Resolve target number', both sides fall back to the event's
+          # issue number instead of disagreeing on an empty segment.
+          name: 'triage-drafts-${{ steps.resolve.outputs.number || github.event.issue.number }}-${{ github.run_id }}-${{ github.run_attempt }}'
           path: '${{ runner.temp }}/triage-drafts/'
           retention-days: 7
           if-no-files-found: 'warn'

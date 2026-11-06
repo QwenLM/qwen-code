@@ -185,7 +185,9 @@ implementation of the write path for both CI and local use. It:
      the bot's own `APPROVED` at that commit, or an existing
      `CHANGES_REQUESTED`, suppresses a duplicate.
    - `close-pr` / `close-issue`: only when the target is still open.
-   - `labels`: verifies every label exists before applying; never creates.
+   - `labels`: verifies every label exists before applying, never creates,
+     and rejects the process labels (`welcome-pr`, `maintainer`,
+     `help wanted`, `good first issue`) that SKILL.md places off-limits.
    - `defer`: runs the moved maintainer resolver, posts the comment with the
      resolved @mention (or without one if nothing resolves), adds the
      assignee best-effort.
@@ -307,6 +309,9 @@ openai --approval-mode yolo --prompt '/triage …' --output-format stream-json`.
   failure reporting) against a stubbed `gh`.
 - `.github/workflows/.size-baseline` — bump the `qwen-triage.yml` entry in
   this PR (see Constraints).
+- `.github/workflows/.ci-budget` — bump the `qwen-triage.yml` entry
+  (7→8 jobs, 280→290 declared timeout-minutes) for the new publish job;
+  the sibling ratchet aborts `Lint & Static` otherwise.
 - This design pair.
 
 ## Constraints and risks
@@ -396,6 +401,7 @@ mirrored by `scripts/tests/workflow-size.test.js`.
   and never submits a `COMMENT` review. The `deferred` branch of that step
   appears unreachable today.
 - `SKILL.md` forbids touching the `welcome-pr` process label while
-  `references/issue-workflow.md` instructs adding it for unreproduced bugs.
-  The publisher validates label existence only and does not adjudicate this
-  conflict.
+  `references/issue-workflow.md` instructed adding it for unreproduced bugs.
+  Resolved during review: the publisher now rejects all process labels at
+  the chokepoint, and the issue-workflow instruction was aligned with the
+  rule.

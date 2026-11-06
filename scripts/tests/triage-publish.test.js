@@ -451,6 +451,21 @@ describe('preflight fail-closed', () => {
     expect(writes).toHaveLength(0);
   });
 
+  it.each(['welcome-pr', 'maintainer', 'help wanted', 'good first issue'])(
+    'rejects the process label "%s" in add and remove',
+    (label) => {
+      // SKILL.md's process-label rule is enforced at the chokepoint now,
+      // not left to agent judgment.
+      for (const key of ['add', 'remove']) {
+        const dir = makeDraft([{ action: 'labels', [key]: [label] }]);
+        const gh = fakeGh();
+        const { code, writes } = runPublish(dir, gh);
+        expect(code).toBe(2);
+        expect(writes).toHaveLength(0);
+      }
+    },
+  );
+
   it('rejects defer when the target is an issue', () => {
     const dir = makeDraft([{ action: 'defer', body: 'bodies/d.md' }], {
       'd.md': 'uncertain',

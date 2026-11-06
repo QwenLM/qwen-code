@@ -138,7 +138,8 @@ jq -cn '{action:"upsert-comment",marker:"stage=1",body:"bodies/triage-comment.md
 
 ### For bugs without clear reproduction:
 
-1. Add `welcome-pr` if it exists. Say community PRs are welcome.
+1. Say community PRs are welcome. Do not draft the `welcome-pr` label —
+   process labels are rejected by the publisher (see SKILL.md Rules).
 2. Add `status/need-retesting` if on a stale version.
 3. Inspect source and docs inside worktree; state confidence: confirmed / plausible / no clear
    direction.

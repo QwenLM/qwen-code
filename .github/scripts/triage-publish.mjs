@@ -26,6 +26,14 @@ const MARKERS = new Set([
   'stage=1b',
 ]);
 const MAX_BODY_LENGTH = 65536;
+// SKILL.md forbids touching process labels; now that every label write goes
+// through this one chokepoint, the rule is enforced in code, not judgment.
+const PROCESS_LABELS = new Set([
+  'welcome-pr',
+  'maintainer',
+  'help wanted',
+  'good first issue',
+]);
 const WRITE_PERMISSIONS = new Set(['admin', 'maintain', 'write']);
 const COMMIT_ID = /^[0-9a-fA-F]{40}$/;
 
@@ -155,6 +163,11 @@ export function validateDrafts({ dir, targetKind }) {
           throw new Error(
             `${where}: labels ${key} must be an array of strings`,
           );
+        }
+        for (const label of action[key] ?? []) {
+          if (PROCESS_LABELS.has(label)) {
+            throw new Error(`${where}: process label "${label}" is off-limits`);
+          }
         }
       }
     }
