@@ -3709,6 +3709,24 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     );
   });
 
+  it('drops a mid-snapshot cut whose prose example closes before the real opening', async () => {
+    // The example's closing tag must not stand in for the real snapshot's:
+    // the search for one starts at the line-start opening.
+    mockVllmBackend(WINDOW, false, {
+      text:
+        'The format is <state_snapshot>x</state_snapshot>.\n' +
+        '<state_snapshot><overall_goal>port the parser</overall_goal><cur',
+      usage: windowFillingUsage,
+    });
+
+    const result = await compressChars(182_000, 45_000);
+
+    expectNoNewHistory(
+      result,
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+  });
+
   it('keeps a complete summary that uses no snapshot tags', async () => {
     mockVllmBackend(WINDOW, false, {
       text: 'Goal: port the parser. Done.',
@@ -4465,6 +4483,33 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     expect(sent).toHaveLength(2);
     expect(sent[1]!.promptTokens).toBeLessThan(sent[0]!.promptTokens);
   });
+
+  it.each([
+    ['takes', 0.6, 1, CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE],
+    ['ignores', 0.4, 2, CompressionStatus.COMPRESSED],
+  ])(
+    '%s a count at %s of the request’s own estimate',
+    async (_verb, share, sends, status) => {
+      // The two shares sit either side of the threshold. Each count is past
+      // the limit its message states, so taken, it bounds the window below
+      // what the reduction reaches and the retry is refused locally; ignored,
+      // the retry is sized from the estimate and sent.
+      mockBackend({
+        ratio: 2,
+        rejection: (promptTokens) => {
+          const count = Math.round((promptTokens / 2) * share);
+          return new Error(
+            `prompt is too long: ${count} tokens > ${count - 1} maximum`,
+          );
+        },
+      });
+
+      const result = await compressHistory(toolSession(20, 4_500), 60_000);
+
+      expect(sent).toHaveLength(sends);
+      expect(result.info.compressionStatus).toBe(status);
+    },
+  );
 
   it('ignores a count under which the rejected request would have fit', async () => {
     // Read at face value, this count says only the output budget overran and
