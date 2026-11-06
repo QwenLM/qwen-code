@@ -198,23 +198,24 @@ export interface ProgramStatus {
 /** Stable machine identifier terminals use to group and pick an icon. */
 export const PROGRAM_STATUS_APP = 'qwen-code';
 
-/** Spec limit for the encoded `msg` value. */
-const PROGRAM_STATUS_MAX_ENCODED_MSG = 2732;
+/**
+ * Spec limit for the decoded `msg` value. Its base64 form is at most 2732
+ * bytes, the spec limit for the encoded value, so this bounds both.
+ */
+const PROGRAM_STATUS_MAX_MSG_BYTES = 2048;
 
 /**
  * Encode a `msg` value: control characters (including newlines, which the
  * spec forbids after decoding) are dropped, and the text is shortened by
- * whole code points until its base64 form fits the spec limit.
+ * whole code points until it fits the spec limit.
  */
 function encodeProgramStatusMsg(msg: string): string {
   // eslint-disable-next-line no-control-regex
   let text = msg.replace(/[\x00-\x1f\x7f\x80-\x9f\u2028\u2029]/g, ' ').trim();
-  let encoded = Buffer.from(text, 'utf8').toString('base64');
-  while (encoded.length > PROGRAM_STATUS_MAX_ENCODED_MSG) {
+  while (Buffer.byteLength(text, 'utf8') > PROGRAM_STATUS_MAX_MSG_BYTES) {
     text = Array.from(text).slice(0, -16).join('');
-    encoded = Buffer.from(text, 'utf8').toString('base64');
   }
-  return encoded;
+  return Buffer.from(text, 'utf8').toString('base64');
 }
 
 /**

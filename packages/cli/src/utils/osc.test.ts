@@ -342,6 +342,16 @@ describe('oscProgramStatus', () => {
     expect(decodeMsg(seq)).toMatch(/^界+$/);
   });
 
+  it('caps the decoded msg at 2048 bytes', () => {
+    const atLimit = oscProgramStatus({ state: 'error', msg: 'x'.repeat(2048) });
+    expect(decodeMsg(atLimit)).toBe('x'.repeat(2048));
+    const overLimit = oscProgramStatus({
+      state: 'error',
+      msg: 'x'.repeat(2049),
+    });
+    expect(Buffer.byteLength(decodeMsg(overLimit))).toBeLessThanOrEqual(2048);
+  });
+
   it('is never wrapped for tmux passthrough', () => {
     process.env['TMUX'] = '/tmp/tmux-501/default,1,0';
     expect(oscProgramStatus({ state: 'idle' })).toBe(

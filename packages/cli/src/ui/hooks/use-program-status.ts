@@ -197,8 +197,13 @@ export function useTurnOutcome(
     setTracker(current);
   }
 
-  // History cleared (/clear): the turn is gone, so is its result.
-  return history.length === 0 ? 'idle' : current.outcome;
+  // History cleared (/clear): the turn is gone, so is its result. Reset the
+  // tracker too, or the next item added while idle would bring it back.
+  if (history.length === 0 && current.outcome !== 'idle') {
+    current = { ...current, outcome: 'idle' };
+    setTracker(current);
+  }
+  return current.outcome;
 }
 
 /**

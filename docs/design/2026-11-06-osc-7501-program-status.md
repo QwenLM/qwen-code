@@ -83,9 +83,12 @@ state leaves `Idle`. When it returns to `Idle`, it decides the outcome once:
 - `done` otherwise.
 
 The outcome holds until the next turn starts. History changes while idle do
-not touch it: a failed slash command does not turn `done` into `error`, and
-memory compaction, which drops old items, does not reset it. Only an empty
-history (`/clear`) falls back to `idle`.
+not touch it: an error added while idle does not turn `done` into `error`, and
+memory compaction, which drops old items, does not reset it. A slash command
+passes through `Responding`, so it counts as a turn and decides its own
+outcome (a failed one ends in `error`). Only an empty history (`/clear`)
+resets the outcome to `idle`, and items added while idle afterwards keep it
+there.
 
 ### Message policy
 

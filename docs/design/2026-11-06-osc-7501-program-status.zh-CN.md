@@ -64,7 +64,7 @@ ESC ] 7501 ; state=<state>[:kind=<kind>]:app=qwen-code[:msg=<base64>] ESC \
 - 如果这一轮新增了 `MessageType.ERROR`、`user_prompt_submit_blocked` 或 `stop_hook_loop` 类型的 history 条目（即 id 更大的条目），或在 pending 条目里留下了错误（API 错误会带着 Ctrl+Y 重试提示停留在那里，直到下一次提交），结果为 `error`；
 - 否则为 `done`。
 
-结果保持到下一轮开始。空闲时 history 的变化不会改动它：失败的斜杠命令不会把 `done` 改成 `error`，删除旧条目的内存压缩也不会把它重置。只有 history 被清空（`/clear`）时才回到 `idle`。
+结果保持到下一轮开始。空闲时 history 的变化不会改动它：空闲时追加的错误不会把 `done` 改成 `error`，删除旧条目的内存压缩也不会把它重置。斜杠命令会经过 `Responding`，因此算作一轮，并决定自己的结果（失败的斜杠命令以 `error` 结束）。只有 history 被清空（`/clear`）时结果才重置为 `idle`，之后空闲时追加的条目也不会改变它。
 
 ### msg 策略
 

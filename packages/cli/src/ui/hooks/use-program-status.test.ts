@@ -369,6 +369,15 @@ describe('useTurnOutcome', () => {
     rerender({ state: StreamingState.Idle, history: [] });
     expect(result.current).toBe('idle');
   });
+
+  it('stays idle when an item is added while idle after a clear', () => {
+    const { result, rerender } = setup();
+    rerender({ state: StreamingState.Responding, history: [user] });
+    rerender({ state: StreamingState.Idle, history: [user, reply] });
+    rerender({ state: StreamingState.Idle, history: [] });
+    rerender({ state: StreamingState.Idle, history: [reply] });
+    expect(result.current).toBe('idle');
+  });
 });
 
 describe('useProgramStatus', () => {
