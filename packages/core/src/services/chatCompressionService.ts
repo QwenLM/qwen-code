@@ -1031,12 +1031,18 @@ export class ChatCompressionService {
           : budgetWindow;
       const reserve = compactionOutputReserve(window);
       // The reduced request, its output budget sized as if every estimated
-      // token cost `tokensPerEstimate` real ones.
+      // token cost `tokensPerEstimate` real ones, and no more than the
+      // reserve: the rejection has just shown the estimate runs low, so the
+      // room it claims past the reserve is not there to take. Without counts,
+      // the full budget that room allowed made the retry overrun again.
       const retrySizedBy = (tokensPerEstimate: number): OverflowRetry => {
         const retry = reduceColdInput();
-        const outputTokens = computeCompactionOutputBudget(
-          Math.ceil(estimateColdRequest(retry) * tokensPerEstimate),
-          window,
+        const outputTokens = Math.min(
+          reserve,
+          computeCompactionOutputBudget(
+            Math.ceil(estimateColdRequest(retry) * tokensPerEstimate),
+            window,
+          ),
         );
         if (outputTokens < minCompactionOutputTokens(window)) {
           return { kind: 'too-large' };

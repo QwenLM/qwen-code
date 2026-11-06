@@ -4385,13 +4385,32 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     ).toBeLessThanOrEqual(WINDOW);
   });
 
-  it('drops a retry cut off at the end of the smaller window the rejection reported', async () => {
-    // The rejection states the server's window but no count, so the retry is
-    // sized from the estimate, which runs low. The server stops the output
-    // where its window ends: the cut shows against that window, not the
-    // larger one configured.
+  it('leaves a retry without counts no more than the reserve', async () => {
+    // A rejection with no counts still shows the estimate ran low. Sized from
+    // that estimate, the retry asked for the full output budget and overran
+    // again; it leaves the reserve, as a retry sized from a count does.
     mockBackend({
       ratio: 1.5,
+      window: 32_768,
+      rejection: () =>
+        new Error("This model's maximum context length is 32768 tokens."),
+    });
+    configureWindow(32_768);
+
+    const result = await compressHistory(toolSession(8, 12_000), 30_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.maxOutputTokens).toBe(8_192);
+  });
+
+  it('drops a retry cut off at the end of the smaller window the rejection reported', async () => {
+    // The rejection states the server's window but no count, so the retry is
+    // sized from the estimate, which runs so low that even the reserve it
+    // leaves overruns. The server stops the output where its window ends:
+    // the cut shows against that window, not the larger one configured.
+    mockBackend({
+      ratio: 2.6,
       window: 32_768,
       stopAtWindow: true,
       rejection: vllmCutOffRejection(32_768),
@@ -4609,22 +4628,23 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     mockBackend({
       ratio: 1.2,
       alwaysReject: true,
-      // Taken at face value, 50,000 leaves the prompt whole, and the same
-      // request would be resent with less output room.
+      // Taken at face value, 46,000 leaves the prompt whole with the reserve
+      // to spare, and the same request would be resent with the 18,512
+      // tokens of output room it leaves.
       rejection: () =>
         new Error(
           `This model's maximum context length is 131072 tokens. However, ` +
-            `your messages resulted in 50000 tokens.`,
+            `your messages resulted in 46000 tokens.`,
         ),
     });
 
     await compressHistory(toolSession(20, 6_000), 40_000);
 
     expect(sent).toHaveLength(2);
+    // Sized as without counts instead: the reduced request, leaving the
+    // reserve, a quarter of the window.
     expect(sent[1]!.promptTokens).toBeLessThan(sent[0]!.promptTokens);
-    // Sized from its own estimate, the retry keeps the full output budget;
-    // the count, taken at face value, would have cut it to the reserve.
-    expect(sent[1]!.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(sent[1]!.maxOutputTokens).toBe(WINDOW / 4);
   });
 
   it('cuts the overflow past an input limit the rejection states', async () => {
