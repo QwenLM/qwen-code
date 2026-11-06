@@ -16,6 +16,7 @@ import {
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   isPrivateProvenanceEnvKey,
+  keepsEmptyHomeEnvValue,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
@@ -248,7 +249,11 @@ function readHomeEnvInto(file: string): void {
   try {
     const parsed = dotenv.parse(fs.readFileSync(file, 'utf-8'));
     for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
-      if (parsed[key] && !Object.hasOwn(process.env, key)) {
+      if (
+        (parsed[key] ||
+          (keepsEmptyHomeEnvValue(key) && parsed[key] !== undefined)) &&
+        !Object.hasOwn(process.env, key)
+      ) {
         process.env[key] = parsed[key];
       }
     }
@@ -551,6 +556,7 @@ export interface EnvFileReadFailure {
 export function readProjectEnvFiles(
   settings: Settings,
   startDir: string,
+  workspaceTrusted?: boolean,
 ): Record<string, Record<string, string> | null> {
   const userLevelPaths = getUserLevelEnvPaths();
   // `hashProjectHooks` hashes this map, and the sandbox mounts only the
@@ -577,7 +583,12 @@ export function readProjectEnvFiles(
     return isWithinRoot(resolved, workspaceRoot);
   };
   const files: Record<string, Record<string, string> | null> = {};
-  for (const file of findEnvFiles(settings, startDir, userLevelPaths)) {
+  for (const file of findEnvFiles(
+    settings,
+    startDir,
+    userLevelPaths,
+    workspaceTrusted,
+  )) {
     if (userLevelPaths.has(path.normalize(file))) continue;
     if (!isInsideWorkspace(file)) continue;
     try {
@@ -812,7 +823,8 @@ export function loadEnvironment(
 
       const existingValue = process.env[key];
       const isEffectivelyUnset =
-        !Object.hasOwn(process.env, key) || existingValue === '';
+        !Object.hasOwn(process.env, key) ||
+        (existingValue === '' && !keepsEmptyHomeEnvValue(key));
       if (isEffectivelyUnset) {
         process.env[key] = envFile.parsedEnv[key];
         dotEnvSourcedKeys.add(key);

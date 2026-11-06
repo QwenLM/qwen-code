@@ -47,6 +47,7 @@ import {
   type Config,
   type Logger,
 } from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import type { PartListUnion } from '@google/genai';
 import { MessageSenderType } from '@qwen-code/qwen-code-core/core/logger.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -60,6 +61,7 @@ import { useGitBranchName } from '../hooks/useGitBranchName.js';
 import { useStatusLineState } from '../hooks/useStatusLine.js';
 import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 import { STATUS_LINE_COMPOSER_ROWS } from '../status-line-model.js';
+import { useSubscriptionCommandVisibility } from '../hooks/use-subscription-command-visibility.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 import {
   MessageType,
@@ -345,6 +347,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const [commandList, setCommandList] = useState<readonly SlashCommand[]>(
     commands ?? [],
   );
+  const presentedCommands = useSubscriptionCommandVisibility(
+    commandList,
+    config,
+  );
 
   const notify = useCallback((text: string) => setNoticeText(text), []);
 
@@ -357,17 +363,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const { width: terminalWidth, height: terminalHeight } =
     useTerminalDimensions();
   const modBand = useModBand(config);
-  // ink renders every dialog inside a region of exactly this height, clipped,
-  // with the composer swapped out (`DefaultAppLayout`'s dialog wrapper) — in
-  // ink's default state: its show-more-lines key lifts `constrainHeight`, which
-  // drops both the height and the clip, while this port keeps the region fixed
-  // in every state (recorded as a divergence in the parity design doc). The
-  // clip reaches content that shrinks with the region; a child that holds its
-  // own size paints past the bottom edge instead of being cut. A
-  // content-height region bottom-anchors the popup instead: the transcript
-  // keeps the free rows above it, so the box sits lower than ink's and a
-  // dialog ink stretches to fill the viewport stays short.
-
   const toggleShellMode = useCallback(
     () => setShellModeActive((active) => !active),
     [],
@@ -375,6 +370,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // ink's Composer hides the footer while the completion list is open; the
   // list lives inside the composer, so its visibility is lifted here.
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const subscriptionActive =
+    config.getAuthType() === AuthType.QWEN_SUBSCRIPTION;
   const onSuggestionsVisibilityChange = useCallback(
     (visible: boolean) => setShowSuggestions(visible),
     [],
@@ -680,6 +677,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       hooksApproval.isProjectHooksApprovalDialogOpen &&
       hooksApproval.pendingProjectHooks
     );
+  // Match Ink's bounded dialog region. Status-line preview keeps the composer
+  // mounted and reserves its rows; other dialogs replace it. Unlike Ink's
+  // show-more-lines mode, OpenTUI always constrains this region.
   const dialogRegionHeight = getDialogMaxHeight(
     terminalHeight,
     STATIC_EXTRA_HEIGHT +
@@ -1725,7 +1725,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                     host={host}
                     config={config}
                     settings={settings}
-                    commands={commandList}
+                    commands={presentedCommands}
                     onClose={() => setDialog(null)}
                     notify={notify}
                     fillInput={fillComposer}
@@ -1769,6 +1769,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                     />
                   )}
                   <OpenTuiInputPrompt
+                    placeholder={
+                      subscriptionActive
+                        ? '  ' + t('Type your request, or /usage')
+                        : undefined
+                    }
                     onSubmit={onSubmit}
                     onNotice={notify}
                     voice={{

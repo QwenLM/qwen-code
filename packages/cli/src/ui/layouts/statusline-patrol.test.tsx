@@ -5,7 +5,6 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Text, Box } from 'ink';
-import { writeFileSync } from 'node:fs';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
@@ -56,6 +55,7 @@ vi.mock('../components/Footer.js', () => ({
 
 const config = {
   getModel: () => 'model',
+  getAuthType: () => undefined,
   getTargetDir: () => '/project',
   getDebugMode: () => false,
   getAccessibility: () => ({}),
@@ -105,12 +105,7 @@ function renderSurface(surface: React.ReactNode, extra: Partial<UIState> = {}) {
     { config },
   );
 }
-function capture(name: string, frame: string | undefined) {
-  if (process.env['PATROL_EVIDENCE'])
-    writeFileSync(`${process.env['PATROL_EVIDENCE']}/${name}.txt`, frame ?? '');
-  return frame ?? '';
-}
-describe('PR 16122 exact-head review reproduction', () => {
+describe('Status line preview layout', () => {
   beforeEach(() => {
     fixture.band = undefined;
   });
@@ -119,8 +114,8 @@ describe('PR 16122 exact-head review reproduction', () => {
     ['default', <DefaultAppLayout key="default" />],
     ['screen-reader', <ScreenReaderAppLayout key="screen-reader" />],
   ] as const)(
-    'R2-4: %s keeps priority approval choices and omits picker composer',
-    (name, layout) => {
+    '%s keeps priority approval choices and omits picker composer',
+    (_name, layout) => {
       const ui = renderSurface(layout, {
         confirmationRequest: {
           prompt: Array.from(
@@ -130,14 +125,28 @@ describe('PR 16122 exact-head review reproduction', () => {
           onConfirm: vi.fn(),
         },
       });
-      const frame = capture(`priority-${name}`, ui.lastFrame());
+      const frame = ui.lastFrame() ?? '';
       ui.unmount();
       expect(frame).toContain('Yes');
       expect(frame).toContain('No');
       expect(frame).not.toContain('InputPrompt');
     },
   );
-  it('R2-5: eight-row Mod band does not push status preview beyond 24 rows', () => {
+  it.each([
+    ['default', <DefaultAppLayout key="default" />],
+    ['screen-reader', <ScreenReaderAppLayout key="screen-reader" />],
+  ] as const)(
+    '%s preserves searchable status line configuration when unconstrained',
+    (_name, layout) => {
+      const ui = renderSurface(layout, { constrainHeight: false });
+      expect(ui.lastFrame()).toContain('Configure Status Line');
+      expect(ui.lastFrame()).toContain('Type to search');
+      expect(ui.lastFrame()).toContain('InputPrompt');
+      expect(ui.lastFrame()).toContain('STATUS-FOOTER');
+      ui.unmount();
+    },
+  );
+  it('hides the Mod band while keeping the live preview visible', () => {
     fixture.band = {
       owner: 'test-band',
       revision: 1,
@@ -149,8 +158,10 @@ describe('PR 16122 exact-head review reproduction', () => {
       },
     };
     const ui = renderSurface(<DefaultAppLayout />);
-    const frame = capture('band-frame', ui.lastFrame());
+    const frame = ui.lastFrame() ?? '';
     expect(frame).toContain('STATUS-FOOTER');
+    expect(frame).toContain('InputPrompt');
+    expect(frame).not.toContain('Band row');
     expect(frame.split('\n').length).toBeLessThanOrEqual(24);
     ui.unmount();
   });
@@ -158,11 +169,13 @@ describe('PR 16122 exact-head review reproduction', () => {
     ['default', <DefaultAppLayout key="default" />],
     ['screen-reader', <ScreenReaderAppLayout key="screen-reader" />],
   ] as const)(
-    'R2-3 witness: %s baseline picker and footer fit the 24-row frame',
-    (name, layout) => {
+    '%s baseline picker and footer fit the 24-row frame',
+    (_name, layout) => {
       const ui = renderSurface(layout);
-      const frame = capture(`baseline-${name}`, ui.lastFrame());
+      const frame = ui.lastFrame() ?? '';
       expect(frame).toContain('STATUS-FOOTER');
+      expect(frame).toContain('InputPrompt');
+      expect(frame).not.toContain('Band row');
       expect(frame.split('\n').length).toBeLessThanOrEqual(24);
       ui.unmount();
     },

@@ -51,7 +51,7 @@ You can also give `/statusline` specific instructions to have it generate a comm
 
 ## Preset mode
 
-Preset mode provides a set of built-in data items that you can pick and combine — no shell commands, no `jq`, no scripting. Items are rendered as `item1 | item2 | item3` in a single line.
+Preset mode provides a set of built-in data items that you can pick and combine — no shell commands, no `jq`, no scripting. Items are rendered as `item1 · item2 · item3` in a single line.
 
 ### Configuration
 
@@ -78,7 +78,7 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 | Field                  | Type       | Required | Description                                                                                                                                                                                                                                  |
 | ---------------------- | ---------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `type`                 | `"preset"` | Yes      | Must be `"preset"`                                                                                                                                                                                                                           |
-| `items`                | string[]   | Yes      | Ordered list of preset item IDs to display (see table below). Items are joined with `\|` as the separator.                                                                                                                                   |
+| `items`                | string[]   | Yes      | Ordered list of preset item IDs to display (see table below). Items are joined with `·` as the separator.                                                                                                                                    |
 | `useThemeColors`       | boolean    | No       | Use the active `/theme`: success for project/Git, accent for model/reasoning, link for context/tokens, and warning for session metadata. Separators stay neutral. Defaults to `true`.                                                        |
 | `hideContextIndicator` | boolean    | No       | Hide the built-in context usage indicator in the footer right section. When unset, it is hidden automatically if `items` contains `context-used` or `context-remaining`, so context usage is not shown twice. Set `false` to always show it. |
 
@@ -112,7 +112,7 @@ Items marked **Default** are pre-selected when you first open the `/statusline` 
 With the default items, the status line looks like:
 
 ```
-qwen-3-235b high | main | Context 65.7% left | /home/user/project | Context 34.3% used
+qwen-3-235b high · main · Context 65.7% left · /home/user/project · Context 34.3% used
 ```
 
 ### Customizing via the dialog

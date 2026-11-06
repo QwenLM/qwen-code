@@ -18,6 +18,7 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { theme } from '../semantic-colors.js';
 import { StreamingState } from '../types.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { useModBand } from '../hooks/use-mod-band.js';
 import { ModBand } from './ModBand.js';
 import { modBandMaxRows } from '../utils/mod-band-tree.js';
@@ -31,6 +32,8 @@ export const Composer = ({ footerRef }: ComposerProps) => {
   const config = useConfig();
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
   const uiState = useUIState();
+  const subscriptionActive =
+    config.getAuthType() === AuthType.QWEN_SUBSCRIPTION;
   const uiActions = useUIActions();
   const showInput = uiState.isInputActive || uiState.isStatusLineDialogOpen;
   const { vimEnabled } = useVimModeState();
@@ -157,7 +160,12 @@ export const Composer = ({ footerRef }: ComposerProps) => {
           placeholder={
             vimEnabled
               ? '  ' + t("Press 'i' for INSERT mode and 'Esc' for NORMAL mode.")
-              : '  ' + t('Type your message or @path/to/file')
+              : '  ' +
+                t(
+                  subscriptionActive
+                    ? 'Type your request, or /usage'
+                    : 'Type your message or @path/to/file',
+                )
           }
           promptSuggestion={uiState.promptSuggestion}
           onPromptSuggestionDismiss={uiState.abortPromptSuggestion}

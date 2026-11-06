@@ -24,6 +24,7 @@ import {
   SettingScope,
   type Settings,
 } from '../src/config/settings.js';
+import { OpenTuiInputPrompt } from '../src/ui/opentui/input-prompt.js';
 import { OpenTuiStatusLineDialog } from '../src/ui/opentui/dialogs-statusline.js';
 import {
   OpenTuiFooter,
@@ -706,10 +707,17 @@ await scenario(
               availableTerminalHeight={regionHeight}
             />
           </box>
-          <box flexDirection="column" marginTop={1}>
-            <box border height={3}>
-              <text>Inactive prompt</text>
-            </box>
+          <box
+            id="statusline-composer"
+            flexDirection="column"
+            height={STATUS_LINE_COMPOSER_ROWS}
+            marginTop={0}
+          >
+            <OpenTuiInputPrompt
+              onSubmit={() => false}
+              userMessages={[]}
+              focus={false}
+            />
             <box id="statusline-footer">
               <OpenTuiFooter
                 config={configFor()}
@@ -739,11 +747,15 @@ await scenario(
     assert.ok(footer.y >= region.y + region.height);
     assert.ok(footer.y + footer.height <= 24, 'live footer escaped terminal');
     assert.match(frame(setup), /LIVE_FOOTER_80x24/);
-    if (process.env['PATROL_EVIDENCE'])
-      fs.writeFileSync(
-        path.join(process.env['PATROL_EVIDENCE'], 'native-80x24.txt'),
-        frame(setup),
-      );
+    const composer = all.find((node) => node.id === 'statusline-composer');
+    assert.ok(composer);
+    assert.equal(composer.height, 7);
+    assert.ok(composer.y + composer.height <= 24);
+    assert.ok(!frame(setup).includes('Type to search'));
+    assert.ok(!frame(setup).includes('Configure Status Line'));
+    assert.match(frame(setup), /Use theme colors/);
+    await key(setup, 'ARROW_DOWN');
+    assert.match(frame(setup), /LIVE_FOOTER_80x24/);
   },
 );
 

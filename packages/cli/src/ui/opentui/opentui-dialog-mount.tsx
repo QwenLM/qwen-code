@@ -40,6 +40,7 @@ import type { LoadedSettings, SettingScope } from '../../config/settings.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import { reloadPluginsRuntime } from '../../config/extension-runtime-reload.js';
 import type { StatusLinePresetConfig } from '../statusLinePresets.js';
+import { useSubscriptionSignedIn } from '../hooks/use-subscription-command-visibility.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
@@ -176,11 +177,16 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
     rawCommand: string | null,
     text: string,
     level: 'info' | 'error' = 'info',
+    presentation?: HistoryItemInfo['presentation'],
   ) => {
     const item: HistoryItemInfo | HistoryItemError =
       level === 'error'
         ? { type: MessageType.ERROR, text }
-        : { type: MessageType.INFO, text };
+        : {
+            type: MessageType.INFO,
+            text,
+            ...(presentation ? { presentation } : {}),
+          };
     host.addItem(item, Date.now());
     if (!rawCommand) return;
     config.getChatRecordingService?.()?.recordSlashCommand({
@@ -308,6 +314,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
 
   // --- model dialog error (kept open on failed selection) -----------------
   const [modelError, setModelError] = useState<string | null>(null);
+  const subscriptionSignedIn = useSubscriptionSignedIn();
   // ink ModelDialog's three guards: `committed` keeps a successful pick from
   // also announcing the model that survived, and from starting a second switch,
   // while the latch plus in-flight flag keep a second Escape — or a second
@@ -455,10 +462,16 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           initialError={request.initialError}
+          openedViaCommand={request.openedViaCommand}
           onClose={onClose}
-          notify={(text) =>
-            reportResult(request.openedViaCommand ? '/auth' : null, text)
-          }
+          notify={(text, presentation) => {
+            reportResult(
+              request.openedViaCommand ? '/auth' : null,
+              text,
+              'info',
+              presentation,
+            );
+          }}
           availableTerminalHeight={props.availableTerminalHeight}
         />
       );
@@ -739,7 +752,11 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       );
 
     case 'model': {
-      const entries = buildModelEntries(config, request.mode);
+      const entries = buildModelEntries(
+        config,
+        request.mode,
+        subscriptionSignedIn,
+      );
       const initialKey = computeModelDialogInitialKey({
         config,
         settings,

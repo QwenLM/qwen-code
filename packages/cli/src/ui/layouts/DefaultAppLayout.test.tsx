@@ -97,6 +97,7 @@ const baseUIState: Partial<UIState> = {
   terminalHeight: 24,
   staticExtraHeight: 0,
   constrainHeight: true,
+  auth: {} as UIState['auth'],
   streamingState: StreamingState.Responding,
   useTerminalBuffer: false,
   historyManager: {
@@ -152,6 +153,24 @@ describe('DefaultAppLayout', () => {
       renderLayout({ ...baseUIState, dialogsVisible: true }).lastFrame(),
     ).not.toContain('Composer');
   });
+  it.each([8, 10, 12])(
+    'keeps the picker visible at %i rows',
+    (terminalHeight) => {
+      dialogManagerMockState.lineCount = 20;
+      const { lastFrame, unmount } = renderLayout({
+        ...baseUIState,
+        constrainHeight: true,
+        terminalHeight,
+        staticExtraHeight: 3,
+        dialogsVisible: true,
+        isStatusLineDialogOpen: true,
+      });
+      expect(lastFrame()).toContain('DialogManager 1');
+      expect(lastFrame()).not.toContain('DialogManager 2');
+      expect(lastFrame()).toContain('Composer');
+      unmount();
+    },
+  );
   beforeEach(() => {
     dialogManagerMockState.lineCount = 1;
   });
@@ -300,6 +319,27 @@ describe('DefaultAppLayout', () => {
     const output = lastFrame() ?? '';
     expect(frameHeight(output)).toBeGreaterThan(terminalHeight);
     expect(output).toContain('DialogManager 20');
+  });
+
+  it.each<Partial<UIState['auth']>>([
+    { isAuthDialogOpen: true },
+    { authError: 'Authentication failed' },
+  ])('does not clip authentication content for %j', (auth) => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+    dialogManagerMockState.lineCount = 25;
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      dialogsVisible: true,
+      terminalHeight: 24,
+      staticExtraHeight: 3,
+      auth: auth as UIState['auth'],
+    });
+
+    expect(lastFrame()).toContain('DialogManager 1');
+    expect(lastFrame()).toContain('DialogManager 25');
   });
 
   it('does not render sticky todo list while waiting for confirmation', () => {

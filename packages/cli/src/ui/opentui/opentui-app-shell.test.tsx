@@ -53,6 +53,11 @@ import {
   STATIC_EXTRA_HEIGHT,
 } from '../utils/layoutUtils.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import {
+  logoutCommand,
+  upgradeCommand,
+} from '../commands/subscription-commands.js';
 import {
   CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
   hasSlashCommandPathSeparator,
@@ -208,6 +213,13 @@ vi.mock('@opentui/react', () => ({
 }));
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
+const isSubscriptionSignedIn = vi.hoisted(() => vi.fn(() => false));
+vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
+  QwenSubscriptionSession: class {
+    isSignedIn = isSubscriptionSignedIn;
+    onChange = () => () => {};
+  },
+}));
 vi.mock('@opentui/core', () => ({
   SyntaxStyle: { fromStyles: () => ({}) },
   MouseButton: { LEFT: 0 },
@@ -431,6 +443,8 @@ vi.mock('../hooks/useStatusLine.js', () => ({
 
 const extensionManager = { setRequestConsent: vi.fn() };
 const CONFIG = {
+  getResumedSessionData: () => undefined,
+  getAuthType: () => 'openai',
   getExtensionManager: () => extensionManager,
   getSessionId: () => 'test-session',
   getContextFilePaths: () => [],
@@ -438,6 +452,7 @@ const CONFIG = {
   getTargetDir: () => '/repo',
   getModel: () => 'session-model',
   onModelChange: () => () => {},
+  setSubscriptionPlan: () => {},
 } as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 const getSessionStats = () => ({}) as unknown as SessionStatsState;
@@ -488,6 +503,7 @@ async function submit(
 
 describe('OpenTuiApp shell wiring', () => {
   beforeEach(() => {
+    isSubscriptionSignedIn.mockReturnValue(false);
     mocks.state.handleResult = { kind: 'handled' };
     mocks.state.handleResults.length = 0;
     mocks.state.loadCommandsOverride = null;
@@ -526,6 +542,63 @@ describe('OpenTuiApp shell wiring', () => {
 
   afterEach(() => {
     mocks.state.executeUserShell.mockImplementation(() => Promise.resolve());
+  });
+
+  it('keeps subscription commands working without the composer hint row', async () => {
+    isSubscriptionSignedIn.mockReturnValue(true);
+    renderApp({
+      config: { ...CONFIG, getAuthType: () => 'qwen-subscription' } as Config,
+    });
+    await settle();
+    expect(mocks.state.inputProps?.['placeholder']).toBe(
+      '  Type your request, or /usage',
+    );
+    expect(document.body.textContent).not.toContain('Try:');
+    expect(document.body.textContent).not.toContain(
+      '/usage  /status  /upgrade  /logout',
+    );
+    expect(screen.getByText('footer')).toBeTruthy();
+    await submit('/usage');
+    expect(mocks.state.handledTexts).toEqual(['/usage']);
+  });
+
+  it('keeps hints absent after login and a response', async () => {
+    const config = {
+      ...CONFIG,
+      getAuthType: () => 'qwen-subscription',
+    } as Config;
+    const props = {
+      config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+    };
+    const ui = render(
+      <OpenTuiApp {...props} initialDialog={{ dialog: 'auth' }} />,
+    );
+    await settle();
+    act(() => {
+      isSubscriptionSignedIn.mockReturnValue(true);
+      (mocks.state.host as OpenTuiAppHost).addItem(
+        {
+          type: 'info',
+          text: 'new login',
+          presentation: 'subscription-success',
+        },
+        Date.now(),
+      );
+      (mocks.state.dialogProps?.['onClose'] as () => void)();
+    });
+    await settle();
+    expect(document.body.textContent).not.toContain('Try:');
+    ui.rerender(<OpenTuiApp {...props} streaming />);
+    await settle();
+    ui.rerender(<OpenTuiApp {...props} streaming={false} />);
+    await settle();
+    expect(document.body.textContent).not.toContain('Try:');
+    expect(screen.getByText('footer')).toBeTruthy();
+    ui.unmount();
   });
 
   it.each(['control', 'retry', 'image'] as const)(
@@ -1175,14 +1248,17 @@ describe('OpenTuiApp shell wiring', () => {
 
   it('keeps the session model across a scoped override and adopts model-change events', async () => {
     let model = 'session-model';
-    let notify: (model: string) => void = () => {};
+    const listeners = new Set<(model: string) => void>();
     const unsubscribe = vi.fn();
     const config = {
       ...CONFIG,
       getModel: () => model,
-      onModelChange: (listener: typeof notify) => {
-        notify = listener;
-        return unsubscribe;
+      onModelChange: (listener: (model: string) => void) => {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+          unsubscribe();
+        };
       },
     } as unknown as Config;
     const props = {
@@ -1197,10 +1273,46 @@ describe('OpenTuiApp shell wiring', () => {
     model = 'fast-subagent';
     view.rerender(<OpenTuiApp {...props} streaming />);
     expect(mocks.state.statusLineState?.currentModel).toBe('session-model');
-    act(() => notify('selected-model'));
+    act(() => listeners.forEach((listener) => listener('selected-model')));
     expect(mocks.state.statusLineState?.currentModel).toBe('selected-model');
     view.unmount();
-    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(unsubscribe).toHaveBeenCalledTimes(2);
+    expect(listeners.size).toBe(0);
+  });
+
+  it('updates subscription entries in help as the connection changes', async () => {
+    isSubscriptionSignedIn.mockReturnValue(true);
+    let authType = AuthType.QWEN_SUBSCRIPTION;
+    const listeners = new Set<(model: string) => void>();
+    const config = {
+      ...CONFIG,
+      getAuthType: () => authType,
+      onModelChange: (listener: (model: string) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    } as unknown as Config;
+    renderApp({
+      config,
+      commands: [logoutCommand, upgradeCommand],
+      initialDialog: { dialog: 'help' },
+    });
+    await settle();
+    const entries = () =>
+      mocks.state.dialogProps?.['commands'] as readonly SlashCommand[];
+    expect(entries()).toEqual([logoutCommand, upgradeCommand]);
+
+    act(() => {
+      authType = AuthType.USE_OPENAI;
+      listeners.forEach((listener) => listener('same-model'));
+    });
+    expect(entries()).toEqual([]);
+
+    act(() => {
+      authType = AuthType.QWEN_SUBSCRIPTION;
+      listeners.forEach((listener) => listener('same-model'));
+    });
+    expect(entries()).toEqual([logoutCommand, upgradeCommand]);
   });
 
   it('projects active worktree details and confirmation state into the status command input', async () => {

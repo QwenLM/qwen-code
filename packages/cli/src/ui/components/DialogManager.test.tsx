@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config, OutputStyleDefinition } from '@qwen-code/qwen-code-core';
 import { BUILT_IN_OUTPUT_STYLES } from '@qwen-code/qwen-code-core';
 import { renderWithProviders, withProviders } from '../../test-utils/render.js';
@@ -48,7 +48,7 @@ const createUIState = (overrides: Partial<UIState>): UIState =>
 
 const dialogTree = (uiState: UIState) => (
   <UIStateContext.Provider value={uiState}>
-    <UIActionsContext.Provider value={{} as UIActions}>
+    <UIActionsContext.Provider value={{ auth: {} } as UIActions}>
       <DialogManager addItem={vi.fn()} terminalWidth={100} />
     </UIActionsContext.Provider>
   </UIStateContext.Provider>
@@ -61,6 +61,7 @@ const renderDialogManager = (
   renderWithProviders(dialogTree(uiState), { config: config as Config });
 
 describe('DialogManager', () => {
+  beforeEach(() => statusLineDialogProps.mockClear());
   it.each([true, false])(
     'reserves composer and footer rows for the status line picker (constrained: %s)',
     (constrainHeight) => {
@@ -79,7 +80,7 @@ describe('DialogManager', () => {
         expect.objectContaining({
           availableTerminalHeight:
             getDialogMaxHeight(terminalHeight, staticExtraHeight) -
-            STATUS_LINE_COMPOSER_ROWS,
+            (constrainHeight ? STATUS_LINE_COMPOSER_ROWS : 0),
         }),
       );
     },
@@ -89,6 +90,7 @@ describe('DialogManager', () => {
     renderDialogManager(
       createUIState({
         terminalHeight: 5,
+        constrainHeight: true,
         isStatusLineDialogOpen: true,
       }),
       {},
@@ -98,6 +100,31 @@ describe('DialogManager', () => {
     );
   });
 
+  it.each([14, 24, 40])(
+    'keeps the full provider menu at %i rows',
+    (terminalHeight) => {
+      const uiState = createUIState({
+        terminalHeight,
+        staticExtraHeight: 3,
+        auth: { isAuthDialogOpen: true } as UIState['auth'],
+      });
+      const { lastFrame, unmount } = renderDialogManager(uiState, {
+        getAuthType: () => undefined,
+        getContentGeneratorConfig: () => ({ model: 'test-model' }),
+      });
+      try {
+        const fullFrame = lastFrame();
+        expect(fullFrame).toContain('Connect a Provider');
+        expect(fullFrame).toContain('Custom Provider');
+        expect(fullFrame).toContain('Terms of Services and Privacy Notice:');
+        expect(fullFrame).toMatch(
+          /Token Plan or Standard API Key[^\n]*\n│\s*│\n/,
+        );
+      } finally {
+        unmount();
+      }
+    },
+  );
   // The picker's list comes from the hook, which re-reads the style
   // directories on every open; wiring it to the built-ins instead would hide
   // every custom style and mount the rows during the disk read.

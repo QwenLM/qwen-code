@@ -342,7 +342,8 @@ export const DialogManager = ({
         onClose={uiActions.closeStatusLineDialog}
         availableTerminalHeight={Math.max(
           1,
-          listDialogHeight - STATUS_LINE_COMPOSER_ROWS,
+          listDialogHeight -
+            (uiState.constrainHeight ? STATUS_LINE_COMPOSER_ROWS : 0),
         )}
       />
     );
@@ -443,7 +444,7 @@ export const DialogManager = ({
   if (uiState.auth.isAuthDialogOpen || uiState.auth.authError) {
     return (
       <Box flexDirection="column">
-        <AuthDialog availableTerminalHeight={listDialogHeight} />
+        <AuthDialog />
       </Box>
     );
   }

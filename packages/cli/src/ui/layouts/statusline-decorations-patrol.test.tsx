@@ -7,7 +7,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { StreamingState } from '../types.js';
 import { Text, Box } from 'ink';
-import { writeFileSync } from 'node:fs';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { renderWithProviders, withProviders } from '../../test-utils/render.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
@@ -67,6 +66,7 @@ vi.mock('../components/Footer.js', () => ({
 
 const config = {
   getModel: () => 'model',
+  getAuthType: () => undefined,
   getTargetDir: () => '/project',
   getDebugMode: () => false,
   getAccessibility: () => ({}),
@@ -118,11 +118,6 @@ function surfaceTree(surface: React.ReactNode, extra: Partial<UIState> = {}) {
 function renderSurface(surface: React.ReactNode, extra: Partial<UIState> = {}) {
   return renderWithProviders(surfaceTree(surface, extra), { config });
 }
-function capture(name: string, frame: string | undefined) {
-  if (process.env['PATROL_EVIDENCE'])
-    writeFileSync(`${process.env['PATROL_EVIDENCE']}/${name}.txt`, frame ?? '');
-  return frame ?? '';
-}
 
 describe('Status-line live preview decoration budgets', () => {
   beforeEach(() => {
@@ -130,18 +125,23 @@ describe('Status-line live preview decoration budgets', () => {
     fixture.streamingState = StreamingState.Idle;
     fixture.toggleShortcuts = undefined;
   });
-  it.each([2, 3, 4])('fits %s queued prompts with the live picker', (count) => {
-    const ui = renderSurface(<DefaultAppLayout />, {
-      messageQueue: Array.from(
-        { length: count },
-        (_, i) => `Queued request ${i + 1}`,
-      ),
-    });
-    const frame = capture(`queued-${count}`, ui.lastFrame());
-    ui.unmount();
-    expect(frame).toContain('STATUS-FOOTER');
-    expect(frame.split('\n').length).toBeLessThanOrEqual(24);
-  });
+  it.each([2, 3, 4])(
+    'hides %s queued prompts while displaying the live preview',
+    (count) => {
+      const ui = renderSurface(<DefaultAppLayout />, {
+        messageQueue: Array.from(
+          { length: count },
+          (_, i) => `Queued request ${i + 1}`,
+        ),
+      });
+      const frame = ui.lastFrame() ?? '';
+      expect(frame).not.toContain('Queued request');
+      expect(frame).toContain('InputPrompt');
+      ui.unmount();
+      expect(frame).toContain('STATUS-FOOTER');
+      expect(frame.split('\n').length).toBeLessThanOrEqual(24);
+    },
+  );
   it('fits one normal loading row while picker is open', () => {
     fixture.streamingState = StreamingState.Responding;
     const ui = renderSurface(<DefaultAppLayout />, {
@@ -149,7 +149,7 @@ describe('Status-line live preview decoration budgets', () => {
       currentLoadingPhrase: 'Working',
       elapsedTime: 2,
     });
-    const frame = capture('loading', ui.lastFrame());
+    const frame = ui.lastFrame() ?? '';
     ui.unmount();
     expect(frame).toContain('STATUS-FOOTER');
     expect(frame.split('\n').length).toBeLessThanOrEqual(24);
@@ -164,9 +164,8 @@ describe('Status-line live preview decoration budgets', () => {
     await act(async () => {
       fixture.toggleShortcuts?.();
     });
-    capture('shortcuts-before-picker', ui.lastFrame());
     ui.rerender(withProviders(surfaceTree(<DefaultAppLayout />), { config }));
-    const frame = capture('shortcuts-retained', ui.lastFrame());
+    const frame = ui.lastFrame() ?? '';
     ui.unmount();
     expect.soft(frame).toContain('STATUS-FOOTER');
     expect(frame.split('\n').length).toBeLessThanOrEqual(24);
