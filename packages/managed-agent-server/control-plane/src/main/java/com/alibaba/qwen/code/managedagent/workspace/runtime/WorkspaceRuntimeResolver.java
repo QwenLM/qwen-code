@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
@@ -20,26 +20,27 @@ import java.util.Map;
 import java.util.Objects;
 
 public final class WorkspaceRuntimeResolver {
-    private final AgentStateStore sessions;
+    private final SessionQueryStore sessions;
     private final WorkspaceExecutionStore authority;
     private final SshWorkspaceService ssh;
     private final com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry externalRegistrations;
     private final com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog residents;
     private final Map<Storage, Mount> mounts = new LinkedHashMap<>();
     private final String boundSessionIsolationClass;
+    private final boolean local;
     private final ManagedAgentSettings.ManagedExtensions managedExtensions;
 
-    public WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
+    public WorkspaceRuntimeResolver(SessionQueryStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentSettings properties) {
         this(sessions, authority, properties, null);
     }
 
-    public WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
+    public WorkspaceRuntimeResolver(SessionQueryStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentSettings properties, SshWorkspaceService ssh) {
         this(sessions, authority, properties, ssh, null);
     }
 
-    public WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
+    public WorkspaceRuntimeResolver(SessionQueryStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentSettings properties, SshWorkspaceService ssh,
             com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry externalRegistrations) {
         this.ssh = ssh;
@@ -51,6 +52,7 @@ public final class WorkspaceRuntimeResolver {
         this.sessions = sessions;
         this.authority = authority;
         var broker = properties.getRuntimeBroker();
+        this.local = com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner());
         this.boundSessionIsolationClass = broker.getBoundSessionIsolationClass();
         this.residents = new com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog(broker.getResidentWorkspaces());
         if (WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
@@ -228,6 +230,9 @@ public final class WorkspaceRuntimeResolver {
      * stay intact. A shared binding has no owning Session to resolve by.
      */
     public void requireMountCurrent(RuntimeScope scope, String storageId) {
+        if (!local) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
         Mount mount = mounts.get(new Storage(scope.getTenantId(), storageId));
         if (mount == null) {
             Path root = authority.createdStorageRoot(scope.getTenantId(), storageId);
@@ -265,7 +270,7 @@ public final class WorkspaceRuntimeResolver {
     }
 
     private Mount mount(ContextBinding binding) {
-        if (authority.isExternal(binding)) {
+        if (!local) {
             throw WorkspaceExecutionStore.unavailable();
         }
         Mount configured = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));

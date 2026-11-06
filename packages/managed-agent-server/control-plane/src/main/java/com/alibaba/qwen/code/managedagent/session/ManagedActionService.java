@@ -29,12 +29,20 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 @Service
 public class ManagedActionService {
     private static final Logger LOG =
             LoggerFactory.getLogger(ManagedActionService.class);
     private static final int INPUT_PREVIEW_BYTES = 8192;
+    private static final int MAX_CURSOR_LENGTH = 512;
+    private static final Pattern CURSOR_TIMESTAMP = Pattern.compile("0|[1-9][0-9]{0,18}");
+    private static final Pattern CURSOR_SESSION = Pattern.compile("[0-9a-f-]{36}");
+    private static final Pattern CURSOR_ACTION = Pattern.compile("tool_approval_[0-9a-f]{32}");
+    private static final Pattern ACTION_CURSOR =
+            Pattern.compile("(0|[1-9][0-9]{0,18}):tool_approval_[0-9a-f]{32}");
+    private static final Pattern UPPERCASE_LETTER = Pattern.compile("([A-Z])");
     private static final Set<String> PREVIEW_TOOLS =
             Set.of("web_fetch", "read_file", "write_file", "edit", "run_shell_command",
                     "todo_write",
@@ -138,7 +146,7 @@ public class ManagedActionService {
         String beforeId = null;
         if (cursor != null && !cursor.isEmpty()) {
             try {
-                if (cursor.length() > 512) {
+                if (cursor.length() > MAX_CURSOR_LENGTH) {
                     throw new IllegalArgumentException();
                 }
                 String decoded = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
@@ -147,8 +155,8 @@ public class ManagedActionService {
                     throw new IllegalArgumentException();
                 }
                 String[] parts = decoded.substring(scope.length()).split(":", -1);
-                if (parts.length != 3 || !parts[0].matches("0|[1-9][0-9]{0,18}")
-                        || !parts[1].matches("[0-9a-f-]{36}") || !parts[2].matches("tool_approval_[0-9a-f]{32}")) {
+                if (parts.length != 3 || !CURSOR_TIMESTAMP.matcher(parts[0]).matches()
+                        || !CURSOR_SESSION.matcher(parts[1]).matches() || !CURSOR_ACTION.matcher(parts[2]).matches()) {
                     throw new IllegalArgumentException();
                 }
                 before = Long.parseLong(parts[0]);
@@ -320,12 +328,12 @@ public class ManagedActionService {
         String beforeId = null;
         if (cursor != null && !cursor.isEmpty()) {
             try {
-                if (cursor.length() > 512) {
+                if (cursor.length() > MAX_CURSOR_LENGTH) {
                     throw new IllegalArgumentException();
                 }
                 String decoded =
                         new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
-                if (!decoded.matches("(0|[1-9][0-9]{0,18}):tool_approval_[0-9a-f]{32}")) {
+                if (!ACTION_CURSOR.matcher(decoded).matches()) {
                     throw new IllegalArgumentException();
                 }
                 String[] parts = decoded.split(":", 2);
@@ -369,7 +377,7 @@ public class ManagedActionService {
                         "expiresAt",
                         "functionCallId",
                         "toolName")) {
-            String name = web ? field : field.replaceAll("([A-Z])", "_$1").toLowerCase(Locale.ROOT);
+            String name = web ? field : UPPERCASE_LETTER.matcher(field).replaceAll("_$1").toLowerCase(Locale.ROOT);
             result.set(name, options.get(field));
         }
         actions.publicTurnId(tenant, session, options.path("turnId").asText())

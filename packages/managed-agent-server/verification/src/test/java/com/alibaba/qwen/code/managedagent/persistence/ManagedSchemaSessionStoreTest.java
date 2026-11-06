@@ -73,6 +73,31 @@ public class ManagedSchemaSessionStoreTest {
     }
 
     @Test
+    void executionFactsReadNullableUnsignedWorkspaceGenerations() {
+        assertThat(store.sessionsWithExecutionRegistryFacts(tenant, List.of(session))).isEmpty();
+        byte[] actor = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, "actor");
+        jdbc.update(
+                "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
+                        + " display_name, config_ref, policy_ref, state) VALUES"
+                        + " (?, 'workspace', 7, 'storage', 'Workspace', 'config', 'policy', 'ACTIVE')",
+                tenant);
+        jdbc.update(
+                "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES"
+                        + " (?, 'workspace', ?, 'OPERATOR')",
+                tenant, actor);
+        jdbc.update(
+                "UPDATE ma_session SET workspace_id = 'workspace', workspace_generation = 7,"
+                        + " workspace_storage_id = 'storage', cwd_relative = '',"
+                        + " context_config_ref = 'context', context_revision = 1,"
+                        + " workspace_config_ref = 'config', workspace_policy_ref = 'policy',"
+                        + " creator_actor_key = ? WHERE tenant_id = ? AND session_id = ?",
+                actor, tenant, session);
+        assertThat(store.sessionsWithExecutionRegistryFacts(tenant, List.of(session))).containsExactly(session);
+        jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
+        assertThat(store.sessionsWithExecutionRegistryFacts(tenant, List.of(session))).isEmpty();
+    }
+
+    @Test
     void publicAndPrivateSessionScopesRemainDistinctAndByteExact() {
         assertThat(store.findSession(tenant, session)).isPresent();
         assertThat(store.findSession(tenant.toUpperCase(), session)).isEmpty();
@@ -243,7 +268,7 @@ public class ManagedSchemaSessionStoreTest {
     @Test
     void projectionCleanupPreservesJournalReferencesAndRecoveryProtection() {
         alignProjectionClock();
-        var privateBody = tx.execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc))
+        var privateBody = tx.execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc)
                 .publishAgentInstructions(tenant, "workspace", session, "private instructions"));
         event("big", "a".repeat(70_000));
         materialize();
@@ -259,11 +284,11 @@ public class ManagedSchemaSessionStoreTest {
         tx.executeWithoutResult(status -> {
             ManagedProjectionResourceCollector.release(jdbc, scope, "JOURNAL", scope);
             jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'JOURNAL' AND owner_key = ?", scope);
-            jdbc.update("UPDATE ma_session SET recovery_protected = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
+            jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
         });
         projectionCollector().runOnce();
         assertThat(resourceState(original)).isEqualTo("REFERENCED");
-        jdbc.update("UPDATE ma_session SET recovery_protected = FALSE WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        jdbc.update("UPDATE ma_session SET is_recovery_protected = FALSE WHERE tenant_id = ? AND session_id = ?", tenant, session);
         makeProjectionCandidatesDue();
         projectionCollector().runOnce();
         assertThat(resourceState(original)).isEqualTo("COLLECTED");
@@ -290,6 +315,77 @@ public class ManagedSchemaSessionStoreTest {
 
     private void makeProjectionCandidatesDue() {
         jdbc.update("UPDATE ma_resource SET retention_until = 946684800000 WHERE tenant_id = ? AND retention_until IS NOT NULL", tenant);
+    }
+
+    // A snapshot can predate the rename that won the tenant-scoped receipt key.
+    @Test
+    void aRacingSessionReusingARenameKeyAnswersConflictFromTheReceiptKey() {
+        String other =
+                tx.execute(
+                                status ->
+                                        store.insertSessionCommand(
+                                                tenant,
+                                                "actor",
+                                                "CREATE_SESSION",
+                                                "create-other",
+                                                "create-other-digest",
+                                                "qwen-code",
+                                                null,
+                                                "title",
+                                                List.of(),
+                                                null))
+                        .sessionId();
+        var winner = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
+        winner.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        assertThatThrownBy(
+                        () ->
+                                tx.executeWithoutResult(
+                                        status -> {
+                                            // Pin this transaction's snapshot before the winner commits.
+                                            jdbc.queryForObject(
+                                                            "SELECT COUNT(*) FROM ma_request_receipt"
+                                                                    + " WHERE namespace = 'SESSION_COMMAND'",
+                                                            Long.class);
+                                            winner.execute(ignored -> store.beginSessionRename(
+                                                    tenant, "shared", "digest", other, "theirs"));
+                                            store.beginSessionRename(tenant, "shared", "digest", session, "mine");
+                                        }))
+                .isInstanceOfSatisfying(
+                        com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
+        assertThat(store.requireSession(tenant, session).title()).isEqualTo("title");
+        assertThat(jdbc.queryForObject(
+                        "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ?",
+                        Long.class,
+                        tenant))
+                .isEqualTo(1);
+    }
+
+    @Test
+    void concurrentRenamesOfDifferentSessionsDoNotDeadlock() throws Exception {
+        String other = tx.execute(status -> store.insertSessionCommand(
+                tenant, "actor", "CREATE_SESSION", "create-other", "other-digest",
+                "qwen-code", null, "other", List.of(), null)).sessionId();
+        try (var threads = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var start = new java.util.concurrent.CyclicBarrier(2);
+            var first = threads.submit(() -> {
+                start.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                return tx.execute(status -> store.beginSessionRename(
+                        tenant, "first", "first-digest", session, "first"));
+            });
+            var second = threads.submit(() -> {
+                start.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                return tx.execute(status -> store.beginSessionRename(
+                        tenant, "second", "second-digest", other, "second"));
+            });
+            assertThat(first.get(15, java.util.concurrent.TimeUnit.SECONDS).renameRevision())
+                    .isEqualTo(1);
+            assertThat(second.get(15, java.util.concurrent.TimeUnit.SECONDS).renameRevision())
+                    .isEqualTo(1);
+        }
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND state = 'PENDING' AND tenant_id = ?",
+                Long.class, tenant)).isEqualTo(2);
     }
 
     @Test
@@ -459,7 +555,7 @@ public class ManagedSchemaSessionStoreTest {
 
     @Test
     void writerHeartbeatCompletesWhileMessagePageReadIsPaused() throws Exception {
-        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "a".repeat(32);
         var grant = tx.execute(status -> privateStore.acquireWriter(tenant, session, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60_000L)));
@@ -492,7 +588,7 @@ public class ManagedSchemaSessionStoreTest {
                 tenant,
                 session,
                 session);
-        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         assertThatThrownBy(() -> privateStore.restore(tenant, "workspace", session, token))
                 .isInstanceOfSatisfying(
                         ManagedAgentException.class,

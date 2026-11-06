@@ -3,8 +3,8 @@ package com.alibaba.qwen.code.runtimebroker;
 import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalHttpRuntimeClient;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalHttpRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalWorkspaceProvisioner;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.sun.net.httpserver.HttpServer;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -283,6 +283,40 @@ class RuntimeExternalWorkspaceDrainTest {
             assertEquals(List.of("cleanup"), fixture.events);
             assertEquals(receipt, fixture.binding().getDrainReceipt());
             assertEquals(RuntimeBindingRecord.State.RELEASED, fixture.binding().getState());
+        }
+    }
+
+    @Test
+    void restartLostLiveWorkerWithoutReceiptStopsForReceiptAndReleases() {
+        try (var fixture = new Fixture()) {
+            fixture.acquireAndExecute();
+            fixture.service.close();
+            // The restart clears the broker's placements and fences the
+            // still-READY binding LOST (invalidateBinding) with no committed
+            // stop receipt; the worker is alive and its Session row is active.
+            var ready = fixture.bindings.findById("binding");
+            assertEquals(RuntimeBindingRecord.State.READY, ready.getState());
+            assertNull(ready.getDrainReceipt());
+            // invalidateBinding claims the operation before fencing READY to LOST.
+            var claim = fixture.bindings.claimOperation("binding", "broker", Duration.ofMinutes(1));
+            assertNotNull(claim);
+            var fenced = fixture.bindings.compareAndSet(claim, claim.withState(
+                    RuntimeBindingRecord.State.LOST, claim.getLease(), fixture.clock.instant()));
+            assertNotNull(fenced);
+            fixture.bindings.releaseOperation(fenced.getBindingId(), "broker", fenced.getOperationGeneration());
+            assertTrue(fixture.sessions.countActiveByBinding("binding", fenced.getGeneration()) > 0);
+            fixture.service = fixture.newService();
+            fixture.service.requestHarnessDrain("tenant", "harness");
+            fixture.events.clear();
+            // R2-1: the close must stop the live worker for a receipt instead of
+            // refusing before the drain claim and fencing the storage holder.
+            fixture.drain();
+            assertTrue(fixture.events.contains("stop"), "The live worker is stopped for the receipt");
+            assertTrue(fixture.events.contains("cleanup"), "The retired holder is released after the receipt");
+            assertNotNull(fixture.binding().getDrainReceipt());
+            assertEquals(RuntimeBindingRecord.State.RELEASED, fixture.binding().getState());
+            assertEquals(RuntimeSessionRecord.State.RELEASED,
+                    fixture.sessions.findById(fixture.scope, "runtime").getState());
         }
     }
 

@@ -4,11 +4,23 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
 import java.util.concurrent.CompletionStage;
 
+/** Control-plane lifecycle bridge to the configured Runtime backend. */
 public interface RuntimeWarmer {
+    /** Whether this host provides Runtime warm-up; this is not a readiness probe. */
     public boolean isEnabled();
 
+    /**
+     * Prepares the binding for the original Harness Session. Completion means
+     * warm-up finished; callers must still acquire their execution binding.
+     * A retired Session fails instead of creating a replacement Session.
+     */
     public CompletionStage<Void> warm(String sessionId);
 
+    /**
+     * Retires Session admission during close/delete. Completion alone is not
+     * proof that a worker stopped or Workspace storage may be released; those
+     * operations use the explicit Workspace lifecycle methods below.
+     */
     public CompletionStage<Void> drain(String sessionId);
 
     public default boolean supportsWorkspaceClose() {

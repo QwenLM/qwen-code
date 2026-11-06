@@ -1,6 +1,6 @@
 # Qwen Managed Agent Server
 
-The application lives in `packages/managed-agent-server`, alongside the Java SDK. It builds as one Maven reactor with six production modules and a verification module. The executable remains one Spring Boot service. Install the Java SDK before building the reactor; see [Runtime Broker internals](docs/runtime-broker.md).
+The application lives in `packages/managed-agent-server`, alongside the Java SDK. It builds as one Maven reactor with thirteen production modules and a verification module. The executable remains one Spring Boot service. Install the Java SDK before building the reactor; see [Runtime Broker internals](docs/runtime-broker.md).
 
 Every configuration property, with its environment variable and default, is listed in the [configuration reference](../../docs/users/managed-agent-configuration-reference.md). It is generated from this module's configuration metadata and the descriptions in `configuration-descriptions.json`; a new property needs a description there, and a settings class declared outside `ManagedAgentProperties` needs `@NestedConfigurationProperty` on its field, or the metadata leaves it out.
 
@@ -95,17 +95,24 @@ remain closed to execution; startup does not re-register or repair them.
 
 ## Maven modules and Java packages
 
-| Module           | Responsibility                                                                          | Internal dependencies      |
-| ---------------- | --------------------------------------------------------------------------------------- | -------------------------- |
-| `contracts`      | Service and repository interfaces, shared values, settings views and protocol rules     | None                       |
-| `control-plane`  | Session, Workspace, catalog, lifecycle, Channel, automation and extension orchestration | `contracts`                |
-| `runtime-broker` | Runtime execution, binding, leases, cancellation and recovery coordination              | `contracts`                |
-| `persistence`    | JDBC/memory repositories, schema and atomic database operations                         | `contracts`                |
-| `adapters`       | Harness SDK, Runtime providers, HTTP clients, OSS, MQ, Git and filesystem operations    | `contracts`                |
-| `server`         | HTTP endpoints, Spring assembly, startup and maintenance entry points                   | All five modules           |
-| `verification`   | Unit, integration, architecture and packaging tests; not published                      | All six production modules |
+| Module               | Responsibility                                                                          | Internal dependencies                          |
+| -------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `contracts`          | Service and repository interfaces, shared values, settings views and protocol rules     | None                                           |
+| `control-plane`      | Session, Workspace, catalog, lifecycle, Channel, automation and extension orchestration | `contracts`                                    |
+| `runtime-broker`     | Runtime execution, routing, binding, leases, cancellation and recovery coordination     | `contracts`                                    |
+| `persistence`        | JDBC/memory repositories, schema and atomic database operations                         | `contracts`                                    |
+| `runtime-http`       | Shared Runtime HTTP transport                                                           | `contracts`                                    |
+| `runtime-host`       | Native identity, bounded host processes and private state files                         | `contracts`                                    |
+| `runtime-local`      | Local process provider and factory                                                      | `contracts`, `runtime-http`, `runtime-host`    |
+| `runtime-external`   | External scratch/workspace providers and factory                                        | `contracts`, `runtime-http`                    |
+| `runtime-kubernetes` | Kubernetes resident/CSI provider and maintenance capability                             | `contracts`, `runtime-http`                    |
+| `runtime-ssh`        | SSH provider, connection manager and factory                                            | `contracts`, `runtime-http`, `runtime-host`    |
+| `runtime-static`     | Pre-attested static Runtime provider and factory                                        | `contracts`                                    |
+| `adapters`           | Harness SDK, OSS, MQ, Git and filesystem operations                                     | `contracts`, `runtime-http`, `runtime-host`    |
+| `server`             | HTTP endpoints, Spring assembly, startup and maintenance entry points                   | Shared modules; optional runtime provider JARs |
+| `verification`       | Unit, integration, architecture and packaging tests; not published                      | All thirteen production modules                |
 
-The parent coordinate is `com.alibaba:qwen-managed-agent-parent`. All modules share its version; the server keeps `com.alibaba:qwen-managed-agent-server`. Each production Java package belongs to one module. Keep implementation modules independent of one another: their collaboration uses contracts injected by server configuration. SQL helpers sharing a connection remain in `managedagent.persistence` or `runtimebroker.persistence`. The Broker service lives in `runtimebroker.service`; physical clients and providers live in the adapter module. Maintenance applications retain their separate component scan.
+The parent coordinate is `com.alibaba:qwen-managed-agent-parent`. All modules share its version; the server keeps `com.alibaba:qwen-managed-agent-server`. Each production Java package belongs to one module. Orchestration and persistence collaborate through contracts; provider implementations share the narrow HTTP and host-I/O modules. The server compiles without any backend implementation classes. Backend modules do not depend on each other; routing stays in `runtime-broker`. SQL helpers sharing a connection remain in `managedagent.persistence` or `runtimebroker.persistence`. The Broker service lives in `runtimebroker.service`; physical clients and providers live in their owning adapter or provider modules. Maintenance applications retain their separate component scan.
 
 Only `server` creates executable JARs. Its ordinary library JAR and the existing `exec` and maintenance classifiers are under `server/target/`. Dependencies are ordinary JARs nested under `BOOT-INF/lib` in executable artifacts. Install the reactor before using the server POM directly or embedding the library in another Maven project:
 
@@ -114,7 +121,15 @@ mvn -pl server -am -DskipTests install
 mvn -f server/pom.xml spring-boot:run
 ```
 
-Embedding imports `ManagedAgentConfiguration`; internal callbacks additionally import `ManagedAgentInternalConfiguration`. The standalone application also enables the public web configuration. Add the ordinary server artifact as the dependency; Maven resolves the other five modules transitively. The verification module is never installed or deployed. The standalone application YAML is excluded from the ordinary library JAR.
+Embedding imports `ManagedAgentConfiguration`; internal callbacks additionally import `ManagedAgentInternalConfiguration`. The standalone application also enables the public web configuration. Add the ordinary server artifact as the dependency; Maven resolves the shared modules transitively. All five backend providers are optional runtime dependencies: an embedding host must explicitly add its chosen `com.alibaba:qwen-managed-agent-runtime-{local,ssh,kubernetes,external,static}` coordinates at the same version. Maven still resolves all five when building the standalone server, but does not propagate them to library consumers. The verification module is never installed or deployed. The standalone application YAML is excluded from the ordinary library JAR.
+
+Runtime factories are discovered through `META-INF/services/com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory`. The default executable and operator artifacts include all five backend JARs. A library host can omit all backends when its Broker is disabled, or select a single provider. `runtime-broker.provisioner` supports `local-process`, `ssh-process`, `kubernetes-workspace`, `external-scratch`, `external-workspace` and `static`; existing built-in settings and persisted identities are unchanged. Only the selected factory validates its configuration and creates resources. Missing providers and duplicate kinds fail explicitly.
+
+Backend selection for embedding is ordinary Maven dependency selection. For example, a host using Kubernetes adds `qwen-managed-agent-server` and `qwen-managed-agent-runtime-kubernetes` at the same version; no exclusions for Local, SSH, External or Static are needed. A host using Local+SSH adds both corresponding backend artifacts. Packaged availability and enabled configuration are separate: only the configured backend is initialized, with Local+SSH as the supported routing combination. The default standalone and operator artifacts continue to contain every backend. Selective standalone builds and archives are outside this change.
+
+To add a compatible provider, compile its factory against `qwen-managed-agent-contracts`, implement `RuntimeProviderFactory`, register its fully qualified class name in that service file, and add the JAR to the host application's runtime classpath. Select its exact kind with `qwen.managed-agent.runtime-broker.provisioner`; bind additional string settings under `qwen.managed-agent.runtime-broker.provider-options`. For example, a provider that reads `getProviderOptions().get("endpoint")` can receive `qwen.managed-agent.runtime-broker.provider-options.endpoint=https://provider.example`. Factories must have inert constructors; validation is configuration-only, preflight may perform read-only diagnostics, and creation transfers the provider's close ownership to the Broker. A remote provider leaves `usesLocalWorkspace()` false. Plugins execute as trusted application code and must honor the existing identity, fencing and Runtime HTTP contracts. This supports classpath selection at startup; existing warmup behavior remains, with no live JAR reload or automatic download.
+
+The provider boundaries and acceptance criteria are in the [backend module design](../../docs/design/2026-10-31-managed-runtime-backend-modules.md).
 
 Server configuration accessors use Lombok through the server POM's annotation processor; enable annotation processing when compiling through an IDE. Keep accessors with normalization, copying or fallback logic explicit. Lombok is excluded from executable and maintenance JARs and is not a runtime dependency of embedding applications.
 
@@ -317,7 +332,20 @@ reclaim anything. If the database check fails, capacity remains skipped.
 MySQL is the supported database family; full integration CI uses MySQL 8.4.
 MariaDB no longer has a CI lane or an ongoing compatibility guarantee.
 Existing dialect handling remains in place; this change does not reject
-connections that previously worked or introduce a catalog migration.
+MariaDB solely by product name or introduce a catalog migration.
+
+MySQL and MariaDB require `STRICT_TRANS_TABLES` or `STRICT_ALL_TABLES` in each
+application connection's session `sql_mode`. Schema admission and validation
+reject non-strict connections before schema writes. The embedded default Managed
+pool adds `STRICT_TRANS_TABLES` when creating every physical connection,
+preserving the other session modes. A non-strict global default is accepted.
+Strict mode prevents ordinary writes to unsigned counters from silently clamping
+negative values to zero; `IGNORE` writes can downgrade these errors to warnings.
+Standalone, maintenance and custom DataSource callers must configure every
+application connection to retain strict mode throughout operation; a startup
+check does not police later administrative or connection-mode changes. The
+application does not change the server's global SQL mode. MariaDB CHECK
+enforcement still requires both global and session settings to be enabled.
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
 process (the credentialed launch is spelled out in the Full WebShell
@@ -933,7 +961,52 @@ Schema V6 preserves the original policy and adds a current override plus per-Tur
 
 Workspace-bound WebShell Session summaries can include `modelContext` with the actual observed `modelId`, optional latest-request `inputTokens` and resolved `contextWindowSize`, and `observedAt`. The Hosted CLI records capacity beside successful provider usage; the Java Session Store projects only committed main-model attempts into one private latest-resource pointer. Lists read these observations in one batch without scanning journal history. Older or invalid usage advances the pointer but leaves missing values unknown; cumulative billing totals and inferred capacities never substitute for them. The shared usage popover does not offer manual compression. New tasks continue to select published AgentDefinition presets. This observation projection uses existing SQL tables and resource-reference cleanup without changing the recovery format.
 
-To allow an existing Workspace Session to change its next Turn's model, publish an explicit `qwen.managed-agent.model-catalog` list of `{modelId, label}` entries in the server configuration. The default is empty. IDs must identify configured, cached-credential models in the Hosted CLI; the browser supplies neither provider settings nor credentials. The Harness must advertise `model-selection/1`. `POST /api/agent/web-shell/v1/session-models/query` returns the catalog and current selection; `POST /api/agent/web-shell/v1/session-models/change` takes `sessionId`, `modelId`, `expectedRevision` and `idempotencyKey` and synchronously returns the saved selection. The caller needs Workspace OPERATOR or OWNER and the Session must be idle, without pending approval, context/lifecycle work or recovery. Same-key retries return their original result before mutable catalog and role gates, provided the caller still has read access. They never reapply a change.
+To allow an existing Workspace Session to change its next Turn's model, publish an explicit `qwen.managed-agent.model-catalog` list of `{modelId, label}` entries in the server configuration. The default is empty. IDs must identify configured, cached-credential models in the Hosted CLI; this selection path supplies only an ID. The Harness must advertise `model-selection/1`. `POST /api/agent/web-shell/v1/session-models/query` returns the catalog and current selection; `POST /api/agent/web-shell/v1/session-models/change` takes `sessionId`, `modelId`, `expectedRevision` and `idempotencyKey` and synchronously returns the saved selection. The caller needs Workspace OPERATOR or OWNER and the Session must be idle, without pending approval, context/lifecycle work or recovery. Same-key retries return their original result before mutable catalog and role gates, provided the caller still has read access. They never reapply a change.
+
+Creation can instead supply a complete connection in public `model_config` or
+WebShell `modelConfig`:
+
+```json
+{
+  "protocol": "openai",
+  "model": "qwen3-coder-plus",
+  "base_url": "https://models.example/v1",
+  "api_key": "application-supplied-key",
+  "generation_config": { "temperature": 0.7, "max_tokens": 4096 }
+}
+```
+
+Configure `qwen.managed-agent.model-config-base-urls` as a YAML list containing
+the exact allowed base URLs; its empty default disables this path. The Session
+Store and `session-model-config/1` Harness capability are required. The standard
+server also needs the Runtime Broker's `SecretProtector` and credential key ring.
+Protocols are `openai`, `openai-responses`, `anthropic` and `gemini`; accepted
+generation fields are `temperature`, `top_p`, `top_k`, `max_tokens`,
+`presence_penalty`, `frequency_penalty` and `seed`. The Anthropic adapter forwards
+only `temperature`, `top_p`, `top_k` and `max_tokens`; it ignores `seed` and both
+penalty fields. Other provider support varies, and providers may reject parameters
+they do not support. URL userinfo, query strings, fragments, OAuth and arbitrary
+headers are not supported. Credentials are literal values, without environment
+substitution.
+
+The complete configuration is encrypted with tenant/Session binding and included
+in creation idempotency through its digest. It is immutable, inherited by child
+Sessions and restored after Harness reattachment. It overrides host model
+settings, including auxiliary and fallback choices, for this Session's execution.
+Do not combine it with `modelId`; host-catalog switching is disabled for these
+Sessions. Public responses and journal resources never include the credentials.
+Retain encryption keys while `ma_session.model_config_key_id` references them,
+including for closed Sessions. The unreleased V1 schema gains these columns;
+recreate development catalogs under the existing schema policy. No browser
+credential editor is included.
+
+For multi-tenant deployments, a trusted application service or gateway must
+authenticate tenant/actor identity and retain the platform signing key. The
+endpoint allowlist is deployment-wide; tenant-specific model permissions,
+parameter limits, quotas and outbound network restrictions must be enforced by
+the caller or deployment. Each Session retains an immutable credential snapshot,
+so replacing a provider key requires a new Session. See the
+[deployment boundary](../../docs/design/managed-session-model-config.md#multi-tenant-deployment-boundary).
 
 Idle Workspace Sessions support manual context compression when the Harness advertises `context-compression/1`. Send `POST /v1/agents/sessions/{sessionId}/compress` with `Idempotency-Key` and `{ "expected_compaction_revision": 0 }`, using the Session's current `compaction_revision`; WebShell uses `/api/agent/web-shell/v1/sessions/compress` and camelCase fields. The public `context_compression` capability advertises deployment support; the WebShell `contextCompression` capability also reflects the current caller grant and execution facts. A Workspace OPERATOR or OWNER can admit the durable `context_compression` operation; the existing operation query returns `pending`, `running`, `recovery_blocked`, `completed` or `failed`, and a completed outcome is `compressed` or `noop`. Same-key retries resolve the original operation before mutable capability, revision and busy checks. Compression refuses active or queued Turns, approvals, unsettled Hooks and conflicting context work. It does not create a user Turn or change approval, Plan or Workspace context revisions. After compression, context usage stays unknown until the next main-model observation. Deploy matching Server/Broker, Harness and WebShell builds using the current V1 baseline; stop new compression admission and settle accepted operations before rollback. Existing retained journals establish their compaction revision on first read; if that evidence is unavailable, the capability is false and the revision is omitted.
 
@@ -1122,8 +1195,12 @@ every tenant and workspace on the host. This does not isolate files: a worker
 runs as the service account and can read whatever that account can.
 
 After a credential-key rotation, keep each prior key in
-`previous-credential-keys` until no persisted Runtime binding references its
-key ID. The brackets are not decoration: Spring's relaxed binder strips `/`,
+`previous-credential-keys` while any persisted row references it: Runtime
+bindings, complete Session model configurations and extension settings all
+retain key IDs. Use the retirement query in the runbook linked below to check
+all three scopes.
+
+The brackets are not decoration: Spring's relaxed binder strips `/`,
 `:` and spaces from plain map keys, so an unbracketed ID binds as a key that
 matches no persisted row.
 

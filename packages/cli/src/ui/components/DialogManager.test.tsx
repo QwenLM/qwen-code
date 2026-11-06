@@ -82,6 +82,38 @@ describe('DialogManager', () => {
     });
   });
 
+  describe('project hooks approval dialog', () => {
+    it.each([true, false])(
+      'keeps the dialog inside a 24-row terminal (constrainHeight: %s)',
+      (constrainHeight) => {
+        const { lastFrame } = renderDialogManager(
+          createUIState({
+            constrainHeight,
+            terminalHeight: 24,
+            isProjectHooksApprovalDialogOpen: true,
+            pendingProjectHooks: {
+              approval: {
+                root: '/r',
+                hooks: {},
+                resolved: {},
+                env: { files: {}, settings: null },
+              },
+              lines: Array.from({ length: 40 }, (_, i) => `Stop  hook-${i}.sh`),
+            },
+          }),
+          {},
+        );
+
+        const frame = lastFrame() ?? '';
+        expect(frame.split('\n').length).toBeLessThanOrEqual(24);
+        expect(frame).toContain('Untrusted hooks in .qwen/settings.json');
+        expect(frame).toContain('hook-0.sh');
+        expect(frame).toContain('more (see .qwen/settings.json)');
+        expect(frame).toContain('Approve these hooks');
+      },
+    );
+  });
+
   describe('provider update prompt', () => {
     const request = (id: number, providerLabel: string) => ({
       id,

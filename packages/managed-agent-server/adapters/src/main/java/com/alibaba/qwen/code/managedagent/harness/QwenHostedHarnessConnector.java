@@ -381,6 +381,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     WorkspaceToolProfiles.isPublicShell(toolProfile(session)) && !publicChildLaunchAvailable(session))
                     .withHarnessPlacement(placementDescriptor(session))
                     .withAgentDefinition(agentDefinition(session, false))
+                    .withModelConfigDigest(modelConfigDigest(session))
                     .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withInitialSelection(initialSelection(session))
                     .withMcpServers(mcpServers(session))
@@ -880,6 +881,22 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
     }
 
+    @Override
+    public boolean supportsModelConfiguration() {
+        try {
+            return sessionStore.isEnabled() && client().capabilities().getFeatures().contains("session-model-config/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    private String modelConfigDigest(SessionRecord session) {
+        if (session.modelConfigDigest() != null && !supportsModelConfiguration()) {
+            throw new IllegalStateException("Hosted Session model configuration is unavailable");
+        }
+        return session.modelConfigDigest();
+    }
+
     private Admission doSubmit(String tenantId, String sessionId,
             String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
@@ -1279,6 +1296,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         WorkspaceToolProfiles.isPublicShell(toolProfile(session)) && !publicChildLaunchAvailable(session))
                         .withHarnessPlacement(placementDescriptor(session))
                         .withAgentDefinition(agentDefinition(session, false))
+                        .withModelConfigDigest(modelConfigDigest(session))
                         .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withInitialSelection(initialSelection(session))
                         .withMcpServers(mcpServers(session))
@@ -1547,6 +1565,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             CreateHarnessSession.Builder builder =
                     CreateHarnessSession.builder()
                             .harnessSessionId(session.sessionId())
+                            .modelConfigDigest(modelConfigDigest(session))
                             .harnessPlacement(placementDescriptor(session))
                             .approvalMode(
                                     session.workspace() == null
@@ -1641,6 +1660,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 WorkspaceToolProfiles.isPublicShell(profile) && !publicChildLaunchAvailable(session))
                 .withHarnessPlacement(placementDescriptor(session))
                 .withAgentDefinition(agentDefinition(session, false))
+                .withModelConfigDigest(modelConfigDigest(session))
                 .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withInitialSelection(initialSelection(session))
                 .withMcpServers(mcpServers(session))
@@ -1803,6 +1823,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     toolProfile(session), false, false, WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !publicChildLaunchAvailable(session))
                     .withHarnessPlacement(placementDescriptor(session))
                     .withAgentDefinition(agentDefinition(session, false))
+                    .withModelConfigDigest(modelConfigDigest(session))
                     .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withInitialSelection(initialSelection(session))
                     .withPublicChildAgentsVersion(session.publicChildAgentsVersion())

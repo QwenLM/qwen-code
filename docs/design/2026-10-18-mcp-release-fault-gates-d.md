@@ -132,3 +132,21 @@ Decisions:
 Mutation witness: `drainConfigurations` iterates `configurations.slice(0, 1)` in a copy of the packaged CLI. The two-server case is red at `settle must complete` because the second configuration stays active; the one-server case stays green, so this case is the one that pins the second configuration. The restored bundle is green.
 
 Budget: the two-server case measures 16.16–16.24 s standalone (two runs) on JDK 21, MySQL 8.4.6 and Linux x86_64; the ten-case class is 81.6 s. It adds 32 s (2×) to the shared healthy sum (11504 → 11536 s), so the `hosted-harness-mysql` fork moves to 11536 s and the Verify step to 203 minutes (12136 s of fork plus wrap); the job ceiling moves to 326 (293 + 33). The `hosted-mcp-gates` profile and the artifact root are unchanged.
+
+## Follow-up cell: detach refused while a tool result is unknown
+
+#15750's FG12d row also asks for a detach that refuses while a tool result is unknown. The class's existing unknown-result cases (`stdioKillDuringRequestSettlesOutcomeUnknownOnMySql` and `workerKillDuringOperationSettlesOutcomeUnknownOnMySql`) stop at the unknown; this follow-up attempts the Harness detach route while the record is `recovery_blocked` / `outcome_unknown`.
+
+| Case                            | Injection                                                                                                                                                             | Expect                                                                                                                                                                                                                        |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `detach-refused-unknown-result` | Start an `ext://hold` raw operation through the private route; kill the stdio fixture; wait for `outcome_unknown` / `recovery_blocked`; POST the Harness detach route | Detach answers 409 `hosted_turn_active` or 503 `managed_session_close_failed` (the close catches the MCP recovery error); no `mcp-release` control; the operation stays unknown; the Session remains attached and reopenable. |
+
+Decisions:
+
+1. **The Harness detach route is the gate.** The control-plane lifecycle close is exercised by the R1-1 and two-server cells; this cell calls `POST /session/{id}/detach` directly, which is the production detach that reaches `HostedMcpSession.close()`.
+2. **The unknown is permanent, not a timed window.** The stdio fixture is killed with an `ext://hold` read in flight, so the operation can only settle through a conclusive answer from its original Runtime generation. The detach has no window to race.
+3. **The refusal is one of the documented close answers.** The test accepts 409 `hosted_turn_active` (MCP busy/recovering) and 503 `managed_session_close_failed` / `hosted_mcp_recovery_required`; it rejects 200/204 and asserts no release control and an unchanged unknown record.
+
+Mutation witness: wrap `session.mcp?.close()` in the close path of a packaged CLI copy in `try { … } catch {}`; detach answers 204 and the case is red at the status assertion. The restored bundle is green.
+
+Budget: the case measures 27.4 s worst of two runs (27.4 s and 17.4 s) on JDK 21, MySQL 8.4.6 and Linux x86_64; booked at 55 s (2×). The `hosted-harness-mysql` fork moves to 11591 s, the Verify step to 204 minutes and the job ceiling to 327 (294 + 33).

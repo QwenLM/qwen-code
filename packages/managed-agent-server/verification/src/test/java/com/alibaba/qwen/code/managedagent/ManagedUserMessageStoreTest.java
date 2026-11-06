@@ -59,7 +59,7 @@ class ManagedUserMessageStoreTest {
 
     @BeforeEach
     void setUp() {
-        session = agents.createSession(TENANT, "create-" + UUID.randomUUID(),
+        session = agents.createSession(TENANT, ACTOR, "create-" + UUID.randomUUID(),
                 "qwen-code", null, "queue", Map.of(), List.of()).sessionId();
         ManagedAgentService queueAgents = mock(ManagedAgentService.class);
         when(queueAgents.supportsUserMessageQueue()).thenReturn(true);
@@ -103,6 +103,27 @@ class ManagedUserMessageStoreTest {
     }
 
     @Test
+    void queueCommandsLockTheirSessionBeforeReconcilingTurns() {
+        var source = new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                "jdbc:h2:mem:queue-lock-" + UUID.randomUUID() + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1", "sa", "");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        var trace = new com.alibaba.qwen.code.managedagent.persistence.StoreLockTrace(source);
+        var tracedJdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(trace);
+        tracedJdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, 'agent', 'ACTIVE', 0, 0)", TENANT, session);
+        var queueAgents = mock(ManagedAgentService.class);
+        when(queueAgents.supportsUserMessageQueue()).thenReturn(true);
+        when(queueAgents.userMessageInput(anyList())).thenAnswer(call -> agents.userMessageInput(call.getArgument(0)));
+        var traced = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(
+                new ManagedUserMessageStore(tracedJdbc, json, digests, queueAgents));
+        var transaction = new org.springframework.transaction.support.TransactionTemplate(
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(trace));
+        trace.clear();
+        transaction.executeWithoutResult(status -> traced.command(TENANT, ACTOR, session, "trace", submit("trace")));
+        trace.assertSessionBeforeTurn(TENANT, session);
+    }
+
+    @Test
     void persistsFifoAndReplaysOriginalCommandSnapshotWithoutDuplicateAdmission() {
         Command first = submit("first");
         Snapshot admitted = command("first-key", first);
@@ -138,6 +159,29 @@ class ManagedUserMessageStoreTest {
         var admission = store.insertTurnCommand(TENANT, "queue-test", "user-queue:" + first.id(),
                 "digest", session, first.input(), "sha256:" + "0".repeat(64), ACTOR);
         assertThat(admission.turnId()).isNotBlank();
+    }
+
+    @Test
+    void startsTheNextQueuedTurnWhileTheTenantPlacementGuardIsHeld() throws Exception {
+        Message first = command("guarded", submit("guarded")).messages().getFirst();
+        try (var holder = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
+            holder.setAutoCommit(false);
+            com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.lockPlacementDomain(holder, TENANT);
+            try {
+                messages.startNext(TENANT, session, (principal, key, target, input) -> {
+                    var admission = store.insertTurnCommand(principal.tenantId(), "queue-test", key, "digest", target,
+                            first.input(), "sha256:" + "0".repeat(64), principal);
+                    return new com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission(
+                            target, admission.turnId(), "ACCEPTED", false);
+                });
+            } finally {
+                holder.rollback();
+            }
+        }
+        assertThat(query().messages()).singleElement().satisfies(message -> {
+            assertThat(message.state()).isEqualTo("claimed");
+            assertThat(message.turnId()).isNotBlank();
+        });
     }
 
     @Test

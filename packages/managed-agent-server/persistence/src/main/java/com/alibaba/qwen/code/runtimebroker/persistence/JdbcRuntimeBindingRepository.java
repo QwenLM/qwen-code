@@ -78,7 +78,7 @@ public final class JdbcRuntimeBindingRepository
                     "runtime_credential_ciphertext",
                     "runtime_credential_key_id",
                     "attestation_generation",
-                    "drain_requested",
+                    "is_drain_requested",
                     "operation_owner",
                     "operation_lease_until",
                     "operation_generation",
@@ -228,13 +228,16 @@ public final class JdbcRuntimeBindingRepository
             }
         }
         try (var clear = connection.prepareStatement("UPDATE ma_runtime_session SET execution_storage_key = NULL,"
-                + " execution_exclusive = FALSE WHERE execution_storage_key = ? AND binding_id = ?"
+                + " is_execution_exclusive = FALSE WHERE execution_storage_key = ? AND binding_id = ?"
                 + " AND runtime_generation = ? AND runtime_session_id = ?")) {
             clear.setString(1, key);
             JdbcRepositorySupport.setIdentity(clear, 2, session.getBindingId());
             clear.setLong(3, session.getRuntimeGeneration());
             JdbcRepositorySupport.setIdentity(clear, 4, session.getRuntimeSessionId());
-            clear.executeUpdate();
+            com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore.releaseMembers(connection, key,
+                    clear.executeUpdate(), com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore
+                            .exclusiveMemberKey(session.getBindingId(), session.getRuntimeGeneration(),
+                                    session.getRuntimeSessionId()));
         }
     }
 
@@ -628,6 +631,9 @@ public final class JdbcRuntimeBindingRepository
                     connection -> {
                         lockPlacementDomain(
                                 connection, original.getRequest().getScope().getTenantId());
+                        if (!csi && HarnessOwnership.sharesRuntimeSessions(original.getRequest())) {
+                            requireStorageAdmission(connection, original.getRequest());
+                        }
                         var csiOriginal =
                                 JdbcCsiActivationAdmission.lockForExecution(
                                         connection, original, this);
@@ -876,10 +882,13 @@ public final class JdbcRuntimeBindingRepository
         requirePhysicalStorageAdmission(connection, request);
     }
 
+    // Harness admission, recovery, cleanup and Hook checks below are read-only: they write no
+    // row a concurrent lifecycle transition could observe, so they take no tenant placement
+    // guard. Authority checks hold the claim mirror through the transaction; ordinary
+    // checks order a transition committing after their snapshot after the check.
     @Override
     public void requireHarnessAdmission(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority);
             return null;
         });
@@ -893,7 +902,6 @@ public final class JdbcRuntimeBindingRepository
             return;
         }
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true));
             return null;
         });
@@ -915,7 +923,6 @@ public final class JdbcRuntimeBindingRepository
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
-                    lockPlacementDomain(connection, scope.getTenantId());
                     try (PreparedStatement fence =
                             connection.prepareStatement(
                                     "SELECT operation_id FROM ma_session_head"
@@ -964,7 +971,6 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public void requireHarnessCleanup(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(false, HarnessFence.CLEANUP));
             return null;
         });
@@ -978,7 +984,6 @@ public final class JdbcRuntimeBindingRepository
             return;
         }
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true, HarnessFence.CLEANUP));
             return null;
         });
@@ -987,7 +992,6 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public void requireHookAdmission(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(false, HarnessFence.LEGACY_HOOK));
             return null;
         });
@@ -1001,7 +1005,6 @@ public final class JdbcRuntimeBindingRepository
             return;
         }
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, scope.getTenantId());
             requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true, HarnessFence.LEGACY_HOOK));
             return null;
         });
@@ -1090,10 +1093,16 @@ public final class JdbcRuntimeBindingRepository
                 }
             }
         }
+        String claimLock = "";
+        if (authority != null) {
+            // Claim updates queue on the Session, independently of tenant placement.
+            claimLock = "H2".equals(connection.getMetaData().getDatabaseProductName())
+                    ? " FOR UPDATE" : " FOR SHARE";
+        }
         try (PreparedStatement statement = connection.prepareStatement(
                         "SELECT tenant_id, harness_session_id, phase, operation_id,"
                                 + " claim_generation, claim_lease_until FROM ma_session_head WHERE"
-                                + " tenant_key = ? AND harness_key = ?")) {
+                                + " tenant_key = ? AND harness_key = ?" + claimLock)) {
             statement.setString(1, harnessDrainKey(scope.getTenantId()));
             statement.setString(2, harnessDrainKey(harnessSessionId));
             try (ResultSet row = statement.executeQuery()) {
@@ -2568,7 +2577,7 @@ public final class JdbcRuntimeBindingRepository
                 "UPDATE ma_runtime_binding SET binding_state = ?, resource_handle_version = ?,"
                     + " resource_handle_json = ?, runtime_instance_id = ?, runtime_endpoint = ?,"
                     + " runtime_lease_id = ?, runtime_epoch = ?, runtime_credential_ciphertext = ?,"
-                    + " runtime_credential_key_id = ?, attestation_generation = ?, drain_requested"
+                    + " runtime_credential_key_id = ?, attestation_generation = ?, is_drain_requested"
                     + " = ?, operation_owner = ?, operation_lease_until = ?, operation_generation ="
                     + " ?, record_version = ?, last_health_at = ?, last_reconciled_at = ?,"
                     + " last_active_at = ?, loss_evidence_json = ?, stop_evidence_json = ?,"
@@ -2730,7 +2739,7 @@ public final class JdbcRuntimeBindingRepository
                 RuntimeBindingRecord.State.valueOf(
                         result.getString("binding_state")),
                 lease, handle, result.getLong("attestation_generation"),
-                result.getBoolean("drain_requested"),
+                result.getBoolean("is_drain_requested"),
                 result.getString("operation_owner"),
                 JdbcRepositorySupport.getInstant(result,
                         "operation_lease_until"),

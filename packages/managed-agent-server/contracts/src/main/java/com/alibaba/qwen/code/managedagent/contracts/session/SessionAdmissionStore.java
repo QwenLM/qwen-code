@@ -33,6 +33,18 @@ public interface SessionAdmissionStore {
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest);
 
+    public default Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            com.alibaba.qwen.code.managedagent.model.SessionModelConfig modelConfig) {
+        if (modelConfig != null) {
+            throw new UnsupportedOperationException("Session model configuration is unavailable");
+        }
+        return insertSessionCommand(tenantId, actorId, operation, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest);
+    }
+
     /**
      * Ownership-enforcing creation of a non-Workspace Session. The
      * implementation must write the ownership row in the same transaction
@@ -45,6 +57,24 @@ public interface SessionAdmissionStore {
             List<Map<String, Object>> input, String payloadDigest) {
         throw new UnsupportedOperationException(
                 "Session ownership records are unavailable");
+    }
+
+    /**
+     * The ownership-enforcing creation with a model configuration. The
+     * default fails closed on a non-null configuration, exactly like the
+     * actor-carrying twin; the principal-only path keeps its own refusal.
+     */
+    public default Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            com.alibaba.qwen.code.managedagent.model.SessionModelConfig modelConfig) {
+        if (modelConfig != null) {
+            throw new UnsupportedOperationException("Session model configuration is unavailable");
+        }
+        return insertSessionCommand(tenantId, principal, operation, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest);
     }
 
     /** Requires that {@code principal} owns an unbound Session exactly. */

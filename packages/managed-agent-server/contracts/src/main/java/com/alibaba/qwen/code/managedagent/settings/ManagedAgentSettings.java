@@ -23,6 +23,7 @@ public interface ManagedAgentSettings {
     public List<String> getDefinitionToolProfiles();
     public List<String> getDefinitionModels();
     public List<? extends ModelOption> getModelCatalog();
+    public default List<String> getModelConfigBaseUrls() { return List.of(); }
     public interface ModelOption {
         public String getModelId();
         public String getLabel();
@@ -148,6 +149,7 @@ public interface ManagedAgentSettings {
         public Duration getV3ResultWindow();
         public String getToken();
         public String getProvisioner();
+        public Map<String, String> getProviderOptions();
         public String getWorkspaceId();
         public String getWorkspaceGeneration();
         public String getWorkspaceCwd();

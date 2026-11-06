@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -73,5 +74,37 @@ public final class ManagedSessionPrincipal {
                 + "\0" + (principal.actorSubjectId() == null ? ""
                         : principal.actorSubjectId());
         return joined.getBytes(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Whether the principal owns the unbound Session exactly: tenant, user
+     * and actor presence plus subject. A legacy Session without an
+     * ownership row never matches.
+     */
+    public static boolean owns(JdbcTemplate jdbc, String tenantId,
+            String sessionId, SessionPrincipal principal) {
+        return principal != null && principal.tenantId().equals(tenantId)
+                && matches(find(jdbc, tenantId, sessionId), principal);
+    }
+
+    /** The enforcing twin of {@link #owns}: a miss answers 404. */
+    public static void requireOwnership(JdbcTemplate jdbc, String tenantId,
+            String sessionId, SessionPrincipal principal) {
+        if (!owns(jdbc, tenantId, sessionId, principal)) {
+            throw new ManagedAgentException(404,
+                    "session_not_found", "The Session was not found.");
+        }
+    }
+
+    /**
+     * A principal may only act inside its own tenant; a cross-tenant or
+     * missing principal answers the same 404 as a missing Session.
+     */
+    public static void requireTenant(String tenantId,
+            SessionPrincipal principal) {
+        if (principal == null || !principal.tenantId().equals(tenantId)) {
+            throw new ManagedAgentException(404, "session_not_found",
+                    "The Session was not found.");
+        }
     }
 }

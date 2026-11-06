@@ -298,6 +298,7 @@ export type WebShellSidebarPrimaryNavItem =
   | 'agents'
   | 'plugins'
   | 'channels'
+  | 'channelEvents'
   | 'live'
   | 'scheduledTasks'
   | 'prWatches'
@@ -347,6 +348,7 @@ export const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[]
     'agents',
     'plugins',
     'channels',
+    'channelEvents',
     'live',
     'scheduledTasks',
     'prWatches',
@@ -466,6 +468,9 @@ interface WebShellSidebarProps {
   onOpenAgents?: (view?: 'agents' | 'squads' | 'runtime') => void;
   onOpenPlugins: () => void;
   onOpenChannels: () => void;
+  /** Opens the cross-Channel event timeline; absent when the host does not
+   * offer it. */
+  onOpenChannelEvents?: () => void;
   onOpenLive?: () => void;
   onLiveVoiceSlotChange?: (element: HTMLDivElement | null) => void;
   onOpenManagedSessions?: () => void;
@@ -1123,6 +1128,7 @@ export function WebShellSidebar({
   onOpenAgents,
   onOpenPlugins,
   onOpenChannels,
+  onOpenChannelEvents,
   onOpenLive,
   onLiveVoiceSlotChange,
   onOpenManagedSessions,
@@ -1281,6 +1287,8 @@ export function WebShellSidebar({
       (primaryNavItems.has('plugins') ||
         (primaryNavItems.has('agents') && Boolean(onOpenAgents)) ||
         primaryNavItems.has('channels') ||
+        (primaryNavItems.has('channelEvents') &&
+          Boolean(onOpenChannelEvents)) ||
         (showLive && primaryNavItems.has('live') && Boolean(onOpenLive)) ||
         primaryNavItems.has('scheduledTasks') ||
         (primaryNavItems.has('prWatches') && Boolean(onOpenPrWatches)) ||
@@ -1316,6 +1324,8 @@ export function WebShellSidebar({
     primaryNavItems.has('channels');
   const channelView =
     channelNavigationEnabled && activePage === 'channels' && !homePreviewOpen;
+  const channelEventsNavigationEnabled =
+    projectFeaturesEnabled && primaryNavItems.has('channelEvents');
   const liveNavigationEnabled =
     railLayout &&
     projectFeaturesEnabled &&
@@ -6374,6 +6384,27 @@ export function WebShellSidebar({
           {!collapsed && !railLayout && <span>{t('sidebar.channels')}</span>}
         </button>
       )}
+      {channelEventsNavigationEnabled && onOpenChannelEvents && (
+        <button
+          className={styles.pluginButton}
+          type="button"
+          title={railLayout ? undefined : t('sidebar.channelEvents')}
+          aria-label={t('sidebar.channelEvents')}
+          aria-current={
+            railLayout && activePage === 'channel-events' ? 'page' : undefined
+          }
+          onClick={() =>
+            openNavigation(onOpenChannelEvents, channelEventsNavigationEnabled)
+          }
+        >
+          <span className={styles.navIcon}>
+            <ActivityIcon size={16} strokeWidth={1.2} />
+          </span>
+          {!collapsed && !railLayout && (
+            <span>{t('sidebar.channelEvents')}</span>
+          )}
+        </button>
+      )}
       {liveNavigationEnabled && onOpenLive && (
         <button
           className={styles.pluginButton}
@@ -7647,6 +7678,9 @@ export function WebShellSidebar({
                   />
                 </div>
               )}
+              {/* Managed 历史由外部 App Host 注入，不受本地 Workspaces
+                  折叠状态控制；否则折叠分组会把仍有效的 Managed 会话一起隐藏。 */}
+              {!channelView && !liveView && managedWorkspaces}
               <div
                 className="flex flex-col"
                 hidden={liveView || !projectsExpanded}
@@ -7668,7 +7702,6 @@ export function WebShellSidebar({
                   {!hideProjectHeader && <WorkspaceHostHeading />}
                   <div className={styles.workspacePicker}>
                     <div className={styles.workspaceList}>
-                      {!channelView && managedWorkspaces}
                       {orderedProjectWorkspaces.map((ws) => (
                         <Fragment key={ws.id}>
                           <WorkspaceSection
