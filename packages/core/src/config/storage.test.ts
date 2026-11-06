@@ -420,6 +420,23 @@ describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
     expect(projectId.startsWith(sanitizeCwd(longRoot).slice(0, 64))).toBe(true);
   });
 
+  it('getProjectDir keeps an identifier the filesystem already accepts', () => {
+    // Regression: the rename threshold was PROJECT_DIR_NAME_MAX minus the hash
+    // suffix (238), so a 239-255 byte identifier that mkdir had always accepted
+    // was rewritten to a new name, orphaning the sessions already filed there.
+    // Measure from a fixed base so the identifier itself is the only variable.
+    const base = path.resolve('w');
+    const prefix = sanitizeCwd(base).length + 1;
+    for (const bytes of [239, 254, 255]) {
+      const root = path.join(base, 'a'.repeat(bytes - prefix));
+      const projectId = path.basename(new Storage(root).getProjectDir());
+      expect({ bytes, projectId }).toEqual({
+        bytes,
+        projectId: sanitizeCwd(root),
+      });
+    }
+  });
+
   it('getProjectDir gives distinct long project paths distinct directories', () => {
     const base = path.resolve('workspace');
     const first = new Storage(path.join(base, 'a'.repeat(200), 'one'));

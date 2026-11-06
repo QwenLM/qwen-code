@@ -627,9 +627,11 @@ export class Storage {
     let projectId = sanitizeCwd(this.getProjectRoot());
     // sanitizeCwd only maps non-alphanumerics to '-', so an identifier can be
     // longer than the filesystem accepts and every path below it then fails
-    // with ENAMETOOLONG. Keep a readable prefix and append part of the project
-    // hash, which also keeps two long roots from colliding on that prefix.
-    if (projectId.length > PROJECT_DIR_READABLE_BUDGET) {
+    // with ENAMETOOLONG. Only an identifier the filesystem would refuse is
+    // renamed: one that already fits stays where its sessions are. Past the
+    // limit, keep a readable prefix and append part of the project hash, which
+    // also keeps two long roots from colliding on that prefix.
+    if (Buffer.byteLength(projectId, 'utf8') > PROJECT_DIR_NAME_MAX) {
       const hash = getProjectHash(this.getProjectRoot());
       const bounded = this.projectIdWithinBudget(
         projectId,
