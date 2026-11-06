@@ -15111,6 +15111,17 @@ export class Session implements SessionContext {
       );
     }
 
+    const enforcedAuthType = this.settings.merged.security?.auth?.enforcedType;
+    const modelAuthType = parsed.modelId.startsWith(RUNTIME_SNAPSHOT_PREFIX)
+      ? parsed.modelId.split('|', 3)[1]
+      : selectedAuthType;
+    if (enforcedAuthType && enforcedAuthType !== modelAuthType) {
+      throw RequestError.invalidParams(
+        { errorKind: 'auth_type_enforced' },
+        'Authentication is restricted by policy.',
+      );
+    }
+
     if (
       this.requiresManagedConversationBinding &&
       selectedAuthType === AuthType.QWEN_SUBSCRIPTION &&

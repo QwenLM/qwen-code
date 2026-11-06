@@ -5,6 +5,7 @@
  */
 import express from 'express';
 import request from 'supertest';
+import { homedir } from 'node:os';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import { registerWorkspaceSubscriptionRoutes } from './workspace-subscription.js';
@@ -190,13 +191,33 @@ it.each([
   },
 );
 
-it('selects the account model without reading or updating any workspace', async () => {
+it('selects the account model using global settings only', async () => {
   const { app, persistSettings, reloadModelProviders } = setup();
   const response = await request(app).post('/auth/subscription/model');
 
   expect(response.status).toBe(200);
   expect(response.body).toEqual({ modelId: 'qwen3.8-max' });
-  expect(mocks.loadSettings).not.toHaveBeenCalled();
+  expect(mocks.loadSettings).toHaveBeenCalledExactlyOnceWith(homedir(), {
+    skipLoadEnvironment: true,
+    skipWorkspaceSettings: true,
+    workspaceTrusted: true,
+  });
+  expect(persistSettings).not.toHaveBeenCalled();
+  expect(reloadModelProviders).not.toHaveBeenCalled();
+});
+
+it('rejects account model discovery under a global authentication policy', async () => {
+  const { app, persistSettings, reloadModelProviders } = setup();
+  mocks.loadSettings.mockReturnValue({
+    workspaceSettingsActive: false,
+    merged: { security: { auth: { enforcedType: 'openai' } } },
+  });
+  const response = await request(app).post('/auth/subscription/model');
+
+  expect(response.status).toBe(403);
+  expect(response.body.code).toBe('auth_type_enforced');
+  expect(mocks.userInfo).not.toHaveBeenCalled();
+  expect(mocks.models).not.toHaveBeenCalled();
   expect(persistSettings).not.toHaveBeenCalled();
   expect(reloadModelProviders).not.toHaveBeenCalled();
 });

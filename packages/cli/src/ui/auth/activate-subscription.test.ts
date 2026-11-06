@@ -176,15 +176,15 @@ it('rejects an untrusted workspace without falling back to user settings', async
   expect(mocks.apply).not.toHaveBeenCalled();
 });
 
-it('requires project settings before activation', async () => {
+it('saves to user settings when the CLI starts in the home directory', async () => {
   const userOnly = {
     ...settings,
     workspaceSettingsActive: false,
   } as LoadedSettings;
-  await expect(
-    activateSubscription(userOnly, config(), new AbortController().signal),
-  ).rejects.toThrow('Open a project folder');
-  expect(mocks.createAdapter).not.toHaveBeenCalled();
+  const runtime = config();
+  await activateSubscription(userOnly, runtime, new AbortController().signal);
+  expect(mocks.createAdapter).toHaveBeenCalledWith(userOnly, SettingScope.User);
+  expect(runtime.setSubscriptionPlan).toHaveBeenCalledWith('pro');
 });
 
 it('keeps committed disk settings and runtime consistent when the dialog closes during refresh', async () => {

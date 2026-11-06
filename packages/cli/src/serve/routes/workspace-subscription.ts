@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { homedir } from 'node:os';
 import type { Application, RequestHandler } from 'express';
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
@@ -72,23 +73,25 @@ export function registerWorkspaceSubscriptionRoutes(
       };
       try {
         assertActive();
-        if (runtime) {
-          const settings = loadSettings(runtime.workspaceCwd, {
-            skipLoadEnvironment: true,
-            workspaceTrusted: true,
+        const settings = loadSettings(runtime?.workspaceCwd ?? homedir(), {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: !runtime,
+          workspaceTrusted: true,
+        });
+        if (runtime && !settings.workspaceSettingsActive) {
+          res.status(409).json({
+            code: 'workspace_settings_unavailable',
+            message: 'Open a project folder to activate Qwen Subscription.',
           });
-          if (!settings.workspaceSettingsActive) {
-            res.status(409).json({
-              code: 'workspace_settings_unavailable',
-              message: 'Open a project folder to activate Qwen Subscription.',
-            });
-            return;
-          }
-          const enforced = settings.merged.security?.auth?.enforcedType;
-          if (enforced && enforced !== AuthType.QWEN_SUBSCRIPTION) {
-            res.status(403).json({ code: 'auth_type_enforced' });
-            return;
-          }
+          return;
+        }
+        const enforced = settings.merged.security?.auth?.enforcedType;
+        if (enforced && enforced !== AuthType.QWEN_SUBSCRIPTION) {
+          res.status(403).json({
+            code: 'auth_type_enforced',
+            message: 'Authentication is restricted by policy.',
+          });
+          return;
         }
         const session = new QwenSubscriptionSession();
         const info = await session.getUserInfo(controller.signal);

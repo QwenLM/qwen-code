@@ -14374,6 +14374,40 @@ describe('Session', () => {
       },
     );
 
+    it.each([
+      'qwen3.8-max(qwen-subscription)',
+      '$runtime|qwen-subscription|qwen3.8-max(openai)',
+    ])(
+      'enforces session auth policy for %s before refreshing models',
+      async (modelId) => {
+        session.dispose();
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+          'standalone',
+        );
+        const refreshSubscriptionModels = vi.fn();
+        Object.assign(mockConfig, { refreshSubscriptionModels });
+        mockSettings.merged.security = {
+          auth: { enforcedType: AuthType.USE_OPENAI },
+        };
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+
+        await expect(
+          session.setModel({
+            sessionId: 'test-session-id',
+            modelId,
+          }),
+        ).rejects.toMatchObject({ data: { errorKind: 'auth_type_enforced' } });
+        expect(refreshSubscriptionModels).not.toHaveBeenCalled();
+        expect(switchModelSpy).not.toHaveBeenCalled();
+        expect(mockSettings.setValue).not.toHaveBeenCalled();
+      },
+    );
+
     it('propagates errors from config.switchModel', async () => {
       const configError = new Error('Invalid model');
       switchModelSpy.mockRejectedValueOnce(configError);
