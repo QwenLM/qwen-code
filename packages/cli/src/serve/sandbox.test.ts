@@ -244,15 +244,23 @@ describe('start_sandbox', () => {
   });
 
   it.each([
-    path.join(process.cwd(), '.qwen', 'trustedFolders.json'),
-    '/opt/qwen-external-trust/trustedFolders.json',
+    {
+      store: path.join(process.cwd(), '.qwen', 'trustedFolders.json'),
+      exists: true,
+    },
+    { store: '/opt/qwen-external-trust/trustedFolders.json', exists: true },
+    // A store the host has not created yet must still reach the container:
+    // its fallback under QWEN_HOME cannot hold the decision (#16397).
+    { store: '/opt/qwen-external-trust/trustedFolders.json', exists: false },
   ])(
-    'forwards a custom trust store without mounting the store file (%s)',
-    async (configuredStore) => {
+    'forwards a custom trust store without mounting the store file ($store, exists: $exists)',
+    async ({ store, exists }) => {
       vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
       vi.spyOn(os, 'platform').mockReturnValue('linux');
-      vi.stubEnv('QWEN_CODE_TRUSTED_FOLDERS_PATH', configuredStore);
-      vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+      vi.stubEnv('QWEN_CODE_TRUSTED_FOLDERS_PATH', store);
+      vi.spyOn(fs, 'existsSync').mockImplementation(
+        (filePath) => filePath !== store || exists,
+      );
       vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
         String(filePath),
       );
@@ -293,9 +301,12 @@ describe('start_sandbox', () => {
       }
       expect(mountSpecs.length).toBeGreaterThan(0);
       expect(
-        mountSpecs.some((spec) => spec.split(':')[0] === configuredStore),
+        mountSpecs.some((spec) => {
+          const { from, to } = parseSandboxMountSpec(spec, 'linux');
+          return from === store || to === store;
+        }),
       ).toBe(false);
-      const envFlag = `QWEN_CODE_TRUSTED_FOLDERS_PATH=${configuredStore}`;
+      const envFlag = `QWEN_CODE_TRUSTED_FOLDERS_PATH=${store}`;
       const envIndex = args.indexOf(envFlag);
       expect(args.slice(envIndex - 1, envIndex + 1)).toEqual([
         '--env',
