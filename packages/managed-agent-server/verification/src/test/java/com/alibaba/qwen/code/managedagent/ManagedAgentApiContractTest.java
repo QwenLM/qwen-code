@@ -329,6 +329,8 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellTaskEvent")),
                     entry(WebShellTaskQueryRequest.class,
                             List.of("WebShellTaskQueryRequest")),
+                    entry(ApiModels.WebShellDiagnosticTraceRequest.class,
+                            List.of("WebShellDiagnosticTraceRequest")),
                     entry(WebShellTaskGetRequest.class,
                             List.of("WebShellTaskGetRequest")),
                     entry(WebShellTaskEventQueryRequest.class,
@@ -1756,6 +1758,14 @@ class ManagedAgentApiContractTest {
             exchange(drift, webOperation, 401, post(webPath).header(TENANT, tenant), body);
             exchange(drift, webOperation, 400,
                     post(webPath).header(TENANT, tenant).principal(principal), "{}");
+            if ("AgentTrace".equals(route[2])) {
+                for (String extra : List.of("\"unexpected\":true", "\"limit\":0", "\"limit\":101",
+                        "\"cursor\":\"" + "a".repeat(257) + "\"")) {
+                    exchange(drift, webOperation, 400,
+                            post(webPath).header(TENANT, tenant).principal(principal),
+                            body.substring(0, body.length() - 1) + "," + extra + "}");
+                }
+            }
         }
     }
 

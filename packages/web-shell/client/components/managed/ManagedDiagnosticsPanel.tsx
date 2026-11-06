@@ -38,6 +38,42 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+function CoverageReasons({ reasons }: { reasons: string[] }) {
+  const t = useManagedDiagnosticsText();
+  const labels = {
+    legacy_history: 'legacyHistory',
+    unclosed_turn: 'unclosedTurn',
+    unclosed_model_attempt: 'unclosedModel',
+    unclosed_maintenance: 'unclosedMaintenance',
+    observation_error: 'observationError',
+    missing_usage: 'missingUsage',
+    interrupted_observation: 'interruptedObservation',
+    counter_overflow: 'counterOverflow',
+    attribution_incomplete: 'attributionIncomplete',
+    details_truncated: 'detailsTruncated',
+    resource_read_limit: 'resourceReadLimit',
+    configuration_history_limit: 'configurationHistoryLimit',
+    mcp_history_limit: 'mcpHistoryLimit',
+    extension_attribution_unavailable: 'extensionAttributionUnavailable',
+    invalid_resource: 'invalidResource',
+    resource_unavailable: 'resourceUnavailable',
+    public_output_limit: 'publicOutputLimit',
+    child_unavailable: 'childUnavailable',
+    description_unavailable: 'descriptionUnavailable',
+    invocation_unavailable: 'invocationUnavailable',
+  } as const;
+  if (reasons.length === 0) return null;
+  return (
+    <ul className="space-y-1 text-sm text-muted-foreground">
+      {[...new Set(reasons)].map((reason) => (
+        <li key={reason}>
+          {t(labels[reason as keyof typeof labels] ?? 'unknownCoverage')}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function ContextSnapshot({ value }: { value: ManagedDiagnosticContextUsage }) {
   const t = useManagedDiagnosticsText();
   const context = value.context;
@@ -53,7 +89,9 @@ function ContextSnapshot({ value }: { value: ManagedDiagnosticContextUsage }) {
       <div>
         <Field label={t('model')}>{context.model}</Field>
         <Field label={t('observedAt')}>
-          {new Date(context.observedAt).toLocaleString()}
+          {context.observedAt > 0
+            ? new Date(context.observedAt).toLocaleString()
+            : t('unknown')}
         </Field>
         <Field label={t('input')}>
           {context.inputTokens?.toLocaleString() ?? t('unknown')}
@@ -157,7 +195,9 @@ function StatisticsSnapshot({ value }: { value: ManagedDiagnosticStats }) {
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">{t('ownOnly')}</p>
       <Field label={t('observedAt')}>
-        {new Date(statistics.observedAt).toLocaleString()}
+        {statistics.observedAt > 0
+          ? new Date(statistics.observedAt).toLocaleString()
+          : t('unknown')}
       </Field>
       <ModelMetrics metrics={statistics.totals} />
       {(['main', 'hook', 'compression'] as const).map((source) => (
@@ -211,6 +251,11 @@ function ResourcesSnapshot({ value }: { value: ManagedDiagnosticResources }) {
   const t = useManagedDiagnosticsText();
   return (
     <div className="space-y-5">
+      {value.outputTruncated && (
+        <p className="text-sm text-muted-foreground">
+          {t('resourceTruncated')}
+        </p>
+      )}
       {value.activeConfigRevision !== null && (
         <Field label={t('activeConfig')}>{value.activeConfigRevision}</Field>
       )}
@@ -302,7 +347,9 @@ function ResourcesSnapshot({ value }: { value: ManagedDiagnosticResources }) {
                           ? 'discoveryFailed'
                           : state === 'stale'
                             ? 'discoveryStale'
-                            : state,
+                            : state === 'partial'
+                              ? 'discoveryPartial'
+                              : state,
                       )}
                     </summary>
                     <div className="space-y-3 py-2">
@@ -387,15 +434,15 @@ export function ManagedDiagnosticsPanel({
           <DialogDescription>{t('description')}</DialogDescription>
         </DialogHeader>
         <Tabs
-          className="min-h-0 flex-1"
+          className="min-h-0 min-w-0 flex-1"
           value={tab}
           onValueChange={(value) => setTab(value as ManagedDiagnosticsTab)}
         >
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <TabsList>
+            <TabsList className="max-w-full flex-wrap group-data-horizontal/tabs:h-auto">
               {(['context', 'statistics', 'resources', 'agents'] as const).map(
                 (kind) => (
-                  <TabsTrigger key={kind} value={kind}>
+                  <TabsTrigger key={kind} value={kind} className="h-8">
                     {t(kind)}
                   </TabsTrigger>
                 ),
@@ -421,6 +468,20 @@ export function ManagedDiagnosticsPanel({
               <p role="status" className="text-sm text-muted-foreground">
                 {t('partial')}
               </p>
+            )}
+            {snapshot && (
+              <CoverageReasons
+                reasons={[
+                  ...snapshot.value.coverageReasons,
+                  ...(snapshot.kind === 'statistics'
+                    ? (snapshot.value.statistics?.coverage.gaps ?? [])
+                    : []),
+                  ...(snapshot.kind === 'context' &&
+                  snapshot.value.context?.attributionComplete === false
+                    ? ['attribution_incomplete']
+                    : []),
+                ]}
+              />
             )}
             {snapshot?.value.availability === 'unsupported' ? (
               <p>{t('unsupported')}</p>
@@ -461,26 +522,32 @@ export function ManagedDiagnosticsPanel({
                     )}
                   </div>
                 ))}
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={read.loading || !read.hasPrevious}
-                    onClick={read.previous}
-                  >
-                    {t('previous')}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={read.loading || !snapshot.value.hasMore}
-                    onClick={read.next}
-                  >
-                    {t('next')}
-                  </Button>
-                </div>
               </div>
             ) : null}
+            {tab === 'agents' && (
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={read.loading || !read.hasPrevious}
+                  onClick={read.previous}
+                >
+                  {t('previous')}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={
+                    read.loading ||
+                    snapshot?.kind !== 'agents' ||
+                    !snapshot.value.hasMore
+                  }
+                  onClick={read.next}
+                >
+                  {t('next')}
+                </Button>
+              </div>
+            )}
           </TabsContent>
         </Tabs>
       </DialogContent>

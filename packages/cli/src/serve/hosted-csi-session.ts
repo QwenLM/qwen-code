@@ -35,6 +35,7 @@ import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url
 import {
   CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
   CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
+  readHostedCsiFileProfile,
   type CsiFilesProfile,
 } from './managed-csi-file-profile.js';
 import { enableManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
@@ -329,12 +330,7 @@ async function initialize(
       prepareOwnershipRelease: deny,
       close: deny,
     };
-    const definition = JSON.parse(
-      (
-        await managed.resources.read(authority.sessionHeader.definitionRef)
-      ).toString('utf8'),
-    ) as { toolProfile?: unknown };
-    if (definition.toolProfile !== owner.admission.profile)
+    if ((await readHostedCsiFileProfile(managed)) !== owner.admission.profile)
       throw new Refusal('csi_runtime_identity_conflict');
     if (owner.admission.profile === 'csi-files-retirement/2') {
       if (!stores.supportsModelDiagnostics())

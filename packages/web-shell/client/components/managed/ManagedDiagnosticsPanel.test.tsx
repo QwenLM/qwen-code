@@ -134,6 +134,9 @@ describe('ManagedDiagnosticsPanel', () => {
       'Input tokens100 (Recorded calls: 1/2)',
     );
     expect(document.body.textContent).toContain('Reasoning tokensUnknown');
+    expect(document.body.textContent).toContain(
+      'Some token usage fields were not reported.',
+    );
   });
 
   it('offers a child link only for an authorized child identity', async () => {
@@ -158,5 +161,69 @@ describe('ManagedDiagnosticsPanel', () => {
     expect(document.body.textContent).toContain('Restricted child');
     await act(async () => links[0].click());
     expect(onOpenChild).toHaveBeenCalledWith('child-a');
+  });
+
+  it('explains resource truncation and individual partial discovery', async () => {
+    const server = diagnosticResources.servers[0];
+    vi.mocked(provider.getResources).mockResolvedValue({
+      ...diagnosticResources,
+      availability: 'partial',
+      coverageReasons: ['extension_attribution_unavailable'],
+      outputTruncated: true,
+      servers: [
+        { ...server, discovery: { ...server.discovery, tools: 'partial' } },
+      ],
+    });
+    await render();
+    await selectTab('Resources');
+    expect(document.body.textContent).toContain(
+      'Extension attribution is unavailable.',
+    );
+    expect(document.body.textContent).toContain(
+      'Some resource entries were omitted',
+    );
+    expect(document.body.textContent).toContain('Tools · Partial');
+  });
+
+  it('shows an unknown observation time and the specific model coverage gap', async () => {
+    vi.mocked(provider.getStatistics).mockResolvedValue({
+      ...diagnosticStats,
+      availability: 'partial',
+      coverageReasons: ['unclosed_turn'],
+      statistics: { ...diagnosticStats.statistics!, observedAt: 0 },
+    });
+    await render();
+    await selectTab('Model statistics');
+    expect(document.body.textContent).toContain('ObservedUnknown');
+    expect(document.body.textContent).toContain('A prior turn did not settle.');
+    expect(document.body.textContent).not.toContain('1970');
+  });
+
+  it('keeps the previous-page control after a failed trace page without retaining old rows', async () => {
+    vi.mocked(provider.listAgentTrace).mockImplementation(
+      async (_session, request) => {
+        if (request.cursor) throw new Error('Invalid or expired cursor');
+        return { ...diagnosticTrace, nextCursor: 'older', hasMore: true };
+      },
+    );
+    await render();
+    await selectTab('Child agents');
+    const button = (label: string) =>
+      [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+        (entry) => entry.textContent === label,
+      )!;
+    await act(async () => button('Next page').click());
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'Could not read diagnostics',
+    );
+    expect(document.body.textContent).not.toContain(
+      diagnosticTrace.items[0].description!,
+    );
+    expect(button('Previous page').disabled).toBe(false);
+    await act(async () => button('Previous page').click());
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(document.body.textContent).toContain(
+      diagnosticTrace.items[0].description!,
+    );
   });
 });

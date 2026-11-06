@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.managedagent.catalog.ManagedSessionResourcesService;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellDiagnosticTraceRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionRequest;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskQueryRequest;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentTraceService;
 import com.alibaba.qwen.code.managedagent.session.ManagedSessionDiagnosticsService;
@@ -72,7 +72,7 @@ public class ManagedDiagnosticsController {
 
     @PostMapping("/api/agent/web-shell/v1/session-agent-trace/query")
     public ResponseEntity<JsonNode> queryTraces(TenantContext tenant,
-            @Valid @RequestBody WebShellTaskQueryRequest request) {
+            @Valid @RequestBody WebShellDiagnosticTraceRequest request) {
         return traces(tenant, request.sessionId(), request.cursor(), request.limit() == null ? 20 : request.limit());
     }
 

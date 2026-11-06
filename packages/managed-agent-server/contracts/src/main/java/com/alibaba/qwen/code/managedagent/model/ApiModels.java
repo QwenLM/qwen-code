@@ -1070,6 +1070,14 @@ public final class ApiModels {
             String cursor, Integer limit) {
     }
 
+    public record WebShellDiagnosticTraceRequest(@NotBlank String sessionId,
+            @Size(max = 256) String cursor, @Min(1) @Max(100) Integer limit) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown diagnostic trace request field: " + name);
+        }
+    }
+
     public record WebShellTaskGetRequest(@NotBlank String sessionId,
             @NotBlank String taskId) {
     }

@@ -86,17 +86,55 @@ for (const width of [1280, 390]) {
     expect(diagnosticRequests).toEqual([]);
     await trigger.click();
     const dialog = page.getByRole('dialog');
+    if (width === 390) {
+      await dialog.evaluate((element) => {
+        element.style.fontFamily = 'Verdana, sans-serif';
+      });
+    }
+    const expectLayout = async () => {
+      await expect
+        .poll(() =>
+          dialog.evaluate((element) => {
+            const list = element.querySelector('[role="tablist"]')!;
+            const listRect = list.getBoundingClientRect();
+            const refresh = [...element.querySelectorAll('button')]
+              .find((button) => button.textContent === 'Refresh')!
+              .getBoundingClientRect();
+            return (
+              element.scrollWidth <= element.clientWidth &&
+              [...list.querySelectorAll('[role="tab"]')].every((tab) => {
+                const rect = tab.getBoundingClientRect();
+                return (
+                  rect.left >= listRect.left &&
+                  rect.right <= listRect.right &&
+                  rect.top >= listRect.top &&
+                  rect.bottom <= listRect.bottom &&
+                  (rect.bottom <= refresh.top ||
+                    rect.top >= refresh.bottom ||
+                    rect.right <= refresh.left ||
+                    rect.left >= refresh.right)
+                );
+              })
+            );
+          }),
+        )
+        .toBe(true);
+    };
     await expect(dialog).toContainText('System prompt');
     await expect(dialog).toContainText('predates a context change');
+    await expectLayout();
     await dialog.getByRole('tab', { name: 'Model statistics' }).click();
     await expect(dialog).toContainText('Counts belong to this Session');
     await expect(dialog).toContainText('Total tokens');
+    await expectLayout();
     await dialog.getByRole('tab', { name: 'Resources', exact: true }).click();
     await expect(dialog).toContainText('manual-skill');
     await dialog.getByText('docs', { exact: false }).first().click();
     await expect(dialog).toContainText('Historical discovery');
+    await expectLayout();
     await dialog.getByRole('tab', { name: 'Child agents' }).click();
     await expect(dialog).toContainText('Inspect changes');
+    await expectLayout();
     await expect(
       dialog.getByRole('button', { name: 'Open child Session' }),
     ).toHaveCount(0);

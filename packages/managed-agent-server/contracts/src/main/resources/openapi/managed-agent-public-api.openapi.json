@@ -7882,7 +7882,7 @@
             "in": "query",
             "schema": {
               "type": "string",
-              "maxLength": 4096
+              "maxLength": 256
             }
           },
           {
@@ -18655,7 +18655,7 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 4096
+                "maxLength": 256
               },
               {
                 "type": "null"

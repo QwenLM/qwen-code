@@ -190,6 +190,32 @@ function nativeInput(event: HookEventName): HookInput {
 describe('Hosted Harness model boundary', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it.each([false, true])(
+    'borrows diagnostics-only preparation while preserving durable capture (%s)',
+    async (durable) => {
+      const model = config([{ type: LlmEventType.Finished }]);
+      await runHostedHarnessTextTurn({
+        ...input,
+        ...(durable
+          ? { prepareModel: vi.fn().mockResolvedValue(undefined) }
+          : {}),
+        modelScope: {
+          bindBudget: vi.fn(),
+          evaluate: vi.fn(),
+          diagnosticsEnabled: true,
+          beginMainAttempt: vi.fn(),
+        },
+      });
+      const callback = (
+        model.sendOptions[0] as {
+          onPreparedRequest: LlmPreparedRequestCallback;
+        }
+      ).onPreparedRequest;
+      if (durable) expect(callback.maxSnapshotBytes).toBeGreaterThan(0);
+      else expect(callback.maxSnapshotBytes).toBe(0);
+    },
+  );
+
   it('classifies final call input using original user intent without Hook or compression instructions', async () => {
     config([
       { type: LlmEventType.Content, value: 'done' },

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+
 // Matches the private authority manifest proposed in #13526. Only the
 // dedicated container worker may accept this composition.
 export const CSI_FILES_RETIREMENT_CAPABILITY_DIGEST =
@@ -21,6 +23,33 @@ export function isCsiFilesCapability(digest: unknown): boolean {
 export type CsiFilesProfile =
   | 'csi-files-retirement/1'
   | 'csi-files-retirement/2';
+
+const sessionProfiles = new WeakMap<
+  ManagedSession['authority'],
+  CsiFilesProfile
+>();
+
+export async function readHostedCsiFileProfile(
+  session: ManagedSession,
+): Promise<CsiFilesProfile> {
+  const saved = sessionProfiles.get(session.authority);
+  if (saved) return saved;
+  const definition = JSON.parse(
+    (
+      await session.resources.read(
+        session.authority.sessionHeader.definitionRef,
+      )
+    ).toString('utf8'),
+  ) as { toolProfile?: unknown };
+  const profile = definition.toolProfile;
+  if (
+    profile !== 'csi-files-retirement/1' &&
+    profile !== 'csi-files-retirement/2'
+  )
+    throw new Error('Invalid CSI Session profile.');
+  sessionProfiles.set(session.authority, profile);
+  return profile;
+}
 
 export function matchesCsiFilesProfile(
   profile: unknown,

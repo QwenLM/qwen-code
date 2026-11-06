@@ -1146,7 +1146,12 @@ async function runPreparedHostedHarnessTextTurn(
         finished = false;
         usage.length = 0;
       };
-      prepare.maxSnapshotBytes = HOSTED_MODEL_REQUEST_BYTES;
+      prepare.maxSnapshotBytes =
+        input.prepareModel ||
+        input.publicChildModelRoute ||
+        input.toolTurn?.capturesChildModelRoute?.()
+          ? HOSTED_MODEL_REQUEST_BYTES
+          : 0;
       const usage: unknown[] = [];
       let finalOutputHandled = false;
       try {

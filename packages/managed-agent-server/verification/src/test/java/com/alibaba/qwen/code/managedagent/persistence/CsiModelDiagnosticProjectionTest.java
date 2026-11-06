@@ -47,6 +47,18 @@ class CsiModelDiagnosticProjectionTest {
                 fixture.references(), original(CsiFilesRetirementProfile.PROFILE), 10_000, true)).isInstanceOf(IllegalArgumentException.class);
     }
 
+    @Test
+    void aHookCarrierCanSupplyStatisticsWithoutReplacingTheMainContext() throws Exception {
+        var statistics = fixture(false, true, false);
+        assertThat(CsiModelDiagnosticProjection.reference(statistics.transactions(), statistics.records(), statistics.resources(),
+                statistics.references(), original(CsiFilesRetirementProfile.DIAGNOSTICS_PROFILE), 10_000, true)
+                .text("resource_id")).isEqualTo("stats-2");
+        var context = fixture(false, true, true);
+        assertThat(CsiModelDiagnosticProjection.reference(context.transactions(), context.records(), context.resources(),
+                context.references(), original(CsiFilesRetirementProfile.DIAGNOSTICS_PROFILE), 10_000, false)
+                .text("resource_id")).isEqualTo("stats-1");
+    }
+
     private RuntimeProvisionRequest original(String profile) {
         return CsiFilesRetirementProfile.request(new ContextBinding("tenant", "workspace", 1, "storage", ".",
                 CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1), "/workspace", SESSION, profile);
@@ -55,30 +67,41 @@ class CsiModelDiagnosticProjectionTest {
     private record Fixture(List<Row> transactions, List<Row> records, List<Row> resources, List<Row> references) { }
 
     private Fixture fixture(boolean conflict) throws Exception {
-        ObjectNode template = JSON.readTree(VerificationFixtures.moduleRoot()
-                .resolve("../core/src/managed-runtime/contracts/managed-model-statistics-v1.fixtures.json").toFile())
-                .path("valid").get(2).path("body").deepCopy();
+        return fixture(conflict, false, false);
+    }
+
+    private Fixture fixture(boolean conflict, boolean hook, boolean context) throws Exception {
+        var templates = JSON.readTree(VerificationFixtures.moduleRoot()
+                .resolve("../core/src/managed-runtime/contracts/managed-model-statistics-v1.fixtures.json").toFile()).path("valid");
         List<Row> transactions = new ArrayList<>();
         Map<String, Row> resources = new LinkedHashMap<>();
         List<Row> references = new ArrayList<>();
-        for (int sequence = 1; sequence <= 3; sequence++) {
+        for (int sequence = 1; sequence <= (context ? 2 : 3); sequence++) {
             String id = "stats-" + (sequence == 3 && !conflict ? 1 : sequence);
-            ObjectNode body = template.deepCopy();
+            String kind = hook && sequence == 2 ? ManagedModelDiagnostics.HOOK_KIND
+                    : context ? ManagedModelDiagnostics.MAIN_KIND : ManagedModelDiagnostics.STATS_KIND;
+            ObjectNode body = templates.get(ManagedModelDiagnostics.HOOK_KIND.equals(kind) ? 1
+                    : ManagedModelDiagnostics.MAIN_KIND.equals(kind) ? 0 : 2).path("body").deepCopy();
             body.withObject("/statistics").put("snapshotRevision", sequence == 2 ? 2 : 1);
             if (sequence == 3 && conflict) {
                 body.withObject("/statistics").put("observedAt", 9);
             }
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             Map<String, byte[]> resource = values("ma_resource");
-            put(resource, "resource_id", id, "resource_key", resourceKey(id), "kind", ManagedModelDiagnostics.STATS_KIND,
+            put(resource, "resource_id", id, "resource_key", resourceKey(id), "kind", kind,
                     "schema_version", "1", "byte_length", Integer.toString(bytes.length), "sha256", DigestUtils.sha256Hex(bytes),
                     "storage_kind", "MYSQL_INLINE", "state", "REFERENCED");
             resource.put("inline_bytes", bytes);
             resources.putIfAbsent(id, row("ma_resource", resource));
             ObjectNode event = JSON.createObjectNode().put("v", 1).put("sequence", sequence)
-                    .put("kind", "turn.settled").put("occurredAt", 1000 + sequence);
+                    .put("kind", ManagedModelDiagnostics.STATS_KIND.equals(kind) ? "turn.settled" : "model.attempt")
+                    .put("occurredAt", 1000 + sequence);
             event.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace").put("sessionId", SESSION);
-            event.putObject("payload").putObject("usageRef").put("resourceId", id).put("kind", ManagedModelDiagnostics.STATS_KIND)
+            ObjectNode payload = event.putObject("payload");
+            if (!ManagedModelDiagnostics.STATS_KIND.equals(kind)) {
+                payload.put("state", "output_committed");
+            }
+            payload.putObject("usageRef").put("resourceId", id).put("kind", kind)
                     .put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", DigestUtils.sha256Hex(bytes));
             ObjectNode envelope = JSON.createObjectNode().put("subtype", "managed_session_event_v1");
             envelope.set("managedSession", event);
@@ -94,12 +117,16 @@ class CsiModelDiagnosticProjectionTest {
                     "journal_revision", Integer.toString(sequence), "resource_id", id, "resource_key", resourceKey(id));
             references.add(row("ma_resource_ref", reference));
         }
+        String domain = context ? ManagedModelDiagnostics.CONTEXT_DOMAIN : ManagedModelDiagnostics.STATS_DOMAIN;
+        String key = context ? ManagedExtensionProjection.recordKey(SESSION, domain, "latest") : KEY;
+        String latest = context ? "1" : "2";
         Map<String, byte[]> projection = values("ma_session_record");
-        put(projection, "record_kind", "DOMAIN", "record_key", KEY, "domain", ManagedModelDiagnostics.STATS_DOMAIN,
-                "record_id", "latest", "revision", "2", "record_resource_id", "stats-2", "gmt_create", "1001", "settled_at", "1002", "first_sequence", "1");
+        put(projection, "record_kind", "DOMAIN", "record_key", key, "domain", domain,
+                "record_id", "latest", "revision", latest, "record_resource_id", "stats-" + latest,
+                "gmt_create", "1001", "settled_at", "100" + latest, "first_sequence", "1");
         Map<String, byte[]> reference = values("ma_resource_ref");
-        put(reference, "owner_kind", "SESSION_RECORD", "owner_key", KEY, "owner_revision", "2", "resource_id", "stats-2",
-                "resource_key", resourceKey("stats-2"), "gmt_create", "1002");
+        put(reference, "owner_kind", "SESSION_RECORD", "owner_key", key, "owner_revision", latest, "resource_id", "stats-" + latest,
+                "resource_key", resourceKey("stats-" + latest), "gmt_create", "100" + latest);
         references.add(row("ma_resource_ref", reference));
         return new Fixture(transactions, List.of(row("ma_session_record", projection)), List.copyOf(resources.values()), references);
     }

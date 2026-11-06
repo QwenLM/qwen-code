@@ -16,6 +16,9 @@ export async function generateNativeTextTurns(
     pathToFileURL(`${root}/packages/core/dist/src/managed-runtime/${name}.js`)
       .href;
   const { openManagedSession } = await import(core('managed-session-assembly'));
+  const { enableManagedSessionDiagnostics } = await import(
+    core('managed-session-diagnostics')
+  );
   const { createManagedHarnessHandle } = await import(
     core('managed-harness-factory')
   );
@@ -180,6 +183,7 @@ export async function generateNativeTextTurns(
       requireNew: true,
       create: { definitionRef, rootSnapshotRef, createdBy: 'hosted-harness' },
     });
+    if (input.diagnostics) await enableManagedSessionDiagnostics(managed);
     if (input.legacyTerminalShape) {
       const write = managed.sink.write.bind(managed.sink);
       managed.sink.write = (entry) =>

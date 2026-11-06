@@ -1443,8 +1443,7 @@ public final class CsiNativeActivationProof {
 
     private static JsonNode diagnosticUsage(JsonNode ref, Function<JsonNode, byte[]> resources) {
         String kind = text(ref, "kind");
-        require(Set.of(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.MAIN_KIND,
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.STATS_KIND).contains(kind));
+        require(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(kind));
         byte[] bytes = reference(ref, kind, resources);
         require(bytes.length <= 65_536);
         JsonNode body = readObject(bytes);

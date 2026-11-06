@@ -159,6 +159,7 @@ public class ManagedSessionResourcesService {
                     attempt("historyCoverage", () -> catalog(server, pin, latest, catalog));
                 }
             }
+            boundOutput();
             if ("partial".equals(result.path("historyCoverage").asText())) {
                 for (JsonNode server : serverItems) {
                     ((ObjectNode) server).put("historical", true).putNull("attemptRevision").putNull("attemptServerRevision")
@@ -170,7 +171,6 @@ public class ManagedSessionResourcesService {
                     }
                 }
             }
-            boundOutput();
             return result;
         }
 
@@ -364,19 +364,19 @@ public class ManagedSessionResourcesService {
                 return;
             }
             result.put("outputTruncated", true);
-            partial("historyCoverage", "public_output_limit");
+            while (!skillItems.isEmpty() && size > MAX_OUTPUT_BYTES - 4096) {
+                size -= bytes(skillItems.remove(skillItems.size() - 1)) + 1L;
+                partial("configCoverage", "public_output_limit");
+            }
             for (JsonNode server : serverItems) {
                 for (String kind : CAPABILITIES) {
                     ArrayNode values = (ArrayNode) server.get(kind);
                     while (!values.isEmpty() && size > MAX_OUTPUT_BYTES - 4096) {
                         size -= bytes(values.remove(values.size() - 1)) + 1L;
+                        partial("historyCoverage", "public_output_limit");
                         ((ObjectNode) server.get("discovery")).put(kind, "partial");
                     }
                 }
-            }
-            while (!skillItems.isEmpty() && size > MAX_OUTPUT_BYTES - 4096) {
-                size -= bytes(skillItems.remove(skillItems.size() - 1)) + 1L;
-                partial("configCoverage", "public_output_limit");
             }
         }
     }

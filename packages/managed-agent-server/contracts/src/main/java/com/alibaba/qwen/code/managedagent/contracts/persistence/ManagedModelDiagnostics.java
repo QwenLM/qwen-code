@@ -168,6 +168,8 @@ public final class ManagedModelDiagnostics {
         counters(bucket.get("failures"), Set.copyOf(FAILURES), "failures");
         counter(bucket.get("backoffRetries"), "backoffRetries");
         long total = bucket.get("requests").get("total").longValue();
+        long outcomes = OUTCOMES.stream().mapToLong(outcome -> bucket.get("requests").get(outcome).longValue()).sum();
+        require(total == Math.min(MAX_SAFE, outcomes), "Request totals must match their saturated outcomes.");
         for (JsonNode known : bucket.get("usageKnown")) {
             require(known.longValue() <= total, "Known usage cannot exceed requests.");
         }

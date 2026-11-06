@@ -358,9 +358,9 @@ export class ManagedSessionRecordSink {
       eventId: `turn:${turnId}`,
     };
     const usageRef =
-      (await getManagedSessionDiagnostics(
-        this.authority,
-      )?.publishTurnFallback()) ?? null;
+      (await getManagedSessionDiagnostics(this.authority)?.publishTurnFallback(
+        turnId,
+      )) ?? null;
     if (actor.class === 'harness' && held !== undefined) {
       const authorization = await this.authority.harnessRunAuthorization();
       if (

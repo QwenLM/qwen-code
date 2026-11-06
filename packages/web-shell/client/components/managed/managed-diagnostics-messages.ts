@@ -117,6 +117,92 @@ const messages = {
   complete: ['Complete', '完整'],
   discoveryFailed: ['Discovery failed', '发现失败'],
   discoveryStale: ['Stale', '已过期'],
+  discoveryPartial: ['Partial', '部分结果'],
+  resourceTruncated: [
+    'Some resource entries were omitted to fit this snapshot.',
+    '部分快照资源条目因大小限制被省略。',
+  ],
+  legacyHistory: [
+    'Older history has no model observations.',
+    '旧历史缺少模型观测。',
+  ],
+  unclosedTurn: ['A prior turn did not settle.', '此前有回合未完成结算。'],
+  unclosedModel: [
+    'A prior model call did not finish.',
+    '此前有模型调用未完成。',
+  ],
+  unclosedMaintenance: [
+    'A prior compression did not finish.',
+    '此前有压缩未完成。',
+  ],
+  observationError: [
+    'A model observation could not be recorded.',
+    '部分模型观测未能记录。',
+  ],
+  missingUsage: [
+    'Some token usage fields were not reported.',
+    '部分 token 用量字段未报告。',
+  ],
+  interruptedObservation: [
+    'A model observation was interrupted.',
+    '部分模型观测被中断。',
+  ],
+  counterOverflow: [
+    'A cumulative counter reached its limit.',
+    '累计计数已达到上限。',
+  ],
+  attributionIncomplete: [
+    'Some context could not be attributed.',
+    '部分上下文无法完成分类归因。',
+  ],
+  detailsTruncated: [
+    'Some context details were omitted.',
+    '部分上下文明细已省略。',
+  ],
+  resourceReadLimit: [
+    'The resource read limit was reached.',
+    '已达到资源读取上限。',
+  ],
+  configurationHistoryLimit: [
+    'Configuration history was limited.',
+    '配置历史超过读取上限。',
+  ],
+  mcpHistoryLimit: [
+    'MCP discovery history was limited.',
+    'MCP 发现历史超过读取上限。',
+  ],
+  extensionAttributionUnavailable: [
+    'Extension attribution is unavailable.',
+    '扩展归属信息不可用。',
+  ],
+  invalidResource: [
+    'A saved resource could not be validated.',
+    '部分已保存资源未通过校验。',
+  ],
+  resourceUnavailable: [
+    'A saved resource is unavailable.',
+    '部分已保存资源不可读取。',
+  ],
+  publicOutputLimit: [
+    'The response size limit was reached.',
+    '已达到响应大小上限。',
+  ],
+  childUnavailable: [
+    'Some child Sessions are unavailable to this viewer.',
+    '部分子会话对当前用户不可用。',
+  ],
+  descriptionUnavailable: [
+    'Some invocation descriptions are unavailable.',
+    '部分调用描述不可用。',
+  ],
+  invocationUnavailable: [
+    'Some invocation details are unavailable.',
+    '部分调用详情不可用。',
+  ],
+  unknownCoverage: [
+    'Additional observations are incomplete.',
+    '另有观测数据不完整。',
+  ],
   empty: ['No entries in this snapshot.', '此快照没有条目。'],
   openChild: ['Open child Session', '打开子会话'],
   state: ['State', '状态'],

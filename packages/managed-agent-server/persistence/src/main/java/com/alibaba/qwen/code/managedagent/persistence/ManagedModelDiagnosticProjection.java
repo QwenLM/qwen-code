@@ -200,7 +200,7 @@ final class ManagedModelDiagnosticProjection {
                 }
                 return;
             }
-            for (String field : List.of("totals", "sources", "rawOutputTokensTotal")) {
+            for (String field : List.of("totals", "sources", "overflow", "rawOutputTokensTotal")) {
                 requireMonotonicStatistics(previous.get(field), statistics.get(field));
             }
             for (JsonNode gap : previous.path("coverage").path("gaps")) {

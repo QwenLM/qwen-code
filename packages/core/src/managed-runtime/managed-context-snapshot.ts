@@ -34,6 +34,12 @@ export function captureManagedContext(input: {
   }>;
 }): Omit<ManagedCommittedContext, 'attemptId'> {
   const { prepared } = input;
+  const contextWindowSize =
+    typeof input.contextWindowSize === 'number' &&
+    Number.isSafeInteger(input.contextWindowSize) &&
+    input.contextWindowSize > 0
+      ? input.contextWindowSize
+      : null;
   const result: ManagedCommittedContext = {
     version: 1,
     attemptId: 'pending',
@@ -43,7 +49,7 @@ export function captureManagedContext(input: {
     observedAt: Date.now(),
     inputTokens: null,
     cachedTokens: null,
-    contextWindowSize: input.contextWindowSize ?? null,
+    contextWindowSize,
     breakdown: {
       systemPrompt: 0,
       builtinTools: 0,
@@ -155,15 +161,15 @@ export function captureManagedContext(input: {
       result.breakdown[category] += tokens;
     }
   }
-  if (input.contextWindowSize && input.contextWindowSize > 0) {
+  if (contextWindowSize !== null) {
     const { warn, auto, hard } = computeThresholds(
-      input.contextWindowSize,
+      contextWindowSize,
       input.autoCompactThreshold,
     );
     result.thresholds = {
-      warn: warn / input.contextWindowSize,
-      auto: auto / input.contextWindowSize,
-      hard: hard / input.contextWindowSize,
+      warn: warn / contextWindowSize,
+      auto: auto / contextWindowSize,
+      hard: hard / contextWindowSize,
     };
   }
   const { attemptId: _, ...snapshot } = boundManagedCommittedContext(result);

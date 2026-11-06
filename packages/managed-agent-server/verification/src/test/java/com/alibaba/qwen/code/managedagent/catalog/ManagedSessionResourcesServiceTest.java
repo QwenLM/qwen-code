@@ -201,6 +201,27 @@ class ManagedSessionResourcesServiceTest {
         assertThat(truncated.path("outputTruncated").asBoolean()).isTrue();
         assertThat(truncated.path("availability").asText()).isEqualTo("partial");
         assertThat(truncated.path("configCoverage").asText()).isEqualTo("partial");
+        assertThat(truncated.path("historyCoverage").asText()).isEqualTo("complete");
+        assertThat(truncated.at("/servers/0/lastAttemptState").asText()).isEqualTo("settled");
+        assertThat(truncated.at("/servers/0/releaseState").asText()).isEqualTo("active");
+    }
+
+    @Test
+    void capabilityOutputTruncationRemovesClaimsAboutCompleteHistory() throws Exception {
+        selection(pin("server").put("state", "enabled"));
+        ObjectNode catalog = catalog(1);
+        for (int index = 0; index < 256; index++) {
+            catalog.withArray("tools").addObject().put("name", "tool-" + index).put("description", "界".repeat(1365));
+        }
+        history(configuration(1, resource("managed-mcp-catalog", catalog)));
+        var truncated = get();
+        assertThat(JSON.writeValueAsBytes(truncated).length).isLessThanOrEqualTo(1024 * 1024);
+        assertThat(truncated.path("outputTruncated").asBoolean()).isTrue();
+        assertThat(truncated.path("historyCoverage").asText()).isEqualTo("partial");
+        for (String field : List.of("attemptRevision", "attemptServerRevision", "lastAttemptState", "lastExecutionState", "releaseState")) {
+            assertThat(truncated.at("/servers/0/" + field).isNull()).isTrue();
+        }
+        assertThat(truncated.at("/servers/0/discovery/tools").asText()).isEqualTo("stale");
     }
 
     @Test

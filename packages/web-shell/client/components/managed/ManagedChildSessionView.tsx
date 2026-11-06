@@ -134,7 +134,7 @@ export function ManagedChildSessionView({
               clientId={clientId}
               sessionId={sessionId}
               running={isManagedSessionRunning(detail.summary.phase)}
-              revision={`${detail.summary.compactionRevision}:${detail.summary.modelSelection?.revision}:${detail.summary.phase}`}
+              revision={`${detail.summary.compactionRevision}:${detail.summary.modelSelection?.revision}:${detail.summary.workspace?.contextRevision}:${detail.summary.phase}:${detail.summary.activeTurnId}`}
               onClose={() => setDiagnosticsOpen(false)}
               restoreFocus={() => diagnosticsTrigger.current?.focus()}
             />

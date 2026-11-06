@@ -50,6 +50,8 @@ Return Session identity, schema/observation revisions and explicit availability/
 
 Capture the actual prepared main-model request after model/tool selection and context installation. Publish its diagnostic snapshot only with the corresponding durable main output; Hook or compression requests do not replace the main-request context. A failed/uncommitted newer request does not make an older snapshot current. Bind the snapshot to its request/attempt, selected model, configuration/context and compaction facts, and retain explicit stale/partial reasons across fallback, model changes, compaction and recovery.
 
+The current persisted context pointer records invalidation, not a detailed cause history. These invalidations expose the shared `context_changed` stale reason; this slice does not claim to distinguish model, configuration and compaction causes after recovery.
+
 Provide exactly these independent local estimate categories:
 
 - `systemPrompt`
@@ -73,17 +75,25 @@ Use three source classes: `main`, `hook` and `compression`. Auxiliary model work
 
 Keep at most 16 named model buckets plus an explicit overflow bucket. Keep at most 20 recent samples for the whole Session, not 20 per model/source. Counts are cumulative; recent samples are bounded evidence and not a second counter source. Streaming and non-streaming success, error, cancellation, Hook requests, compression and retry backoff must all use the same collector semantics.
 
+Outcome totals must reconcile using saturated integer addition in both Java and TypeScript, including overflow buckets. Committed malformed diagnostics fail closed: skipping a corrupt resource would discard the accumulator revision and billing-budget baseline, so recovery must not continue with reset totals.
+
+Recovery reads maintenance carriers and statistics in batches of at most eight, then folds results in the original reference order. It still verifies every historical carrier and retains same-revision conflict detection and highest-revision selection; this bounds concurrency, not total history. A recovery-generated Turn settlement carries a budget only when its Session and Turn identities match that settlement. Otherwise its budget is null while cumulative statistics and raw-output accounting remain intact.
+
 Collect synchronously in memory. At the existing native `runSerial` commit boundary, freeze pending deltas, fold them into the newest committed baseline and allocate `snapshotRevision`. Retry the exact frozen bytes rather than recomputing the same delta. A later queued commit must fold from the latest baseline so nested Hook/compression work cannot be lost or counted twice. Recovery restores committed totals before new deltas; an unclosed native owner leaves a sticky coverage-gap marker. Replayed terminal events and duplicate commits do not increment counters again.
 
 ## 6. Resource budgets and persistence compatibility
 
 The diagnostic usage resource remains within the existing UTF-8 64 KiB inline limit. Partition that envelope as follows: statistics 40 KiB, context 8 KiB, envelope plus budget state 12 KiB, and 4 KiB reserve. Apply bounds before publication, including Unicode byte counts. Overflow/truncation is explicit. Do not store raw prompts/errors or the legacy `models` dictionary. Preserve the budget's raw-output total as a separate scalar, `rawOutputTokensTotal`; normalized diagnostic output must not silently replace its semantics.
 
+Reapply the context bound after assigning the actual attempt identity and provider usage. A diagnostics-only prepared-request observer uses the existing zero snapshot budget and measures its synchronous borrowed input without cloning it. A model window is known only when it is a positive safe integer; an absent observation timestamp remains unknown in the UI.
+
 Use main/hook usage v2 resources. Automatic compression is included with main terminal output or a `turn.settled` usage reference. A new maintenance v2 record carries `modelStatsRef`; its candidate is published before `PostCompact` so later Hook work can build on the correct baseline. Existing active v1 maintenance chains may finish with partial coverage. Leave `context.compacted.tokenCountsRef` unchanged. Do not add a native domain, a Stage H family, or a request journal.
 
 Reuse `ma_session_record` for derived `hosted_context_usage/latest` and `hosted_session_statistics/latest` projections. Updates are atomic with the source commit and resource references. Use a common highest-`snapshotRevision` rule to reject regression: a main r1 reference, followed by Hook r2, followed by an older r1 reference must retain r2 statistics. A Hook-only snapshot must not substitute Hook context for main context. Preserve applicable resource closure, retention and recovery checks; no DDL is required.
 
 Deploy control-plane readers for storage versions 1/2/3 before writers. The first v2 diagnostic write advances the stored reader floor to storage 3; an old worker is rejected with 409 instead of silently dropping diagnostics. Keep existing CSI behavior and `csi-files-retirement/1` intact. Add `csi-files-retirement/2` with its own manifest/proof for diagnostics-aware transfer, without making unsupported manual compression or other execution paths newly available. Old/v1 Sessions retain explicit partial legacy availability.
+
+Both CSI profiles still admit main-model attempts and file-history advancement only; Hook and manual-maintenance execution remain unavailable. The SQL inventory recognizes the shared diagnostic carrier kinds, while context projection uses only main carriers. `/2` is selected from the pinned immutable definition and enabled collector, not inferred by relaxing native activation proof.
 
 ## 7. Skills and MCP inventory
 
@@ -98,6 +108,8 @@ Scan at most 256 `mcp_configuration` history rows, with one additional sentinel 
 Configuration selection, latest attempt, published catalog and live health are separate facts. With complete history, select by recorded `configRevision`, retaining pin/revision identity; with partial history, results are bounded historical observations and latest/missing remain unknown. An old successful catalog cannot mask a newer failed attempt. Even `active` plus `settled` does not prove a live connection. Release/disabled states remain visible, and tools/resources/prompts have independent discovery coverage. `gmt_create` is operation creation time, not last observation; do not invent `observedAt` from the query time.
 
 Return `serverRevision` for the selected pin, `attemptRevision` plus `attemptServerRevision` for the latest recorded attempt, and `catalogRevision` plus `catalogServerRevision` for published discovery. `lastAttemptState` is the logical run state; `lastExecutionState` is the physical execution state. These are different even for a failed request whose execution conclusively settled. When history is incomplete, the attempt fields and `releaseState` are null; retain any observed catalog as `historical` with stale/unknown discovery. Nullable fields remain present in the response.
+
+Output bounding removes Skills before dropping MCP history, and history completeness is normalized after any capability truncation. Removing Skills alone cannot invalidate complete MCP attempt evidence. Surface output truncation, partial discovery and individual coverage reasons separately.
 
 ## 8. Direct child invocation trace
 

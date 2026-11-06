@@ -50,6 +50,8 @@
 
 在模型/工具选择和 context 安装之后，采集实际 prepared 主模型请求。仅随对应的持久主输出发布诊断快照；Hook 或压缩请求不替换主请求 context。更新请求失败或尚未提交时，不能让旧快照显得仍是当前值。快照绑定请求/attempt、所选模型、配置/context 和压缩事实；fallback、模型切换、压缩与恢复之后保留明确 stale/partial 原因。
 
+当前持久化 context 指针记录失效状态，不保存详细原因历史。这些失效统一返回 `context_changed` stale 原因；本切片不宣称能在恢复后区分模型、配置和压缩导致的失效。
+
 提供且仅提供以下独立本地估算分类：
 
 - `systemPrompt`
@@ -73,17 +75,25 @@ Provider 报告的总量与本地估算分开。Cached tokens 与 input 重叠�
 
 最多保留 16 个具名模型桶及一个显式 overflow 桶。整个 Session 最多保留 20 条近期样本，而不是每个模型/来源各 20 条。计数是累计值；近期样本是有界证据，不能再作为第二套计数来源。流式/非流式成功、错误、取消、Hook、压缩和重试退避共用同一采集语义。
 
+Java 与 TypeScript 均使用饱和整数加法核对终态计数之和，包括 overflow 桶。已提交的畸形诊断按失败关闭处理：跳过损坏资源会丢失累计 revision 和费用预算基线，因此恢复不能清零累计后继续。
+
+恢复时以最多八项的小批次读取 maintenance carrier 和统计，再按原引用顺序折叠。仍校验全部历史 carrier，保留同 revision 冲突检测和最高 revision 选择；限制的是并发数，不是总历史量。恢复生成的 Turn 结算仅在预算的 Session 和 Turn 身份均匹配时携带预算，否则该 carrier 的预算为 null，累计统计和原始输出计数保持不变。
+
 采集同步写入内存。在现有 native `runSerial` commit 边界冻结待提交增量，从最新已提交 baseline 折叠，并分配 `snapshotRevision`。重试复用完全相同的冻结 bytes，不重新计算同一增量。后续排队 commit 必须从最新 baseline 折叠，防止嵌套 Hook/压缩工作丢失或重复计数。恢复时先还原已提交总量再接收增量；未闭合 native owner 留下 sticky coverage-gap 标记。终态重放与重复 commit 不再次递增计数。
 
 ## 6. 资源预算与持久化兼容
 
 诊断 usage 资源保持在现有 UTF-8 64 KiB inline 上限内。分配如下：统计 40 KiB、context 8 KiB、envelope 加 budget state 12 KiB、预留 4 KiB。发布前按字节落实限制，覆盖 Unicode。Overflow/截断必须显式表达。不保存原始 prompt/error 或旧 `models` 字典。Budget 的原始输出总量作为独立标量 `rawOutputTokensTotal` 保留；规范化诊断 output 不能静默替代其语义。
 
+填入实际 attempt 身份和 provider usage 后，再次落实 context 大小限制。仅用于诊断的 prepared-request observer 使用已有零 snapshot budget，同步测量临时借用的输入，不复制请求。模型窗口仅在正的安全整数时才视为已知；观察时间缺失时，UI 保持未知。
+
 使用 main/hook usage v2 资源。自动压缩随 main terminal output 或 `turn.settled` 的 usage 引用提交。新的 maintenance v2 record 携带 `modelStatsRef`；candidate 在 `PostCompact` 之前发布，让后续 Hook 从正确 baseline 继续。已有活动 v1 maintenance 链允许以部分覆盖兼容收尾。保持 `context.compacted.tokenCountsRef` 不变。不新增 native domain、Stage H 家族或请求 journal。
 
 复用 `ma_session_record` 保存派生 `hosted_context_usage/latest` 与 `hosted_session_statistics/latest` 投影。投影和资源引用随源 commit 原子更新。统一采用最高 `snapshotRevision` 规则阻止回退：main r1 引用、随后 Hook r2、再到旧 r1 引用，统计必须保持 r2。仅 Hook 快照不能以 Hook context 替换主 context。保持适用的资源闭包、保留与恢复检查；不需要 DDL。
 
 先部署可读取 storage 1/2/3 的控制面，再启用 writer。首次写入 v2 诊断时，将持久 reader floor 推进为 storage 3；旧 worker 返回 409，不静默丢弃诊断。保留已有 CSI 行为与 `csi-files-retirement/1`。新增独立 manifest/proof 的 `csi-files-retirement/2`，用于理解诊断的转移，但不让原本不支持的手动压缩或其他执行路径变为可用。旧/v1 Session 保持明确的部分 legacy 可用性。
+
+两个 CSI profile 仍只允许主模型 attempt 与 file-history 推进；Hook 和手动 maintenance 执行继续不可用。SQL inventory 识别共享诊断 carrier kind，而 context 投影仅使用 main carrier。依据固定的不可变 definition 和已启用 collector 选择 `/2`，不放宽 native activation proof 来推断版本。
 
 ## 7. Skills 与 MCP 清单
 
@@ -98,6 +108,8 @@ Active bundle 的 `independentMcpSelections` 保留独立服务器 disabled/remo
 配置选择、最新 attempt、已发布 catalog 与实时健康是不同事实。历史完整时按记录的 `configRevision` 选择，并保留 pin/revision 身份；历史部分覆盖时只表达有界历史观察，latest/missing 保持未知。旧成功 catalog 不能掩盖更新的失败 attempt。即便 `active` 加 `settled`，也不能证明连接当前在线。Release/disabled 状态保持可见，tools/resources/prompts 各有独立发现覆盖。`gmt_create` 是 operation 创建时间，不是最近观察；不以查询时间虚构 `observedAt`。
 
 `serverRevision` 表示所选 pin，`attemptRevision` 加 `attemptServerRevision` 表示最新已记录尝试，`catalogRevision` 加 `catalogServerRevision` 表示已发布发现结果。`lastAttemptState` 是逻辑 run 状态，`lastExecutionState` 是物理执行状态；即使失败请求的执行已经确定结束，这两者也不同。历史不完整时，attempt 字段及 `releaseState` 均为 null；保留已观察到的 catalog，标记 `historical`，发现状态为 stale/unknown。可空字段仍出现在响应中。
+
+输出限额优先移除 Skills，再缩减 MCP 历史，并在能力截断后归一历史完整性。仅移除 Skills 不得使完整的 MCP attempt 证据失效。输出截断、部分发现结果和逐项 coverage 原因分别展示。
 
 ## 8. 直接子代理调用 trace
 

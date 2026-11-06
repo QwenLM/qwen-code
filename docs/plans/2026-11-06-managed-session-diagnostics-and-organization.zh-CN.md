@@ -105,3 +105,23 @@ Chromium fixture 在 1280 px 和 390 px 下通过，覆盖四个页签、关闭�
 集成后的 TypeScript 代码通过根目录 build/typecheck/bundle、282 项 WebShell 测试、26 项结构化提问测试、4 项所选 Hosted Session 测试（687 项明确未选）和 2 项 Chromium fixture。共享 Java 账本累计 599.08/600 秒，其中保守计入了整个前置工作区重建。按本计划预算，不再执行额外本地 Java 检查。
 
 有界 Java 增量检查完成 ClassSizeRatchet 和 CSI `/1` 用例，新增 CSI `/2` 缺失 request key 用例失败，随后在结构化提问测试启动期间停止。失败表明旧生成 guard 标记在 request key 缺失时未覆盖 `/2`。现已在同一次主键加锁读取中补充 tool profile 判定，保留回归断言且不增加 DDL。修正后的 Java 源码尚未在本地重跑；其编译、定向测试和完整验收仍等待 CI。此前 9 项 MySQL、打包 Hosted 和 2 项 CSI 通过证据属于重基前实现，不能证明最终 Java 增量已通过。
+
+## 10. 评审与 CI 修正轮次
+
+本轮修复 CSI 测试 admission fixture，缓存不可变 profile 读取，避免仅诊断 observer 复制 prepared request，在填入最终 attempt 元数据后限制 context，并拒绝无效模型容量。Java 终态总数及 overflow 单调性与共享 TypeScript 契约对齐，修正资源截断覆盖状态，补充真实 `/2` 诊断提交/重放及 `/1` 拒绝用例。CSI 仍不支持 Hook 和手动 maintenance；损坏的已提交诊断继续失败关闭。重复投影扫描留待测量证据支持后单独优化。
+
+WebShell trace 请求现拒绝未知字段，limit/cursor 限制与 OpenAPI 一致。Capability parity 包含已实现的四个诊断 surface；从源码生成的 route 和 SQL capture 分别包含 178 条路由、356 条 SQL ownership。子会话 context 刷新包含活动 Turn 和 workspace context revision。界面展示未知时间、具体 coverage 原因及部分发现结果；trace 分页失败仍可返回上一页。页签换行后按实际高度布局，390 px 回归强制使用 Verdana，检查四个页签的溢出和重叠，保留原有断言。
+
+本轮定向证据为 Core context/Hook/statistics 40 项及最终 restore/Hook/sink 66 项（重叠用例不累加），另有 prepared-request 14 项（明确未选 703 项）、CLI 210 项及 capability-parity 210 项、WebShell 15 项及 Chromium fixture 2 项。独立 CSI retirement/admission 验证通过 CLI 所选用例中的 10 项；属于重复验证，不另加十项独立测试。根目录 TypeScript build、typecheck 与 bundle 已完成；格式与定向 lint 记录在本地报告。Build 日志完整，但命令退出元数据在上下文压缩时丢失。未重新启动 Java、Maven 或 MySQL 验证；共享账本保持 599.08/600 秒。
+
+被评审 head `42562a31bd` 的 CI 确认此前 CSI guard 修正通过，同时发现过期 route/SQL capture、model-selection 断言，以及两个漏启 collector 的 `/2` Hosted fixture；这些输入已在本轮修正。Approval failover runner 现期待诊断 storage floor 3。两个 Hosted 假模型工具列表补入已允许的 question 工具，该偏差在 base commit 也存在。这些 Java/真实进程修正未在本地验证，需要新 head CI。保留的 Hosted 故障 artifact 明确了 automation DELETE 503 的原因：冷恢复结算 Turn B 时，快照仍携带从 Turn A 恢复的预算，因此服务端正确拒绝统计并停止写入。结算 carrier 必须接收实际 Turn 身份并省略无关预算；保留 Java 校验。该真实进程修正仍需新 head CI；未盲目重跑，也未报告通过。此前 CI 失败及评审前所选成功证据保持分别记录。
+
+最终 Core 包构建先因新增冷恢复夹具缺少必需的 `endedAt` 字段而失败。补齐后，该冷恢复定向用例及 Core 构建通过；此前 66 项结果分别保留，不重复累加该用例。
+
+## 11. 最新 main 的 CI freshness 集成
+
+首个修正提交 `75f72f708f` 进入 CI 后，Lint & Static 因 main 已更新 CI host-asset 交接而被 freshness guard 拦截。两个 PR 提交已无冲突重基到 `80fd7c3353`。该基线还更新 Hosted 基础工具、本地 journal prefix 刷新、WebShell 入口布局、JDBC helper/锁范围及包版本 0.26.9。Latency 假模型预期现包含新允许的 `glob`，与上游 workspace driver 一致，保留严格工具列表比较。
+
+静态集成复核保留上游共享 JDBC helper、摘要实现和锁范围，以及两个 CSI profile、诊断预算和恢复修正。不重新启动 Java 验证；共享账本保持 599.08/600 秒。此前成功检查仅在测试输入不变时继续作为证据；更新后的 TypeScript 基础及受影响消费者在发布刷新分支前进行定向验证。
+
+刷新后的代码通过完整根目录 TypeScript build、根目录 typecheck（含 integration 消费者）、bundle、Core restore/Hook/sink 66 项及本地 journal snapshot 30 项、CLI 诊断消费者 210 项及所选基础工具/恢复分支 21 项（明确未选 1,336 项），以及 host-asset 交接元测试 3 项（明确未选 78 项）。首次 Core 选择器误将 journal 文件放在另一目录下，因此仅运行 66 项；修正选择器后单独运行全部 30 项 journal 用例。诊断浏览器 fixture 不挂载变更后的 Sidebar，page/Dialog/Tabs 源码不变，因此此前受控布局 2/2 证据仍有效，未重复执行。WebShell 与 capability-parity 证据同样仅在消费者未变时复用。所有新增 Java 和真实 Hosted/fault 检查仍等待发布 head 的 CI。

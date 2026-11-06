@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.HistoricalScan;
@@ -59,15 +60,14 @@ final class CsiModelDiagnosticProjection {
                 String eventKind = event.path("kind").asText();
                 JsonNode payload = event.path("payload");
                 if (!statistics && latest != null
-                        && com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.MAIN_KIND.equals(
-                                latest.path("payload").path("usageRef").path("kind").asText())
+                        && ManagedModelDiagnostics.MAIN_KIND.equals(latest.path("payload").path("usageRef").path("kind").asText())
                         && ManagedModelDiagnosticProjection.invalidatesContext(eventKind, payload.path("domain").asText())) {
                     stale = true;
                 }
                 JsonNode candidateUsage = payload.path("usageRef");
                 String usageKind = candidateUsage.path("kind").asText();
                 JsonNode observation = null;
-                if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(usageKind)) {
+                if (ManagedModelDiagnostics.KINDS.contains(usageKind)) {
                     requireEncoded(diagnostics && Set.of("model.attempt", "turn.settled").contains(eventKind));
                     var matches = resources.stream().filter(row -> row.membership() == Membership.ORIGINAL
                             && candidateUsage.path("resourceId").asText().equals(row.text("resource_id"))).toList();
@@ -78,7 +78,7 @@ final class CsiModelDiagnosticProjection {
                             && Objects.equals(carrier.text("sha256"), candidateUsage.path("digest").asText())
                             && Objects.equals(carrier.number("byte_length"), candidateUsage.path("byteLength").longValue()));
                     observation = CsiNativeActivationProof.readObject(HistoricalScan.payload(carrier, "inline_bytes", "sha256", 65_536));
-                    com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.requireBody(usageKind, observation);
+                    ManagedModelDiagnostics.requireBody(usageKind, observation);
                     JsonNode snapshot = observation.get("statistics");
                     String digest = CsiNativeActivationProof.sha256(utf8(CsiNativeActivationProof.canonical(snapshot)));
                     String previous = snapshots.putIfAbsent(snapshot.path("snapshotRevision").longValue(), digest);
@@ -98,7 +98,8 @@ final class CsiModelDiagnosticProjection {
                         }
                     }
                     latestStatistics = snapshot;
-                } else if (!"model.attempt".equals(eventKind) || !"output_committed".equals(payload.path("state").asText())) {
+                } else if (!"model.attempt".equals(eventKind) || !"output_committed".equals(payload.path("state").asText())
+                        || !Set.of("managed-hosted-model-usage", ManagedModelDiagnostics.MAIN_KIND).contains(usageKind)) {
                     continue;
                 }
                 JsonNode sessionKey = event.path("sessionKey");
@@ -134,9 +135,9 @@ final class CsiModelDiagnosticProjection {
         requireEncoded(tenant.equals(resource.text("tenant_id")) && workspace.equals(resource.text("workspace_id"))
                 && session.equals(resource.text("session_id")) && "REFERENCED".equals(resource.text("state"))
                 && resource.text("kind").equals(usage.path("kind").textValue())
-                && (statistics ? Set.of("managed-hosted-model-usage-v2", "managed-session-model-stats").contains(resource.text("kind"))
+                && (statistics ? ManagedModelDiagnostics.KINDS.contains(resource.text("kind"))
                         : "managed-hosted-model-usage".equals(resource.text("kind"))
-                                || diagnostics && "managed-hosted-model-usage-v2".equals(resource.text("kind")))
+                                || diagnostics && ManagedModelDiagnostics.MAIN_KIND.equals(resource.text("kind")))
                 && ManagedExtensionRecords.count(usage.get("schemaVersion"), 1, 1, "usage.schemaVersion") == 1
                 && Objects.equals(resource.number("byte_length"),
                         ManagedExtensionRecords.count(usage.get("byteLength"), 1, ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES, "usage.byteLength"))

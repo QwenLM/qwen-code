@@ -20,6 +20,7 @@ import {
 import { parseHistoryMaintenance } from './managed-history-maintenance-record.js';
 import {
   addModelStatisticsGap,
+  boundManagedCommittedContext,
   boundManagedModelStatistics,
   createManagedModelStatistics,
   MANAGED_MODEL_STATISTICS_KINDS,
@@ -66,6 +67,42 @@ export class ManagedSessionDiagnostics {
       1,
       this.session.authority.committedSequence,
     );
+    const maintenance = new Map<
+      string,
+      {
+        ref: ManagedSessionDurableRef;
+        modelStatsRef: ManagedSessionDurableRef | null;
+      }
+    >();
+    for (const event of events) {
+      if (
+        event.kind !== 'domain.committed' ||
+        event.payload['domain'] !== 'history_maintenance'
+      )
+        continue;
+      const ref = assertManagedSessionDurableRef(
+        event.payload['recordRef'],
+        'maintenance recordRef',
+      );
+      maintenance.set(managedSessionJsonDigest(ref), {
+        ref,
+        modelStatsRef: null,
+      });
+    }
+    const maintenanceRefs = [...maintenance.values()];
+    for (let index = 0; index < maintenanceRefs.length; index += 8) {
+      await Promise.all(
+        maintenanceRefs.slice(index, index + 8).map(async (entry) => {
+          const record = parseHistoryMaintenance(
+            JSON.parse(
+              (await this.session.resources.read(entry.ref)).toString('utf8'),
+            ),
+          );
+          entry.modelStatsRef =
+            record.schemaVersion === 2 ? record.modelStatsRef : null;
+        }),
+      );
+    }
     const refs = new Map<string, ManagedSessionDurableRef>();
     const attempts = new Set<string>();
     const turns = new Set<string>();
@@ -102,13 +139,10 @@ export class ManagedSessionDiagnostics {
           event.payload['recordRef'],
           'maintenance recordRef',
         );
-        const record = parseHistoryMaintenance(
-          JSON.parse(
-            (await this.session.resources.read(recordRef)).toString('utf8'),
-          ),
-        );
-        if (record.schemaVersion === 2 && record.modelStatsRef)
-          refs.set(record.modelStatsRef.resourceId, record.modelStatsRef);
+        const modelStatsRef = maintenance.get(
+          managedSessionJsonDigest(recordRef),
+        )!.modelStatsRef;
+        if (modelStatsRef) refs.set(modelStatsRef.resourceId, modelStatsRef);
       }
     }
     for (const entry of this.session.authority.extensionRecordsInDomain(
@@ -129,32 +163,39 @@ export class ManagedSessionDiagnostics {
       refs.size === 0 &&
       events.some((event) => event.kind === 'message.committed');
     const revisionDigests = new Map<number, string>();
-    for (const ref of refs.values()) {
-      if (ref.schemaVersion !== 1)
-        throw new ManagedSessionRecordError(
-          'Unsupported model statistics resource version.',
-        );
-      const envelope = parseManagedStatisticsEnvelope(
-        ref.kind,
-        parseManagedSessionRecordJson(
-          (await this.session.resources.read(ref)).toString('utf8'),
-          64 * 1024,
-        ),
+    const statisticsRefs = [...refs.values()];
+    for (let index = 0; index < statisticsRefs.length; index += 8) {
+      const envelopes = await Promise.all(
+        statisticsRefs.slice(index, index + 8).map(async (ref) => {
+          if (ref.schemaVersion !== 1)
+            throw new ManagedSessionRecordError(
+              'Unsupported model statistics resource version.',
+            );
+          return parseManagedStatisticsEnvelope(
+            ref.kind,
+            parseManagedSessionRecordJson(
+              (await this.session.resources.read(ref)).toString('utf8'),
+              64 * 1024,
+            ),
+          );
+        }),
       );
-      const statistics = envelope.statistics;
-      const digest = managedSessionJsonDigest(statistics);
-      if (
-        revisionDigests.has(statistics.snapshotRevision) &&
-        revisionDigests.get(statistics.snapshotRevision) !== digest
-      )
-        throw new ManagedSessionRecordError(
-          'Conflicting model statistics revision.',
-        );
-      revisionDigests.set(statistics.snapshotRevision, digest);
-      if (statistics.snapshotRevision > this.revision) {
-        this.statistics = statistics;
-        this.revision = statistics.snapshotRevision;
-        this.budget = envelope.budget;
+      for (const envelope of envelopes) {
+        const statistics = envelope.statistics;
+        const digest = managedSessionJsonDigest(statistics);
+        if (
+          revisionDigests.has(statistics.snapshotRevision) &&
+          revisionDigests.get(statistics.snapshotRevision) !== digest
+        )
+          throw new ManagedSessionRecordError(
+            'Conflicting model statistics revision.',
+          );
+        revisionDigests.set(statistics.snapshotRevision, digest);
+        if (statistics.snapshotRevision > this.revision) {
+          this.statistics = statistics;
+          this.revision = statistics.snapshotRevision;
+          this.budget = envelope.budget;
+        }
       }
     }
     for (const event of [...events].reverse()) {
@@ -254,6 +295,7 @@ export class ManagedSessionDiagnostics {
     kind: string,
     route: object = {},
     context: ManagedCommittedContext | null = null,
+    budget: ManagedStatisticsBudget | null = this.budget,
   ): Promise<ManagedSessionDurableRef> {
     const observations = this.observations;
     this.statistics.snapshotRevision = ++this.revision;
@@ -265,9 +307,9 @@ export class ManagedSessionDiagnostics {
     const envelope = parseManagedStatisticsEnvelope(kind, {
       version: kind === MANAGED_MODEL_STATISTICS_KINDS.snapshot ? 1 : 2,
       ...route,
-      budget: this.budget,
+      budget,
       statistics: this.statistics,
-      context,
+      context: context ? boundManagedCommittedContext(context) : null,
     });
     const ref = await this.session.resources.publish(
       kind,
@@ -277,9 +319,17 @@ export class ManagedSessionDiagnostics {
     return ref;
   }
 
-  publishTurnFallback(): Promise<ManagedSessionDurableRef | null> {
+  publishTurnFallback(
+    turnId: string,
+  ): Promise<ManagedSessionDurableRef | null> {
+    const budget =
+      this.budget?.promptId === turnId &&
+      this.budget.sessionId ===
+        this.session.authority.sessionHeader.sessionKey.sessionId
+        ? this.budget
+        : null;
     return this.dirty
-      ? this.publish(MANAGED_MODEL_STATISTICS_KINDS.snapshot)
+      ? this.publish(MANAGED_MODEL_STATISTICS_KINDS.snapshot, {}, null, budget)
       : Promise.resolve(null);
   }
 }

@@ -2733,7 +2733,7 @@ try {
         ),
       );
       if (
-        privateHead[0] !== '2' ||
+        privateHead[0] !== '3' ||
         checkpoint.continuation?.phase !== 'await_action' ||
         checkpoint.approval?.requestId !== originalApprovalId
       ) {

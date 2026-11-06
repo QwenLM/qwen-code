@@ -9,6 +9,28 @@ import { captureManagedContext } from './managed-context-snapshot.js';
 import type { LlmPreparedRequest } from '../core/llm-chat.js';
 
 describe('committed prepared context snapshot', () => {
+  it.each([undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity])(
+    'records an invalid context window as unknown (%s)',
+    (contextWindowSize) => {
+      const context = captureManagedContext({
+        prepared: {
+          request: { model: 'main', contents: [], config: {} },
+          history: [],
+          completedToolCallIds: [],
+          routeSelector: 'main',
+          providerPin: 'a'.repeat(64),
+          promptTokensForClamp: 0,
+        },
+        turnId: 'turn',
+        contextWindowSize,
+        mcpToolNames: new Set(),
+        origins: [],
+      });
+      expect(context.contextWindowSize).toBeNull();
+      expect(context.thresholds).toBeNull();
+    },
+  );
+
   it('attributes actual request declarations and trusted injected origins without retaining content', () => {
     const prepared: LlmPreparedRequest = {
       request: {

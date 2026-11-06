@@ -138,6 +138,26 @@ class ManagedModelContextTest {
     }
 
     @Test
+    void decreasingOverflowStatisticsRollBackTheOriginalTransaction() throws Exception {
+        var journal = open(TENANT, "overflow-regression", true);
+        ObjectNode first = diagnosticBody("snapshot-zero", 1);
+        for (String field : List.of("totals", "sources/main", "overflow")) {
+            first.withObject("/statistics/" + field + "/requests").put("total", 2).put("success", 2);
+        }
+        commit(journal, diagnosticRequest(journal, "first", first, ManagedModelDiagnostics.STATS_KIND, "completed"));
+        long revision = records.findModelDiagnostics(TENANT, "overflow-regression").readRevision();
+        ObjectNode next = first.deepCopy();
+        next.withObject("/statistics").put("snapshotRevision", 2);
+        next.withObject("/statistics/overflow/requests").put("total", 1).put("success", 1);
+        assertThatThrownBy(() -> commit(journal, diagnosticRequest(journal, "regressing", next,
+                ManagedModelDiagnostics.STATS_KIND, "completed"))).isInstanceOf(ManagedAgentException.class)
+                .hasMessageContaining("cannot decrease");
+        var saved = records.findModelDiagnostics(TENANT, "overflow-regression");
+        assertThat(saved.readRevision()).isEqualTo(revision);
+        assertThat(saved.statistics().at("/overflow/requests/total").longValue()).isEqualTo(2);
+    }
+
+    @Test
     void staleContextRemainsReadableAfterCompactionAndTheBadgeReturnsAfterTheNextModel() throws Exception {
         var journal = open(TENANT, "stale-diagnostic", true);
         commit(journal, diagnosticRequest(journal, "main", diagnosticBody("main-zero", 1), ManagedModelDiagnostics.MAIN_KIND, "output_committed"));
