@@ -4140,21 +4140,32 @@ export function App({
         ? trustedLiveWorkspaces[0]?.cwd
         : undefined
       : connection.workspaceCwd;
-  const sidebarlessLiveStateWorkspaceCwds = useMemo(() => {
-    if (
-      sidebarOptions.enabled ||
-      !connection.sessionId ||
-      !activePromptWorkspaceCwd ||
-      !isAbsolutePath(activePromptWorkspaceCwd)
-    ) {
-      return [];
-    }
-    const trusted = workspaces.some(
-      (entry) => entry.cwd === activePromptWorkspaceCwd && entry.trusted,
+  const [splitPaneWorkspaces, setSplitPaneWorkspaces] = useState<
+    readonly string[]
+  >([]);
+  const reportSplitPaneWorkspaces = useCallback((cwds: readonly string[]) => {
+    setSplitPaneWorkspaces((current) =>
+      current.length === cwds.length &&
+      current.every((cwd, index) => cwd === cwds[index])
+        ? current
+        : cwds,
     );
-    return trusted ? [activePromptWorkspaceCwd] : [];
+  }, []);
+  const sidebarlessLiveStateWorkspaceCwds = useMemo(() => {
+    if (sidebarOptions.enabled) return [];
+    const targets = new Set(splitPaneWorkspaces);
+    if (connection.sessionId && activePromptWorkspaceCwd) {
+      targets.add(activePromptWorkspaceCwd);
+    }
+    return workspaces
+      .filter(
+        (entry) =>
+          targets.has(entry.cwd) && entry.trusted && isAbsolutePath(entry.cwd),
+      )
+      .map((entry) => entry.cwd);
   }, [
     sidebarOptions.enabled,
+    splitPaneWorkspaces,
     connection.sessionId,
     activePromptWorkspaceCwd,
     workspaces,
@@ -24073,6 +24084,11 @@ export function App({
                         // callback stable to avoid looping SplitView's reporting
                         // effect.
                         onPanesChange={handleSplitPanesChange}
+                        onPaneWorkspacesChange={
+                          sidebarOptions.enabled
+                            ? undefined
+                            : reportSplitPaneWorkspaces
+                        }
                         onPendingPanesChange={handleSplitPendingPanesChange}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
