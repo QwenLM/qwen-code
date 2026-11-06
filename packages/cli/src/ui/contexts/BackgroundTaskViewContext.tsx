@@ -200,8 +200,25 @@ export function BackgroundTaskViewProvider({
   // would approve the background command (#16432 R1-2). Entering detail
   // stays an explicit user navigation.
   const surfacedApprovalIdsRef = useRef<Set<string>>(new Set());
+  // Parked queue-head ids at the moment the user closed the dialog. Without
+  // this, the close itself re-runs the effect, which finds the next entry
+  // that still holds a parked approval and re-opens in the same frame — with
+  // two parked workflows Escape looks broken and re-arms the disarm. A
+  // genuinely new approval changes the snapshot and surfaces normally.
+  const parkedHeadIds = entries
+    .map((entry) =>
+      entry.kind === 'workflow' && entry.pendingApprovals[0]
+        ? entry.pendingApprovals[0].approvalId
+        : '',
+    )
+    .join('|');
+  const closedParkedHeadIdsRef = useRef<string | null>(null);
   useEffect(() => {
     if (dialogMode !== 'closed') return;
+    if (closedParkedHeadIdsRef.current !== null) {
+      if (closedParkedHeadIdsRef.current === parkedHeadIds) return;
+      closedParkedHeadIdsRef.current = null;
+    }
     const index = entries.findIndex(
       (entry) =>
         entry.kind === 'workflow' &&
@@ -216,9 +233,13 @@ export function BackgroundTaskViewProvider({
     if (!approval) return;
     surfacedApprovalIdsRef.current.add(approval.approvalId);
     setRawSelectedIndex(index);
+    // Same invariant `openDialog` establishes: dialog open ⇒ pill unfocused.
+    // The pill subscribes on `pillFocused` alone, so leaving it focused lets
+    // its Enter run `openDialog()` and clear the disarm (#16432 R3-2).
+    setPillFocused(false);
     setAutoOpened(true);
     setDialogMode('list');
-  }, [entries, dialogMode]);
+  }, [entries, dialogMode, parkedHeadIds]);
 
   // rawSelectedIndex can fall out of range when entries shrink; clamp on read.
   const selectedIndex =
@@ -246,9 +267,16 @@ export function BackgroundTaskViewProvider({
   }, []);
 
   const closeDialog = useCallback(() => {
+    // A dismissal before the acknowledgment would consume the latch with the
+    // approval never seen: the dialog closes, the effect skips the latched
+    // head forever and the run falls back to the badge-only hang this PR
+    // removes. Swallow it like the other composer-aimed keys; Ctrl+C reaches
+    // here through `closeAnyOpenDialog` too (#16432 R3-1).
+    if (autoOpened) return;
+    closedParkedHeadIdsRef.current = parkedHeadIds;
     setAutoOpened(false);
     setDialogMode('closed');
-  }, []);
+  }, [autoOpened, parkedHeadIds]);
 
   const acknowledgeAutoOpen = useCallback(() => {
     setAutoOpened(false);

@@ -1860,6 +1860,7 @@ describe('BackgroundTasksDialog', () => {
       const h = await autoSurfacedWorkflow();
       // Close the auto-open, then reopen deliberately: the disarm tag
       // must not survive into a user-initiated open.
+      h.call(() => h.probe.current!.actions.acknowledgeAutoOpen());
       h.call(() => h.probe.current!.actions.closeDialog());
       h.call(() => h.probe.current!.actions.openDialog());
       expect(h.probe.current!.state.autoOpened).toBe(false);
@@ -1869,6 +1870,63 @@ describe('BackgroundTasksDialog', () => {
         'wf_test1234',
         expect.any(Number),
       );
+    });
+
+    it('does not treat a typed k or j as the acknowledgment', async () => {
+      // The selection matchers also carry bare k/j, and prose typed at the
+      // composer the dialog just unmounted satisfies them. Acknowledging on
+      // those let the next `x`/`p` of the same sentence reach the run
+      // (#16432 R2-1).
+      const h = await autoSurfacedWorkflow();
+
+      h.pressKey({ sequence: 'k' });
+      h.pressKey({ sequence: 'j' });
+      expect(h.probe.current!.state.autoOpened).toBe(true);
+
+      h.pressKey({ sequence: 'x' });
+      expect(h.workflowCancel).not.toHaveBeenCalled();
+
+      h.pressKey({ name: 'up' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ sequence: 'x' });
+      expect(h.workflowCancel).toHaveBeenCalledWith(
+        'wf_test1234',
+        expect.any(Number),
+      );
+    });
+
+    it('swallows Escape until the auto-open is acknowledged', async () => {
+      // A dismissal before the acknowledgment would burn the approval latch
+      // with the prompt never seen — the badge-only hang this PR removes
+      // (#16432 R3-1).
+      const h = await autoSurfacedWorkflow();
+
+      h.pressKey({ name: 'escape' });
+      expect(h.probe.current!.state.dialogMode).toBe('list');
+      expect(h.probe.current!.state.autoOpened).toBe(true);
+
+      h.pressKey({ name: 'down' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ name: 'escape' });
+      expect(h.probe.current!.state.dialogMode).toBe('closed');
+    });
+
+    it('advertises only the activation hint while auto-opened', async () => {
+      const h = await autoSurfacedWorkflow();
+
+      expect(h.lastFrame()).not.toContain('Enter view');
+      expect(h.lastFrame()).not.toContain('x stop');
+      expect(h.lastFrame()).toContain('activate');
+
+      h.pressKey({ name: 'up' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      expect(h.lastFrame()).toContain('Enter view');
     });
   });
 

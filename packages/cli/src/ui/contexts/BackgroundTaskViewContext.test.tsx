@@ -133,6 +133,7 @@ describe('BackgroundTaskViewProvider approval surfacing', () => {
 
     // Closing must stick: a later refresh that still carries the same
     // parked approval cannot bounce the user back into the dialog.
+    act(() => result.current.actions.acknowledgeAutoOpen());
     act(() => result.current.actions.closeDialog());
     expect(result.current.state.dialogMode).toBe('closed');
     act(() => fireApprovalChange());
@@ -186,6 +187,7 @@ describe('BackgroundTaskViewProvider approval surfacing', () => {
     expect(result.current.state.selectedIndex).toBe(0);
 
     // Back out without answering; wfap-new stays parked.
+    act(() => result.current.actions.acknowledgeAutoOpen());
     act(() => result.current.actions.closeDialog());
     expect(result.current.state.dialogMode).toBe('closed');
 
@@ -231,6 +233,7 @@ describe('BackgroundTaskViewProvider approval surfacing', () => {
 
     // a parks → auto-open; the user backs out without answering.
     expect(result.current.state.dialogMode).toBe('list');
+    act(() => result.current.actions.acknowledgeAutoOpen());
     act(() => result.current.actions.closeDialog());
     expect(result.current.state.dialogMode).toBe('closed');
 
@@ -250,6 +253,86 @@ describe('BackgroundTaskViewProvider approval surfacing', () => {
     });
     expect(result.current.state.dialogMode).toBe('list');
     expect(result.current.state.selectedIndex).toBe(1);
+  });
+
+  it('unfocuses the pill when an approval auto-opens the dialog', () => {
+    // The pill subscribes on `pillFocused` alone: leaving it focused let its
+    // Enter run openDialog() and clear the disarm the auto-open installed
+    // (#16432 R3-2).
+    let workflows: WorkflowTask[] = [];
+    const { config, fireApprovalRequest } = makeConfig(() => workflows);
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <BackgroundTaskViewProvider config={config}>
+        {children}
+      </BackgroundTaskViewProvider>
+    );
+    const { result } = renderHook(
+      () => ({
+        state: useBackgroundTaskViewState(),
+        actions: useBackgroundTaskViewActions(),
+      }),
+      { wrapper },
+    );
+
+    act(() => result.current.actions.setPillFocused(true));
+    act(() => {
+      workflows = [workflowEntry(['wfap-pill'])];
+      fireApprovalRequest();
+    });
+
+    expect(result.current.state.dialogMode).toBe('list');
+    expect(result.current.state.autoOpened).toBe(true);
+    expect(result.current.state.pillFocused).toBe(false);
+  });
+
+  it('stays closed after an acknowledged close while another workflow is parked', () => {
+    // `dialogMode` is an effect dependency, so the close itself re-ran the
+    // surfacing effect and re-opened on the next parked head in the same
+    // frame — with two parked workflows Escape looked broken (#16432 R3-5).
+    let workflows: WorkflowTask[] = [];
+    const { config, fireApprovalRequest, fireApprovalChange } = makeConfig(
+      () => workflows,
+    );
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <BackgroundTaskViewProvider config={config}>
+        {children}
+      </BackgroundTaskViewProvider>
+    );
+    const { result } = renderHook(
+      () => ({
+        state: useBackgroundTaskViewState(),
+        actions: useBackgroundTaskViewActions(),
+      }),
+      { wrapper },
+    );
+
+    act(() => {
+      workflows = [
+        {
+          ...workflowEntry(['wfap-a']),
+          id: 'wf-a',
+          runId: 'wf-a',
+          startTime: 300,
+        } as unknown as WorkflowTask,
+        {
+          ...workflowEntry(['wfap-b']),
+          id: 'wf-b',
+          runId: 'wf-b',
+          startTime: 200,
+        } as unknown as WorkflowTask,
+      ];
+      fireApprovalRequest();
+    });
+    expect(result.current.state.dialogMode).toBe('list');
+
+    act(() => result.current.actions.acknowledgeAutoOpen());
+    act(() => result.current.actions.closeDialog());
+    expect(result.current.state.dialogMode).toBe('closed');
+
+    // A refresh that still carries the same two parked heads must not
+    // bounce the user back into the dialog.
+    act(() => fireApprovalChange());
+    expect(result.current.state.dialogMode).toBe('closed');
   });
 
   it('leaves an open detail view alone when a new approval parks', () => {

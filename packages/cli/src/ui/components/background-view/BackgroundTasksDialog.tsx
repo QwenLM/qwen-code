@@ -1778,14 +1778,21 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       }
 
       if (dialogMode === 'list') {
-        if (keyMatchers[Command.SELECTION_UP](key)) {
+        // Only keys prose cannot produce acknowledge the auto-open. The
+        // selection matchers also carry bare `k`/`j` and Ctrl+P/Ctrl+N, and
+        // ordinary typed letters satisfy them — acknowledging on those let
+        // the next letter of the same sentence cancel or pause the run
+        // (#16432 R2-1). Bare k/j still move the selection; the disarm
+        // simply stays armed until a real arrow key arrives.
+        if (key.name === 'up' || key.name === 'down') {
           acknowledgeAutoOpen();
+        }
+        if (keyMatchers[Command.SELECTION_UP](key)) {
           moveSelectionUp();
           setPendingCancelEntryId(null);
           return;
         }
         if (keyMatchers[Command.SELECTION_DOWN](key)) {
-          acknowledgeAutoOpen();
           moveSelectionDown();
           setPendingCancelEntryId(null);
           return;
@@ -1931,16 +1938,23 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       'Esc cancel',
     );
   } else if (dialogMode === 'list') {
-    hints.push('\u2191/\u2193 select', 'Enter view');
-    if (selectedEntry && isStoppableEntry(selectedEntry)) {
-      hints.push('x stop');
+    if (autoOpened) {
+      // Every destructive list key is swallowed until a navigation key
+      // acknowledges the auto-open, so advertising `Enter view` / `x stop`
+      // here would document keys that do nothing (#16432 R3-3).
+      hints.push('\u2191/\u2193 activate');
+    } else {
+      hints.push('\u2191/\u2193 select', 'Enter view');
+      if (selectedEntry && isStoppableEntry(selectedEntry)) {
+        hints.push('x stop');
+      }
+      if (selectedWorkflowPauseHint) hints.push(selectedWorkflowPauseHint);
+      if (selectedEntryAllowsResume) hints.push('r resume');
+      if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
+        hints.push('x abandon');
+      }
+      hints.push('\u2190/Esc close');
     }
-    if (selectedWorkflowPauseHint) hints.push(selectedWorkflowPauseHint);
-    if (selectedEntryAllowsResume) hints.push('r resume');
-    if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
-      hints.push('x abandon');
-    }
-    hints.push('\u2190/Esc close');
   } else {
     hints.push('\u2190 back', 'Esc close');
     if (selectedEntry && isStoppableEntry(selectedEntry)) {
