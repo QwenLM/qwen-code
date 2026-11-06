@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
 import java.util.Set;
@@ -37,5 +38,10 @@ final class ExternalWorkspaceSessionPolicies {
                     WorkspaceToolProfiles.EXTERNAL_FILES, false, false);
         }
         return AgentSessionPolicies.selectApprovalMode(effective, command.requestedApprovalMode(), command.approvalSelectionSupported());
+    }
+
+    /** The legacy v1 close refusal exempts an external-files Session on its registered EXTERNAL Workspace. */
+    static boolean admitsLegacyClose(SessionRecord session, ManagedWorkspaceRegistry workspaces) {
+        return WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && workspaces.isExternal(session.workspace());
     }
 }
