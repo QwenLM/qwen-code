@@ -794,7 +794,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 }).thenCompose(stage -> stage);
     }
 
-    private CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
+    CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
             BindingRenewal renewal) {
         return releaseSavedSession(binding, record, renewal, true);
     }
@@ -2629,184 +2629,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             return failed(conflict("runtime_broker_recovery_blocked",
                     "Invalid recovery snapshot"));
         }
-        return recoverBinding(
+        return bindingProvisioning.recoverBinding(
                 bindingId, expectedGeneration, false, expectedVersion);
-    }
-
-    private boolean externalRecoveryEligible(RuntimeBindingRecord binding) {
-        return binding != null
-                && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
-                        .isExternalWorkspaceRequest(binding.getRequest())
-                && "workspace".equals(
-                        binding.getRequest().getScope().getIsolationClass())
-                && (binding.getState() == RuntimeBindingRecord.State.READY
-                        || binding.getState()
-                                == RuntimeBindingRecord.State.RECOVERY_BLOCKED)
-                && !binding.isDrainRequested() && binding.getLease() != null
-                && binding.getProvisionSeed() != null
-                && binding.getProvisionSeed().matches(binding.getLease())
-                && !retirementOwns(binding)
-                && !executionRepository.hasActiveByBinding(
-                        binding.getBindingId(), binding.getGeneration());
-    }
-
-    /**
-     * Close owns retirement after journal settlement. Observing its retired
-     * registration as journal loss would erase the clean-stop boundary. One
-     * Session's close never retires a shared binding; only storage retirement does.
-     */
-    private boolean retirementOwns(RuntimeBindingRecord binding) {
-        RuntimeProvisionRequest request = binding.getRequest();
-        String tenantId = request.getScope().getTenantId();
-        if (HarnessOwnership.sharesRuntimeSessions(request)) {
-            return request.getStorageId() != null
-                    && bindingRepository.isStorageFenced(tenantId, request.getStorageId(), null);
-        }
-        return "session".equals(request.getScope().getIsolationClass())
-                && (bindingRepository.isHarnessAdmissionClosed(tenantId, request.getIsolationKey())
-                        || request.getStorageId() != null
-                        && bindingRepository.isStorageFenced(tenantId, request.getStorageId(), null));
-    }
-
-    private CompletionStage<RuntimeBindingRecord> recoverBinding(String bindingId, long expectedGeneration, boolean lookupOnly) {
-        return recoverBinding(
-                bindingId, expectedGeneration, lookupOnly, null);
-    }
-
-    private CompletionStage<RuntimeBindingRecord> recoverBinding(
-            String bindingId, long expectedGeneration, boolean lookupOnly,
-            Long expectedVersion) {
-        requireOpen(closed);
-        RuntimeBindingRecord record = bindingRepository.findById(bindingId);
-        if (record == null || record.getGeneration() != expectedGeneration
-                || !provisioner.supportsKind(record.getRequest().getProvisionerKind())) {
-            return failed(conflict("runtime_broker_recovery_blocked", "Saved Runtime recovery is unavailable"));
-        }
-        if (expectedVersion != null
-                && (record.getVersion() != expectedVersion
-                        || !externalRecoveryEligible(record))) {
-            return failed(conflict("runtime_broker_recovery_blocked",
-                    "Recovery snapshot is stale or unsettled"));
-        }
-        if (!lookupOnly && record.getState() != RuntimeBindingRecord.State.LOST && retirementOwns(record)) {
-            return CompletableFuture.completedFuture(record);
-        }
-        if (!provisioner.supportsStartupRecovery(record.getResourceHandle())) {
-            return failed(conflict("runtime_broker_recovery_blocked", "Saved Runtime recovery is unavailable"));
-        }
-        if (!record.isActive()) {
-            return CompletableFuture.completedFuture(record);
-        }
-        CompletableFuture<BindingContext> reservation = new CompletableFuture<>();
-        AtomicReference<BindingContext> adopted = new AtomicReference<>();
-        if (bindingRegistry.reserveBinding(bindingId, reservation) != null) {
-            return failed(unavailable("runtime_reconcile_in_progress", "Runtime recovery is already in progress"));
-        }
-        RuntimeBindingRecord claimed;
-        try {
-            claimed = bindingRepository.claimOperation(bindingId, brokerOwnerId, operationLeaseDuration);
-        } catch (RuntimeException error) {
-            bindingRegistry.finishBindingOperation(bindingId, reservation);
-            reservation.completeExceptionally(error);
-            return failed(error);
-        }
-        CompletionStage<RuntimeBindingRecord> operation = safeStage(() -> {
-            if (claimed == null || claimed.getGeneration() != expectedGeneration) {
-                return failed(unavailable("runtime_reconcile_in_progress", "Another Broker owns Runtime recovery"));
-            }
-            // claimOperation 的原子版本递增必须紧接快照；恢复期间若有变更，
-            // 不能把这个绑定重新放回 READY。
-            if (expectedVersion != null
-                    && (claimed.getVersion() != expectedVersion + 1
-                            || !externalRecoveryEligible(claimed))) {
-                return failed(conflict("runtime_broker_recovery_blocked",
-                        "Recovery snapshot was fenced"));
-            }
-            if (expectedVersion != null) {
-                // 与工具 admission 共用 binding 行 CAS。先关闭新写，
-                // 再检查抢先进入的未决工具；失败时保持 BLOCKED。
-                RuntimeBindingRecord fenced =
-                        bindingRepository.compareAndSet(
-                                claimed,
-                                claimed.withState(
-                                        RuntimeBindingRecord.State.RECOVERY_BLOCKED,
-                                        claimed.getLease(),
-                                        clock.instant()));
-                if (fenced == null
-                        || executionRepository.hasActiveByBinding(
-                                fenced.getBindingId(),
-                                fenced.getGeneration())) {
-                    return failed(conflict("runtime_broker_recovery_blocked",
-                            "Recovery admission is unsettled"));
-                }
-            }
-            if (!lookupOnly && claimed.getState() != RuntimeBindingRecord.State.LOST && retirementOwns(claimed)) {
-                return CompletableFuture.completedFuture(claimed);
-            }
-            if (claimed.getState() == RuntimeBindingRecord.State.LOST) {
-                if (lookupOnly) {
-                    return failed(conflict("workspace_close_identity_unverified", "Original Hook Runtime is lost"));
-                }
-                return cleanupLost(claimed);
-            }
-            if (!canReconcile(claimed) && claimed.getState() != RuntimeBindingRecord.State.DRAINING) {
-                return failed(conflict("runtime_broker_recovery_blocked", "Saved Runtime cannot be observed"));
-            }
-            return renewingStep(claimed, () -> provisioner.reconcile(claimed.getRequest(), claimed.getProvisionSeed(),
-                    claimed.getResourceHandle(), claimed.getLease()))
-                    .thenCompose(observed -> {
-                        RuntimeBindingRecord current = renewRecoveryClaim(claimed);
-                        if (observed == null) {
-                            return CompletableFuture.completedFuture(current);
-                        }
-                        if (lookupOnly && observed.getOutcome() != RuntimeObservation.Outcome.READY) {
-                            return failed(conflict("workspace_close_identity_unverified", "Original Hook Runtime is unverified"));
-                        }
-                        if (observed.getOutcome() == RuntimeObservation.Outcome.NOT_FOUND
-                                && observed.getLossEvidence() != null) {
-                            RuntimeBindingRecord lost = bindingRepository.compareAndSet(current,
-                                    current.withRecoveryEvidence(observed.getLossEvidence(),
-                                            observed.getStopEvidence(), clock.instant()));
-                            return lost == null
-                                    ? failed(unavailable("runtime_provision_fenced", "Runtime recovery claim expired"))
-                                    : cleanupLost(lost);
-                        }
-                        if (observed.getOutcome() == RuntimeObservation.Outcome.READY
-                                && current.getState() != RuntimeBindingRecord.State.DRAINING) {
-                            return adoptObservation(bindingId, claimed.getOperationGeneration(), observed,
-                                    cleanupStepTimeoutMillis())
-                                    .thenApply(context -> {
-                                        adopted.set(context);
-                                        return context.record();
-                                    });
-                        }
-                        if (observed.getOutcome() == RuntimeObservation.Outcome.CONFLICT) {
-                            blockRecovery(current);
-                        }
-                        return CompletableFuture.completedFuture(bindingRepository.findById(bindingId));
-                    });
-        });
-        // The inner steps are each bounded and the claim is renewed between
-        // them, so the chain can legitimately span more than one lease; the
-        // outer backstop uses the same 4x deadline as reconciliation instead
-        // of cutting a healthy chain at exactly one lease.
-        return operation.toCompletableFuture().orTimeout(operationDeadlineMillis(), TimeUnit.MILLISECONDS)
-                .whenComplete((recovered, error) -> {
-                    if (claimed != null) {
-                        bindingRegistry.releaseOperationQuietly(bindingId, claimed.getOperationGeneration());
-                    }
-                    if (recovered != null && recovered.getState() == RuntimeBindingRecord.State.RELEASED) {
-                        bindingRegistry.forgetBinding(bindingId);
-                    }
-                    bindingRegistry.finishBindingOperation(bindingId, reservation);
-                    BindingContext healthy = error == null ? adopted.get() : null;
-                    if (healthy != null) {
-                        reservation.complete(healthy);
-                    } else {
-                        reservation.completeExceptionally(unavailable("runtime_reconciliation_required",
-                                "Maintenance observation completed; retry using current authorization"));
-                    }
-                });
     }
 
     private boolean blockRecovery(RuntimeBindingRecord claimed) {
@@ -2859,23 +2683,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     private long operationDeadlineMillis() {
         return Math.max(1, operationDeadlineNanos() / 1_000_000);
-    }
-
-    private static boolean validAttestation(RuntimeAttestation attestation,
-            RuntimeLease lease, RuntimeProvisionSeed seed,
-            RuntimeProvisionRequest request) {
-        return attestation != null
-                && lease.getRuntimeInstanceId().equals(
-                        attestation.getRuntimeInstanceId())
-                && seed.getGatewayIncarnation().equals(
-                        attestation.getRuntimeIncarnation())
-                && lease.getLeaseId().equals(attestation.getLeaseId())
-                && lease.getEpoch() == attestation.getEpoch()
-                && request.getScope().equals(attestation.getScope())
-                && java.util.Objects.equals(request.getStorageId(),
-                        attestation.getStorageId())
-                && seed.getProvisionRequestId().equals(
-                        attestation.getProvisionRequestId());
     }
 
     private record DurableProvision(RuntimeLease lease,

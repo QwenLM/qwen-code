@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.BindingContext;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService.BindingRenewal;
@@ -1114,12 +1115,39 @@ final class RuntimeBindingProvisioning {
                         && bindingRepository.isStorageFenced(tenantId, request.getStorageId(), null));
     }
 
+    private boolean externalRecoveryEligible(RuntimeBindingRecord binding) {
+        return binding != null
+                && WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())
+                && "workspace".equals(
+                        binding.getRequest().getScope().getIsolationClass())
+                && (binding.getState() == RuntimeBindingRecord.State.READY
+                        || binding.getState()
+                                == RuntimeBindingRecord.State.RECOVERY_BLOCKED)
+                && !binding.isDrainRequested() && binding.getLease() != null
+                && binding.getProvisionSeed() != null
+                && binding.getProvisionSeed().matches(binding.getLease())
+                && !retirementOwns(binding)
+                && !executionRepository.hasActiveByBinding(
+                        binding.getBindingId(), binding.getGeneration());
+    }
+
     CompletionStage<RuntimeBindingRecord> recoverBinding(String bindingId, long expectedGeneration, boolean lookupOnly) {
+        return recoverBinding(bindingId, expectedGeneration, lookupOnly, null);
+    }
+
+    CompletionStage<RuntimeBindingRecord> recoverBinding(String bindingId, long expectedGeneration, boolean lookupOnly,
+            Long expectedVersion) {
         requireOpen(closed);
         RuntimeBindingRecord record = bindingRepository.findById(bindingId);
         if (record == null || record.getGeneration() != expectedGeneration
                 || !provisioner.supportsKind(record.getRequest().getProvisionerKind())) {
             return failed(conflict("runtime_broker_recovery_blocked", "Saved Runtime recovery is unavailable"));
+        }
+        if (expectedVersion != null
+                && (record.getVersion() != expectedVersion
+                        || !externalRecoveryEligible(record))) {
+            return failed(conflict("runtime_broker_recovery_blocked",
+                    "Recovery snapshot is stale or unsettled"));
         }
         if (!lookupOnly && record.getState() != RuntimeBindingRecord.State.LOST && retirementOwns(record)) {
             return CompletableFuture.completedFuture(record);
@@ -1146,6 +1174,32 @@ final class RuntimeBindingProvisioning {
         CompletionStage<RuntimeBindingRecord> operation = safeStage(() -> {
             if (claimed == null || claimed.getGeneration() != expectedGeneration) {
                 return failed(unavailable("runtime_reconcile_in_progress", "Another Broker owns Runtime recovery"));
+            }
+            // claimOperation 的原子版本递增必须紧接快照；恢复期间若有变更，
+            // 不能把这个绑定重新放回 READY。
+            if (expectedVersion != null
+                    && (claimed.getVersion() != expectedVersion + 1
+                            || !externalRecoveryEligible(claimed))) {
+                return failed(conflict("runtime_broker_recovery_blocked",
+                        "Recovery snapshot was fenced"));
+            }
+            if (expectedVersion != null) {
+                // 与工具 admission 共用 binding 行 CAS。先关闭新写，
+                // 再检查抢先进入的未决工具；失败时保持 BLOCKED。
+                RuntimeBindingRecord fenced =
+                        bindingRepository.compareAndSet(
+                                claimed,
+                                claimed.withState(
+                                        RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                                        claimed.getLease(),
+                                        clock.instant()));
+                if (fenced == null
+                        || executionRepository.hasActiveByBinding(
+                                fenced.getBindingId(),
+                                fenced.getGeneration())) {
+                    return failed(conflict("runtime_broker_recovery_blocked",
+                            "Recovery admission is unsettled"));
+                }
             }
             if (!lookupOnly && claimed.getState() != RuntimeBindingRecord.State.LOST && retirementOwns(claimed)) {
                 return CompletableFuture.completedFuture(claimed);
