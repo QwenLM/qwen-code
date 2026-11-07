@@ -1201,6 +1201,7 @@ function CompactionRow({
   compression: Extract<LiveHistoryItem, { kind: 'compaction' }>['compression'];
 }) {
   const text = getCompressionStatusText({
+    strategy: compression.strategy,
     isPending: compression.isPending,
     originalTokenCount: compression.originalTokenCount,
     newTokenCount: compression.newTokenCount,

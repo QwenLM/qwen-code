@@ -11,6 +11,25 @@ import {
 } from './contextCompression';
 
 describe('parseContextCompressionMeta', () => {
+  it.each(['notes', 'summary', undefined, 'unknown'])(
+    'keeps only a recognized strategy: %s',
+    (strategy) => {
+      const result = parseContextCompressionMeta({
+        phase: 'done',
+        strategy,
+        originalTokenCount: 10,
+        newTokenCount: 5,
+      });
+      expect(result).toMatchObject({
+        phase: 'done',
+        result: { originalTokenCount: 10 },
+      });
+      if (result?.phase === 'done')
+        expect(result.result.strategy).toBe(
+          strategy === 'notes' || strategy === 'summary' ? strategy : undefined,
+        );
+    },
+  );
   it('reads a progress frame', () => {
     expect(parseContextCompressionMeta({ phase: 'progress' })).toEqual({
       phase: 'progress',

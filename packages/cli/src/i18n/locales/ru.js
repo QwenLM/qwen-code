@@ -1076,6 +1076,8 @@ export default {
   'Failed to compress chat history: {{error}}':
     'Не удалось сжать историю чата: {{error}}',
   'Compressing chat history': 'Сжатие истории чата',
+  'Started a new context from local notes: {{originalTokens}} to {{newTokens}} tokens.':
+    'Новый контекст создан из локальных заметок: с {{originalTokens}} до {{newTokens}} токенов.',
   'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.':
     'История чата сжата с {{originalTokens}} до {{newTokens}} токенов.',
   'Compression was not beneficial for this history size.':

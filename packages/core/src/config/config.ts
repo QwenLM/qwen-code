@@ -150,6 +150,7 @@ import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { SESSION_CONTEXT_TOOL_NAMES } from '../services/session-notes-state.js';
 import { forgetAutofixPrSession } from '../tools/autofix-pr-grants.js';
 import {
   ToolMode,
@@ -751,6 +752,7 @@ export interface BugCommandSettings {
 }
 
 export interface ChatCompressionSettings {
+  strategy?: 'summary' | 'notes';
   /**
    * Estimated tokens for a single inline image / document part when
    * apportioning chars across history during compression size estimation.
@@ -3791,6 +3793,15 @@ export class Config {
       params.loadMemoryFromIncludeDirectories ?? false;
     this.importFormat = params.importFormat ?? 'tree';
     this.chatCompression = params.chatCompression;
+    if (
+      this.sessionExecutionEngine === 'managed' &&
+      this.chatCompression?.strategy === 'notes'
+    ) {
+      this.chatCompression = { ...this.chatCompression, strategy: 'summary' };
+      this.debugLogger.warn(
+        "Local notes compression is unavailable for this session's recording format; using summary compression.",
+      );
+    }
     this.autoCompactThreshold = params.autoCompactThreshold;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
@@ -13566,6 +13577,45 @@ export class Config {
       toolName: ToolName,
       factory: ToolFactory,
     ): Promise<void> => this.registerLazyTool(registry, toolName, factory);
+
+    if (
+      this.chatCompression?.strategy === 'notes' &&
+      this.chatRecordingEnabled &&
+      !options?.forSubAgent
+    ) {
+      const names = SESSION_CONTEXT_TOOL_NAMES;
+      try {
+        const statuses = await Promise.all(
+          names.map(
+            (name) =>
+              this.getPermissionManager()?.getToolRegistrationStatus(name) ??
+              'registered',
+          ),
+        );
+        if (statuses.every((status) => status !== 'disabled')) {
+          for (const [index, name] of names.entries()) {
+            const factory = async () => {
+              const { SessionContextTool } = await import(
+                '../tools/session-context.js'
+              );
+              return new SessionContextTool(this, name);
+            };
+            if (statuses[index] === 'deferred')
+              registry.registerPermissionDeferredFactory(name, factory);
+            else registry.registerFactory(name, factory);
+          }
+        } else {
+          this.debugLogger.warn(
+            `Session context tools disabled by policy (${names.filter((_, index) => statuses[index] === 'disabled').join(', ')}); using summary compression.`,
+          );
+        }
+      } catch (error) {
+        this.debugLogger.warn(
+          'Could not check permissions for session context tools; using summary compression.',
+          error,
+        );
+      }
+    }
 
     // The synthetic structured_output tool is the terminal contract for
     // --json-schema runs. It must be registered in BOTH the bare-mode

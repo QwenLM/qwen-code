@@ -12,6 +12,7 @@
  * than dropping the message.
  */
 export interface ContextCompressionResult {
+  strategy?: 'summary' | 'notes';
   originalTokenCount: number;
   newTokenCount: number;
   originalTokenCountIsEstimated: boolean;
@@ -54,6 +55,9 @@ function parseContextCompressionResult(
   }
   const warning = value['warning'];
   return {
+    ...(value['strategy'] === 'notes' || value['strategy'] === 'summary'
+      ? { strategy: value['strategy'] }
+      : {}),
     originalTokenCount,
     newTokenCount,
     originalTokenCountIsEstimated:

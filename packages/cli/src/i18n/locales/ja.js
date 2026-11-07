@@ -820,6 +820,8 @@ export default {
   'Failed to compress chat history: {{error}}':
     'チャット履歴の圧縮に失敗: {{error}}',
   'Compressing chat history': 'チャット履歴を圧縮中',
+  'Started a new context from local notes: {{originalTokens}} to {{newTokens}} tokens.':
+    'ローカルノートから新しいコンテキストを開始しました: {{originalTokens}} → {{newTokens}} トークン。',
   'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.':
     'チャット履歴を {{originalTokens}} トークンから {{newTokens}} トークンに圧縮しました',
   'Compression was not beneficial for this history size.':

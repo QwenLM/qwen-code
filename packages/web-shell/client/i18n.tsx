@@ -3880,6 +3880,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
     'Requires an idle, connected session with permission to compress context.',
+  'contextCompression.notesResult': (v) =>
+    `Started a new context from local notes ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.result': (v) =>
     `Context compressed ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.instructionsTruncated': (v) =>
@@ -5810,6 +5812,10 @@ const ZH: Messages = {
   'toolName.update_goal': '更新目标',
   'toolName.propose_goal': '提议目标',
   'toolName.save_memory': '保存记忆',
+  'toolName.session_notes': '会话笔记',
+  'toolName.session_history': '会话历史',
+  'toolName.get_context_remaining': '上下文余量',
+  'toolName.new_context': '新建上下文',
   'toolName.manage_memory': '管理记忆',
   'toolName.search_memory': '搜索记忆',
   'toolName.agent': '智能体',
@@ -8677,6 +8683,8 @@ const ZH: Messages = {
     '压缩已完成，但用量刷新失败。请点击刷新重试。',
   'contextUsage.compressUnavailable':
     '会话连接正常、空闲且有上下文压缩权限时可用。',
+  'contextCompression.notesResult': (v) =>
+    `已从本地笔记开始新上下文 ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.result': (v) =>
     `上下文已压缩 ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.instructionsTruncated': (v) =>

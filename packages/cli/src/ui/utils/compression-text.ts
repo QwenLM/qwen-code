@@ -16,6 +16,7 @@ export const formatCompressionTokenCount = (
 ) => (isEstimated ? `~${count}` : String(count));
 
 export interface CompressionStatusTextOptions {
+  strategy?: 'summary' | 'notes';
   isPending?: boolean;
   originalTokenCount?: number | null;
   newTokenCount?: number | null;
@@ -25,6 +26,7 @@ export interface CompressionStatusTextOptions {
 }
 
 export function getCompressionStatusText({
+  strategy,
   isPending,
   originalTokenCount,
   newTokenCount,
@@ -42,7 +44,9 @@ export function getCompressionStatusText({
   switch (compressionStatus) {
     case CompressionStatus.COMPRESSED:
       return t(
-        'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.',
+        strategy === 'notes'
+          ? 'Started a new context from local notes: {{originalTokens}} to {{newTokens}} tokens.'
+          : 'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.',
         {
           originalTokens: formatCompressionTokenCount(
             originalTokens,

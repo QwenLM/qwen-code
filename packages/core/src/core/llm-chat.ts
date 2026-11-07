@@ -120,6 +120,11 @@ import {
   type ChatRecordingService,
   type ChatCompressionRecordPayload,
 } from '../services/chatRecordingService.js';
+import { SessionNotesService } from '../services/session-notes-service.js';
+import { SessionHistoryService } from '../services/session-history-service.js';
+import { SessionTranscriptReader } from '../services/session-transcript-reader.js';
+import { SESSION_CONTEXT_TOOL_NAMES } from '../services/session-notes-state.js';
+import { PostCompactTrigger } from '../hooks/types.js';
 import {
   ChatCompressionService,
   computeThresholds,
@@ -776,7 +781,13 @@ export const userContentPushSnapshotKey = Symbol(
   'LlmChat.userContentPushSnapshot',
 );
 
+export const deferNotesInputObservationKey = Symbol(
+  'LlmChat.deferNotesInputObservation',
+);
+
 interface TryCompressOptions {
+  notesRevision?: string;
+  onPendingMessageIncluded?: () => void;
   /**
    * Explicit original token count for this attempt, with its provenance.
    * Only a provider-reported count (e.g. `actualTokens` parsed from a
@@ -2393,6 +2404,10 @@ function stripTrailingSessionStartContextBlock(
 }
 
 export class LlmChat {
+  private notesService?: SessionNotesService;
+  private historyService?: SessionHistoryService;
+  private notesWarningWindow?: string;
+  private notesUnavailableReported = false;
   private historyReplacementRevision = 0;
 
   getHistoryReplacementRevision(): number {
@@ -2661,6 +2676,92 @@ export class LlmChat {
     markCompressedHistory(history);
     this.redactApprovedPlansFromLoadedHistory();
     this.markToolResultsInjected(this.history);
+    if (
+      config.getChatCompression?.()?.strategy === 'notes' &&
+      chatRecordingService
+    ) {
+      this.notesService = new SessionNotesService(config, chatRecordingService);
+    }
+  }
+
+  getSessionNotesService(): SessionNotesService | undefined {
+    if (!this.notesService || this.isForkedChat) return undefined;
+    const declarations = this.config
+      .getToolRegistry()
+      .getFunctionDeclarations();
+    if (
+      !SESSION_CONTEXT_TOOL_NAMES.every((name) =>
+        declarations.some((tool) => tool.name === name),
+      )
+    ) {
+      if (!this.notesUnavailableReported) {
+        this.config
+          .getDebugLogger()
+          .warn(
+            'Notes compaction requires all four session context tools. Using summary compression until they are available.',
+          );
+        this.notesUnavailableReported = true;
+      }
+      return undefined;
+    }
+    return this.notesService;
+  }
+
+  getSessionHistoryService(): SessionHistoryService {
+    const notes = this.getSessionNotesService();
+    if (!notes)
+      throw new Error('Local notes and history are unavailable in this chat.');
+    notes.assertAvailable();
+    this.historyService ??= new SessionHistoryService(
+      () =>
+        new SessionTranscriptReader(
+          this.config.getProjectRoot(),
+          undefined,
+          this.config.storage.getRuntimeBaseDir(),
+        ),
+      notes.sessionId,
+      () => this.getContextRemaining().hardLimitHeadroom,
+    );
+    return this.historyService;
+  }
+
+  observeSessionNotesInput(content: Content): void {
+    const response = this.notesService?.captureResponse();
+    if (response && !response.settled) {
+      response.observed = this.chatRecordingService?.observeNotesInput(content);
+    }
+  }
+
+  getContextRemaining(): {
+    windowId?: string;
+    estimatedInputTokens: number;
+    remainingAutomatic: number;
+    hardLimitHeadroom: number;
+    source: string;
+  } {
+    this.adoptTokenCountsForRoute();
+    const window =
+      this.config.getContentGeneratorConfig()?.contextWindowSize ??
+      DEFAULT_TOKEN_LIMIT;
+    const { auto, hard } = computeThresholds(
+      window,
+      this.config.getAutoCompactThreshold(),
+    );
+    const estimatedInputTokens = estimatePromptTokens(
+      this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
+      { role: 'user', parts: [] },
+      this.lastPromptTokenCount,
+      this.lastOutputTokenCount,
+    );
+    return {
+      windowId: this.chatRecordingService?.getSessionNotesState().windowId,
+      estimatedInputTokens,
+      remainingAutomatic: Math.max(0, auto - estimatedInputTokens),
+      hardLimitHeadroom: Math.max(0, hard - estimatedInputTokens),
+      source: this.promptCountIsEstimateDerived()
+        ? 'local_estimate'
+        : 'provider_usage_plus_estimate',
+    };
   }
 
   /**
@@ -3087,8 +3188,40 @@ export class LlmChat {
         `originalTokenCount=${originalTokenCount}, ` +
         `estimated=${originalTokenCountIsEstimated}`,
     );
+    if (!this.isForkedChat) this.notesService?.assertAvailable();
+    const notesService = this.getSessionNotesService();
+    const notesRecorder =
+      !this.isForkedChat && this.notesService
+        ? this.chatRecordingService
+        : undefined;
+    await notesRecorder?.refreshSessionNotesState();
+    const notesAttemptState = notesRecorder?.getSessionNotesState();
+    let notesHandoff: Awaited<
+      ReturnType<SessionNotesService['getNotesForHandoff']>
+    >;
+    if (notesService) {
+      notesService.assertAvailable();
+      if (!options?.customInstructions) {
+        try {
+          notesHandoff = await notesService.getNotesForHandoff(
+            options?.pendingUserMessage,
+          );
+        } catch (error) {
+          notesService.assertAvailable();
+          debugLogger.warn(`Notes unavailable for this compression: ${error}`);
+        }
+      }
+    }
+    if (
+      options?.notesRevision &&
+      notesHandoff?.notes.revision !== options.notesRevision
+    ) {
+      throw new Error(
+        'The requested notes handoff is unavailable. Process pending input and read the current notes revision before retrying.',
+      );
+    }
     const service = new ChatCompressionService();
-    const { newHistory, info } = await service.compress(this, {
+    const result = await service.compress(this, {
       promptId,
       force,
       config: this.config,
@@ -3104,8 +3237,13 @@ export class LlmChat {
       customInstructions: options?.customInstructions,
       requestPayloadTooLarge: options?.requestPayloadTooLarge,
       signal,
+      notesHandoff,
+      notesOnly: options?.notesRevision !== undefined,
+      deferPostCompactEvent: notesRecorder !== undefined,
       restoreRecentFiles: this.compressionObserverOptions?.restoreRecentFiles,
     });
+    let { newHistory } = result;
+    const { info, postCompactSummary } = result;
     // The service owns the compression outcome; LlmChat owns the input
     // provenance. Expose it so UIs can mark estimated banner numbers
     // instead of presenting cross-path scale changes as lost context
@@ -3125,7 +3263,56 @@ export class LlmChat {
       // for older/custom implementations that omit the field, but preserve an
       // explicit authoritative `false`.
       info.newTokenCountIsEstimated ??= true;
-      if (!options?.deferChatCompressionRecord) {
+      if (notesRecorder) {
+        notesRecorder.assertNotesWriterReady();
+        const summaryPrefixLength = newHistory.length;
+        if (options?.pendingUserMessage) {
+          newHistory = [...newHistory, options.pendingUserMessage];
+          // Effective/override counts already include the pending prompt.
+          // Only the stored API baseline still needs its contribution.
+          if (
+            info.strategy !== 'notes' &&
+            originalTokenCountOverride === undefined &&
+            !originalTokenCountIsEstimated
+          ) {
+            info.newTokenCount += estimateContentTokens(
+              [options.pendingUserMessage],
+              resolveSlimmingConfig(this.config.getChatCompression())
+                .imageTokenEstimate,
+            );
+          }
+        }
+        const { auto } = computeThresholds(
+          this.config.getContentGeneratorConfig()?.contextWindowSize ??
+            DEFAULT_TOKEN_LIMIT,
+          this.config.getAutoCompactThreshold(),
+        );
+        if (
+          info.newTokenCount >= auto ||
+          info.newTokenCount >= originalTokenCount
+        ) {
+          if (!force) this.consecutiveFailures++;
+          return {
+            ...info,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+          };
+        }
+        validateHistory(newHistory);
+        info.strategy ??= 'summary';
+        await notesRecorder.recordChatCompressionStrict(
+          {
+            info,
+            compressedHistory: newHistory,
+            summaryPrefixLength,
+            completedToolCallIds: this.completedToolCallIds,
+          },
+          info.strategy === 'notes' ? notesHandoff?.notes : undefined,
+          signal,
+          notesAttemptState,
+        );
+        if (options?.pendingUserMessage) options.onPendingMessageIncluded?.();
+      } else if (!options?.deferChatCompressionRecord) {
         // Resume replaces history with this snapshot, so include the pending
         // question and do not share the live array mutated later in the turn.
         await this.recordCompression({
@@ -3138,6 +3325,13 @@ export class LlmChat {
         });
       }
       this.setHistory(newHistory, this.completedToolCallIds);
+      if (options?.notesRevision)
+        notesService?.completePendingReset(options.notesRevision);
+      if (info.strategy === 'notes') {
+        this.config
+          .getMemoryManager?.()
+          ?.invalidatePendingExtract(this.config.getSessionId(), this.config);
+      }
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
       try {
@@ -3185,6 +3379,32 @@ export class LlmChat {
       // tripped.
       this.consecutiveFailures = 0;
       this.hardRescueFailureCount = 0;
+      if (notesRecorder) {
+        const hookSystem = this.config.getHookSystem();
+        try {
+          await hookSystem?.firePostCompactEvent(
+            (options?.trigger ?? (force ? 'manual' : 'auto')) === 'manual'
+              ? PostCompactTrigger.Manual
+              : PostCompactTrigger.Auto,
+            postCompactSummary ?? '',
+            signal,
+          );
+        } catch (error) {
+          this.config
+            .getDebugLogger()
+            .warn(`PostCompact hook failed: ${error}`);
+          if (hookSystem?.isManaged()) throw error;
+        }
+        if (info.strategy === 'notes') {
+          logChatCompression(
+            this.config,
+            makeChatCompressionEvent({
+              tokens_before: info.originalTokenCount,
+              tokens_after: info.newTokenCount,
+            }),
+          );
+        }
+      }
     } else if (isCompressionFailureStatus(info.compressionStatus)) {
       // Track failed attempts (only count if not forced) so we stop spending
       // compression-API calls on a chat that can't shrink after
@@ -3453,6 +3673,7 @@ export class LlmChat {
     let requestContents: Content[];
     let userContentAdded = false;
     let manualPlanExitNoticeVersion: number | undefined;
+    const previousNotesWarningWindow = this.notesWarningWindow;
     let manualPlanExitNoticeText: string | undefined;
 
     // Determine the ceiling for this turn's output request. The clamp below
@@ -3490,6 +3711,7 @@ export class LlmChat {
       ? this.generationConfig
       : undefined;
     let currentUserContent: Content | undefined;
+    let pendingMessageIncluded = false;
     try {
       if (options?.preparedRequest) {
         const saved = options.preparedRequest;
@@ -3524,6 +3746,8 @@ export class LlmChat {
         // gap where `lastPromptTokenCount === 0` and the gate would otherwise
         // see only the stale prior-turn count (0).
         let userContent = createUserContent(params.message);
+        const notesService = this.getSessionNotesService();
+        const pendingNotesRevision = notesService?.peekPendingReset();
         // Restored responses have no original-size provenance. Never infer it from a preview.
         userContent = {
           ...userContent,
@@ -3540,7 +3764,7 @@ export class LlmChat {
               : part,
           ),
         };
-        const { auto, hard } = computeThresholds(
+        const { auto, hard, warn } = computeThresholds(
           contextWindowForClamp,
           this.config.getAutoCompactThreshold(),
         );
@@ -3818,6 +4042,25 @@ export class LlmChat {
           }
         }
 
+        if (this.manualPlanExitNoticesEnabled) {
+          const notice = this.config.takePendingManualPlanExitNotice();
+          if (notice) {
+            manualPlanExitNoticeVersion = notice.version;
+            manualPlanExitNoticeText = getManualPlanExitSystemReminder(
+              notice.currentMode,
+            );
+            userContent = {
+              ...userContent,
+              parts: [
+                ...(userContent.parts ?? []),
+                {
+                  text: manualPlanExitNoticeText,
+                },
+              ],
+            };
+          }
+        }
+
         // Hard-tier rescue: when the estimated prompt size is at or above the
         // hard threshold (effectiveWindow - HARD_BUFFER), force compaction in
         // this send instead of waiting for the API to reject the request as too
@@ -3837,7 +4080,28 @@ export class LlmChat {
         // failures fall through to reactive overflow after a few strikes.
         // Thresholds gate on the full window: the output clamp guarantees the
         // response fits, so nothing needs to be pre-reserved for it.
-        const effectiveTokens = estimatePendingPrompt(userContent);
+        let effectiveTokens = estimatePendingPrompt(userContent);
+        const notesWindow = notesService
+          ? this.chatRecordingService?.getSessionNotesState().windowId
+          : undefined;
+        if (
+          notesService &&
+          notesWindow &&
+          this.notesWarningWindow !== notesWindow &&
+          effectiveTokens >= warn
+        ) {
+          this.notesWarningWindow = notesWindow;
+          userContent = {
+            ...userContent,
+            parts: [
+              ...(userContent.parts ?? []),
+              {
+                text: '<system-reminder>Context is filling up. Update session_notes with the goal, constraints, decisions, completed work, failed approaches, next steps and useful history references. Write notes alone in a tool-only response; after it succeeds, call new_context alone with its revision.</system-reminder>',
+              },
+            ],
+          };
+          effectiveTokens = estimatePendingPrompt(userContent);
+        }
         const isHardTier = effectiveTokens >= hard;
         const shouldForceFromHard =
           !exactRoute &&
@@ -3904,10 +4168,14 @@ export class LlmChat {
         } else {
           compressionInfo = await this.tryCompress(
             prompt_id,
-            shouldForceFromHard,
+            shouldForceFromHard || pendingNotesRevision !== undefined,
             params.config?.abortSignal,
             {
               pendingUserMessage: userContent,
+              notesRevision: pendingNotesRevision,
+              onPendingMessageIncluded: () => {
+                pendingMessageIncluded = true;
+              },
               precomputedEffectiveTokens: effectiveTokens,
               requestGenerationConfig: params.config,
               requestRouteKey,
@@ -3917,7 +4185,10 @@ export class LlmChat {
               // compactTrigger explicitly as 'auto' so PostCompact hooks are
               // classified correctly while the pending user message preserves
               // any active tool-call / response pairing.
-              trigger: shouldForceFromHard ? 'auto' : undefined,
+              trigger:
+                shouldForceFromHard || pendingNotesRevision
+                  ? 'auto'
+                  : undefined,
             },
           );
         }
@@ -3939,7 +4210,11 @@ export class LlmChat {
           ];
         }
         const localPromptTokensAfterCompression = shouldForceFromHard
-          ? estimatePendingPrompt(userContent)
+          ? estimatePendingPrompt(
+              pendingMessageIncluded
+                ? { role: 'user', parts: [] }
+                : userContent,
+            )
           : 0;
         if (
           shouldStopAfterHardRescue(
@@ -3961,7 +4236,8 @@ export class LlmChat {
           if (
             compressionInfo.compressionStatus ===
               CompressionStatus.COMPRESSED &&
-            historyBeforeHardRescue
+            historyBeforeHardRescue &&
+            compressionInfo.strategy === undefined
           ) {
             // Hard-rescue compression mutates in-memory history before this
             // guard can compare the compressed prompt size. If the compressed
@@ -4020,7 +4296,8 @@ export class LlmChat {
         }
         if (
           shouldForceFromHard &&
-          compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
+          compressionInfo.compressionStatus === CompressionStatus.COMPRESSED &&
+          compressionInfo.strategy === undefined
         ) {
           // Keep the pending question with the compressed answer on resume.
           await this.recordCompression({
@@ -4031,25 +4308,6 @@ export class LlmChat {
           });
         }
 
-        if (this.manualPlanExitNoticesEnabled) {
-          const notice = this.config.takePendingManualPlanExitNotice();
-          if (notice) {
-            manualPlanExitNoticeVersion = notice.version;
-            manualPlanExitNoticeText = getManualPlanExitSystemReminder(
-              notice.currentMode,
-            );
-            userContent = {
-              ...userContent,
-              parts: [
-                ...(userContent.parts ?? []),
-                {
-                  text: manualPlanExitNoticeText,
-                },
-              ],
-            };
-          }
-        }
-
         // Zero-count fallback ignores the conservative flag, so when nothing
         // changed since the gate estimate (no manual-plan-exit notice), reuse
         // it instead of paying a second full shallow-history walk.
@@ -4057,7 +4315,12 @@ export class LlmChat {
           this.lastPromptTokenCount === 0 &&
           manualPlanExitNoticeVersion === undefined
             ? effectiveTokens
-            : estimatePendingPrompt(userContent, true);
+            : estimatePendingPrompt(
+                pendingMessageIncluded
+                  ? { role: 'user', parts: [] }
+                  : userContent,
+                true,
+              );
 
         // Publish the acceptance snapshot for a caller-side settlement
         // carrier (see `userContentPushSnapshotKey`) immediately before the
@@ -4073,7 +4336,11 @@ export class LlmChat {
         }
         // Add user content to history ONCE before any attempts. Later object
         // spreads preserve the identity marked before compression.
-        this.history.push(userContent);
+        if (pendingMessageIncluded) {
+          this.history[this.history.length - 1] = userContent;
+        } else {
+          this.history.push(userContent);
+        }
         // Interrupted-prompt replay can carry detached snapshot parts itself.
         for (const part of userContent.parts ?? []) {
           if (part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true) {
@@ -4081,8 +4348,18 @@ export class LlmChat {
           }
         }
         this.syncReviewedSchemasForContent(userContent);
+        const deferNotesObservation =
+          Array.isArray(params.message) &&
+          (params.message as unknown as Record<PropertyKey, unknown>)[
+            deferNotesInputObservationKey
+          ] === true;
+        notesService?.beginResponse(
+          deferNotesObservation
+            ? undefined
+            : this.chatRecordingService?.observeNotesInput(userContent),
+        );
         currentUserContent = userContent;
-        userContentAdded = true;
+        userContentAdded = !pendingMessageIncluded;
         // Record that the user content landed (see `userContentPushCount`). The
         // setup-error path below decrements this if it rolls the push back.
         this.userContentPushCount++;
@@ -4170,6 +4447,7 @@ export class LlmChat {
         // The push above was rolled back, so undo its count too.
         this.userContentPushCount--;
       }
+      this.notesWarningWindow = previousNotesWarningWindow;
       if (manualPlanExitNoticeVersion !== undefined) {
         this.config.restorePendingManualPlanExitNotice(
           manualPlanExitNoticeVersion,
@@ -5933,6 +6211,7 @@ export class LlmChat {
           self.generationConfig = previousGenerationConfig;
         }
         sleepInhibitorHandle.release();
+        self.notesService?.finishResponse([]);
         streamDoneResolver!();
         // Flush any deferred partial-tool_use record. Covers both the
         // post-retry-loop unretryable break AND the max-tokens
@@ -7762,6 +8041,7 @@ export class LlmChat {
         this.pendingPartialAssistantRecord = recordArgs;
       } else {
         this.chatRecordingService?.recordAssistantTurn(recordArgs);
+        this.notesService?.finishResponse(acceptedTurnParts);
       }
     }
 

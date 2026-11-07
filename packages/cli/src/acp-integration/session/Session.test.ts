@@ -611,6 +611,8 @@ describe('Session', () => {
     recordTurnAttempt: ReturnType<typeof vi.fn>;
     recordTurnResult: ReturnType<typeof vi.fn>;
     recordUserMessage: ReturnType<typeof vi.fn>;
+    bindNotesInput: ReturnType<typeof vi.fn>;
+    releaseNotesInput: ReturnType<typeof vi.fn>;
     recordCronPrompt: ReturnType<typeof vi.fn>;
     recordGoalRuntimeMessage: ReturnType<typeof vi.fn>;
     recordGoalTurnEnd: ReturnType<typeof vi.fn>;
@@ -1015,6 +1017,8 @@ describe('Session', () => {
       recordTurnAttempt: vi.fn().mockResolvedValue(undefined),
       recordTurnResult: vi.fn(),
       recordUserMessage: vi.fn(),
+      bindNotesInput: vi.fn(),
+      releaseNotesInput: vi.fn(),
       recordCronPrompt: vi.fn(),
       recordGoalRuntimeMessage: vi.fn(),
       recordGoalTurnEnd: vi.fn().mockResolvedValue(undefined),
@@ -27445,6 +27449,32 @@ describe('Session', () => {
         );
       });
 
+      it('describes an automatic notes rollover without claiming a summary', async () => {
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 1200,
+          newTokenCount: 450,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+          strategy: 'notes',
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Started a new context from local notes (1200 to 450 tokens).',
+            },
+          },
+        });
+      });
+
       it('emits an ACP-visible update when automatic compression succeeds', async () => {
         mockLlmClient.tryCompressChat.mockResolvedValueOnce({
           originalTokenCount: 1200,
@@ -36821,6 +36851,84 @@ describe('Session', () => {
         }
       });
 
+      it('re-expands the full loop.md block after notes compaction occurs inside the model stream', async () => {
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-compact-'),
+        );
+        const loopMdPath = path.join(tmpDir, '.qwen', 'loop.md');
+        await fs.mkdir(path.dirname(loopMdPath), { recursive: true });
+        await fs.writeFile(loopMdPath, '- stable task list');
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+
+        mockConfig.getChatCompression = vi
+          .fn()
+          .mockReturnValue({ strategy: 'notes' });
+        let cronSends = 0;
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(
+            async (_model: string, _params: unknown, promptId: string) => {
+              if (String(promptId).includes('cron')) cronSends++;
+              if (cronSends === 2) {
+                return (async function* () {
+                  yield {
+                    type: core.StreamEventType.COMPRESSED,
+                    info: {
+                      originalTokenCount: 1000,
+                      newTokenCount: 200,
+                      compressionStatus: core.CompressionStatus.COMPRESSED,
+                      strategy: 'notes',
+                    },
+                  } as const;
+                })();
+              }
+              return createEmptyStream();
+            },
+          );
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const fullDeliveries = () =>
+            (
+              mockChat.sendMessageStream as ReturnType<typeof vi.fn>
+            ).mock.calls.filter((c) =>
+              (Array.isArray(c[1]?.message) ? c[1].message : [])
+                .map((p: { text?: string }) => p.text ?? '')
+                .join('')
+                .includes('The user configured a loop-tasks file.'),
+            ).length;
+
+          await vi.waitFor(() => {
+            expect(fullDeliveries()).toBe(2);
+          });
+          expect(cronSends).toBe(3);
+          expect(mockLlmClient.tryCompressChat).not.toHaveBeenCalled();
+        } finally {
+          await fs.rm(tmpDir, { recursive: true, force: true });
+        }
+      });
+
       it('stops cron-fired ACP prompt before sending when the session token limit is exceeded', async () => {
         let cronCallback: ((job: { prompt: string }) => void) | undefined;
         const scheduler = {
@@ -37029,6 +37137,226 @@ describe('Session', () => {
           mockChatRecordingService.recordSlashCommand,
         ).toHaveBeenCalledWith(
           expect.objectContaining({ rawCommand: '/compress' }),
+        );
+      });
+
+      it('does not duplicate notes compression invocation records on daemon retry', async () => {
+        mockConfig.getChatCompression = vi
+          .fn()
+          .mockReturnValue({ strategy: 'notes' });
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValue({
+          type: 'message',
+          messageType: 'info',
+          content: 'New context started.',
+          resolvedCommand: { name: 'compress', kind: CommandKind.BUILT_IN },
+        });
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress' }],
+          _meta: { 'qwen.daemon.retry': true },
+        });
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).not.toHaveBeenCalledWith(
+          expect.objectContaining({ phase: 'invocation' }),
+        );
+      });
+
+      it('keeps built-in notes compression from invalidating its checkpoint', async () => {
+        mockConfig.getChatCompression = vi
+          .fn()
+          .mockReturnValue({ strategy: 'notes' });
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(async () => {
+          expect(
+            mockChatRecordingService.recordUserMessage,
+          ).not.toHaveBeenCalled();
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: 'New context started.',
+            resolvedCommand: { name: 'compress', kind: CommandKind.BUILT_IN },
+          };
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress' }],
+        });
+
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).not.toHaveBeenCalled();
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith({
+          phase: 'invocation',
+          rawCommand: '/compress',
+          sentToModel: false,
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
+      it('Nov5 R2-1 notes summarize alias preserves the checkpoint', async () => {
+        mockConfig.getChatCompression = vi
+          .fn()
+          .mockReturnValue({ strategy: 'notes' });
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(async () => {
+          expect(
+            mockChatRecordingService.recordUserMessage,
+          ).not.toHaveBeenCalled();
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: 'New context started.',
+            resolvedCommand: { name: 'compress', kind: CommandKind.BUILT_IN },
+          };
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/summarize' }],
+        });
+
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).not.toHaveBeenCalled();
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith({
+          phase: 'invocation',
+          rawCommand: '/summarize',
+          sentToModel: false,
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
+      it('binds a custom compress prompt and attachments to notes observation before sending', async () => {
+        mockConfig.getChatCompression = vi
+          .fn()
+          .mockReturnValue({ strategy: 'notes' });
+        mockChatRecordingService.recordUserMessage.mockReturnValue(
+          'notes-input',
+        );
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Expanded custom prompt' }],
+          resolvedCommand: { name: 'compress', kind: CommandKind.FILE },
+        });
+        mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+          expect(mockChatRecordingService.bindNotesInput).toHaveBeenCalled();
+          return createEmptyStream();
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: '/compress inspect this' },
+            { type: 'image', mimeType: 'image/png', data: 'QUJD' },
+          ],
+        });
+
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).toHaveBeenCalledOnce();
+        expect(firstSentMessage()).toEqual([
+          { inlineData: { mimeType: 'image/png', data: 'QUJD' } },
+          { text: 'Expanded custom prompt' },
+        ]);
+        const boundInput: Content = {
+          role: 'user',
+          parts: firstSentMessage(),
+        };
+        const promptId =
+          mockChatRecordingService.recordUserMessage.mock.calls[0][3];
+        expect(promptId).toMatch(/^test-session-id########\d+$/);
+        markApiHistoryPrompt(boundInput, promptId);
+        expect(mockChatRecordingService.bindNotesInput).toHaveBeenCalledWith(
+          'notes-input',
+          boundInput,
+        );
+        expect(mockChatRecordingService.releaseNotesInput).toHaveBeenCalledWith(
+          'notes-input',
+        );
+        expect(mockLlmClient.tryCompressChat).not.toHaveBeenCalled();
+      });
+
+      it('persists attachment references and resource links for a custom compress command', async () => {
+        mockConfig.getChatCompression = vi
+          .fn()
+          .mockReturnValue({ strategy: 'notes' });
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Expanded custom prompt' }],
+          resolvedCommand: { name: 'compress', kind: CommandKind.FILE },
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        const reference = {
+          type: 'image' as const,
+          attachmentId: 'image-1',
+          mimeType: 'image/png',
+          size: 3,
+        };
+        const link = {
+          type: 'resource_link' as const,
+          uri: 'file:///tmp/spec.md',
+          name: 'spec.md',
+        };
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress inspect' }, link],
+          _meta: { 'qwen.daemon.attachmentReferences': [reference] },
+        });
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          '/compress inspect',
+          undefined,
+          expect.objectContaining({
+            attachmentReferences: [reference],
+            resourceLinks: [link],
+          }),
+          expect.any(String),
+          undefined,
+        );
+      });
+
+      it('releases a notes observation marker when an expanded command is cancelled before sending', async () => {
+        mockConfig.getChatCompression = vi
+          .fn()
+          .mockReturnValue({ strategy: 'notes' });
+        mockChatRecordingService.recordUserMessage.mockReturnValue(
+          'cancelled-input',
+        );
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(async (_input, controller) => {
+          controller.abort();
+          return {
+            type: 'submit_prompt',
+            content: [{ text: 'Expanded prompt' }],
+          };
+        });
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: '/custom' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockChatRecordingService.releaseNotesInput).toHaveBeenCalledWith(
+          'cancelled-input',
         );
       });
 

@@ -17,6 +17,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, act } from '@testing-library/react';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
+import { CompressionStatus } from '@qwen-code/qwen-code-core/core/turn.js';
 
 // theme.ts builds a SyntaxStyle at module scope, which needs the OpenTUI
 // native FFI — unavailable in the test runtime. Stub the graphics surface.
@@ -2292,5 +2293,51 @@ describe('canonical compact group boundaries', () => {
     } finally {
       view.unmount();
     }
+  });
+});
+
+describe('notes compaction transcript rendering', () => {
+  it('renders the notes handoff wording after replay', () => {
+    const view = render(
+      <OpenTuiTranscriptView
+        items={[
+          {
+            kind: 'compaction',
+            id: 'notes-reset',
+            compression: {
+              isPending: false,
+              originalTokenCount: 10000,
+              newTokenCount: 1000,
+              compressionStatus: CompressionStatus.COMPRESSED,
+              strategy: 'notes',
+            },
+          },
+        ]}
+      />,
+    );
+    expect(view.container.textContent).toContain(
+      'Started a new context from local notes',
+    );
+    view.unmount();
+  });
+  it('preserves summary wording for legacy records with no strategy', () => {
+    const view = render(
+      <OpenTuiTranscriptView
+        items={[
+          {
+            kind: 'compaction',
+            id: 'summary',
+            compression: {
+              isPending: false,
+              originalTokenCount: 10000,
+              newTokenCount: 1000,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          },
+        ]}
+      />,
+    );
+    expect(view.container.textContent).toContain('compressed');
+    view.unmount();
   });
 });

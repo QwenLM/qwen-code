@@ -1068,6 +1068,8 @@ export default {
   'Failed to compress chat history: {{error}}':
     'Falha ao comprimir histórico do chat: {{error}}',
   'Compressing chat history': 'Comprimindo histórico do chat',
+  'Started a new context from local notes: {{originalTokens}} to {{newTokens}} tokens.':
+    'Novo contexto iniciado a partir das notas locais: de {{originalTokens}} para {{newTokens}} tokens.',
   'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.':
     'Histórico do chat comprimido de {{originalTokens}} para {{newTokens}} tokens.',
   'Compression was not beneficial for this history size.':
