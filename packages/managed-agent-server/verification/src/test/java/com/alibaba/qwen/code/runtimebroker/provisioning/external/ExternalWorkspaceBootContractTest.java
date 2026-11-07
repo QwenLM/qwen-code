@@ -8,11 +8,12 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 import org.junit.jupiter.api.Assumptions;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -42,8 +43,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * actual {@code provision} boot document and a rotated-equivalent
  * {@code registration.json} descriptor into a private directory, and the existing
  * {@code readManagedRuntimeContainerBoot} (TypeScript, via {@code tsx}) admits or
- * refuses it. No CLI, worker or registration-write change is made — the shipped
- * {@code boot-v2 + storage} contract is exercised as it stands.
+ * refuses it. Both isolation classes are exercised: a single-Session external
+ * boot is {@code session}-isolated and a shared resident external Workspace boot
+ * is {@code workspace}-isolated; the shipped worker must admit each on the
+ * external boot path while plain v1 boots keep the session requirement.
  *
  * <p>The always-on Java mirror checks the same closed shape, so a skipped
  * cross-language run still fails when the document drifts.
@@ -63,20 +66,22 @@ class ExternalWorkspaceBootContractTest {
     @TempDir
     Path temporary;
 
-    private static RuntimeScope scope(String mountRoot) {
+    private static RuntimeScope scope(String mountRoot, String isolationClass) {
         return new RuntimeScope(TENANT, ALIAS, "1", mountRoot,
-                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, isolationClass);
     }
 
-    private static Map<String, Object> mintedBoot(String mountRoot) throws Exception {
+    private static Map<String, Object> mintedBoot(String mountRoot, String isolationClass) throws Exception {
         ExternalStorageRegistry registry = (tenant, alias) -> Optional.of(
                 new ExternalStorageRegistry.RegisteredExternalStorage(PROVIDER, PHYSICAL, 1,
                         ALIAS, ALIAS_PATH, mountRoot));
         var client = new CapturingClient();
         try (var provisioner = new ExternalWorkspaceProvisioner(client, registry, PROVIDER,
                 Duration.ofSeconds(5))) {
-            RuntimeProvisionRequest request = provisioner.createRequest(scope(mountRoot),
-                    "isolation-a");
+            // A shared resident Workspace is workspace-isolated with a null
+            // isolation key; a single-Session external boot keeps its key.
+            RuntimeProvisionRequest request = provisioner.createRequest(scope(mountRoot, isolationClass),
+                    "workspace".equals(isolationClass) ? null : "isolation-a");
             RuntimeProvisionSeed seed = new RuntimeProvisionSeed("request-a", "runtime-a",
                     "incarnation-a", "lease-a", 1, "token-a");
             var handle = provisioner.ensureResource(request, seed, null)
@@ -89,9 +94,10 @@ class ExternalWorkspaceBootContractTest {
         }
     }
 
-    @Test
-    void theMintedBootKeepsTheShippedManagedContextShape() throws Exception {
-        Map<String, Object> boot = mintedBoot("/mnt/external/workspace-a");
+    @ParameterizedTest
+    @ValueSource(strings = {"session", "workspace"})
+    void theMintedBootKeepsTheShippedManagedContextShape(String isolationClass) throws Exception {
+        Map<String, Object> boot = mintedBoot("/mnt/external/workspace-a", isolationClass);
 
         List<String> keys = new ArrayList<>(boot.keySet());
         keys.sort(String::compareTo);
@@ -107,14 +113,15 @@ class ExternalWorkspaceBootContractTest {
         assertEquals("external", storage.get("kind"));
         assertEquals(boot.get("mountRoot"), storage.get("mountRoot"),
                 "the worker requires the context mount root to equal the storage one");
-        assertEquals("session", boot.get("isolationClass"));
+        assertEquals(isolationClass, boot.get("isolationClass"));
         assertEquals(WorkspaceExecutionProfile.CAPABILITY_DIGEST, boot.get("capabilityDigest"));
     }
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(strings = {"session", "workspace"})
     @Timeout(120)
     @DisabledOnOs(OS.WINDOWS)
-    void theShippedWorkerParserAdmitsTheMintedBoot() throws Exception {
+    void theShippedWorkerParserAdmitsTheMintedBoot(String isolationClass) throws Exception {
         Path repoRoot = VerificationFixtures.repositoryRoot();
         Assumptions.assumeTrue(Files.isRegularFile(repoRoot.resolve(
                         "packages/cli/src/serve/managed-runtime-attestation-worker.ts")),
@@ -130,7 +137,7 @@ class ExternalWorkspaceBootContractTest {
         Path mountRoot = Files.createDirectory(directory.resolve("workspace"));
         privateDirectory(mountRoot, Set.of(PosixFilePermission.OWNER_READ,
                 PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE));
-        Map<String, Object> boot = mintedBoot(mountRoot.toString());
+        Map<String, Object> boot = mintedBoot(mountRoot.toString(), isolationClass);
         Path bootFile = writeBoot(directory, boot);
         writeDescriptor(directory, PHYSICAL);
 

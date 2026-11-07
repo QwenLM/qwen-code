@@ -289,7 +289,13 @@ export async function startManagedRuntimeAttestationWorker(
     (containerMode &&
       csiBoot === undefined &&
       ((boot.version !== 1 && !externalBoot) ||
-        boot.isolationClass !== 'session'))
+        // A shared resident external Workspace boots workspace-isolated; admit
+        // that on the external boot path only. Plain v1 boots keep the session
+        // requirement.
+        (externalBoot
+          ? boot.isolationClass !== 'session' &&
+            boot.isolationClass !== 'workspace'
+          : boot.isolationClass !== 'session')))
   ) {
     throw new Error(INVALID_BOOT_MESSAGE);
   }
