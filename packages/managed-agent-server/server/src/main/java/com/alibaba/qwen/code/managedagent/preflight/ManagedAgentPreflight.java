@@ -1015,6 +1015,10 @@ public final class ManagedAgentPreflight {
         boolean files = harness.isWorkspaceFilesEnabled();
         boolean shell = harness.isWorkspaceShellEnabled();
         if (ExternalRuntimeKinds.isExternal(broker.getProvisioner()) && (files || shell)) {
+            if (properties.isExternalWorkspaceFilesConfigured()) {
+                return new Check("tool-path", Status.PASS,
+                        "External Workspace files configuration is supported; negotiated readiness and original-worker close proof remain required", null);
+            }
             return new Check("tool-path", Status.FAIL,
                     ExternalRuntimeKinds.isWorkspace(broker.getProvisioner())
                                     ? "External Workspace Runtime is a storage provisioning prerequisite"

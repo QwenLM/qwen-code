@@ -359,6 +359,8 @@ import {
 import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import {
   hostedShellLaneAttachesChildAgents,
+  hasHostedExternalFilesExcludedOptions,
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
   isHostedWorkspaceReadProfile,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
 } from './hosted-workspace-profiles.js';
@@ -829,6 +831,7 @@ async function hostedApprovalForTurn(
       'hosted-workspace-files/1',
       'hosted-workspace-shell/1',
       'hosted-workspace-files/3',
+      HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
     ].includes(session.toolProfile ?? '');
   const admission = await readHostedTurnApprovalSelection(
     session.managed,
@@ -4761,6 +4764,16 @@ export function registerHostedHarnessSessionRoutes(
     holdCancellation?: (session: HostedSession) => void,
   ): Promise<void> => {
     const body = object(req.body);
+    const requestedProfile =
+      body?.['toolProfile'] ??
+      (!create ? sessions.get(req.params['id']!)?.toolProfile : undefined);
+    if (
+      requestedProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
+      (!contract.features?.includes(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE) ||
+        contract.lifecycleProtocolVersion !== 1 ||
+        hasHostedExternalFilesExcludedOptions(body))
+    )
+      return error(res, 400, 'hosted_tool_profile_unavailable');
     let cleanupPromptId = body?.['recoveryCleanupPromptId'];
     const cancellationPromptId = body?.['cancellationPromptId'];
     if (
@@ -4880,6 +4893,7 @@ export function registerHostedHarnessSessionRoutes(
       foregroundOnly &&
       ((toolProfile !== undefined &&
         toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+        toolProfile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
         toolProfile !== 'hosted-workspace-shell/1') ||
         (create && toolProfile === undefined) ||
         body?.['mcpServers'] !== undefined ||
@@ -5028,7 +5042,12 @@ export function registerHostedHarnessSessionRoutes(
     if (
       lifecycle &&
       (lifecycleProtocolVersion === 1
-        ? toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE
+        ? toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+          !(
+            toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
+            contract.lifecycleProtocolVersion === 1 &&
+            contract.features?.includes(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE)
+          )
         : typeof toolProfile !== 'string' ||
           !contract.lifecycleV2Profiles?.includes(toolProfile))
     ) {
@@ -5058,6 +5077,7 @@ export function registerHostedHarnessSessionRoutes(
         hookCatalog !== undefined ||
         (toolProfile !== undefined &&
           toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+          toolProfile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
           toolProfile !== 'hosted-workspace-shell/1'))
     ) {
       error(res, 409, 'hosted_tool_profile_conflict');
@@ -5984,6 +6004,8 @@ export function registerHostedHarnessSessionRoutes(
                         approval,
                         !agentDefinition &&
                           (toolProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
+                            toolProfile ===
+                              HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
                             toolProfile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
                             isHostedWorkspaceShellProfile(toolProfile)),
                       )
@@ -6043,6 +6065,44 @@ export function registerHostedHarnessSessionRoutes(
           ).toString('utf8'),
         ),
       );
+      const externalFiles =
+        definition?.['toolProfile'] === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE;
+      if (
+        externalFiles &&
+        (!contract.features?.includes(
+          HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+        ) ||
+          contract.lifecycleProtocolVersion !== 1 ||
+          hasHostedExternalFilesExcludedOptions(body) ||
+          hasHostedExternalFilesExcludedOptions(definition) ||
+          managed.authority
+            .eventsInSequenceRange(1, managed.authority.committedSequence)
+            .some(
+              (event) =>
+                event.kind === 'domain.committed' &&
+                [
+                  'hook_registration',
+                  'hook_execution',
+                  'mcp_configuration',
+                  'mcp_operation',
+                  'child_run',
+                  'monitor_run',
+                  'schedule',
+                  'automation_run',
+                  'child_acceptance',
+                  'session_message',
+                  'channel_route',
+                  'channel_delivery',
+                  'team_state',
+                  'team_task',
+                  'team_plan',
+                  'session_command',
+                ].includes(event.payload['domain'] as string),
+            ))
+      ) {
+        await managed.close();
+        return error(res, 409, 'hosted_tool_profile_conflict');
+      }
       let savedAgentDefinition: HostedAgentDefinition | undefined;
       let savedSessionSkillsRef: ManagedSessionDurableRef | undefined;
       let skills: HostedSkillCatalog | undefined;
@@ -6156,6 +6216,7 @@ export function registerHostedHarnessSessionRoutes(
       if (
         (foregroundOnly &&
           ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+            toolProfile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
             toolProfile !== 'hosted-workspace-shell/1') ||
             mcpServers !== undefined ||
             hookCatalog !== undefined ||
@@ -6303,6 +6364,10 @@ export function registerHostedHarnessSessionRoutes(
             ).toString('utf8'),
           ),
         );
+      if (externalFiles && hasExtensionConfiguration) {
+        await managed.close();
+        return error(res, 409, 'hosted_tool_profile_conflict');
+      }
       const mcpSettings = hasExtensionConfiguration
         ? []
         : await readHostedMcpSettings(managed);
@@ -6457,7 +6522,12 @@ export function registerHostedHarnessSessionRoutes(
       if (session.extensionAgentPrompt)
         session.extensionContext = `${session.extensionContext ?? ''}\n\n${session.extensionAgentPrompt}`;
       if (extensionManagement?.pending) session.blocked = true;
-      if (!foregroundOnly && session.toolProfile && brokerOptions) {
+      if (
+        !externalFiles &&
+        !foregroundOnly &&
+        session.toolProfile &&
+        brokerOptions
+      ) {
         session.childRuns = new HostedChildRunSession(
           {
             authority: session.managed.authority,
@@ -6578,41 +6648,43 @@ export function registerHostedHarnessSessionRoutes(
         });
       // H6b: every hosted Session owns its automation funnel — a run's
       // input needs no Runtime, and its settle reads the turn alone.
-      session.automations = new HostedAutomationSession(
-        {
-          authority: managed.authority,
-          resources: managed.resources,
-          sink: managed.sink,
-        },
-        managed.authority.sessionHeader.sessionKey,
-        {
-          // The gate probe runs in the Workspace Runtime through the
-          // Broker; a Harness without one blocks every gated fire.
-          ...(brokerOptions
-            ? gateOptions({
-                broker: {
-                  ...brokerOptions,
-                  lifecycleAuthority: () => session.lifecycle,
-                },
-                sessionKey: managed.authority.sessionHeader.sessionKey,
-                toolProfile: () => session.toolProfile,
-              })
-            : {}),
-          shellAvailable: () =>
-            isHostedWorkspaceShellProfile(session.toolProfile),
-          hooksConfigured: () => session.hooks !== undefined,
-        },
-      );
-      // H5b: every hosted Session owns its channel funnel — a channel input
-      // needs no Runtime, and its reply plans from the settled turn alone.
-      session.channels = new HostedChannelSession(
-        {
-          authority: managed.authority,
-          resources: managed.resources,
-          sink: managed.sink,
-        },
-        managed.authority.sessionHeader.sessionKey,
-      );
+      if (!externalFiles) {
+        session.automations = new HostedAutomationSession(
+          {
+            authority: managed.authority,
+            resources: managed.resources,
+            sink: managed.sink,
+          },
+          managed.authority.sessionHeader.sessionKey,
+          {
+            // The gate probe runs in the Workspace Runtime through the
+            // Broker; a Harness without one blocks every gated fire.
+            ...(brokerOptions
+              ? gateOptions({
+                  broker: {
+                    ...brokerOptions,
+                    lifecycleAuthority: () => session.lifecycle,
+                  },
+                  sessionKey: managed.authority.sessionHeader.sessionKey,
+                  toolProfile: () => session.toolProfile,
+                })
+              : {}),
+            shellAvailable: () =>
+              isHostedWorkspaceShellProfile(session.toolProfile),
+            hooksConfigured: () => session.hooks !== undefined,
+          },
+        );
+        // H5b: a channel input needs no Runtime, and its reply plans from
+        // the settled turn alone.
+        session.channels = new HostedChannelSession(
+          {
+            authority: managed.authority,
+            resources: managed.resources,
+            sink: managed.sink,
+          },
+          managed.authority.sessionHeader.sessionKey,
+        );
+      }
       // H3: the embedded wake scheduler of a notification-capable Session.
       // A notification rides its observation revision (H4b: its child
       // acceptance; H6: an automation input rides its run's dispatch
@@ -7091,6 +7163,14 @@ export function registerHostedHarnessSessionRoutes(
       // A bare load of a parked Session keeps refusing with 409 so it never
       // drives a Runtime by accident.
       const unsettled = unsettledPromptId(session);
+      if (
+        externalFiles &&
+        unsettled &&
+        (await readHostedTurnApprovalSelection(managed, unsettled))?.planMode
+      ) {
+        await managed.close();
+        return error(res, 409, 'hosted_tool_profile_conflict');
+      }
       // Cold loads stay inert: only an explicit takeover request may touch
       // the Broker or settle anything. A bare load of a parked Session keeps
       // refusing with 409 so it never drives a Runtime by accident.
@@ -8193,7 +8273,12 @@ export function registerHostedHarnessSessionRoutes(
         session.managed.authority.sessionHeader.sessionKey,
       ) ||
       (protocolVersion === 1 &&
-        session.toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE)
+        session.toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+        !(
+          session.toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
+          contract.lifecycleProtocolVersion === 1 &&
+          contract.features?.includes(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE)
+        ))
     )
       return error(res, 400, 'invalid_hosted_lifecycle_request');
     if (
@@ -8409,6 +8494,7 @@ export function registerHostedHarnessSessionRoutes(
                   'hosted-workspace-shell/1',
                   'hosted-workspace-files/2',
                   'hosted-workspace-files/3',
+                  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
                 ]
           ).includes(session.toolProfile ?? '') ||
           (approvalSelection.revision === 0 &&
@@ -12589,6 +12675,7 @@ export function registerHostedHarnessSessionRoutes(
     if (
       !session.toolProfile ||
       session.toolProfile === HOSTED_MCP_PROFILE ||
+      session.toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
       !brokerOptions
     )
       return error(res, 409, 'hosted_file_history_unavailable');

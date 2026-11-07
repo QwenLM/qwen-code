@@ -52,8 +52,10 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
         this.extensionBindings = extensionBindings;
         this.extensionTransport = extensionTransport;
     }
+
     public static HarnessSessionResolver resolver(SessionQueryStore store, WorkspaceRuntimeResolver workspaces,
-            ManagedAgentSettings properties, String workspaceId, String workspaceCwd) {
+            ManagedAgentSettings properties, String workspaceId, String workspaceCwd,
+            com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore workspaceExecutionStore) {
         var broker = properties.getRuntimeBroker();
         return new HarnessSessionResolver() {
             @Override
@@ -104,6 +106,9 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
                 }
                 if (session.workspace() != null) {
                     if (workspaces != null) {
+                        if (admission && authority == null) {
+                            workspaceExecutionStore.requireExternalExecution(session.workspace());
+                        }
                         return CompletableFuture.completedFuture(workspaces.resolve(sessionId, authority).scope());
                     }
                     return CompletableFuture.failedFuture(

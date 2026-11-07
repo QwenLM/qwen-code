@@ -126,6 +126,20 @@ final class RuntimeBindingProvisioning {
                         || "runtime_external_unavailable".equals(failure.getCode()));
     }
 
+    private static boolean retryableExternalWorkspaceProvision(RuntimeProvisionRequest request, Throwable cause) {
+        if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)) {
+            return false;
+        }
+        if (cause instanceof RuntimeBrokerException failure) {
+            return failure.isRetryable()
+                    && ("runtime_external_provider_failed".equals(failure.getCode())
+                            || failure.getStatusCode() == 503 && (externalRetryable(request, failure)
+                                    || "runtime_broker_provision_timeout".equals(failure.getCode())
+                                    || "managed_runtime_unavailable".equals(failure.getCode())));
+        }
+        return cause instanceof java.io.IOException || cause instanceof TimeoutException;
+    }
+
     CompletionStage<BindingContext> ensureBinding(
             RuntimeProvisionRequest request) {
         RuntimeBindingRecord record = bindingRepository.findOrCreate(request);
@@ -199,6 +213,9 @@ final class RuntimeBindingProvisioning {
                 != RuntimeBindingRecord.State.PROVISIONING) {
             return failed(unavailable("runtime_binding_unavailable",
                     "Runtime binding is not available"));
+        }
+        if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(request) && record.getResourceHandle() != null) {
+            return reconcileBinding(record);
         }
         CompletableFuture<BindingContext> created =
                 new CompletableFuture<>();
@@ -368,6 +385,7 @@ final class RuntimeBindingProvisioning {
                 try {
                     RuntimeBindingRecord timedOut = renewal.stopAndGet();
                     blocked = request.isManagedContext() && timedOut != null
+                            && !retryableExternalWorkspaceProvision(request, answer)
                             && blockRecoveryQuietly(timedOut, answer);
                 } finally {
                     bindingRegistry.releaseOperationQuietly(bindingId, operationGeneration);
@@ -419,6 +437,16 @@ final class RuntimeBindingProvisioning {
                     RuntimeBindingRecord currentClaim = renewal.stopAndGet();
                     try {
                         if (error != null) {
+                            if (request.isManagedContext()
+                                    && retryableExternalWorkspaceProvision(request, cause)) {
+                                // A retryable external-workspace failure keeps the
+                                // binding recoverable instead of blocking it.
+                                if (cause instanceof RuntimeBrokerException brokerFailure) {
+                                    throw new CompletionException(brokerFailure);
+                                }
+                                throw unavailable("runtime_provision_failed",
+                                        "Runtime provisioning failed", cause);
+                            }
                             throw provisionFailureHandler.failure(claimed, currentClaim, cause, localCapacityRefused.get());
                         }
                         if (currentClaim == null) {

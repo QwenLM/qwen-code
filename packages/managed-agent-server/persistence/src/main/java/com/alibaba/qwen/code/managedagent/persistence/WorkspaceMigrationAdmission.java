@@ -91,12 +91,57 @@ final class WorkspaceMigrationAdmission {
         if (!tenant.equals(alias.get("tenant_id")) || !storage.equals(alias.get("storage_id"))) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
+        if ("EXTERNAL".equals(alias.get("storage_kind"))) {
+            requireExternalPhysicalOpen(jdbc, tenant, storage, lock);
+            return;
+        }
         if (alias.get("physical_key") == null || "CSI".equals(alias.get("storage_kind"))) {
             return;
         }
         var owner = "SSH_LOCAL".equals(alias.get("storage_kind"))
                 ? SshWorkspaceStore.requireOwner(jdbc, tenant, storage, alias, lock) : LocalStorageOwners.requireOwner(jdbc, alias, lock);
         if (!"READY".equals(owner.get("mount_state"))) {
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    private static void requireExternalPhysicalOpen(JdbcTemplate jdbc, String tenant, String storage, String lock) {
+        var registrations = jdbc.query("SELECT registration_json, registration_revision, physical_key FROM ma_storage"
+                + " WHERE alias_key = ? AND storage_kind = 'EXTERNAL' AND registration_state = 'REGISTERED'"
+                + lock, (row, index) -> {
+                    com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.RegisteredExternalStorage registered;
+                    try {
+                        registered = com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry
+                                .decodeRegistration(row.getString("registration_json"));
+                    } catch (RuntimeException unreadable) {
+                        // A registration this build cannot decode cannot prove that
+                        // the mount is safe. Refuse the admission with the stable
+                        // Workspace verdict instead of leaking a mapper 400/500.
+                        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    }
+                    if (!storage.equals(registered.tenantWorkspaceId()) || !registered.ownerKey().equals(row.getString("physical_key"))
+                            || registered.registrationRevision() != row.getLong("registration_revision")) {
+                        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    }
+                    return registered;
+                }, JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
+        if (registrations.size() != 1) {
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        }
+        var registered = registrations.getFirst();
+        var owners = jdbc.query("SELECT * FROM ma_storage_owner WHERE storage_key = ?" + lock,
+                (row, index) -> registered.ownerKey().equals(row.getString("physical_key"))
+                        && "EXTERNAL".equals(row.getString("storage_kind"))
+                        && tenant.equals(row.getString("tenant_id")) && storage.equals(row.getString("storage_id"))
+                        && registered.mountRoot().equals(row.getString("mount_root"))
+                        && registered.registrationRevision() == row.getLong("mount_revision")
+                        && "UNVERIFIED".equals(row.getString("mount_state"))
+                        && row.getObject("maintenance_id") == null && row.getObject("maintenance_generation") == null
+                        && "RELEASED".equals(row.getString("csi_phase")) && row.getLong("csi_revision") == 0
+                        && row.getObject("csi_reservation_id") == null && row.getObject("csi_registration_key") == null
+                        && row.getObject("csi_registration_revision") == null && row.getObject("csi_provision_request_id") == null,
+                registered.ownerKey());
+        if (owners.size() != 1 || !owners.getFirst()) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
     }

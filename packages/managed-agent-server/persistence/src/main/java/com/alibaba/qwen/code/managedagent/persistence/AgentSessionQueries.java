@@ -451,13 +451,16 @@ final class AgentSessionQueries {
             String promptId) {
         var rows = jdbc.query("SELECT t.approval_mode, t.approval_revision, t.is_plan_enabled, t.permission_rules_json,"
                         + " s.approval_revision AS selected_revision, s.agent_id, s.agent_definition_digest,"
-                        + " s.workspace_id, s.tool_profile FROM ma_turn t JOIN ma_session s"
+                        + " s.workspace_id, s.tool_profile, s.parent_session_id, s.public_child_agents_version FROM ma_turn t JOIN ma_session s"
                         + " ON s.tenant_id=t.tenant_id AND s.session_id=t.session_id"
                         + " WHERE t.tenant_id=? AND t.session_id=? AND t.prompt_id=?", (row, index) -> {
                     if (("qwen-code".equals(row.getString("agent_id"))
                             ? row.getString("agent_definition_digest") != null
                             : row.getString("agent_definition_digest") == null) || row.getString("workspace_id") == null
-                            || !(WorkspaceToolProfiles.FILES.equals(row.getString("tool_profile"))
+                            || !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(row.getString("tool_profile"))
+                                    ? "qwen-code".equals(row.getString("agent_id")) && row.getString("agent_definition_digest") == null
+                                            && row.getString("parent_session_id") == null && row.getInt("public_child_agents_version") == 0
+                                    : WorkspaceToolProfiles.FILES.equals(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.FILES_V3.equals(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.isPublicShell(row.getString("tool_profile")))) {
                         return null;

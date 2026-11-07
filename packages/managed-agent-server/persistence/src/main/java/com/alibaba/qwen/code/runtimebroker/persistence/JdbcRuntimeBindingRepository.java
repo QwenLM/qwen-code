@@ -152,8 +152,12 @@ public final class JdbcRuntimeBindingRepository
         }
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
             lockPlacementDomain(connection, claim.getRequest().getScope().getTenantId()); // binding, then storage rows
-            RuntimeBindingRecord binding = selectById(connection, expected.getBindingId(), true);
-            String physical = localStorageOwnerKey(connection, claim.getRequest().getScope().getTenantId(),
+            boolean external = WorkspaceExecutionProfile.isExternalWorkspaceRequest(claim.getRequest());
+            var externalOwner = external ? JdbcExternalWorkspaceOwnership.lockStoppedRelease(connection, claim) : null;
+            RuntimeBindingRecord binding = external
+                    ? JdbcExternalWorkspaceOwnership.requireCurrent(connection, this, claim, false)
+                    : selectById(connection, expected.getBindingId(), true);
+            String physical = external ? null : localStorageOwnerKey(connection, claim.getRequest().getScope().getTenantId(),
                     claim.getRequest().getStorageId(), true);
             if (physical != null) {
                 try (var lock = connection.prepareStatement("SELECT physical_key FROM ma_storage_owner WHERE storage_key = ?"
@@ -182,16 +186,14 @@ public final class JdbcRuntimeBindingRepository
             RuntimeSessionRecord updated = JdbcRuntimeSessionRepository.compareAndSet(connection, expected,
                     expected.withState(RuntimeSessionRecord.State.RELEASED, JdbcRepositorySupport.databaseNow(connection)));
             if (updated != null) {
-                if (physical != null) {
-                    clearStoppedMember(connection, physical, expected);
-                }
+                JdbcExternalWorkspaceOwnership.releaseStoppedMember(connection, external, externalOwner, binding, claim, expected, physical);
                 RuntimeAdmission.requireStoppedRelease(binding, claim, expected, JdbcRepositorySupport.databaseNowPrecise(connection));
             }
             return updated;
         });
     }
 
-    private static void clearStoppedMember(Connection connection, String key, RuntimeSessionRecord session) throws SQLException {
+    static void clearStoppedMember(Connection connection, String key, RuntimeSessionRecord session) throws SQLException {
         try (var read = connection.prepareStatement("SELECT execution_storage_key FROM ma_runtime_session"
                 + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ? FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(read, 1, session.getBindingId());
@@ -282,7 +284,7 @@ public final class JdbcRuntimeBindingRepository
         }
     }
 
-    private static RuntimeBrokerException unverifiedWorkspaceHolder() {
+    static RuntimeBrokerException unverifiedWorkspaceHolder() {
         return new RuntimeBrokerException(
                 409,
                 "workspace_close_identity_unverified",
@@ -990,7 +992,7 @@ public final class JdbcRuntimeBindingRepository
     }
 
     /** What a Harness fence admits beyond ordinary new work. */
-    private enum HarnessFence {
+    enum HarnessFence {
         LEGACY_HOOK,
         RETIREMENT,
         CLEANUP,
@@ -998,7 +1000,7 @@ public final class JdbcRuntimeBindingRepository
         RUNTIME_SESSION_OWNER
     }
 
-    private static Set<HarnessFence> fence(boolean runtimeSessionOwner, HarnessFence... fences) {
+    static Set<HarnessFence> fence(boolean runtimeSessionOwner, HarnessFence... fences) {
         Set<HarnessFence> result = EnumSet.noneOf(HarnessFence.class);
         result.addAll(List.of(fences));
         if (runtimeSessionOwner) {
@@ -1012,7 +1014,7 @@ public final class JdbcRuntimeBindingRepository
      * Session's own Harness Session lifecycle claim: Hook placement and
      * cleanup proceed only while that claim matches.
      */
-    private static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
+    static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
             String harnessSessionId, RuntimeLifecycleAuthority authority, Set<HarnessFence> fence) throws SQLException {
         boolean legacyHook = fence.contains(HarnessFence.LEGACY_HOOK);
         boolean retirement = fence.contains(HarnessFence.RETIREMENT);

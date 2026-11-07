@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceState;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -26,6 +27,59 @@ public class ManagedWorkspaceRegistry
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private com.alibaba.qwen.code.managedagent.settings.SshSettings ssh;
+    private java.util.function.BooleanSupplier externalFilesActivation = () -> false;
+    private ExternalStorageRegistrationStore externalRegistrations;
+    private com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void configureExternalFiles(com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings settings,
+            ExternalStorageRegistrationStore registrations,
+            org.springframework.beans.factory.ObjectProvider<com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector> harnesses,
+            org.springframework.beans.factory.ObjectProvider<com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer> warmers) {
+        this.properties = settings;
+        this.externalRegistrations = registrations;
+        this.externalFilesActivation = () -> {
+            if (!settings.isExternalWorkspaceFilesConfigured()) {
+                return false;
+            }
+            var harness = harnesses.getIfAvailable();
+            var warmer = warmers.getIfAvailable();
+            String profile = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES;
+            return harness != null && warmer != null && harness.supportsLifecycle(profile)
+                    && warmer.supportsWorkspaceClose(profile);
+        };
+    }
+
+    public boolean externalFilesAvailable() {
+        return externalFilesActivation.getAsBoolean();
+    }
+
+    public boolean isExternal(ContextBinding binding) {
+        return com.alibaba.qwen.code.runtimebroker.persistence.JdbcExternalWorkspaceOwnership.externalStorage(jdbc, binding);
+    }
+
+    public boolean externalFilesAllowed(ContextBinding binding) {
+        return externalFilesAvailable() && externalBindingCurrent(binding);
+    }
+
+    private boolean externalBindingCurrent(ContextBinding binding) {
+        if (binding == null || properties == null || externalRegistrations == null
+                || !".".equals(binding.getCwdRelative())
+                || !com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(binding.getContextConfigRef())) {
+            return false;
+        }
+        var rows = jdbc.query("SELECT config_ref, policy_ref FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?"
+                + " AND workspace_generation = ? AND storage_id = ? AND workspace_kind = 'ROOT' AND state = 'ACTIVE'",
+                (row, index) -> com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONFIG_REF.equals(row.getString("config_ref"))
+                        && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF.equals(row.getString("policy_ref")),
+                binding.getTenantId(), binding.getWorkspaceId(), binding.getWorkspaceGeneration(), binding.getStorageId());
+        if (rows.size() != 1 || !rows.getFirst()) {
+            return false;
+        }
+        var registered = externalRegistrations.find(binding.getTenantId(), binding.getStorageId()).orElse(null);
+        return registered != null && binding.getWorkspaceId().equals(registered.tenantWorkspaceId())
+                && properties.getRuntimeBroker().getExternalProviderId().equals(registered.providerId());
+    }
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     void configureSsh(com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties) {
@@ -125,21 +179,23 @@ public class ManagedWorkspaceRegistry
             String actorId, String afterId, int limit) {
         byte[] key = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         byte[] after = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(afterId == null ? "" : afterId);
-        List<WorkspaceSummary> rows = jdbc.query("SELECT r.workspace_id, r.display_name, r.state, r.workspace_kind, s.storage_kind, a.role FROM ma_workspace r"
+        List<WorkspaceRow> rows = jdbc.query("SELECT r.workspace_id, r.display_name, r.state, r.workspace_kind, r.workspace_generation,"
+                        + " r.storage_id, r.config_ref, r.policy_ref, s.storage_kind, a.role FROM ma_workspace r"
                         + " JOIN ma_workspace_access a ON a.tenant_id = r.tenant_id AND a.workspace_id = r.workspace_id"
                         + " LEFT JOIN ma_storage s ON s.tenant_id = r.tenant_id AND s.storage_id = r.storage_id"
                         + " WHERE r.tenant_id = ? AND a.actor_id = ? AND a.role IN ('READER', 'OPERATOR', 'OWNER')"
                         + " AND r.workspace_id > ? ORDER BY r.workspace_id LIMIT ?",
-                (result, row) -> summary(result), tenantId, key, after, limit);
-        return withDefaults(tenantId, rows);
+                (result, row) -> workspaceRow(result), tenantId, key, after, limit);
+        return withDefaults(tenantId, summarize(tenantId, rows));
     }
 
     public WorkspaceSummary findReadable(String tenantId, String actorId,
             String workspaceId) {
         byte[] key = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
-        List<WorkspaceSummary> rows = jdbc.query(
+        List<WorkspaceRow> rows = jdbc.query(
                 "SELECT r.workspace_id, r.display_name, r.state,"
-                        + " r.workspace_kind, s.storage_kind, a.role FROM ma_workspace r"
+                        + " r.workspace_kind, r.workspace_generation, r.storage_id,"
+                        + " r.config_ref, r.policy_ref, s.storage_kind, a.role FROM ma_workspace r"
                         + " JOIN ma_workspace_access a ON"
                         + " a.tenant_id = r.tenant_id"
                         + " AND a.workspace_id = r.workspace_id"
@@ -147,8 +203,8 @@ public class ManagedWorkspaceRegistry
                         + " WHERE r.tenant_id = ? AND r.workspace_id = ?"
                         + " AND a.actor_id = ? AND a.role IN ('READER',"
                         + " 'OPERATOR', 'OWNER')",
-                (result, row) -> summary(result), tenantId, workspaceId, key);
-        return rows.isEmpty() ? null : withDefaults(tenantId, rows).getFirst();
+                (result, row) -> workspaceRow(result), tenantId, workspaceId, key);
+        return rows.isEmpty() ? null : findOneReadable(tenantId, rows.getFirst());
     }
 
     /**
@@ -171,24 +227,22 @@ public class ManagedWorkspaceRegistry
         arguments.add(tenantId);
         arguments.addAll(workspaceIds);
         arguments.add(key);
-        List<ReadableGrant> rows = jdbc.query(
+        List<WorkspaceRow> rows = jdbc.query(
                 "SELECT r.workspace_id, r.workspace_generation,"
-                        + " r.storage_id, r.state, a.role"
+                        + " r.storage_id, r.state, r.config_ref, r.policy_ref,"
+                        + " r.display_name, r.workspace_kind,"
+                        + " s.storage_kind, a.role"
                         + " FROM ma_workspace r"
                         + " JOIN ma_workspace_access a ON"
                         + " a.tenant_id = r.tenant_id"
                         + " AND a.workspace_id = r.workspace_id"
+                        + " LEFT JOIN ma_storage s ON s.tenant_id = r.tenant_id AND s.storage_id = r.storage_id"
                         + " WHERE r.tenant_id = ? AND r.workspace_id IN ("
                         + plain + ")"
                         + " AND a.actor_id = ? AND a.role IN ('READER',"
                         + " 'OPERATOR', 'OWNER')",
-                (result, row) -> readableGrant(result), arguments.toArray());
-        java.util.Map<String, ReadableGrant> result =
-                new java.util.HashMap<>(rows.size() * 2);
-        for (ReadableGrant row : rows) {
-            result.put(row.workspaceId(), row);
-        }
-        return result;
+                (result, row) -> workspaceRow(result), arguments.toArray());
+        return readableGrants(tenantId, rows);
     }
 
     public WorkspaceSummary readableDefault(String tenantId,
@@ -203,20 +257,6 @@ public class ManagedWorkspaceRegistry
         WorkspaceSummary found = findReadable(tenantId, actorId,
                 ids.getFirst());
         return found != null && found.canCreateSession() ? found : null;
-    }
-
-    private static WorkspaceSummary summary(ResultSet result)
-            throws SQLException {
-        String state = result.getString("state");
-        return new WorkspaceSummary(result.getString("workspace_id"),
-                result.getString("display_name"), state,
-                WorkspaceAccess.valueOf(result.getString("role"))
-                        .atLeast(WorkspaceAccess.OPERATOR)
-                        && "ACTIVE".equals(state), ".",
-                "OWNER".equals(result.getString("role")) && "ACTIVE".equals(state)
-                        && "ROOT".equals(result.getString("workspace_kind"))
-                        && !"SSH_LOCAL".equals(result.getString("storage_kind"))
-                        && !"CSI".equals(result.getString("storage_kind")));
     }
 
     private List<WorkspaceSummary> withDefaults(String tenantId, List<WorkspaceSummary> items) {
@@ -242,15 +282,92 @@ public class ManagedWorkspaceRegistry
                 item.canSelectDirectory())).toList();
     }
 
-    private static ReadableGrant readableGrant(ResultSet result)
-            throws SQLException {
-        String state = result.getString("state");
-        return new ReadableGrant(result.getString("workspace_id"),
-                result.getLong("workspace_generation"),
-                result.getString("storage_id"),
-                WorkspaceAccess.valueOf(result.getString("role"))
-                        .atLeast(WorkspaceAccess.OPERATOR)
-                        && "ACTIVE".equals(state));
+    private List<WorkspaceSummary> summarize(String tenantId,
+            List<WorkspaceRow> rows) {
+        boolean[] external = externalEligibility(tenantId, rows);
+        return java.util.stream.IntStream.range(0, rows.size()).mapToObj(index -> {
+            WorkspaceRow row = rows.get(index);
+            return new WorkspaceSummary(row.workspaceId(),
+                    row.displayName(), row.state(),
+                    row.access().atLeast(WorkspaceAccess.OPERATOR)
+                            && "ACTIVE".equals(row.state())
+                            && (!"EXTERNAL".equals(row.storageKind()) || external[index]), ".",
+                    "OWNER".equals(row.role()) && "ACTIVE".equals(row.state())
+                            && "ROOT".equals(row.workspaceKind())
+                            && !"SSH_LOCAL".equals(row.storageKind())
+                            && !"CSI".equals(row.storageKind())
+                            && !"EXTERNAL".equals(row.storageKind()));
+        }).toList();
+    }
+
+    private WorkspaceSummary findOneReadable(String tenantId, WorkspaceRow row) {
+        boolean external = externalEligibility(tenantId, List.of(row))[0];
+        WorkspaceSummary summary = new WorkspaceSummary(row.workspaceId(),
+                row.displayName(), row.state(),
+                row.access().atLeast(WorkspaceAccess.OPERATOR)
+                        && "ACTIVE".equals(row.state())
+                        && (!"EXTERNAL".equals(row.storageKind()) || external), ".",
+                "OWNER".equals(row.role()) && "ACTIVE".equals(row.state())
+                        && "ROOT".equals(row.workspaceKind())
+                        && !"SSH_LOCAL".equals(row.storageKind())
+                        && !"CSI".equals(row.storageKind())
+                        && !"EXTERNAL".equals(row.storageKind()));
+        return withDefaults(tenantId, List.of(summary)).getFirst();
+    }
+
+    private java.util.Map<String, ReadableGrant> readableGrants(String tenantId,
+            List<WorkspaceRow> rows) {
+        boolean[] external = externalEligibility(tenantId, rows);
+        java.util.Map<String, ReadableGrant> result = new java.util.HashMap<>(rows.size() * 2);
+        for (int index = 0; index < rows.size(); index++) {
+            WorkspaceRow row = rows.get(index);
+            result.put(row.workspaceId(), new ReadableGrant(row.workspaceId(),
+                    row.workspaceGeneration(), row.storageId(),
+                    row.access().atLeast(WorkspaceAccess.OPERATOR)
+                            && "ACTIVE".equals(row.state())
+                            && (!"EXTERNAL".equals(row.storageKind()) || external[index])));
+        }
+        return result;
+    }
+
+    /**
+     * Resolve external eligibility after the Workspace page has been read. One
+     * storage query and one readiness evaluation replace per-row JDBC reads
+     * inside a ResultSet mapper.
+     */
+    private boolean[] externalEligibility(String tenantId, List<WorkspaceRow> rows) {
+        boolean[] result = new boolean[rows.size()];
+        var external = java.util.stream.IntStream.range(0, rows.size())
+                .filter(index -> "EXTERNAL".equals(rows.get(index).storageKind()))
+                .boxed().toList();
+        if (external.isEmpty() || !externalFilesAvailable()) {
+            return result;
+        }
+        java.util.Map<String, ExternalStorageRegistrationStore.RegistrationState> states =
+                externalRegistrations.states(tenantId, external.stream()
+                        .map(index -> rows.get(index).storageId()).toList());
+        for (int index : external) {
+            WorkspaceRow row = rows.get(index);
+            var state = states.get(row.storageId());
+            result[index] = "ACTIVE".equals(row.state())
+                    && "ROOT".equals(row.workspaceKind())
+                    && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONTEXT_CONFIG_REF
+                            .equals(descriptorRef(row.configRef(), row.policyRef()))
+                    && state != null && state.current()
+                    && row.workspaceId().equals(state.tenantWorkspaceId())
+                    && properties.getRuntimeBroker().getExternalProviderId().equals(state.providerId());
+        }
+        return result;
+    }
+
+    private static WorkspaceRow workspaceRow(ResultSet result) throws SQLException {
+        return new WorkspaceRow(result.getString("workspace_id"),
+                result.getString("display_name"), result.getString("state"),
+                result.getString("workspace_kind"), result.getLong("workspace_generation"),
+                result.getString("storage_id"), result.getString("config_ref"),
+                result.getString("policy_ref"), result.getString("storage_kind"),
+                WorkspaceAccess.valueOf(result.getString("role")),
+                result.getString("role"));
     }
 
     /**
@@ -371,6 +488,11 @@ public class ManagedWorkspaceRegistry
                 || !"ROOT".equals(records.getFirst().kind()))) {
             throw new ManagedAgentException(404, "workspace_not_found", "Workspace not found.");
         }
+        if (isExternal(binding)
+                && (!ExternalWorkspaceSessionPolicies.externalFilesAllowedOrRefuse(this, binding)
+                || !".".equals(binding.getCwdRelative()))) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT.value(), "workspace_unavailable", "External Workspace files are unavailable.");
+        }
         return new ResolvedBinding(binding, record.getConfigRef(),
                 record.getPolicyRef());
     }
@@ -434,6 +556,12 @@ public class ManagedWorkspaceRegistry
     }
 
     private record AccessRow(WorkspaceAccess value) {
+    }
+
+    private record WorkspaceRow(String workspaceId, String displayName,
+            String state, String workspaceKind, long workspaceGeneration,
+            String storageId, String configRef, String policyRef,
+            String storageKind, WorkspaceAccess access, String role) {
     }
 
     private record RegistryRow(WorkspaceRecord workspace, String kind) {

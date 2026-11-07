@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
@@ -65,6 +66,40 @@ class ManagedUserMessageStoreTest {
         when(queueAgents.userMessageInput(anyList()))
                 .thenAnswer(call -> agents.userMessageInput(call.getArgument(0)));
         messages = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedUserMessageStore(jdbc, json, digests, queueAgents));
+    }
+
+    @Test
+    void refusesExternalAttachmentsBeforeSubmitOrEditCanPoisonTheQueue() {
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, TENANT, session);
+        List<InputBlock> attachment = List.of(new InputBlock("input_file", "contents", "text/plain", null, "notes.txt"));
+
+        assertCode("workspace_unavailable", () -> command("first", new Command("submit", null, null, attachment)));
+        assertThat(query().messages()).isEmpty();
+        Message first = command("first", submit("first")).messages().getFirst();
+        Snapshot beforeEdit = query();
+        assertCode("workspace_unavailable", () -> command("edit",
+                new Command("edit", first.id(), first.revision(), attachment)));
+        assertThat(query()).isEqualTo(beforeEdit);
+        command("edit", new Command("edit", first.id(), first.revision(), text("edited")));
+        Message second = command("second", submit("second")).messages().getLast();
+
+        List<Message> delivered = messages.claim(TENANT, session, turn("RUNNING"), false);
+        assertThat(delivered).extracting(Message::id).containsExactly(first.id(), second.id());
+        assertThat(delivered).extracting(message -> message.input().getFirst().get("text"))
+                .containsExactly("edited", "second");
+    }
+
+    @Test
+    void preservesAttachmentSubmitAndEditForOtherProfiles() {
+        List<InputBlock> attachment = List.of(new InputBlock("input_file", "contents", "text/plain", null, "notes.txt"));
+        Message first = command("first", new Command("submit", null, null, attachment)).messages().getFirst();
+        assertThat(first.input().getFirst().get("type")).isEqualTo("resource");
+        Message second = command("second", submit("text")).messages().getLast();
+        Snapshot edited = command("edit", new Command("edit", second.id(), second.revision(), attachment));
+        assertThat(edited.messages().getLast().input()).isEqualTo(first.input());
+        assertThat(messages.claim(TENANT, session, turn("RUNNING"), false))
+                .extracting(Message::id).containsExactly(first.id(), second.id());
     }
 
     @Test

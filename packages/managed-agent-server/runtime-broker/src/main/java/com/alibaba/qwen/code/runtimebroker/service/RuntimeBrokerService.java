@@ -127,6 +127,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     private final RuntimeExecutionRecovery executionRecovery;
     private final RuntimeExecutionCancellation executionCancellation;
     private final RuntimeHoldInventory holdInventory;
+    private final RuntimeDrainRelease drainRelease;
 
     /**
      * H4b: the live physical Runtime binding of a Harness Session — how
@@ -289,10 +290,16 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 sessionRepository, transport, executionReconciler, closed);
         this.executionCancellation = new RuntimeExecutionCancellation(bindingRegistry, executionState, executionRepository,
                 transport, executionDispatcher, scheduler, this.operationLeaseDuration, closed);
+        this.drainRelease = new RuntimeDrainRelease(this, sessionRepository, executionRepository, transport,
+                provisioner, executionDispatcher, bindingRepository);
     }
 
     public boolean supportsDrainedStop() {
         return provisioner.supportsDrainedStop();
+    }
+
+    public boolean supportsDrainedStopKind(String kind) {
+        return provisioner.supportsDrainedStopKind(kind);
     }
 
     public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
@@ -450,6 +457,10 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     }
                     return CompletableFuture.completedFuture(null);
                 }
+                if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())
+                        && (binding.getDrainReceipt() != null || !stoppedOnly)) {
+                    return drainBinding(binding, null, authority);
+                }
                 if (stoppedOnly) {
                     if (binding.getLease() == null || binding.getProvisionSeed() == null || binding.getResourceHandle() == null) {
                         return failed(conflict("workspace_close_identity_unverified", "Original stop identity is incomplete"));
@@ -565,8 +576,21 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             bindingRegistry.releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
             return failed(conflict("workspace_close_identity_unverified", "Original worker stop identity changed"));
         }
-        if ((lost || absence != null) && (executionRepository.hasActiveByBinding(claimed.getBindingId(), claimed.getGeneration())
-                || absence == null && sessionRepository.countActiveByBinding(claimed.getBindingId(), claimed.getGeneration()) != 0)) {
+        boolean activeExecutions = executionRepository.hasActiveByBinding(
+                claimed.getBindingId(), claimed.getGeneration());
+        // A restart-fenced external-workspace binding may still own a live
+        // worker with one stale Session row. The drain below marks it
+        // drain-requested, stops that worker for the persisted receipt and
+        // re-checks for unsettled rows before RELEASED, so refusing here would
+        // only fence the storage holder with no exit. Executions in flight
+        // still refuse: nothing can settle them without their worker.
+        boolean liveWorkerStopRecoverable = lost && absence == null
+                && claimed.getDrainReceipt() == null && !activeExecutions
+                && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
+                        .isExternalWorkspaceRequest(claimed.getRequest());
+        if ((lost || absence != null) && !liveWorkerStopRecoverable
+                && (activeExecutions || absence == null && sessionRepository.countActiveByBinding(
+                        claimed.getBindingId(), claimed.getGeneration()) != 0)) {
             bindingRegistry.releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
             return failed(conflict("workspace_close_execution_unsettled", "Lost Runtime resources require recovery"));
         }
@@ -581,12 +605,22 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         renewal.start();
         CompletionStage<Void> result = safeStage(() -> {
             CompletionStage<Void> stopped = CompletableFuture.completedFuture(null);
-            if (absence != null) {
-                bindingRepository.requireHarnessCleanup(draining.getRequest().getScope(), draining.getRequest().getIsolationKey(), authority);
+            // A LOST binding has no stop proof yet: stop the worker and commit
+            // its receipt before releasing any row, so the release below runs
+            // on proven retirement instead of a runtime the broker lost track of.
+            if (draining.getDrainReceipt() != null || absence != null || authority != null || lost) {
+                if (authority != null) {
+                    bindingRepository.requireHarnessCleanup(draining.getRequest().getScope(), draining.getRequest().getIsolationKey(), authority);
+                }
+                if (executionRepository.hasActiveByBinding(draining.getBindingId(), draining.getGeneration())) {
+                    throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
+                }
                 var receipt = draining.getDrainReceipt();
-                stopped = (receipt == null ? provisioner.stopDrained(draining) : CompletableFuture.completedFuture(receipt))
+                stopped = (receipt == null ? drainRelease.stopAcknowledgedRuntime(draining, renewal, authority) : CompletableFuture.completedFuture(receipt))
                         .thenAccept(proof -> {
-                            bindingRepository.requireHarnessCleanup(draining.getRequest().getScope(), draining.getRequest().getIsolationKey(), authority);
+                            if (authority != null) {
+                                bindingRepository.requireHarnessCleanup(draining.getRequest().getScope(), draining.getRequest().getIsolationKey(), authority);
+                            }
                             renewal.persistDrainReceipt(proof, authority);
                         });
             }
@@ -594,16 +628,17 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 // The sessions release — and their sweep of provably ended
                 // background exits — run BEFORE the unsettled gate: a row the
                 // sweep can prove never blocks the close on a stale active.
-                releaseDrainedSessions(draining, renewal, authority)).thenCompose(ignored -> {
+                drainRelease.releaseDrainedSessions(draining, renewal, authority)).thenCompose(ignored -> {
                     if (sessionRepository.countActiveByBinding(draining.getBindingId(), draining.getGeneration()) != 0
                             || executionRepository.hasActiveByBinding(draining.getBindingId(), draining.getGeneration())) {
                         throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
                     }
-                    var receipt = renewal.current.get().getDrainReceipt();
-                    return receipt == null ? stopAcknowledgedRuntime(draining)
+                    var current = renewal.requireDrainClaim();
+                    var receipt = current.getDrainReceipt();
+                    return receipt == null ? drainRelease.stopAcknowledgedRuntime(current, renewal, authority)
                             : CompletableFuture.completedFuture(receipt);
-                }).thenCompose(receipt -> releaseRetiredHolders(draining, renewal)
-                        .thenApply(ignored -> receipt)).thenAccept(receipt -> {
+                }).thenAccept(receipt -> renewal.persistDrainReceipt(receipt, authority))
+                        .thenCompose(ignored -> drainRelease.releaseRetiredHolders(draining, renewal, authority)).thenRun(() -> {
                             if (authority != null) {
                                 bindingRepository.requireHarnessCleanup(draining.getRequest().getScope(), draining.getRequest().getIsolationKey(), authority);
                             }
@@ -611,8 +646,12 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                             if (current != null && authority != null) {
                                 current = current.withLifecycleAuthority(authority);
                             }
-                            if (current == null || bindingRepository.compareAndSet(current, current.withDrainReceipt(receipt)
-                                    .withState(RuntimeBindingRecord.State.RELEASED, current.getLease(), clock.instant())) == null) {
+                            if (current == null || current.getDrainReceipt() == null
+                                    || !current.getDrainReceipt().matches(current)
+                                    || current.getOperationLeaseUntil() == null
+                                    || !current.getOperationLeaseUntil().isAfter(clock.instant())
+                                    || bindingRepository.compareAndSet(current,
+                                            current.withState(RuntimeBindingRecord.State.RELEASED, current.getLease(), clock.instant())) == null) {
                                 throw unavailable("runtime_close_claim_pending", "Drain completion was fenced");
                             }
                             bindingRegistry.forgetBinding(draining.getBindingId());
@@ -797,7 +836,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                             }
                             // Absence cannot confirm a Session release. Persist the
                             // original worker's stop receipt before releasing its rows.
-                            return provisioner.stopDrained(binding).thenAccept(receipt -> {
+                            return drainRelease.stopAcknowledgedRuntime(renewal.requireDrainClaim(), renewal, null).thenAccept(receipt -> {
                                 renewal.persistDrainReceipt(receipt);
                                 renewal.releaseStoppedSession(record);
                             });
@@ -1608,6 +1647,15 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                 || Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))
                                     && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
+                        }
+                        if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+                                && (v3 || record.getReference().containsKey("runtimeProtocol")
+                                        || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
+                            executionRepository.settlePrepared(record, Map.of(
+                                    "executionStatus", "not_started", "responseParts", List.of(),
+                                    "error", Map.of("type", "workspace_tool_unsupported",
+                                            "message", "External Workspace requires a file Tool v2 payload")), clock.instant());
+                            throw invalid("runtime_payload_invalid", "External Workspace requires a file Tool v2 payload");
                         }
                         if (CsiFilesRetirementProfile.isProfile(context.binding().getRequest().getScope())
                                 && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
@@ -2760,10 +2808,16 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         private final AtomicReference<RuntimeBindingRecord> current;
         private final AtomicBoolean valid = new AtomicBoolean(true);
         private final AtomicBoolean stopped = new AtomicBoolean();
+        // A drain claimed from a LOST binding stays LOST until its stop proof
+        // commits, so that state is this claim's legitimate resting point —
+        // not a rival's. The stop proof, not a DRAINING transition, is what
+        // licenses the close.
+        private final boolean lostClaim;
         private ScheduledFuture<?> task;
 
         BindingRenewal(RuntimeBindingRecord claimed) {
             current = new AtomicReference<>(claimed);
+            lostClaim = claimed.getState() == RuntimeBindingRecord.State.LOST;
         }
 
         void start() {
@@ -2795,7 +2849,13 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             monitor.lock();
             try {
                 var expected = requireDrainClaim(authority != null);
-                if (receipt == null || !receipt.matches(expected)) {
+                if (receipt == null || !receipt.matches(expected)
+                        || expected.getDrainReceipt() != null && !expected.getDrainReceipt().equals(receipt)
+                        || com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(expected.getRequest().getProvisionerKind())
+                                && (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(expected.getRequest())
+                                        || expected.getResourceHandle() == null || expected.getProvisionSeed() == null
+                                        || expected.getLease() == null || !expected.getProvisionSeed().matches(expected.getLease())
+                                        || !expected.getResourceHandle().equals(receipt.resourceHandle()))) {
                     throw conflict("workspace_close_identity_unverified", "Original stop receipt differs");
                 }
                 var replacement = expected.withDrainReceipt(receipt);
@@ -2844,16 +2904,16 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             }
         }
 
-        private RuntimeBindingRecord requireDrainClaim() {
+        RuntimeBindingRecord requireDrainClaim() {
             return requireDrainClaim(false);
         }
 
-        private RuntimeBindingRecord requireDrainClaim(boolean stoppedRecovery) {
+        RuntimeBindingRecord requireDrainClaim(boolean stoppedRecovery) {
             var binding = current.get();
             if (closed.get() || stopped.get() || !valid.get()
                     || !brokerOwnerId.equals(binding.getOperationOwner())
                     || !binding.isDrainRequested() || !(binding.getState() == RuntimeBindingRecord.State.DRAINING
-                            || stoppedRecovery && binding.getState() == RuntimeBindingRecord.State.LOST)
+                            || (stoppedRecovery || lostClaim) && binding.getState() == RuntimeBindingRecord.State.LOST)
                     || binding.getOperationLeaseUntil() == null
                     || !binding.getOperationLeaseUntil().isAfter(clock.instant())) {
                 throw unavailable("runtime_close_claim_pending", "Original drain claim expired");
@@ -2865,7 +2925,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 RuntimeResourceHandle handle) {
             monitor.lock();
             try {
-                if (closed.get() || !valid.get()) {
+                if (closed.get() || stopped.get() || !valid.get()) {
                     return false;
                 }
                 RuntimeBindingRecord expected = current.get();

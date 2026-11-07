@@ -23,6 +23,7 @@ public final class WorkspaceRuntimeResolver {
     private final SessionQueryStore sessions;
     private final WorkspaceExecutionStore authority;
     private final SshWorkspaceService ssh;
+    private final com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry externalRegistrations;
     private final com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog residents;
     private final Map<Storage, Mount> mounts = new LinkedHashMap<>();
     private final String boundSessionIsolationClass;
@@ -36,7 +37,14 @@ public final class WorkspaceRuntimeResolver {
 
     public WorkspaceRuntimeResolver(SessionQueryStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentSettings properties, SshWorkspaceService ssh) {
+        this(sessions, authority, properties, ssh, null);
+    }
+
+    public WorkspaceRuntimeResolver(SessionQueryStore sessions, WorkspaceExecutionStore authority,
+            ManagedAgentSettings properties, SshWorkspaceService ssh,
+            com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry externalRegistrations) {
         this.ssh = ssh;
+        this.externalRegistrations = externalRegistrations;
         this.managedExtensions = properties.getManagedExtensions();
         if (managedExtensions.isEnabled() && !properties.getExtensions().isEnabled()) {
             throw new IllegalStateException("Managed extension execution requires extensions to be enabled");
@@ -98,7 +106,23 @@ public final class WorkspaceRuntimeResolver {
 
     private Resolved resolve(String sessionId, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycle, boolean hook) {
         SessionRecord session = sessions.findSessionById(sessionId)
-                .orElseThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore::unavailable);
+                .orElseThrow(WorkspaceExecutionStore::unavailable);
+        if (authority.isExternal(session.workspace())) {
+            if (hook || managedExtensions.isEnabled() || externalRegistrations == null
+                    || !"session".equals(boundSessionIsolationClass)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            authority.authorizeExternal(session, lifecycle);
+            ContextBinding saved = session.workspace();
+            var registered = externalRegistrations.find(session.tenantId(), saved.getStorageId())
+                    .orElseThrow(WorkspaceExecutionStore::unavailable);
+            if (!saved.getWorkspaceId().equals(registered.tenantWorkspaceId())) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            return new Resolved(saved, new RuntimeScope(session.tenantId(), saved.getWorkspaceId(),
+                    Long.toString(saved.getWorkspaceGeneration()), registered.mountRoot(),
+                    WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session").withLifecycleAuthority(lifecycle));
+        }
         if (lifecycle == null && hook && "CLOSING".equals(session.status())) {
             authority.authorizeLegacyClose(session);
         } else if (lifecycle == null) {

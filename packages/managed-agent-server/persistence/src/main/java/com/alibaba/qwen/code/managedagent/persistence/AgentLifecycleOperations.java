@@ -401,7 +401,7 @@ final class AgentLifecycleOperations {
         }
         if (session.workspace() != null && !resumed) {
             if (kind == OperationKind.CLOSE || kind == OperationKind.DELETE && "ACTIVE".equals(session.status()) && WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
-                if (!supported || protocolVersion == 1 && !workspaceFilesEnabled) {
+                if (!supported || protocolVersion == 1 && !workspaceFilesEnabled && !ExternalWorkspaceSessionPolicies.admitsLegacyClose(session, workspaces)) {
                     throw AgentSessionPolicies.workspaceExecutionUnavailable();
                 }
                 if ("ACTIVE".equals(session.status())) {
