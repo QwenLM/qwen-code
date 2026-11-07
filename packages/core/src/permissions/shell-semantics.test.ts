@@ -1067,6 +1067,28 @@ describe('commandContainsGitAmend static value proof is not a proof', () => {
   ])('denies a name written outside NAME=value: %s', (command) => {
     expect(commandContainsGitAmend(command)).toBe(true);
   });
+
+  // A program word that resolves to static text does not make the REST of the
+  // command static: `$Y` in flag position can still be `--amend`
+  // (#16075 review, R12-1 second round).
+  it.each([
+    "X='git commit'; Y='--amend'; $X $Y",
+    "X='git'; Y='commit --amend'; $X $Y",
+  ])(
+    'denies a static program with an expansion in flag position: %s',
+    (command) => {
+      expect(commandContainsGitAmend(command)).toBe(true);
+    },
+  );
+
+  it.each([
+    // Quoted message data is inert, and a static program with plain flags is
+    // not an amend.
+    "X='git commit'; $X -m 'msg'",
+    "X='git commit'; $X -m 'fix: --amend'",
+  ])('keeps a static program with inert arguments allowed: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(false);
+  });
 });
 
 // R8-2 / R10-1: a trailing `\c` in an ANSI-C word stays literal. Consuming

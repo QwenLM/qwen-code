@@ -3331,6 +3331,21 @@ function programExpansionCouldAmend(
     if (amendExecutableBasename(combined[offset]!) !== 'git') continue;
     if (isGitAmendInvocationAt(combined, offset)) return true;
   }
+  // The program word resolving to static text does not make the REST of the
+  // command static: a bare expansion in a position that decides the invocation
+  // can be `--amend` (`X='git commit'; Y='--amend'; $X $Y`). A flag's value is
+  // data (`-m "$MSG"`), so only an expansion word that is not consumed as a
+  // value fails closed (#16075 review, R12-1 second round).
+  for (let i = 0; i < rest.length; i++) {
+    const token = rest[i]!;
+    if (!/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(token)) continue;
+    const previous = i > 0 ? rest[i - 1]! : undefined;
+    const consumed =
+      previous !== undefined &&
+      (AMEND_COMMIT_LONG_FLAGS_WITH_VALUE.test(previous) ||
+        amendCommitShortClusterConsumesNext(previous));
+    if (!consumed) return true;
+  }
   // A dashed git program word (`git-commit`) is a git invocation the invocation
   // reader does not model; keep it blocked rather than guess it is amend-free.
   const program = amendExecutableBasename(stripped[0] ?? '');
