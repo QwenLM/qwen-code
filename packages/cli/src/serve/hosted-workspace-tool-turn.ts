@@ -73,12 +73,19 @@ import type { ClassifierResult } from '@qwen-code/qwen-code-core/permissions/cla
 import { evaluateHostedPermissionRules } from './hosted-permission-policy.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { enforceFunctionResponseBudget } from '@qwen-code/qwen-code-core/tools/tool-response-finalizer.js';
+import { hostedSkillDiagnostic } from './hosted-skill-diagnostics.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import {
-  convertToFunctionResponse,
+  convertToFunctionResponse as baseFunctionResponse,
   convertToFunctionErrorResponse,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import {
+  getManagedExecutionDiagnostics,
+  executionDiagnosticDigest,
+  observeManagedToolResponse,
+  type ManagedInvocationObservation,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
 import {
   managedToolDigest,
   ManagedToolProtocolError,
@@ -190,7 +197,11 @@ import {
 import { WORKFLOW_NAME_PATTERN } from '@qwen-code/qwen-code-core/agents/runtime/workflow-saved.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
-import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
+import {
+  managedChildTaskId,
+  managedExtensionRecordKey,
+  managedTaskId,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import type { HostedMonitorSession } from './hosted-monitor-session.js';
 import {
   HOSTED_BROADCAST_POSITIONS,
@@ -1789,6 +1800,9 @@ export function fitChildResultInline(
     const folded = convertToFunctionResponse(name, callId, [
       { text: text.slice(0, head) + marker + suffix },
     ]);
+    for (const part of folded)
+      if (part.functionResponse?.response)
+        part.functionResponse.response['outputTruncated'] = true;
     if (fits(folded)) return folded;
   }
   throw new Error('Child agent result cannot be recorded inline.');
@@ -1841,6 +1855,15 @@ interface HostedPreparedRequest {
   planExit?: boolean;
   question?: boolean;
   todo?: boolean;
+}
+
+const diagnosticResults = new WeakMap<object, 'success'>();
+function convertToFunctionResponse(
+  ...args: Parameters<typeof baseFunctionResponse>
+): ReturnType<typeof baseFunctionResponse> {
+  const parts = baseFunctionResponse(...args);
+  for (const part of parts) diagnosticResults.set(part, 'success');
+  return parts;
 }
 
 export class HostedWorkspaceToolTurn {
@@ -1957,7 +1980,7 @@ export class HostedWorkspaceToolTurn {
     private readonly session: ManagedSession,
     private readonly harness: ManagedHarnessHandle,
     private readonly promptId: string,
-    private readonly commit: (
+    private readonly commitRecord: (
       type: 'assistant' | 'tool_result',
       parts: Part[],
       model: string,
@@ -1965,6 +1988,7 @@ export class HostedWorkspaceToolTurn {
         ChatRecord,
         'uuid' | 'timestamp' | 'clientInitiatedSkills'
       >,
+      diagnostics?: readonly ManagedInvocationObservation[],
     ) => Promise<string>,
     private readonly messageFitsInline: (
       type: 'assistant' | 'tool_result',
@@ -3513,6 +3537,141 @@ export class HostedWorkspaceToolTurn {
     this.promptHookRunner = runner;
   }
 
+  private readonly diagnosticOverrides = new Map<
+    string,
+    Partial<ManagedInvocationObservation>
+  >();
+  private diagnosticWorkspaceContext?: {
+    cwdRelative: string;
+    contextRevision: string;
+  } | null;
+  private diagnosticWorkspaceRead?: Promise<void>;
+  private diagnosticRejectedRequests?: readonly HostedPreparedRequest[];
+
+  private diagnosticObservation(
+    callId: string,
+  ): ManagedInvocationObservation | undefined {
+    const fact = getManagedExecutionDiagnostics(
+      this.session.authority,
+    )?.observation(callId);
+    if (!fact) return undefined;
+    const batch =
+      this.nativeBatch?.messageId === fact.assistantMessageId
+        ? this.nativeBatch
+        : undefined;
+    const requests = batch?.requests ?? this.diagnosticRejectedRequests;
+    const index =
+      requests?.findIndex((request) => request.call.callId === callId) ?? -1;
+    const request = index >= 0 ? requests![index] : undefined;
+    if (request) {
+      fact.providerCallId = request.call.providerCallId ?? null;
+      fact.toolKind = request.mcp
+        ? 'mcp'
+        : request.agent ||
+            request.message ||
+            request.team ||
+            request.command ||
+            request.planExit ||
+            request.question ||
+            request.skill ||
+            request.todo ||
+            request.workflow
+          ? 'hosted'
+          : 'builtin';
+      if (request.mcp && request.payloadJson) {
+        const route = JSON.parse(request.payloadJson) as {
+          input?: { serverId?: unknown };
+        };
+        if (typeof route.input?.serverId === 'string')
+          fact.serverId = route.input.serverId;
+      }
+      fact.admission = request.validationError
+        ? 'invalid'
+        : batch?.refusals[index] !== undefined
+          ? 'denied'
+          : 'allowed';
+      if (fact.admission === 'denied' || fact.admission === 'invalid')
+        fact.execution = 'not_started';
+      if (
+        ['read_file', 'write_file', 'edit'].includes(request.call.name) &&
+        !request.mcp
+      ) {
+        const raw = request.input['file_path'];
+        const path =
+          typeof raw === 'string' &&
+          !raw.includes('://') &&
+          !raw.startsWith('/') &&
+          !raw.includes('\\') &&
+          ![...raw].some((character) => {
+            const code = character.codePointAt(0)!;
+            return (
+              code < 32 || code === 127 || (code >= 0xd800 && code <= 0xdfff)
+            );
+          }) &&
+          !raw.split('/').includes('..')
+            ? raw
+            : null;
+        const cwd = this.diagnosticWorkspaceContext?.cwdRelative;
+        const rooted =
+          path !== null && cwd !== undefined
+            ? cwd === '.'
+              ? path
+              : `${cwd}/${path}`
+            : null;
+        fact.file ??= {
+          operation:
+            request.call.name === 'read_file'
+              ? 'read'
+              : request.call.name === 'write_file'
+                ? 'write'
+                : 'edit',
+          path:
+            rooted !== null && Buffer.byteLength(rooted) <= 4096
+              ? rooted
+              : null,
+          cwdRelative: cwd ?? null,
+        };
+      }
+      if (request.skill && this.skills && !request.validationError) {
+        fact.skill = hostedSkillDiagnostic(
+          this.skills,
+          request.call.args,
+          request.call.isClientInitiated ? 'user' : 'model',
+          this.extensionConfig?.revision,
+        );
+      }
+    }
+    return { ...fact, ...this.diagnosticOverrides.get(callId) };
+  }
+
+  private async commit(
+    type: 'assistant' | 'tool_result',
+    parts: Part[],
+    model: string,
+    identity?: Pick<ChatRecord, 'uuid' | 'timestamp' | 'clientInitiatedSkills'>,
+  ): Promise<string> {
+    if (type === 'assistant') {
+      this.diagnosticOverrides.clear();
+      this.diagnosticWorkspaceRead = undefined;
+      this.diagnosticWorkspaceContext = undefined;
+      this.diagnosticRejectedRequests = undefined;
+    }
+    const facts =
+      type === 'tool_result'
+        ? parts.flatMap((part) => {
+            const response = part.functionResponse;
+            const fact = response?.id
+              ? this.diagnosticObservation(response.id)
+              : undefined;
+            if (!fact) return [];
+            if (diagnosticResults.has(part)) fact.execution = 'success';
+            observeManagedToolResponse(fact, response?.response);
+            return [fact];
+          })
+        : undefined;
+    return this.commitRecord(type, parts, model, identity, facts);
+  }
+
   private async refuseBatch(
     calls: ToolCallRequestInfo[],
     errors: Array<string | undefined>,
@@ -3521,6 +3680,7 @@ export class HostedWorkspaceToolTurn {
     skillOrigin:
       | Pick<ChatRecord, 'uuid' | 'timestamp' | 'clientInitiatedSkills'>
       | undefined,
+    prepared?: readonly HostedPreparedRequest[],
   ): Promise<Part[]> {
     if (parts && !this.messageFitsInline('assistant', parts, model))
       throw new Error(
@@ -3542,6 +3702,12 @@ export class HostedWorkspaceToolTurn {
     this.uncertain = true;
     try {
       if (parts) await this.commit('assistant', parts, model, skillOrigin);
+      this.diagnosticRejectedRequests = prepared;
+      for (const [index, call] of calls.entries())
+        this.diagnosticOverrides.set(call.callId, {
+          admission: errors[index] === undefined ? 'denied' : 'invalid',
+          execution: 'not_started',
+        });
       await this.commit('tool_result', responses, model);
       this.uncertain = false;
       return responses;
@@ -3555,6 +3721,12 @@ export class HostedWorkspaceToolTurn {
   }
 
   setModelRound(round: number): void {
+    if (round !== this.logicalRound) {
+      this.diagnosticOverrides.clear();
+      this.diagnosticWorkspaceRead = undefined;
+      this.diagnosticWorkspaceContext = undefined;
+      this.diagnosticRejectedRequests = undefined;
+    }
     this.logicalRound = round;
   }
 
@@ -4720,6 +4892,7 @@ export class HostedWorkspaceToolTurn {
         parts,
         model,
         skillOrigin,
+        requests,
       );
     }
     let requests = restored?.requests ?? prepareRequests(calls);
@@ -4753,6 +4926,7 @@ export class HostedWorkspaceToolTurn {
         parts,
         model,
         skillOrigin,
+        requests,
       );
     }
     if (
@@ -4952,6 +5126,25 @@ export class HostedWorkspaceToolTurn {
             reason,
           );
     };
+    if (
+      !restored &&
+      getManagedExecutionDiagnostics(this.session.authority) &&
+      requests.some(
+        (request) =>
+          ['read_file', 'write_file', 'edit'].includes(request.call.name) &&
+          !request.mcp,
+      )
+    ) {
+      await (this.diagnosticWorkspaceRead ??= Promise.resolve(
+        this.broker.readWorkspaceContext?.(),
+      )
+        .then((context) => {
+          this.diagnosticWorkspaceContext = context ?? null;
+        })
+        .catch(() => {
+          this.diagnosticWorkspaceContext = null;
+        }));
+    }
     const paths = requests.flatMap((request, index) =>
       this.fileBackupsEnabled &&
       refusals[index] === undefined &&
@@ -5142,36 +5335,56 @@ export class HostedWorkspaceToolTurn {
           throw new Error('Original prepared intent conflicts.');
         const intent = existingIntent
           ? { lastSequence: existingIntent.sequence }
-          : await authority.appendExecutionEvent(
-              {
-                operation: 'toolIntent',
-                commandId: `tool-intent:${executionCallId}`,
-                sessionKey: authority.sessionHeader.sessionKey,
-                contentDigest: routeRef.digest,
-              },
-              (sequence) => ({
-                v: 1,
-                sequence,
-                eventId: `tool-intent:${executionCallId}`,
-                sessionKey: authority.sessionHeader.sessionKey,
-                kind: 'tool.intent',
-                occurredAt: Date.now(),
-                subject: {
-                  type: 'activation',
-                  scopeId: activation.activationId,
-                  ...activation,
-                },
-                payload: {
+          : await (async () => {
+              const collector = getManagedExecutionDiagnostics(authority);
+              const observation = this.diagnosticObservation(
+                request.call.callId,
+              );
+              if (observation) observation.executionCallId = executionCallId;
+              const diagnosticsRef =
+                collector && observation
+                  ? await collector.publish(`tool-intent:${executionCallId}`, [
+                      observation,
+                    ])
+                  : undefined;
+              if (observation)
+                this.diagnosticOverrides.set(request.call.callId, {
                   executionCallId,
-                  batchId: messageId,
-                  ordinal,
-                  toolDefinitionRef,
-                  argsRef,
-                  outcomeSource: 'runtime',
+                });
+              return authority.appendExecutionEvent(
+                {
+                  operation: 'toolIntent',
+                  commandId: `tool-intent:${executionCallId}`,
+                  sessionKey: authority.sessionHeader.sessionKey,
+                  contentDigest: diagnosticsRef
+                    ? executionDiagnosticDigest(argsRef.digest, diagnosticsRef)
+                    : routeRef.digest,
                 },
-              }),
-              { class: 'harness', activation },
-            );
+                (sequence) => ({
+                  v: 1,
+                  sequence,
+                  eventId: `tool-intent:${executionCallId}`,
+                  sessionKey: authority.sessionHeader.sessionKey,
+                  kind: 'tool.intent',
+                  occurredAt: Date.now(),
+                  subject: {
+                    type: 'activation',
+                    scopeId: activation.activationId,
+                    ...activation,
+                  },
+                  payload: {
+                    executionCallId,
+                    batchId: messageId,
+                    ordinal,
+                    toolDefinitionRef,
+                    argsRef,
+                    outcomeSource: 'runtime',
+                    ...(diagnosticsRef ? { diagnosticsRef } : {}),
+                  },
+                }),
+                { class: 'harness', activation },
+              );
+            })();
         if (prepared) {
           shellBindings.set(executionCallId, {
             publicationId: request.publicationId!,
@@ -5197,6 +5410,13 @@ export class HostedWorkspaceToolTurn {
               executionCallId,
               args: request.input,
             });
+            this.diagnosticOverrides.set(request.call.callId, {
+              ...this.diagnosticOverrides.get(request.call.callId),
+              taskId: managedChildTaskId(
+                authority.sessionHeader.sessionKey.sessionId,
+                executionCallId,
+              ),
+            });
           }
           if (request.monitoring) {
             await this.monitors!.admit({
@@ -5216,6 +5436,16 @@ export class HostedWorkspaceToolTurn {
                 600_000,
               ),
               debounceMs: 1_000,
+            });
+            this.diagnosticOverrides.set(request.call.callId, {
+              ...this.diagnosticOverrides.get(request.call.callId),
+              taskId: managedTaskId(
+                managedExtensionRecordKey(
+                  authority.sessionHeader.sessionKey.sessionId,
+                  'monitor_run',
+                  executionCallId,
+                ),
+              ),
             });
           }
         }
@@ -5459,6 +5689,26 @@ export class HostedWorkspaceToolTurn {
       const skillBatch = skillResponses.length
         ? enforceFunctionResponseBudget(skillResponses, this.toolOutputBudget)
         : undefined;
+      if (skillBatch)
+        for (const [index, request] of requests.entries()) {
+          if (refusals[index] !== undefined) continue;
+          const original = skillResponses[index].responseParts;
+          const finalized = skillBatch[index].responseParts;
+          const success = original.some((part) => diagnosticResults.has(part));
+          const fact = this.diagnosticObservation(request.call.callId);
+          if (fact?.skill)
+            this.diagnosticOverrides.set(request.call.callId, {
+              execution: success ? 'success' : 'unknown',
+              skill: {
+                ...fact.skill,
+                delivery: success
+                  ? isDeepStrictEqual(original, finalized)
+                    ? 'complete'
+                    : 'partial'
+                  : 'unknown',
+              },
+            });
+        }
       executing = true;
       for (const [index, request] of requests.entries()) {
         const refused = refusal(index);
@@ -6470,6 +6720,9 @@ export class HostedWorkspaceToolTurn {
       return parts;
     };
     if (signal.aborted) {
+      this.diagnosticOverrides.set(request.call.callId, {
+        execution: 'not_started',
+      });
       return answer(
         'The turn was cancelled before this message was sent.',
         true,
@@ -6748,6 +7001,9 @@ export class HostedWorkspaceToolTurn {
     // its abort (a sibling's abandoned wait returned control) must not
     // stamp a new child the cancelled turn never started.
     if (signal.aborted) {
+      this.diagnosticOverrides.set(request.call.callId, {
+        execution: 'not_started',
+      });
       const skipped = convertToFunctionErrorResponse(
         request.call.name,
         request.call.callId,
@@ -6764,6 +7020,10 @@ export class HostedWorkspaceToolTurn {
     const prompt = request.call.args['prompt'] as string;
     const childRunId = this.childRunIdFor(request.call.callId);
     if (!this.agentsAdmitted() && children.record(childRunId) === undefined) {
+      this.diagnosticOverrides.set(request.call.callId, {
+        admission: 'denied',
+        execution: 'not_started',
+      });
       const refused = convertToFunctionErrorResponse(
         request.call.name,
         request.call.callId,
@@ -6798,6 +7058,10 @@ export class HostedWorkspaceToolTurn {
         } catch (cause) {
           if (!(cause instanceof HostedTeamRefusal)) throw cause;
           if (children.record(childRunId) === undefined) {
+            this.diagnosticOverrides.set(request.call.callId, {
+              admission: 'denied',
+              execution: 'not_started',
+            });
             const refused = convertToFunctionErrorResponse(
               request.call.name,
               request.call.callId,
@@ -6909,6 +7173,10 @@ export class HostedWorkspaceToolTurn {
         envelopeBytes,
       });
       if (!admission.admitted) {
+        this.diagnosticOverrides.set(request.call.callId, {
+          admission: admission.reason === 'byte_limit' ? 'invalid' : 'denied',
+          execution: 'not_started',
+        });
         const refused = convertToFunctionErrorResponse(
           request.call.name,
           request.call.callId,
@@ -6969,6 +7237,10 @@ export class HostedWorkspaceToolTurn {
       );
     }
     const taskId = managedChildTaskId(key.sessionId, childRunId);
+    this.diagnosticOverrides.set(request.call.callId, {
+      ...this.diagnosticOverrides.get(request.call.callId),
+      taskId,
+    });
     if (member !== undefined && joining) {
       const joined = await this.teams!.join({
         teamId: member.teamId,
@@ -7035,6 +7307,9 @@ export class HostedWorkspaceToolTurn {
     modelMessageId: string,
   ): Promise<Part[]> {
     if (signal.aborted) {
+      this.diagnosticOverrides.set(request.call.callId, {
+        execution: 'not_started',
+      });
       const skipped = convertToFunctionErrorResponse(
         request.call.name,
         request.call.callId,
@@ -7076,6 +7351,10 @@ export class HostedWorkspaceToolTurn {
         envelopeBytes,
       });
       if (!admission.admitted) {
+        this.diagnosticOverrides.set(request.call.callId, {
+          admission: admission.reason === 'byte_limit' ? 'invalid' : 'denied',
+          execution: 'not_started',
+        });
         const refused = convertToFunctionErrorResponse(
           request.call.name,
           request.call.callId,
@@ -7124,6 +7403,10 @@ export class HostedWorkspaceToolTurn {
       );
     }
     const taskId = managedChildTaskId(key.sessionId, childRunId);
+    this.diagnosticOverrides.set(request.call.callId, {
+      ...this.diagnosticOverrides.get(request.call.callId),
+      taskId,
+    });
     const started = convertToFunctionResponse(
       request.call.name,
       request.call.callId,
@@ -7175,6 +7458,9 @@ export class HostedWorkspaceToolTurn {
   ): Promise<Part[]> {
     const { name, callId, args } = request.call;
     if (signal.aborted) {
+      this.diagnosticOverrides.set(request.call.callId, {
+        execution: 'not_started',
+      });
       const skipped = convertToFunctionErrorResponse(
         name,
         callId,
@@ -7764,6 +8050,13 @@ export class HostedWorkspaceToolTurn {
     signal: AbortSignal,
     journaled?: ReadonlySet<string>,
   ): Promise<Part[]> {
+    this.diagnosticOverrides.set(request.call.callId, {
+      ...this.diagnosticOverrides.get(request.call.callId),
+      taskId: managedChildTaskId(
+        this.session.authority.sessionHeader.sessionKey.sessionId,
+        childRunId,
+      ),
+    });
     for (;;) {
       if (signal.aborted) {
         const abandoned = convertToFunctionErrorResponse(

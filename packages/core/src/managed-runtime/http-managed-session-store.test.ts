@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openManagedSession } from './managed-session-assembly.js';
 import { ManagedHookActivationController } from './managed-hook-activation.js';
 import { enableManagedSessionDiagnostics } from './managed-session-diagnostics.js';
+import { enableManagedExecutionDiagnostics } from './managed-execution-diagnostics.js';
 import {
   ManagedSessionMessageProjection,
   projectManagedSessionRecords,
@@ -1801,6 +1802,52 @@ describe('HTTP Managed Session store', () => {
     },
   );
 
+  it.each([1, 2, 3, 4])(
+    'requires storage 4 before committing execution diagnostics (version=%s)',
+    async (version) => {
+      const server = new FakeManagedSessionStore();
+      server.supportedStorageVersion = version;
+      const { stores, session } = await bootStoresAndSession(server);
+      try {
+        expect(stores.supportsExecutionDiagnostics()).toBe(version === 4);
+        if (version === 4) server.headOverrides['storageVersion'] = 4;
+        await enableManagedExecutionDiagnostics(session);
+        const record = {
+          uuid: 'activity-request',
+          parentUuid: null,
+          sessionId: SESSION_KEY.sessionId,
+          timestamp: new Date().toISOString(),
+          type: 'assistant' as const,
+          cwd: '/workspace',
+          version: 'test',
+          message: {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'call', name: 'read_file', args: {} } },
+            ],
+          },
+        };
+        if (version === 4) {
+          await session.sink.write(record);
+          expect(
+            session.authority.lastEventOfKind('message.committed')?.payload[
+              'diagnosticsRef'
+            ],
+          ).toBeDefined();
+        } else {
+          await expect(session.sink.write(record)).rejects.toThrow(
+            'storage version 4',
+          );
+          expect(
+            session.authority.lastEventOfKind('message.committed'),
+          ).toBeUndefined();
+        }
+      } finally {
+        await session.close().catch(() => undefined);
+      }
+    },
+  );
+
   it('continues writing and cold restores after diagnostics promote storage to version 3', async () => {
     const server = new FakeManagedSessionStore();
     server.supportedStorageVersion = 3;
@@ -1976,7 +2023,7 @@ describe('HTTP Managed Session store', () => {
         expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
         expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
         expect(headers.get('X-Qwen-Managed-Max-Readable-Storage-Version')).toBe(
-          '3',
+          '4',
         );
         expect(init?.method).toBe('POST');
         expect(JSON.parse(String(init?.body))).toEqual(request);

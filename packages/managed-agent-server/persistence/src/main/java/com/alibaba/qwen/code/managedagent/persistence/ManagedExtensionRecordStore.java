@@ -19,6 +19,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.StreamReadConstraints;
@@ -125,6 +126,7 @@ public class ManagedExtensionRecordStore
     private final AgentStateStore sessions;
     private final ManagedTaskEventStore taskEvents;
     private final ManagedModelDiagnosticProjection modelDiagnostics;
+    private final ManagedActivityDiagnosticProjection activityDiagnostics;
 
     @Autowired
     public ManagedExtensionRecordStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
@@ -133,6 +135,7 @@ public class ManagedExtensionRecordStore
         this.sessions = sessions;
         this.taskEvents = taskEvents;
         this.modelDiagnostics = new ManagedModelDiagnosticProjection(jdbc, this);
+        this.activityDiagnostics = new ManagedActivityDiagnosticProjection(jdbc, this);
     }
 
     /** A store beside no public Session table, which announces nothing. */
@@ -193,6 +196,32 @@ public class ManagedExtensionRecordStore
 
     public ModelDiagnostics findModelDiagnostics(String tenantId, String sessionId) {
         return modelDiagnostics.findModelDiagnostics(tenantId, sessionId);
+    }
+
+    public JsonNode findActivityStatistics(String tenantId, String sessionId) {
+        return activityDiagnostics.find(tenantId, sessionId,
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.STATS, "latest");
+    }
+
+    boolean rebuildActivityBatch(String tenant, String workspace, String session, long version, long revision, long sequence, String digest) {
+        return activityDiagnostics.rebuildBatch(tenant, workspace, session, version, revision, sequence, digest);
+    }
+
+    public String diagnosticCommittedSequence(String tenantId, String sessionId) {
+        return jdbc.queryForList("SELECT committed_sequence FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?"
+                + " AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'", Long.class,
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                tenantId, sessionId).stream()
+                .findFirst().map(Object::toString).orElse(null);
+    }
+
+    public ActivityPage listActivity(String tenantId, String sessionId, String domain, long upperSequence,
+            Long beforeCreatedAt, String beforeKey, int limit) {
+        require(java.util.Set.of(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.TOOLS,
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.FILES,
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.SKILLS).contains(domain),
+                "Invalid activity domain.");
+        return activityDiagnostics.page(tenantId, sessionId, domain, upperSequence, beforeCreatedAt, beforeKey, limit);
     }
 
     static Map<String, WebShellModelContext> findModelContexts(JdbcTemplate jdbc,
@@ -484,6 +513,7 @@ public class ManagedExtensionRecordStore
             if ("tool.receipt".equals(kind)) {
                 receipts.add(event);
             }
+            activityDiagnostics.apply(tenantId, workspaceId, sessionId, event, resources);
             if ("context.compacted".equals(kind)) {
                 projectContextCompaction(tenantId, workspaceId, sessionId, event, resources, occurredAt);
             }
