@@ -203,9 +203,11 @@ export async function getEnvironmentContext(
   const platform = config.getExecutionEnvironment?.()
     ? ''
     : `My operating system is: ${process.platform}\n`;
-  // Platform alone does not decide shell syntax: a Windows machine may run
-  // cmd, PowerShell, or a POSIX shell inside WSL. Say which one will run the
-  // command, so the model does not guess from the platform.
+  // Platform alone does not decide shell syntax: on win32 the resolver can
+  // return cmd, PowerShell, or bash reached through Git Bash / MSYS2, and each
+  // wants different syntax. Say which one will run the command, so the model
+  // does not guess from the platform. (WSL reports `linux`, so it takes the
+  // Unix branch in getShellConfiguration and never reaches that choice.)
   const shell = config.getExecutionEnvironment?.()
     ? ''
     : `Shell commands run under: ${getShellDisplayName(
