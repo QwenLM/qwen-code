@@ -348,9 +348,9 @@ event.
 `%%` renders a literal `%`, and an unknown `%foo%` stays literal so typos are
 visible. Substituted GitHub values are sanitized, and `%title%` and
 `%sender%` are also capped at 200 code points with a visible marker. The
-rendered instruction appears in a labeled
-`[Operator instruction — trusted, from this channel's configuration]` block;
-the untrusted-data warning explicitly covers the substituted values. Example
+rendered instruction appears under an `[Operator instruction — trusted]`
+label and a `Source: this channel's configuration` line; the untrusted-data
+warning explicitly covers the substituted values. Example
 for a review / verify / fix split across three workspaces:
 
 ```json

@@ -77,6 +77,7 @@ export {
 export {
   BOUND_ACTION_TEMPLATE_MAX_CODE_POINTS,
   BOUND_ACTION_VARIABLE_MAX_CODE_POINTS,
+  BOUND_EVENT_PLATFORMS,
   BOUND_PROMPT_BODY_MAX_CODE_POINTS,
   boundActionTemplateEntries,
   buildBoundEventPrompt,
@@ -89,6 +90,7 @@ export type {
   BoundActionKeyVocabulary,
   BoundActionTemplateSource,
   BoundActionValues,
+  BoundEventPlatform,
   BoundEventPromptParts,
 } from './bound-session-prompt.js';
 export type {
