@@ -1112,14 +1112,10 @@ describe('StreamJsonOutputAdapter', () => {
       );
     });
 
-    it('should report a refusal after a retry retracted the turn text', () => {
-      adapter.startAssistantMessage();
-      adapter.processEvent({
-        type: LlmEventType.Content,
-        value: 'First answer',
-      });
-      // The provider retries and the consumer discards the streamed text, so
-      // it is not this turn's answer any more.
+    it('should report a refusal after a retry in a turn that produced no text', () => {
+      // A refusal fires at the head of a send, before that send streams, so the
+      // only real sequence is: this turn produced nothing yet, an attempt is
+      // retried, then the next send is refused.
       adapter.restartAttempt(false, []);
       adapter.processEvent({
         type: LlmEventType.UserPromptSubmitBlocked,
@@ -1138,6 +1134,34 @@ describe('StreamJsonOutputAdapter', () => {
 
       expect(parsed.is_error).toBe(true);
       expect(parsed).not.toHaveProperty('result');
+    });
+
+    it('should keep a later round refusal on the success envelope after a retry in a later round', () => {
+      // A later round of the same turn re-baselines, is retried by the provider
+      // before its replacement streams, then that send is refused. Clearing the
+      // turn tally there would erase the answer already delivered and report an
+      // answered turn as `error_during_execution`.
+      adapter.startAssistantMessage();
+      adapter.restartAttempt(false, []);
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 3,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.is_error).toBe(false);
+      expect(parsed.result).toBe('Response text');
     });
 
     it('should not treat a synthesized reply as the turn text', () => {

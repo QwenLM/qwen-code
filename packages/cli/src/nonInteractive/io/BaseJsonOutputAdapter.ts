@@ -197,6 +197,15 @@ export abstract class BaseJsonOutputAdapter {
    */
   protected turnProducedText = false;
 
+  /**
+   * The tally as it stood when the current attempt began. A discarded attempt
+   * may retract only the text it produced itself, so `restartAttempt` restores
+   * this snapshot instead of clearing the tally: text an earlier round of the
+   * same turn delivered is still the turn's answer and must keep a following
+   * refusal on the success envelope.
+   */
+  protected attemptStartProducedText = false;
+
   // Track permission denials (execution denied tool calls)
   protected permissionDenials: CLIPermissionDenial[] = [];
 
@@ -642,6 +651,8 @@ export abstract class BaseJsonOutputAdapter {
    * This is a shared implementation used by both streaming and non-streaming adapters.
    */
   startAssistantMessage(): void {
+    // Re-baseline at every attempt start: a fresh attempt retracts only its own text.
+    this.attemptStartProducedText = this.turnProducedText;
     this.startAssistantMessageInternal(this.mainAgentMessageState);
   }
 
@@ -680,9 +691,11 @@ export abstract class BaseJsonOutputAdapter {
       }
       return;
     }
-    // A discarded attempt's text is not the turn's answer any more, so a
-    // refusal that lands after this retry must not sample it as delivered.
-    this.turnProducedText = false;
+    // A discarded attempt's text is not the turn's answer any more, but text
+    // an earlier round of the same turn streamed still is. Restore the tally as
+    // it stood when this attempt began so a later refusal samples the turn's
+    // real delivered output rather than this attempt's retracted text.
+    this.turnProducedText = this.attemptStartProducedText;
     this.startAssistantMessageInternal(this.mainAgentMessageState);
   }
 

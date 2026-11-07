@@ -498,7 +498,7 @@ describe('JsonOutputAdapter', () => {
       );
     });
 
-    it('should report a refusal after a retry retracted the turn text', () => {
+    it('should report a refusal after a retry in a turn that produced no text', () => {
       // Previous prompt's turn, ended by its own result.
       adapter.emitResult({
         isError: false,
@@ -506,13 +506,9 @@ describe('JsonOutputAdapter', () => {
         apiDurationMs: 800,
         numTurns: 1,
       });
+      // A refusal fires at the head of a send, before that send streams, so a
+      // turn that produced no text and was retried is the reachable sequence.
       adapter.startAssistantMessage();
-      adapter.processEvent({
-        type: LlmEventType.Content,
-        value: 'First answer',
-      });
-      // The provider retries and the consumer discards the streamed text, so
-      // it is not this turn's answer any more.
       adapter.restartAttempt(false, []);
       adapter.processEvent({
         type: LlmEventType.UserPromptSubmitBlocked,
