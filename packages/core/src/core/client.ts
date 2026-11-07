@@ -4438,6 +4438,12 @@ export class LlmClient {
                 verdict?.prompt ??
                 preHookUserPromptText ??
                 '',
+              // This payload IS a projection: displayText is the user's
+              // submission and hookContext is model-only. Say so explicitly
+              // instead of relying on the legacy marker-less heuristic,
+              // which would pin projection mode for a producer that never
+              // set out to hide text.
+              displayProjection: true,
               hookContext: additionalContext,
             };
           }

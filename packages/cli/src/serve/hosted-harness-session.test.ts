@@ -4228,6 +4228,7 @@ describe('Hosted Harness no-tool session', () => {
         createdBy: 'hosted-harness',
       },
     });
+    state.approvalSelections.set(SESSION_ID, { mode: 'yolo', revision: 0 });
     try {
       // The baseline goes down first: with any continuation content but
       // no checkpoint the authority restores blocked (missing_checkpoint),
@@ -8165,6 +8166,7 @@ describe('Hosted Harness no-tool session', () => {
         createdBy: 'hosted-harness',
       },
     });
+    state.approvalSelections.set(SESSION_ID, { mode: 'yolo', revision: 0 });
     try {
       const children = new HostedChildAgentSession(
         { authority: managed.authority, resources: managed.resources },
@@ -9910,6 +9912,7 @@ describe('Hosted Harness no-tool session', () => {
         createdBy: 'hosted-harness',
       },
     });
+    state.approvalSelections.set(SESSION_ID, { mode: 'yolo', revision: 0 });
     try {
       const store = {
         authority: managed.authority,
@@ -24848,6 +24851,19 @@ describe('Hosted Harness tool approvals', () => {
     expect(await definitions()).toEqual([
       { engine: 'managed', sessionId: SESSION_ID },
     ]);
+
+    const autoSessionId = randomUUID();
+    const auto = await headers(supertest(server).post('/session')).send({
+      sessionId: autoSessionId,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: files,
+      approvalMode: 'auto',
+    });
+    expect(auto.status).toBe(200);
+    await headers(supertest(server).delete(`/session/${autoSessionId}`))
+      .set('X-Qwen-Client-Id', auto.body.clientId as string)
+      .expect(204);
   });
 
   it.each([

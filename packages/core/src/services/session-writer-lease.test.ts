@@ -3424,6 +3424,24 @@ describe('restore checkpoint branch on confirmed real transcript bytes', () => {
     });
   });
 
+  it('rebinds projection state when restoring a tool branch discards a projected turn', async () => {
+    await restoreFixture(async ({ recorder, input }) => {
+      expect(await recorder.restoreToolBranch(input)).toBe(true);
+      expect(recorder.getUserDisplayTextsForTitle()).toEqual([
+        'Original title input',
+      ]);
+      expect(recorder.hasDisplayProjectionForTitle()).toBe(true);
+
+      recorder.rewindRecording(0, { truncatedCount: 1 }, []);
+
+      // The only projected turn is gone; the flag must follow the discarded
+      // turn instead of keeping the session in projection mode over an
+      // empty ring (which would make auto-title read empty history).
+      expect(recorder.getUserDisplayTextsForTitle()).toEqual([]);
+      expect(recorder.hasDisplayProjectionForTitle()).toBe(false);
+    });
+  });
+
   it('retains all original parallel call parts, persists only selected NEW result and excludes old sibling success', async () => {
     await restoreFixture(async ({ fixture, recorder, input }) => {
       const originalParts = structuredClone(input.responseParts);
