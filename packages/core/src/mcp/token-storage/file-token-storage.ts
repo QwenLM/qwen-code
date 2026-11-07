@@ -8,6 +8,7 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { BaseTokenStorage } from './base-token-storage.js';
 import type { OAuthCredentials, SecretStorage } from './types.js';
 import { Storage } from '../../config/storage.js';
@@ -24,17 +25,42 @@ export class FileTokenStorage
   private readonly tokenFilePath: string;
   private readonly secretFilePath: string;
   private readonly encryptionKey: Buffer;
+  private readonly hostname = os.hostname();
+  private readonly legacyUsernames: string[];
 
   constructor(serviceName: string) {
     super(serviceName);
     const configDir = Storage.getGlobalQwenDir();
     this.tokenFilePath = path.join(configDir, 'mcp-oauth-tokens-v2.json');
     this.secretFilePath = path.join(configDir, 'extension-secrets-v1.json');
-    this.encryptionKey = this.deriveEncryptionKey();
+    let username: string;
+    if (process.versions['bun'] && process.platform !== 'win32') {
+      username = execFileSync('/usr/bin/id', ['-un'], {
+        encoding: 'utf8',
+        timeout: 1000,
+        maxBuffer: 4096,
+        killSignal: 'SIGKILL',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).replace(/\n$/, '');
+      if (!username || /[\0\r\n]/.test(username)) {
+        throw new Error(
+          'Could not resolve the OS username for encrypted storage',
+        );
+      }
+    } else {
+      username = os.userInfo().username;
+    }
+    this.encryptionKey = this.deriveEncryptionKey(username);
+    this.legacyUsernames =
+      process.platform === 'win32'
+        ? []
+        : [...new Set([process.env['USER'] ?? 'unknown', 'unknown'])].filter(
+            (legacy) => legacy !== username,
+          );
   }
 
-  private deriveEncryptionKey(): Buffer {
-    const salt = `${os.hostname()}-${os.userInfo().username}-qwen-code`;
+  private deriveEncryptionKey(username: string): Buffer {
+    const salt = `${this.hostname}-${username}-qwen-code`;
     return crypto.scryptSync('qwen-code-oauth', salt, 32);
   }
 
@@ -60,17 +86,24 @@ export class FileTokenStorage
     const authTag = Buffer.from(parts[1], 'hex');
     const encrypted = parts[2];
 
-    const decipher = crypto.createDecipheriv(
-      'aes-256-gcm',
-      this.encryptionKey,
-      iv,
-    );
-    decipher.setAuthTag(authTag);
-
-    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
-
-    return decrypted;
+    const authenticate = (key: Buffer): string => {
+      const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+      decipher.setAuthTag(authTag);
+      return decipher.update(encrypted, 'hex', 'utf8') + decipher.final('utf8');
+    };
+    try {
+      return authenticate(this.encryptionKey);
+    } catch (error) {
+      // Older Bun versions used USER (or "unknown") instead of the OS username.
+      for (const username of this.legacyUsernames) {
+        try {
+          return authenticate(this.deriveEncryptionKey(username));
+        } catch {
+          // Only authenticated plaintext is accepted; keep the original error.
+        }
+      }
+      throw error;
+    }
   }
 
   private async ensureDirectoryExists(): Promise<void> {

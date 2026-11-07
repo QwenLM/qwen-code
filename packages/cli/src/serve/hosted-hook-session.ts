@@ -395,6 +395,7 @@ export class HostedHookSession {
     private readonly initialPin: ManagedHookCatalogPin,
     broker?: HostedWorkspaceBroker,
     private readonly lifecycleV2: () => boolean = () => false,
+    runtimeSessionId?: string,
   ) {
     this.ownsBroker = broker === undefined;
     const previous = lifecycleV2()
@@ -405,9 +406,10 @@ export class HostedHookSession {
       new HostedWorkspaceBroker(
         options,
         this.key,
-        previous
-          ? parseHookExecution(previous.record).runtimeSessionId
-          : `hooks-activation-${digest([session.activation.activationId, session.activation.epoch])}`,
+        runtimeSessionId ??
+          (previous
+            ? parseHookExecution(previous.record).runtimeSessionId
+            : `hooks-activation-${digest([session.activation.activationId, session.activation.epoch])}`),
       );
   }
 
@@ -440,6 +442,20 @@ export class HostedHookSession {
       0,
       signal,
     );
+  }
+
+  get selectedPin(): ManagedHookCatalogPin {
+    const latest = this.session.authority
+      .extensionRecordsInDomain('hook_registration')
+      .filter((entry) => entry.run.state === 'settled')
+      .at(-1);
+    if (!latest) return this.initialPin;
+    const registration = parseHookRegistration(latest.record);
+    return {
+      catalogId: registration.catalogId,
+      catalogRevision: registration.catalogRevision,
+      definitionDigest: registration.run.definition!.definitionDigest,
+    };
   }
 
   async acquire(): Promise<void> {

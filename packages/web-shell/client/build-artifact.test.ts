@@ -44,6 +44,17 @@ function enclosingLayer(rule: Rule): string | undefined {
 }
 
 describe('build artifact — package boundary', () => {
+  it('keeps Generated UI retention out of the read-only transcript runtime', () => {
+    const withoutCss = (javascript: string) =>
+      javascript.replace(/^const __qwenWebShellCss=.*\n/gm, '');
+    expect(withoutCss(readTranscriptBundle())).not.toContain(
+      'data-generated-ui-slot',
+    );
+    expect(withoutCss(readPackageJavascript())).toContain(
+      'data-generated-ui-slot',
+    );
+  });
+
   it('keeps deletion-only copy out of the read-only transcript', () => {
     for (const copy of [
       'Delete permanently',
@@ -617,6 +628,19 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js.includes('managed.tasks.')).toBe(false);
+  });
+
+  it('keeps browser notification strings and lookups in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toContain('browserNotifications.');
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('browserNotifications.helpMac');
+    expect(interactive).toContain('browserNotifications.approval');
+    expect(interactive).toContain('Open System Settings → Notifications.');
+    expect(interactive).toContain('浏览器（Chrome');
   });
 
   it('keeps remote Workspace registration copy in the interactive entry', () => {

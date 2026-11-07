@@ -58,6 +58,9 @@ vi.mock('@opentui/core', () => ({
 vi.mock('@opentui/react', async () => {
   const React = await import('react');
   return {
+    useAppContext: (
+      await import('../../test-utils/opentui-catalog.js')
+    ).catalogAppContext(mocks.state.keyboardHandlers),
     useKeyboard: (handler: (key: unknown) => void) => {
       const ref = React.useRef(handler);
       ref.current = handler;
@@ -296,6 +299,8 @@ describe('hooks dialog helpers', () => {
       'safeMode',
       'allHooksDisabled',
       'untrusted',
+      'pendingApproval',
+      'rejected',
       'registryDisabled',
     ] as const;
     const texts = reasons.map((disabledReason) =>
@@ -309,6 +314,8 @@ describe('hooks dialog helpers', () => {
       'disabled (safe mode)',
       'disabled (disableAllHooks)',
       'disabled (folder not trusted)',
+      'disabled (not approved)',
+      'disabled (rejected)',
       'disabled (turned off for this session)',
     ]);
     expect(new Set(texts).size).toBe(reasons.length);

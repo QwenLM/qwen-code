@@ -873,6 +873,7 @@ for (const count of [1, 105]) {
 test('message actions use a hoverable menu that also supports click and keyboard @smoke', async ({
   page,
 }, info) => {
+  await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') });
   await setup(page, String(info.project.use.baseURL), 1);
   const row = page.locator('[data-web-shell-message-row]').filter({
     has: page.getByText('Question 1', { exact: true }),
@@ -911,6 +912,12 @@ test('message actions use a hoverable menu that also supports click and keyboard
     'Edit message',
     'Delete messages',
   ]);
+  await menu.evaluate(async (element) => {
+    await Promise.all(
+      element.getAnimations().map((animation) => animation.finished),
+    );
+  });
+  await page.clock.pauseAt(new Date('2026-01-01T01:00:00Z'));
   const triggerBox = await trigger.boundingBox();
   const menuBox = await menu.boundingBox();
   expect(triggerBox).not.toBeNull();
@@ -920,7 +927,7 @@ test('message actions use a hoverable menu that also supports click and keyboard
       ? (triggerBox!.y + triggerBox!.height + menuBox!.y) / 2
       : (menuBox!.y + menuBox!.height + triggerBox!.y) / 2;
   await page.mouse.move(triggerBox!.x + triggerBox!.width / 2, gapY);
-  await page.waitForTimeout(60);
+  await page.clock.runFor(60);
   await expect(menu).toBeVisible();
   const hoveredItem = menu.getByRole('menuitem', {
     name: 'Edit message',
@@ -936,7 +943,7 @@ test('message actions use a hoverable menu that also supports click and keyboard
     hoveredItemBox.y + hoveredItemBox.height / 2,
     { steps: 5 },
   );
-  await page.waitForTimeout(180);
+  await page.clock.runFor(180);
   await expect(menu).toBeVisible();
   await expect(hoveredItem).toBeFocused();
   await expect(hoveredItem).toHaveAttribute('data-highlighted', '');
@@ -945,7 +952,9 @@ test('message actions use a hoverable menu that also supports click and keyboard
     fullPage: true,
   });
   await page.locator('[data-web-shell-composer-editor]').hover();
+  await page.clock.runFor(121);
   await expect(menu).toHaveCount(0);
+  await page.clock.resume();
   await composer.focus();
   await trigger.hover();
   await expect(menu).toHaveAttribute('data-state', 'open');

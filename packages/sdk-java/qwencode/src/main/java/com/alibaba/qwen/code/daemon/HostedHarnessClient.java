@@ -277,6 +277,7 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new IllegalArgumentException("request must not be null");
         }
         ensureOpen();
+        requireModelConfigurationCapability(request.toJson());
         HttpResponse<HttpSupport.Body> raw;
         try {
             raw = send("/session", "POST", request.toJson(), null);
@@ -324,6 +325,13 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
     }
 
+    private void requireModelConfigurationCapability(Map<String, Object> request) {
+        if (request.containsKey("modelConfigDigest")
+                && !capabilities.getFeatures().contains("session-model-config/1")) {
+            throw new DaemonProtocolException("Hosted Session model configuration capability is required");
+        }
+    }
+
     public HarnessSessionRef loadSession(LoadHarnessSession request) {
         return loadSession(request, false);
     }
@@ -337,6 +345,7 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new IllegalArgumentException("request must not be null");
         }
         ensureOpen();
+        requireModelConfigurationCapability(request.toJson());
         if (request.getRecoveryCleanupPromptId() != null
                 && !capabilities.getFeatures().contains("recovery-cleanup/1")) {
             throw new DaemonProtocolException("Hosted cleanup-only load capability is required");
@@ -388,6 +397,26 @@ public final class HostedHarnessClient implements AutoCloseable {
             String optionId,
             long inputRevision,
             String policyRevision) {
+        resolveActionResponse(session, actionId, Map.of("optionId", optionId,
+                "inputRevision", inputRevision, "policyRevision", policyRevision));
+    }
+
+    public void resolveQuestion(
+            HarnessSessionRef session,
+            String actionId,
+            List<Map<String, Object>> answers,
+            long inputRevision,
+            String policyRevision) {
+        if (answers == null || answers.isEmpty() || answers.size() > 4
+                || inputRevision < 1 || inputRevision > 9007199254740991L
+                || !"hosted-user-question/1".equals(policyRevision)) {
+            throw new IllegalArgumentException("Invalid question response");
+        }
+        resolveActionResponse(session, actionId, Map.of("answers", answers,
+                "inputRevision", inputRevision, "policyRevision", policyRevision));
+    }
+
+    private void resolveActionResponse(HarnessSessionRef session, String actionId, Map<String, Object> body) {
         HarnessSessionRef ref = requireSessionRef(session);
         if (actionId == null || !actionId.matches("tool_approval_[0-9a-f]{32}")) {
             throw new IllegalArgumentException("Invalid actionId");
@@ -398,13 +427,7 @@ public final class HostedHarnessClient implements AutoCloseable {
                                 + "/actions/"
                                 + actionId
                                 + "/resolve",
-                        Map.of(
-                                "optionId",
-                                optionId,
-                                "inputRevision",
-                                inputRevision,
-                                "policyRevision",
-                                policyRevision),
+                        body,
                         ref.getHarnessSessionId(),
                         ref.getHarnessClientId(),
                         "POST /session/:id/actions/:id/resolve");
@@ -428,6 +451,14 @@ public final class HostedHarnessClient implements AutoCloseable {
         if (request.getApprovalSelection() != null && Boolean.TRUE.equals(request.getApprovalSelection().get("planMode"))
                 && !capabilities().getFeatures().contains("plan-mode/1")) {
             throw new DaemonException("Hosted Plan mode is unavailable");
+        }
+        if (request.getApprovalSelection() != null && "auto".equals(request.getApprovalSelection().get("mode"))
+                && !capabilities().getFeatures().contains("auto-approval/1")) {
+            throw new DaemonException("Hosted classifier approval is unavailable");
+        }
+        if (request.getApprovalSelection() != null && request.getApprovalSelection().containsKey("permissionRules")
+                && !capabilities().getFeatures().contains("permission-rules/1")) {
+            throw new DaemonException("Hosted permission rules are unavailable");
         }
         if (request.getPromptContent().stream().anyMatch(block -> List.of("image", "resource").contains(block.get("type")))
                 && !capabilities().getFeatures().contains("input-attachments/1")) {
@@ -858,6 +889,48 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new DaemonProtocolException("Hosted MCP management names a different operation");
         }
         return result;
+    }
+
+    /** Applies a full package selection to an idle, already bound Session. */
+    public Map<String, Object> applyExtensions(HarnessSessionRef session, Map<String, Object> body) {
+        return extensionMutation(session, "/extensions/management", body);
+    }
+
+    public Map<String, Object> continueExtensionOperation(HarnessSessionRef session, String operationId, boolean recoverPrevious) {
+        String id = requireUuid(operationId, "operationId");
+        return extensionMutation(session, "/extensions/management/operations/" + id
+                + (recoverPrevious ? "/recover-previous" : "/continue"), Map.of("operationId", id));
+    }
+
+    public Map<String, Object> extensionManagement(HarnessSessionRef session) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "GET /session/:id/extensions/management";
+        HttpSupport.Response response = sendRead(sessionPath(ref.getHarnessSessionId()) + "/extensions/management", ref, operation);
+        DaemonClient.requireStatus(response, 200, operation);
+        Map<String, Object> result = JsonSupport.parseObject(response.getBody(), operation);
+        if (!ref.getHarnessSessionId().equals(result.get("sessionId"))) {
+            throw new DaemonProtocolException("Extension snapshot names another Session");
+        }
+        return result;
+    }
+
+    private Map<String, Object> extensionMutation(HarnessSessionRef session, String suffix, Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String id = requireUuid(JsonSupport.requiredString(body, "operationId", "Extension apply"), "operationId");
+        String operation = "POST /session/:id" + suffix;
+        HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + suffix,
+                body, ref.getHarnessSessionId(), ref.getHarnessClientId(), operation);
+        try {
+            DaemonClient.requireStatus(response, 202, operation);
+            Map<String, Object> result = JsonSupport.parseObject(response.getBody(), operation);
+            if (!ref.getHarnessSessionId().equals(result.get("sessionId"))
+                    || !id.equals(JsonSupport.requiredObject(result, "operation", operation).get("operationId"))) {
+                throw new DaemonProtocolException("Extension snapshot names another operation");
+            }
+            return result;
+        } catch (DaemonProtocolException error) {
+            throw new MutationOutcomeUnknownException(operation, error);
+        }
     }
 
     public Map<String, Object> compressContext(HarnessSessionRef session, Map<String, Object> body) {

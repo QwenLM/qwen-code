@@ -21,6 +21,7 @@ import {
   resolveReasoningForModel,
 } from './reasoning-overrides.js';
 import type { AvailableModel } from '../models/types.js';
+import { QWENCLOUD_MAAS_HOSTS } from './dashscope-source-config.js';
 
 const route: ContentGeneratorConfig = {
   model: 'alias',
@@ -487,6 +488,24 @@ describe('reasoning declarations', () => {
     },
   );
 
+  // Same derived-from-the-leaf shape as the telemetry pin: the gate must keep
+  // admitting every host the attribution leaf owns, including its
+  // `token-plan.` form, without restating the literals here (#15107).
+  it.each(QWENCLOUD_MAAS_HOSTS.flatMap((host) => [host, `token-plan.${host}`]))(
+    'admits QwenCloud host %s as a DashScope endpoint',
+    (host) => {
+      const resolved = resolveReasoningCapabilities(
+        {
+          ...route,
+          model: 'qwen3.8-max',
+          baseUrl: `https://${host}/compatible-mode/v1`,
+        },
+        { canDisable: false },
+      );
+      expect(resolved).toMatchObject({ profile: 'dashscope-effort' });
+    },
+  );
+
   // A lookalike host matches no preset, so resolution returns at the
   // `!inherited && !gpt && !claude && !input.profile` guard before parsing
   // `route.baseUrl`: these pin "unregistered host resolves to nothing", while
@@ -826,4 +845,27 @@ describe('prompt reasoning snapshots', () => {
       warning.mockRestore();
     },
   );
+});
+
+it('defaults subscription routes to medium and honors explicit Chat declarations', () => {
+  const subscriptionRoute = {
+    model: 'future-served-model',
+    authType: AuthType.QWEN_SUBSCRIPTION,
+    baseUrl: 'https://api.qwen.ai/v1',
+  };
+  expect(
+    resolveReasoningCapabilities(subscriptionRoute, undefined),
+  ).toMatchObject({ defaultEffort: 'medium', disableField: 'enable_thinking' });
+  expect(
+    resolveReasoningCapabilities(
+      { ...subscriptionRoute, authType: AuthType.USE_OPENAI },
+      undefined,
+    ),
+  ).toBeUndefined();
+  expect(
+    resolveReasoningCapabilities(subscriptionRoute, declaration),
+  ).toMatchObject({
+    profile: 'openai-effort',
+    defaultEffort: 'medium',
+  });
 });

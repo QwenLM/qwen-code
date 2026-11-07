@@ -113,9 +113,12 @@ export function buildWorkflowSteeringNotice(
     trigger?: WorkflowIntentTrigger;
     bridgeWorkflowTool?: boolean;
     nameOnly?: boolean;
+    introduction?: string;
   } = {},
 ): string {
-  const introduction = `The user's message includes the "${options.trigger ?? 'workflow'}" keyword. `;
+  const introduction =
+    options.introduction ??
+    `The user's message includes the "${options.trigger ?? 'workflow'}" keyword. `;
   const parts = [
     introduction +
       (options.nameOnly
@@ -143,6 +146,36 @@ export function buildWorkflowSteeringNotice(
   return parts.join(' ');
 }
 
+export interface WorkflowContext {
+  surface?: WorkflowAuthoringSurface;
+  bridgeWorkflowTool: boolean;
+  nameOnly: boolean;
+}
+
+export function resolveWorkflowContext(config: Config): WorkflowContext | null {
+  if (!config.isWorkflowsEnabled()) return null;
+  const registry = config.getToolRegistry();
+  const names = registry.getAllToolNames();
+  if (!names.includes(ToolNames.WORKFLOW)) return null;
+  const bridgeWorkflowTool = isToolHiddenBehindToolSearch(
+    config,
+    ToolNames.WORKFLOW,
+  );
+  if (
+    bridgeWorkflowTool &&
+    (!names.includes(ToolNames.TOOL_SEARCH) ||
+      !names.includes(ToolNames.TOOL_CALL))
+  ) {
+    return null;
+  }
+  const nameOnly = config.isWorkflowNameOnly();
+  const tool = registry.getTool(ToolNames.WORKFLOW) as WorkflowTool | undefined;
+  const surface = nameOnly
+    ? undefined
+    : (tool?.authoringSurface ?? resolveWorkflowAuthoringSurface(config));
+  return { surface, bridgeWorkflowTool, nameOnly };
+}
+
 export function resolveWorkflowIntent(
   config: Config,
   humanInput: HumanPromptInput | undefined,
@@ -161,27 +194,9 @@ export function resolveWorkflowIntent(
         ? 'workflow'
         : undefined;
     if (!trigger) return null;
-    const registry = config.getToolRegistry();
-    const names = registry.getAllToolNames();
-    if (!names.includes(ToolNames.WORKFLOW)) return null;
-    const bridgeWorkflowTool = isToolHiddenBehindToolSearch(
-      config,
-      ToolNames.WORKFLOW,
-    );
-    if (
-      bridgeWorkflowTool &&
-      (!names.includes(ToolNames.TOOL_SEARCH) ||
-        !names.includes(ToolNames.TOOL_CALL))
-    ) {
-      return null;
-    }
-    const nameOnly = config.isWorkflowNameOnly();
-    const tool = registry.getTool(ToolNames.WORKFLOW) as
-      | WorkflowTool
-      | undefined;
-    const surface = nameOnly
-      ? undefined
-      : (tool?.authoringSurface ?? resolveWorkflowAuthoringSurface(config));
+    const context = resolveWorkflowContext(config);
+    if (!context) return null;
+    const { surface, bridgeWorkflowTool, nameOnly } = context;
     return {
       trigger,
       reminder: `<system-reminder>\n${buildWorkflowSteeringNotice(surface, { trigger, bridgeWorkflowTool, nameOnly })}\n</system-reminder>`,

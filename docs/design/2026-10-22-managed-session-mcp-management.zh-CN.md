@@ -48,7 +48,7 @@ Managed 提供已提交的 MCP 目录，但没有公开管理命令。daemon 管
 
 从 daemon 管理页提取小型 server 卡片、工具 schema 和资源元数据展示组件。daemon 保留 ACP 生命周期、epoch、发现轮询和 OAuth 控制器。Managed 管理页使用自己的 provider 命令和会话设置，不伪造 daemon epoch、连接状态或工具验证结果。界面选择已发布定义，不提供原始可执行 recipe 表单。
 
-从 Managed 会话和现有 MCP 管理入口打开该界面。请求范围包含 provider、client、Workspace 和 Session，目标切换时取消请求并丢弃迟到结果；重试保留原目标的操作身份。用户显式重试时先查询原操作，仅在仍 pending 或需要恢复时用相同身份重新提交保存的原命令。查询失败不能触发变更，刷新也不能自动重新提交。provider 具有显式租户和 actor 存储命名空间时，只将未确认命令的公开 pin 元数据和请求身份保存到当前 tab 的 session storage，确认终态后删除；没有该命名空间的 provider 只在内存保留。可执行 recipe 和凭据不能进入浏览器存储。使用共享 WebShell 基础组件和隔离 portal root。资源正文和 prompt 展开不属于本次管理改动。
+使用 Plugin 管理中的 MCP 页签作为 Managed MCP 管理的可见入口，通过既有应用状态接收当前选中的 Managed Session 与 Workspace。移除对话顶部和会话行菜单中重复的 Manage MCP 入口，独立对话视图也不保留该按钮。输入框的 MCP 目录继续绑定当前选中的对话，从 Plugin 管理返回时，通过既有视图可见性范围变化刷新目录。请求范围包含 provider、client、Workspace 和 Session，目标切换时取消请求并丢弃迟到结果；重试保留原目标的操作身份。用户显式重试时先查询原操作，仅在仍 pending 或需要恢复时用相同身份重新提交保存的原命令。查询失败不能触发变更，刷新也不能自动重新提交。provider 具有显式租户和 actor 存储命名空间时，只将未确认命令的公开 pin 元数据和请求身份保存到当前 tab 的 session storage，确认终态后删除；没有该命名空间的 provider 只在内存保留。可执行 recipe 和凭据不能进入浏览器存储。使用共享 WebShell 基础组件和隔离 portal root。资源正文和 prompt 展开不属于本次管理改动。
 
 ## API 所属范围
 
@@ -66,3 +66,5 @@ Managed 提供已提交的 MCP 目录，但没有公开管理命令。daemon 管
 先用全局 `qwen` dry-run 基线，将管理能力缺失与既有组合验证分开记录。使用一次性 MySQL、两个真实 stdio server 和确定性模型，联合验证构建后的 CLI、Java 服务和 WebShell。在同一会话中执行全部操作，验证对话身份稳定、原定义 pins 不变、响应不含凭据、模型声明变化、Harness 重启并冷加载后保留禁用状态、重试幂等、旧修订拒绝、会话隔离和最终关闭。
 
 验证失败或未知的释放不会报告重启成功或启动替代连接，活动 Turn 和未获授权的 actor 不能变更。覆盖空会话、只读会话、不支持的 profile、旧日志、provider/会话切换、响应式管理控件，以及既有 daemon 管理回归。运行受影响包测试、根 build/typecheck/bundle、Java API/surface 门禁、Maven verify 和适用的 MySQL/Hosted profile。完整自审两遍并独立审查。局部进程和浏览器证据不代表 Linux cgroup、SSH/CSI、Windows 或真实上游 provider 验收。
+
+入口统一到 Plugin 管理的专项 UI 计划位于 `.qwen/e2e-tests/managed-mcp-plugin-only/plan.md`：以正在运行的 main 版本服务作为基线，验证 Plugin 管理查询当前选中的会话并保留对话草稿，在独立工作树构建静态前端后发布，不重启服务。本次 UI 调整不改变管理命令、授权、Runtime 所有权或更广泛的验收矩阵。

@@ -11,7 +11,10 @@ type Translate = ReturnType<typeof useI18n>['t'];
  */
 export function getLocalCommands(
   t: Translate,
-  options: { sideTaskAvailable?: boolean } = {},
+  options: {
+    sideTaskAvailable?: boolean;
+    subscriptionAvailable?: boolean;
+  } = {},
 ): CommandInfo[] {
   const commands: CommandInfo[] = [
     { name: 'help', description: t('local.help') },
@@ -24,7 +27,7 @@ export function getLocalCommands(
     {
       name: 'language',
       description: t('local.language'),
-      argumentHint: 'ui [en|zh-CN] | output <language>',
+      argumentHint: 'ui [en|zh-CN|ru] | output <language>',
       subcommands: ['ui', 'output'],
     },
     {
@@ -48,6 +51,15 @@ export function getLocalCommands(
     { name: 'delete', description: t('local.delete') },
     { name: 'release', description: t('local.release') },
     { name: 'auth', description: t('local.auth') },
+    ...(options.subscriptionAvailable
+      ? [
+          { name: 'logout', description: t('subscription.signOutDescription') },
+          {
+            name: 'upgrade',
+            description: t('subscription.upgradeDescription'),
+          },
+        ]
+      : []),
     {
       name: 'approval-mode',
       description: t('local.approvalMode'),
@@ -182,6 +194,7 @@ const BUILTIN_COMMAND_DESCRIPTION_KEYS: Record<string, string> = {
  */
 const SKILL_DESCRIPTION_KEYS: Record<string, string> = {
   // Bundled with Qwen Code (packages/core/src/skills/bundled).
+  'autofix-pr': 'skilldesc.autofixPr',
   batch: 'skilldesc.batch',
   dataviz: 'skilldesc.dataviz',
   'extension-creator': 'skilldesc.extensionCreator',

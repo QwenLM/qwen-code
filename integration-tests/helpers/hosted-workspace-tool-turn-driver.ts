@@ -249,9 +249,9 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
     tools.map((tool) => tool.function.name).sort(),
     [
       ...(shellProfile ? ['agent'] : []),
+      'ask_user_question',
       'edit',
-      ...(shellProfile ? ['glob'] : []),
-      ...(shellProfile ? ['monitor'] : []),
+      'glob',
       'read_file',
       ...(shellProfile
         ? [
@@ -263,6 +263,7 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
             'task_update',
             'team_create',
             'team_delete',
+            'todo_write',
             'workflow',
           ]
         : []),

@@ -33,6 +33,8 @@ import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { SchemaValidator } from '../../utils/schemaValidator.js';
+import { convertGeminiContentsToResponsesInput } from '../openaiResponsesContentGenerator/responses-converter.js';
+import type { ResponsesTextPart } from '../../utils/responses-message.js';
 import { appendAutoMemoryContext } from '../../memory/request-context.js';
 import {
   content,
@@ -377,6 +379,175 @@ describe('OpenAIContentConverter', () => {
         (part as { type?: string }).type ?? '',
       ),
     );
+
+  describe('thought signatures', () => {
+    it.each([
+      ['direct', { thoughtSignature: 'sig-a' }],
+      ['nested', { extra_content: { google: { thought_signature: 'sig-a' } } }],
+      [
+        'identical dual',
+        {
+          thoughtSignature: 'sig-a',
+          extra_content: { google: { thought_signature: 'sig-a' } },
+        },
+      ],
+    ])(
+      'captures %s signatures from non-streaming tool calls',
+      (_name, extension) => {
+        const response = toLlm([
+          choice(
+            {
+              tool_calls: [
+                {
+                  id: 'call_read',
+                  type: 'function',
+                  function: { name: 'read_file', arguments: '{"path":"a.ts"}' },
+                  ...extension,
+                },
+              ],
+            },
+            'tool_calls',
+          ),
+        ]);
+
+        expect(partsOf(response)).toEqual([
+          {
+            functionCall: {
+              id: 'call_read',
+              name: 'read_file',
+              args: { path: 'a.ts' },
+            },
+            thoughtSignature: 'sig-a',
+          },
+        ]);
+      },
+    );
+
+    it('does not guess when direct and nested signatures conflict', () => {
+      const response = toLlm([
+        choice(
+          {
+            tool_calls: [
+              {
+                id: 'call_read',
+                type: 'function',
+                function: { name: 'read_file', arguments: '{}' },
+                thoughtSignature: 'sig-direct',
+                extra_content: {
+                  google: { thought_signature: 'sig-nested' },
+                },
+              },
+            ],
+          },
+          'tool_calls',
+        ),
+      ]);
+
+      expect(partsOf(response)).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+        },
+      ]);
+    });
+
+    it('replays a signed function call with both OpenAI wire extensions', () => {
+      const messages = toMessages(
+        content('model', {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+          thoughtSignature: 'sig-a',
+        }),
+        content(
+          'user',
+          fnResponse('read_file', { output: 'done' }, 'call_read'),
+        ),
+      );
+
+      expect(messages.find(hasOpenAIToolCalls)?.tool_calls).toEqual([
+        {
+          id: 'call_read',
+          type: 'function',
+          function: { name: 'read_file', arguments: '{}' },
+          thoughtSignature: 'sig-a',
+          extra_content: { google: { thought_signature: 'sig-a' } },
+        },
+      ]);
+    });
+
+    it('keeps streaming signatures attached to their own parallel calls', () => {
+      const stream = withStreamParser();
+      streamParts(stream, {
+        tool_calls: [
+          {
+            index: 0,
+            id: 'call_read',
+            type: 'function',
+            function: { name: 'read_file', arguments: '{"path":' },
+            thoughtSignature: 'sig-read',
+          },
+        ],
+      });
+      streamParts(stream, {
+        tool_calls: [
+          {
+            index: 1,
+            id: 'call_glob',
+            type: 'function',
+            function: { name: 'glob', arguments: '{}' },
+            extra_content: {
+              google: { thought_signature: 'sig-glob' },
+            },
+          },
+        ],
+      });
+      streamParts(stream, {
+        tool_calls: [{ index: 0, function: { arguments: '"a.ts"}' } }],
+      });
+
+      expect(streamParts(stream, {}, 'tool_calls')).toEqual([
+        {
+          functionCall: {
+            id: 'call_read',
+            name: 'read_file',
+            args: { path: 'a.ts' },
+          },
+          thoughtSignature: 'sig-read',
+        },
+        {
+          functionCall: { id: 'call_glob', name: 'glob', args: {} },
+          thoughtSignature: 'sig-glob',
+        },
+      ]);
+    });
+
+    it('captures a signature delivered on the finish delta', () => {
+      const stream = withStreamParser();
+      streamParts(stream, {
+        tool_calls: [
+          {
+            index: 0,
+            id: 'call_read',
+            type: 'function',
+            function: { name: 'read_file', arguments: '{}' },
+          },
+        ],
+      });
+
+      expect(
+        streamParts(
+          stream,
+          {
+            tool_calls: [{ index: 0, thoughtSignature: 'sig-late' }],
+          },
+          'tool_calls',
+        ),
+      ).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+          thoughtSignature: 'sig-late',
+        },
+      ]);
+    });
+  });
 
   describe('stream-local parser state', () => {
     /** Sends one chunk (provider model 'test') and returns the converted response. */
@@ -2248,6 +2419,61 @@ describe('OpenAIContentConverter', () => {
 
     it.each([
       [
+        'non-streaming',
+        (extra: Record<string, unknown>) =>
+          toLlm([], { usage: usage(373, 112, 485, extra) }).usageMetadata,
+      ],
+      [
+        'streaming',
+        (extra: Record<string, unknown>) =>
+          usageChunk(withStreamParser(), usage(373, 112, 485, extra))
+            .usageMetadata,
+      ],
+    ])(
+      'reports prompt_tokens_details.cache_write_tokens as cache creation (%s)',
+      (_title, convert) => {
+        const usageMetadata = convert({
+          prompt_tokens_details: { cache_write_tokens: 256 },
+        });
+
+        // The provider's prompt_tokens already includes cache reads and
+        // writes, so the aggregate must not be reduced again.
+        expect(usageMetadata?.promptTokenCount).toBe(373);
+        expect(
+          getGenAiUsageProvenance(usageMetadata)?.cacheCreationInputTokens,
+        ).toBe(256);
+      },
+    );
+
+    it.each([
+      [
+        'non-streaming',
+        (extra: Record<string, unknown>) =>
+          toLlm([], { usage: usage(373, 112, 485, extra) }).usageMetadata,
+      ],
+      [
+        'streaming',
+        (extra: Record<string, unknown>) =>
+          usageChunk(withStreamParser(), usage(373, 112, 485, extra))
+            .usageMetadata,
+      ],
+    ])(
+      'distinguishes an absent cache write field from an explicitly reported zero (%s)',
+      (_title, convert) => {
+        const absent = convert({});
+        const zero = convert({
+          prompt_tokens_details: { cache_write_tokens: 0 },
+        });
+
+        expect(
+          getGenAiUsageProvenance(absent)?.cacheCreationInputTokens,
+        ).toBeUndefined();
+        expect(getGenAiUsageProvenance(zero)?.cacheCreationInputTokens).toBe(0);
+      },
+    );
+
+    it.each([
+      [
         'estimates missing reasoning tokens from non-streaming content',
         { reasoning_content: '先仔细想' },
         usage(1, 10, 11),
@@ -3496,7 +3722,121 @@ describe('OpenAIContentConverter', () => {
     });
   });
 
-  describe('mergeConsecutiveAssistantMessages', () => {
+  describe.each([true, false])(
+    'interleaved assistant replay (clean orphan calls: %s)',
+    (cleanOrphanToolCalls) => {
+      it.each([
+        'one model entry',
+        'consecutive model entries',
+        'reasoning between calls',
+      ])('preserves segments and a complete tool batch for %s', (shape) => {
+        const withText = shape !== 'reasoning between calls';
+        const episode = (index: number): ResponsesTextPart[] => [
+          {
+            thought: true,
+            text: `R${index}`,
+            thoughtSignature: JSON.stringify({
+              id: `rs_${index}`,
+              encrypted_content: `ciphertext_${index}`,
+            }),
+          },
+          ...(withText
+            ? [
+                {
+                  text: `M${index}`,
+                  responsesMessage: {
+                    id: `msg_${index}`,
+                    phase: 'commentary' as const,
+                  },
+                },
+              ]
+            : []),
+          {
+            functionCall: {
+              id: `call_${index}`,
+              name: 'read_file',
+              args: { path: `${index}.txt` },
+            },
+          },
+        ];
+        const request: GenerateContentParameters = {
+          model: 'test-model',
+          contents: [
+            ...(shape === 'consecutive model entries'
+              ? [
+                  { role: 'model', parts: episode(1) },
+                  { role: 'model', parts: episode(2) },
+                ]
+              : [{ role: 'model', parts: [...episode(1), ...episode(2)] }]),
+            {
+              role: 'user',
+              parts: [1, 2].map((index) => ({
+                functionResponse: {
+                  id: `call_${index}`,
+                  name: 'read_file',
+                  response: { output: `result_${index}` },
+                },
+              })),
+            },
+          ],
+        };
+        const original = structuredClone(request);
+        const nativeBefore = convertGeminiContentsToResponsesInput(request);
+        const messages = converter.convertLlmRequestToOpenAI(
+          request,
+          requestContext,
+          { cleanOrphanToolCalls },
+        );
+        expect(messages).toMatchObject([
+          {
+            role: 'assistant',
+            reasoning_content: 'R1',
+            content: withText ? 'M1' : '',
+          },
+          {
+            role: 'assistant',
+            reasoning_content: 'R2',
+            content: withText ? 'M2' : '',
+            tool_calls: [
+              {
+                id: 'call_1',
+                function: { name: 'read_file', arguments: '{"path":"1.txt"}' },
+              },
+              {
+                id: 'call_2',
+                function: { name: 'read_file', arguments: '{"path":"2.txt"}' },
+              },
+            ],
+          },
+          { role: 'tool', tool_call_id: 'call_1' },
+          { role: 'tool', tool_call_id: 'call_2' },
+        ]);
+        expect(messages[0]).not.toHaveProperty('tool_calls');
+        expect(JSON.stringify(messages)).not.toContain('ciphertext_');
+        expect(request).toEqual(original);
+        const nativeAfter = convertGeminiContentsToResponsesInput(request);
+        expect(nativeAfter).toEqual(nativeBefore);
+        expect(
+          nativeAfter.input.filter((item) => item.type === 'reasoning'),
+        ).toEqual([
+          {
+            type: 'reasoning',
+            id: 'rs_1',
+            encrypted_content: 'ciphertext_1',
+            summary: [{ type: 'summary_text', text: 'R1' }],
+          },
+          {
+            type: 'reasoning',
+            id: 'rs_2',
+            encrypted_content: 'ciphertext_2',
+            summary: [{ type: 'summary_text', text: 'R2' }],
+          },
+        ]);
+      });
+    },
+  );
+
+  describe('normalizeAssistantMessages', () => {
     /** Converts `contents` and expects them merged into a single message. */
     const mergeAll = (...contents: Content[]) => {
       const messages = toMessages(...contents);
@@ -3504,8 +3844,8 @@ describe('OpenAIContentConverter', () => {
       return messages[0];
     };
 
-    it('should preserve reasoning_content from every merged assistant turn', () => {
-      const merged = mergeAll(
+    it('should preserve reasoning and text order across consecutive assistant turns', () => {
+      const messages = toMessages(
         content('model', thoughtPart('First reasoning.'), {
           text: 'First answer.',
         }),
@@ -3514,12 +3854,18 @@ describe('OpenAIContentConverter', () => {
         }),
       );
 
-      expect(merged.role).toBe('assistant');
-      expect(merged.content).toBe('First answer.Second answer.');
-      // The reasoning of the merged-away turn must not be silently dropped.
-      expect((merged as { reasoning_content?: string }).reasoning_content).toBe(
-        'First reasoning.Second reasoning.',
-      );
+      expect(messages).toEqual([
+        {
+          role: 'assistant',
+          reasoning_content: 'First reasoning.',
+          content: 'First answer.',
+        },
+        {
+          role: 'assistant',
+          reasoning_content: 'Second reasoning.',
+          content: 'Second answer.',
+        },
+      ]);
     });
 
     it.each<[string, Content[], string]>([

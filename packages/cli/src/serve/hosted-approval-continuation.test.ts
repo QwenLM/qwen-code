@@ -20,18 +20,211 @@ import {
   HostedWorkspaceBroker,
   hostedRuntimeSessionId,
 } from './hosted-workspace-broker.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
   endHostedAction,
   HOSTED_TOOL_APPROVAL_POLICY,
   HostedApprovalWaiters,
   resolveHostedAction,
 } from './hosted-tool-approval.js';
-import { findHostedApprovalContinuation } from './hosted-approval-continuation.js';
+import {
+  findHostedApprovalContinuation,
+  readHostedApprovalContinuation,
+} from './hosted-approval-continuation.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { hostedPublicPlanActive } from './hosted-plan-mode.js';
+import { HostedSkillCatalog } from './hosted-skill-catalog.js';
+import { slowHostBudgetMs } from '../test-utils/slow-test-host.js';
 import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 
 afterEach(() => vi.restoreAllMocks());
+
+// The observed chain is a serial run of fsync-backed publishes and journal
+// commits; a fixed 10s budget flaked on a loaded runner (#15176).
+const WAIT_TIMEOUT_MS = slowHostBudgetMs(10_000, 45_000);
+const TEST_TIMEOUT_MS = slowHostBudgetMs(20_000, 75_000);
+
+function nativeContinuationFixture(toolNames = ['ask_user_question']) {
+  const bytesById = new Map<string, Buffer>();
+  const publish = (kind: string, value: unknown): ManagedSessionDurableRef => {
+    const bytes = Buffer.from(JSON.stringify(value));
+    const resourceId = `resource-${bytesById.size}`;
+    bytesById.set(resourceId, bytes);
+    return {
+      resourceId,
+      kind,
+      schemaVersion: 1,
+      byteLength: bytes.length,
+      digest: createHash('sha256').update(bytes).digest('hex'),
+    };
+  };
+  const sessionKey = {
+    tenantId: 'tenant',
+    workspaceId: 'workspace',
+    sessionId: 'session',
+  };
+  const input = {
+    questions: [
+      {
+        header: 'Next step',
+        question: 'Which step should run next?',
+        options: [
+          { label: 'Read', description: 'Read the current files.' },
+          { label: 'Edit', description: 'Edit the current files.' },
+        ],
+      },
+    ],
+  };
+  const parts = toolNames.map((name, index) => ({
+    functionCall: { id: `call-${index}`, name, args: input },
+  }));
+  const definitionRef = publish('managed-definition', {
+    toolProfile: 'hosted-workspace-files/1',
+  });
+  const rootSnapshotRef = publish('managed-root', {});
+  const assistantRef = publish('managed-message', {
+    daemonPromptId: 'prompt',
+    message: { parts },
+  });
+  const runtime: Record<string, unknown> = {
+    runtimeSessionId: 'prompt',
+    bindingId: 'binding',
+    generation: '1',
+    workspaceGeneration: '1',
+  };
+  const plan: Record<string, unknown> = {
+    v: 1,
+    sessionKey,
+    promptId: 'prompt',
+    definitionRef,
+    rootSnapshotRef,
+    sourceActivation: { activationId: 'activation', epoch: 1 },
+    runtime,
+    batchId: 'batch',
+    assistantRef,
+    model: 'model',
+    round: 0,
+    stage: 'final',
+    approvalOrdinal: 0,
+    actionId: null,
+    calls: toolNames.map((name, index) => {
+      const callId = `call-${index}`;
+      const payloadJson = JSON.stringify({ toolName: name, input });
+      const requestDigest = `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`;
+      return {
+        call: { callId, name, args: input, prompt_id: 'prompt' },
+        runtimeCallId: callId,
+        inputRef: publish('managed-tool-input', {
+          harnessSessionId: 'session',
+          runtimeSessionId: 'prompt',
+          payloadJson,
+        }),
+        definitionRef: publish('managed-tool-definition', { name }),
+        requestDigest,
+        argsDigest: `sha256:${managedToolDigest(input)}`,
+        prepareKey: `prompt:${callId}`,
+        prepareReference: {
+          sessionId: 'prompt',
+          promptId: 'prompt',
+          callId,
+          argsDigest: requestDigest,
+        },
+        partIndex: index,
+        refusal: 'Question ended without an answer.',
+        actionId: null,
+      };
+    }),
+  };
+  const session = {
+    authority: {
+      sessionHeader: { sessionKey, definitionRef, rootSnapshotRef },
+      committedSequence: 1,
+      eventsInSequenceRange: () => [
+        {
+          kind: 'message.committed',
+          payload: {
+            messageId: 'batch',
+            role: 'assistant',
+            contentRef: assistantRef,
+          },
+        },
+      ],
+    },
+    resources: {
+      read: async (ref: ManagedSessionDurableRef) =>
+        bytesById.get(ref.resourceId)!,
+    },
+  } as unknown as Awaited<ReturnType<typeof openManagedSession>>;
+  return {
+    plan,
+    runtime,
+    read: () =>
+      readHostedApprovalContinuation(
+        session,
+        publish('hosted-approval-continuation', plan),
+        'prompt',
+      ),
+  };
+}
+
+it('accepts legacy native owners and the local question provider pin', async () => {
+  const fixture = nativeContinuationFixture();
+  await expect(fixture.read()).resolves.toMatchObject({
+    plan: { runtime: fixture.runtime },
+  });
+  fixture.runtime['provisionerKind'] = 'local-process';
+  await expect(fixture.read()).resolves.toMatchObject({
+    plan: { runtime: { provisionerKind: 'local-process' } },
+  });
+  await expect(
+    nativeContinuationFixture(['read_file']).read(),
+  ).resolves.toMatchObject({
+    plan: { runtime: { runtimeSessionId: 'prompt' } },
+  });
+});
+
+it.each(['ssh-process', 'external-workspace', 'static', '', null, true])(
+  'rejects an unsupported question provider pin (%s)',
+  async (provider) => {
+    const fixture = nativeContinuationFixture();
+    fixture.runtime['provisionerKind'] = provider;
+    await expect(fixture.read()).rejects.toThrow(
+      'Hosted approval continuation conflicts with the original Turn.',
+    );
+  },
+);
+
+it.each([['read_file'], ['ask_user_question', 'read_file']])(
+  'rejects provider pins outside a single question (%j)',
+  async (...toolNames) => {
+    const fixture = nativeContinuationFixture(toolNames);
+    fixture.runtime['provisionerKind'] = 'local-process';
+    await expect(fixture.read()).rejects.toThrow(
+      'Hosted approval continuation conflicts with the original Turn.',
+    );
+  },
+);
+
+it('rejects a question provider pin on command steps or open Runtime shapes', async () => {
+  const command = nativeContinuationFixture();
+  command.runtime['provisionerKind'] = 'local-process';
+  command.plan['commandStep'] = {
+    toolStageId: 'stage',
+    toolName: 'shell',
+    configRevision: 1,
+  };
+  await expect(command.read()).rejects.toThrow(
+    'Hosted approval continuation conflicts with the original Turn.',
+  );
+  const extra = nativeContinuationFixture();
+  extra.runtime['provisionerKind'] = 'local-process';
+  extra.runtime['unexpected'] = true;
+  await expect(extra.read()).rejects.toThrow(
+    'Hosted approval continuation conflicts with the original Turn.',
+  );
+});
 
 it.each(
   ['allow', 'deny', 'cancelled', 'expired']
@@ -72,6 +265,16 @@ it.each(
           }),
         ),
       ),
+    )
+    .concat(
+      ['allow', 'deny'].map((decision) => ({
+        decision,
+        promptId: randomUUID(),
+        round: 1,
+        planMode: false,
+        profile: 'hosted-workspace-shell/1',
+        publicTool: 'skill',
+      })),
     )
     .concat(
       ['allow', 'deny', 'cancelled', 'expired'].flatMap((decision) =>
@@ -174,6 +377,15 @@ it.each(
         },
       );
       await harness.ensureRunnable();
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'resolveCapabilities',
+      ).mockResolvedValue();
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'capabilityDigest',
+        'get',
+      ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
         async function (this: HostedWorkspaceBroker) {
           this.runtime = {
@@ -195,6 +407,34 @@ it.each(
       const prepare = vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare');
       const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
       const publicShell = profile === 'hosted-workspace-shell/1' && !planMode;
+      const commandSkills =
+        publicTool === 'skill'
+          ? new HostedSkillCatalog(
+              [],
+              [
+                {
+                  name: 'sample:run',
+                  description: 'Run once',
+                  prompt: '!{printf %s {{args}}}',
+                  extensionId: 'sample',
+                  modelInvocable: true,
+                },
+              ],
+            )
+          : undefined;
+      const extensionConfig = {
+        revision: 1,
+        packages: [
+          {
+            pin: {
+              extensionId: 'sample',
+              packageRevision: 1,
+              packageDigest: 'a'.repeat(64),
+            },
+            assetRoot: 'extension://sample/',
+          },
+        ],
+      };
       const publication = publicShell
         ? {
             owner: {
@@ -235,6 +475,7 @@ it.each(
         },
         {
           profile,
+          ...(commandSkills ? { skills: commandSkills, extensionConfig } : {}),
           publicPlanMode: planMode,
           ...(profile === 'hosted-workspace-shell/1' && !planMode
             ? {
@@ -260,17 +501,22 @@ it.each(
         callId: 'original-call',
         args: planMode
           ? { plan: '# Plan\nRead the files, then update original.txt.' }
-          : publicTool === 'agent'
-            ? {
-                description: 'audit',
-                prompt: 'review the file',
-                run_in_background: true,
-              }
-            : publicTool === 'run_shell_command'
-              ? { command: 'printf once' }
-              : publicTool === 'web_fetch'
-                ? { url: 'https://example.com/docs', prompt: 'Summarize' }
-                : { file_path: 'original.txt', content: 'one original batch' },
+          : publicTool === 'skill'
+            ? { skill: 'sample:run', args: 'argument' }
+            : publicTool === 'agent'
+              ? {
+                  description: 'audit',
+                  prompt: 'review the file',
+                  run_in_background: true,
+                }
+              : publicTool === 'run_shell_command'
+                ? { command: 'printf once' }
+                : publicTool === 'web_fetch'
+                  ? { url: 'https://example.com/docs', prompt: 'Summarize' }
+                  : {
+                      file_path: 'original.txt',
+                      content: 'one original batch',
+                    },
         isClientInitiated: false,
         prompt_id: promptId,
       };
@@ -309,7 +555,7 @@ it.each(
           requestId = authorization.checkpoint.approval!.requestId;
           expect(first.authority.action(requestId)?.state).toBe('requested');
         },
-        { timeout: 10_000 },
+        { timeout: WAIT_TIMEOUT_MS },
       );
       const action = first.authority.action(requestId)!;
       const descriptor = JSON.parse(
@@ -395,6 +641,45 @@ it.each(
             continuation: { phase: 'model_output_committed' },
           },
         });
+        if (publicTool === 'skill') {
+          expect(saved!.plan.commandStep).toMatchObject({
+            toolName: 'shell',
+            configRevision: 1,
+          });
+          if (decision === 'allow') {
+            const commandExecute = vi
+              .spyOn(HostedWorkspaceBroker.prototype, 'extensionCommand')
+              .mockResolvedValue({
+                state: 'settled',
+                result: {
+                  executionStatus: 'success',
+                  responseParts: [{ text: 'ran once' }],
+                },
+              });
+            const resumed = new HostedWorkspaceToolTurn(
+              { baseUrl: 'http://127.0.0.1:1', token: 'fixture-no-traffic' },
+              replacement,
+              harness,
+              promptId,
+              vi.fn().mockResolvedValue('unused'),
+              () => true,
+              publication,
+              undefined,
+              {
+                settings: { mode: 'default', timeoutMs: 60_000 },
+                waiters: new HostedApprovalWaiters(),
+              },
+              { profile, skills: commandSkills, extensionConfig },
+            );
+            const result = await resumed.resumeSavedNativeBatch(
+              saved!,
+              1,
+              new AbortController().signal,
+            );
+            expect(JSON.stringify(result)).toContain('ran once');
+            expect(commandExecute).toHaveBeenCalledTimes(1);
+          }
+        }
         if (publicShell && publicTool === 'run_shell_command') {
           expect(saved!.plan.calls[0].publicationId).toMatch(
             /^[a-f0-9-]{36}$/u,
@@ -462,5 +747,179 @@ it.each(
       await rm(root, { recursive: true, force: true });
     }
   },
-  20_000,
+  TEST_TIMEOUT_MS,
+);
+
+// A6 (G1): the saved-batch owner gate refuses a non-commandStep plan under
+// a Hook/MCP owner and a commandStep plan whose configRevision no longer
+// matches, while a matching-revision commandStep plan proceeds past the
+// gate (the A3 commandStep follow-up keeps working). The gate reads
+// ownership and revisions, not plan contents — a minimal identity-matching
+// plan isolates the clause (the reader has its own suite).
+// G2 scope: this pins the tool-turn backstop, including that an
+// extensionConfig on the turn does not exempt the owner gate. The harness
+// takeover entry's `session.extensions?.enabled` clause is a separate
+// route-level surface, recorded as a follow-up in the design doc.
+it.each([
+  {
+    owner: 'hooks',
+    hooks: true,
+    mcp: false,
+    commandStep: 'none',
+    extensionConfig: false,
+    verdict: 'refuse',
+  },
+  {
+    owner: 'mcp',
+    hooks: false,
+    mcp: true,
+    commandStep: 'none',
+    extensionConfig: false,
+    verdict: 'refuse',
+  },
+  {
+    owner: 'hooks with a stale commandStep revision',
+    hooks: true,
+    mcp: false,
+    commandStep: 'stale',
+    extensionConfig: true,
+    verdict: 'refuse',
+  },
+  {
+    owner: 'hooks with a matching commandStep revision',
+    hooks: true,
+    mcp: false,
+    commandStep: 'matching',
+    extensionConfig: true,
+    verdict: 'pass',
+  },
+  {
+    owner: 'hooks with extensions and no commandStep',
+    hooks: true,
+    mcp: false,
+    commandStep: 'none',
+    extensionConfig: true,
+    verdict: 'refuse',
+  },
+])(
+  'the saved-batch owner gate: $owner ($verdict)',
+  async ({ hooks, mcp, commandStep, extensionConfig, verdict }) => {
+    const root = await mkdtemp(path.join(tmpdir(), 'g3-a6-owner-'));
+    const sessionKey = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: randomUUID(),
+    };
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: root,
+      sessionKey,
+    });
+    const session = await openManagedSession({
+      runtimeBaseDir: root,
+      cwd: root,
+      transcriptPath: path.join(root, 'transcript.jsonl'),
+      sessionId: sessionKey.sessionId,
+      sessionKey,
+      version: 'g3-a6-owner',
+      activationLeaseDurationMs: 60_000,
+      workerId: 'a6-owner-probe',
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              toolProfile: 'hosted-workspace-files/1',
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from('{}'),
+        ),
+        createdBy: 'a6-owner-probe',
+      },
+    });
+    try {
+      const promptId = randomUUID();
+      const turn = new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'fixture-no-traffic' },
+        session,
+        createManagedHarnessHandle(session),
+        promptId,
+        vi.fn().mockResolvedValue('unused'),
+        () => true,
+        undefined,
+        undefined,
+        {
+          settings: { mode: 'default', timeoutMs: 60_000 },
+          waiters: new HostedApprovalWaiters(),
+        },
+        {
+          profile: 'hosted-workspace-files/1',
+          ...(hooks
+            ? {
+                hooks:
+                  {} as unknown as import('./hosted-hook-session.js').HostedHookSession,
+              }
+            : {}),
+          ...(mcp
+            ? {
+                mcp: {
+                  ensureReady: async () => undefined,
+                } as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+              }
+            : {}),
+          ...(commandStep !== 'none' || extensionConfig
+            ? { extensionConfig: { revision: 1, packages: [] } }
+            : {}),
+        },
+      );
+      const saved = {
+        plan: {
+          promptId,
+          calls: [],
+          ...(commandStep !== 'none'
+            ? {
+                commandStep: {
+                  toolName: 'shell',
+                  configRevision: commandStep === 'stale' ? 2 : 1,
+                },
+              }
+            : {}),
+          runtime: {
+            bindingId: 'binding-1',
+            generation: '1',
+            workspaceGeneration: '1',
+            runtimeSessionId: hostedRuntimeSessionId(promptId),
+          },
+        },
+        parts: [],
+        inputs: [],
+      } as unknown as import('./hosted-approval-continuation.js').RestoredHostedApprovalContinuation;
+      const error = await turn
+        .resumeSavedNativeBatch(saved, 1, new AbortController().signal)
+        .catch((cause: unknown) => cause);
+      if (verdict === 'refuse') {
+        expect(error).toBeInstanceOf(HostedToolRecoveryRequiredError);
+        expect((error as HostedToolRecoveryRequiredError).cause).toBe(
+          'Unsupported saved batch owner.',
+        );
+      } else {
+        // Past the gate: the turn warms against the fixture's unreachable
+        // broker, and the resume body wraps that transport failure into the
+        // family error with the TypeError as its cause — never the owner
+        // refusal's string cause. Dropping `!plan.commandStep &&` from the
+        // gate's first arm turns this row into the owner refusal and reds it.
+        expect(error).toBeInstanceOf(HostedToolRecoveryRequiredError);
+        const cause = (error as HostedToolRecoveryRequiredError).cause;
+        expect(cause).toBeInstanceOf(TypeError);
+        expect((cause as Error).message).toContain('fetch failed');
+      }
+    } finally {
+      await session.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  TEST_TIMEOUT_MS,
 );

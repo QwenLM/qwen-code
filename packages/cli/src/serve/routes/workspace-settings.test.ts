@@ -784,6 +784,36 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).toHaveBeenCalled();
   });
 
+  it('serves serve.maxSessions to the Web Shell and writes it at user scope only', async () => {
+    // The key is showInDialog: false, so WEB_SHELL_SETTINGS is what puts it in
+    // the panel; the workspace restriction still refuses a workspace write.
+    const { app, persistSetting } = makeApp();
+
+    const list = await request(app).get('/workspace/settings');
+    expect(list.status).toBe(200);
+    expect(
+      list.body.settings.some(
+        (setting: { key: string }) => setting.key === 'serve.maxSessions',
+      ),
+    ).toBe(true);
+
+    const workspace = await request(app)
+      .post('/workspace/settings')
+      .send({ scope: 'workspace', key: 'serve.maxSessions', value: 64 });
+    expect(workspace.status).toBe(400);
+    expect(workspace.body).toMatchObject({
+      code: 'workspace_restricted_setting',
+    });
+    expect(persistSetting).not.toHaveBeenCalled();
+
+    const user = await request(app)
+      .post('/workspace/settings')
+      .send({ scope: 'user', key: 'serve.maxSessions', value: 64 });
+    expect(user.status).toBe(200);
+    expect(user.body).toMatchObject({ requiresRestart: true });
+    expect(persistSetting).toHaveBeenCalled();
+  });
+
   it('refuses workspace pluginConfigs without persisting operator options', async () => {
     const { app, persistSetting } = makeApp();
     const response = await request(app)
