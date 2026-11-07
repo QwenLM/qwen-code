@@ -7467,6 +7467,7 @@ export function WebShellSidebar({
             >
               <button
                 className={styles.newChatButton}
+                data-web-shell-new-task-button
                 type="button"
                 title={t('sidebar.newTask')}
                 aria-label={t('sidebar.newTask')}
@@ -7696,6 +7697,7 @@ export function WebShellSidebar({
                     label={t('sidebar.pinnedSessions')}
                     expanded={pinnedExpanded}
                     onToggle={() => setPinnedExpanded((expanded) => !expanded)}
+                    buttonProps={{ 'data-web-shell-pinned-header': '' }}
                   />
                   {pinnedExpanded && (
                     <div className={styles.pinnedSessionList}>
