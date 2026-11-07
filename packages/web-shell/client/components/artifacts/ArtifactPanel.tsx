@@ -224,6 +224,7 @@ export type ArtifactPanelTab =
       workspaceCwd?: string;
       workspaceId?: string;
       changes?: readonly TurnOutputFileChange[];
+      unfilteredChanges?: readonly TurnOutputFileChange[];
       selectedPath?: string;
       sourceTurnId?: string;
       sourceSessionId?: string;

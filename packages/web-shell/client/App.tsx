@@ -1,3 +1,10 @@
+import { useWorkspaceFileChanges } from './components/artifacts/useWorkspaceFileChanges';
+import {
+  filterWorkspaceFileChanges,
+  fileChangeOwnerSessionId,
+  loadGitIgnoredChangePaths,
+  workspaceRelativeChangePath,
+} from './components/artifacts/workspace-file-changes';
 import { DaemonConnectionBanner } from './components/DaemonConnectionBanner.js';
 import { ProjectHooksApprovalCard } from './components/ProjectHooksApprovalCard.js';
 import { useDaemonAvailability } from './daemon/availability-context.js';
@@ -5137,14 +5144,19 @@ export function App({
     artifactsByTurn,
     onChange: onSessionArtifactsChange,
   });
-  const fileChangesByTurn = useMemo(
-    () =>
-      getFileChangesByTurn(
-        displayMessages,
-        artifactsByTurn,
-        connection.workspaceCwd || '',
-      ),
-    [displayMessages, artifactsByTurn, connection.workspaceCwd],
+  const fileChangesByTurn = useWorkspaceFileChanges(
+    displayMessages,
+    artifactsByTurn,
+    connection.workspaceCwd ||
+      connection.standaloneSession?.projectlessOutputDirectory ||
+      '',
+    connection.sessionId,
+    connection.workspaceCwd &&
+      currentSessionSummary?.sessionId === connection.sessionId
+      ? (sessionWorktree?.path ?? connection.workspaceCwd)
+      : connection.workspaceCwd
+        ? undefined
+        : null,
   );
   const latestReviewChanges = useMemo(() => {
     let latest: readonly TurnOutputFileChange[] = [];
@@ -6222,18 +6234,41 @@ export function App({
       tabId = 'review',
       sourceTurnId?: string,
       sourceSessionId?: string,
+      unfilteredChanges?: readonly TurnOutputFileChange[],
     ) => {
+      const sourceMessages =
+        artifactPanelRestoreInputsRef.current.displayMessages;
+      const sourceCwd =
+        connection.workspaceCwd ||
+        connection.standaloneSession?.projectlessOutputDirectory ||
+        '';
+      const sourceChanges =
+        unfilteredChanges ??
+        ((!sourceSessionId || sourceSessionId === connection.sessionId) &&
+        sourceTurnId
+          ? getFileChangesByTurn(
+              sourceMessages,
+              getArtifactsByTurn(
+                sourceMessages,
+                artifactsRef.current,
+                sourceCwd,
+              ),
+              sourceCwd,
+            ).get(sourceTurnId)
+          : undefined) ??
+        changes;
       const reviewTab: ArtifactPanelTab = {
         id: tabId,
         kind: 'review',
         title: t('turnOutputs.review'),
         changes,
+        unfilteredChanges: sourceChanges,
         ...(selectedPath ? { selectedPath } : {}),
         ...(reviewWorkspaceCwd ? { workspaceCwd: reviewWorkspaceCwd } : {}),
         ...(reviewWorkspaceId ? { workspaceId: reviewWorkspaceId } : {}),
         ...(sourceTurnId ? { sourceTurnId } : {}),
         ...(sourceSessionId ? { sourceSessionId } : {}),
-        sourceToolCallIds: changes.map((change) => change.toolCallId),
+        sourceToolCallIds: sourceChanges.map((change) => change.toolCallId),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === reviewTab.id)
@@ -6248,7 +6283,13 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t],
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      connection.standaloneSession?.projectlessOutputDirectory,
+      getDefaultReviewPanelWidth,
+      t,
+    ],
   );
   const openLatestReviewPanel = useCallback(() => {
     if (latestReviewChanges.length === 0) return;
@@ -6677,6 +6718,144 @@ export function App({
       workspace.client,
     ],
   );
+  const filterReviewChanges = useCallback(
+    async (
+      changes: readonly TurnOutputFileChange[],
+      sourceSessionId: string,
+      reviewWorkspaceCwd?: string,
+    ): Promise<readonly TurnOutputFileChange[]> => {
+      const gitSessionId = fileChangeOwnerSessionId(sourceSessionId);
+      const summary = gitSessionId
+        ? await workspace.client
+            .sessionStatus(gitSessionId)
+            .catch(() => undefined)
+        : undefined;
+      const outputDirectory =
+        sourceSessionId === connection.sessionId
+          ? connection.standaloneSession?.projectlessOutputDirectory
+          : undefined;
+      if (
+        !outputDirectory &&
+        !reviewWorkspaceCwd &&
+        summary?.sourceType === 'standalone'
+      )
+        return changes;
+      const cwd =
+        outputDirectory ??
+        summary?.worktree?.path ??
+        reviewWorkspaceCwd ??
+        (sourceSessionId === connection.sessionId
+          ? connection.workspaceCwd
+          : undefined) ??
+        summary?.workspaceCwd;
+      if (!cwd) return changes;
+      const contained = filterWorkspaceFileChanges(
+        new Map([['review', changes]]),
+        cwd,
+      );
+      const ownerCwd =
+        reviewWorkspaceCwd ??
+        (outputDirectory ? undefined : summary?.workspaceCwd);
+      if (
+        !workspace.capabilities?.features?.includes(
+          'workspace_git_check_ignore',
+        ) ||
+        !ownerCwd ||
+        !summary ||
+        !resolveArtifactWorkspaceOwner(workspace.capabilities, ownerCwd)
+      )
+        return contained.get('review') ?? [];
+      const paths = [
+        ...new Set(
+          (contained.get('review') ?? []).map(
+            (change) => workspaceRelativeChangePath(change.path, cwd)!,
+          ),
+        ),
+      ];
+      const ignored = await loadGitIgnoredChangePaths(paths, (batch) =>
+        workspace.client
+          .workspaceByCwd(ownerCwd)
+          .workspaceGitIgnoredPaths(
+            batch,
+            summary.worktree?.path,
+            gitSessionId,
+          ),
+      ).catch(() => new Set<string>());
+      return (
+        filterWorkspaceFileChanges(contained, cwd, ignored).get('review') ?? []
+      );
+    },
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      connection.standaloneSession?.projectlessOutputDirectory,
+      workspace.capabilities,
+      workspace.client,
+    ],
+  );
+  const reviewVisibilityKey = JSON.stringify([
+    [...fileChangesByTurn].map(([turn, changes]) => [
+      turn,
+      changes.map((change) => change.path),
+    ]),
+    artifactPanelTabs
+      .filter((tab) => tab.kind === 'review')
+      .map((tab) => [
+        tab.id,
+        tab.sourceSessionId,
+        tab.workspaceCwd,
+        tab.sourceToolCallIds,
+      ]),
+  ]);
+  useEffect(() => {
+    if (
+      !daemonAvailable ||
+      connection.status !== 'connected' ||
+      !workspace.capabilities?.features?.includes('workspace_git_check_ignore')
+    )
+      return;
+    let active = true;
+    const owner = sessionOwnerGuard.capture();
+    for (const tab of artifactPanelTabsRef.current) {
+      if (tab.kind !== 'review') continue;
+      const sourceSessionId = tab.sourceSessionId ?? connection.sessionId;
+      if (!sourceSessionId) continue;
+      void filterReviewChanges(
+        tab.unfilteredChanges ?? tab.changes ?? [],
+        sourceSessionId,
+        tab.workspaceCwd,
+      )
+        .then((changes) => {
+          if (active && owner.isCurrent())
+            setArtifactPanelTabs((tabs) =>
+              tabs.map((item) =>
+                item.kind === 'review' &&
+                item.id === tab.id &&
+                item.sourceSessionId === tab.sourceSessionId &&
+                item.changes === tab.changes
+                  ? {
+                      ...item,
+                      changes,
+                      unfilteredChanges: tab.unfilteredChanges ?? tab.changes,
+                    }
+                  : item,
+              ),
+            );
+        })
+        .catch(() => {});
+    }
+    return () => {
+      active = false;
+    };
+  }, [
+    connection.status,
+    daemonAvailable,
+    connection.sessionId,
+    filterReviewChanges,
+    reviewVisibilityKey,
+    sessionOwnerGuard,
+    workspace.capabilities,
+  ]);
   const hydratePendingArtifactPanelTab = useCallback(
     async (tab: Extract<ArtifactPanelTab, { kind: 'pending' }> | undefined) => {
       if (!tab) return;
@@ -6836,25 +7015,49 @@ export function App({
                 sourceArtifacts,
                 tab.workspaceCwd ?? '',
               ),
-              tab.workspaceCwd ?? '',
+              tab.workspaceCwd,
             );
-            const changes =
+            const sourceChanges =
               findReviewChangesByToolCallIds(
                 changesByTurn,
                 tab.sourceToolCallIds,
               ) ?? changesByTurn.get(tab.sourceTurnId ?? '');
+            const complete = (tab.sourceToolCallIds ?? []).every((id) =>
+              sourceChanges?.some((change) => change.toolCallId === id),
+            );
+            const changes =
+              sourceChanges && complete
+                ? await filterReviewChanges(
+                    sourceChanges,
+                    tab.sourceSessionId,
+                    tab.workspaceCwd,
+                  )
+                : undefined;
+            if (!owner.isCurrent()) return;
             if (changes) {
               restored = {
                 id: tab.id,
                 kind: 'review',
                 title: tab.title,
+                unfilteredChanges: sourceChanges,
                 changes,
                 selectedPath: tab.selectedPath,
                 sourceTurnId: tab.sourceTurnId,
                 sourceSessionId: tab.sourceSessionId,
                 sourceToolCallIds: tab.sourceToolCallIds,
-                workspaceCwd: tab.workspaceCwd,
-                workspaceId: tab.workspaceId,
+                workspaceCwd:
+                  tab.workspaceCwd ??
+                  (tab.sourceSessionId === connection.sessionId
+                    ? connection.workspaceCwd
+                    : undefined),
+                workspaceId:
+                  tab.workspaceId ??
+                  (tab.sourceSessionId === connection.sessionId
+                    ? resolveArtifactWorkspaceOwner(
+                        workspace.capabilities,
+                        tab.workspaceCwd ?? connection.workspaceCwd,
+                      )?.id
+                    : undefined),
               };
             }
           } else if (tab.targetKind === 'scheduled_task') {
@@ -6949,9 +7152,12 @@ export function App({
     },
     [
       connection.sessionId,
+      filterReviewChanges,
+      connection.workspaceCwd,
       sessionActions,
       sessionOwnerGuard,
       t,
+      workspace.capabilities,
       workspace.client,
     ],
   );
@@ -7195,7 +7401,7 @@ export function App({
       retainCurrentTrajectory();
       return;
     }
-    if (artifactsLoading) {
+    if (artifactsLoading || !workspace.capabilities) {
       saveCurrentState();
       artifactPanelRestoredSessionKeyRef.current = undefined;
       const pendingState =
@@ -7295,37 +7501,61 @@ export function App({
                 case 'turn_calls':
                   return { ...tab, sessionId: connection.sessionId };
                 case 'review': {
-                  if (
-                    tab.sourceSessionId &&
-                    tab.sourceSessionId !== connection.sessionId
-                  ) {
-                    return {
-                      ...tab,
-                      kind: 'pending',
-                      targetKind: 'review',
-                      sourceSessionId: tab.sourceSessionId,
-                    };
-                  }
-                  const changes =
-                    findReviewChangesByToolCallIds(
-                      restoreInputs.fileChangesByTurn,
-                      tab.sourceToolCallIds,
-                    ) ??
-                    (tab.sourceTurnId
-                      ? restoreInputs.fileChangesByTurn.get(tab.sourceTurnId)
-                      : restoreInputs.latestReviewChanges);
-                  const sourceSessionId =
+                  const reviewSessionId =
                     tab.sourceSessionId ?? connection.sessionId;
-                  return changes
-                    ? { ...tab, changes }
-                    : tab.sourceTurnId && sourceSessionId
-                      ? {
-                          ...tab,
-                          kind: 'pending',
-                          targetKind: 'review',
-                          sourceSessionId,
-                        }
-                      : undefined;
+                  if (!reviewSessionId) return undefined;
+                  if (reviewSessionId === connection.sessionId) {
+                    const cwd =
+                      connection.workspaceCwd ||
+                      connection.standaloneSession?.projectlessOutputDirectory;
+                    const memoryChanges = getFileChangesByTurn(
+                      restoreInputs.displayMessages,
+                      getArtifactsByTurn(
+                        restoreInputs.displayMessages,
+                        artifactsRef.current,
+                        cwd,
+                      ),
+                      cwd,
+                    );
+                    const changes =
+                      findReviewChangesByToolCallIds(
+                        memoryChanges,
+                        tab.sourceToolCallIds,
+                      ) ??
+                      (tab.sourceTurnId
+                        ? memoryChanges.get(tab.sourceTurnId)
+                        : [...memoryChanges.values()].at(-1));
+                    const complete = (tab.sourceToolCallIds ?? []).every((id) =>
+                      [...memoryChanges.values()].some((changes) =>
+                        changes.some((change) => change.toolCallId === id),
+                      ),
+                    );
+                    if (changes && complete)
+                      return {
+                        ...tab,
+                        sourceSessionId: reviewSessionId,
+                        workspaceCwd:
+                          tab.workspaceCwd ?? connection.workspaceCwd,
+                        workspaceId:
+                          tab.workspaceId ??
+                          resolveArtifactWorkspaceOwner(
+                            workspace.capabilities,
+                            tab.workspaceCwd ?? connection.workspaceCwd,
+                          )?.id,
+                        unfilteredChanges: changes,
+                        changes: await filterReviewChanges(
+                          changes,
+                          reviewSessionId,
+                          tab.workspaceCwd,
+                        ),
+                      };
+                  }
+                  return {
+                    ...tab,
+                    kind: 'pending',
+                    targetKind: 'review',
+                    sourceSessionId: reviewSessionId,
+                  };
                 }
                 case 'files':
                   return filesAvailable ? tab : undefined;
@@ -7602,6 +7832,7 @@ export function App({
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
+    connection.workspaceCwd,
     getDefaultReviewPanelWidth,
     hydratePendingArtifactPanelTab,
     hydrateRestoredAttachmentTab,
@@ -7614,6 +7845,10 @@ export function App({
     filesAvailable,
     webPreviewAvailable,
     workspace.baseUrl,
+    workspace.capabilities,
+    filterReviewChanges,
+    connection.standaloneSession?.projectlessOutputDirectory,
+    sessionWorktree?.path,
     workspace.client,
   ]);
   const openShellPanel = useCallback(
@@ -7886,6 +8121,7 @@ export function App({
             : undefined,
           request.turnId,
           request.sourceSessionId,
+          request.unfilteredChanges,
         );
         return;
       }

@@ -79,7 +79,10 @@ import type { WebShellSettingsOptions } from './settings';
 import type { WebShellModelManagementOptions } from './modelManagement';
 import { DEFAULT_SESSION_ACTION_ITEMS } from './components/sidebar/WebShellSidebar';
 import type { Message } from './adapters/types';
-import type { TurnOutputOpenRequest } from './components/artifacts/TurnOutputs';
+import type {
+  TurnOutputFileChange,
+  TurnOutputOpenRequest,
+} from './components/artifacts/TurnOutputs';
 import type {
   VoiceStatusRevision,
   VoiceWorkspaceTarget,
@@ -948,6 +951,7 @@ const {
         | undefined,
       latestMessageListProps: null as {
         onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+        turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
         messages?: Array<{
           role?: string;
           content?: string;
@@ -1616,6 +1620,7 @@ vi.mock('./components/TranscriptViewport', async () => {
   return {
     TranscriptViewport: React.forwardRef(function TranscriptViewport(
       props: {
+        turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
         messages?: Array<{
           role?: string;
           content?: string;
@@ -5736,6 +5741,264 @@ describe('task activity key', () => {
       container.querySelector('button[title="Daily report"]'),
     ).not.toBeNull();
   });
+
+  it.each([
+    'memory',
+    'missing-metadata',
+    'unknown-root',
+    'incomplete-memory',
+    'missing-persisted-edit',
+  ])(
+    'restores file visibility reviews or reports missing snapshots (%s)',
+    async (mode) => {
+      testState.captureArtifactPanelOnly = true;
+      mockWorkspace.capabilities = {
+        features: ['workspace_git_check_ignore'],
+        workspaceCwd: '/tmp/project',
+        workspaces: [
+          { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        ],
+      } as typeof mockWorkspace.capabilities;
+      const scoped = Object.assign(
+        mockWorkspace.client.workspaceByCwd('/tmp/project'),
+        {
+          workspaceGitIgnoredPaths: vi
+            .fn()
+            .mockResolvedValue({ v: 1, ignoredPaths: [] }),
+        },
+      );
+      mockWorkspace.client.workspaceByCwd.mockReturnValue(scoped);
+      const source =
+        mode === 'unknown-root' ? 'historical-session' : 'session-1';
+      if (mode === 'missing-metadata' || mode === 'unknown-root')
+        mockWorkspace.client.sessionStatus.mockRejectedValue(
+          new Error('offline'),
+        );
+      testState.messages =
+        mode === 'unknown-root'
+          ? []
+          : [
+              { id: 'old-turn', role: 'user', content: 'write' },
+              {
+                id: 'tools',
+                role: 'tool_group',
+                tools: [
+                  {
+                    callId: 'write-old',
+                    toolName: 'write_file',
+                    status: 'completed',
+                    args: {
+                      file_path: '/tmp/project/src/old.ts',
+                      content: 'source',
+                    },
+                  },
+                ],
+              },
+            ];
+      mockWorkspace.client.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: source,
+        events: [
+          'unknown-root',
+          'incomplete-memory',
+          'missing-persisted-edit',
+        ].includes(mode)
+          ? (mode === 'incomplete-memory' ? ['old', 'missing'] : ['old']).map(
+              (name) => ({
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'tool_call',
+                  toolCallId: `write-${name}`,
+                  title: 'Write',
+                  status: 'completed',
+                  rawInput: {
+                    file_path: `/tmp/project/src/${name}.ts`,
+                    content: 'source',
+                  },
+                  _meta: { toolName: 'write_file' },
+                },
+              }),
+            )
+          : [],
+        hasMore: false,
+        partial: mode === 'memory' || mode === 'missing-metadata',
+      });
+      window.localStorage.setItem(
+        'qwen-code-web-shell-right-panel-state',
+        JSON.stringify({
+          '/tmp/project\0session-1': {
+            open: true,
+            activeTabId: 'old-review',
+            tabs: [
+              {
+                id: 'old-review',
+                kind: 'review',
+                title: 'Old review',
+                sourceTurnId: 'old-turn',
+                sourceSessionId: source,
+                sourceToolCallIds: [
+                  'incomplete-memory',
+                  'missing-persisted-edit',
+                ].includes(mode)
+                  ? ['write-old', 'write-missing']
+                  : ['write-old'],
+              },
+            ],
+          },
+        }),
+      );
+      renderApp();
+      await flush();
+      await flush();
+      await vi.waitFor(async () => {
+        await flush();
+        const tab = testState.latestArtifactPanelProps?.tabs.find(
+          (tab) => tab.id === 'old-review',
+        );
+        if (mode === 'missing-persisted-edit') {
+          expect(tab?.kind).toBe('pending');
+          expect(tab?.kind === 'pending' && tab.loadError).toContain(
+            'Saved panel content is unavailable',
+          );
+          return;
+        }
+        expect(tab?.kind).toBe('review');
+        if (mode !== 'unknown-root')
+          expect(tab && 'workspaceCwd' in tab && tab.workspaceCwd).toBe(
+            '/tmp/project',
+          );
+        if (mode !== 'unknown-root')
+          expect(tab && 'workspaceId' in tab && tab.workspaceId).toBe(
+            'primary',
+          );
+        expect(
+          tab?.kind === 'review' && tab.changes?.map((change) => change.path),
+        ).toEqual(
+          mode === 'incomplete-memory'
+            ? ['/tmp/project/src/old.ts', '/tmp/project/src/missing.ts']
+            : ['/tmp/project/src/old.ts'],
+        );
+      });
+      if (
+        [
+          'unknown-root',
+          'incomplete-memory',
+          'missing-persisted-edit',
+        ].includes(mode)
+      )
+        expect(
+          mockWorkspace.client.getSessionTranscriptPage,
+        ).toHaveBeenCalledTimes(1);
+      else
+        expect(
+          mockWorkspace.client.getSessionTranscriptPage,
+        ).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['latest', false],
+    ['latest', true],
+    ['card', false],
+    ['card', true],
+  ] as const)(
+    'refreshes an open review after file visibility recovers (%s, widen=%s)',
+    async (entry, widen) => {
+      testState.captureArtifactPanelOnly = true;
+      mockWorkspace.capabilities = {
+        features: ['workspace_git_check_ignore'],
+        workspaceCwd: '/tmp/project',
+        workspaces: [
+          { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        ],
+      } as typeof mockWorkspace.capabilities;
+      let failed = !widen;
+      let hidden = widen;
+      const ignored = vi.fn(async () => {
+        if (failed) throw new Error('offline');
+        return { v: 1, ignoredPaths: hidden ? ['ignored.log'] : [] };
+      });
+      const scoped = Object.assign(
+        mockWorkspace.client.workspaceByCwd('/tmp/project'),
+        { workspaceGitIgnoredPaths: ignored },
+      );
+      mockWorkspace.client.workspaceByCwd.mockReturnValue(scoped);
+      testState.messages = [
+        { id: 'write-turn', role: 'user', content: 'write' },
+        {
+          id: 'tools',
+          role: 'tool_group',
+          tools: ['src/app.ts', 'ignored.log'].map((path, index) => ({
+            callId: `write-${index}`,
+            toolName: 'write_file',
+            status: 'completed',
+            args: { file_path: `/tmp/project/${path}`, content: 'source' },
+          })),
+        },
+      ];
+      const view = renderApp();
+      await flush();
+      act(() =>
+        view.container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      await flush();
+      await vi.waitFor(async () => {
+        await flush();
+        expect(testState.latestArtifactPanelProps?.latestReviewAvailable).toBe(
+          true,
+        );
+      });
+      await act(async () => {
+        if (entry === 'latest')
+          testState.latestArtifactPanelProps?.onOpenLatestReview?.();
+        else
+          testState.latestMessageListProps?.onTurnOutputOpen?.({
+            id: 'review',
+            kind: 'review',
+            title: 'Review',
+            turnId: 'write-turn',
+            changes:
+              testState.latestMessageListProps?.turnFileChanges?.get(
+                'write-turn',
+              ) ?? [],
+            workspaceCwd: '/tmp/project',
+          });
+      });
+      const review = () =>
+        testState.latestArtifactPanelProps?.tabs.find(
+          (tab) => tab.kind === 'review',
+        );
+      expect(review()?.kind === 'review' && review()?.changes).toHaveLength(
+        widen ? 1 : 2,
+      );
+      expect(
+        review()?.kind === 'review' && review()?.sourceToolCallIds,
+      ).toEqual(['write-0', 'write-1']);
+      failed = false;
+      hidden = !widen;
+      mockConnection.status = 'disconnected';
+      act(() => view.rerender());
+      await flush();
+      mockConnection.status = 'connected';
+      act(() => view.rerender());
+      await vi.waitFor(async () => {
+        await flush();
+        const tab = review();
+        expect(
+          tab?.kind === 'review' && tab.changes?.map((change) => change.path),
+        ).toEqual(
+          widen
+            ? ['/tmp/project/src/app.ts', '/tmp/project/ignored.log']
+            : ['/tmp/project/src/app.ts'],
+        );
+      });
+    },
+  );
 
   it('keeps a current-session review tab while loading an older turn', async () => {
     window.localStorage.setItem(

@@ -2003,6 +2003,46 @@ describe('DaemonClient', () => {
       expect(transportFetch).not.toHaveBeenCalled();
     });
 
+    it('queries ignored paths against the selected workspace and session cwd', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { v: 1, ignoredPaths: ['helper.log'] }),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'wrong transport' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+      const response = await client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitIgnoredPaths(
+          ['helper.log', 'source.ts'],
+          '/work/secondary/tree',
+          'session-1',
+        );
+      expect(response.ignoredPaths).toEqual(['helper.log']);
+      expect(response.v).toBe(1);
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Fwork%2Fsecondary/git/check-ignore?cwd=%2Fwork%2Fsecondary%2Ftree&sessionId=session-1',
+      );
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        paths: ['helper.log', 'source.ts'],
+      });
+    });
+
     it('builds Git status query strings from cwd/wait options', async () => {
       const status = {
         v: 1 as const,

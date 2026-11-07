@@ -86,6 +86,7 @@ export type TurnOutputOpenRequest = (
       title: string;
       turnId: string;
       changes: readonly TurnOutputFileChange[];
+      unfilteredChanges?: readonly TurnOutputFileChange[];
       selectedPath?: string;
       workspaceCwd?: string;
       workspaceId?: string;

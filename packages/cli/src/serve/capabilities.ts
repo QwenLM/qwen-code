@@ -347,6 +347,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // admin directory and with it that worktree's HEAD, reflog and any
   // submodule repository.
   workspace_git_worktrees: { since: 'v1' },
+  // Read-only, bounded Git ignore classification for per-turn file summaries.
+  workspace_git_check_ignore: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live
