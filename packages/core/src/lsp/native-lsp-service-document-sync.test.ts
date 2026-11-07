@@ -863,6 +863,7 @@ describe('NativeLspService disk document synchronization', () => {
     useHandles([
       ['test', handle],
       ['second', secondHandle],
+      ['starting', { ...handle, status: 'IN_PROGRESS', connection: undefined }],
     ]);
     await hover(uri, 'test');
     await hover(uri, 'second');
@@ -878,9 +879,11 @@ describe('NativeLspService disk document synchronization', () => {
         },
       ],
     });
-    expect(await run(service.workspaceDiagnostics(undefined, 1))).toHaveLength(
-      1,
-    );
+    const report = await run(service.workspaceDiagnostics(undefined, 1));
+    expect(report.items).toHaveLength(1);
+    // The skipped ready server was left out on purpose; only the server that
+    // still cannot be reached makes the report partial.
+    expect(report.unqueried).toBe('starting is in progress');
     expect(secondConnection.send).not.toHaveBeenCalled();
     expect(secondConnection.request).not.toHaveBeenCalled();
   });
@@ -2364,7 +2367,22 @@ describe('NativeLspService disk document synchronization', () => {
         connection.request.mockRejectedValue(new Error('server exploded'));
         const result = await run(queryDiagnosticsTool(operation));
         expect(result.error).toBeUndefined();
-        expect(result.llmContent).toContain('real warning');
+        expect(result.llmContent).toBe(
+          [
+            ...(operation === 'diagnostics'
+              ? [
+                  'Diagnostics for main.ts (1 issues):',
+                  '1. [WARNING] 1:1: real warning',
+                ]
+              : [
+                  'Workspace diagnostics (1 issues in 1 files):',
+                  '',
+                  'main.ts [healthy]:',
+                  '  [WARNING] 1:1: real warning',
+                ]),
+            'Note: some LSP servers could not be queried (test: server exploded); this report is partial.',
+          ].join('\n'),
+        );
       },
     );
 
@@ -2522,6 +2540,78 @@ describe('NativeLspService disk document synchronization', () => {
         expect(result.error!.message).toContain('test:');
         expect(result.error!.message).toContain('healthy:');
         expect(result.llmContent).not.toContain('x'.repeat(1001));
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'names a still-starting server in the partial %s note',
+      async (operation) => {
+        mockDiagnosticsResponses(connection, [
+          { range, severity: 2, message: 'real warning' },
+        ]);
+        withServers([
+          ['test', handle],
+          [
+            'vtsls',
+            {
+              ...handle,
+              config: { ...handle.config, name: 'vtsls' },
+              status: 'IN_PROGRESS',
+              connection: undefined,
+            },
+          ],
+        ]);
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeUndefined();
+        expect(String(result.llmContent).split('\n').at(-1)).toBe(
+          'Note: some LSP servers could not be queried (vtsls is in progress); this report is partial.',
+        );
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'bounds a stack-packed cause in the partial %s note',
+      async (operation) => {
+        // Only the last line of each cause is kept, and the note shares the
+        // rejection's aggregate budget, so failures cannot flood the list.
+        const healthyConnection = createConnection();
+        mockDiagnosticsResponses(healthyConnection, [
+          { range, severity: 2, message: 'real warning' },
+        ]);
+        const secondConnection = createConnection();
+        secondConnection.request.mockRejectedValue(new Error('y'.repeat(5000)));
+        withServers([
+          ['test', handle],
+          [
+            'second',
+            {
+              ...handle,
+              config: { ...handle.config, name: 'second' },
+              connection: secondConnection,
+            },
+          ],
+          [
+            'healthy',
+            {
+              ...handle,
+              config: { ...handle.config, name: 'healthy' },
+              connection: healthyConnection,
+            },
+          ],
+        ]);
+        connection.request.mockRejectedValue(
+          new Error(
+            'server exploded\n    at frame (a.js:1)\n    at last (b.js:2)',
+          ),
+        );
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeUndefined();
+        const note = String(result.llmContent).split('\n').at(-1)!;
+        expect(note).toMatch(
+          /^Note: some LSP servers could not be queried \(test: at last \(b\.js:2\); second: y+\.\.\.\); this report is partial\.$/,
+        );
+        expect(note.length).toBeLessThan(1100);
+        expect(result.llmContent).not.toContain('at frame');
       },
     );
 
@@ -2935,6 +3025,23 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.llmContent).toMatch(/^No diagnostics found/);
     });
 
+    it("does not call a document report partial for an irrelevant server's failed pull", async () => {
+      mockDiagnosticsResponses(connection, [
+        { range, severity: 2, message: 'real warning' },
+      ]);
+      const failingConnection = createConnection();
+      failingConnection.request.mockRejectedValue(new Error('server exploded'));
+      withServers([
+        ['test', handle],
+        ['pyright', serverOn('pyright', ['python'], failingConnection)],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toBe(
+        'Diagnostics for main.ts (1 issues):\n1. [WARNING] 1:1: real warning',
+      );
+    });
+
     /** A READY server named `name`, serving `languages`, on connection `target`. */
     function serverOn(
       name: string,
@@ -3026,8 +3133,43 @@ describe('NativeLspService disk document synchronization', () => {
           ),
         ],
       ]);
-      await expect(workspaceDiagnostics()).resolves.toEqual([]);
+      await expect(workspaceDiagnostics()).resolves.toEqual({ items: [] });
     });
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'does not call a %s report partial for a -32601 sibling',
+      async (operation) => {
+        // The refusal says nothing about the file or workspace, so the
+        // answering server's report is complete.
+        const tsgo = createConnection();
+        mockDiagnosticsResponses(tsgo, [
+          { range, severity: 2, message: 'real warning' },
+        ]);
+        withServers([
+          ['tsgo', serverOn('tsgo', ['typescript'], tsgo)],
+          [
+            'tsls',
+            serverOn(
+              'tsls',
+              ['typescript'],
+              refusingConnection(
+                -32601,
+                operation === 'diagnostics'
+                  ? 'textDocument/diagnostic'
+                  : 'workspace/diagnostic',
+              ),
+            ),
+          ],
+        ]);
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toBe(
+          operation === 'diagnostics'
+            ? 'Diagnostics for main.ts (1 issues):\n1. [WARNING] 1:1: real warning'
+            : 'Workspace diagnostics (1 issues in 1 files):\n\nmain.ts [tsgo]:\n  [WARNING] 1:1: real warning',
+        );
+      },
+    );
 
     it('does not treat a lone -32601 workspace refusal as a failed pull', async () => {
       // With no other server there is nothing to veto: the workspace reads
@@ -3043,7 +3185,7 @@ describe('NativeLspService disk document synchronization', () => {
           ),
         ],
       ]);
-      await expect(workspaceDiagnostics()).resolves.toEqual([]);
+      await expect(workspaceDiagnostics()).resolves.toEqual({ items: [] });
     });
 
     it('lets a -32601 refusal from the rust owner veto a non-owner empty answer', async () => {
@@ -3683,7 +3825,9 @@ describe('NativeLspService disk document synchronization', () => {
       // to the ownership rule cannot silently turn it into a refusal.
       const virtualUri = 'jdt://contents/Foo.java?=%2Fsrc';
       mockDiagnosticsResponses(connection);
-      await expect(run(service.diagnostics(virtualUri))).resolves.toEqual([]);
+      await expect(run(service.diagnostics(virtualUri))).resolves.toEqual({
+        items: [],
+      });
       expect(connection.request).toHaveBeenCalledWith(
         'textDocument/diagnostic',
         expect.objectContaining({ textDocument: { uri: virtualUri } }),
