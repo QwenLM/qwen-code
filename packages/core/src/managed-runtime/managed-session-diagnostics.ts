@@ -111,14 +111,15 @@ export class ManagedSessionDiagnostics {
     for (const event of events) {
       if (event.kind === 'model.attempt') {
         const id = event.payload['attemptId'] as string;
+        const usageRef = event.payload[
+          'usageRef'
+        ] as ManagedSessionDurableRef | null;
         if (event.payload['state'] === 'started') attempts.add(id);
         else attempts.delete(id);
         if (
           event.payload['state'] !== 'started' &&
-          !kinds.has(
-            (event.payload['usageRef'] as ManagedSessionDurableRef | null)
-              ?.kind ?? '',
-          )
+          usageRef &&
+          !kinds.has(usageRef.kind)
         )
           legacy = true;
       }

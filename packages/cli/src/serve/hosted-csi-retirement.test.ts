@@ -315,6 +315,10 @@ describe('original Hosted retirement owner barrier', () => {
         expect(components.diagnostics).not.toHaveBeenCalled();
         expect(components.bind).not.toHaveBeenCalled();
         expect(components.initial).not.toHaveBeenCalled();
+        if (failure === 'storage') {
+          expect(selected.stores.resourceStore.publish).not.toHaveBeenCalled();
+          expect(components.open).not.toHaveBeenCalled();
+        }
       } finally {
         await fixture.handle.stopLocal();
       }

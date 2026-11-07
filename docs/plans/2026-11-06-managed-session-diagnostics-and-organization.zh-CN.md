@@ -151,3 +151,13 @@ Storage-version-3 workspace reader 在遍历资源闭包时仍拒绝三种新增
 评审同时指出 `history_maintenance`，但基线 `80fd7c3353` 已存在相同拒绝。它的 Stage H body 与此 reader 支持的通用 revision-chain envelope 不同，仅将名称加入 `DOMAINS` 仍会校验失败。保留这项现有限制，将更广的历史维护 bundle 支持记录为延后事项；本修正不扩展执行或支持的 domain 家族。
 
 修正前，三种新 carrier 用例均因 `unsupported resource protocol` 失败，也遮蔽了新增的缺失字节断言。首次 workspace 构建发现测试专用 reader payload 类型不合法；改用符合类型的 slash-command 结果包络，发布器字节和引用元数据不变。随后完整恢复文件 99 项通过，覆盖全部新增 carrier、缺失/损坏字节用例，以及既有未知协议、未完成工作和迁移拒绝控制。刷新的根目录 build、typecheck 和 bundle 均通过。这是 Node/TypeScript 证据；真实 workspace 导出/导入和修正后的 Hosted B3 进程恢复仍需其 CI 门禁确认。
+
+## 15. 恢复分类与 CSI 接入后续修正
+
+独立 native producer 复现了主请求中断、resume 路径提交空 usage 的放弃事件、成功诊断提交以及再次冷启动。所有已记录 usage carrier 均为诊断 v2，restore 却错误追加 `legacy_history`。现仅按非空 usage 引用的 kind 判断旧历史，保留此前持久化的 `unclosed_model_attempt` 缺口。回归在修正前失败、修正后通过，不为未知调用伪造 token 数或中断请求计数。既有 legacy usage 和小数原始预算控制保持。
+
+CSI `/2` 现于发布不可变 definition/root 或打开、安装 Session authority 之前，检查已获取的存储能力。不支持的 store 仍拒绝接入并停止本地续租，但不发布资源、header 或 activation 事件。独立 Node/本地日志见证确认拒绝后提交事件数为零。该见证更广的同 id `/1` 重试断言仍失败：新 writer generation 尝试恢复空日志。本地适配器未实现 Java CSI fencing；真实服务端降级重试尚未验证，也不是本修正的保证。writer 获取、空 head 恢复及 original writer 替换规则保持。
+
+另一个要求重建 daemon UiTelemetry 模型/来源字典的意见未采纳。Managed WebShell/Public 统计通过诊断服务读取持久化 v2 投影，不使用 ACP 的进程内统计缓存。v2 有意限制并规范化模型统计，独立保留小数原始 usage。真实冷 producer 控制保留原始输出与下一 Turn baseline 均为 `10.25`；从规范化或已省略的模型桶反向重建原始逐模型字典会改变这些语义。
+
+定向验证通过 29 项 Core 测试及 13 项 CLI 测试。未启动本地 Java/Maven/MySQL 验证，共享账本保持 599.08/600 秒。本次后续修正之前，head `f506f0ce6f` 的完整 MySQL profile 1,630 项及 Hosted failover CI 通过。后者保留的 B3 制品维持逻辑回合 2 和完全一致的 500,000-token 预算，原始输出从 600 增至 700、记录请求从 2 增至 3。这些是对应 head 的证据，不表示后续修正的 CI 已完成。更广的 Node 接入探针中失败的降级断言继续明确披露。

@@ -265,6 +265,11 @@ async function initialize(
     });
     owner.stores = stores;
     const journal = await stores.journalStore.open({ sessionKey: owner.key });
+    if (
+      owner.admission.profile === 'csi-files-retirement/2' &&
+      !stores.supportsModelDiagnostics()
+    )
+      throw new Refusal('csi_diagnostics_storage_unavailable');
     owner.recovering = (await stores.publication.owner()).writerGeneration > 1;
     active(owner);
     const definitionRef = owner.recovering
@@ -333,8 +338,6 @@ async function initialize(
     if ((await readHostedCsiFileProfile(managed)) !== owner.admission.profile)
       throw new Refusal('csi_runtime_identity_conflict');
     if (owner.admission.profile === 'csi-files-retirement/2') {
-      if (!stores.supportsModelDiagnostics())
-        throw new Refusal('csi_diagnostics_storage_unavailable');
       await enableManagedSessionDiagnostics(managed);
     }
     owner.timer = setInterval(() => {

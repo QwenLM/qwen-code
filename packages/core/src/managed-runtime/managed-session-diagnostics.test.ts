@@ -144,6 +144,43 @@ function fixture(revisions: number[], maintenance = false) {
 }
 
 describe('Managed diagnostic restore', () => {
+  it('does not classify null abandoned usage as legacy or clear earlier recovery gaps', async () => {
+    const state = fixture([1]);
+    const ref = state.refs[0];
+    const prior = JSON.parse(state.bytes.get(ref.resourceId)!.toString());
+    prior.statistics.coverage.gaps = ['unclosed_model_attempt'];
+    const bytes = Buffer.from(JSON.stringify(prior));
+    state.bytes.set(ref.resourceId, bytes);
+    Object.assign(ref, {
+      byteLength: bytes.length,
+      digest: createHash('sha256').update(bytes).digest('hex'),
+    });
+    state.events.unshift(
+      {
+        kind: 'model.attempt',
+        payload: {
+          attemptId: 'interrupted',
+          state: 'started',
+          usageRef: null,
+        },
+      },
+      {
+        kind: 'model.attempt',
+        payload: {
+          attemptId: 'interrupted',
+          state: 'abandoned',
+          usageRef: null,
+        },
+      },
+    );
+
+    await state.diagnostics.restore();
+    await state.diagnostics.publishTurnFallback('next-turn');
+    const saved = JSON.parse(state.publish.mock.calls[0][1].toString());
+    expect(saved.statistics.coverage.gaps).toEqual(['unclosed_model_attempt']);
+    expect(saved.statistics.totals.requests.total).toBe(1);
+  });
+
   it('retains fractional legacy raw output when enabling diagnostics', async () => {
     const state = fixture([1]);
     const ref = { ...state.refs[0], kind: 'managed-hosted-model-usage' };
