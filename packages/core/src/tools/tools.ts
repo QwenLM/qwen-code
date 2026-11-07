@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ToolOutputSize } from './tool-output-size.js';
+import type { SubscriptionQuotaDisplay } from '../utils/subscription-quota.js';
 import type { ShellResultDisplay } from '../utils/shell-result.js';
 import type { FunctionDeclaration, Part, PartListUnion } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
@@ -580,9 +582,19 @@ export interface ToolArtifact {
   mimeType?: string;
   sizeBytes?: number;
   metadata?: Record<string, string | number | boolean | null>;
+  /** Only refresh an artifact the session already has; never create one. */
+  updateOnly?: boolean;
 }
 
 export interface ToolResult {
+  /** Numeric size before a producer reduces its semantic result. */
+  rawOutputSize?: ToolOutputSize | null;
+  /**
+   * Set when the producer bounded its own render: the returned body is
+   * shortened. `rawOutputSize` may still be `null` (the pre-reduction size is
+   * unrecoverable), but the truncation fact itself is known here.
+   */
+  truncatedByProducer?: boolean;
   /**
    * Content meant to be included in LLM history.
    * This should represent the factual outcome of the tool execution.
@@ -601,6 +613,9 @@ export interface ToolResult {
    */
   persistedOutputFiles?: string[];
 
+  /** Producer-owned reason and recovery handle, preserved as one unit. */
+  recoveryText?: string;
+
   /**
    * Internal runtime marker: the producer already sized `llmContent` against
    * its own declared character budget, whether or not anything was cut. Records
@@ -613,6 +628,13 @@ export interface ToolResult {
    * is bounding it alone. The aggregate batch budget applies on every path.
    */
   outputBudgetApplied?: boolean;
+
+  /**
+   * Set by a producer that knows its own work was cut short but reports that
+   * outcome as an ordinary result instead of throwing. The scheduler uses it to
+   * tell the model the call was interrupted rather than completed.
+   */
+  interruptedBeforeCompletion?: boolean;
 
   /**
    * Markdown string for user display.
@@ -837,6 +859,7 @@ export interface McpAppToolResult {
 /** A completed MCP tool call with an interactive MCP Apps resource. */
 export interface McpAppResultDisplay {
   type: 'mcp_app';
+  requiredFeature?: 'generated-ui';
   serverName: string;
   resourceUri: string;
   html: string;
@@ -910,6 +933,7 @@ export interface AskUserQuestionResultDisplay {
 }
 
 export type ToolResultDisplay =
+  | SubscriptionQuotaDisplay
   | ShellResultDisplay
   | string
   | AdvisorReviewDisplay

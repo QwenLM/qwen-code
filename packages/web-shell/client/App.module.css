@@ -720,12 +720,18 @@
   overflow: hidden;
 }
 
-.managedContext {
+/* Host-mounted managed home has no .appChatEmpty ancestor, so give its
+   empty conversation the same shrink-to-content behavior here. The
+   centered group must exclude the session header, which stays pinned at
+   the top. */
+.chatPane[data-managed-home][data-managed-empty] .content {
   flex: 0 0 auto;
-  width: min(100%, var(--chat-shell-width));
-  margin: 0 auto;
-  padding: 0 20px;
-  font-size: 12px;
+  overflow: visible;
+}
+
+.chatPane[data-managed-home][data-managed-empty] {
+  justify-content: center;
+  overflow-y: auto;
 }
 
 /* The chat view (message list + composer) stays mounted while a panel is shown,

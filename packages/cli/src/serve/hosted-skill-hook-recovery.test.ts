@@ -19,8 +19,10 @@ import {
   type HookOutput,
 } from '@qwen-code/qwen-code-core/hooks/types.js';
 import {
+  HOSTED_TOOL_INPUT_ORDER,
   HostedHookRecoveryRequiredError,
   HostedHookSession,
+  type HostedToolInputOrder,
 } from './hosted-hook-session.js';
 import type { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
@@ -167,6 +169,7 @@ afterEach(async () => {
 
 async function firePreTool(
   fields: Record<string, unknown> = {},
+  toolInputOrder?: string,
 ): Promise<void> {
   const hooks = new HostedHookSession(options, session, pin, broker);
   await hooks.fire(
@@ -181,6 +184,9 @@ async function firePreTool(
       ...fields,
     },
     new AbortController().signal,
+    undefined,
+    undefined,
+    toolInputOrder as HostedToolInputOrder | undefined,
   );
 }
 
@@ -254,6 +260,38 @@ it('uses the saved Hook updatedInput after replacement instead of the original S
   expect(hookControl).toHaveBeenCalledTimes(controls);
 });
 
+it.each([
+  { order: HOSTED_TOOL_INPUT_ORDER, recovers: true },
+  { order: 'pre-permission/1', recovers: false },
+])(
+  'reads a Skill PreToolUse saved under order $order only when that order is known',
+  async ({ order, recovers }) => {
+    output = {
+      hookSpecificOutput: {
+        hookEventName: HookEventName.PreToolUse,
+        updatedInput: { skill: 'testing' },
+      },
+    };
+    await firePreTool({}, order);
+    const controls = hookControl.mock.calls.length;
+    if (recovers) {
+      expect(await recover()).toBe(1);
+      expect(
+        (await session.sink.project()).at(-1)?.message?.parts?.[0]
+          .functionResponse?.response?.['output'],
+      ).toBe(skills.response({ skill: 'testing' }));
+    } else {
+      await expect(recover()).rejects.toBeInstanceOf(
+        HostedHookRecoveryRequiredError,
+      );
+      expect((await session.sink.project()).map((entry) => entry.type)).toEqual(
+        ['assistant'],
+      );
+    }
+    expect(hookControl).toHaveBeenCalledTimes(controls);
+  },
+);
+
 it('durably refuses an interrupted Skill call before its PreToolUse marker committed', async () => {
   const original = session.authority.commitExtensionRecord.bind(
     session.authority,
@@ -285,38 +323,44 @@ it('durably refuses an interrupted Skill call before its PreToolUse marker commi
   expect(hookControl).toHaveBeenCalledTimes(controls);
 });
 
-it('replays the committed byte-limit refusal after the Hook input was stripped', async () => {
-  hookCommand = 'x'.repeat(70 * 1024);
-  await firePreTool();
-  expect(
-    hookControl.mock.calls.some(
-      ([operation]) => operation.kind === 'hook-execute',
-    ),
-  ).toBe(false);
-  const controls = hookControl.mock.calls.length;
-  expect(await recover()).toBe(1);
-  const history = await session.sink.project();
-  expect(history.map((entry) => entry.type)).toEqual([
-    'assistant',
-    'tool_result',
-  ]);
-  expect(
-    history.at(-1)?.message?.parts?.[0].functionResponse?.response,
-  ).toEqual({
-    error:
-      'Hook data exceeds the 60 KiB resource or 8 MiB control/transaction limit.',
-  });
-  expect(JSON.stringify(history.at(-1))).not.toContain('Original secret body.');
-  expect(await recover()).toBe(0);
-  expect(await session.sink.project()).toEqual(history);
-  expect(hookControl).toHaveBeenCalledTimes(controls);
-});
+it.each(['default', 'auto-edit', 'yolo'])(
+  'replays the committed byte-limit refusal with its recorded %s mode after the Hook input was stripped',
+  async (permissionMode) => {
+    hookCommand = 'x'.repeat(70 * 1024);
+    await firePreTool({ permission_mode: permissionMode });
+    expect(
+      hookControl.mock.calls.some(
+        ([operation]) => operation.kind === 'hook-execute',
+      ),
+    ).toBe(false);
+    const controls = hookControl.mock.calls.length;
+    expect(await recover()).toBe(1);
+    const history = await session.sink.project();
+    expect(history.map((entry) => entry.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(
+      history.at(-1)?.message?.parts?.[0].functionResponse?.response,
+    ).toEqual({
+      error:
+        'Hook data exceeds the 60 KiB resource or 8 MiB control/transaction limit.',
+    });
+    expect(JSON.stringify(history.at(-1))).not.toContain(
+      'Original secret body.',
+    );
+    expect(await recover()).toBe(0);
+    expect(await session.sink.project()).toEqual(history);
+    expect(hookControl).toHaveBeenCalledTimes(controls);
+  },
+);
 
 it.each([
   { tool_input: { skill: 'testing' } },
   { tool_use_id: 'another-call' },
   { prompt_id: 'another-prompt' },
-  { permission_mode: 'yolo' },
+  { tool_name: 'read_file' },
+  { permission_mode: 'unknown' },
 ])(
   'rejects a stripped Hook input bound to different fields: %j',
   async (fields) => {

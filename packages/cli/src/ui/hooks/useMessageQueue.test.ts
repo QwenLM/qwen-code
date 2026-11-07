@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { GoalTurnHost, GoalTurnPermit } from '@qwen-code/qwen-code-core';
 import { useMessageQueue } from './useMessageQueue.js';
+import { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
 
 describe('useMessageQueue', () => {
   beforeEach(() => {
@@ -18,6 +19,109 @@ describe('useMessageQueue', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
+  });
+
+  it('aggregates only declared human input while preserving every display projection', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    const literal =
+      '<system-reminder>literal</system-reminder>\nworkflow inspect';
+    act(() => {
+      result.current.addMessage(
+        'expanded unknown workflow',
+        false,
+        undefined,
+        false,
+        { displayText: literal },
+      );
+      result.current.addMessage(
+        'expanded human payload',
+        false,
+        undefined,
+        false,
+        { displayText: 'look @file', humanInput: { text: 'look @file' } },
+      );
+    });
+    expect(result.current.messageQueue).toEqual([literal, 'look @file']);
+    const popped = result.current.popNextSubmission();
+    expect(popped).toMatchObject({
+      kind: 'user',
+      modelText: 'expanded unknown workflow\n\nexpanded human payload',
+      displayText: `${literal}\n\nlook @file`,
+      humanInput: { text: 'look @file' },
+      hasUnknownInput: true,
+    });
+  });
+
+  it('restores human and display metadata after a failed admission without changing hook provenance', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    const displayText =
+      '<system-reminder>literal</system-reminder>\nultracode audit';
+    const humanInput = { text: displayText };
+    act(() => {
+      result.current.restoreMessages(
+        ['model-only notice'],
+        undefined,
+        true,
+        false,
+        { displayText, humanInput },
+      );
+    });
+    const restored = result.current.popAllMessages();
+    expect(restored).toMatchObject({
+      modelText: 'model-only notice',
+      displayText,
+      humanInput,
+    });
+    expect(restored?.submittedPrompt).toBe('model-only notice');
+  });
+
+  it('keeps colliding queued paste bodies editable without promoting unknown members', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    const placeholder = '[Pasted Content 1200 chars]';
+    const firstBody = 'first workflow payload'.padEnd(1200, 'x');
+    const secondBody = 'second ultracode payload'.padEnd(1200, 'y');
+    act(() => {
+      result.current.addMessage(firstBody, false, undefined, false, {
+        displayText: placeholder,
+        humanInput: { text: placeholder },
+        pasteExpansions: new Map([[placeholder, firstBody]]),
+      });
+      result.current.addMessage(secondBody, false, undefined, false, {
+        displayText: placeholder,
+        pasteExpansions: new Map([[placeholder, secondBody]]),
+      });
+    });
+    const popped = result.current.popAllMessages();
+    expect(popped).toMatchObject({
+      modelText: `${firstBody}\n\n${secondBody}`,
+      displayText: `${placeholder}\n\n${placeholder} #2`,
+      humanInput: { text: placeholder },
+      hasUnknownInput: true,
+    });
+    expect(
+      expandPendingPastePlaceholders(
+        `${popped?.displayText}\nappend instruction`,
+        popped?.pasteExpansions ?? new Map(),
+      ),
+    ).toBe(`${firstBody}\n\n${secondBody}\nappend instruction`);
+    act(() => {
+      result.current.restoreMessages(
+        [popped!.modelText],
+        popped!.submittedPrompt,
+        true,
+        false,
+        {
+          displayText: popped!.displayText,
+          humanInput: popped!.humanInput,
+          hasUnknownInput: popped!.hasUnknownInput,
+          pasteExpansions: popped!.pasteExpansions,
+        },
+      );
+    });
+    expect(result.current.popAllMessages()).toMatchObject({
+      humanInput: { text: placeholder },
+      hasUnknownInput: true,
+    });
   });
 
   it('should initialize with empty queue', () => {

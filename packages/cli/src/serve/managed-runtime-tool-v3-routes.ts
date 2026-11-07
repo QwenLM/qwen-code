@@ -67,6 +67,11 @@ function reference(value: unknown): ManagedToolReference | null {
   return body as unknown as ManagedToolReference;
 }
 
+export {
+  reference as parseManagedToolReference,
+  capture as parseManagedShellCapture,
+};
+
 function body(
   value: unknown,
   keys: readonly string[],
@@ -156,8 +161,9 @@ function receipt(value: unknown): ToolResultAcknowledgement | null {
   const historyRevision = parsed['historyRevision'];
   if (
     deliveryStatus === 'committed'
-      ? !Number.isSafeInteger(historyRevision) ||
-        (historyRevision as number) < 1
+      ? !(manifest === null && historyRevision === null) &&
+        (!Number.isSafeInteger(historyRevision) ||
+          (historyRevision as number) < 1)
       : historyRevision !== null
   )
     return null;

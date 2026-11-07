@@ -15,17 +15,21 @@ import { listenerIdentityOf } from '../local-control/listener-identity.js';
 import { isLoopbackBind } from '../loopback-binds.js';
 import {
   InvalidLocalControlTargetError,
+  LocalControlBindError,
   type LocalControlService,
   type LocalControlStatus,
 } from '../local-control/service.js';
 import { requestHasOperatorAuthority } from '../auth.js';
+import type { DaemonLogger } from '../daemon-logger.js';
 import {
   writeStderrLine,
+  writeStderrLineSafe,
   writeStdoutLineSafe,
 } from '../../utils/stdioHelpers.js';
 
 export interface RegisterWorkspaceLocalControlRoutesDeps {
   service: LocalControlService;
+  daemonLog?: Pick<DaemonLogger, 'error'>;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   isDaemonDraining?: () => boolean;
@@ -61,17 +65,37 @@ async function withUiData(status: LocalControlStatus) {
 }
 
 /**
+ * The pairing credential belongs to the Local Control listener, so only
+ * requests from that listener or from the primary one may see it.
+ *
+ * Being authenticated is not the same fact: the secondary listeners share one
+ * Express app, and each verifies only its own token. A remote-access bearer is
+ * authenticated on the `remote-access` listener, which must not reach the
+ * pairing secret of a different listener — nothing revokes `#pairing` when
+ * remote access is turned off.
+ */
+function ownsLocalControlListener(req: Request): boolean {
+  const kind = listenerIdentityOf(req).kind;
+  return kind === 'primary' || kind === 'local-control';
+}
+
+/**
  * `url` carries the pairing token in its fragment and `qrText` encodes it.
- * Return that material only to a request with operator authority: either a
- * listener credential was verified or the request arrived on the trusted
- * primary loopback listener. Everyone else gets a redacted status.
+ * Return that material only to a request that both arrived on a listener which
+ * owns it and holds operator authority there. Everyone else gets a redacted
+ * status.
  */
 function presentStatus(
   req: Request,
   ui: Awaited<ReturnType<typeof withUiData>>,
   trustedLoopbackMode: boolean,
 ) {
-  if (requestHasOperatorAuthority(req, trustedLoopbackMode)) return ui;
+  if (
+    ownsLocalControlListener(req) &&
+    requestHasOperatorAuthority(req, trustedLoopbackMode)
+  ) {
+    return ui;
+  }
   const { url: _url, qrText: _qrText, ...rest } = ui;
   return { ...rest, urlRedacted: ui.url !== undefined };
 }
@@ -86,10 +110,11 @@ function presentStatus(
  * machine can grant.
  *
  * Disabling stays open to every caller admitted by its listener policy,
- * including the trusted primary listener and a paired phone. Revoking your own
- * access is always safe, and a user who realizes they are on an untrusted
- * network needs to cut the connection from the device in their hand, not from
- * the laptop they walked away from.
+ * including a paired phone and a remote-access client. Revoking access is
+ * always safe, and a remote-access bearer already reaches every other route
+ * on this app, so denying it here would be security theatre while breaking
+ * remote management. What it must not get is the pairing secret —
+ * `presentStatus` scopes that to the listeners that own it.
  */
 function requirePrimaryListener(req: Request, res: Response): boolean {
   if (listenerIdentityOf(req).kind === 'primary') return true;
@@ -130,10 +155,8 @@ export function registerWorkspaceLocalControlRoutes(
         });
         return;
       }
-      // Same precondition the `--local-control` CLI flag enforces: the LAN
-      // listener binds the primary listener's port on the selected LAN
-      // address, which a wildcard or LAN primary bind already owns —
-      // enabling there would fail with EADDRINUSE and no remediation.
+      // Preserve the same documented loopback-primary boundary enforced by
+      // the `--local-control` CLI flag.
       if (
         deps.primaryBindHostname !== undefined &&
         !isLoopbackBind(deps.primaryBindHostname)
@@ -176,7 +199,7 @@ export function registerWorkspaceLocalControlRoutes(
         }
         res.status(200).json(presentStatus(req, ui, trustedLoopbackMode));
       } catch (error) {
-        sendEnableError(res, error);
+        sendEnableError(res, error, deps.daemonLog);
       }
     },
   );
@@ -209,7 +232,11 @@ export function registerWorkspaceLocalControlRoutes(
   );
 }
 
-function sendEnableError(res: Response, error: unknown): void {
+function sendEnableError(
+  res: Response,
+  error: unknown,
+  daemonLog: RegisterWorkspaceLocalControlRoutesDeps['daemonLog'],
+): void {
   // 409 rather than 400: the request was well-formed and the operator did
   // nothing wrong — the host simply has more than one answer. The candidate
   // list comes back with it so the client can ask and retry with `address`
@@ -238,8 +265,28 @@ function sendEnableError(res: Response, error: unknown): void {
     res.status(400).json({ error: error.message, code: error.code });
     return;
   }
-  res.status(500).json({
-    error: error instanceof Error ? error.message : String(error),
-    code: 'local_control_enable_failed',
-  });
+  const bindError = error instanceof LocalControlBindError ? error : undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  const diagnostic = bindError
+    ? `Local Control enable failed (${bindError.errno}): ${message}`
+    : `Local Control enable failed: ${message}`;
+  try {
+    if (daemonLog) {
+      daemonLog.error(diagnostic, error instanceof Error ? error : undefined, {
+        route: 'POST /workspace/local-control/enable',
+        ...(bindError ? { errno: bindError.errno } : {}),
+      });
+    } else {
+      writeStderrLineSafe(`qwen serve: ${diagnostic}`);
+    }
+  } catch {
+    // Logging must not replace the HTTP error response with another failure.
+    writeStderrLineSafe(`qwen serve: ${diagnostic}`);
+  }
+  res
+    .status(bindError?.code === 'bind_denied' ? 403 : bindError ? 409 : 500)
+    .json({
+      error: message,
+      code: bindError?.code ?? 'local_control_enable_failed',
+    });
 }

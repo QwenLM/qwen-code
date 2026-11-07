@@ -38,6 +38,186 @@ import type {
 } from './managed-session-storage.js';
 
 /**
+ * Charged bytes (bodies plus a fixed per-entry overhead) of the verified
+ * message bodies that the projections of one process keep.
+ * A Harness rebuilds a Session's history from its message bodies several times
+ * per Turn; without a cache every rebuild read every body of the Session again.
+ * The bound keeps resident Sessions from each holding their whole history:
+ * active Sessions stay warm and idle ones fall out first, except that a Session
+ * found to exceed the bound on its own only uses free room (see
+ * `ManagedMessageBodyCache`).
+ */
+export const MANAGED_MESSAGE_BODY_CACHE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * What the cache charges each entry on top of its body: the key, the map entry,
+ * the buffer objects and the buffer's own allocation, measured at 520 to 740
+ * bytes on Node 22 and rounded up, so that many small bodies cannot hold
+ * several times the bound.
+ */
+export const MANAGED_MESSAGE_BODY_ENTRY_BYTES = 768;
+
+/** The cached bodies of one resource store, least recently read first. */
+interface StoreBodies {
+  readonly entries: Map<string, Buffer>;
+  /** Charged bytes of the entries. */
+  bytes: number;
+  /**
+   * Keeping another of the store's own bodies, one that fits the bound alone,
+   * once would have taken them past the bound.
+   */
+  oversized: boolean;
+}
+
+/**
+ * Message bodies already read through a projection. A body is immutable and
+ * its ref names its kind, length and digest, so an entry is exactly the body
+ * the store's verified read returned for that ref, assembled whole for a
+ * chunked one. A cached body is not read through the store again, so a store
+ * check that runs on every read, such as a writer fence, no longer runs for
+ * it. Entries are kept per resource store, so Sessions never share them, and a
+ * store's entries are released when the store itself is collected. Only reads
+ * fill the cache: a body a projection has never read is still read from the
+ * store, and fails the projection if the store no longer has it.
+ *
+ * The resource store's own read contract does not change. Readers that open
+ * their own store, such as `readManagedSessionRecords`, read it on every call,
+ * so if a store loses a body that a committed event references, they fail,
+ * while a projection whose cache kept that body keeps serving it until the
+ * entry is evicted or its store object is collected. Losing such a body is
+ * damage: while the Session can still be read, nothing removes it.
+ *
+ * A projection reads every body of its Session in commit order, so plain LRU
+ * would let a Session whose bodies exceed the bound evict each body just
+ * before its next projection reached it, and never hit. Instead a store never
+ * evicts its own bodies to keep a new one: such a Session keeps the bodies it
+ * kept first and reads the rest from the store. Room for a new body comes from
+ * the other stores, the store least recently hit or kept first and, within
+ * it, its least recently read bodies first. A body whose charge alone exceeds
+ * the bound is returned but never kept, and does not cap its store. Once
+ * keeping another of a store's own bodies would take them past the bound, the
+ * store only uses free room from then on (room no store holds, such as what a
+ * collected store or an eviction leaves) and never takes room from another
+ * store, idle or not. Such a Session reads part
+ * of its history from the store on every projection anyway; letting it take
+ * room back would make the Sessions it took the room from re-read their whole
+ * history instead, every time they and it alternate. The flag only sees what
+ * a store holds, so two such Sessions projecting at the same time can keep
+ * displacing each other before either holds the bound alone. At worst a
+ * Session reads as it did without the cache.
+ *
+ * Every entry is charged its body's length plus a fixed overhead, and the
+ * body is kept in a buffer of its own, so a slice of a pooled buffer does not
+ * pin the whole pool. The returned buffer is shared with the cache and must
+ * not be modified.
+ */
+export class ManagedMessageBodyCache {
+  private readonly stores = new WeakMap<
+    ManagedSessionResourceStore,
+    StoreBodies
+  >();
+  /** Stores holding bodies, least recently hit or kept first. */
+  private readonly order = new Set<StoreBodies>();
+  private readonly collected = new FinalizationRegistry<StoreBodies>((bodies) =>
+    this.release(bodies),
+  );
+  private size = 0;
+
+  constructor(
+    private readonly limitBytes: number,
+    private readonly entryBytes: number = MANAGED_MESSAGE_BODY_ENTRY_BYTES,
+  ) {}
+
+  /** Charged bytes of every entry. */
+  get bytes(): number {
+    return this.size;
+  }
+
+  async read(
+    resources: ManagedSessionResourceStore,
+    ref: ManagedSessionDurableRef,
+  ): Promise<Buffer> {
+    let bodies = this.stores.get(resources);
+    if (bodies === undefined) {
+      bodies = { entries: new Map(), bytes: 0, oversized: false };
+      this.stores.set(resources, bodies);
+      this.collected.register(resources, bodies);
+    }
+    const key = [
+      ref.resourceId,
+      ref.kind,
+      ref.schemaVersion,
+      ref.byteLength,
+      ref.digest,
+    ].join('\u0000');
+    const cached = bodies.entries.get(key);
+    if (cached !== undefined) {
+      bodies.entries.delete(key);
+      bodies.entries.set(key, cached);
+      this.touch(bodies);
+      return cached;
+    }
+    const body = await readManagedMessageBody(
+      (bodyRef) => resources.read(bodyRef),
+      ref,
+    );
+    const cost = body.byteLength + this.entryBytes;
+    // A concurrent read of the same ref may have kept it while this one waited.
+    if (cost > this.limitBytes || bodies.entries.has(key)) return body;
+    if (bodies.bytes + cost > this.limitBytes) {
+      bodies.oversized = true;
+      return body;
+    }
+    if (bodies.oversized && this.size + cost > this.limitBytes) return body;
+    let kept = body;
+    if (body.buffer.byteLength !== body.byteLength) {
+      // Buffer.from would copy into the shared pool again.
+      kept = Buffer.allocUnsafeSlow(body.byteLength);
+      body.copy(kept);
+    }
+    bodies.entries.set(key, kept);
+    bodies.bytes += cost;
+    this.size += cost;
+    this.touch(bodies);
+    this.evict();
+    return kept;
+  }
+
+  private touch(bodies: StoreBodies): void {
+    this.order.delete(bodies);
+    this.order.add(bodies);
+  }
+
+  /**
+   * The store that just kept a body is the most recently read and holds at
+   * most the bound, so the other stores make room before the loop reaches it.
+   */
+  private evict(): void {
+    for (const bodies of this.order) {
+      if (this.size <= this.limitBytes) return;
+      for (const [key, body] of bodies.entries) {
+        if (this.size <= this.limitBytes) break;
+        bodies.entries.delete(key);
+        bodies.bytes -= body.byteLength + this.entryBytes;
+        this.size -= body.byteLength + this.entryBytes;
+      }
+      if (bodies.entries.size === 0) this.order.delete(bodies);
+    }
+  }
+
+  private release(bodies: StoreBodies): void {
+    this.order.delete(bodies);
+    this.size -= bodies.bytes;
+    bodies.entries.clear();
+    bodies.bytes = 0;
+  }
+}
+
+const sharedMessageBodies = new ManagedMessageBodyCache(
+  MANAGED_MESSAGE_BODY_CACHE_BYTES,
+);
+
+/**
  * Carries the existing transcript history inside the authoritative log.
  *
  * A Managed session must not append an equivalent legacy record beside each
@@ -51,6 +231,7 @@ export class ManagedSessionMessageProjection {
   constructor(
     private readonly authority: LocalManagedSessionAuthority,
     private readonly resources: ManagedSessionResourceStore,
+    private readonly bodies: ManagedMessageBodyCache = sharedMessageBodies,
   ) {}
 
   /**
@@ -119,6 +300,17 @@ export class ManagedSessionMessageProjection {
    * (`ChatRecordingService.readActiveTranscriptChain`).
    */
   async project(throughSequence?: number): Promise<ChatRecord[]> {
+    return this.projectRecords(throughSequence, false);
+  }
+
+  async projectModelRecords(throughSequence?: number): Promise<ChatRecord[]> {
+    return this.projectRecords(throughSequence, true);
+  }
+
+  private async projectRecords(
+    throughSequence: number | undefined,
+    includeCompactions: boolean,
+  ): Promise<ChatRecord[]> {
     const records: ChatRecord[] = [];
     const checkpoints = new Map<string, number>();
     let after = 0;
@@ -146,14 +338,18 @@ export class ManagedSessionMessageProjection {
         }
         if (branch !== undefined) {
           records.push(branch);
-        } else if (event.kind === 'message.committed') {
-          records.push(
-            await readRecordBody(
-              this.resources,
-              event.payload['contentRef'],
-              `message.committed event ${event.eventId} contentRef`,
-            ),
+        } else if (
+          event.kind === 'message.committed' ||
+          (includeCompactions && event.kind === 'context.compacted')
+        ) {
+          const ref = assertManagedSessionDurableRef(
+            event.payload[
+              event.kind === 'context.compacted' ? 'summaryRef' : 'contentRef'
+            ],
+            `${event.kind} event ${event.eventId} body`,
           );
+          const body = await this.bodies.read(this.resources, ref);
+          records.push(JSON.parse(body.toString('utf8')) as ChatRecord);
         }
       }
     }
@@ -192,11 +388,7 @@ export async function readManagedSessionRecords(options: {
   /** Bounds the projection to a frozen snapshot's byte length. */
   readonly maxBytes?: number;
 }): Promise<ChatRecord[]> {
-  const scan = await readManagedSessionLog(
-    options.transcriptPath,
-    options.sessionKey,
-    options.maxBytes,
-  );
+  const scan = await readManagedSessionLog(options);
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: options.runtimeBaseDir,
     sessionKey: options.sessionKey,
@@ -221,11 +413,7 @@ export async function readManagedSessionRecordsAndTitle(options: {
   records: ChatRecord[];
   titleInfo: { title?: string; source?: 'auto' | 'manual' };
 }> {
-  const scan = await readManagedSessionLog(
-    options.transcriptPath,
-    options.sessionKey,
-    options.maxBytes,
-  );
+  const scan = await readManagedSessionLog(options);
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: options.runtimeBaseDir,
     sessionKey: options.sessionKey,

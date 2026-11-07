@@ -10,6 +10,13 @@ import type { CommandKind } from './sandboxed-exec.js';
 export interface ToolchainRunArgs {
   root: string;
   changedFiles: string[];
+  /**
+   * The old paths of the files the diff renames (the plan's `renameFrom`).
+   * `changedFiles` names a rename by its new path only, and what imported the
+   * old one is no longer in any import graph — so a rename runs every suite
+   * whole (`relatedTests`). Undefined is none.
+   */
+  renamedFrom?: string[];
   timeout: number;
   /**
    * Gates the adapter's dependency-acquisition step — `npm ci`, or pnpm for a
