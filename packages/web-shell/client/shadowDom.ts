@@ -148,6 +148,8 @@ export function installWebShellShadowStyles(
       }
       let released = false;
       return () => {
+        // The ref count is per install, so a second call would release a
+        // sibling install's reference and strip a still-mounted shell.
         if (released) return;
         released = true;
         const installed = packageSheet

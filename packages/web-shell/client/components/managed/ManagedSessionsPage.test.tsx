@@ -387,6 +387,30 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.listSessions).not.toHaveBeenCalled();
   });
 
+  it('measures the pane once the host supplies a session ID', async () => {
+    const observed = vi.fn();
+    vi.stubGlobal(
+      'ResizeObserver',
+      class MockResizeObserver {
+        observe = observed;
+        unobserve = vi.fn();
+        disconnect = vi.fn();
+      },
+    );
+    try {
+      const host = { hostSessionOnly: true };
+      await render(undefined, 'en', provider, undefined, true, host);
+      expect(
+        container.querySelector('[data-managed-host-waiting]'),
+      ).not.toBeNull();
+      expect(observed).not.toHaveBeenCalled();
+      await render('s1', 'en', provider, undefined, true, host);
+      expect(observed).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('tears down the old host scope and ignores its late transcript', async () => {
     let resolveOld!: (value: ManagedAgentSessionTranscript) => void;
     mocks.client.getTranscript.mockImplementationOnce(
@@ -2014,6 +2038,135 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it('keeps one host session pending request out of another session', async () => {
+    const host = { hostSessionOnly: true };
+    const clientId = getManagedClientId(provider.storageKey);
+    const key = `qwen-managed-pending:${provider.storageKey}:${clientId}:host:s1`;
+    sessionStorage.setItem(
+      key,
+      JSON.stringify({
+        idempotencyKey: 'host-pending',
+        text: 'queued in s1',
+        sessionId: 's1',
+      }),
+    );
+    await render('s2', 'en', provider, undefined, true, host);
+    // s2 must not adopt s1's unconfirmed request: without the `:host:<id>`
+    // key suffix it would surface here as a foreign pending banner.
+    expect(container.textContent).not.toContain(
+      'Another conversation has an unconfirmed request',
+    );
+    expect(container.textContent).not.toContain(
+      'was not confirmed as submitted',
+    );
+    await render('s1', 'en', provider, undefined, true, host);
+    expect(container.textContent).toContain('was not confirmed as submitted');
+  });
+
+  it('opens the pending owner with its workspace through the shared navigation path', async () => {
+    const owner = summary('s2', {
+      workspace: { workspaceId: 'ws-2', cwdRelative: '.' },
+    });
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [summary(), owner],
+    });
+    const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+    sessionStorage.setItem(
+      key,
+      JSON.stringify({
+        idempotencyKey: 'pending-owner',
+        text: 'queued elsewhere',
+        sessionId: 's2',
+      }),
+    );
+    await render('s1');
+    const open = [...container.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Open the original conversation',
+    );
+    expect(open).toBeTruthy();
+    await act(async () => {
+      open!.click();
+      await flush();
+    });
+    // Without the workspace id the host-side handler clears the managed
+    // workspace selection the owner session belongs to.
+    expect(onSelect).toHaveBeenCalledWith('s2', 'ws-2');
+  });
+
+  it('opens a pending owner that the served session page does not contain', async () => {
+    // Filtered, paginated and host-only pages can all omit the owner, so the
+    // workspace has to come from the request captured at submit time.
+    mocks.client.listSessions.mockResolvedValue({ sessions: [summary()] });
+    const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+    sessionStorage.setItem(
+      key,
+      JSON.stringify({
+        idempotencyKey: 'pending-owner-absent',
+        text: 'queued elsewhere',
+        sessionId: 's2',
+        workspaceId: 'ws-2',
+      }),
+    );
+    await render('s1');
+    const open = [...container.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Open the original conversation',
+    );
+    expect(open).toBeTruthy();
+    await act(async () => {
+      open!.click();
+      await flush();
+    });
+    expect(onSelect).toHaveBeenCalledWith('s2', 'ws-2');
+  });
+
+  it('ignores a pending record whose workspaceId is not a string', async () => {
+    // Rejecting the tampered record means the page behaves as if nothing was
+    // queued. Restoring it would hand the host a number where `workspaceId?:
+    // string` is contracted and clear the wrong selection.
+    mocks.client.listSessions.mockResolvedValue({ sessions: [summary()] });
+    const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+    sessionStorage.setItem(
+      key,
+      JSON.stringify({
+        idempotencyKey: 'pending-owner-tampered',
+        text: 'queued elsewhere',
+        sessionId: 's2',
+        workspaceId: 7,
+      }),
+    );
+    await render('s1');
+    expect(
+      [...container.querySelectorAll('button')].find(
+        (item) => item.textContent === 'Open the original conversation',
+      ),
+    ).toBeUndefined();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('persists the submitted workspace on the pending record', async () => {
+    // The read side alone is not enough: a filtered, paginated or host-only
+    // page only recovers the workspace from what was written here.
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        activeTurnId: undefined,
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+        capabilities: { canSend: true, canCancel: false, workspaceTurns: true },
+      }),
+    );
+    mocks.client.submitPrompt.mockResolvedValue({
+      sessionId: 'bound',
+      turnId: 'p2',
+    });
+    const saved = vi.spyOn(pendingStorage, 'saveManagedPending');
+    await render('bound');
+    await input('Run it again');
+    await click('Send');
+    const record = saved.mock.calls
+      .map(([, value]) => value)
+      .find((value) => value?.sessionId === 'bound');
+    expect(record).toMatchObject({ sessionId: 'bound', workspaceId: 'ws-a' });
+  });
+
   it.each([
     JSON.stringify({ storage: 'indexeddb', pendingId: 'missing' }),
     '{',
@@ -2976,7 +3129,7 @@ describe('ManagedSessionsPage', () => {
         's1',
         expect.objectContaining({ includeChildren: true }),
       );
-      expect(container.textContent).toContain('Child Agent approval');
+      expect(container.textContent).toContain('Child session request');
       const composer = container.querySelector('textarea')!;
       const setter = Object.getOwnPropertyDescriptor(
         HTMLTextAreaElement.prototype,
@@ -3349,6 +3502,63 @@ describe('ManagedSessionsPage', () => {
     ).toBe('null');
   });
 
+  it('answers both child permissions when their Action IDs are identical', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: {
+          canSend: false,
+          canCancel: true,
+          actions: true,
+          childAgents: true,
+        },
+      }),
+    );
+    const first = { ...pendingAction, sessionId: 'child-a', createdAt: 1 };
+    const second = { ...pendingAction, sessionId: 'child-b', createdAt: 2 };
+    let listed = [first, second];
+    const listPending = vi.fn(async () => listed);
+    const respond = vi.fn(async (action: { sessionId: string }) => {
+      listed = listed.filter((item) => item.sessionId !== action.sessionId);
+    });
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    await act(async () => flush());
+    const allow = () => {
+      const button = [
+        ...container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="managed-approval"] button',
+        ),
+      ].find((item) => item.textContent?.includes('Yes, allow once'));
+      expect(button).toBeDefined();
+      expect(button!.disabled).toBe(false);
+      return button!;
+    };
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledExactlyOnceWith(first, 'allow', {
+      clientId: expect.any(String),
+      idempotencyKey: 'tool_approval_1:allow',
+    });
+    expect(
+      container.querySelector('[data-testid="managed-approval"]')?.textContent,
+    ).toContain('Child session request · child-b');
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(2);
+    expect(respond).toHaveBeenLastCalledWith(second, 'allow', {
+      clientId: expect.any(String),
+      idempotencyKey: 'tool_approval_1:allow',
+    });
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+  });
+
   it('shows a question without approval buttons and retains its answers until confirmed', async () => {
     vi.stubGlobal('crypto', webcrypto);
     mocks.client.getSession.mockImplementation(async (id: string) =>
@@ -3412,6 +3622,103 @@ describe('ManagedSessionsPage', () => {
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).toBeNull();
+  });
+
+  it('lists root and child requests and preserves each draft while answering any child', async () => {
+    vi.stubGlobal('crypto', webcrypto);
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: {
+          canSend: false,
+          canCancel: true,
+          actions: true,
+          childAgents: true,
+        },
+      }),
+    );
+    const first = {
+      ...pendingQuestion(),
+      sessionId: 'child-a',
+      createdAt: 1,
+    };
+    const second = { ...first, sessionId: 'child-b', createdAt: 2 };
+    const permission = { ...pendingAction, createdAt: 3 };
+    const listPending = vi.fn().mockResolvedValue([permission, second, first]);
+    const respond = vi.fn().mockResolvedValue(undefined);
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    await act(async () => flush());
+    const card = () =>
+      container.querySelector('[data-testid="managed-approval"]')!;
+    const selector = () =>
+      card().querySelector('[aria-label="Pending requests"]')!;
+    const choose = async (text: string) => {
+      await act(async () => {
+        [...selector().querySelectorAll('button')]
+          .find((button) => button.textContent?.includes(text))!
+          .click();
+      });
+    };
+    const fill = async (index: number, text: string) => {
+      await act(async () => {
+        const input = card().querySelectorAll('textarea')[index]!;
+        Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )!.set!.call(input, text);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    };
+    expect(listPending).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ includeChildren: true }),
+    );
+    expect(selector().querySelectorAll('button')).toHaveLength(3);
+    expect(selector().textContent).toContain('This session · Permission');
+    expect(selector().textContent).toContain('Expires');
+    expect(
+      selector().querySelector('[aria-pressed="true"]')?.textContent,
+    ).toContain('child-a');
+    await fill(0, 'Keep child A');
+    await choose('child-b');
+    expect(card().querySelector('textarea')?.value).toBe('');
+    await fill(0, 'Child B answer');
+    await fill(1, 'Child B details');
+    await choose('This session');
+    expect(card().querySelector('[role="alertdialog"]')).not.toBeNull();
+    await choose('child-a');
+    expect(card().querySelector('textarea')?.value).toBe('Keep child A');
+    await choose('child-b');
+    expect(card().querySelector('textarea')?.value).toBe('Child B answer');
+    await act(async () => {
+      card()
+        .querySelector('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+      await flush();
+    });
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+    await act(async () => flush());
+    expect(respond).toHaveBeenCalledWith(
+      second,
+      {
+        kind: 'question',
+        answers: [
+          { questionId: 'q1', text: 'Child B answer' },
+          { questionId: 'q2', text: 'Child B details' },
+        ],
+      },
+      expect.objectContaining({
+        idempotencyKey: expect.stringMatching(/^question:/),
+      }),
+    );
+    expect(selector().querySelectorAll('button')).toHaveLength(2);
+    expect(
+      selector().querySelector('[aria-pressed="true"]')?.textContent,
+    ).toContain('child-a');
+    expect(card().querySelector('textarea')?.value).toBe('Keep child A');
   });
 
   it.each([
@@ -4307,6 +4614,7 @@ describe('ManagedSessionsPage', () => {
         .querySelector('[data-managed-home]')
         ?.getAttribute('data-managed-empty'),
     ).toBe('true');
+    expect(container.querySelector('[data-welcome-header]')).not.toBeNull();
     navigationTarget.remove();
 
     await act(async () => root.unmount());
@@ -4331,6 +4639,11 @@ describe('ManagedSessionsPage', () => {
         .querySelector('[data-managed-home]')
         ?.getAttribute('data-managed-empty'),
     ).toBeNull();
+    // The banner explains the state, so the welcome block must not stack on it.
+    expect(container.querySelector('[data-welcome-header]')).toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'Runtime lost',
+    );
     failureTarget.remove();
   });
 
@@ -4642,6 +4955,26 @@ describe('ManagedSessionsPage', () => {
       expect(onSelect).toHaveBeenLastCalledWith('s1');
     },
   );
+
+  it('drops a foreign error banner when the host switches sessions', async () => {
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [summary('s1'), summary('s2')],
+    });
+    mocks.client.submitPrompt.mockRejectedValueOnce(
+      new Error('Submit exploded'),
+    );
+    const host = { hostSessionOnly: true };
+    await render('s1', 'en', provider, undefined, true, host);
+    await input('For session A');
+    await click('Send');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'Submit exploded',
+    );
+    // The notice describes the conversation it came from; session B must not
+    // inherit it.
+    await render('s2', 'en', provider, undefined, true, host);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
 
   it('clears accepted input after the owning editor remounts during an uncertain retry', async () => {
     mocks.client.listSessions.mockResolvedValue({

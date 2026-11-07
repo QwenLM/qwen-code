@@ -60,7 +60,7 @@ import {
   type ManagedRecoveryHandoff,
 } from './managed-recovery-handoff';
 import { useManagedSessionRename } from './use-managed-session-rename';
-import { useManagedActions } from './use-managed-actions';
+import { managedActionKey, useManagedActions } from './use-managed-actions';
 import { ManagedQuestionForm } from './ManagedQuestionForm';
 import { useManagedContextCompression } from './use-managed-context-compression';
 import { useManagedModelChange } from './use-managed-model-change';
@@ -111,6 +111,8 @@ interface PendingPrompt {
   draftText?: string;
   queued?: boolean;
   sessionId?: string;
+  // Captured at submit time: the owner can be absent from the filtered or
+  // paginated session page, so the page cannot re-derive it.
   workspaceId?: string;
   input?: ManagedInputBlock[];
 }
@@ -470,7 +472,6 @@ function ManagedSessionsContent({
     tasks.refresh,
     tasks.apply,
   );
-  const waitingForHostSession = hostSessionOnly && !sessionId;
   useEffect(() => {
     const element = pageRef.current;
     if (!element) return;
@@ -487,9 +488,10 @@ function ManagedSessionsContent({
       observer?.disconnect();
       window.removeEventListener('resize', resize);
     };
-    // The waiting state renders no wrapper, so re-run when the host supplies an
-    // ID: otherwise the pane is never measured and never observes resizes.
-  }, [waitingForHostSession]);
+    // A host that mounts before it has a session renders the ref-less waiting
+    // section, so the measured pane appears on a later commit of the same
+    // instance; without re-running here the observer never attaches.
+  }, [sessionId, hostSessionOnly]);
   useEffect(() => setTaskPanelSession(undefined), [provider, sessionId]);
   const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
   const [archivedSummaries, setArchivedSummaries] = useState<
@@ -2107,20 +2109,27 @@ function ManagedSessionsContent({
                 variant="outline"
                 size="sm"
                 onClick={() => {
-                  if (!pending) return;
-                  // An unconfirmed create has no owning Session yet: its home is
-                  // the new-conversation page, not a Session open.
-                  if (pending.sessionId === undefined) {
+                  const owner = pending?.sessionId;
+                  // Route through openSession like every other navigation
+                  // entry: it clears the draft/error of the conversation being
+                  // left and forwards the owner's workspace. A request with no
+                  // owner clears the selection instead.
+                  if (!owner) {
                     onSelectSession(undefined);
+                    setText('');
                     setError(undefined);
                     return;
                   }
-                  const ownerWorkspaceId =
-                    pending.workspaceId ??
-                    lifecycleSummaries.find(
-                      (session) => session.sessionId === pending.sessionId,
-                    )?.workspace?.workspaceId;
-                  openSession(pending.sessionId, ownerWorkspaceId);
+                  openSession(
+                    owner,
+                    // The owner may not be on the current (filtered,
+                    // paginated, or host-mode empty) page, so prefer the
+                    // workspace captured when the request was submitted.
+                    pending?.workspaceId ??
+                      lifecycleSummaries.find(
+                        (session) => session.sessionId === owner,
+                      )?.workspace?.workspaceId,
+                  );
                 }}
               >
                 {t('managed.openPendingOwner')}
@@ -2185,27 +2194,87 @@ function ManagedSessionsContent({
               className={home ? shellStyles.footer : 'shrink-0'}
               data-testid="managed-approval"
             >
+              <section
+                aria-label={t('managed.actions.title')}
+                className="mb-3 space-y-2"
+              >
+                <p className="text-sm font-medium">
+                  {t('managed.actions.title')} ({approvals.actions.length})
+                </p>
+                <div className="flex max-h-48 flex-wrap gap-2 overflow-y-auto">
+                  {approvals.actions.map((action) => {
+                    const selected =
+                      approvals.action !== undefined &&
+                      managedActionKey(action) ===
+                        managedActionKey(approvals.action);
+                    return (
+                      <Button
+                        key={managedActionKey(action)}
+                        type="button"
+                        variant={selected ? 'secondary' : 'outline'}
+                        aria-pressed={selected}
+                        className="h-auto max-w-full flex-col items-start whitespace-normal text-left"
+                        onClick={() => approvals.select(action)}
+                      >
+                        <span className="text-xs text-muted-foreground">
+                          {action.sessionId === sessionId
+                            ? t('managed.actions.root')
+                            : t('managed.actions.child', {
+                                session: action.sessionId,
+                              })}{' '}
+                          ·{' '}
+                          {t(
+                            action.kind === 'question'
+                              ? 'managed.actions.question'
+                              : 'managed.actions.permission',
+                          )}
+                        </span>
+                        <span>
+                          {action.kind === 'question'
+                            ? action.questions[0]?.prompt
+                            : action.toolName}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {Date.now() >= action.expiresAt
+                            ? t('managed.actions.expired')
+                            : t('managed.actions.expires', {
+                                time: new Date(
+                                  action.expiresAt,
+                                ).toLocaleString(),
+                              })}
+                        </span>
+                      </Button>
+                    );
+                  })}
+                </div>
+              </section>
               {approvals.action?.sessionId !== sessionId && (
                 <p className="mb-2 text-sm font-medium">
-                  {t('managed.tasks.childApproval')} ·{' '}
+                  {t('managed.actions.childSource')} ·{' '}
                   {approvals.action?.sessionId}
                 </p>
               )}
               {approvals.action?.kind === 'question' ? (
                 <ManagedQuestionForm
-                  key={`${provider.storageKey}:${approvals.action.sessionId}:${approvals.action.actionId}:${approvals.action.inputRevision}:${approvals.action.policyRevision}`}
+                  key={managedActionKey(approvals.action)}
                   action={approvals.action}
+                  draft={approvals.questionDraft}
+                  onDraftChange={(draft) =>
+                    approvals.setQuestionDraft(approvals.action!, draft)
+                  }
+                  submitting={approvals.submitting}
                   disabled={approvals.respondForbidden || compression.blocked}
                   onSubmit={(response) => {
                     if (compression.isBlocked())
                       return Promise.reject(
                         new Error('Context compression is pending'),
                       );
-                    return approvals.respond(pendingApproval.id, response);
+                    return approvals.respond(approvals.action!, response);
                   }}
                 />
               ) : (
                 <ToolApproval
+                  key={approvals.action && managedActionKey(approvals.action)}
                   request={pendingApproval}
                   planExecutionMode={
                     approvals.action?.sessionId === sessionId &&
@@ -2221,7 +2290,11 @@ function ManagedSessionsContent({
                   // holds for every approval this Session raises — until an
                   // explicit retry re-probes, so the latch is scoped to the
                   // Session rather than the Action.
-                  disabled={approvals.respondForbidden || compression.blocked}
+                  disabled={
+                    approvals.respondForbidden ||
+                    approvals.submitting ||
+                    compression.blocked
+                  }
                   extraDescriptionId={
                     [
                       pendingApproval.rawInput === undefined
@@ -2233,8 +2306,11 @@ function ManagedSessionsContent({
                       .join(' ') || undefined
                   }
                   onConfirm={(actionId, optionId) => {
-                    if (!compression.isBlocked())
-                      return approvals.respond(actionId, optionId);
+                    if (
+                      !compression.isBlocked() &&
+                      approvals.action?.actionId === actionId
+                    )
+                      return approvals.respond(approvals.action, optionId);
                     return Promise.resolve();
                   }}
                 />

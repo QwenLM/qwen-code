@@ -25,7 +25,6 @@ import { WebShellCustomizationProvider } from './customization';
 import {
   I18nProvider,
   normalizeLanguage,
-  useI18n,
   type WebShellLanguage,
 } from './i18n';
 import { WebShellPortalRootContext } from './portalRoot';
@@ -83,8 +82,13 @@ function HostNavigationSlot({
 export interface ManagedAgentWebShellProps
   extends Omit<JavaManagedAgentProviderOptions, 'baseUrl'>,
     ManagedSessionsNavigationProps {
-  baseUrl?: string;
   managedAgentProvider?: ManagedAgentProvider;
+  /**
+   * Backend base URL for the built-in Java provider. Required unless
+   * `managedAgentProvider` is supplied; a missing value fails loudly instead
+   * of resolving requests against `<origin>/undefined`.
+   */
+  baseUrl?: string;
   /** Only open the existing Session explicitly selected by the host. */
   hostSessionOnly?: boolean;
   sessionId?: string;
@@ -96,25 +100,35 @@ export interface ManagedAgentWebShellProps
   style?: CSSProperties;
 }
 
+function shellErrorFallback(language: WebShellLanguage) {
+  return function ShellErrorFallback(error: Error, reset: () => void) {
+    return (
+      <RootErrorFallback error={error} onRetry={reset} language={language} />
+    );
+  };
+}
+
 /**
- * Shown when the shell is mounted with neither an injected provider nor a
- * baseUrl to build one from. The mount docs promise a notice in this state;
- * rendering it (rather than an empty wrapper) keeps that promise honest.
+ * Managed-only 产品入口，不创建 daemon workspace/session context。
+ *
+ * The provider (and its `baseUrl` guard) resolves one level below this
+ * boundary: an error boundary cannot catch a throw from the component that
+ * renders it, and a host mounting before its config resolves would otherwise
+ * get a blank container instead of the shell's own fallback.
  */
-function ManagedUnavailableNotice() {
-  const { t } = useI18n();
+export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   return (
-    <p
-      role="status"
-      style={{ padding: '2rem', textAlign: 'center', opacity: 0.7 }}
+    <ErrorBoundary
+      label="managed-agent-web-shell-config"
+      resetKeys={[props.baseUrl, props.managedAgentProvider]}
+      fallback={shellErrorFallback(normalizeLanguage(props.language))}
     >
-      {t('managed.unavailable')}
-    </p>
+      <ManagedAgentWebShellRoot {...props} />
+    </ErrorBoundary>
   );
 }
 
-/** Managed-only 产品入口，不创建 daemon workspace/session context。 */
-export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
+function ManagedAgentWebShellRoot(props: ManagedAgentWebShellProps) {
   const {
     sessionId,
     managedAgentProvider,
@@ -188,45 +202,49 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   const hasFetch = fetchImpl !== undefined;
   const hasGetHeaders = getHeaders !== undefined;
   const hasSaveArtifact = saveArtifact !== undefined;
-  const provider = useMemo(
-    () =>
-      managedAgentProvider ??
-      (baseUrl === undefined
-        ? undefined
-        : createJavaManagedAgentProvider({
-            baseUrl,
-            credentials,
-            fetch: !hasFetch
-              ? undefined
-              : (...args) => (callbacksRef.current.fetchImpl ?? fetch)(...args),
-            getHeaders: !hasGetHeaders
-              ? undefined
-              : () => callbacksRef.current.getHeaders?.() ?? {},
-            agentId,
-            productScope,
-            enableWorkspaceBinding,
-            modelPresets,
-            saveArtifact: !hasSaveArtifact
-              ? undefined
-              : (artifact, options) =>
-                  callbacksRef.current.saveArtifact?.(artifact, options) ??
-                  Promise.resolve(),
-          })),
-    [
-      managedAgentProvider,
+  const provider = useMemo(() => {
+    if (managedAgentProvider) return managedAgentProvider;
+    // `''` is a supported same-origin base (`new URL('', origin)` resolves to
+    // the page origin), so only a missing prop is a configuration error. A
+    // plain-JS host can hand over `null` for an unresolved config value, which
+    // would otherwise resolve every request against `<origin>/null`.
+    if (baseUrl == null)
+      throw new Error(
+        'ManagedAgentWebShell requires `baseUrl` when no `managedAgentProvider` is supplied.',
+      );
+    return createJavaManagedAgentProvider({
       baseUrl,
       credentials,
+      fetch: !hasFetch
+        ? undefined
+        : (...args) => (callbacksRef.current.fetchImpl ?? fetch)(...args),
+      getHeaders: !hasGetHeaders
+        ? undefined
+        : () => callbacksRef.current.getHeaders?.() ?? {},
       agentId,
       productScope,
       enableWorkspaceBinding,
       modelPresets,
-      hasFetch,
-      hasGetHeaders,
-      hasSaveArtifact,
-    ],
-  );
+      saveArtifact: !hasSaveArtifact
+        ? undefined
+        : (artifact, options) =>
+            callbacksRef.current.saveArtifact?.(artifact, options) ??
+            Promise.resolve(),
+    });
+  }, [
+    managedAgentProvider,
+    baseUrl,
+    credentials,
+    agentId,
+    productScope,
+    enableWorkspaceBinding,
+    modelPresets,
+    hasFetch,
+    hasGetHeaders,
+    hasSaveArtifact,
+  ]);
   const [selection, setSelection] = useState(() => ({
-    storageKey: provider?.storageKey,
+    storageKey: provider.storageKey,
     hostSessionOnly,
     externalSessionId: sessionId,
     selectedSessionId: sessionId,
@@ -238,36 +256,23 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   const controlled =
     hostSessionOnly ||
     (sessionId !== undefined && onSessionChange !== undefined);
-  const providerKey = provider?.storageKey;
   let selectedSessionId: string | undefined;
   if (
-    // A provider-less render keeps the stored identity, so comparing it to
-    // `undefined` here would hold this branch open forever and setState on
-    // every render. Only a mounted provider can change the identity.
-    (providerKey !== undefined && selection.storageKey !== providerKey) ||
+    selection.storageKey !== provider.storageKey ||
     selection.hostSessionOnly !== hostSessionOnly ||
     selection.externalSessionId !== sessionId
   ) {
     // Adjust during render (React's adjusting-state-when-props-change
     // pattern): an external switch is visible on this commit — an effect
     // would paint one stale frame first. Only an id carried over from the
-    // previous identity is dropped, never an explicit new selection. Without a
-    // provider there is no previous identity to carry an id over from.
-    // Compare against the last real identity, not the stored one: a
-    // provider-less render in between must not erase the scope a carried id
-    // belongs to, or A -> none -> C would hand A's session to C.
+    // previous identity is dropped, never an explicit new selection.
     selectedSessionId =
-      providerKey !== undefined &&
-      selection.storageKey !== undefined &&
-      selection.storageKey !== providerKey &&
+      selection.storageKey !== provider.storageKey &&
       sessionId === selection.externalSessionId
         ? undefined
         : sessionId;
     setSelection({
-      // Retain the identity while no provider is mounted. Gating the
-      // comparison on providerKey above is what keeps this from making the
-      // branch condition permanently true and looping setState per render.
-      storageKey: providerKey ?? selection.storageKey,
+      storageKey: provider.storageKey,
       hostSessionOnly,
       externalSessionId: sessionId,
       selectedSessionId,
@@ -339,14 +344,8 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   return (
     <ErrorBoundary
       label="managed-agent-web-shell-root"
-      resetKeys={[provider?.storageKey, selectedSessionId]}
-      fallback={(error, reset) => (
-        <RootErrorFallback
-          error={error}
-          onRetry={reset}
-          language={resolvedLanguage}
-        />
-      )}
+      resetKeys={[provider.storageKey, selectedSessionId]}
+      fallback={shellErrorFallback(resolvedLanguage)}
     >
       <ThemeProvider value={theme}>
         <BrandProvider value={brand}>
@@ -417,7 +416,6 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
                           navigationSearch={navigationSearch}
                         />
                       )}
-                      {!provider && <ManagedUnavailableNotice />}
                     </div>
                   </CompactModeContext.Provider>
                 </TodoContextsProvider>

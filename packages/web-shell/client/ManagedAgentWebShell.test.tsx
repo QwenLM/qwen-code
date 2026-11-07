@@ -101,6 +101,121 @@ describe('ManagedAgentWebShell', () => {
     container.remove();
   });
 
+  it('fails loudly when neither a provider nor a base URL is supplied', async () => {
+    const errors: unknown[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      errors.push(...args);
+    });
+    try {
+      await act(async () => {
+        root.render(<ManagedAgentWebShell />);
+      });
+    } catch (error) {
+      errors.push(error);
+    } finally {
+      spy.mockRestore();
+    }
+    // The built-in Java provider must not silently resolve requests against
+    // `<origin>/undefined`. The guard throws inside the shell, so its own
+    // boundary reports that through the fallback instead of a blank container
+    // and still logs the guard's message.
+    expect(container.textContent).toContain('Something went wrong');
+    expect(
+      errors.some(
+        (error) =>
+          error instanceof Error &&
+          error.message.includes('requires `baseUrl`'),
+      ),
+    ).toBe(true);
+  });
+
+  it('accepts an empty base URL as the supported same-origin value', async () => {
+    // `new URL('', origin)` resolves to the page origin, which is what the
+    // client and its storage key already assume, so `''` is a present prop.
+    await act(async () => {
+      root.render(<ManagedAgentWebShell baseUrl="" />);
+    });
+    expect(container.querySelector('[data-web-shell-root]')).not.toBeNull();
+    // Rendering the root alone would also pass with `<origin>/undefined` in the
+    // storage key, which is the failure mode this prop's guard exists to stop.
+    expect(
+      (captured.props as { managedAgentProvider: ManagedAgentProvider })
+        .managedAgentProvider.storageKey,
+    ).toBe(`${window.location.origin}:managed:default`);
+  });
+
+  it('clears the fallback once the config arrives (resetKeys)', async () => {
+    // The boundary clears through `resetKeys`, which is the whole recovery
+    // path for a host that mounts before its config resolves: without it the
+    // shell stays on the fallback until the host remounts the component.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await act(async () => {
+        root.render(<ManagedAgentWebShell />);
+      });
+      expect(container.textContent).toContain('Something went wrong');
+
+      await act(async () => {
+        root.render(<ManagedAgentWebShell baseUrl="https://product.example" />);
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(container.textContent).not.toContain('Something went wrong');
+    expect(container.querySelector('[data-web-shell-root]')).not.toBeNull();
+  });
+
+  it('clears the fallback when only the provider arrives (resetKeys)', async () => {
+    // A host whose async config is a provider re-renders with that provider and
+    // still no `baseUrl`; if the boundary keyed only on `baseUrl` it would keep
+    // the error until the host remounted.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const provider = { storageKey: 'tenant-a:actor-a' } as ManagedAgentProvider;
+    try {
+      await act(async () => {
+        root.render(<ManagedAgentWebShell />);
+      });
+      expect(container.textContent).toContain('Something went wrong');
+
+      await act(async () => {
+        root.render(<ManagedAgentWebShell managedAgentProvider={provider} />);
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(container.textContent).not.toContain('Something went wrong');
+    expect(container.querySelector('[data-web-shell-root]')).not.toBeNull();
+  });
+
+  it('rejects a null base URL, not just an absent one', async () => {
+    // A plain-JS host erases the prop type at runtime: an unresolved config
+    // value arrives as `null`, which would otherwise resolve every request
+    // against `<origin>/null`.
+    const errors: unknown[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      errors.push(...args);
+    });
+    try {
+      await act(async () => {
+        root.render(
+          <ManagedAgentWebShell baseUrl={null as unknown as string} />,
+        );
+      });
+    } catch (error) {
+      errors.push(error);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(container.textContent).toContain('Something went wrong');
+    expect(
+      errors.some(
+        (error) =>
+          error instanceof Error &&
+          error.message.includes('requires `baseUrl`'),
+      ),
+    ).toBe(true);
+  });
+
   it('uses the injected provider and resets host selection when its identity scope changes', async () => {
     const fetchImpl = vi.fn();
     const first = { storageKey: 'tenant-a:actor-a' } as ManagedAgentProvider;
@@ -143,15 +258,6 @@ describe('ManagedAgentWebShell', () => {
     expect(captured.props).toMatchObject({ sessionId: undefined });
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(createJavaManagedAgentProvider).not.toHaveBeenCalled();
-  });
-
-  it('renders the unavailable notice without a provider or base URL', async () => {
-    await act(async () => root.render(<ManagedAgentWebShell />));
-    expect(createJavaManagedAgentProvider).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain('managed-only');
-    expect(container.querySelector('[role="status"]')?.textContent).toContain(
-      'Managed Agents is unavailable',
-    );
   });
 
   it('wraps a host navigation slot in the portal scope and syncs theme variables', async () => {
