@@ -2887,7 +2887,10 @@ export class LlmChat {
       this.config.getChatCompression(),
     );
     let replaced: ReturnType<typeof replaceImagePayloadsInPlace> = [];
-    if (countAllInlineImages(curatedHistory) >= imagePayloadThreshold) {
+    if (
+      imagePayloadThreshold > 0 &&
+      countAllInlineImages(curatedHistory) >= imagePayloadThreshold
+    ) {
       const skipEntry = currentUserContent
         ? curatedHistory.find(
             (c) =>

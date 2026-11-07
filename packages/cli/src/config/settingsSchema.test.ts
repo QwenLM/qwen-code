@@ -297,6 +297,96 @@ describe('SettingsSchema', () => {
       expect(threshold?.requiresRestart).toBe(false);
     });
 
+    // The runtime resolves these in core's `resolveCompactionTuning` /
+    // `resolveSlimmingConfig`; declaring them keeps the settings dialog,
+    // validation and the IDE schema in step with what the runtime reads.
+    it('should declare every model.chatCompression knob', () => {
+      const properties =
+        getSettingsSchema().model.properties.chatCompression.properties;
+
+      expect(Object.keys(properties).sort()).toEqual(
+        [
+          'enableScreenshotTrigger',
+          'imagePayloadThreshold',
+          'imageTokenEstimate',
+          'maxRecentFilesToRetain',
+          'maxRecentImagesToRetain',
+          'screenshotTriggerThreshold',
+        ].sort(),
+      );
+      // Every declared default is pinned: nothing else in the repo compares a
+      // numeric schema default against core's constant, so an unpinned one
+      // can drift from the value the runtime actually uses.
+      expect(properties.imagePayloadThreshold).toMatchObject({
+        type: 'integer',
+        default: 20,
+        minimum: 0,
+      });
+      expect(properties.maxRecentFilesToRetain).toMatchObject({
+        type: 'integer',
+        default: 5,
+        minimum: 0,
+      });
+      expect(properties.maxRecentImagesToRetain).toMatchObject({
+        type: 'integer',
+        default: 3,
+        minimum: 0,
+      });
+      expect(properties.screenshotTriggerThreshold).toMatchObject({
+        type: 'integer',
+        default: 20,
+        minimum: 1,
+      });
+      expect(properties.enableScreenshotTrigger).toMatchObject({
+        type: 'boolean',
+        default: true,
+      });
+      expect(properties.imageTokenEstimate).toMatchObject({
+        type: 'number',
+        default: 1600,
+        minimum: 1,
+      });
+    });
+
+    // The declared defaults are literals, so without the widening in
+    // `InferSettings` these keys infer the default's own type and a caller
+    // cannot assign any other value. Pin the widened property types and a
+    // non-default assignment; the runtime read path accepts both.
+    it('should keep every model.chatCompression knob writable', () => {
+      type Compaction = NonNullable<
+        NonNullable<Settings['model']>['chatCompression']
+      >;
+      expectTypeOf<Compaction['imagePayloadThreshold']>().toEqualTypeOf<
+        number | undefined
+      >();
+      expectTypeOf<Compaction['maxRecentImagesToRetain']>().toEqualTypeOf<
+        number | undefined
+      >();
+      expectTypeOf<Compaction['screenshotTriggerThreshold']>().toEqualTypeOf<
+        number | undefined
+      >();
+
+      const writable: Compaction = {
+        imagePayloadThreshold: 0,
+        maxRecentImagesToRetain: 9,
+        screenshotTriggerThreshold: 12345,
+      };
+      expect(writable.imagePayloadThreshold).toBe(0);
+    });
+
+    it('should mark every model.chatCompression knob restart-scoped', () => {
+      const properties =
+        getSettingsSchema().model.properties.chatCompression.properties;
+      // core's Config captures this snapshot at boot, so a `/config set`
+      // only lands on the next launch and the flag must say so.
+      for (const [name, definition] of Object.entries(properties)) {
+        expect({ name, requiresRestart: definition.requiresRestart }).toEqual({
+          name,
+          requiresRestart: true,
+        });
+      }
+    });
+
     it('should have sandboxImage setting under tools', () => {
       expect(getSettingsSchema().tools.properties.sandboxImage).toBeDefined();
       expect(getSettingsSchema().tools.properties.sandboxImage.type).toBe(

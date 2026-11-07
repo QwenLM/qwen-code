@@ -23,7 +23,13 @@ import {
   validateSettingValue,
 } from '../../config/settingsUtils.js';
 
-const SETTABLE_TYPES = new Set(['boolean', 'string', 'number', 'enum']);
+const SETTABLE_TYPES = new Set([
+  'boolean',
+  'string',
+  'number',
+  'integer',
+  'enum',
+]);
 
 const SENSITIVE_KEY_PATTERNS = [
   /apikey/i,
@@ -205,20 +211,26 @@ function listAllSettings(context: CommandContext): MessageActionReturn {
 
   const lines: string[] = [];
 
+  const keys = Object.keys(flattened)
+    .filter((key) => SETTABLE_TYPES.has(flattened[key]!.type))
+    .sort();
+  // The key column is the longest settable name, so a deep model.* knob is
+  // not truncated away: `model.chatCompression.screenshotTriggerThreshold`
+  // alone is 48 characters.
+  const keyWidth = Math.max(40, ...keys.map((key) => key.length + 1));
+
   lines.push(t('Available settings:'));
   lines.push('');
   lines.push(
-    padRight('Key', 40) +
+    padRight('Key', keyWidth) +
       padRight('Type', 10) +
       padRight('Current', 15) +
       'Description',
   );
-  lines.push('-'.repeat(90));
+  lines.push('-'.repeat(keyWidth + 10 + 15 + 'Description'.length));
 
-  const keys = Object.keys(flattened).sort();
   for (const key of keys) {
     const def = flattened[key]!;
-    if (!SETTABLE_TYPES.has(def.type)) continue;
 
     const current = getNestedProperty(merged as Record<string, unknown>, key);
     let displayCurrent: string;
@@ -230,7 +242,7 @@ function listAllSettings(context: CommandContext): MessageActionReturn {
     }
 
     lines.push(
-      padRight(key, 40) +
+      padRight(key, keyWidth) +
         padRight(def.type, 10) +
         padRight(displayCurrent, 15) +
         (def.description ?? def.label),

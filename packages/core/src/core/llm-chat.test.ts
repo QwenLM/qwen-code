@@ -3378,6 +3378,11 @@ describe('LlmChat', async () => {
         maxRecentImagesToRetain: 1,
         imagePayloadThreshold: 1,
       });
+    const evictNothing = () =>
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 1,
+        imagePayloadThreshold: 0,
+      });
     const png = (data: string) =>
       content('user', { inlineData: { mimeType: 'image/png', data } });
 
@@ -3435,6 +3440,32 @@ describe('LlmChat', async () => {
       expect(JSON.stringify(requestAt(1).contents)).toContain(
         '"data":"old-shot"',
       );
+    });
+
+    it('keeps every image payload in history when the threshold disables eviction', async () => {
+      evictNothing();
+      chat.setHistory([
+        png('first-shot'),
+        modelText('I see the first image'),
+        png('second-shot'),
+        modelText('I see the second image'),
+        png('third-shot'),
+        modelText('I see the third image'),
+      ]);
+      streamEach(() => textStream('response'));
+
+      await sendDrain('first question', 'prompt-id-image-off-first');
+      await sendDrain('second question', 'prompt-id-image-off-second');
+
+      const sent = JSON.stringify(requestAt(1).contents);
+      for (const shot of ['first-shot', 'second-shot', 'third-shot']) {
+        expect(sent).toContain(`"data":"${shot}"`);
+      }
+      expect(sent).not.toMatch(/\[Image #/);
+      const durable = JSON.stringify(chat.getHistory());
+      for (const shot of ['first-shot', 'second-shot', 'third-shot']) {
+        expect(durable).toContain(`"data":"${shot}"`);
+      }
     });
 
     it('coalesces startup reminders with the first user prompt for provider requests', async () => {
