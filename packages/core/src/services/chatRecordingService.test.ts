@@ -364,6 +364,18 @@ describe('ChatRecordingService', () => {
         undefined,
       ]);
     });
+
+    it('parents the first real record on the flushed prelude', async () => {
+      svc.recordStartupContext({
+        role: 'user',
+        parts: [{ text: '<system-reminder>\nprelude\n</system-reminder>' }],
+      });
+      user('hello');
+
+      const [preludeRecord, userRecord] = await flushedAll();
+      expect(preludeRecord!.parentUuid).toBeNull();
+      expect(userRecord!.parentUuid).toBe(preludeRecord!.uuid);
+    });
   });
 
   describe('background execution recording ownership', () => {
