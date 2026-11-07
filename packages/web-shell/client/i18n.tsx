@@ -4770,6 +4770,18 @@ const EN: Messages = {
     'member_feature_requested — organization members asked to enable a feature such as Copilot',
   'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
     'security_advisory_credit — the bot was credited for contributing to a security advisory',
+  'channels.editor.field.github.repoFilterMode': 'Repository Filter',
+  'channels.editor.field.github.repoFilterMode.description':
+    'Filter incoming notifications by repository. Notifications about PRs bound to a session are filtered too; only their PR state watch events bypass the filter.',
+  'channels.editor.field.github.repoFilterMode.option.off':
+    'Off — all repositories',
+  'channels.editor.field.github.repoFilterMode.option.allowlist':
+    'Allowlist — only listed repositories',
+  'channels.editor.field.github.repoFilterMode.option.blocklist':
+    'Blocklist — all except listed repositories',
+  'channels.editor.field.github.repoFilter': 'Filtered Repositories',
+  'channels.editor.field.github.repoFilter.description':
+    'Comma-separated owner/repo names. You can paste repository or PR URLs; they are shortened to owner/repo on save.',
   'channels.editor.field.github.deliverToBoundSessions':
     'Deliver To PR-Bound Sessions',
   'channels.editor.field.github.deliverToBoundSessions.description':
@@ -4997,6 +5009,8 @@ const EN: Messages = {
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.requiresBoundDelivery':
     'Enable "Deliver To PR-Bound Sessions" to save the selected watch events.',
+  'channels.editor.validation.repoFilterRequired':
+    'List at least one repository, or set Repository Filter to Off.',
   'channels.editor.validation.number': 'Enter a valid number.',
   'channels.editor.validation.outOfRange': (v) =>
     v?.min !== undefined && v?.max !== undefined
@@ -9472,6 +9486,17 @@ const ZH: Messages = {
     'member_feature_requested — 组织成员请求启用 Copilot 等功能',
   'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
     'security_advisory_credit — 机器人因参与安全公告而被致谢',
+  'channels.editor.field.github.repoFilterMode': '按仓库过滤',
+  'channels.editor.field.github.repoFilterMode.description':
+    '按仓库过滤入站通知。绑定到会话的 PR，其通知同样被过滤；只有它们的状态监视事件绕过此过滤器。',
+  'channels.editor.field.github.repoFilterMode.option.off': '关闭 — 所有仓库',
+  'channels.editor.field.github.repoFilterMode.option.allowlist':
+    '白名单 — 仅列出的仓库',
+  'channels.editor.field.github.repoFilterMode.option.blocklist':
+    '黑名单 — 除列出的仓库以外',
+  'channels.editor.field.github.repoFilter': '过滤的仓库',
+  'channels.editor.field.github.repoFilter.description':
+    '以逗号分隔的 owner/repo 仓库名。可以直接粘贴仓库或 PR 链接，保存时会自动缩短为 owner/repo。',
   'channels.editor.field.github.deliverToBoundSessions': '投递到 PR 绑定会话',
   'channels.editor.field.github.deliverToBoundSessions.description':
     '将已绑定到活跃会话的 PR 事件以 prompt 形式投递进该会话，而不是频道自有会话。需要 daemon 托管的频道。',
@@ -9685,6 +9710,8 @@ const ZH: Messages = {
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.requiresBoundDelivery':
     '需开启「投递到 PR 绑定会话」才能保存所选的监视事件。',
+  'channels.editor.validation.repoFilterRequired':
+    '请至少列出一个仓库，或把「按仓库过滤」设为关闭。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>
     v?.min !== undefined && v?.max !== undefined
