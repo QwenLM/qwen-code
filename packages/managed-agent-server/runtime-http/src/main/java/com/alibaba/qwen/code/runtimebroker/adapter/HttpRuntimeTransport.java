@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
+import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -19,6 +20,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
@@ -35,6 +37,7 @@ import com.alibaba.qwen.code.runtimebroker.transport.ManagedMonitorProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedShellProtocol;
 
 import java.io.EOFException;
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -42,11 +45,15 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -64,7 +71,7 @@ import java.util.function.Function;
  * their separate Session control protocol. MCP controls have their own
  * bounded envelope.
  */
-public final class HttpRuntimeTransport implements com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport {
+public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
     static final int BODY_LIMIT_BYTES = 16 * 1024;
     static final int TOOL_REQUEST_LIMIT_BYTES = 256 * 1024;
     static final int TOOL_RESULT_LIMIT_BYTES = 1024 * 1024;
@@ -122,7 +129,7 @@ public final class HttpRuntimeTransport implements com.alibaba.qwen.code.runtime
     private String managedExtensionCgroupRoot;
 
     public HttpRuntimeTransport withManagedExtensionCacheDirectory(String directory, String cgroupRoot) {
-        if (directory == null || !java.nio.file.Path.of(directory).isAbsolute()) {
+        if (directory == null || !Path.of(directory).isAbsolute()) {
             throw new IllegalArgumentException("Extension cache must be absolute");
         }
         this.managedExtensionCacheDirectory = directory;
@@ -133,13 +140,13 @@ public final class HttpRuntimeTransport implements com.alibaba.qwen.code.runtime
     private Map<String, Object> contextBoot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         String digest = request.getScope().getCapabilityDigest();
         return ManagedContextProtocol.boot(request, seed,
-                com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.admits(digest)
-                        ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.configuration(digest,
+                ManagedExtensionExecutionProfile.admits(digest)
+                        ? ManagedExtensionExecutionProfile.configuration(digest,
                                 managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null);
     }
 
     public void configureExtensionPreparation(ExtensionPreparation preparation) {
-        this.extensionPreparation = java.util.Objects.requireNonNull(preparation, "preparation");
+        this.extensionPreparation = Objects.requireNonNull(preparation, "preparation");
     }
 
     public CompletionStage<Map<String, Object>> extensionControl(RuntimeBindingRecord runtime, String harnessSessionId,
@@ -208,7 +215,7 @@ public final class HttpRuntimeTransport implements com.alibaba.qwen.code.runtime
         }
         this.client = client;
         this.requestTimeout = requestTimeout;
-        this.endpointResolver = java.util.Objects.requireNonNull(endpointResolver, "endpointResolver");
+        this.endpointResolver = Objects.requireNonNull(endpointResolver, "endpointResolver");
     }
 
     @Override
@@ -618,7 +625,7 @@ public final class HttpRuntimeTransport implements com.alibaba.qwen.code.runtime
                 || !runtime.getBindingId().equals(sessionRecord.getBindingId())
                 || runtime.getGeneration() != sessionRecord.getRuntimeGeneration()
                 || !request.getScope().equals(session.getScope())
-                || !java.util.Objects.equals(request.getIsolationKey(),
+                || !Objects.equals(request.getIsolationKey(),
                         isolationKey)) {
             throw new IllegalArgumentException(
                     "session must belong to a READY Runtime binding");
@@ -1087,7 +1094,7 @@ public final class HttpRuntimeTransport implements com.alibaba.qwen.code.runtime
     }
 
     @Override
-    public CompletionStage<java.util.List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
+    public CompletionStage<List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
         var scope = runtime.getRequest().getScope();
         byte[] request = encodeToolRequest(Map.of("protocolVersion", 1,
                 "tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId()), TOOL_REQUEST_LIMIT_BYTES);
@@ -1096,19 +1103,19 @@ public final class HttpRuntimeTransport implements com.alibaba.qwen.code.runtime
     }
 
     public CompletionStage<Map<String, Object>> installExtensionPackage(RuntimeBindingRecord runtime,
-            String digest, java.nio.file.Path archive) {
+            String digest, Path archive) {
         if (runtime == null || runtime.getLease() == null || digest == null || !digest.matches("[a-f0-9]{64}")) {
             throw new IllegalArgumentException("An original Runtime and extension archive digest are required");
         }
         HttpRequest.BodyPublisher body;
         try {
-            long length = java.nio.file.Files.size(archive);
+            long length = Files.size(archive);
             if (length < 1 || length > 100L * 1024 * 1024
-                    || !java.nio.file.Files.isRegularFile(archive, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                    || !Files.isRegularFile(archive, LinkOption.NOFOLLOW_LINKS)) {
                 throw new IllegalArgumentException("Extension archive exceeds its limit");
             }
             body = HttpRequest.BodyPublishers.ofFile(archive);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             return CompletableFuture.failedFuture(unavailable(error));
         }
         RuntimeLease lease = runtime.getLease();

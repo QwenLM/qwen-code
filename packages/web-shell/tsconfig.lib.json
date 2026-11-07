@@ -5,6 +5,7 @@
     "stripInternal": true,
     "emitDeclarationOnly": true,
     "declarationDir": "dist/types",
+    "rootDir": "client",
     "noEmit": false
   },
   "include": ["client/**/*.ts", "client/**/*.tsx"],

@@ -99,6 +99,20 @@ describe('Generated UI action invalidation', () => {
       expect(onGeneratedUiInvalidated).not.toHaveBeenCalled();
     },
   );
+
+  it('releases through the workspace client when no session is connected', async () => {
+    const closeSession = vi.fn().mockResolvedValue(undefined);
+    const onGeneratedUiInvalidated = vi.fn();
+    const h = createActionsHarness({
+      getClient: () => ({ closeSession }) as unknown as DaemonClient,
+      onGeneratedUiInvalidated,
+    });
+
+    await h.actions.releaseSession('background');
+
+    expect(closeSession).toHaveBeenCalledWith('background');
+    expect(onGeneratedUiInvalidated).not.toHaveBeenCalled();
+  });
 });
 
 describe('context usage counter reconciliation', () => {
@@ -247,6 +261,64 @@ describe('context usage counter reconciliation', () => {
       expect(h.getConnection().tokenCount).toBe(change === 'usage' ? 70 : 60);
       expect(h.getConnection().contextWindow).toBe(
         change === 'context-window' ? 32_000 : 100,
+      );
+    },
+  );
+});
+
+describe('local prompt timing before the authoritative echo', () => {
+  it.each(['completed', 'cancelled'] as const)(
+    'clears its local clock after an admitted turn is %s',
+    async (outcome) => {
+      const session = createMockSession('session-a');
+      const h = createActionsHarness({ session });
+      const result = h.actions.sendPrompt('new question', {
+        optimisticUserMessage: false,
+      });
+      await vi.waitFor(() =>
+        expect(h.activePromptsRef.current.get('session-a')?.resolve).toBeTypeOf(
+          'function',
+        ),
+      );
+      expect(h.getConnection().localPrompt?.sessionId).toBe('session-a');
+      const active = h.activePromptsRef.current.get('session-a')!;
+      if (outcome === 'completed') active.resolve?.({ stopReason: 'end_turn' });
+      else active.controller.abort();
+      await result;
+      expect(h.getConnection().localPrompt).toBeUndefined();
+      expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'clears only its own clock after rejection (newer owner: %s)',
+    async (newerOwner) => {
+      const session = createMockSession('session-a');
+      const admission = createDeferred<{ promptId: string }>();
+      session.submitPrompt.mockReturnValueOnce(admission.promise);
+      const h = createActionsHarness({ session });
+      const before = Date.now();
+      const result = h.actions.sendPrompt('new question', {
+        optimisticUserMessage: false,
+      });
+      const rejected = result.catch((error: unknown) => error);
+      await vi.waitFor(() =>
+        expect(session.submitPrompt).toHaveBeenCalledOnce(),
+      );
+      const local = h.getConnection().localPrompt;
+      expect(local?.sessionId).toBe('session-a');
+      expect(local?.startedAt).toBeGreaterThanOrEqual(before);
+      expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      const replacement = {
+        sessionId: 'session-b',
+        startedAt: Date.now() + 1000,
+      };
+      if (newerOwner)
+        h.replaceConnection({ ...h.getConnection(), localPrompt: replacement });
+      admission.reject(new DaemonHttpError(413, {}, 'Rejected'));
+      await rejected;
+      expect(h.getConnection().localPrompt).toEqual(
+        newerOwner ? replacement : undefined,
       );
     },
   );
@@ -2265,6 +2337,43 @@ describe('createDaemonSessionActions', () => {
       },
       errorStatus: 503,
     });
+  });
+
+  it('marks a workspace session-limit create failure with its daemon code', async () => {
+    const addNotice = vi.fn();
+    const createDetachedSession = vi.fn(async () => {
+      throw new DaemonHttpError(
+        503,
+        {
+          error: 'Session limit reached (64)',
+          code: 'session_limit_exceeded',
+          limit: 64,
+          scope: 'workspace',
+        },
+        'Session limit reached (64)',
+      );
+    });
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        workspaceCwd: '/workspace',
+      },
+      addNotice,
+      createDetachedSession,
+    });
+
+    await expect(actions.createSession()).rejects.toBeInstanceOf(
+      DaemonHttpError,
+    );
+
+    expect(createDetachedSession).toHaveBeenCalledOnce();
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'create_session',
+        code: 'session_limit_exceeded',
+      }),
+    );
   });
 
   it('publishes standalone recovery after a workspace predecessor is cleared', async () => {
