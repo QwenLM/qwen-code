@@ -11,6 +11,8 @@ export interface HookSettingsForConfig {
   systemHooks?: Record<string, unknown>;
   userHooks?: Record<string, unknown>;
   projectHooks?: Record<string, unknown>;
+  /** Display-only raw workspace block; never feeds execution. */
+  projectHooksDisplayOnly?: Record<string, unknown>;
   hooks?: Record<string, unknown>;
 }
 
@@ -34,6 +36,7 @@ export function resolveHookSettingsForConfig(
         systemHooks?: Record<string, unknown>;
         userHooks?: Record<string, unknown>;
         projectHooks?: Record<string, unknown>;
+        projectHooksDisplayOnly?: Record<string, unknown>;
       }
     | undefined,
   hooksDisabled: boolean,
@@ -58,6 +61,7 @@ export function resolveHookSettingsForConfig(
     systemHooks: mergeMem0Hooks(separated.systemHooks, mem0Server),
     userHooks: separated.userHooks,
     projectHooks: separated.projectHooks,
+    projectHooksDisplayOnly: separated.projectHooksDisplayOnly,
     hooks: undefined,
   };
 }

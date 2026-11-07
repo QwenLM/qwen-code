@@ -2,6 +2,8 @@
 
 [English](2026-10-15-managed-agent-server-layout.md) | [简体中文](2026-10-15-managed-agent-server-layout.zh-CN.md)
 
+Successor: [Maven module boundaries](2026-10-29-managed-agent-maven-modules.md). This document retains its historical decisions and validation record; the successor defines the current build layout.
+
 Status: implemented and validated locally. Remote CI and real MySQL/Linux deployment acceptance have not been run for this change.
 
 ## Problem and current state

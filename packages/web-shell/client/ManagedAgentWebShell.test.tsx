@@ -60,6 +60,250 @@ describe('ManagedAgentWebShell', () => {
     container.remove();
   });
 
+  it('fails loudly when neither a provider nor a base URL is supplied', async () => {
+    const errors: unknown[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      errors.push(...args);
+    });
+    try {
+      await act(async () => {
+        root.render(<ManagedAgentWebShell />);
+      });
+    } catch (error) {
+      errors.push(error);
+    } finally {
+      spy.mockRestore();
+    }
+    // The built-in Java provider must not silently resolve requests against
+    // `<origin>/undefined`. The guard throws inside the shell, so its own
+    // boundary reports that through the fallback instead of a blank container
+    // and still logs the guard's message.
+    expect(container.textContent).toContain('Something went wrong');
+    expect(
+      errors.some(
+        (error) =>
+          error instanceof Error &&
+          error.message.includes('requires `baseUrl`'),
+      ),
+    ).toBe(true);
+  });
+
+  it('accepts an empty base URL as the supported same-origin value', async () => {
+    // `new URL('', origin)` resolves to the page origin, which is what the
+    // client and its storage key already assume, so `''` is a present prop.
+    await act(async () => {
+      root.render(<ManagedAgentWebShell baseUrl="" />);
+    });
+    expect(container.querySelector('[data-web-shell-root]')).not.toBeNull();
+    // Rendering the root alone would also pass with `<origin>/undefined` in the
+    // storage key, which is the failure mode this prop's guard exists to stop.
+    expect(
+      (captured.props as { managedAgentProvider: ManagedAgentProvider })
+        .managedAgentProvider.storageKey,
+    ).toBe(`${window.location.origin}:managed:default`);
+  });
+
+  it('clears the fallback once the config arrives (resetKeys)', async () => {
+    // The boundary clears through `resetKeys`, which is the whole recovery
+    // path for a host that mounts before its config resolves: without it the
+    // shell stays on the fallback until the host remounts the component.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await act(async () => {
+        root.render(<ManagedAgentWebShell />);
+      });
+      expect(container.textContent).toContain('Something went wrong');
+
+      await act(async () => {
+        root.render(<ManagedAgentWebShell baseUrl="https://product.example" />);
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(container.textContent).not.toContain('Something went wrong');
+    expect(container.querySelector('[data-web-shell-root]')).not.toBeNull();
+  });
+
+  it('clears the fallback when only the provider arrives (resetKeys)', async () => {
+    // A host whose async config is a provider re-renders with that provider and
+    // still no `baseUrl`; if the boundary keyed only on `baseUrl` it would keep
+    // the error until the host remounted.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const provider = { storageKey: 'tenant-a:actor-a' } as ManagedAgentProvider;
+    try {
+      await act(async () => {
+        root.render(<ManagedAgentWebShell />);
+      });
+      expect(container.textContent).toContain('Something went wrong');
+
+      await act(async () => {
+        root.render(<ManagedAgentWebShell managedAgentProvider={provider} />);
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(container.textContent).not.toContain('Something went wrong');
+    expect(container.querySelector('[data-web-shell-root]')).not.toBeNull();
+  });
+
+  it('rejects a null base URL, not just an absent one', async () => {
+    // A plain-JS host erases the prop type at runtime: an unresolved config
+    // value arrives as `null`, which would otherwise resolve every request
+    // against `<origin>/null`.
+    const errors: unknown[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      errors.push(...args);
+    });
+    try {
+      await act(async () => {
+        root.render(
+          <ManagedAgentWebShell baseUrl={null as unknown as string} />,
+        );
+      });
+    } catch (error) {
+      errors.push(error);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(container.textContent).toContain('Something went wrong');
+    expect(
+      errors.some(
+        (error) =>
+          error instanceof Error &&
+          error.message.includes('requires `baseUrl`'),
+      ),
+    ).toBe(true);
+  });
+
+  it('uses the injected provider and resets host selection when its identity scope changes', async () => {
+    const fetchImpl = vi.fn();
+    const first = { storageKey: 'tenant-a:actor-a' } as ManagedAgentProvider;
+    const second = { storageKey: 'tenant-b:actor-b' } as ManagedAgentProvider;
+    const render = async (
+      provider: ManagedAgentProvider,
+      sessionId?: string,
+    ) => {
+      await act(async () =>
+        root.render(
+          <ManagedAgentWebShell
+            managedAgentProvider={provider}
+            hostSessionOnly
+            sessionId={sessionId}
+            fetch={fetchImpl}
+          />,
+        ),
+      );
+    };
+    await render(first, 'old');
+    expect(captured.props).toMatchObject({
+      managedAgentProvider: first,
+      hostSessionOnly: true,
+      sessionId: 'old',
+    });
+    await render(second, 'old');
+    expect(captured.props).toMatchObject({
+      managedAgentProvider: second,
+      sessionId: undefined,
+    });
+    await render(second, 'new');
+    expect(captured.props).toMatchObject({ sessionId: 'new' });
+    await act(async () => {
+      (
+        captured.props as { onSelectSession: (id?: string) => void }
+      ).onSelectSession('unrequested');
+    });
+    expect(captured.props).toMatchObject({ sessionId: 'new' });
+    await render(second);
+    expect(captured.props).toMatchObject({ sessionId: undefined });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('discards internal selection when a host takes ownership without an ID', async () => {
+    const provider = { storageKey: 'host-mode-switch' } as ManagedAgentProvider;
+    await act(async () =>
+      root.render(<ManagedAgentWebShell managedAgentProvider={provider} />),
+    );
+    await act(async () => {
+      (
+        captured.props as { onSelectSession: (id?: string) => void }
+      ).onSelectSession('internal-session');
+    });
+    expect(captured.props).toMatchObject({ sessionId: 'internal-session' });
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          hostSessionOnly
+        />,
+      ),
+    );
+    expect(captured.props).toMatchObject({
+      sessionId: undefined,
+      hostSessionOnly: true,
+    });
+  });
+
+  it('lets a delete/archive clear through when the host has no echo channel', async () => {
+    const provider = { storageKey: 'host-no-echo' } as ManagedAgentProvider;
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          hostSessionOnly
+          sessionId="s1"
+        />,
+      ),
+    );
+    expect(captured.props).toMatchObject({ sessionId: 's1' });
+    // New selections stay host-owned even without an echo channel…
+    await act(async () => {
+      (
+        captured.props as { onSelectSession: (id?: string) => void }
+      ).onSelectSession('unrequested');
+    });
+    expect(captured.props).toMatchObject({ sessionId: 's1' });
+    // …but clearing the deleted/archived session must reach the page.
+    await act(async () => {
+      (
+        captured.props as { onSelectSession: (id?: string) => void }
+      ).onSelectSession(undefined);
+    });
+    expect(captured.props).toMatchObject({ sessionId: undefined });
+  });
+
+  it('routes the clear through the echo channel when the host provides one', async () => {
+    const provider = { storageKey: 'host-echo' } as ManagedAgentProvider;
+    const onSessionChange = vi.fn();
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          hostSessionOnly
+          sessionId="s1"
+          onSessionChange={onSessionChange}
+        />,
+      ),
+    );
+    await act(async () => {
+      (
+        captured.props as { onSelectSession: (id?: string) => void }
+      ).onSelectSession(undefined);
+    });
+    expect(onSessionChange).toHaveBeenCalledWith(undefined);
+    // The host owns the selection: no internal write before the echo.
+    expect(captured.props).toMatchObject({ sessionId: 's1' });
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          hostSessionOnly
+          onSessionChange={onSessionChange}
+        />,
+      ),
+    );
+    expect(captured.props).toMatchObject({ sessionId: undefined });
+  });
+
   it('constructs a Java provider without daemon workspace props', async () => {
     await act(async () => {
       root.render(
@@ -411,5 +655,47 @@ describe('ManagedAgentWebShell', () => {
     expect(
       newScopeRenders.every((render) => render.sessionId === undefined),
     ).toBe(true);
+  });
+
+  it('forwards the navigation slot props unchanged to the sessions page', async () => {
+    const provider = { storageKey: 'navigation-props' } as ManagedAgentProvider;
+    const navigationTarget = document.createElement('nav');
+    const archivedNavigationTarget = document.createElement('section');
+    const onArchivedSessionsStatusChange = vi.fn();
+    await act(async () => {
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          navigationTarget={navigationTarget}
+          archivedNavigationTarget={archivedNavigationTarget}
+          onArchivedSessionsStatusChange={onArchivedSessionsStatusChange}
+          navigationActive={false}
+          navigationSearch="release"
+        />,
+      );
+    });
+    expect(captured.props).toMatchObject({
+      navigationTarget,
+      archivedNavigationTarget,
+      onArchivedSessionsStatusChange,
+      navigationActive: false,
+      navigationSearch: 'release',
+    });
+  });
+
+  it('leaves the navigation defaults to the sessions page when unset', async () => {
+    const provider = {
+      storageKey: 'navigation-defaults',
+    } as ManagedAgentProvider;
+    await act(async () => {
+      root.render(<ManagedAgentWebShell managedAgentProvider={provider} />);
+    });
+    expect(captured.props).toMatchObject({
+      navigationTarget: undefined,
+      archivedNavigationTarget: undefined,
+      onArchivedSessionsStatusChange: undefined,
+      navigationActive: undefined,
+      navigationSearch: undefined,
+    });
   });
 });
