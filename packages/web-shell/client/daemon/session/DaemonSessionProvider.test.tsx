@@ -17615,23 +17615,25 @@ describe('DaemonSessionProvider', () => {
 
   describe('autoContinueInterruptedTurn', () => {
     const recovered = (
-      recovery:
-        | {
-            kind: 'interrupted_prompt' | 'interrupted_turn';
-            canContinue: boolean;
-            cancellationConfirmationId?: string;
-          }
-        | { kind: 'clean'; canContinue: false },
-    ) => ({
-      v: 1 as const,
+      recovery: DaemonSessionContextStatus['recovery'],
+    ): DaemonSessionContextStatus => ({
+      v: 1,
       sessionId: 'session-1',
       workspaceCwd: '/mock-workspace',
       state: {},
       recovery,
     });
-    // A resumed session arms `catchingUp` until the replay sentinel arrives,
-    // and `continueSession` refuses while it is set. Wait for the sentinel the
-    // way a real load does instead of leaving the stream silent.
+    type RecoveryFixture = NonNullable<DaemonSessionContextStatus['recovery']>;
+    type RecoverySource =
+      | RecoveryFixture
+      | ((call: number) => RecoveryFixture | Promise<RecoveryFixture>);
+
+    // Every case waits for the replay sentinel, not just the positive one: a
+    // load that never yields it leaves `catchingUp` armed, and then the
+    // `continueSession` gate refuses the call before the mocked client is
+    // reached. Asserting "not called" under a stream that never drains would
+    // pass even with the eligibility guard deleted, which is what made the
+    // original negative cases vacuous.
     const replayedThenIdle = (): MockSession['events'] =>
       async function* replayedThenIdle(opts: { signal?: AbortSignal } = {}) {
         yield {
@@ -17650,7 +17652,21 @@ describe('DaemonSessionProvider', () => {
         });
       };
 
-    it('continues an interrupted turn once, without a user click', async () => {
+    function setup(
+      source: RecoverySource,
+      options: {
+        events?: MockSession['events'];
+        lastEventId?: number;
+        replaySnapshot?: MockSession['replaySnapshot'];
+      } = {},
+    ) {
+      let call = 0;
+      const context = vi.fn(async () => {
+        call += 1;
+        return recovered(
+          typeof source === 'function' ? await source(call) : source,
+        );
+      });
       const continued = vi.fn(async () => ({
         accepted: true as const,
         interruption: 'interrupted_prompt' as const,
@@ -17659,17 +17675,36 @@ describe('DaemonSessionProvider', () => {
       }));
       const session = Object.assign(
         createMockSession({
-          lastEventId: 10,
-          events: replayedThenIdle(),
-          context: vi.fn(async () =>
-            recovered({ kind: 'interrupted_prompt', canContinue: true }),
-          ),
+          lastEventId: 'lastEventId' in options ? options.lastEventId : 10,
+          events: options.events ?? replayedThenIdle(),
+          context,
+          ...(options.replaySnapshot
+            ? { replaySnapshot: options.replaySnapshot }
+            : {}),
         }),
         { continueSession: continued },
       );
       sdkMocks.sessions.push(session);
+      return { session, continued, context };
+    }
 
-      await renderWithProvider(<div />, {
+    let notices: readonly DaemonSessionNotice[] = [];
+    function Harness() {
+      notices = useDaemonSessionNotices().notices;
+      return null;
+    }
+
+    beforeEach(() => {
+      notices = [];
+    });
+
+    it('continues an interrupted prompt once, without a user click', async () => {
+      const { session, continued } = setup({
+        kind: 'interrupted_prompt',
+        canContinue: true,
+      });
+
+      await renderWithProvider(<Harness />, {
         autoConnect: true,
         sessionId: 'session-1',
         autoContinueInterruptedTurn: true,
@@ -17684,88 +17719,150 @@ describe('DaemonSessionProvider', () => {
       expect(continued).toHaveBeenCalledTimes(1);
     });
 
-    it('leaves the turn to the Continue button when the user cancelled it', async () => {
-      const continued = vi.fn(async () => ({
-        accepted: false as const,
-        interruption: 'none' as const,
-      }));
-      sdkMocks.sessions.push(
-        Object.assign(
-          createMockSession({
-            lastEventId: 10,
-            context: vi.fn(async () =>
-              recovered({
-                kind: 'interrupted_prompt',
-                canContinue: true,
-                cancellationConfirmationId: 'confirm-1',
-              }),
-            ),
-          }),
-          { continueSession: continued },
-        ),
-      );
+    // `interrupted_turn` persists as an unanswered tool call. The design keeps
+    // its repair behind an explicit user decision, so a load must not spend a
+    // model request on it. The shared `replayedThenIdle` stream is what the
+    // positive case above uses, so this is not vacuous the way a
+    // `catchingUp`-blocked assertion would be.
+    it('leaves a dangling tool call to the Continue button', async () => {
+      const { continued } = setup({
+        kind: 'interrupted_turn',
+        canContinue: true,
+      });
 
-      await renderWithProvider(<div />, {
+      await renderWithProvider(<Harness />, {
         autoConnect: true,
         sessionId: 'session-1',
         autoContinueInterruptedTurn: true,
       });
 
       expect(continued).not.toHaveBeenCalled();
+      expect(notices).toEqual([]);
+    });
+
+    it('leaves the turn to the Continue button when the user cancelled it', async () => {
+      const { continued } = setup({
+        kind: 'interrupted_prompt',
+        canContinue: true,
+        cancellationConfirmationId: 'confirm-1',
+      });
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        sessionId: 'session-1',
+        autoContinueInterruptedTurn: true,
+      });
+
+      expect(continued).not.toHaveBeenCalled();
+      expect(notices).toEqual([]);
     });
 
     it('does nothing when the turn finished cleanly', async () => {
-      const continued = vi.fn(async () => ({
-        accepted: false as const,
-        interruption: 'none' as const,
-      }));
-      sdkMocks.sessions.push(
-        Object.assign(
-          createMockSession({
-            lastEventId: 10,
-            context: vi.fn(async () =>
-              recovered({ kind: 'clean', canContinue: false }),
-            ),
-          }),
-          { continueSession: continued },
-        ),
-      );
+      const { continued } = setup({ kind: 'clean', canContinue: false });
 
-      await renderWithProvider(<div />, {
+      await renderWithProvider(<Harness />, {
         autoConnect: true,
         sessionId: 'session-1',
         autoContinueInterruptedTurn: true,
       });
 
       expect(continued).not.toHaveBeenCalled();
+      expect(notices).toEqual([]);
     });
 
     it('stays opt-in', async () => {
-      const continued = vi.fn(async () => ({
-        accepted: true as const,
-        interruption: 'interrupted_prompt' as const,
-        promptId: 'continued-1',
-        lastEventId: 10,
-      }));
-      sdkMocks.sessions.push(
-        Object.assign(
-          createMockSession({
-            lastEventId: 10,
-            events: replayedThenIdle(),
-            context: vi.fn(async () =>
-              recovered({ kind: 'interrupted_prompt', canContinue: true }),
-            ),
-          }),
-          { continueSession: continued },
-        ),
-      );
+      const { continued } = setup({
+        kind: 'interrupted_prompt',
+        canContinue: true,
+      });
 
-      await renderWithProvider(<div />, {
+      await renderWithProvider(<Harness />, {
         autoConnect: true,
         sessionId: 'session-1',
       });
 
       expect(continued).not.toHaveBeenCalled();
+    });
+
+    // A `turn_error` refreshes the recovery snapshot with `canContinue: true`.
+    // The resume is fenced to the snapshot the load itself published, so the
+    // turn the user just watched fail must not restart behind their back.
+    // `replay_complete` clears `catchingUp` first (a replay snapshot would
+    // re-arm it), so the load fence is the only guard left to observe.
+    it('does not resume a turn that fails after the load', async () => {
+      const finish = createDeferred<void>();
+      const { continued, context } = setup(
+        (call) =>
+          call === 1
+            ? { kind: 'clean', canContinue: false }
+            : { kind: 'interrupted_prompt', canContinue: true },
+        {
+          async *events(opts) {
+            yield {
+              v: 1,
+              type: 'replay_complete',
+              data: { replayedCount: 0 },
+            };
+            await finish.promise;
+            yield {
+              v: 1,
+              id: 11,
+              type: 'turn_error',
+              data: { promptId: 'prompt-1', message: 'provider exploded' },
+            };
+            yield* createIdleEvents()(opts);
+          },
+        },
+      );
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        sessionId: 'session-1',
+        autoContinueInterruptedTurn: true,
+      });
+      expect(continued).not.toHaveBeenCalled();
+
+      await act(async () => {
+        finish.resolve();
+        await flushPromises();
+      });
+
+      // The failed turn did republish a resumable recovery snapshot, so the
+      // refusal has to come from the load fence rather than from the daemon
+      // never reporting a resumable turn.
+      expect(context.mock.calls.length).toBeGreaterThan(1);
+      expect(continued).not.toHaveBeenCalled();
+      expect(notices).toEqual([]);
+    });
+
+    it('does not claim a session whose load never finishes replaying', async () => {
+      // No `replay_complete`: the load stays in catch-up, and a claim recorded
+      // before the action's own refusal would leave the turn unresumable.
+      const finish = createDeferred<void>();
+      const { continued } = setup(
+        { kind: 'interrupted_prompt', canContinue: true },
+        {
+          async *events(opts) {
+            await finish.promise;
+            yield* createIdleEvents()(opts);
+          },
+        },
+      );
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        sessionId: 'session-1',
+        autoContinueInterruptedTurn: true,
+      });
+
+      expect(continued).not.toHaveBeenCalled();
+
+      await act(async () => {
+        finish.resolve();
+        await flushPromises();
+      });
+      expect(continued).not.toHaveBeenCalled();
+      expect(notices).toEqual([]);
     });
   });
 
